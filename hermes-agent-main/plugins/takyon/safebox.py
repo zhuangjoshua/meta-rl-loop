@@ -1011,7 +1011,13 @@ def read_env_backed_value(key: str) -> str:
 
 
 def first_env_backed_value(*keys: str) -> str:
-    """Return the first non-empty sensitive value across env-backed aliases."""
+    """Return the first non-empty env-backed value across explicit aliases.
+
+    Sensitive keys still flow through the normal Safebox authority gate. For authenticated internal
+    callers that request a short allowlist of public aliases (for example Supabase browser config),
+    this also falls back to the local env file on the Safebox host instead of failing closed on the
+    sensitive-only reader.
+    """
     if _use_remote_authority():
         payload = _remote_json(
             "POST",
@@ -1019,8 +1025,28 @@ def first_env_backed_value(*keys: str) -> str:
             {"keys": [str(key or "").strip() for key in keys]},
         )
         return str(payload.get("value") or "").strip()
+    try:
+        env_values = load_env()
+    except OSError:
+        # The local .env may be momentarily unreadable (e.g. a concurrent
+        # root-run secret write). It is a SECONDARY source — os.environ (the
+        # systemd EnvironmentFile, kept in sync by _save_env_value_direct) is
+        # authoritative — so degrade to an empty file view instead of 500ing
+        # the /v1/env/first rail for every business.
+        env_values = {}
     for key in keys:
-        value = read_env_backed_value(key)
+        name = str(key or "").strip()
+        if not name:
+            continue
+        try:
+            value = read_env_backed_value(name)
+        except KeyError:
+            # Non-sensitive public alias (for example DATABASE_URL): the
+            # sensitive reader refuses it. Resolve from the process env first —
+            # which systemd loads from .env and _save_env_value_direct keeps in
+            # sync — then the parsed file, so resolution survives an unreadable
+            # .env rather than collapsing to "" and breaking DB-URL lookup.
+            value = str(os.environ.get(name) or env_values.get(name) or "").strip()
         if value:
             return value
     return ""

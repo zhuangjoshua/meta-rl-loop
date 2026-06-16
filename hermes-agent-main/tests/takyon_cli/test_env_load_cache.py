@@ -191,3 +191,55 @@ def test_load_env_handles_missing_file():
             assert load_env() == {}  # cached
     finally:
         invalidate_env_cache()
+
+
+def test_load_env_degrades_to_last_cache_when_file_unreadable():
+    """A transient PermissionError reading an EXISTING .env degrades to the last good
+    parse instead of raising.
+
+    The .env file is a secondary source (os.environ / the systemd EnvironmentFile is
+    authoritative on hosts that serve secrets). A concurrent root-run secret write can
+    leave the file briefly root-owned 0600, unreadable by the service user. If load_env()
+    propagated that, the Safebox /v1/env rail 500s for EVERY business at once — so it must
+    degrade, never crash.
+    """
+    import builtins
+
+    from takyon_cli.config import invalidate_env_cache, load_env
+
+    invalidate_env_cache()
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".env", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("DATABASE_URL=postgres://cached\n")
+        env_path = Path(f.name)
+
+    real_open = builtins.open
+
+    def _boom_for_env(file, *args, **kwargs):
+        if str(file) == str(env_path):
+            raise PermissionError(13, "Permission denied")
+        return real_open(file, *args, **kwargs)
+
+    try:
+        with patch("takyon_cli.config.get_env_path", return_value=env_path):
+            # Prime the cache while the file is readable.
+            assert load_env().get("DATABASE_URL") == "postgres://cached"
+
+            # Bump mtime so the next call is a cache MISS and must re-read the file,
+            # then make that read fail. load_env must serve the last good parse.
+            future = env_path.stat().st_mtime + 5.0
+            os.utime(env_path, (future, future))
+            with patch("builtins.open", _boom_for_env):
+                degraded = load_env()
+            assert degraded.get("DATABASE_URL") == "postgres://cached", (
+                "load_env() must degrade to the last cached parse on a transient read error"
+            )
+
+            # The degraded result must NOT be memoised: once the file is readable again
+            # (cache still keyed on the bumped mtime), the next call re-reads cleanly.
+            assert load_env().get("DATABASE_URL") == "postgres://cached"
+    finally:
+        env_path.unlink(missing_ok=True)
+        invalidate_env_cache()

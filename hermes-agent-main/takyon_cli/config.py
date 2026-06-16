@@ -4638,8 +4638,22 @@ def load_env() -> Dict[str, str]:
         # fail on UTF-8 .env files. Always use explicit UTF-8; tolerate BOM
         # via utf-8-sig since users may edit .env in Notepad which adds one.
         open_kw = {"encoding": "utf-8-sig", "errors": "replace"}
-        with open(env_path, **open_kw) as f:
-            raw_lines = f.readlines()
+        try:
+            with open(env_path, **open_kw) as f:
+                raw_lines = f.readlines()
+        except OSError:
+            # The file exists but is momentarily unreadable — e.g. a concurrent
+            # root-run secret write transiently leaves it 0600/root-owned before
+            # chown back to the service user. The .env file is a SECONDARY env
+            # source (os.environ / the systemd EnvironmentFile is authoritative
+            # on the hosts that serve secrets), so a transient read error must
+            # DEGRADE, never raise: a crash here 500s the Safebox /v1/env rail
+            # for every business at once. Serve the last good parse if we have
+            # one, else empty — and do NOT memoise the degraded result, so the
+            # next call retries the file once it is readable again.
+            if _env_cache is not None:
+                return dict(_env_cache[1])
+            return {}
         # Sanitize before parsing: split concatenated lines & drop stale
         # placeholders so corrupted .env files don't produce invalid tokens.
         lines = _sanitize_env_lines(raw_lines)

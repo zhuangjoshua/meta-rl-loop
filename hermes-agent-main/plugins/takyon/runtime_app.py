@@ -55,8 +55,6 @@ _HOST_ROLE_ALIASES = {
 _APPROVED_REMOTE_POSTGRES_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
 _APPROVED_REMOTE_POSTGRES_HOME_PREFIXES = (Path("/opt/takyon/.takyon"),)
 _LOOPBACK_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-
-
 class RuntimeNotConfigured(RuntimeError):
     """Raised when the runtime host is built without any database URL (invariant #8: blocked with a
     reason, never a silent fallback)."""
@@ -148,16 +146,51 @@ def _enforce_database_url_policy(value: str) -> str:
     )
 
 
+def configure_takyon_pg_session(conn, *, bypass: bool = True) -> None:
+    """Initialize the Takyon app-plane RLS GUCs on an already-open psycopg connection."""
+    defaults = {
+        "takyon.rls_bypass": "1" if bypass else "0",
+        "takyon.rls_business_slug": "",
+        "takyon.rls_app_user_id": "",
+        "takyon.rls_session_hash": "",
+    }
+    for key, value in defaults.items():
+        conn.execute("select set_config(%s, %s, false)", (key, value))
+
+
+# Process-static memo of the resolved no-explicit DB-URL env value (see resolve_database_url).
+_resolved_database_url_env_value: str | None = None
+
+
+def reset_database_url_cache() -> None:
+    """Clear the process-static DB-URL memo. For tests; a rotated URL is picked up on restart
+    (which every deploy performs), so no runtime invalidation is needed."""
+    global _resolved_database_url_env_value
+    _resolved_database_url_env_value = None
+
+
 def resolve_database_url(explicit: str | None = None) -> str:
     """The configured Postgres URL: an explicit argument wins (tests point it at a throwaway DB),
     else the first non-empty of DATABASE_URL / POSTGRES_URL / POSTGRES_PRISMA_URL. Absent
-    everywhere → ``RuntimeNotConfigured``."""
+    everywhere → ``RuntimeNotConfigured``.
+
+    The no-explicit env/Safebox lookup is memoised process-wide. The URL is static for a process
+    lifetime, but every product DB op resolves it, and on a subuser node that lookup is a remote
+    ``POST /v1/env/first`` to the Safebox — re-resolving per op produced ~1700 Safebox requests/min
+    that hard-coupled every DB op to a live Safebox round-trip and could self-DoS the Safebox during
+    a blip. Only the non-empty resolved value is cached, so "no DB configured → raise" is unchanged
+    and the policy gate still runs on every call; a restart picks up a rotated URL."""
     if explicit and explicit.strip():
         return _enforce_database_url_policy(explicit)
-    try:
-        value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
-    except safebox.SafeboxAuthorityUnavailable:
-        value = ""
+    global _resolved_database_url_env_value
+    value = _resolved_database_url_env_value
+    if not value:
+        try:
+            value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
+        except safebox.SafeboxAuthorityUnavailable:
+            value = ""
+        if value:
+            _resolved_database_url_env_value = value
     if value:
         return _enforce_database_url_policy(value)
     raise RuntimeNotConfigured(
@@ -189,6 +222,7 @@ def build_runtime_app(*, database_url: str | None = None) -> FastAPI:
         # mode. Correctness is identical (extended protocol either way); only a micro perf hint is
         # dropped, which a low-QPS control plane does not need.
         conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+        configure_takyon_pg_session(conn, bypass=True)
         try:
             yield conn
         finally:

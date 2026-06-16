@@ -53,6 +53,25 @@ def test_first_env_backed_value_returns_first_populated_alias(monkeypatch):
     )
 
 
+def test_first_env_backed_value_survives_unreadable_env(monkeypatch):
+    # The .env file can be momentarily unreadable (a concurrent root-run secret write leaves it
+    # briefly root-owned 0600). os.environ — which systemd loads from .env and _save_env_value_direct
+    # keeps in sync — is authoritative, so a non-sensitive alias (DATABASE_URL) must still resolve
+    # rather than 500ing /v1/env/first for every business.
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("DATABASE_URL", "postgres://from-process-env")
+
+    def _boom():
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(safebox, "load_env", _boom)
+
+    assert (
+        safebox.first_env_backed_value("DATABASE_URL", "POSTGRES_URL")
+        == "postgres://from-process-env"
+    )
+
+
 def test_read_env_backed_value_allows_sensitive_api_keys(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

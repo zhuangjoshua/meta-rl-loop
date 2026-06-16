@@ -137,3 +137,33 @@ def test_resolve_database_url_allows_remote_on_approved_vps_runtime(monkeypatch)
         resolve_database_url(explicit="postgresql://db.example.com/prod")
         == "postgresql://db.example.com/prod"
     )
+
+
+def test_resolve_database_url_memoises_the_env_lookup(monkeypatch):
+    # The no-explicit lookup is process-static but runs on EVERY product DB op; on a subuser node
+    # it is a remote POST /v1/env/first to the Safebox. Re-resolving per op produced a ~1700 req/min
+    # Safebox storm that could self-DoS it during a blip. Memoise: one round-trip per process.
+    import plugins.takyon.runtime_app as runtime_app_mod
+    from plugins.takyon import safebox
+
+    runtime_app_mod.reset_database_url_cache()
+    monkeypatch.setattr("plugins.takyon.runtime_app.platform.system", lambda: "Linux")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setenv("TAKYON_HOME", "/opt/takyon/.takyon")
+    monkeypatch.delenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", raising=False)
+
+    calls = {"n": 0}
+
+    def _counting_first(*_keys):
+        calls["n"] += 1
+        return "postgresql://db.example.com/prod"
+
+    monkeypatch.setattr(safebox, "first_env_backed_value", _counting_first)
+
+    try:
+        first = resolve_database_url()
+        second = resolve_database_url()
+        assert first == second == "postgresql://db.example.com/prod"
+        assert calls["n"] == 1, "DB-URL env lookup must be memoised (one Safebox round-trip per process)"
+    finally:
+        runtime_app_mod.reset_database_url_cache()
