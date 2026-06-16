@@ -1,11 +1,9 @@
 """Anthropic provider leaf — the one place that builds a Messages request, prices it in microUSD,
 calls the SHARED platform provider key, and parses the response.
 
-Extracted from ``app_api.py`` (the SQLite product HTTP surface) so the SAME logic serves BOTH the
-current SQLite ``/generate`` route and the Postgres-era Internal AI Gateway (``ai_gateway.py``) —
-ONE implementation of "what does a token cost / how do we call Anthropic", never two copies that can
-silently drift. ``app_api.py`` imports these back under its existing private names; the gateway
-imports the public names directly. When Phase 8 deletes the SQLite path, this leaf is the survivor.
+Lifted out of the old SQLite app runtime so the Internal AI Gateway (``ai_gateway.py``) owns ONE
+implementation of "what does a token cost / how do we call Anthropic", never two copies that can
+silently drift. The retired standalone app API is gone; this leaf is the survivor.
 
 Pure and side-effect-free at import. The only outbound effect is ``call_anthropic``, which performs
 the real HTTPS POST using the provider key the CALLER passes in — the shared key is resolved by
@@ -103,13 +101,29 @@ def anthropic_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, st
     )
 
 
-def microusd_cost(model: str, input_tokens: int, output_tokens: int) -> int:
+def microusd_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> int:
+    """Exact provider cost in microUSD for one Anthropic call. Cached prompt tokens
+    bill at their own (cheaper) cache-read / (pricier) cache-write rates from the
+    canonical table — never at $0 and never silently at full input rate. The flat
+    env override has no separate cache rate, so under the override cached tokens
+    bill at the input rate (conservative: never undercharges)."""
     input_override = _env("TAKYON_APP_ANTHROPIC_INPUT_MICROUSD_PER_TOKEN")
     output_override = _env("TAKYON_APP_ANTHROPIC_OUTPUT_MICROUSD_PER_TOKEN")
     if input_override or output_override:
         input_rate, output_rate, _source = anthropic_rates_microusd_per_token(model)
         total = (
-            input_rate * Decimal(max(0, input_tokens))
+            input_rate
+            * Decimal(
+                max(0, input_tokens)
+                + max(0, cache_read_tokens)
+                + max(0, cache_write_tokens)
+            )
             + output_rate * Decimal(max(0, output_tokens))
         )
         return int(total.to_integral_value(rounding=ROUND_CEILING))
@@ -119,6 +133,8 @@ def microusd_cost(model: str, input_tokens: int, output_tokens: int) -> int:
         CanonicalUsage(
             input_tokens=max(0, input_tokens),
             output_tokens=max(0, output_tokens),
+            cache_read_tokens=max(0, cache_read_tokens),
+            cache_write_tokens=max(0, cache_write_tokens),
         ),
         provider="anthropic",
     )
@@ -209,6 +225,84 @@ def call_anthropic(payload: dict, api_key: str) -> dict:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Anthropic API returned {exc.code}: {body[:500]}") from exc
+
+
+# ── Tavily web search / extract — product-runtime metered tool provider ──────
+# The product runtime reaches Tavily ONLY through the AI gateway's metered search
+# broker (`ai_gateway.broker_search_for_business`), never ungated. This leaf prices
+# a request fail-closed and performs the call with a key the CALLER passes in
+# (resolved by `tavily_key()` server-side; never an app argument, never returned).
+# It mirrors the Anthropic leaf above so "what does a search cost / how do we call
+# Tavily" lives in ONE place, not two that can drift.
+
+TAVILY_BASE_URL_DEFAULT = "https://api.tavily.com"
+
+
+class TavilyPricingUnavailable(ValueError):
+    """Raised when a Tavily operation has no exact known per-request pricing."""
+
+
+def tavily_key() -> str:
+    """The SHARED platform Tavily key, resolved server-side (safebox-aware, then env).
+    Returns "" when unconfigured — callers MUST treat "" as blocked, never as permission
+    to call keyless (mirrors ``anthropic_key`` / invariant #8)."""
+    try:
+        from . import safebox
+
+        if safebox.is_sensitive_env_key("TAVILY_API_KEY"):
+            value = safebox.read_env_backed_value("TAVILY_API_KEY")
+            if value:
+                return str(value).strip()
+    except Exception:
+        pass
+    return _env("TAVILY_API_KEY")
+
+
+def tavily_request_microusd(operation: str, *, units: int = 1) -> int:
+    """Exact per-request Tavily cost in microUSD, FAIL-CLOSED. ``operation`` is the pricing
+    key ("search" | "search_advanced" | "extract"); ``units`` bills multiple provider
+    credits in one request (extract = 1 credit per 5 URLs). Raises ``TavilyPricingUnavailable``
+    for any unpriced operation, so an unpriced search can never spend budget — the same
+    fail-closed contract the model path has."""
+    result = estimate_usage_cost(
+        operation,
+        CanonicalUsage(request_count=max(1, int(units))),
+        provider="tavily",
+    )
+    if result.amount_usd is None:
+        raise TavilyPricingUnavailable(
+            f"no exact Tavily pricing is configured for operation {operation!r}"
+        )
+    return int((result.amount_usd * _ONE_MILLION).to_integral_value(rounding=ROUND_CEILING))
+
+
+def call_tavily(endpoint: str, payload: dict, api_key: str) -> dict:
+    """Server-side Tavily call with an EXPLICIT key (mirrors ``call_anthropic``). The key is
+    injected into the request body (and a Bearer header for /crawl, which Tavily additionally
+    requires) and is never returned. Returns the parsed JSON; raises ``RuntimeError`` on HTTP
+    error so the broker releases the reservation."""
+    endpoint = str(endpoint or "search").strip("/").lower()
+    base_url = (_env("TAVILY_BASE_URL") or TAVILY_BASE_URL_DEFAULT).rstrip("/")
+    body = dict(payload or {})
+    body["api_key"] = api_key
+    headers = {"Content-Type": "application/json"}
+    if endpoint == "crawl":
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(
+        f"{base_url}/{endpoint}",
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    timeout = _bounded_int(
+        _env("TAKYON_APP_TAVILY_TIMEOUT_SECONDS", "60"), default=60, minimum=5, maximum=120
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Tavily API returned {exc.code}: {detail[:500]}") from exc
 
 
 def anthropic_text(response: dict) -> str:

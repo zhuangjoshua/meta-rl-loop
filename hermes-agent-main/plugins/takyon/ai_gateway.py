@@ -10,7 +10,7 @@ business's product budget through THE ONE gate (``app_usage`` reserve→settle/r
 calls the SHARED platform provider key server-side. The provider key is resolved HERE and bound into
 a caller closure; it is never an argument the app supplies and never appears in any response.
 
-This is the Postgres successor to the SQLite ``/generate`` route (``app_api.py``), with two
+This is the Postgres successor to the old SQLite ``/generate`` route, with two
 deliberate hardenings over it:
   * Spend is gated by the atomic reserve-under-row-lock (``app_usage.reserve_usage``), not the old
     read-then-act budget mirror that N concurrent calls could all slip past.
@@ -27,6 +27,7 @@ reason) — it never calls keyless and never fabricates a completion.
 from __future__ import annotations
 
 from http.cookies import SimpleCookie
+import logging
 import uuid
 from typing import Any, Callable
 
@@ -34,12 +35,16 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
 from .ai_provider import (
     AnthropicPricingUnavailable,
+    TavilyPricingUnavailable,
     anthropic_key,
     anthropic_payload,
     anthropic_rates_microusd_per_token,
     anthropic_text,
     call_anthropic,
+    call_tavily,
     microusd_cost,
+    tavily_key,
+    tavily_request_microusd,
 )
 from . import app_entitlements, app_identity
 from .app_gateway_keys import GatewayPrincipal, resolve_gateway_key
@@ -62,6 +67,40 @@ _APP_SESSION_HEADER = "X-Takyon-App-Session"
 # ever sees this callable (or None when unconfigured) — never the key itself.
 ProviderCaller = Callable[[dict], dict]
 _CALLER_UNSET = object()
+
+logger = logging.getLogger(__name__)
+
+
+def _settle_or_hold(
+    conn,
+    business_slug: str,
+    reservation_key: str,
+    *,
+    actual_cost_microusd: int,
+    **settle_kwargs,
+) -> bool:
+    """Finalize a reservation after the provider was ALREADY PAID. On a settle failure we must NOT
+    ``release`` — the provider was paid, so releasing would forget real spend and undercharge. The
+    reservation already holds the (>= actual) cost, so we keep the hold, log, and report
+    non-fatally; the caller still returns the paid-for result instead of 500-ing into a retry that
+    would mint a fresh ``reservation_key`` and double-spend (the proxy conn is autocommit, so the
+    reserve is already committed and cannot be rolled back). A reconciliation pass can finalize the
+    held row later. Returns True iff the row reached ``completed``."""
+    try:
+        settle_usage(
+            conn,
+            business_slug,
+            reservation_key,
+            actual_cost_microusd=actual_cost_microusd,
+            **settle_kwargs,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "settle_usage failed after provider was paid; holding reservation %s at its reserved cost",
+            reservation_key,
+        )
+        return False
 
 
 class GatewayMessageError(Exception):
@@ -101,6 +140,29 @@ def get_provider_caller() -> ProviderCaller | None:
 
     def _call(payload: dict) -> dict:
         return call_anthropic(payload, key)
+
+    return _call
+
+
+# A search caller is a server-side closure that already holds the shared Tavily key. The endpoint
+# only ever sees this callable (or None when unconfigured) — never the key itself, exactly like
+# ProviderCaller above.
+SearchCaller = Callable[[dict], dict]
+
+
+def get_search_caller() -> SearchCaller | None:
+    """Resolve the SHARED platform Tavily key server-side and bind it into a caller closure.
+
+    Returns None when no key is configured — the search broker then BLOCKS (503), never calling
+    keyless. The key lives ONLY inside the returned closure; it is never returned to a caller and
+    is not an argument the app supplies. Tests override this seam with a canned searcher, so no real
+    key or network is needed to exercise the gate."""
+    key = tavily_key()
+    if not key:
+        return None
+
+    def _call(req: dict) -> dict:
+        return call_tavily(str(req.get("endpoint") or "search"), req.get("payload") or {}, key)
 
     return _call
 
@@ -291,10 +353,21 @@ def broker_message_for_business(
     usage = provider_response.get("usage") or {}
     input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
     output_tokens = int(usage.get("output_tokens") or 0)
-    actual_cost = microusd_cost(model, input_tokens, output_tokens)
+    # Anthropic reports cached prompt tokens in separate buckets and EXCLUDES them
+    # from input_tokens. Bill them at their real cache rates instead of dropping
+    # them (which would undercharge true provider cost on every cached call).
+    cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
+    cache_write_tokens = int(usage.get("cache_creation_input_tokens") or 0)
+    actual_cost = microusd_cost(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
     provider_request_id = str(provider_response.get("id") or "")
 
-    settle_usage(
+    _settle_or_hold(
         conn,
         business_slug,
         reservation_key,
@@ -304,6 +377,10 @@ def broker_message_for_business(
         provider_request_id=provider_request_id,
         provider="anthropic",
         model=model,
+        metadata={
+            "cache_read_input_tokens": cache_read_tokens,
+            "cache_creation_input_tokens": cache_write_tokens,
+        },
     )
 
     return {
@@ -316,6 +393,219 @@ def broker_message_for_business(
             "output_tokens": output_tokens,
             "estimated_cost_microusd": estimated_cost,
             "actual_cost_microusd": actual_cost,
+        },
+    }
+
+
+def _gateway_reservation_error(exc: Exception) -> GatewayMessageError:
+    """Map an ``app_usage`` reservation failure to the structured gateway error. Shared by the
+    message and search brokers so the two budget gates report a tenant's cap state identically."""
+    if isinstance(exc, AppBudgetInactive):
+        return GatewayMessageError(
+            status_code=402,
+            detail={"error": "app_budget_inactive", "status": exc.status},
+        )
+    if isinstance(exc, AppBudgetExceeded):
+        return GatewayMessageError(
+            status_code=402,
+            detail={
+                "error": "app_budget_exceeded",
+                "hard_limit_microusd": exc.hard_limit_microusd,
+                "committed_microusd": exc.committed_microusd,
+                "requested_microusd": exc.requested_microusd,
+                "remaining_microusd": exc.remaining_microusd,
+            },
+        )
+    if isinstance(exc, AppUserBudgetExceeded):
+        return GatewayMessageError(
+            status_code=402,
+            detail={
+                "error": "app_user_budget_exceeded",
+                "app_user_id": exc.app_user_id,
+                "user_monthly_limit_microusd": exc.user_monthly_limit_microusd,
+                "committed_microusd": exc.committed_microusd,
+                "requested_microusd": exc.requested_microusd,
+                "remaining_microusd": exc.remaining_microusd,
+            },
+        )
+    if isinstance(exc, AppUserNotFound):
+        return GatewayMessageError(status_code=400, detail="unknown_app_user")
+    raise exc
+
+
+def _normalize_search_results(raw: dict | None) -> list[dict[str, Any]]:
+    """Map a Tavily /search response to a key-free result list (title/url/content/position)."""
+    out: list[dict[str, Any]] = []
+    for i, item in enumerate((raw or {}).get("results") or []):
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "title": str(item.get("title") or ""),
+                "url": str(item.get("url") or ""),
+                "content": str(item.get("content") or ""),
+                "position": i + 1,
+            }
+        )
+    return out
+
+
+def _normalize_extract_results(raw: dict | None) -> list[dict[str, Any]]:
+    """Map a Tavily /extract response to a key-free document list (url/title/content)."""
+    out: list[dict[str, Any]] = []
+    for item in (raw or {}).get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        text = str(item.get("raw_content") or item.get("content") or "")
+        out.append({"url": url, "title": str(item.get("title") or ""), "content": text})
+    return out
+
+
+_TAVILY_MAX_RESULTS = 10
+_TAVILY_MAX_EXTRACT_URLS = 20
+
+
+def broker_search_for_business(
+    conn,
+    *,
+    business_slug: str,
+    raw_session_token: str,
+    body: dict | None = None,
+    searcher: SearchCaller | None | object = _CALLER_UNSET,
+    audit_route: str = "internal_search_gateway",
+) -> dict[str, Any]:
+    """Metered web-search broker — the Tavily sibling of ``broker_message_for_business``.
+
+    Validate the app session → price the request FAIL-CLOSED from ``usage_pricing`` → reserve the
+    cost against the business app budget (THE gate, atomic under the budget row lock) → call the
+    SHARED Tavily key server-side → settle the fixed per-request cost (or release on failure). The
+    caller never sees the Tavily key and cannot bypass the budget. This is the path that turns
+    product-runtime web search from an ungated operator-billed money leak into metered app usage.
+    """
+    body = body or {}
+    if searcher is _CALLER_UNSET:
+        searcher = get_search_caller()
+
+    if not raw_session_token:
+        raise GatewayMessageError(status_code=401, detail="missing_app_session")
+    app_user = app_identity.validate_session(conn, business_slug, raw_session_token)
+    if app_user is None:
+        raise GatewayMessageError(status_code=401, detail="invalid_app_session")
+    requested_app_user_id = body.get("app_user_id") or body.get("appUserId") or None
+    if requested_app_user_id and str(requested_app_user_id) != app_user.id:
+        raise GatewayMessageError(status_code=403, detail="mismatched_app_user")
+
+    # Invariant #8 (search): no Tavily key configured -> block. Checked after auth (callers cannot
+    # probe config) and before any reservation.
+    if searcher is None:
+        raise GatewayMessageError(status_code=503, detail="search_unconfigured")
+
+    operation = str(body.get("operation") or "search").strip().lower()
+    if operation not in {"search", "extract"}:
+        raise GatewayMessageError(status_code=400, detail="operation must be 'search' or 'extract'")
+
+    if operation == "search":
+        query = str(body.get("query") or "").strip()
+        if not query:
+            raise GatewayMessageError(status_code=400, detail="query is required")
+        advanced = (
+            str(body.get("depth") or body.get("search_depth") or "basic").strip().lower()
+            == "advanced"
+        )
+        try:
+            max_results = max(1, min(int(body.get("max_results") or 5), _TAVILY_MAX_RESULTS))
+        except (TypeError, ValueError):
+            max_results = 5
+        pricing_op = "search_advanced" if advanced else "search"
+        units = 1
+        endpoint = "search"
+        provider_payload = {
+            "query": query,
+            "max_results": max_results,
+            "search_depth": "advanced" if advanced else "basic",
+            "include_raw_content": False,
+            "include_images": False,
+        }
+    else:  # extract
+        raw_urls = body.get("urls") or body.get("url") or []
+        if isinstance(raw_urls, str):
+            raw_urls = [raw_urls]
+        urls = [str(u).strip() for u in raw_urls if str(u).strip()][:_TAVILY_MAX_EXTRACT_URLS]
+        if not urls:
+            raise GatewayMessageError(status_code=400, detail="urls is required for extract")
+        pricing_op = "extract"
+        units = (len(urls) + 4) // 5  # Tavily bills 1 credit per 5 URLs
+        endpoint = "extract"
+        provider_payload = {"urls": urls, "include_images": False}
+
+    # Server-side, fail-closed price. An unpriced operation is refused BEFORE any reservation or
+    # provider call — a new search depth can never spend budget unpriced.
+    try:
+        cost = tavily_request_microusd(pricing_op, units=units)
+    except TavilyPricingUnavailable as exc:
+        raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
+
+    _entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    feature_name = str(body.get("feature") or "web_search").strip() or "web_search"
+    if plan is not None and not _feature_allowed(plan, feature_name):
+        raise GatewayMessageError(
+            status_code=403,
+            detail={"error": "feature_not_in_plan", "feature": feature_name},
+        )
+
+    reservation_key = uuid.uuid4().hex
+    try:
+        reserve_usage(
+            conn,
+            business_slug,
+            estimated_cost_microusd=cost,
+            reservation_key=reservation_key,
+            app_user_id=app_user.id,
+            user_monthly_limit_microusd=_user_monthly_budget_microusd(plan),
+            app_user_tier=app_user.tier,
+            purpose=feature_name,
+            route=audit_route,
+            provider="tavily",
+            model=pricing_op,
+            metadata={"operation": operation, "units": units},
+        )
+    except (AppBudgetInactive, AppBudgetExceeded, AppUserBudgetExceeded, AppUserNotFound) as exc:
+        raise _gateway_reservation_error(exc) from exc
+
+    try:
+        raw = searcher({"endpoint": endpoint, "payload": provider_payload})
+    except Exception as exc:
+        release_usage(conn, business_slug, reservation_key, error=str(exc))
+        raise GatewayMessageError(status_code=502, detail="search_provider_error") from exc
+
+    # Fixed per-request price: the provider was paid, so settle the reserved amount (truth — never
+    # re-checks the cap).
+    settled = _settle_or_hold(
+        conn,
+        business_slug,
+        reservation_key,
+        actual_cost_microusd=cost,
+        provider="tavily",
+        model=pricing_op,
+        metadata={"operation": operation, "units": units},
+    )
+
+    results = (
+        _normalize_search_results(raw)
+        if operation == "search"
+        else _normalize_extract_results(raw)
+    )
+    return {
+        "success": True,
+        "operation": operation,
+        "results": results,
+        "usage": {
+            "provider": "tavily",
+            "operation": pricing_op,
+            "units": units,
+            "cost_microusd": cost,
+            "settled": settled,
         },
     }
 
@@ -347,6 +637,37 @@ def build_ai_gateway_router() -> APIRouter:
                 body=body,
                 caller=caller,
                 audit_route="internal_ai_gateway",
+            )
+        except GatewayMessageError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=exc.detail,
+                headers=exc.headers or None,
+            ) from exc
+
+    @router.post("/search")
+    def web_search(
+        body: dict | None = Body(default=None),
+        principal: GatewayPrincipal = Depends(_gateway_principal),
+        app_session_token: str | None = Header(default=None, alias=_APP_SESSION_HEADER),
+        cookie_header: str | None = Header(default=None, alias="Cookie"),
+        conn=Depends(get_gateway_conn),
+        searcher: SearchCaller | None = Depends(get_search_caller),
+    ) -> dict[str, Any]:
+        """Broker one metered web search/extract for the gateway key's business: price → reserve →
+        call the shared Tavily key → settle. Returns only normalized results + usage — never the
+        provider key. Same auth/budget rails as ``/messages``; this is the metered alternative to a
+        product app reaching Tavily ungated."""
+        body = body or {}
+        raw_session_token = _session_token(body, app_session_token, cookie_header)
+        try:
+            return broker_search_for_business(
+                conn,
+                business_slug=principal.business_slug,
+                raw_session_token=raw_session_token,
+                body=body,
+                searcher=searcher,
+                audit_route="internal_search_gateway",
             )
         except GatewayMessageError as exc:
             raise HTTPException(

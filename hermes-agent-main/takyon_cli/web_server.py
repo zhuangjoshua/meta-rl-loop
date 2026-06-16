@@ -2317,6 +2317,60 @@ def _takyon_app_broker_generate(
         conn.close()
 
 
+def _takyon_app_broker_search(
+    *,
+    business: str,
+    body: dict[str, Any],
+    session_token: str,
+) -> tuple[int, dict[str, Any]]:
+    """Product-facing metered web search — the Tavily sibling of ``_takyon_app_broker_generate``.
+    Brokers POST /search through the same reserve→settle budget gate so app web search is metered
+    usage, never an ungated operator-billed call."""
+    from plugins.takyon.ai_gateway import (
+        GatewayMessageError,
+        broker_search_for_business,
+    )
+    from plugins.takyon.core import _db_backend
+    from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+    if _db_backend() != "postgres":
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app search requires the Postgres runtime authority",
+        }
+
+    try:
+        resolved_url = _resolve_runtime_database_url()
+    except RuntimeNotConfigured:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app search authority is not configured",
+        }
+
+    try:
+        import psycopg
+    except Exception:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app search authority requires psycopg",
+        }
+
+    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+    try:
+        payload = broker_search_for_business(
+            conn,
+            business_slug=business,
+            raw_session_token=session_token,
+            body=body,
+            audit_route=f"/api/takyon/apps/{business}/search",
+        )
+        return int(HTTPStatus.OK), payload
+    except GatewayMessageError as exc:
+        return exc.status_code, _takyon_app_gateway_error_payload(exc.detail)
+    finally:
+        conn.close()
+
+
 def _takyon_media_status_payload(
     status: int,
     payload: dict[str, Any],
@@ -2775,6 +2829,17 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
         status, payload = _takyon_app_broker_generate(
+            business=business,
+            body=body,
+            session_token=token,
+        )
+        return _takyon_app_json(status, payload)
+
+    if parts == ["search"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        status, payload = _takyon_app_broker_search(
             business=business,
             body=body,
             session_token=token,

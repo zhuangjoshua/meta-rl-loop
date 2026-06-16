@@ -18,7 +18,7 @@ Keep these two identity layers separate:
 
 ## Takyon Product App Surfaces
 
-Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store that per business with `business_upsert_app_surface_contract`, mirrored at `product/surface.md`, and point it at the canonical product source path plus the recorded customer shape that the CEO and skills should inspect.
+Hermes app runtime code may hardcode only shared backend rails: auth/session protocol, payment/webhook reconciliation, entitlement policy, app usage budget accounting, state mirrors, and safety gates. It must not hardcode the final product's look, layout, copy, theme, or information architecture. Store only the tiny per-business shell record with `business_upsert_app_surface_contract`, mirrored at `product/surface.md`: canonical product source path, routes, publish target, and runtime rails. Product direction and copy should come from the business workspace and research, not from an LLM-authored surface theory record.
 
 ## Creative Credits vs Usage Billing
 
@@ -41,6 +41,7 @@ Creative-credit payment rules:
 - User-facing credits may be fixed packs, but each credited action should still record exact provider/model cost metadata from `agent/usage_pricing.py`.
 - New billing-sensitive model/provider integrations should extend `agent/usage_pricing.py`; do not add a second hardcoded pricing table in a skill or channel tool.
 - Normal app AI runtime pricing should resolve exact model pricing from `agent/usage_pricing.py`, not heuristic family matching.
+- **No ungated paid capability — gate it behind usage or credits before it ships.** Never introduce a tool, skill, action, or runtime call that spends real money (provider/API, model inference, search/extract such as Tavily, media, or infra) without first metering it through a money gate. Route consumption-priced spend — model inference and per-request runtime tool calls — through the usage rail (`plugins/takyon/app_usage.py`, reserve→settle→release, priced in `agent/usage_pricing.py`; use `request_cost` for per-request providers); route fixed operator-priced creative/ad actions through the creative-credit rail (`plugins/takyon/business_credits.py`). Spendful paths must fail closed: resolve exact cost from `agent/usage_pricing.py` (unpriced = refused), reserve before the provider call, settle on success, release on failure. Do not paper over an ungated call with a downstream cost report or label — gate the call itself. If it cannot be gated yet, ship only the guarded/disabled path and record the missing gate; never expose the ungated paid path.
 
 ## Operator Budget Rails
 

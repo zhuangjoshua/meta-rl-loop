@@ -83,6 +83,63 @@ _UTC_NOW = lambda: datetime.now(timezone.utc)
 # Official docs snapshot entries. Models whose published pricing and cache
 # semantics are stable enough to encode exactly.
 _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
+    # ── Tavily web search / extract (per-request, NOT per-token) ──────────
+    # Product-runtime web search is metered through the usage rail like model
+    # inference: priced per request via `request_cost` (USD), billed by
+    # `ai_provider.tavily_request_microusd`. Values track Tavily's API-credit
+    # pricing — basic search = 1 credit, advanced = 2, extract = 1 credit / 5
+    # URLs — at the pay-as-you-go ~$0.008/credit rate. Reconcile against
+    # https://tavily.com/#pricing when Tavily changes credit pricing. Without an
+    # entry here the metered search broker fails closed (refuses the call), so a
+    # new search depth can never spend budget unpriced.
+    ("tavily", "search"): PricingEntry(
+        request_cost=Decimal("0.008"),
+        source="official_docs_snapshot",
+        source_url="https://tavily.com/#pricing",
+        pricing_version="tavily-2026-06",
+    ),
+    ("tavily", "search_advanced"): PricingEntry(
+        request_cost=Decimal("0.016"),
+        source="official_docs_snapshot",
+        source_url="https://tavily.com/#pricing",
+        pricing_version="tavily-2026-06",
+    ),
+    ("tavily", "extract"): PricingEntry(
+        request_cost=Decimal("0.008"),
+        source="official_docs_snapshot",
+        source_url="https://tavily.com/#pricing",
+        pricing_version="tavily-2026-06",
+    ),
+    # ── Anthropic Fable 5 ────────────────────────────────────────────────
+    # New top tier above Opus. $10/$50; cache read 0.1x input, write 1.25x.
+    # Source: https://platform.claude.com/docs/en/about-claude/pricing
+    (
+        "anthropic",
+        "claude-fable-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("10.00"),
+        output_cost_per_million=Decimal("50.00"),
+        cache_read_cost_per_million=Decimal("1.00"),
+        cache_write_cost_per_million=Decimal("12.50"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-05",
+    ),
+    # ── Anthropic Claude 4.8 ─────────────────────────────────────────────
+    # Opus 4.8 keeps the Opus-tier $5/$25 pricing (same as 4.5/4.6/4.7).
+    # Source: https://platform.claude.com/docs/en/about-claude/pricing
+    (
+        "anthropic",
+        "claude-opus-4-8",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("5.00"),
+        output_cost_per_million=Decimal("25.00"),
+        cache_read_cost_per_million=Decimal("0.50"),
+        cache_write_cost_per_million=Decimal("6.25"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-05",
+    ),
     # ── Anthropic Claude 4.7 ─────────────────────────────────────────────
     # Opus 4.5/4.6/4.7 share $5/$25 pricing (new tokenizer, up to 35% more
     # tokens for the same text).
