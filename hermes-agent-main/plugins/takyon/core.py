@@ -9311,7 +9311,8 @@ def _refresh_product_surface_path(
             )
             result["checks"].append(install_check)
             if install_check["status"] != "passed":
-                result.update({"status": "failed", "error": "dependency install failed"})
+                detail = ((install_check.get("stdout") or "") + "\n" + (install_check.get("stderr") or "")).strip()
+                result.update({"status": "failed", "error": "dependency install failed" + (f":\n{detail[:4000]}" if detail else "")})
                 return result
         else:
             result["warnings"].append("dependency install skipped because no package manager is available; using existing node_modules")
@@ -9337,7 +9338,8 @@ def _refresh_product_surface_path(
     )
     result["checks"].append(build_check)
     if build_check["status"] != "passed":
-        result.update({"status": "failed", "error": "product build failed"})
+        detail = ((build_check.get("stdout") or "") + "\n" + (build_check.get("stderr") or "")).strip()
+        result.update({"status": "failed", "error": "product build failed" + (f":\n{detail[:4000]}" if detail else "")})
         return result
     if "typecheck" in scripts:
         typecheck_command = _javascript_run_script_command(package_manager, "typecheck", root=root)
@@ -9356,7 +9358,8 @@ def _refresh_product_surface_path(
         )
         result["checks"].append(typecheck)
         if typecheck["status"] != "passed":
-            result.update({"status": "failed", "error": "product typecheck failed"})
+            detail = ((typecheck.get("stdout") or "") + "\n" + (typecheck.get("stderr") or "")).strip()
+            result.update({"status": "failed", "error": "product typecheck failed" + (f":\n{detail[:4000]}" if detail else "")})
             return result
     publish_blocker = _product_publish_readiness_blocker(root)
     if publish_blocker:
@@ -27184,6 +27187,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         worker_attempts = 0
         active_max_turns = max_turns
         turn_cap_retries: list[dict[str, int]] = []
+        surface_build_retries: list[dict[str, str]] = []
         agent_record: dict[str, Any] | None = None
         with workspace_context as mounted_context, ExitStack() as scoped_workspaces:
             active_store = store
@@ -27557,6 +27561,47 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         )
                         active_max_turns = next_max_turns
                         continue
+                # Warm in-session retry on a fixable build/typecheck failure: rather than bail to the
+                # CEO (which re-delegates a fresh COLD worker pass), feed the exact build error back to
+                # the agent on the SAME warm workspace so it fixes its own defect in one pass. Bounded
+                # to a single retry; forbidden-source / durability blockers are NOT retried here (they
+                # fall through to the normal blocked path).
+                should_retry_surface_build = (
+                    bool(surface_refresh)
+                    and surface_refresh.get("status") == "failed"
+                    and not _surface_refresh_has_forbidden_source_blockers(surface_refresh)
+                    and customer_facing_product_workspace
+                    and len(surface_build_retries) < 1
+                )
+                if should_retry_surface_build:
+                    build_error = str((surface_refresh or {}).get("error") or "product build/typecheck failed").strip()
+                    surface_build_retries.append({"error": _truncate_text(build_error, 2000)})
+                    retry_note = (
+                        "Product build/typecheck failed on the canonical read-back; retrying once on the "
+                        "warm workspace so the worker fixes it in-session instead of restarting."
+                    )
+                    _record_claude_agent_runtime_event(
+                        business=business,
+                        workspace_rel=workspace_rel,
+                        status="output",
+                        detail=retry_note,
+                        line=retry_note,
+                    )
+                    active_worker_instruction = "\n\n".join(
+                        [
+                            worker_instruction.rstrip(),
+                            "Hermes automatic build-fix retry (attempt "
+                            + str(worker_attempts + 1)
+                            + "): the product workspace was rebuilt from canonical source and "
+                            "`npm run build` / `npm run typecheck` FAILED. Exact error:\n"
+                            + _truncate_text(build_error, 4000)
+                            + "\n\nContinue from the current workspace state (do NOT restart). Fix ONLY the "
+                            "files causing the error above. Both `npm run build` and `npm run typecheck` must "
+                            "pass before you finish — run them and confirm green. Do not leave unused "
+                            "variables or imports; `tsc --noEmit` rejects them.",
+                        ]
+                    )
+                    continue
                 break
             if _surface_refresh_has_forbidden_source_blockers(surface_refresh):
                 sdk_result["blocked"] = True
