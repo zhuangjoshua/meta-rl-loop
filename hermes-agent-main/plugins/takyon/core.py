@@ -2010,6 +2010,48 @@ def _starter_plan_shape_payload(plans: list[dict[str, Any]] | None) -> list[dict
     return payloads
 
 
+def _subuser_public_env_value(*names: str) -> str:
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        direct = str(os.getenv(name) or "").strip()
+        if direct:
+            return direct
+        try:
+            mirrored = str(safebox.read_env_backed_value(name) or "").strip()
+        except Exception:
+            mirrored = ""
+        if mirrored:
+            return mirrored
+    return ""
+
+
+def _subuser_public_auth_payload(surface: dict[str, Any] | None) -> dict[str, Any] | None:
+    if "auth" not in set(_surface_effective_runtime_features(surface)):
+        return None
+    project_url = _subuser_public_env_value(
+        "SUPABASE_URL",
+        "NEXT_PUBLIC_SUPABASE_URL",
+        "TAKYON_SUPABASE_URL",
+    )
+    publishable_key = _subuser_public_env_value(
+        "SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_ANON_KEY",
+        "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+    )
+    configured = bool(project_url and publishable_key)
+    return {
+        "provider": "supabase",
+        "configured": configured,
+        "url": project_url,
+        "publishableKey": publishable_key,
+        "googleProvider": "google",
+        "redirectPath": "/app",
+    }
+
+
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
@@ -2027,6 +2069,7 @@ def _subuser_surface_context_payload(
         "runtimeApiBase": f"/api/takyon/apps/{slug}",
         "runtimeFeatures": effective_runtime_features,
         "railState": shape.get("rail_state") or {},
+        "auth": _subuser_public_auth_payload(surface),
         "plans": _starter_plan_shape_payload(plans),
         "routes": routes,
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
@@ -5986,6 +6029,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "Prepared subuser app kit:",
         "- Managed kit files are available under `./_takyon/` in this workspace.",
         "- `./_takyon/surface-context.js` exports the current app truth for this business, including routes and runtime rails.",
+        "- Auth-aware app shells also get `surfaceContext.auth` there, with the public Supabase URL + publishable key needed to start Google OAuth in the browser.",
         "- `./_takyon/surface-context.js` also exports any configured starter plan shape, including `priceCents` and `includedAiBudgetMicrousd` for the canonical monthly plan when present.",
         "- `./_takyon/runtime-client.js` exports `createSubuserRuntimeClient(...)` against the canonical `/api/takyon/apps/<slug>/...` runtime namespace.",
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
@@ -9253,7 +9297,11 @@ def _refresh_product_surface_path(
         except Exception as exc:
             result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
             return result
-    if install:
+    # A freshly-materialized readback/cache workspace is deps-free by design (node_modules is
+    # never synced into canonical storage), so install MUST run there even when a caller passes
+    # install=False — otherwise the build false-fails later with a misleading "vite: not found".
+    # (The package-manager-unavailable + node_modules-absent case is already fail-closed above.)
+    if install or not _node_modules_present(root):
         if package_manager.get("available"):
             install_check = _run_surface_command(
                 _javascript_install_command(package_manager),
@@ -10906,9 +10954,9 @@ class TakyonStore:
         from psycopg.rows import dict_row
 
         try:
-            from .runtime_app import resolve_database_url
+            from .runtime_app import configure_takyon_pg_session, resolve_database_url
         except ImportError:  # pragma: no cover - import-style robustness for alternate load paths
-            from plugins.takyon.runtime_app import resolve_database_url
+            from plugins.takyon.runtime_app import configure_takyon_pg_session, resolve_database_url
 
         database_url = resolve_database_url(self._database_url)
         pool = _postgres_pool(database_url)
@@ -10923,6 +10971,7 @@ class TakyonStore:
                 prepare_threshold=None,
             )
         )
+        configure_takyon_pg_session(conn, bypass=True)
         return _PGConn(conn, release=pool.release)
 
     def seed_platform_owner(self) -> tuple[str | None, str | None]:
@@ -11049,6 +11098,65 @@ class TakyonStore:
             yield raw
         finally:
             raw.row_factory = dict_row
+
+    @staticmethod
+    def _pg_current_setting(raw: Any, key: str) -> str:
+        row = raw.execute("select current_setting(%s, true)", (key,)).fetchone()
+        if row is None:
+            return ""
+        if isinstance(row, Mapping):
+            value = next(iter(row.values()), None)
+        else:
+            value = row[0]
+        if value is None:
+            return ""
+        return str(value)
+
+    @contextmanager
+    def _pg_app_scope(
+        self,
+        conn: "_PGConn",
+        business_slug: str,
+        *,
+        app_user_id: str | None = None,
+        session_token: str | None = None,
+    ):
+        """Temporarily narrow a pooled Postgres connection to one app-customer scope.
+
+        Internal connections default to RLS bypass so operator/server code keeps its current authority.
+        App-facing handlers use this scope to bind the live business plus either the current app user id
+        or a presented session token hash, letting the DB enforce the same customer boundary as the
+        runtime surface for the duration of the block.
+        """
+        if not isinstance(conn, _PGConn):
+            yield conn
+            return
+        raw = conn._pg
+        settings = (
+            "takyon.rls_bypass",
+            "takyon.rls_business_slug",
+            "takyon.rls_app_user_id",
+            "takyon.rls_session_hash",
+        )
+        previous = {key: self._pg_current_setting(raw, key) for key in settings}
+        try:
+            raw.execute("select set_config('takyon.rls_bypass', '0', true)")
+            raw.execute(
+                "select set_config('takyon.rls_business_slug', %s, true)",
+                (str(business_slug or "").strip(),),
+            )
+            raw.execute(
+                "select set_config('takyon.rls_app_user_id', %s, true)",
+                (str(app_user_id or "").strip(),),
+            )
+            raw.execute(
+                "select set_config('takyon.rls_session_hash', %s, true)",
+                (_hash_token(str(session_token or "").strip()) if session_token else "",),
+            )
+            yield conn
+        finally:
+            for key, value in previous.items():
+                raw.execute("select set_config(%s, %s, true)", (key, value))
 
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
@@ -14934,19 +15042,30 @@ class TakyonStore:
             if _db_backend() == "postgres":
                 leaves = self._app_leaves()
                 try:
-                    with self._leaf_conn(conn) as raw:
-                        resolved = leaves["profiles"].upsert_profile(
-                            raw,
+                    scope = (
+                        self._pg_app_scope(
+                            conn,
                             slug,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
-                            email=(str(op.get("email")) if op.get("email") else None),
                             session_token=(str(op.get("session_token")) if op.get("session_token") else None),
-                            display_name=op.get("display_name"),
-                            headline=op.get("headline"),
-                            bio=op.get("bio"),
-                            attributes=op.get("attributes"),
-                            metadata=op.get("metadata"),
                         )
+                        if op.get("session_token") or op.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with self._leaf_conn(conn) as raw:
+                            resolved = leaves["profiles"].upsert_profile(
+                                raw,
+                                slug,
+                                app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                                email=(str(op.get("email")) if op.get("email") else None),
+                                session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                                display_name=op.get("display_name"),
+                                headline=op.get("headline"),
+                                bio=op.get("bio"),
+                                attributes=op.get("attributes"),
+                                metadata=op.get("metadata"),
+                            )
                 except (leaves["profiles"].AppProfileError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 user = resolved.user
@@ -15101,18 +15220,29 @@ class TakyonStore:
             if _db_backend() == "postgres":
                 leaves = self._app_leaves()
                 try:
-                    with self._leaf_conn(conn) as raw:
-                        resolved = leaves["directory"].upsert_entry(
-                            raw,
+                    scope = (
+                        self._pg_app_scope(
+                            conn,
                             slug,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
-                            email=(str(op.get("email")) if op.get("email") else None),
                             session_token=(str(op.get("session_token")) if op.get("session_token") else None),
-                            display_name=op.get("display_name"),
-                            headline=op.get("headline"),
-                            bio=op.get("bio"),
-                            attributes=op.get("attributes"),
                         )
+                        if op.get("session_token") or op.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with self._leaf_conn(conn) as raw:
+                            resolved = leaves["directory"].upsert_entry(
+                                raw,
+                                slug,
+                                app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                                email=(str(op.get("email")) if op.get("email") else None),
+                                session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                                display_name=op.get("display_name"),
+                                headline=op.get("headline"),
+                                bio=op.get("bio"),
+                                attributes=op.get("attributes"),
+                            )
                 except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = resolved.user.id
@@ -15184,14 +15314,25 @@ class TakyonStore:
             if _db_backend() == "postgres":
                 leaves = self._app_leaves()
                 try:
-                    with self._leaf_conn(conn) as raw:
-                        resolved = leaves["directory"].disable_entry(
-                            raw,
+                    scope = (
+                        self._pg_app_scope(
+                            conn,
                             slug,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
-                            email=(str(op.get("email")) if op.get("email") else None),
                             session_token=(str(op.get("session_token")) if op.get("session_token") else None),
                         )
+                        if op.get("session_token") or op.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with self._leaf_conn(conn) as raw:
+                            resolved = leaves["directory"].disable_entry(
+                                raw,
+                                slug,
+                                app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                                email=(str(op.get("email")) if op.get("email") else None),
+                                session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                            )
                 except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = resolved.user.id
@@ -15259,16 +15400,27 @@ class TakyonStore:
             if _db_backend() == "postgres":
                 leaves = self._app_leaves()
                 try:
-                    with self._leaf_conn(conn) as raw:
-                        user, connection_payload = leaves["connections"].set_connection(
-                            raw,
+                    scope = (
+                        self._pg_app_scope(
+                            conn,
                             slug,
-                            target_app_user_id=target_app_user_id,
-                            action=action_value,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
-                            email=(str(op.get("email")) if op.get("email") else None),
                             session_token=(str(op.get("session_token")) if op.get("session_token") else None),
                         )
+                        if op.get("session_token") or op.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with self._leaf_conn(conn) as raw:
+                            user, connection_payload = leaves["connections"].set_connection(
+                                raw,
+                                slug,
+                                target_app_user_id=target_app_user_id,
+                                action=action_value,
+                                app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                                email=(str(op.get("email")) if op.get("email") else None),
+                                session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                            )
                 except (leaves["connections"].AppConnectionError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = user.id
@@ -15406,23 +15558,34 @@ class TakyonStore:
             if _db_backend() == "postgres":
                 leaves = self._app_leaves()
                 try:
-                    with self._leaf_conn(conn) as raw:
-                        user, record = leaves["records"].save_record(
-                            raw,
+                    scope = (
+                        self._pg_app_scope(
+                            conn,
                             slug,
-                            record_type=record_type,
-                            data=data_value,
-                            record_id=(
-                                str(raw_record_id).strip()
-                                if raw_record_id not in {None, ""}
-                                else None
-                            ),
-                            title=title_value,
-                            metadata=metadata_value,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
-                            email=(str(op.get("email")) if op.get("email") else None),
                             session_token=(str(op.get("session_token")) if op.get("session_token") else None),
                         )
+                        if op.get("session_token") or op.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with self._leaf_conn(conn) as raw:
+                            user, record = leaves["records"].save_record(
+                                raw,
+                                slug,
+                                record_type=record_type,
+                                data=data_value,
+                                record_id=(
+                                    str(raw_record_id).strip()
+                                    if raw_record_id not in {None, ""}
+                                    else None
+                                ),
+                                title=title_value,
+                                metadata=metadata_value,
+                                app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                                email=(str(op.get("email")) if op.get("email") else None),
+                                session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                            )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = user.id
@@ -15552,16 +15715,27 @@ class TakyonStore:
             if _db_backend() == "postgres":
                 leaves = self._app_leaves()
                 try:
-                    with self._leaf_conn(conn) as raw:
-                        user, record = leaves["records"].delete_record(
-                            raw,
+                    scope = (
+                        self._pg_app_scope(
+                            conn,
                             slug,
-                            record_type=record_type,
-                            record_id=record_id,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
-                            email=(str(op.get("email")) if op.get("email") else None),
                             session_token=(str(op.get("session_token")) if op.get("session_token") else None),
                         )
+                        if op.get("session_token") or op.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with self._leaf_conn(conn) as raw:
+                            user, record = leaves["records"].delete_record(
+                                raw,
+                                slug,
+                                record_type=record_type,
+                                record_id=record_id,
+                                app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
+                                email=(str(op.get("email")) if op.get("email") else None),
+                                session_token=(str(op.get("session_token")) if op.get("session_token") else None),
+                            )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 app_user_id = user.id
@@ -18057,8 +18231,9 @@ def handle_business_read_app_session(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
-                    with store._leaf_conn(conn) as leaf:
-                        user = leaves["identity"].validate_session(leaf, business, session_token)
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as leaf:
+                            user = leaves["identity"].validate_session(leaf, business, session_token)
                 except leaves["identity"].AppIdentityError as exc:
                     raise TakyonError(str(exc)) from exc
                 if user is None:
@@ -18085,6 +18260,47 @@ def handle_business_read_app_session(args: dict, **_: Any) -> str:
                 },
             }
         )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_delete_app_session(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        session_token = str(args.get("session_token") or "").strip()
+        if not session_token:
+            raise TakyonError("session_token is required")
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if isinstance(conn, _PGConn):
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as leaf:
+                            revoked = leaves["identity"].revoke_session(leaf, business, session_token)
+                except leaves["identity"].AppIdentityError as exc:
+                    raise TakyonError(str(exc)) from exc
+            else:
+                row = conn.execute(
+                    "SELECT id FROM app_sessions WHERE business_slug = ? AND token_hash = ? AND revoked_at IS NULL LIMIT 1",
+                    (business, _hash_token(session_token)),
+                ).fetchone()
+                revoked = row is not None
+                if revoked:
+                    conn.execute(
+                        "UPDATE app_sessions SET revoked_at = ? WHERE business_slug = ? AND token_hash = ? AND revoked_at IS NULL",
+                        (_now(), business, _hash_token(session_token)),
+                    )
+            if revoked:
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.session.revoke",
+                    payload={"revoked": True},
+                )
+        return tool_result({"success": True, "business": business, "revoked": bool(revoked)})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -18176,33 +18392,52 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
         business = _slugify(str(args.get("business") or ""))
         with store._connect() as conn:
             store._ensure_business(conn, business)
-            user = None
-            if args.get("session_token"):
-                user = store._row_to_dict(conn.execute(
-                    "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
-                    (business, _hash_token(str(args.get("session_token"))), _now()),
-                ).fetchone())
-            elif args.get("app_user_id"):
-                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, str(args.get("app_user_id")))).fetchone())
-            elif args.get("email"):
-                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, _normalize_email(str(args.get("email"))))).fetchone())
+            session_token = str(args.get("session_token") or "").strip()
+            app_user_id = str(args.get("app_user_id") or "").strip()
+            email = str(args.get("email") or "").strip()
+            resolve_scope = (
+                store._pg_app_scope(
+                    conn,
+                    business,
+                    app_user_id=(app_user_id or None),
+                    session_token=(session_token or None),
+                )
+                if session_token or app_user_id
+                else nullcontext()
+            )
+            with resolve_scope:
+                user = None
+                if session_token:
+                    user = store._row_to_dict(conn.execute(
+                        "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
+                        (business, _hash_token(session_token), _now()),
+                    ).fetchone())
+                elif app_user_id:
+                    user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, app_user_id)).fetchone())
+                elif email:
+                    user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, _normalize_email(email))).fetchone())
             if not user:
                 raise TakyonError("app account not found")
             _maybe_reconcile_pg_completed_checkout(store, conn, business, user)
-            user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
-            entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
+            with (
+                store._pg_app_scope(conn, business, app_user_id=str(user["id"]))
+                if isinstance(conn, _PGConn)
+                else nullcontext()
+            ):
+                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
+                entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
+                budget = store._ensure_app_budget(conn, business)
+                usage = conn.execute(
+                    "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
+                    (business, user["id"], budget["current_period_start"]),
+                ).fetchone()
+                revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
             for entitlement in entitlements:
                 metadata = entitlement.get("metadata") if isinstance(entitlement.get("metadata"), dict) else {}
                 if "cancel_at_period_end" not in entitlement and "cancel_at_period_end" in metadata:
                     entitlement["cancel_at_period_end"] = bool(metadata.get("cancel_at_period_end"))
                 if "stripe_subscription_status" not in entitlement and "stripe_subscription_status" in metadata:
                     entitlement["stripe_subscription_status"] = metadata.get("stripe_subscription_status")
-            budget = store._ensure_app_budget(conn, business)
-            usage = conn.execute(
-                "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
-                (business, user["id"], budget["current_period_start"]),
-            ).fetchone()
-            revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
         return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -18220,10 +18455,11 @@ def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
             if not isinstance(conn, _PGConn):
                 raise TakyonError("app subscription cancellation requires the Postgres runtime")
             leaves = store._app_leaves()
-            with store._leaf_conn(conn) as leaf:
-                user = leaves["identity"].validate_session(leaf, business, session_token)
-                if user is None:
-                    raise TakyonError("app account not found")
+            with store._pg_app_scope(conn, business, session_token=session_token):
+                with store._leaf_conn(conn) as leaf:
+                    user = leaves["identity"].validate_session(leaf, business, session_token)
+                    if user is None:
+                        raise TakyonError("app account not found")
             try:
                 from . import stripe_util
             except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
@@ -18358,14 +18594,25 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
-                    with store._leaf_conn(conn) as leaf:
-                        resolved = leaves["profiles"].get_profile(
-                            leaf,
+                    scope = (
+                        store._pg_app_scope(
+                            conn,
                             business,
                             app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                            email=(str(args.get("email")) if args.get("email") else None),
                             session_token=(str(args.get("session_token")) if args.get("session_token") else None),
                         )
+                        if args.get("session_token") or args.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with store._leaf_conn(conn) as leaf:
+                            resolved = leaves["profiles"].get_profile(
+                                leaf,
+                                business,
+                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                email=(str(args.get("email")) if args.get("email") else None),
+                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                            )
                 except (leaves["profiles"].AppProfileError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 if resolved is None:
@@ -18373,13 +18620,14 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
                 if _is_service_email(resolved.user.email):
                     raise TakyonError("service identities have no profile")
                 if resolved.profile is None:
-                    with store._leaf_conn(conn) as leaf:
-                        resolved = leaves["profiles"].ensure_profile(
-                            leaf,
-                            business,
-                            app_user_id=resolved.user.id,
-                            display_name=resolved.user.name,
-                        )
+                    with store._pg_app_scope(conn, business, app_user_id=resolved.user.id):
+                        with store._leaf_conn(conn) as leaf:
+                            resolved = leaves["profiles"].ensure_profile(
+                                leaf,
+                                business,
+                                app_user_id=resolved.user.id,
+                                display_name=resolved.user.name,
+                            )
                 user_payload = _app_user_runtime_payload(resolved.user)
                 profile_payload = _app_profile_runtime_payload(resolved.profile)
                 exists = profile_payload is not None
@@ -18455,15 +18703,26 @@ def handle_business_list_app_directory_entries(args: dict, **_: Any) -> str:
                 if isinstance(conn, _PGConn):
                     leaves = store._app_leaves()
                     try:
-                        with store._leaf_conn(conn) as leaf:
-                            resolved = leaves["directory"].list_visible_entries(
-                                leaf,
+                        scope = (
+                            store._pg_app_scope(
+                                conn,
                                 business,
                                 app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                                email=(str(args.get("email")) if args.get("email") else None),
                                 session_token=(str(args.get("session_token")) if args.get("session_token") else None),
-                                limit=limit,
                             )
+                            if args.get("session_token") or args.get("app_user_id")
+                            else nullcontext()
+                        )
+                        with scope:
+                            with store._leaf_conn(conn) as leaf:
+                                resolved = leaves["directory"].list_visible_entries(
+                                    leaf,
+                                    business,
+                                    app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                    email=(str(args.get("email")) if args.get("email") else None),
+                                    session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                    limit=limit,
+                                )
                     except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
                         raise TakyonError(str(exc)) from exc
                     if resolved is None:
@@ -18593,38 +18852,39 @@ def handle_business_read_app_directory_entry(args: dict, **_: Any) -> str:
                 if isinstance(conn, _PGConn):
                     leaves = store._app_leaves()
                     try:
-                        with store._leaf_conn(conn) as leaf:
-                            if target_app_user_id or target_email:
-                                target_id = target_app_user_id
-                                if not target_id and target_email:
-                                    target_user = leaves["identity"].get_app_user(
+                        with store._pg_app_scope(conn, business, session_token=session_token):
+                            with store._leaf_conn(conn) as leaf:
+                                if target_app_user_id or target_email:
+                                    target_id = target_app_user_id
+                                    if not target_id and target_email:
+                                        target_user = leaves["identity"].get_app_user(
+                                            leaf,
+                                            business,
+                                            email=target_email,
+                                        )
+                                        target_id = target_user.id if target_user is not None else ""
+                                    resolved = leaves["directory"].get_visible_entry(
                                         leaf,
                                         business,
-                                        email=target_email,
+                                        target_app_user_id=target_id,
+                                        session_token=session_token,
                                     )
-                                    target_id = target_user.id if target_user is not None else ""
-                                resolved = leaves["directory"].get_visible_entry(
-                                    leaf,
-                                    business,
-                                    target_app_user_id=target_id,
-                                    session_token=session_token,
-                                )
-                            else:
-                                self_entry = leaves["directory"].get_self_entry(
-                                    leaf,
-                                    business,
-                                    session_token=session_token,
-                                )
-                                if self_entry is None:
-                                    raise TakyonError("app account not found")
-                                return tool_result(
-                                    {
-                                        "success": True,
-                                        "business": business,
-                                        "user": _app_user_runtime_payload(self_entry.user),
-                                        "directory_entry": _app_directory_entry_runtime_payload(self_entry.entry),
-                                    }
-                                )
+                                else:
+                                    self_entry = leaves["directory"].get_self_entry(
+                                        leaf,
+                                        business,
+                                        session_token=session_token,
+                                    )
+                                    if self_entry is None:
+                                        raise TakyonError("app account not found")
+                                    return tool_result(
+                                        {
+                                            "success": True,
+                                            "business": business,
+                                            "user": _app_user_runtime_payload(self_entry.user),
+                                            "directory_entry": _app_directory_entry_runtime_payload(self_entry.entry),
+                                        }
+                                    )
                     except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
                         raise TakyonError(str(exc)) from exc
                     if resolved is None:
@@ -18781,16 +19041,27 @@ def handle_business_list_app_connections(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
-                    with store._leaf_conn(conn) as leaf:
-                        resolved = leaves["connections"].list_connections(
-                            leaf,
+                    scope = (
+                        store._pg_app_scope(
+                            conn,
                             business,
-                            state=list_state,
                             app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                            email=(str(args.get("email")) if args.get("email") else None),
                             session_token=(str(args.get("session_token")) if args.get("session_token") else None),
-                            limit=limit,
                         )
+                        if args.get("session_token") or args.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with store._leaf_conn(conn) as leaf:
+                            resolved = leaves["connections"].list_connections(
+                                leaf,
+                                business,
+                                state=list_state,
+                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                email=(str(args.get("email")) if args.get("email") else None),
+                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                limit=limit,
+                            )
                 except (leaves["connections"].AppConnectionError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 if resolved is None:
@@ -18940,30 +19211,41 @@ def handle_business_list_app_records(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
-                    with store._leaf_conn(conn) as leaf:
-                        if query_requested:
-                            resolved = leaves["records"].query_records(
-                                leaf,
-                                business,
-                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                                email=(str(args.get("email")) if args.get("email") else None),
-                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
-                                record_type=record_type,
-                                filters=args.get("filters"),
-                                sort=args.get("sort"),
-                                cursor=args.get("cursor"),
-                                limit=args.get("limit"),
-                            )
-                        else:
-                            resolved = leaves["records"].list_records(
-                                leaf,
-                                business,
-                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                                email=(str(args.get("email")) if args.get("email") else None),
-                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
-                                record_type=record_type,
-                                limit=limit,
-                            )
+                    scope = (
+                        store._pg_app_scope(
+                            conn,
+                            business,
+                            app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                            session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                        )
+                        if args.get("session_token") or args.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with store._leaf_conn(conn) as leaf:
+                            if query_requested:
+                                resolved = leaves["records"].query_records(
+                                    leaf,
+                                    business,
+                                    app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                    email=(str(args.get("email")) if args.get("email") else None),
+                                    session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                    record_type=record_type,
+                                    filters=args.get("filters"),
+                                    sort=args.get("sort"),
+                                    cursor=args.get("cursor"),
+                                    limit=args.get("limit"),
+                                )
+                            else:
+                                resolved = leaves["records"].list_records(
+                                    leaf,
+                                    business,
+                                    app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                    email=(str(args.get("email")) if args.get("email") else None),
+                                    session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                                    record_type=record_type,
+                                    limit=limit,
+                                )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 if resolved is None:
@@ -19064,16 +19346,27 @@ def handle_business_read_app_record(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
-                    with store._leaf_conn(conn) as leaf:
-                        resolved = leaves["records"].get_record(
-                            leaf,
+                    scope = (
+                        store._pg_app_scope(
+                            conn,
                             business,
-                            record_type=record_type,
-                            record_id=record_id,
                             app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
-                            email=(str(args.get("email")) if args.get("email") else None),
                             session_token=(str(args.get("session_token")) if args.get("session_token") else None),
                         )
+                        if args.get("session_token") or args.get("app_user_id")
+                        else nullcontext()
+                    )
+                    with scope:
+                        with store._leaf_conn(conn) as leaf:
+                            resolved = leaves["records"].get_record(
+                                leaf,
+                                business,
+                                record_type=record_type,
+                                record_id=record_id,
+                                app_user_id=(str(args.get("app_user_id")) if args.get("app_user_id") else None),
+                                email=(str(args.get("email")) if args.get("email") else None),
+                                session_token=(str(args.get("session_token")) if args.get("session_token") else None),
+                            )
                 except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
                     raise TakyonError(str(exc)) from exc
                 if resolved is None:
