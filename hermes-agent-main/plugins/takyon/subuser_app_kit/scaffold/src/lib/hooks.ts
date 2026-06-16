@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { client, type TakyonActionError } from "./takyon";
+import { client, defaultSubscribePlanKey, type TakyonActionError } from "./takyon";
 
 export interface SessionUser {
   [key: string]: unknown;
@@ -180,6 +180,60 @@ export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated
     secondaryLabel: "Account",
     membershipState: access.subscriptionState || "signed_in",
   };
+}
+
+/** Consume the `?intent=subscribe` CTA. The subscribe links across the kit point at
+ *  `/app?intent=subscribe`; this is the ONE place that intent is turned into a real checkout call,
+ *  so every business gets a working subscribe without the generated UI wiring it by hand. When a
+ *  signed-in, not-yet-entitled viewer carries intent=subscribe, start checkout via the shared rail
+ *  and redirect to the returned URL; on no-URL/failure, clear the intent so it can be retried. */
+export function useSubscribeIntent(
+  access: Pick<ViewerAccessResult, "authenticated" | "entitled" | "loading">,
+  intent: string | null,
+): void {
+  const startedRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // `intent` MUST be passed from the router (useSearchParams) and be in the deps, so a
+    // client-side <Link> click to /app?intent=subscribe re-runs this effect. Reading
+    // window.location.search alone would only fire on a full reload (when `access` changes),
+    // which is exactly the bug that made the click do nothing. Reset the once-guard when the
+    // intent clears so a later click re-arms it.
+    if (intent !== "subscribe") {
+      startedRef.current = false;
+      return;
+    }
+    if (access.loading || !access.authenticated || access.entitled) return;
+    if (startedRef.current) return;
+    startedRef.current = true;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const planKey = defaultSubscribePlanKey();
+        const response = await client.checkout(planKey ? { plan_key: planKey } : {});
+        const url = String((response && (response.url || response.checkout_url)) || "").trim();
+        if (!cancelled && url) {
+          window.location.assign(url);
+          return;
+        }
+      } catch {
+        // fall through to clear the intent so the CTA can be retried without looping
+      }
+      if (cancelled) return;
+      const next = new URLSearchParams(window.location.search);
+      next.delete("intent");
+      const query = next.toString();
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + (query ? `?${query}` : "") + window.location.hash,
+      );
+      startedRef.current = false;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [intent, access.authenticated, access.entitled, access.loading]);
 }
 
 /** Loads the current product session once on mount via client.session(). */

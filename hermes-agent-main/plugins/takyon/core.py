@@ -2247,6 +2247,10 @@ def _materialize_subuser_app_kit(
         encoding="utf-8",
     )
     _materialize_subuser_app_starter(workspace_root, slug=slug, surface=materialized_surface)
+    # After the (seed-once) starter, force-refresh the AppKit-owned rail wrappers so canonical
+    # auth/checkout/entitlement plumbing fixes reach existing businesses on rebuild, not just new
+    # ones. Worker-owned screens are untouched.
+    _rematerialize_appkit_owned_src(workspace_root, slug=slug, surface=materialized_surface)
 
 
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
@@ -5910,6 +5914,59 @@ def _materialize_subuser_app_scaffold(
             shutil.copy2(path, destination)
 
 
+# The AppKit-owned rail wrappers + shared app shell. Unlike the worker-owned screens (app-home,
+# landing, profile, support, components, branding tokens), these encode canonical auth / session /
+# checkout / entitlement plumbing the worker must NOT edit (see the product-build contract). The
+# scaffold seeds them once at bootstrap, but a fix to this canonical plumbing must reach EXISTING
+# businesses on their next rebuild — otherwise a platform rail fix (e.g. wiring subscribe checkout)
+# only ever lands in brand-new businesses. So these specific files are force-refreshed from the
+# scaffold on every materialize, exactly like the `_takyon/` kit. They are additive/backward-
+# compatible by policy (new exports, never breaking the API the worker screens import).
+_APPKIT_OWNED_SRC_FILES = (
+    "src/lib/takyon.ts",
+    "src/lib/hooks.ts",
+    "src/lib/product-auth.tsx",
+    "src/lib/branding.ts",
+    "src/screens/app-layout.tsx",
+)
+
+
+def _rematerialize_appkit_owned_src(
+    workspace_root: Path,
+    *,
+    slug: str,
+    surface: dict[str, Any] | None,
+) -> None:
+    """Force-refresh the AppKit-owned rail wrappers from the scaffold, overwriting the business's
+    seeded-once copies. Worker-owned screens/components are left untouched. This is what lets a
+    canonical rail fix propagate to an already-bootstrapped business on rebuild."""
+    source = _subuser_app_scaffold_source_dir()
+    if not source.exists():
+        return
+    copy = _subuser_app_starter_strings(surface, slug=slug)
+
+    def _seed_safe(value: Any) -> str:
+        return re.sub(r'["<>{}]', "", str(value or "")).strip()
+
+    replacements = {
+        "__STARTER_SITE_NAME__": _seed_safe(copy.get("title")) or _humanize_business_slug(slug),
+        "__STARTER_SITE_DESCRIPTION__": _seed_safe(copy.get("description")),
+    }
+    for rel in _APPKIT_OWNED_SRC_FILES:
+        src_path = source / rel
+        if not src_path.is_file():
+            continue
+        destination = workspace_root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if src_path.suffix.lower() in _SCAFFOLD_SEED_TOKEN_SUFFIXES:
+            text = src_path.read_text(encoding="utf-8")
+            for token, value in replacements.items():
+                text = text.replace(token, value)
+            destination.write_text(text, encoding="utf-8")
+        else:
+            shutil.copy2(src_path, destination)
+
+
 def _materialize_subuser_app_starter(
     workspace_root: Path,
     *,
@@ -6047,6 +6104,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
         "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers in `src/lib/hooks.ts` instead of hardcoding paid-vs-unpaid copy.",
+        "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",
         "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, continue, or open app.",
         "- The shared account rail returns canonical account truth as `user` plus `entitlements[]`; if a screen needs subscription/access state, derive it from those helpers instead of reviving legacy `has_active_subscription`, nested `subscription.status`, or custom `client.account()` field guesses.",
         "- Do not hand-roll subscription gates inside `src/screens/app-home.tsx` or `src/screens/profile.tsx` when the shared hooks already answer whether the viewer should subscribe, continue, update billing, or open the app.",
