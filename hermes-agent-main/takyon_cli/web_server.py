@@ -64,6 +64,7 @@ from plugins.takyon.core import (
     handle_business_act_on_app_connection,
     handle_business_cancel_app_subscription,
     handle_business_create_app_checkout,
+    handle_business_delete_app_session,
     handle_business_disable_app_directory_entry,
     handle_business_delete_app_record,
     handle_business_enqueue_job,
@@ -2134,6 +2135,10 @@ def _takyon_app_set_session_cookie(response: Response, request: Request, token: 
     )
 
 
+def _takyon_app_clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(TAKYON_APP_SESSION_COOKIE, path="/")
+
+
 def _takyon_test_checkout_receipt_path(business: str, intent_id: str) -> Path:
     safe_business = re.sub(r"[^a-z0-9-]", "", str(business or "").strip().lower())
     safe_intent = re.sub(r"[^a-z0-9]", "", str(intent_id or "").strip().lower())
@@ -2472,7 +2477,9 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             status == int(HTTPStatus.BAD_REQUEST)
             and str(payload.get("error") or "").strip().lower() == "app account not found"
         ):
-            return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+            response = _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+            _takyon_app_clear_session_cookie(response)
+            return response
         payload["authenticated"] = status == int(HTTPStatus.OK)
         return _takyon_app_json(status, payload)
 
@@ -2488,7 +2495,9 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             status == int(HTTPStatus.BAD_REQUEST)
             and str(payload.get("error") or "").strip().lower() == "app account not found"
         ):
-            return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+            response = _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
+            _takyon_app_clear_session_cookie(response)
+            return response
         payload["authenticated"] = status == int(HTTPStatus.OK)
         return _takyon_app_json(status, payload)
 
@@ -2664,7 +2673,12 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "access_token": body.get("access_token") or body.get("accessToken"),
             "name": body.get("name"),
         }))
-        return _takyon_app_json(status, payload)
+        response = _takyon_app_json(status, payload)
+        if status == int(HTTPStatus.OK):
+            session_token = str(payload.get("session_token") or "").strip()
+            if session_token:
+                _takyon_app_set_session_cookie(response, request, session_token)
+        return response
 
     if parts == ["auth", "request"]:
         status, payload = _takyon_app_tool(handle_business_request_app_magic_link({
@@ -2690,7 +2704,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             }))
         status, payload = _takyon_app_tool(handle_business_create_app_checkout({
             "business": business,
-            "plan_key": body.get("plan_key") or body.get("planKey"),
+            "plan_key": body.get("plan_key") or body.get("planKey") or body.get("price_key") or body.get("priceKey"),
             "success_url": body.get("success_url") or body.get("successUrl"),
             "cancel_url": body.get("cancel_url") or body.get("cancelUrl"),
             "customer_email": body.get("customer_email") or body.get("customerEmail") or (account.get("user") or {}).get("email"),
@@ -2926,6 +2940,19 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
             {"success": False, "error": "owner_token_rejected_on_app_plane"},
         )
     parts = _takyon_app_route_parts(route)
+    if parts == ["session"]:
+        token = _takyon_app_session_token(request)
+        if not token:
+            response = _takyon_app_json(HTTPStatus.OK, {"success": True, "revoked": False})
+            _takyon_app_clear_session_cookie(response)
+            return response
+        status, payload = _takyon_app_tool(handle_business_delete_app_session({
+            "business": business,
+            "session_token": token,
+        }))
+        response = _takyon_app_json(status, payload)
+        _takyon_app_clear_session_cookie(response)
+        return response
     if parts == ["directory", "me"]:
         token = _takyon_app_session_token(request)
         if not token:
