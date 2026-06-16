@@ -35,12 +35,20 @@ import sys
 from pathlib import Path
 
 from plugins.takyon import safebox
-from plugins.takyon.core import (
-    _apply_xurl_oauth1_credentials,
-    _read_x_oauth1_credentials,
-    _xurl_auth_status_ok,
-    load_takyon_env,
-)
+from plugins.takyon.core import load_takyon_env
+
+try:
+    from plugins.takyon.core import (
+        _apply_xurl_oauth1_credentials,
+        _read_x_oauth1_credentials,
+        _xurl_auth_status_ok,
+    )
+except ImportError:
+    # X auth migrated from xurl/OAuth1 to Composio; the legacy xurl seed helpers were removed
+    # from core. There is nothing to seed on this rail anymore — exit cleanly so the deploy
+    # continues (the operator rail already tolerated this; the sub-user rail must too).
+    print("xurl OAuth1 machinery retired (X uses Composio); skipping xurl auth seed")
+    raise SystemExit(0)
 
 load_takyon_env()
 
