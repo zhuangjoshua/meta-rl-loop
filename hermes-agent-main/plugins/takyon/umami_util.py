@@ -39,6 +39,15 @@ def umami_configured() -> bool:
         return False
 
 
+# Umami Cloud sits behind Cloudflare, which 1010-blocks bare automation User-Agents (e.g. the
+# default "Python-urllib/3.x"), returning 403 Access denied BEFORE the API ever evaluates the key.
+# Send a normal browser UA so a valid key actually reaches Umami instead of being bounced by the CDN.
+_UMAMI_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
 def umami_request(
     path: str,
     params: dict[str, Any] | None,
@@ -61,7 +70,11 @@ def umami_request(
         url = f"{url}?{encoded}"
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/json", "x-umami-api-key": key},
+        headers={
+            "Accept": "application/json",
+            "User-Agent": _UMAMI_USER_AGENT,
+            "x-umami-api-key": key,
+        },
         method="GET",
     )
     try:

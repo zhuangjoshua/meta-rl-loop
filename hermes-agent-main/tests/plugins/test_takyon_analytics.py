@@ -100,6 +100,35 @@ def test_umami_configured_is_safe_without_authority():
     assert umami_util.umami_configured() is False
 
 
+def test_umami_request_sends_browser_user_agent(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout=0):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = {key.lower(): value for key, value in request.header_items()}
+        return DummyResponse()
+
+    monkeypatch.setattr(umami_util.safebox, "read_env_backed_value", lambda key: "secret-key")
+    monkeypatch.setattr(umami_util.urllib.request, "urlopen", fake_urlopen)
+    out = umami_util.umami_request("websites/wid/stats", {"hostname": "demo.example"}, "https://api.umami.is/v1")
+    assert out == {}
+    assert captured["url"] == "https://api.umami.is/v1/websites/wid/stats?hostname=demo.example"
+    headers = captured["headers"]
+    assert headers["user-agent"] == umami_util._UMAMI_USER_AGENT
+    assert headers["x-umami-api-key"] == "secret-key"
+
+
 def test_website_stats_normalizes_numbers_and_value_objects(monkeypatch):
     monkeypatch.setattr(
         umami_util,
@@ -139,6 +168,31 @@ def test_summary_disabled_returns_not_configured_without_network(monkeypatch):
     monkeypatch.setattr(core, "_analytics_umami_config", lambda: {"enabled": False})
     out = core._business_analytics_summary("demo")
     assert out == {"configured": False, "reason": "analytics disabled"}
+
+
+def test_core_analytics_config_uses_effective_load_config(monkeypatch):
+    from takyon_cli import config as takyon_config
+
+    monkeypatch.setattr(
+        takyon_config,
+        "load_config",
+        lambda: {
+            "analytics": {
+                "umami": {
+                    "enabled": True,
+                    "website_id": "WID",
+                    "script_src": "https://cloud.umami.is/script.js",
+                    "api_endpoint": "https://api.umami.is/v1",
+                }
+            }
+        },
+    )
+    assert core._analytics_umami_config() == {
+        "enabled": True,
+        "website_id": "WID",
+        "script_src": "https://cloud.umami.is/script.js",
+        "api_endpoint": "https://api.umami.is/v1",
+    }
 
 
 def test_summary_enabled_without_key_reports_missing_key(monkeypatch):

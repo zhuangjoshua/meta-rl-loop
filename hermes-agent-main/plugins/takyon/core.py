@@ -7506,16 +7506,18 @@ def _model_from_config(*keys: str) -> str:
 
 
 def _analytics_umami_config() -> dict[str, Any]:
-    """Read the analytics.umami.* block from config.yaml (shared source of truth)."""
-    path = get_takyon_home() / "config.yaml"
-    try:
-        import yaml
+    """Read the effective analytics.umami.* config using the shared loader.
 
-        with open(path, encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
-        umami = (data.get("analytics") or {}).get("umami")
+    This must match the product-site injector path in ``takyon_cli.web_server``:
+    callers need the merged/default runtime config, not just whatever keys happen
+    to be materialized in ``TAKYON_HOME/config.yaml`` on one node.
+    """
+    try:
+        from takyon_cli.config import load_config
+
+        umami = (load_config().get("analytics") or {}).get("umami")
         if isinstance(umami, dict):
-            return umami
+            return dict(umami)
     except Exception:
         return {}
     return {}
