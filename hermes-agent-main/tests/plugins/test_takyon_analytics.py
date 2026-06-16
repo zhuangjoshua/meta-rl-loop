@@ -1,0 +1,170 @@
+"""Tests for the Umami web-analytics rail: always-on contract, server-side
+script injection, the read tool's summary, and the minimal client."""
+
+from __future__ import annotations
+
+import pytest
+
+from plugins.takyon import core, umami_util
+from takyon_cli import web_server as ws
+
+
+# --------------------------------------------------------------------------- #
+# Always-on rail: analytics must be present for every product, never a choice  #
+# --------------------------------------------------------------------------- #
+
+def test_analytics_is_registered_and_always_on():
+    assert "analytics" in core.PRODUCT_RUNTIME_RAILS
+    assert "analytics" in core.ALWAYS_ON_RUNTIME_RAILS
+
+
+def test_contract_block_always_includes_analytics_when_other_rails_selected():
+    block = core._runtime_ui_contract_block(
+        {"runtime_features": ["auth", "account"], "runtime_api_base": "/api/takyon/apps/demo"}
+    )
+    assert "Always-on runtime rails" in block
+    assert "analytics" in block
+    # the always-on note must steer workers away from their own tracker
+    assert "tracking" in block.lower()
+
+
+def test_contract_block_mentions_analytics_even_with_no_selected_rails():
+    block = core._runtime_ui_contract_block({})
+    assert "analytics" in block
+
+
+# --------------------------------------------------------------------------- #
+# Server-side <head> injection                                                 #
+# --------------------------------------------------------------------------- #
+
+_SNIP = '<script defer src="https://cloud.umami.is/script.js" data-website-id="W"></script>'
+
+
+def test_inject_before_close_head_and_idempotent():
+    doc = "<html><head><title>x</title></head><body></body></html>"
+    out = ws._inject_head_snippet(doc, _SNIP)
+    assert _SNIP in out and out.index(_SNIP) < out.lower().index("</head>")
+    assert ws._inject_head_snippet(out, _SNIP) == out  # idempotent
+
+
+def test_inject_handles_uppercase_head_and_missing_head():
+    up = ws._inject_head_snippet("<HTML><HEAD></HEAD><BODY></BODY></HTML>", _SNIP)
+    assert _SNIP in up
+    nohead = ws._inject_head_snippet("<html><body>hi</body></html>", _SNIP)
+    assert _SNIP in nohead
+
+
+def test_snippet_disabled_returns_empty(monkeypatch):
+    ws._UMAMI_SNIPPET_CACHE = None
+    monkeypatch.setattr(ws, "load_config", lambda: {"analytics": {"umami": {"enabled": False, "website_id": "W"}}})
+    assert ws._umami_analytics_snippet() == ""
+
+
+def test_snippet_enabled_returns_tag(monkeypatch):
+    ws._UMAMI_SNIPPET_CACHE = None
+    monkeypatch.setattr(
+        ws,
+        "load_config",
+        lambda: {"analytics": {"umami": {"enabled": True, "website_id": "WID-123", "script_src": "https://u.example/s.js"}}},
+    )
+    tag = ws._umami_analytics_snippet()
+    assert 'data-website-id="WID-123"' in tag and 'src="https://u.example/s.js"' in tag
+    ws._UMAMI_SNIPPET_CACHE = None  # don't leak cache to other tests
+
+
+def test_file_response_injects_html_passes_through_assets(monkeypatch, tmp_path):
+    ws._UMAMI_SNIPPET_CACHE = None
+    monkeypatch.setattr(
+        ws,
+        "load_config",
+        lambda: {"analytics": {"umami": {"enabled": True, "website_id": "WID", "script_src": "https://u/s.js"}}},
+    )
+    html_file = tmp_path / "index.html"
+    html_file.write_text("<html><head></head><body></body></html>", encoding="utf-8")
+    js_file = tmp_path / "app.js"
+    js_file.write_text("console.log(1)", encoding="utf-8")
+    html_resp = ws._product_site_file_response(html_file)
+    assert html_resp.__class__.__name__ == "HTMLResponse"
+    assert b"WID" in html_resp.body
+    js_resp = ws._product_site_file_response(js_file)
+    assert js_resp.__class__.__name__ == "FileResponse"  # assets untouched
+    ws._UMAMI_SNIPPET_CACHE = None
+
+
+# --------------------------------------------------------------------------- #
+# Minimal Umami client                                                         #
+# --------------------------------------------------------------------------- #
+
+def test_umami_configured_is_safe_without_authority():
+    # Must never raise even when the secret authority is unavailable.
+    assert umami_util.umami_configured() is False
+
+
+def test_website_stats_normalizes_numbers_and_value_objects(monkeypatch):
+    monkeypatch.setattr(
+        umami_util,
+        "umami_request",
+        lambda *a, **k: {"pageviews": {"value": 42}, "visitors": 17, "visits": {"value": 20}, "bounces": 3, "totaltime": 999},
+    )
+    stats = umami_util.website_stats("wid", start_ms=0, end_ms=1, api_endpoint="https://api.umami.is/v1", hostname="x.example")
+    assert stats == {"pageviews": 42, "visitors": 17, "visits": 20, "bounces": 3, "totaltime": 999}
+
+
+def test_website_pageviews_series_normalizes_xy(monkeypatch):
+    captured = {}
+
+    def fake_request(path, params, api_endpoint, **k):
+        captured["path"] = path
+        captured["params"] = params
+        return {
+            "pageviews": [{"x": "2026-06-10 00:00:00", "y": "5"}, {"x": "2026-06-11 00:00:00", "y": 8}],
+            "sessions": [{"x": "2026-06-10 00:00:00", "y": 3}],
+        }
+
+    monkeypatch.setattr(umami_util, "umami_request", fake_request)
+    out = umami_util.website_pageviews_series(
+        "wid", start_ms=0, end_ms=10, unit="day", api_endpoint="https://api.umami.is/v1", hostname="x.example"
+    )
+    assert captured["path"] == "websites/wid/stats".replace("stats", "pageviews")
+    assert captured["params"]["unit"] == "day" and captured["params"]["hostname"] == "x.example"
+    assert out["pageviews"] == [{"x": "2026-06-10 00:00:00", "y": 5}, {"x": "2026-06-11 00:00:00", "y": 8}]
+    assert out["sessions"] == [{"x": "2026-06-10 00:00:00", "y": 3}]
+
+
+# --------------------------------------------------------------------------- #
+# Business analytics summary (best-effort, never raises, never faked)          #
+# --------------------------------------------------------------------------- #
+
+def test_summary_disabled_returns_not_configured_without_network(monkeypatch):
+    monkeypatch.setattr(core, "_analytics_umami_config", lambda: {"enabled": False})
+    out = core._business_analytics_summary("demo")
+    assert out == {"configured": False, "reason": "analytics disabled"}
+
+
+def test_summary_enabled_without_key_reports_missing_key(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_analytics_umami_config",
+        lambda: {"enabled": True, "website_id": "WID", "api_endpoint": "https://api.umami.is/v1"},
+    )
+    monkeypatch.setattr(umami_util, "umami_configured", lambda: False)
+    out = core._business_analytics_summary("demo")
+    assert out["configured"] is False and "UMAMI_API_KEY" in out["reason"]
+
+
+def test_summary_ok_path_returns_stats(monkeypatch):
+    core._ANALYTICS_SUMMARY_CACHE.clear()
+    monkeypatch.setattr(
+        core,
+        "_analytics_umami_config",
+        lambda: {"enabled": True, "website_id": "WID", "api_endpoint": "https://api.umami.is/v1", "stats_cache_seconds": 0},
+    )
+    monkeypatch.setattr(umami_util, "umami_configured", lambda: True)
+    monkeypatch.setattr(
+        umami_util,
+        "website_stats",
+        lambda *a, **k: {"pageviews": 5, "visitors": 4, "visits": 4, "bounces": 1, "totaltime": 60},
+    )
+    out = core._business_analytics_summary("demo", days=30)
+    assert out["configured"] is True and out["ok"] is True
+    assert out["window_days"] == 30 and out["stats"]["visitors"] == 4

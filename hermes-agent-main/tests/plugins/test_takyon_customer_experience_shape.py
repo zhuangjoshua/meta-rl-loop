@@ -256,7 +256,7 @@ def test_worker_contract_block_states_positive_obligation_and_facts():
     assert "createActionRunner(name)" in block
     assert "product/site/actions/<name>.ts" in block
     assert "default-export async `(payload, ctx) => result`" in block
-    assert "ctx.base_url" in block
+    assert "ctx IS the runtime client" in block
     assert "Never fake or simulate an action result client-side" in block
     # The deleted app-shape taxonomy and the old per-rail fear prose are gone.
     assert "App mode:" not in block

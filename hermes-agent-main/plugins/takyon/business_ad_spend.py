@@ -5,10 +5,15 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 
 class BusinessAdSpendError(Exception):
     """Base for backend ad-spend policy errors."""
+
+
+class AdSpendCapExceeded(BusinessAdSpendError):
+    """A daily budget is non-positive, over the per-channel safety cap, or over the reserved cap."""
 
 
 class BusinessAdSpendPolicyNotFound(BusinessAdSpendError):
@@ -249,3 +254,38 @@ def update_policy(
             ),
         )
         return get_policy(conn, business_slug, channel, slug)
+
+
+def enforce_daily_budget(
+    policy: BusinessAdSpendPolicy,
+    *,
+    daily_budget_cents: int,
+    now: datetime,
+    safety_cap_cents: int = 0,
+) -> None:
+    """The single source of cap truth, shared by the control TOOL and the runtime GATEWAY.
+
+    Raises ``AdSpendCapExceeded`` if ``daily_budget_cents`` is non-positive, exceeds the
+    per-channel safety cap (when given), or would spend past the reserved-credit campaign cap
+    on ``policy`` (``total_budget_cents`` already paid in credits, minus what the platform has
+    already spent). Pure / no I/O so both the in-tool gate and the gateway gate compute identically.
+    """
+    cents = int(daily_budget_cents)
+    if cents <= 0:
+        raise AdSpendCapExceeded("daily_budget must be positive")
+    if safety_cap_cents and cents > int(safety_cap_cents):
+        raise AdSpendCapExceeded(
+            f"daily_budget {cents / 100:.2f} USD exceeds the safety cap of {int(safety_cap_cents) / 100:.2f} USD/day"
+        )
+    remaining_cents = max(0, int(policy.total_budget_cents) - int(policy.last_synced_spend_cents))
+    end_at = policy.end_at if isinstance(policy.end_at, datetime) else now
+    seconds_left = max(1.0, (end_at - now).total_seconds())
+    days_remaining = max(1, int((seconds_left + 86399) // 86400))
+    if cents > remaining_cents:
+        raise AdSpendCapExceeded(
+            f"daily_budget {cents / 100:.2f} USD exceeds the remaining reserved campaign cap of {remaining_cents / 100:.2f} USD"
+        )
+    if cents * days_remaining > remaining_cents:
+        raise AdSpendCapExceeded(
+            f"daily_budget {cents / 100:.2f} USD through the scheduled window exceeds the reserved campaign cap of {remaining_cents / 100:.2f} USD"
+        )

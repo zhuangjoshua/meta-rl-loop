@@ -108,6 +108,14 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   chown -R takyon:takyon '$REMOTE_HOME' '$REMOTE_SECRETS'
   if [ -e /root/.xurl ] && [ ! -e '$REMOTE_ROOT/.xurl' ]; then cp -a /root/.xurl '$REMOTE_ROOT/.xurl'; fi
   if [ -e '$REMOTE_ROOT/.xurl' ]; then chown -R takyon:takyon '$REMOTE_ROOT/.xurl'; fi
+  # Product-host actions run in a per-call \`systemd-run --user --scope\` sandbox, which needs the
+  # takyon user-manager bus at /run/user/<uid>. Enable lingering so user@<uid> runs, and carve that
+  # dir back through ProtectHome (tmpfs + BindPaths) via a uid-computed drop-in. Without this every
+  # product action fails to start its sandbox (\"Interactive authentication required\").
+  loginctl enable-linger takyon
+  TUID=\$(id -u takyon)
+  install -d /etc/systemd/system/'$REMOTE_SERVICE_NAME'.d
+  printf '[Service]\nProtectHome=tmpfs\nBindPaths=/run/user/%s\n' \"\$TUID\" > /etc/systemd/system/'$REMOTE_SERVICE_NAME'.d/10-run-user-carveout.conf
   python3 -m compileall -q '$REMOTE_RUNTIME/plugins/takyon' '$REMOTE_RUNTIME/takyon_cli' '$REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl enable '$REMOTE_SERVICE_NAME' >/dev/null

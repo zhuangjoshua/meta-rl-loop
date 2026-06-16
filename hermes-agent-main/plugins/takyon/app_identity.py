@@ -291,6 +291,90 @@ def verify_magic_link(
     return session, raw_session
 
 
+def start_session(
+    conn,
+    business_slug: str,
+    app_user_id: str,
+    *,
+    session_ttl_days: int = _DEFAULT_SESSION_TTL_DAYS,
+) -> tuple[AppSession, str]:
+    """Mint a 30-day bearer session for an already-resolved sub-user. Returns
+    (AppSession, raw_session_token); only the hash is stored. Refuses a suspended/closed user
+    (InactiveAppUser). This is the session-minting half of ``verify_magic_link``, factored out so
+    the Supabase login path mints an IDENTICAL session — `validate_session` and everything downstream
+    cannot tell, nor need to, how the user authenticated."""
+    if not isinstance(session_ttl_days, int) or session_ttl_days <= 0:
+        raise ValueError("session_ttl_days must be a positive integer")
+    raw_session = _random_token()
+    with conn.transaction():
+        status_row = conn.execute(
+            "select status from app_users where business_slug = %s and id = %s",
+            (business_slug, app_user_id),
+        ).fetchone()
+        if status_row is None or str(status_row[0]) != "active":
+            raise InactiveAppUser(str(app_user_id))
+        row = conn.execute(
+            "insert into app_sessions (business_slug, app_user_id, token_hash, expires_at) "
+            "values (%s, %s, %s, now() + make_interval(days => %s)) "
+            "returning id, expires_at",
+            (business_slug, app_user_id, _hash_token(raw_session), session_ttl_days),
+        ).fetchone()
+    session = AppSession(
+        id=str(row[0]),
+        business_slug=business_slug,
+        app_user_id=str(app_user_id),
+        expires_at=row[1],
+    )
+    return session, raw_session
+
+
+def upsert_app_user_by_supabase_id(
+    conn,
+    business_slug: str,
+    supabase_user_id: str,
+    email: str | None,
+    *,
+    name: str | None = None,
+) -> AppUser:
+    """Upsert a sub-user for a VERIFIED Supabase identity (AUTH0.md §7).
+
+    Resolution order: (1) an existing row already bound to this ``supabase_user_id``; else (2) a
+    legacy email-only row for (business, email) with no supabase id is ADOPTED — its
+    ``supabase_user_id`` is set — so a customer who pre-existed via magic-link keeps the same
+    identity, entitlements, and usage history on their first Google login; else (3) a brand-new
+    ``active`` sub-user. A suspended/closed user is never reactivated here, and the caller (the
+    login route) only mints a session via ``start_session``, which refuses non-active users.
+
+    The caller MUST have verified the Supabase token first (``app_supabase_auth.verify_supabase_jwt``)
+    — this never trusts a raw subject/email straight off the wire."""
+    sub = str(supabase_user_id or "").strip()
+    if not sub:
+        raise ValueError("supabase_user_id is required")
+    normalized = _normalize_email(email) if email else None
+    with conn.transaction():
+        row = conn.execute(
+            f"select {_APP_USER_COLUMNS} from app_users "
+            "where business_slug = %s and supabase_user_id = %s",
+            (business_slug, sub),
+        ).fetchone()
+        if row is None and normalized is not None:
+            row = conn.execute(
+                "update app_users set supabase_user_id = %s, "
+                " name = coalesce(%s, name), updated_at = now() "
+                "where business_slug = %s and email = %s and supabase_user_id is null "
+                f"returning {_APP_USER_COLUMNS}",
+                (sub, name, business_slug, normalized),
+            ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "insert into app_users (business_slug, email, name, status, supabase_user_id) "
+                "values (%s, %s, %s, 'active', %s) "
+                f"returning {_APP_USER_COLUMNS}",
+                (business_slug, normalized or f"{sub}@supabase.local", name, sub),
+            ).fetchone()
+    return _app_user_from_row(row)
+
+
 def validate_session(conn, business_slug: str, raw_session_token: str) -> AppUser | None:
     """Resolve a presented session token to its sub-user, or None. A session counts as
     valid only while it is unrevoked, unexpired, and its sub-user is active. Pure read —

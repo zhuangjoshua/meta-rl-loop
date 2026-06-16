@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
-PRODUCT_ACTIVATION_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-activation-broker.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 
 TARGET_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
@@ -31,11 +30,6 @@ fi
 
 if [[ ! -f "$DOCKER_BROKER_SERVICE_FILE" ]]; then
   echo "docker broker service file not found: $DOCKER_BROKER_SERVICE_FILE" >&2
-  exit 1
-fi
-
-if [[ ! -f "$PRODUCT_ACTIVATION_BROKER_SERVICE_FILE" ]]; then
-  echo "product activation broker service file not found: $PRODUCT_ACTIVATION_BROKER_SERVICE_FILE" >&2
   exit 1
 fi
 

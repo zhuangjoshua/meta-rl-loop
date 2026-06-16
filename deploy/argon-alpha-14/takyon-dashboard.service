@@ -6,8 +6,6 @@ After=docker.service
 Wants=docker.service
 After=takyon-docker-broker.service
 Wants=takyon-docker-broker.service
-After=takyon-activation-broker.service
-Wants=takyon-activation-broker.service
 
 [Service]
 Type=simple
@@ -20,7 +18,15 @@ User=takyon
 Group=takyon
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# Product-action sandbox carve-out: scheduled actions run here (the worker plane) via
+# `systemd-run --user --scope` (app_actions.py), which needs the takyon (uid 995) user-manager bus at
+# /run/user/995. Plain ProtectHome=true blanks /run/user inside the namespace; ProtectHome=tmpfs +
+# BindPaths re-exposes ONLY takyon's own runtime dir (the user-manager socket, not the docker/system
+# daemon socket). The `%U` specifier resolves to the MANAGER uid (0) on this systemd, so the literal
+# takyon uid is required. All other isolation (NoNewPrivileges, ProtectSystem=strict, deno
+# --deny-write/--no-remote/scoped --allow-net, cgroup CPU/Mem/Tasks caps) is unchanged.
+ProtectHome=tmpfs
+BindPaths=/run/user/995
 ProtectSystem=strict
 ReadWritePaths=/opt/takyon
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
@@ -52,7 +58,6 @@ Environment=TAKYON_STORAGE_BACKEND=supabase_s3
 Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 Environment=TAKYON_DOCKER_BROKER_URL=http://127.0.0.1:8011
-Environment=TAKYON_PRODUCT_ACTIVATION_BROKER_URL=http://127.0.0.1:8012
 Environment=TAKYON_DOCKER_BINARY=/opt/takyon/hermes-agent-main/scripts/takyon-docker-broker.py
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true

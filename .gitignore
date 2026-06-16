@@ -85,3 +85,11 @@ result
 .codex-reference-images/
 takyon-vps
 takyon-vps.pub
+
+# Local scratch, build artifacts, and codex hand-off plans (not source).
+site-exports/
+*-plan-for-codex.md
+AUTH0.md
+lfd/
+changes.md
+/you

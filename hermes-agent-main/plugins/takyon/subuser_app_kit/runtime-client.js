@@ -1,4 +1,4 @@
-const DEFAULT_FRONTEND_API_MODE = "same_origin_product_host_with_prefixed_fallback";
+const DEFAULT_FRONTEND_API_MODE = "prefixed_runtime_api";
 const ALLOW_CALL_STATES = new Set(["live", "declared"]);
 
 function isObject(value) {
@@ -46,31 +46,8 @@ function encodeRoutePart(value) {
   return encodeURIComponent(String(value || "").trim());
 }
 
-function defaultLocation() {
-  if (typeof window !== "undefined" && window.location) return window.location;
-  return { hostname: "", href: "", pathname: "/", origin: "" };
-}
-
-function looksLikeProductHost(hostname) {
-  const host = String(hostname || "").trim().toLowerCase();
-  if (!host) return false;
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return false;
-  if (host.startsWith("app.")) return false;
-  return host.endsWith(".fourmanifold.com");
-}
-
 export function resolveSubuserRuntimeBase(config = {}) {
-  const frontendApiMode = String(
-    config.frontendApiMode || DEFAULT_FRONTEND_API_MODE,
-  ).trim();
   const runtimeApiBase = String(config.runtimeApiBase || "").trim();
-  const location = config.location || defaultLocation();
-  const preferSameOrigin =
-    typeof config.preferSameOrigin === "boolean"
-      ? config.preferSameOrigin
-      : frontendApiMode === DEFAULT_FRONTEND_API_MODE &&
-        looksLikeProductHost(location.hostname);
-  if (preferSameOrigin) return "";
   return runtimeApiBase.replace(/\/+$/, "");
 }
 
@@ -151,7 +128,11 @@ export function createSubuserRuntimeClient(context = {}) {
     context.frontendApiMode || DEFAULT_FRONTEND_API_MODE,
   ).trim();
   const runtimeApiBase = String(context.runtimeApiBase || "").trim();
-  const location = context.location || defaultLocation();
+  const location =
+    context.location ||
+    (typeof window !== "undefined" && window.location
+      ? window.location
+      : { hostname: "", href: "", pathname: "/", origin: "" });
 
   function railStateFor(rail) {
     if (railState[rail]) return railState[rail];
@@ -200,6 +181,16 @@ export function createSubuserRuntimeClient(context = {}) {
       return jsonRequest(routeUrl("auth/request"), {
         method: "POST",
         body: JSON.stringify(payload),
+      });
+    },
+    async loginWithSupabase(accessToken, extra = {}) {
+      // Supabase Auth (Google/email) sign-in: complete the Supabase OAuth flow in the browser,
+      // then pass the Supabase access token here. Returns { success, session_token, app_user_id,
+      // email, tier, ... } — the session_token is the Takyon app credential for later calls.
+      ensureRail("auth");
+      return jsonRequest(routeUrl("auth/session"), {
+        method: "POST",
+        body: JSON.stringify({ access_token: accessToken, ...extra }),
       });
     },
     async session() {
@@ -326,7 +317,7 @@ export function createSubuserRuntimeClient(context = {}) {
     },
     async checkout(payload = {}) {
       ensureRail("checkout");
-      return jsonRequest(routeUrl("checkout"), {
+      const response = await jsonRequest(routeUrl("checkout"), {
         method: "POST",
         body: JSON.stringify({
           ...payload,
@@ -340,6 +331,10 @@ export function createSubuserRuntimeClient(context = {}) {
             defaultCheckoutUrl("cancel", location),
         }),
       });
+      if (response && response.checkout_url && !response.url) {
+        response.url = response.checkout_url;
+      }
+      return response;
     },
     async recordUsage(payload = {}) {
       ensureRail("usage");
@@ -407,13 +402,23 @@ export function createSubuserRuntimeClient(context = {}) {
         body: JSON.stringify(payload),
       });
     },
+    async search(payload = {}) {
+      // Metered web search/extract through the shared search authority (reserve→settle against the
+      // app budget). payload: { operation:'search', query, depth, max_results } or
+      // { operation:'extract', urls:[...] }. Returns { success, results, usage } — never a provider key.
+      ensureRail("search");
+      return jsonRequest(routeUrl("search"), {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
     async invokeAction(name, payload = {}, options = {}) {
       ensureRail("actions");
       const actionName = String(name || "").trim();
       if (!actionName) {
         throw new Error("action name is required");
       }
-      return jsonRequest(routeUrl(`actions/${encodeRoutePart(actionName)}`), {
+      const envelope = await jsonRequest(routeUrl(`actions/${encodeRoutePart(actionName)}`), {
         method: "POST",
         body: JSON.stringify({
           payload,
@@ -423,6 +428,10 @@ export function createSubuserRuntimeClient(context = {}) {
             undefined,
         }),
       });
+      // Return the action's own result, not the transport envelope (matches createActionRunner.run).
+      return envelope && typeof envelope === "object" && "result" in envelope
+        ? envelope.result
+        : envelope;
     },
     createActionRunner(name) {
       const actionName = String(name || "").trim();
@@ -450,7 +459,7 @@ export function createSubuserRuntimeClient(context = {}) {
             `action:${actionName}:${randomKeySuffix()}`;
           try {
             ensureRail("actions");
-            const result = await jsonRequest(
+            const envelope = await jsonRequest(
               routeUrl(`actions/${encodeRoutePart(actionName)}`),
               {
                 method: "POST",
@@ -458,7 +467,11 @@ export function createSubuserRuntimeClient(context = {}) {
               },
             );
             replayKey = "";
-            return result;
+            // Return the action's OWN result, not the transport envelope, so product code reads the
+            // fields the action returned (e.g. `result.polished`) — matching how actions are written.
+            return envelope && typeof envelope === "object" && "result" in envelope
+              ? envelope.result
+              : envelope;
           } catch (error) {
             const classified = classifyActionError(error, {
               checkoutCallable: ALLOW_CALL_STATES.has(railStateFor("checkout")),

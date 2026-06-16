@@ -17,7 +17,7 @@
 --
 -- WHY collapse to reserve-then-settle (the whole point of this increment): the SQLite
 -- trunk gated product spend on TWO uncoordinated paths, and both are wrong under load:
---   1. an estimate PRE-CHECK in app_api.py:379 that reads a rendered budget mirror and
+--   1. an estimate PRE-CHECK in the old SQLite `/generate` route that reads a rendered budget mirror and
 --      compares estimate>remaining but RESERVES NOTHING — pure read-then-act, so N
 --      concurrent /generate calls all see the same remaining and all proceed (overspend);
 --   2. an actuals RE-SUM at insert time (core.py:5362) that sums actual_cost only and

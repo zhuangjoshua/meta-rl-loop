@@ -7,7 +7,7 @@ that is the user→platform ledger; this is the per-business product COMPUTE bud
 
 THE ONE GATE — reserve-then-settle. The SQLite trunk gated product spend on TWO
 uncoordinated paths, and both are wrong under load:
-  1. an estimate PRE-CHECK (app_api.py:379) that read a rendered budget mirror and compared
+  1. an estimate PRE-CHECK on the old SQLite app runtime that read a rendered budget mirror and compared
      estimate>remaining but RESERVED NOTHING — pure read-then-act, so N concurrent /generate
      calls all saw the same remaining and all proceeded (overspend); and
   2. an actuals RE-SUM at insert time (core.py:5362) that summed actual_cost only and raised
@@ -292,10 +292,10 @@ def get_app_budget(conn, business_slug: str) -> AppBudget | None:
 
 def get_usage_summary(conn, business_slug: str) -> dict:
     """Authoritative budget/remaining read for the current period: the figures a pre-flight UI
-    or check should use INSTEAD of the SQLite rendered-mirror read (`_app_budget_remaining_microusd`,
-    app_api.py:176) that the broken estimate pre-check relied on. Pure read; the real gate is
-    reserve_usage. Returns status/hard_limit/committed/remaining/period. If the budget was never
-    opened, status is 'missing' and the cap is the default (what reserve would open it at)."""
+    or check should use INSTEAD of the old SQLite rendered-mirror read that the broken estimate
+    pre-check relied on. Pure read; the real gate is reserve_usage. Returns
+    status/hard_limit/committed/remaining/period. If the budget was never opened, status is
+    'missing' and the cap is the default (what reserve would open it at)."""
     budget = get_app_budget(conn, business_slug)
     if budget is None:
         return {
@@ -518,8 +518,8 @@ def record_completed_usage(
     metadata: dict | None = None,
 ) -> UsageEvent:
     """Record an already-completed spend in one shot — reserve+settle fused for the synchronous
-    self-report path (the SQLite `/usage` route, app_api.py:339, where the cost is known and there
-    is no provider round-trip to straddle). Goes through the SAME gate as reserve (committed +
+    self-report path from the old SQLite app runtime, where the cost was already known and there
+    was no provider round-trip to straddle. Goes through the SAME gate as reserve (committed +
     this amount must fit the cap), then writes a `completed` row directly. Idempotent on
     `reservation_key`. The gate amount is `estimated_cost_microusd` if given, else the actual."""
     if actual_cost_microusd < 0:

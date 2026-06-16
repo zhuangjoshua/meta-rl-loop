@@ -14,8 +14,6 @@ Proves the Phase 7 contract:
   * **backend selection is one seam, two impls** — ``local`` is the credential-free default unless
     a full Supabase object-store config is provisioned; ``supabase_s3`` still BLOCKS with a reason
     when selected unprovisioned (invariant #8), never silently downgrading to local;
-  * :func:`with_business_workspace` syncs down→up on a clean run but, by the crash discipline, does NOT
-    sync up on an exception, so a crashed run never clobbers the last good remote state.
 
 Most tests exercise the pure leaf (no DB); the headline no-fleet test ties it to a real Postgres
 business. The module skips entirely unless psycopg is importable.
@@ -335,102 +333,6 @@ def test_supabase_backend_uses_cache_business_root(monkeypatch, tmp_path):
     monkeypatch.setenv("TAKYON_STORAGE_BUCKET", "business-workspaces")
     store = TakyonStore(root=tmp_path)
     assert store._business_root("Acme", sync=False) == (tmp_path / "cache" / "businesses" / "acme")
-
-
-# ── worker integration seam + crash discipline ───────────────────────────────────────────────────
-
-
-def test_with_business_workspace_syncs_down_then_up_on_clean_exit(tmp_path):
-    backend = _backend(tmp_path)
-    seed = tmp_path / "seed"
-    _seed_workspace(seed)
-    storage.sync_up(backend, "biz-x", seed)
-
-    scratch = tmp_path / "scratch"
-    with storage.with_business_workspace(backend, "biz-x", scratch) as root:
-        assert (root / "research" / "strategy.md").exists()  # synced down on enter
-        (root / "metrics" / "summary.md").write_text("pulse\n")  # the run produces a new file
-
-    # Clean exit synced up: a fresh resume sees the new file.
-    dest = tmp_path / "dest"
-    dest.mkdir()
-    storage.sync_down(backend, "biz-x", dest)
-    assert (dest / "metrics" / "summary.md").read_text() == "pulse\n"
-
-
-def test_with_business_workspace_does_not_sync_up_on_exception(tmp_path):
-    backend = _backend(tmp_path)
-    seed = tmp_path / "seed"
-    _seed_workspace(seed)
-    storage.sync_up(backend, "biz-x", seed)
-    before = backend.list_digests(storage.object_prefix("biz-x"))
-
-    scratch = tmp_path / "scratch"
-    with pytest.raises(RuntimeError, match="boom"):
-        with storage.with_business_workspace(backend, "biz-x", scratch) as root:
-            (root / "research" / "strategy.md").write_text("HALF-WRITTEN, crash mid-run\n")
-            raise RuntimeError("boom")
-
-    # The crash did NOT sync up: the last good remote state is preserved untouched.
-    after = backend.list_digests(storage.object_prefix("biz-x"))
-    assert after == before
-
-
-def test_with_business_workspace_can_sync_partial_progress_on_exception(tmp_path):
-    backend = _backend(tmp_path)
-    seed = tmp_path / "seed"
-    _seed_workspace(seed)
-    storage.sync_up(backend, "biz-x", seed)
-
-    scratch = tmp_path / "scratch"
-    with pytest.raises(RuntimeError, match="boom"):
-        with storage.with_business_workspace(
-            backend,
-            "biz-x",
-            scratch,
-            sync_on_exception=True,
-        ) as root:
-            (root / "metrics").mkdir(parents=True, exist_ok=True)
-            (root / "metrics" / "summary.md").write_text("partial progress\n")
-            raise RuntimeError("boom")
-
-    resumed = tmp_path / "resumed"
-    resumed.mkdir()
-    storage.sync_down(backend, "biz-x", resumed)
-    assert (resumed / "metrics" / "summary.md").read_text() == "partial progress\n"
-
-
-def test_mounted_business_workspace_syncs_down_and_cleans_without_syncing_back(tmp_path):
-    backend = _backend(tmp_path)
-    seed = tmp_path / "seed"
-    _seed_workspace(seed)
-    storage.sync_up(backend, "biz-x", seed)
-    before = backend.list_digests(storage.object_prefix("biz-x"))
-
-    home_ref: Path | None = None
-    with storage.mounted_business_workspace(backend, "biz-x", owner_label="tester") as home:
-        home_ref = home
-        scratch = home / "businesses" / "biz-x"
-        assert (scratch / "research" / "strategy.md").exists()
-        (scratch / "metrics").mkdir(parents=True, exist_ok=True)
-        (scratch / "metrics" / "summary.md").write_text("scratch only\n")
-
-    assert home_ref is not None
-    assert not home_ref.exists()
-    after = backend.list_digests(storage.object_prefix("biz-x"))
-    assert after == before
-
-
-def test_mounted_business_workspace_defaults_under_takyon_home(tmp_path, monkeypatch):
-    backend = _backend(tmp_path)
-    seed = tmp_path / "seed"
-    _seed_workspace(seed)
-    storage.sync_up(backend, "biz-x", seed)
-    monkeypatch.setenv("TAKYON_HOME", str(tmp_path / ".takyon-home"))
-
-    with storage.mounted_business_workspace(backend, "biz-x", owner_label="tester") as home:
-        assert home.parent == (tmp_path / ".takyon-home" / "tmp" / "workspaces").resolve()
-        assert (home / "businesses" / "biz-x" / "research" / "strategy.md").exists()
 
 
 def test_sync_excludes_dependency_and_build_caches(tmp_path):

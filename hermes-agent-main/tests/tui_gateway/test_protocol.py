@@ -166,11 +166,9 @@ def test_takyon_create_shell_exec_returns_before_background_bootstrap(server, mo
     assert ran.is_set()
 
 
-def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monkeypatch):
+def test_takyon_create_from_global_rejects_existing_normalized_slug(server, monkeypatch):
     sid = "takyon-session"
     server._sessions[sid] = {"takyon_current_business": ""}
-    ran = threading.Event()
-    captured: dict[str, object] = {}
 
     fake_cli = types.ModuleType("plugins.takyon.cli")
 
@@ -178,26 +176,18 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
         def __init__(self, *args, **kwargs):
             pass
 
-        def read(self, *_args, **_kwargs):
-            return {"businesses": [{"slug": "latexflow"}]}
-
-    def fake_parse_business_start_args(*_args, **_kwargs):
-        return ("latexflow", "latexflow", "overleaf competitor", "test", "every 6h", True, False)
-
-    def fake_handle_shell_line(*args, **_kwargs):
-        captured["line"] = args[0]
-        ran.set()
-        return "unexpected", None
+    def fake_handle_shell_line(*_args, **_kwargs):
+        raise SystemExit(
+            "business:latexflow already exists. /create requires a fresh slug and will not reuse an existing business."
+        )
 
     def fake_record_shell_turn(history, line, output):
         history.append({"line": line, "output": output})
 
     fake_cli.TakyonStore = FakeStore
-    fake_cli._parse_business_start_args = fake_parse_business_start_args
     fake_cli._handle_shell_line = fake_handle_shell_line
     fake_cli._record_shell_turn = fake_record_shell_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
-    monkeypatch.setattr(server.time, "strftime", lambda *_args, **_kwargs: "05262217")
     monkeypatch.setattr(
         server,
         "_takyon_scope_payload",
@@ -212,11 +202,9 @@ def test_takyon_create_from_global_uses_fresh_slug_when_name_exists(server, monk
         },
     )
 
-    assert response["result"]["business"] == "latexflow-05262217"
-    assert ran.wait(1)
-    captured_line = str(captured.get("line") or "")
-    assert "--name latexflow" in captured_line
-    assert "latexflow-05262217" in captured_line
+    assert "fresh slug" in response["result"]["output"]
+    assert "latexflow" in response["result"]["output"]
+    assert server._sessions[sid]["takyon_current_business"] == ""
 
 
 def test_takyon_create_no_auto_stays_synchronous(server, monkeypatch):
@@ -459,10 +447,9 @@ def test_takyon_dashboard_create_bootstrap_false_creates_ready_dev_business(serv
     assert server._sessions[sid]["takyon_current_business"] == "dev-lab"
 
 
-def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(server, monkeypatch):
+def test_takyon_dashboard_create_rejects_existing_normalized_slug(server, monkeypatch):
     sid = "takyon-session"
     server._sessions[sid] = {"takyon_current_business": "", "takyon_operator_user_id": "user-1"}
-    captured: dict[str, object] = {}
 
     fake_cli = types.ModuleType("plugins.takyon.cli")
 
@@ -477,51 +464,15 @@ def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(s
         assert operator_user_id == "user-1"
         return "Cat App", "cat-app"
 
-    def fake_run_takyon_command(argv, **_kwargs):
-        captured["argv"] = list(argv)
-        return {
-            "success": True,
-            "business": "cat-app-0602012413",
-            "mode": "live",
-            "bootstrap_job": {
-                "job_id": "job-999",
-                "kind": "ceo_bootstrap",
-                "status": "queued",
-            },
-        }
+    def fake_run_takyon_command(_argv, **_kwargs):
+        raise SystemExit(
+            "business:cat-app already exists. /create requires a fresh slug and will not reuse an existing business."
+        )
 
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
-    monkeypatch.setattr(
-        server,
-        "_takyon_unique_business_slug",
-        lambda *_args, **_kwargs: "cat-app-0602012413",
-    )
-    monkeypatch.setattr(
-        server,
-        "_takyon_require_durable_business",
-        lambda *_args, **_kwargs: {
-            "business": {"slug": "cat-app-0602012413", "name": "Cat App", "mode": "live"},
-        },
-    )
-    monkeypatch.setattr(
-        server,
-        "_takyon_workspace_payload",
-        lambda *_args, **_kwargs: {
-            "business_slug": "cat-app-0602012413",
-            "current": {"slug": "cat-app-0602012413", "name": "Cat App", "mode": "live"},
-            "overview": {},
-            "outputs": [],
-            "background_run": {"kind": "create", "status": "queued"},
-        },
-    )
-    monkeypatch.setattr(
-        server,
-        "_takyon_businesses_for_session",
-        lambda *_args, **_kwargs: [{"slug": "cat-app-0602012413", "name": "Cat App"}],
-    )
 
     response = server._methods["takyon.dashboard.create"](
         "dashboard-create-unique-1",
@@ -534,17 +485,9 @@ def test_takyon_dashboard_create_preserves_requested_name_when_slug_is_uniqued(s
         },
     )
 
-    assert captured["argv"] == [
-        "create",
-        "--live",
-        "--name",
-        "Cat App",
-        "cat-app-0602012413",
-        "cat app",
-    ]
-    result = response["result"]
-    assert result["business_slug"] == "cat-app-0602012413"
-    assert result["business_name"] == "Cat App"
+    assert response["error"]["code"] == 4004
+    assert "fresh slug" in response["error"]["message"]
+    assert "cat-app" in response["error"]["message"]
 
 
 def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch):

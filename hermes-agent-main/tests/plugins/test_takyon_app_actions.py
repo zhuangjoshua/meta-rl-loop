@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -21,7 +22,7 @@ class _SQLiteStore:
         yield self._conn
 
 
-def _store_commit(store, scope: str, operations: list[dict], key: str):
+def _store_commit(store: Any, scope: str, operations: list[dict[str, Any]], key: str) -> dict[str, Any]:
     return store.commit(scope=scope, operations=operations, idempotency_key=key, reason="test", actor="test")
 
 
@@ -1229,6 +1230,64 @@ def test_action_blocker_flags_reexport_of_product_src_client_code(tmp_path, monk
     )
     assert "coach-message" in blocker
     assert "re-exports client code" in blocker
+
+
+def test_action_blocker_flags_default_export_of_identifier_imported_from_product_src(tmp_path, monkeypatch):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("save-intake");\n', encoding="utf-8"
+    )
+    (base / "actions" / "save-intake.ts").write_text(
+        'import saveIntake from "../src/actions/save-intake";\n'
+        "export default saveIntake;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: "/usr/bin/deno")
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    blocker = app_actions.action_refresh_blocker(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert "save-intake" in blocker
+    assert "default-exports `saveIntake` imported from client code" in blocker
+
+
+def test_action_blocker_allows_local_backend_reexport(tmp_path, monkeypatch):
+    base = tmp_path / "businesses" / "biz" / "product" / "site"
+    (base / "src" / "screens").mkdir(parents=True)
+    (base / "actions").mkdir(parents=True)
+    (base / "src" / "screens" / "app-home.tsx").write_text(
+        'const { run } = useActionRunner("coach-message");\n', encoding="utf-8"
+    )
+    (base / "actions" / "_impl.ts").write_text(
+        "export default async () => ({ ok: true });\n",
+        encoding="utf-8",
+    )
+    (base / "actions" / "coach-message.ts").write_text(
+        'export { default } from "./_impl";\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: "/usr/bin/deno")
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path / "businesses" / slug
+
+    blocker = app_actions.action_refresh_blocker(
+        store=_Store(),
+        business="biz",
+        surface={"runtime_features": ["auth", "account"], "product_workflow": {}},
+        source_path="product/site",
+    )
+    assert blocker == ""
 
 
 def test_action_blocker_allows_actions_rail_without_declared_actions_when_source_has_no_action_usage(tmp_path, monkeypatch):

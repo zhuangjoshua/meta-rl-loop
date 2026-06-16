@@ -29,6 +29,12 @@ _ACTION_STDERR_LIMIT = 16 * 1024
 _ACTION_MIN_INTERVAL_SECONDS = 15 * 60
 _ACTION_CONTEXT_PREFIX = "/api/takyon/apps/{business}"
 _HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
+# Platform rails a server-side action may call. The action runs where these rails are reachable and
+# the SERVER is the authority (validate_session + plan/budget per rail), so the shared client's
+# ensureRail() — a browser-side UX guard keyed on the product's declared UI features — must not
+# pre-block them for actions. media/email gate server-side on declaration, so they are deliberately
+# omitted here and follow the surface's declared runtime_features instead.
+_ACTION_RUNTIME_RAILS = ("generate", "actions", "records", "search", "connections", "profile", "directory")
 _ACTION_TRIGGER_ALIASES = {
     "user": "http",
     "manual": "http",
@@ -54,7 +60,7 @@ _DEFAULT_CONFIG = {
 }
 
 _ACTION_RUNNER_SOURCE = r"""
-const [actionUrl] = Deno.args;
+const [actionUrl, clientUrl] = Deno.args;
 if (!actionUrl) {
   console.error("missing action module url");
   Deno.exit(1);
@@ -74,29 +80,54 @@ if (raw.trim()) {
   request = JSON.parse(raw);
 }
 
-const mod = await import(actionUrl);
-// Resolve the handler from the common shapes workers write: `export default fn`,
-// `export default { run | handler }`, or a named `export { run | handler }`. It is always
-// invoked as handler(payload, ctx); the canonical shape is
-// `export default async (payload, ctx) => result` (see the worker action contract).
-let handler = null;
-if (mod) {
-  if (typeof mod.default === "function") handler = mod.default;
-  else if (mod.default && typeof mod.default === "object") {
-    if (typeof mod.default.run === "function") handler = mod.default.run;
-    else if (typeof mod.default.handler === "function") handler = mod.default.handler;
+const bare = request.ctx ?? {};
+const baseUrl = String(bare.base_url || "");
+const sessionToken = String(bare.session_token || "");
+
+// The action runs sandboxed with no cookie, so the shared client's same-origin requests carry no
+// auth. Inject the customer's business-scoped Bearer session token, but ONLY for requests to the
+// rails origin (baseUrl prefix) so the token can never leak to a declared outbound host. Authority
+// stays server-side: the rail still validates the session against this business + enforces budget.
+const realFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = (input, init = {}) => {
+  const url = typeof input === "string" ? input : (input && input.url) || "";
+  if (baseUrl && sessionToken && url.startsWith(baseUrl)) {
+    const headers = new Headers(init.headers || (typeof input === "object" ? input.headers : undefined) || {});
+    if (!headers.has("Authorization")) headers.set("Authorization", "Bearer " + sessionToken);
+    init = { ...init, headers };
   }
-  if (!handler && typeof mod.run === "function") handler = mod.run;
-  if (!handler && typeof mod.handler === "function") handler = mod.handler;
-}
-if (typeof handler !== "function") {
-  throw new Error("action module must export a handler: default async (payload, ctx) => result");
+  return realFetch(input, init);
+};
+
+// ctx IS the shared runtime client (the SAME createSubuserRuntimeClient the browser UI uses), so
+// ctx.generate / ctx.invokeAction / ctx.saveRecord / ctx.listRecords work identically and there is
+// one source of truth (runtime-client.js) instead of an asymmetric data bag the action must guess at.
+let ctx = bare;
+if (clientUrl && baseUrl) {
+  try {
+    const { createSubuserRuntimeClient } = await import(clientUrl);
+    const client = createSubuserRuntimeClient({
+      runtimeApiBase: baseUrl,
+      runtimeFeatures: bare.runtime_features ?? [],
+      railState: bare.rail_state ?? {},
+      location: { origin: new URL(baseUrl).origin, href: baseUrl },
+    });
+    ctx = Object.assign(Object.create(client), {
+      business: bare.business,
+      trigger: bare.trigger,
+      principal: bare.principal,
+      base_url: baseUrl,
+      session_token: sessionToken,
+    });
+  } catch (err) {
+    console.error("runtime client unavailable: " + (err && err.message));
+    ctx = bare;
+  }
 }
 
-const ctx = { ...(request.ctx ?? {}) };
-// Server-side AI rail: action handlers call ctx.generate(payload) instead of importing a
-// provider SDK or calling a provider/`/generate` URL directly. It POSTs the business generate
-// rail using the action's own base_url + session_token and returns the rail JSON unchanged.
+// Belt-and-suspenders: if ctx is the bare fallback bag (the shared client failed to load above),
+// it has no .generate. Attach the inline generate rail so a generate-only action still works
+// without the materialized client. No-op when ctx already provides generate (the normal path).
 if (typeof ctx.generate !== "function" && ctx.base_url && ctx.session_token) {
   ctx.generate = async (genPayload = {}) => {
     const res = await fetch(`${ctx.base_url}/generate`, {
@@ -116,6 +147,25 @@ if (typeof ctx.generate !== "function" && ctx.base_url && ctx.session_token) {
     }
     return data;
   };
+}
+
+const mod = await import(actionUrl);
+// Resolve the handler from the common shapes workers write: `export default fn`,
+// `export default { run | handler }`, or a named `export { run | handler }`. It is always
+// invoked as handler(payload, ctx); the canonical shape is
+// `export default async (payload, ctx) => result` (see the worker action contract).
+let handler = null;
+if (mod) {
+  if (typeof mod.default === "function") handler = mod.default;
+  else if (mod.default && typeof mod.default === "object") {
+    if (typeof mod.default.run === "function") handler = mod.default.run;
+    else if (typeof mod.default.handler === "function") handler = mod.default.handler;
+  }
+  if (!handler && typeof mod.run === "function") handler = mod.run;
+  if (!handler && typeof mod.handler === "function") handler = mod.handler;
+}
+if (typeof handler !== "function") {
+  throw new Error("action module must export a handler: default async (payload, ctx) => result");
 }
 
 const result = await handler(request.payload ?? {}, ctx);
@@ -352,8 +402,23 @@ _ACTION_EXPORT_SCHEDULE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _ACTION_DEFAULT_EXPORT_PATTERN = re.compile(r"""(?m)^[ \t]*export\s+default\b""")
+_ACTION_DEFAULT_IDENTIFIER_EXPORT_PATTERN = re.compile(
+    r"""(?m)^[ \t]*export\s+default\s+(?P<identifier>[A-Za-z_$][A-Za-z0-9_$]*)\s*;?\s*$"""
+)
+_ACTION_DEFAULT_MEMBER_EXPORT_PATTERN = re.compile(
+    r"""(?m)^[ \t]*export\s+default\s+(?P<namespace>[A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*default\s*;?\s*$"""
+)
 _ACTION_DEFAULT_REEXPORT_PATTERN = re.compile(
     r"""(?m)^[ \t]*export\s*\{[^}\n]*\bdefault\b[^}\n]*\}\s*from\s*['"](?P<target>[^'"]+)['"]"""
+)
+_ACTION_DEFAULT_IMPORT_PATTERN = re.compile(
+    r"""(?m)^[ \t]*import\s+(?!type\b)(?P<identifier>[A-Za-z_$][A-Za-z0-9_$]*)(?:\s*,\s*\{[^}]*\})?\s*from\s*['"](?P<target>[^'"]+)['"]"""
+)
+_ACTION_NAMESPACE_IMPORT_PATTERN = re.compile(
+    r"""(?m)^[ \t]*import\s+\*\s+as\s+(?P<identifier>[A-Za-z_$][A-Za-z0-9_$]*)\s+from\s*['"](?P<target>[^'"]+)['"]"""
+)
+_ACTION_NAMED_IMPORT_PATTERN = re.compile(
+    r"""(?m)^[ \t]*import\s+(?:type\s+)?\{(?P<imports>[^}]*)\}\s*from\s*['"](?P<target>[^'"]+)['"]"""
 )
 _ACTION_SCAN_SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".vue", ".svelte"}
 _ACTION_SCAN_SKIP_DIRS = {".git", ".next", "_takyon", "build", "dist", "node_modules", "references"}
@@ -411,6 +476,37 @@ def _reexports_product_client_code(target: str) -> bool:
     )
 
 
+def _imported_runtime_identifiers_from_product_src(text: str) -> dict[str, str]:
+    imported: dict[str, str] = {}
+
+    def remember(identifier: str, target: str) -> None:
+        name = str(identifier or "").strip()
+        src = str(target or "").strip()
+        if not name or not _reexports_product_client_code(src):
+            return
+        imported[name] = src
+
+    for pattern in (_ACTION_DEFAULT_IMPORT_PATTERN, _ACTION_NAMESPACE_IMPORT_PATTERN):
+        for match in pattern.finditer(text):
+            remember(str(match.group("identifier") or ""), str(match.group("target") or ""))
+
+    for match in _ACTION_NAMED_IMPORT_PATTERN.finditer(text):
+        target = str(match.group("target") or "")
+        if not _reexports_product_client_code(target):
+            continue
+        for raw_item in str(match.group("imports") or "").split(","):
+            item = raw_item.strip()
+            if not item or item.startswith("type "):
+                continue
+            if " as " in item:
+                local_name = item.split(" as ", 1)[1].strip()
+            else:
+                local_name = item
+            if local_name:
+                imported[local_name] = target
+    return imported
+
+
 def _action_handler_blocker(path: Path) -> str:
     try:
         text = path.read_text(encoding="utf-8")
@@ -422,6 +518,19 @@ def _action_handler_blocker(path: Path) -> str:
         if _reexports_product_client_code(target):
             return f"re-exports client code from `{target}`; implement a real backend handler in this file"
         return ""
+    imported_runtime_identifiers = _imported_runtime_identifiers_from_product_src(text)
+    default_identifier_match = _ACTION_DEFAULT_IDENTIFIER_EXPORT_PATTERN.search(text)
+    if default_identifier_match:
+        identifier = str(default_identifier_match.group("identifier") or "").strip()
+        target = imported_runtime_identifiers.get(identifier)
+        if target:
+            return f"default-exports `{identifier}` imported from client code `{target}`; implement a real backend handler in this file"
+    default_member_match = _ACTION_DEFAULT_MEMBER_EXPORT_PATTERN.search(text)
+    if default_member_match:
+        namespace = str(default_member_match.group("namespace") or "").strip()
+        target = imported_runtime_identifiers.get(namespace)
+        if target:
+            return f"default-exports `{namespace}.default` from client code `{target}`; implement a real backend handler in this file"
     if _ACTION_DEFAULT_EXPORT_PATTERN.search(text):
         return ""
     return "does not default export a backend handler"
@@ -911,9 +1020,15 @@ def invoke_action(
 
     if len(json.dumps(payload).encode("utf-8")) > _ACTION_REQUEST_BODY_LIMIT:
         raise AppActionError("payload too large")
-    contract = store.read(scope=f"business:{business_slug}", query="summary", include=["app"]).get("app") or {}
-    surface = contract.get("surface") or contract.get("surface_contract") or {}
-    if not isinstance(surface, Mapping):
+    # App-plane surface read: this path serves product customer (and scheduled
+    # service) requests, which carry a business-scoped session, not an operator
+    # identity. store.read(scope="business:...") is operator-gated and would 400
+    # every customer invoke; _app_surface_contract is the same app-plane read the
+    # other customer handlers use. Tenant isolation is enforced upstream by the
+    # caller's validate_session(business, token) / service principal.
+    with store._connect() as conn:
+        surface = store._app_surface_contract(conn, business_slug)
+    if not isinstance(surface, Mapping) or str(surface.get("status") or "").strip() == "missing":
         raise ActionContractError("app surface contract is missing")
     workflow = _surface_product_workflow_shape(dict(surface))
     specs = file_backed_action_specs(store._business_root(business_slug) / "product" / "site", workflow)
@@ -960,6 +1075,14 @@ def invoke_action(
                 "kind": str(principal.get("kind") or "session"),
                 "id": str((principal.get("user") or {}).get("id") or ""),
                 "email": str((principal.get("user") or {}).get("email") or ""),
+            },
+            # The shared client's ensureRail() needs the rails declared. Pass the surface's declared
+            # features PLUS the platform rails a server action may call (server-gated), so ctx.generate
+            # etc. resolve regardless of which UI features the product happened to declare.
+            "runtime_features": list(surface.get("runtime_features") or []),
+            "rail_state": {
+                **(surface.get("rail_state") if isinstance(surface.get("rail_state"), dict) else {}),
+                **{rail: "live" for rail in _ACTION_RUNTIME_RAILS},
             },
         },
     }
@@ -1287,7 +1410,16 @@ def _run_action_subprocess(
         runner_path = Path(tempdir) / "runner.mjs"
         runner_path.write_text(_ACTION_RUNNER_SOURCE, encoding="utf-8")
         request_bytes = json.dumps(request).encode("utf-8")
-        allow_read = f"{runner_path.parent},{action_path.parent}"
+        # The shared runtime client (the SAME module the browser uses) lives in the materialized kit
+        # dir beside the product site (product/site/_takyon/runtime-client.js). Pass it to the runner
+        # so ctx IS that client. Read-only; if the workspace predates materialization the runner
+        # gracefully falls back to the plain ctx bag.
+        client_path = action_path.parent.parent / "_takyon" / "runtime-client.js"
+        client_available = client_path.is_file()
+        read_roots = [str(runner_path.parent), str(action_path.parent)]
+        if client_available:
+            read_roots.append(str(client_path.parent))
+        allow_read = ",".join(read_roots)
         allow_net_hosts = [base.hostport, *outbound_hosts]
         deno_command = [
             deno,
@@ -1301,6 +1433,8 @@ def _run_action_subprocess(
             str(runner_path),
             action_path.resolve().as_uri(),
         ]
+        if client_available:
+            deno_command.append(client_path.resolve().as_uri())
         sandbox_required = _operator_host_requires_action_sandbox()
         isolation = "subprocess"
         command = list(deno_command)

@@ -1763,6 +1763,30 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # Per-business web analytics for published product sites (Umami).
+    # One shared Umami "website" is used across all businesses; each business
+    # is segmented by its own subdomain hostname. The tracking script is
+    # injected server-side into the product <head> at serve time. website_id
+    # and script_src are public; the API key is a secret in .env (UMAMI_API_KEY).
+    "analytics": {
+        "umami": {
+            # Master switch. Set here (not per-node) so the deploy ships it to
+            # every compute node — adding a VPS needs no per-box config edit.
+            "enabled": True,
+            # Shared Umami website id (data-website-id) — non-secret (it ships in
+            # every page's HTML). Lives here, the code-level config the deploy
+            # distributes to all nodes; the secret API key stays in Safebox.
+            "website_id": "53c7278e-1930-4a44-82f0-06a625623373",
+            # Tracking script URL served by the Umami instance.
+            "script_src": "https://cloud.umami.is/script.js",
+            # Umami API base for reading stats (Cloud: https://api.umami.is/v1;
+            # self-hosted: https://<host>/api). The API key is the secret in .env.
+            "api_endpoint": "https://api.umami.is/v1",
+            # Cache TTL (seconds) for stats reads, to respect API rate limits.
+            "stats_cache_seconds": 300,
+        },
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 23,
 }
@@ -1806,6 +1830,15 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "tools": ["vision_analyze", "mixture_of_agents"],
         "category": "provider",
+        "advanced": True,
+    },
+    "UMAMI_API_KEY": {
+        "description": "Umami Cloud API key (reads published product-site analytics stats)",
+        "prompt": "Umami API key",
+        "url": "https://cloud.umami.is/settings/api-keys",
+        "password": True,
+        "tools": ["business_read_app_analytics"],
+        "category": "tool",
         "advanced": True,
     },
     "GOOGLE_API_KEY": {

@@ -87,6 +87,7 @@ from plugins.takyon.core import (
     handle_business_list_app_records,
     handle_business_upsert_app_directory_entry,
     handle_business_upsert_app_record,
+    handle_business_supabase_login,
     handle_business_upsert_app_profile,
     handle_business_verify_app_magic_link,
     _is_reserved_public_subdomain,
@@ -2653,6 +2654,18 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         body = _takyon_app_parse_json_bytes(raw_body)
     except json.JSONDecodeError as exc:
         return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": f"invalid JSON body: {exc}"})
+    if parts == ["auth", "session"]:
+        # Supabase Auth (Google/email) sign-in: the browser completes the Supabase OAuth flow and
+        # POSTs the Supabase access_token here; the runtime verifies it server-side and returns the
+        # Takyon app session_token (the credential the client then presents). The Supabase
+        # replacement for the magic-link request+verify pair.
+        status, payload = _takyon_app_tool(handle_business_supabase_login({
+            "business": business,
+            "access_token": body.get("access_token") or body.get("accessToken"),
+            "name": body.get("name"),
+        }))
+        return _takyon_app_json(status, payload)
+
     if parts == ["auth", "request"]:
         status, payload = _takyon_app_tool(handle_business_request_app_magic_link({
             "business": business,
@@ -2885,14 +2898,21 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
                 for key, value in body.items()
                 if key not in {"idempotency_key", "idempotencyKey", "origin"}
             }
-        status, payload = _takyon_app_tool(handle_business_invoke_app_action({
+        invoke_args = {
             "business": business,
             "action": action_name,
             "session_token": token,
             "payload": payload_value if payload_value is not None else {},
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"action:{business}:{action_name}:{uuid.uuid4().hex}",
             "bound_origin": _takyon_app_origin(request, body),
-        }))
+        }
+        # Run the (blocking, deno-subprocess) action invoke OFF the event loop. The action's
+        # ctx.generate hairpins back to /generate on THIS same server, so blocking the loop here
+        # would starve that callback and self-deadlock until the 60s action deadline. asyncio.to_thread
+        # keeps the loop free to serve the nested rail call (matches the run_in_executor/to_thread
+        # pattern already used for /api/status and site-preview).
+        invoke_raw = await asyncio.to_thread(handle_business_invoke_app_action, invoke_args)
+        status, payload = _takyon_app_tool(invoke_raw)
         status, payload = _takyon_action_status_payload(status, payload)
         return _takyon_app_json(status, payload)
 
@@ -8215,6 +8235,74 @@ def _materialize_product_site_from_storage(business: str, build_id: str) -> Path
         materialize_lock.release()
 
 
+_UMAMI_SNIPPET_CACHE: "str | None" = None
+
+
+def _umami_analytics_snippet() -> str:
+    """Return the Umami tracking <script> tag to inject into product HTML.
+
+    Returns "" when analytics is disabled or unconfigured (no tag, no faked
+    tracking). Cached for the process lifetime — a config change takes effect
+    on the next server start, same as the rest of the dashboard config.
+
+    One shared website id is used across all businesses; each product site is
+    segmented downstream by its own subdomain hostname, which Umami records
+    automatically from the request host.
+    """
+    global _UMAMI_SNIPPET_CACHE
+    if _UMAMI_SNIPPET_CACHE is not None:
+        return _UMAMI_SNIPPET_CACHE
+    snippet = ""
+    try:
+        cfg = (load_config().get("analytics") or {}).get("umami") or {}
+        if cfg.get("enabled"):
+            website_id = str(cfg.get("website_id") or "").strip()
+            script_src = str(cfg.get("script_src") or "").strip()
+            if website_id and script_src:
+                src = html.escape(script_src, quote=True)
+                wid = html.escape(website_id, quote=True)
+                snippet = f'<script defer src="{src}" data-website-id="{wid}"></script>'
+    except Exception:
+        snippet = ""
+    _UMAMI_SNIPPET_CACHE = snippet
+    return snippet
+
+
+def _inject_head_snippet(html_text: str, snippet: str) -> str:
+    """Splice ``snippet`` into the document <head>, idempotently."""
+    if not snippet or snippet in html_text:
+        return html_text
+    lowered = html_text.lower()
+    close_head = lowered.find("</head>")
+    if close_head != -1:
+        return html_text[:close_head] + snippet + html_text[close_head:]
+    open_head = lowered.find("<head")
+    if open_head != -1:
+        gt = html_text.find(">", open_head)
+        if gt != -1:
+            return html_text[: gt + 1] + snippet + html_text[gt + 1 :]
+    return snippet + html_text
+
+
+def _product_site_file_response(path: Path) -> Response:
+    """Serve a product-site file, injecting the analytics tag into HTML docs.
+
+    Non-HTML files (JS/CSS/assets) pass straight through as a FileResponse, so
+    asset serving is unchanged; only HTML documents get the <head> injection.
+    """
+    snippet = _umami_analytics_snippet()
+    if snippet and path.suffix.lower() in (".html", ".htm"):
+        try:
+            html_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return FileResponse(path)
+        return HTMLResponse(
+            _inject_head_snippet(html_text, snippet),
+            headers={"Cache-Control": "no-cache"},
+        )
+    return FileResponse(path)
+
+
 async def _serve_product_site_file(business: str, full_path: str = "", *, request: Request | None = None) -> Response:
     slug = _safe_product_slug(business)
     root = _dashboard_product_site_root().resolve()
@@ -8277,15 +8365,15 @@ async def _serve_product_site_file(business: str, full_path: str = "", *, reques
     if target.is_dir():
         target = target / "index.html"
     if root in (target, *target.parents) and target.is_file():
-        return FileResponse(target)
+        return _product_site_file_response(target)
     if not Path(rel).suffix:
         for candidate in (target / "index.html", target.with_suffix(".html")):
             candidate = candidate.resolve()
             if root in (candidate, *candidate.parents) and candidate.is_file():
-                return FileResponse(candidate)
+                return _product_site_file_response(candidate)
         spa_index = (site_root / "index.html").resolve()
         if root in (spa_index, *spa_index.parents) and spa_index.is_file():
-            return FileResponse(spa_index)
+            return _product_site_file_response(spa_index)
     detail = {
         "error": "product site file not found",
         "business": slug,

@@ -33,6 +33,26 @@ def test_resolve_create_identity_falls_back_to_humanized_slug_hint():
     assert slug == "coachesyard"
 
 
+def test_resolve_create_identity_avoids_reserved_public_subdomains():
+    name, slug = _resolve_create_identity("App", "", "")
+
+    assert name == "App"
+    assert slug == "app-site"
+
+
+def test_resolve_create_identity_avoids_configured_reserved_public_subdomains(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "dashboard:\n  reserved_public_subdomains:\n    - sai\n",
+        encoding="utf-8",
+    )
+
+    name, slug = _resolve_create_identity("SAI", "", "")
+
+    assert name == "SAI"
+    assert slug == "sai-site"
+
+
 def test_bootstrap_prompt_pins_canonical_business_name():
     prompt = _business_bootstrap_instruction(
         "longer",
@@ -53,7 +73,7 @@ def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface(
         business_name="CRM",
     )
 
-    assert "Use the Hermes app kit materialized in the workspace as the runtime rail base for /app and /app/profile, while making / business-specific." in prompt
+    assert "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access." in prompt
     assert "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell." in prompt
     assert "Do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows on this first pass." in prompt
     assert "The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like." in prompt
@@ -112,6 +132,23 @@ def test_resolve_dashboard_create_identity_prefers_llm_name(monkeypatch):
 
     assert name == "Longer"
     assert slug == "longer"
+
+
+def test_resolve_dashboard_create_identity_avoids_reserved_llm_slug(monkeypatch):
+    monkeypatch.setattr(
+        "plugins.takyon.cli._derive_name_from_goal_with_llm",
+        lambda goal, operator_user_id=None: "App",
+    )
+
+    name, slug = _resolve_dashboard_create_identity(
+        "",
+        "build app for teams",
+        "",
+        operator_user_id="user-1",
+    )
+
+    assert name == "App"
+    assert slug == "app-site"
 
 
 def test_derive_name_from_goal_with_llm_uses_operator_budget_rail(monkeypatch):

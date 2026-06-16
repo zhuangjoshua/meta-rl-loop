@@ -28,10 +28,9 @@ if the operator host cannot run the tracked Claude Agent SDK container image.
 The tracked contract now also includes a pinned system-wide `deno` install plus
 `systemd-run`, because scheduled product actions execute on this plane through
 the shared actions runtime.
-Host-level product activation now follows the same least-privilege pattern: the
-dashboard/worker stay on the locked-down `takyon` user, and the narrow root-only
-systemd/Caddy mutations happen through `takyon-activation-broker.service`
-on `127.0.0.1:8012`.
+The old localhost product-activation broker has been removed. The dashboard and
+worker stay on the locked-down `takyon` user, and operator deploy now cleans up
+any stale `takyon-activation-broker.service` copy left behind on the host.
 
 The tracked dashboard systemd unit lives at:
 

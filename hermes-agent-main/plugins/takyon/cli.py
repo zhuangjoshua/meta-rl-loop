@@ -17,7 +17,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .core import TakyonError, TakyonStore, _normalize_work_focus, _slugify, load_takyon_env, upgrade_businesses
+from .core import (
+    TakyonError,
+    TakyonStore,
+    _is_reserved_public_subdomain,
+    _normalize_work_focus,
+    _slugify,
+    load_takyon_env,
+    upgrade_businesses,
+)
 
 
 _CEO_PROMPT_PATH = Path(__file__).parent / "prompts" / "ceo.md"
@@ -844,16 +852,39 @@ def _derive_name_from_goal(goal: str) -> str:
 def _resolve_create_identity(name: str, goal: str, slug_hint: str = "") -> tuple[str, str]:
     explicit_name = _collapse_whitespace(name)
     if explicit_name:
-        return explicit_name, _slugify(explicit_name)
+        return explicit_name, _preferred_public_business_slug(explicit_name)
     goal_text = _collapse_whitespace(goal)
     if goal_text:
         resolved_name = _derive_name_from_goal(goal_text)
-        return resolved_name, _slugify(resolved_name)
+        return resolved_name, _preferred_public_business_slug(resolved_name)
     slug_seed = _collapse_whitespace(slug_hint)
     if slug_seed:
-        slug = _slugify(slug_seed)
+        slug = _preferred_public_business_slug(slug_seed)
         return _display_name_from_slug(slug), slug
     raise TakyonError("business name or goal is required")
+
+
+def _preferred_public_business_slug(value: str) -> str:
+    """Prefer a slug that won't collide with reserved Four Manifold infra hosts."""
+    slug = _slugify(value)
+    if not _is_reserved_public_subdomain(slug):
+        return slug
+
+    max_len = 80
+    for suffix in ("site", "app", "co", "lab"):
+        trimmed = slug[: max_len - len(suffix) - 1].rstrip("-_")
+        candidate = _slugify(f"{trimmed}-{suffix}" if trimmed else suffix)
+        if not _is_reserved_public_subdomain(candidate):
+            return candidate
+
+    counter = 2
+    while True:
+        suffix = f"site-{counter}"
+        trimmed = slug[: max_len - len(suffix) - 1].rstrip("-_")
+        candidate = _slugify(f"{trimmed}-{suffix}" if trimmed else suffix)
+        if not _is_reserved_public_subdomain(candidate):
+            return candidate
+        counter += 1
 
 
 def _resolve_dashboard_create_identity(
@@ -865,7 +896,7 @@ def _resolve_dashboard_create_identity(
 ) -> tuple[str, str]:
     explicit_name = _collapse_whitespace(name)
     if explicit_name:
-        return explicit_name, _slugify(explicit_name)
+        return explicit_name, _preferred_public_business_slug(explicit_name)
     goal_text = _collapse_whitespace(goal)
     if goal_text:
         try:
@@ -881,7 +912,7 @@ def _resolve_dashboard_create_identity(
         else:
             resolved_name = _collapse_whitespace(resolved_name)
             if resolved_name:
-                return resolved_name, _slugify(resolved_name)
+                return resolved_name, _preferred_public_business_slug(resolved_name)
         return _resolve_create_identity("", goal_text, slug_hint)
     return _resolve_create_identity("", "", slug_hint)
 

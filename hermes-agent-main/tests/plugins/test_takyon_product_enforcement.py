@@ -407,6 +407,8 @@ def test_scaffold_visible_shell_markers_flag_blank_core_screens(tmp_path):
         'export function ProfileScreen() { return <section data-takyon-scaffold="profile" />; }\n',
         encoding="utf-8",
     )
+    # support.tsx is seeded as real, shippable content and is intentionally NOT gated as a
+    # blank scaffold shell, so it must not appear in the visible-shell markers.
     (site / "src" / "screens" / "support.tsx").write_text(
         'export function FaqScreen() { return <main data-takyon-scaffold="support" />; }\n',
         encoding="utf-8",
@@ -414,8 +416,6 @@ def test_scaffold_visible_shell_markers_flag_blank_core_screens(tmp_path):
 
     markers = takyon_core._scaffold_visible_shell_markers(site)
 
-    # support.tsx is seeded as real, shippable content and is intentionally NOT gated as a
-    # blank scaffold shell, so it must not appear in the visible-shell markers.
     assert [marker["path"] for marker in markers] == [
         "src/screens/landing.tsx",
         "src/screens/app-home.tsx",

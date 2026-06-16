@@ -9827,7 +9827,6 @@ def _(rid, params: dict) -> dict:
         )
 
         store = TakyonStore(operator_user_id=operator_user_id)
-        slug = _takyon_unique_business_slug(store, slug)
         command_argv = ["create", "--live"]
         if can_stream_bootstrap or not bootstrap_enabled:
             command_argv.append("--no-auto")
@@ -10114,23 +10113,9 @@ def _(rid, params: dict) -> dict:
         detached_target = _takyon_detached_shell_target(line, current_business)
         if detached_target:
             detached_kind, target_business, detached_line = detached_target
-            requested_create_slug = ""
             if detached_kind == "create" and target_business:
                 _takyon_invalidate_businesses_cache(session)
-                requested_create_slug = target_business
                 create_store = TakyonStore(operator_user_id=operator_user_id)
-                unique_slug = _takyon_unique_business_slug(create_store, target_business)
-                if unique_slug != target_business:
-                    try:
-                        raw = detached_line.strip().lstrip("/")
-                        tokens = shlex.split(raw)
-                        business_index = _takyon_create_business_arg_index(tokens)
-                        if business_index is not None:
-                            tokens[business_index] = unique_slug
-                            detached_line = "/" + shlex.join(tokens)
-                    except Exception:
-                        pass
-                target_business = unique_slug
                 try:
                     existing = create_store.read(scope="global", query="list_businesses", limit=200)
                     session["takyon_businesses_before_prompt"] = sorted(
@@ -10345,46 +10330,12 @@ def _(rid, params: dict) -> dict:
                 "output": message,
                 **_takyon_scope_payload(session),
             }
-            if detached_kind == "create" and target_business and target_business != requested_create_slug:
-                result["business"] = target_business
             return _ok(
                 rid,
                 result,
             )
-        normalized_line = line
-        expected_create_business = ""
-        create_requested = False
-        create_bootstrap_requested = False
-        try:
-            raw = line.strip().lstrip("/")
-            tokens = shlex.split(raw)
-            command = str(tokens[0] or "").lower() if tokens else ""
-            if command in {"create", "build", "init"}:
-                create_requested = True
-                from plugins.takyon.cli import _parse_business_start_args
-
-                slug, raw_name, _goal, _mode, _schedule, auto_start, no_auto = _parse_business_start_args(
-                    ["create", *tokens[1:]],
-                    usage='usage: /create [--live] [--no-auto] [--schedule "every 6h"] [--name "Display name"] <business> [goal]',
-                    auto_default=True,
-                )
-                create_bootstrap_requested = bool(auto_start and not no_auto)
-                expected_create_business = _takyon_unique_business_slug(
-                    TakyonStore(operator_user_id=operator_user_id),
-                    slug,
-                )
-                if expected_create_business != slug:
-                    business_index = _takyon_create_business_arg_index(tokens)
-                    if business_index is not None:
-                        tokens[business_index] = expected_create_business
-                        if raw_name and raw_name != expected_create_business and "--name" not in tokens:
-                            tokens[business_index:business_index] = ["--name", raw_name]
-                        normalized_line = "/" + shlex.join(tokens)
-        except Exception:
-            expected_create_business = ""
-            create_requested = False
         output, next_business = _handle_shell_line(
-            normalized_line,
+            line,
             current_business=current_business,
             store=TakyonStore(operator_user_id=operator_user_id),
             model=os.getenv("TAKYON_MODEL", ""),
@@ -10392,20 +10343,9 @@ def _(rid, params: dict) -> dict:
             shell_history=history if isinstance(history, list) else None,
             operator_user_id=operator_user_id,
         )
-        if create_requested:
-            next_business = next_business or expected_create_business
-            if (
-                create_bootstrap_requested
-                and next_business
-                and not re.match(r"^Create started for business:", str(output or ""), re.I)
-            ):
-                output = (
-                    f"Create started for business:{next_business}. Refresh status or open the business after a moment "
-                    "to see files, blockers, and deliverables."
-                )
         session["takyon_current_business"] = next_business or ""
         if isinstance(history, list):
-            _record_shell_turn(history, normalized_line, output)
+            _record_shell_turn(history, line, output)
         return _ok(
             rid,
             {

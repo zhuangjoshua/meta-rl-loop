@@ -49,8 +49,10 @@ const runner = client.createActionRunner("summarize");
 
 responder = () => ({ status: 200, body: { success: true, result: { ok: 1 } } });
 const happy = await runner.run({ q: 1 });
+// run() returns the action's RESULT unwrapped from the {success,result} transport envelope
+// (the contract the browser UI consumes — it reads result fields directly).
 out.happy = {
-  success: happy.success,
+  ok: happy.ok,
   url: calls[0].url,
   key: calls[0].body.idempotency_key,
   state: runner.state(),
@@ -157,7 +159,7 @@ def test_create_action_runner_behavior(tmp_path):
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert out["happy"]["success"] is True
+    assert out["happy"]["ok"] == 1
     assert out["happy"]["url"].endswith("/actions/summarize")
     assert out["happy"]["key"].startswith("action:summarize:")
     assert out["happy"]["state"] == "idle"

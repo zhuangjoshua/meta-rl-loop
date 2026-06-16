@@ -1,7 +1,7 @@
 ---
 name: takyon-meta-ads
-description: Launch and operate a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video or static image asset — preflight the token, reserve the channel credit cap, create the Campaign/AdSet/Ad, activate when launch intent is live, and sync ad-platform metrics through guarded tools. Test-mode businesses suppress to local receipts.
-version: 1.2.0
+description: Launch and operate a Meta (Facebook/Instagram) ad for one Takyon business from a UGC video or static image asset — preflight the Composio connection, reserve the channel credit cap, create the Campaign/AdSet/Ad, activate when launch intent is live, and sync ad-platform metrics through guarded tools. Test-mode businesses suppress to local receipts.
+version: 1.2.1
 author: Four Manifold
 license: Proprietary
 platforms: [linux, macos]
@@ -26,7 +26,7 @@ metadata:
         - a finished UGC or static ad asset needs to be launched or staged as a bounded Meta campaign
         - Meta should stop at a manual handoff packet because the business cannot auto-post yet
         - a manually launched Meta campaign needs its real campaign/adset/ad ids bound back into Takyon
-        - Meta token or ad-account preflight is needed before launch work
+        - Meta connection or ad-account preflight is needed before launch work
         - a launched Meta ad needs to be activated, paused, or have its daily budget updated
         - ad-platform delivery metrics need to be synced into Takyon for later tracking, whether they came from the Meta API or a manual operator entry
       do_not_use_for:
@@ -43,7 +43,7 @@ metadata:
       - metrics/meta-ads/<slug>/insights.jsonl
       - metrics/meta-ads/<slug>/syncs/<idempotency>.json
 
-required_environment_variables: [META_ACCESS_TOKEN]
+required_environment_variables: [COMPOSIO_API_KEY]
 required_credential_files: []
 ---
 
@@ -78,7 +78,7 @@ invent business attribution.
 
 - A business has a UGC ad at `product/ugc-ads/<slug>/ad.mp4` or a static image under
   `product/static-ads/<slug>/` and wants it staged as a Meta (Facebook/Instagram) ad.
-- You need to verify the Meta access token / which ad accounts it can touch (preflight)
+- You need to verify the Meta Composio connection / which ad accounts it can touch (preflight)
   before spending any effort.
 - You want to launch a bounded campaign immediately or intentionally stage it paused for review.
 - You need to explicitly activate, pause, or update the daily budget of a previously launched
@@ -117,8 +117,11 @@ attribution or CAC when the join keys have not been recorded.
 - **A finished UGC video** at `product/ugc-ads/<slug>/ad.mp4` (build it first with
   `ugc-video-ad`).
 - **Live launch / preflight credentials** (env or local `.env`; never hardcode):
-  - **`META_ACCESS_TOKEN`** *or* **`META_SYSTEM_USER_ACCESS_TOKEN`** — the access token the
-    tool authenticates with.
+  - **`COMPOSIO_API_KEY`** — the Composio project API key Takyon uses for Meta Ads.
+  - **One active Composio Meta Ads connected account** — either set
+    `COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID`, or provide a resolvable
+    `COMPOSIO_METAADS_USER_ID` / `COMPOSIO_USER_ID` plus alias
+    (`COMPOSIO_METAADS_ALIAS`, default `takyon-prod-meta-ads`).
   - **`META_AD_ACCOUNT_ID`** — the ad account to create objects in (with or without `act_`).
   - **`META_PAGE_ID`** — the Facebook Page a video creative must be tied to.
   - Optional: `META_GRAPH_VERSION` (default `v23.0`).
@@ -144,8 +147,9 @@ attribution or CAC when the join keys have not been recorded.
 - Call `business_read_business` first to confirm the business id, its **mode** (test vs
   live), and that a UGC ad exists at `product/ugc-ads/<slug>/`.
 - **Preflight (read-only, no objects):** call `business_meta_ad_launch` with
-  `mode: "preflight"`. It returns the token identity and the ad accounts it can touch. Run
-  this before any launch to confirm the token works and to pick the right `ad_account_id`.
+  `mode: "preflight"`. It returns the connected-account identity and the ad accounts it can
+  touch. Run this before any launch to confirm the Composio Meta Ads connection works and to
+  pick the right `ad_account_id`.
 - **Draft the plan:** write `distribution/meta-ads/<slug>/plan.json` from
   [templates/plan.json](templates/plan.json) (objective, optional explicit daily pace, targeting, the ad
   copy + destination link, and `ad_video_path`).
@@ -177,7 +181,7 @@ attribution or CAC when the join keys have not been recorded.
 1. **Read business state** — `business_read_business`. Note the business `mode`. Confirm
    `product/ugc-ads/<slug>/ad.mp4` exists (the upstream `ugc-video-ad` output, normally
    recorded via `business_ugc_ad_write`). If it is missing, stop and build it first.
-2. **Preflight the token** — call `business_meta_ad_launch` `mode: "preflight"`. Verify it
+2. **Preflight the connection** — call `business_meta_ad_launch` `mode: "preflight"`. Verify it
    returns an identity and at least one ad account. If it errors with a missing-credential
    message, record the blocker and stop; do not fabricate a launch.
 3. **Draft `plan.json`** under `distribution/meta-ads/<slug>/` from the template: pick the
@@ -242,7 +246,7 @@ attribution or CAC when the join keys have not been recorded.
 ## Common Pitfalls
 
 - **Assuming launch is always paused.** Live launch activates by default unless you explicitly staged a paused campaign.
-- **Launching without preflight.** Always confirm the token + ad account first; a bad token
+- **Launching without preflight.** Always confirm the Composio connection + ad account first; a bad connection
   fails the whole chain mid-way.
 - **No thumbnail.** A Meta video creative needs an image. If the auto thumbnail is not ready
   yet, pass `ad.image_url` or retry shortly — do not pretend the creative was made.
@@ -256,7 +260,7 @@ attribution or CAC when the join keys have not been recorded.
 ## Verification Checklist
 
 - [ ] `business_read_business` confirmed the business mode and that `ad.mp4` exists.
-- [ ] `mode: "preflight"` returned a token identity + at least one ad account.
+- [ ] `mode: "preflight"` returned a connected-account identity + at least one ad account.
 - [ ] `distribution/meta-ads/<slug>/plan.json` exists with `ad_video_path` and a capped budget.
 - [ ] Launch result + `receipt.json` show the right `status`, `reserved_credits`, `daily_budget_usd`, and bounded `end_at`.
 - [ ] Live launches carry real Meta `ids`; test launches are `suppressed_test_mode` with no IDs.
@@ -277,14 +281,14 @@ attribution or CAC when the join keys have not been recorded.
    (`distribution/`, owned here) separate.
 6. Keep **metrics** under `metrics/` and do not present ad-platform metrics as business
    attribution unless Takyon has separate evidence.
-7. Credentials come from env/`.env` only; never hardcode tokens.
+7. Credentials come from env/`.env` only; never hardcode provider secrets.
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| `Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN` | Export the token or add it to a local `.env`; never hardcode. |
-| Preflight returns no ad accounts | The token can't see any ad account; fix permissions or use a token with `ads_management`. |
+| `Meta action requires a Composio Meta Ads connection` | Set `COMPOSIO_API_KEY` and connect a Meta Ads account in the same Composio project, or save `COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID`. |
+| Preflight returns no ad accounts | The connected Meta Ads account can't see any ad account; fix permissions or connect the correct account in Composio. |
 | `live launch requires META_PAGE_ID` | Set `META_PAGE_ID` or pass `ad.page_id`; video creatives must be tied to a Page. |
 | `Meta requires a thumbnail ... none was ready` | Pass `ad.image_url`, or retry after the uploaded video finishes processing. |
 | `daily_budget_usd ... exceeds the safety cap` | Lower the budget or raise `TAKYON_META_MAX_DAILY_BUDGET_USD` deliberately. |

@@ -11,7 +11,7 @@ Use it as a starting point, not a visual cage:
 Files:
 
 - `surface-context.js` — generated per business; exports the current surface truth.
-- `runtime-client.js` — same-origin product-host client with prefixed fallback, including account helpers such as `cancelSubscription()`.
+- `runtime-client.js` — canonical client for `/api/takyon/apps/<slug>/...`, including account helpers such as `cancelSubscription()`.
 - `packs.js` — mode, subscription, and API pack hints for faster composition.
 - `ui-primitives.js` — small blocked/pricing/usage/API helper renderers.
 - `tokens.css` — neutral shared tokens and state styles.
@@ -27,4 +27,4 @@ Normal pattern:
 6. Build the actual product UI around that truth.
 7. Replace the seeded page presentation freely, but keep the auth/paywall/account boundaries unless you are intentionally changing the rail logic.
 
-The kit is intentionally framework-agnostic so static HTML, vanilla JS, React, or Next source can all use the same runtime boundary.
+The kit targets the pinned Vite app scaffold only.

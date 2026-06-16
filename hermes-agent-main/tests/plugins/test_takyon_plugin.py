@@ -4574,6 +4574,10 @@ def test_delete_business_dry_run_keeps_state_and_files(tmp_path):
 
     assert deletion["dry_run"] is True
     assert deletion["filesystem"]["files"] >= 1
+    assert deletion["subuser_product_site"] == {
+        "target": "root@134.209.123.8",
+        "path": "/opt/takyon/.takyon/product-sites/latexflow",
+    }
     assert (tmp_path / "businesses" / "latexflow" / "product" / "spec.md").exists()
     assert store.read(scope="global", query="list_businesses")["businesses"][0]["slug"] == "latexflow"
 
@@ -4603,6 +4607,20 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
     published = tmp_path / "published-sites" / "latexflow"
     published.mkdir(parents=True)
     (published / "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+    subuser_delete_calls: list[str] = []
+    monkeypatch.setattr(
+        takyon_core,
+        "_delete_subuser_product_site",
+        lambda slug: (
+            subuser_delete_calls.append(slug)
+            or {
+                "target": "root@134.209.123.8",
+                "path": f"/opt/takyon/.takyon/product-sites/{slug}",
+                "removed": True,
+                "status": "removed",
+            }
+        ),
+    )
     cron_jobs.create_job(
         prompt="CEO wakeup for business:latexflow.",
         schedule="every 1h",
@@ -4628,6 +4646,8 @@ def test_delete_business_removes_files_rows_and_cron(tmp_path, monkeypatch):
     assert deletion["dry_run"] is False
     assert deletion["filesystem"]["removed"] is True
     assert deletion["published_site"]["removed"] is True
+    assert deletion["subuser_product_site"]["removed"] is True
+    assert subuser_delete_calls == ["latexflow"]
     assert not (tmp_path / "businesses" / "latexflow").exists()
     assert not published.exists()
     assert store.read(scope="global", query="list_businesses")["businesses"] == []
@@ -4639,6 +4659,16 @@ def test_delete_business_removes_product_service_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_PRODUCT_SERVICE_ROOT", str(tmp_path / "product-services"))
     monkeypatch.setenv("TAKYON_PRODUCT_SYSTEMD_DIR", str(tmp_path / "systemd"))
     monkeypatch.setenv("TAKYON_PRODUCT_CADDYFILE", str(tmp_path / "Caddyfile"))
+    monkeypatch.setattr(
+        takyon_core,
+        "_delete_subuser_product_site",
+        lambda slug: {
+            "target": "root@134.209.123.8",
+            "path": f"/opt/takyon/.takyon/product-sites/{slug}",
+            "removed": True,
+            "status": "removed",
+        },
+    )
 
     store = TakyonStore(tmp_path)
     _commit(
@@ -4691,6 +4721,7 @@ def test_delete_business_removes_product_service_runtime(tmp_path, monkeypatch):
     assert deletion["product_service"]["service_root"]["removed"] is True
     assert deletion["product_service"]["service_file"]["removed"] is True
     assert deletion["product_service"]["caddy_route"]["removed"] is True
+    assert deletion["subuser_product_site"]["removed"] is True
     assert not service_root.exists()
     assert not service_file.exists()
     assert "latexflow.fourmanifold.com" not in caddyfile.read_text(encoding="utf-8")
@@ -5735,6 +5766,11 @@ def _meta_launch_args(**overrides):
     return args
 
 
+def _set_meta_composio_env(monkeypatch) -> None:
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-test-key")
+    monkeypatch.setenv("COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID", "metaads-test-account")
+
+
 def _write_meta_launch_receipt(tmp_path, *, business="clipbook", slug="demo-meta", mode="live"):
     receipt_path = (
         tmp_path
@@ -5878,7 +5914,7 @@ def test_business_meta_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
 
 
 def test_business_meta_ad_launch_defaults_to_activation_when_live(tmp_path, monkeypatch):
-    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    _set_meta_composio_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -5946,14 +5982,19 @@ def test_business_meta_ad_launch_blocks_missing_video(tmp_path, monkeypatch):
 
 
 def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, monkeypatch):
-    for var in ("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN"):
+    for var in (
+        "COMPOSIO_API_KEY",
+        "COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID",
+        "COMPOSIO_METAADS_USER_ID",
+        "COMPOSIO_USER_ID",
+    ):
         monkeypatch.delenv(var, raising=False)
     _meta_test_business(tmp_path, monkeypatch, mode="live")
     monkeypatch.setattr(
         takyon_core,
         "_call_creative_runtime_gateway",
         lambda endpoint, payload: (_ for _ in ()).throw(
-            TakyonError("Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN")
+            TakyonError("Meta action requires a Composio Meta Ads connection: missing COMPOSIO_API_KEY")
         ),
     )
 
@@ -5964,7 +6005,8 @@ def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, mo
     )
 
     assert result["success"] is False
-    assert "META_ACCESS_TOKEN" in result["error"]
+    assert "Composio Meta Ads connection" in result["error"]
+    assert "COMPOSIO_API_KEY" in result["error"]
 
 
 def test_business_meta_ad_launch_test_mode_supports_image_asset(tmp_path, monkeypatch):
@@ -6039,7 +6081,7 @@ def test_business_meta_ad_launch_manual_handoff_writes_packet_without_meta_call(
 
 
 def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, monkeypatch):
-    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    _set_meta_composio_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6063,7 +6105,7 @@ def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, mon
 
 
 def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatch):
-    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    _set_meta_composio_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6128,7 +6170,7 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
 
 
 def test_business_meta_ad_launch_derives_bounded_budget_when_omitted(tmp_path, monkeypatch):
-    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    _set_meta_composio_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6274,7 +6316,7 @@ def test_business_meta_ad_control_test_mode_suppresses_and_is_idempotent(tmp_pat
 
 
 def test_business_meta_ad_control_live_activate_records_event(tmp_path, monkeypatch):
-    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    _set_meta_composio_env(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
     _seed_live_ad_spend_policy(
@@ -6367,7 +6409,7 @@ def test_business_meta_ad_control_rejects_over_cap_budget(tmp_path, monkeypatch)
 
 
 def test_business_meta_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypatch):
-    monkeypatch.setenv("META_ACCESS_TOKEN", "meta-test-token")
+    _set_meta_composio_env(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
     _seed_live_ad_spend_policy(

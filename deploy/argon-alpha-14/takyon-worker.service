@@ -18,8 +18,6 @@ After=docker.service
 Wants=docker.service
 After=takyon-docker-broker.service
 Wants=takyon-docker-broker.service
-After=takyon-activation-broker.service
-Wants=takyon-activation-broker.service
 
 [Service]
 Type=simple
@@ -31,7 +29,13 @@ User=takyon
 Group=takyon
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectHome=true
+# Product-action sandbox carve-out: execute_scheduled_action -> invoke_action wraps the deno action
+# in `systemd-run --user --scope`, which needs the takyon (uid 995) user-manager bus at /run/user/995.
+# ProtectHome=tmpfs + BindPaths re-exposes ONLY takyon's own runtime dir (%U resolves to the manager
+# uid 0 on this systemd, so the literal uid is required). All other isolation (NoNewPrivileges,
+# ProtectSystem=strict, deno sandbox, cgroup caps) is unchanged. See dashboard unit.
+ProtectHome=tmpfs
+BindPaths=/run/user/995
 ProtectSystem=strict
 ReadWritePaths=/opt/takyon
 ReadOnlyPaths=/opt/takyon/hermes-agent-main
@@ -48,7 +52,6 @@ Environment=TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14
 Environment=TAKYON_STORAGE_BACKEND=supabase_s3
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
 Environment=TAKYON_DOCKER_BROKER_URL=http://127.0.0.1:8011
-Environment=TAKYON_PRODUCT_ACTIVATION_BROKER_URL=http://127.0.0.1:8012
 Environment=TAKYON_DOCKER_BINARY=/opt/takyon/hermes-agent-main/scripts/takyon-docker-broker.py
 Environment=TERMINAL_ENV=docker
 Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true

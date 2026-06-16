@@ -1,20 +1,12 @@
-# App Surface Contract
+# Product Surface
 
-## Contract
-
-## App Shape
-
-## Customer Experience Shape
-
-## Product Workflow
+## Shell Record
 
 ## Routes
 
 ## Runtime Rails
 
-## Theme Source
-
-## Constraints
+## Publication
 
 ## Live Now
 

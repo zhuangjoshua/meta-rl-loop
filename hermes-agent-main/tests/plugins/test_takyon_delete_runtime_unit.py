@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import types
 
+from plugins.takyon import core as takyon_core
 from plugins.takyon.core import TakyonStore
 
 
@@ -35,6 +36,16 @@ def test_delete_business_removes_product_runtime_surfaces(tmp_path, monkeypatch)
         "    }\n"
         "}\n",
         encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_delete_subuser_product_site",
+        lambda business_slug: {
+            "target": "root@134.209.123.8",
+            "path": f"/opt/takyon/.takyon/product-sites/{business_slug}",
+            "removed": True,
+            "status": "removed",
+        },
     )
 
     store._ensure_business = types.MethodType(lambda self, conn, business_slug: {"slug": business_slug}, store)
@@ -69,7 +80,52 @@ def test_delete_business_removes_product_runtime_surfaces(tmp_path, monkeypatch)
     assert result["product_service"]["service_root"]["removed"] is True
     assert result["product_service"]["service_file"]["removed"] is True
     assert result["product_service"]["caddy_route"]["removed"] is True
+    assert result["subuser_product_site"]["removed"] is True
     assert not business_root.exists()
     assert not service_root.exists()
     assert not service_file.exists()
     assert "latexflow.fourmanifold.com" not in caddyfile.read_text(encoding="utf-8")
+
+
+def test_delete_subuser_product_site_uses_tracked_ssh_defaults(tmp_path, monkeypatch):
+    key_path = tmp_path / "takyon_argon_alpha14"
+    key_path.write_text("dummy-key\n", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return types.SimpleNamespace(returncode=0, stdout="removed\n", stderr="")
+
+    monkeypatch.setenv("TAKYON_SUBUSER_VPS_SSH_KEY", str(key_path))
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOST", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_USER", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_REMOTE_HOME", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_REMOTE_PRODUCT_SITES", raising=False)
+    monkeypatch.setattr(takyon_core.shutil, "which", lambda name: "/usr/bin/ssh" if name == "ssh" else None)
+    monkeypatch.setattr(takyon_core.subprocess, "run", fake_run)
+
+    result = takyon_core._delete_subuser_product_site("latexflow")
+
+    assert result == {
+        "target": "root@134.209.123.8",
+        "path": "/opt/takyon/.takyon/product-sites/latexflow",
+        "removed": True,
+        "status": "removed",
+    }
+    assert calls and calls[0][0] == "/usr/bin/ssh"
+    assert calls[0][1:10] == [
+        "-i",
+        str(key_path),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+    ]
+    assert calls[0][10] == "StrictHostKeyChecking=accept-new"
+    assert calls[0][11] == "root@134.209.123.8"
+    assert "target=/opt/takyon/.takyon/product-sites/latexflow" in calls[0][12]
+    assert "root=/opt/takyon/.takyon/product-sites" in calls[0][12]

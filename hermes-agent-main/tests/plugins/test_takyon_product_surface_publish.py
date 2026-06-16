@@ -183,7 +183,6 @@ def test_publish_product_surface_writes_build_artifact_and_returns_live_pointer(
     assert result["publish_root"] == str(publish_root / "plannerly" / "current")
     assert result["publish_mode"] == "pointer_static"
     assert result["public_url"] == "https://plannerly.fourmanifold.com/"
-    assert result["activation_target"] == ""
     assert (stored_dist_root / "index.html").read_text(encoding="utf-8") == "<html><body>dist site</body></html>\n"
     assert (stored_dist_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#fedcba}\n"
 

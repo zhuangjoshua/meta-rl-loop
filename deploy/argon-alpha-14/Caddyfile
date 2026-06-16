@@ -25,7 +25,6 @@ https:// {
 	@product {
 		host *.fourmanifold.com
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
 		reverse_proxy 10.116.0.3:80 {
@@ -62,7 +61,6 @@ https:// {
 	@product {
 		host *.fourmanifold.com
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
 		reverse_proxy 10.116.0.3:80 {
@@ -74,48 +72,4 @@ https:// {
 	handle {
 		respond "not found" 404
 	}
-}
-
-# Legacy static product hosts. New companies should not add Caddy blocks; they
-# should use the shared route above and Takyon's business-scoped product state.
-latexflow.fourmanifold.com {
-	root * /var/www/takyon-sites/latexflow
-	try_files {path} {path}/ /index.html
-	file_server
-}
-
-e2e-postfix-05262217.fourmanifold.com {
-	root * /var/www/takyon-sites/e2e-postfix-05262217
-	try_files {path} {path}/ /index.html
-	file_server
-}
-
-longer.fourmanifold.com {
-	root * /var/www/takyon-sites/longer
-	try_files {path} {path}/ /index.html
-	file_server
-}
-
-grantkit.fourmanifold.com {
-	root * /var/www/takyon-sites/grantkit
-	try_files {path} {path}/ /index.html
-	file_server
-}
-
-inboxpilot.fourmanifold.com {
-	root * /var/www/takyon-sites/inboxpilot
-	try_files {path} {path}/ /index.html
-	file_server
-}
-
-latexflow-0527124758.fourmanifold.com {
-	root * /var/www/takyon-sites/latexflow-0527124758
-	try_files {path} {path}/ /index.html
-	file_server
-}
-
-blog.fourmanifold.com {
-	root * /var/www/takyon-sites/blog
-	try_files {path} {path}/ /index.html
-	file_server
 }

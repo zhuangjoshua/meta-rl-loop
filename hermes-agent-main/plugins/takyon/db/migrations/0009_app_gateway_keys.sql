@@ -3,7 +3,7 @@
 -- "generated app never holds provider key" (mediationplan Phase 5 ADD (b) + acceptance).
 --
 -- THE GAP THIS CLOSES (mediationplan Gate-1 finding, verified at source): the SQLite product
--- `/generate` path (app_api.py:395) calls Anthropic with the PLATFORM's shared key
+-- `/generate` path in the old SQLite app API calls Anthropic with the PLATFORM's shared key
 -- (`_anthropic_key()`) directly — there is NO per-business gateway-key boundary in front of the
 -- provider key. So any caller of the product AI route is one step from the raw platform key.
 --

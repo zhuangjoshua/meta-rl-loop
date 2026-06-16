@@ -806,6 +806,8 @@ export interface TakyonBusinessTractionPoint {
   revenue_cents: number;
   users: number;
   usage_events: number;
+  pageviews?: number;
+  visits?: number;
 }
 
 export interface TakyonBusinessTractionResponse {
@@ -818,11 +820,15 @@ export interface TakyonBusinessTractionResponse {
     revenue_cents: number;
     users: number;
     usage_events: number;
+    pageviews?: number;
+    visits?: number;
   };
   previous_totals: {
     revenue_cents: number;
     users: number;
     usage_events: number;
+    pageviews?: number;
+    visits?: number;
   };
 }
 

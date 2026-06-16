@@ -33,19 +33,17 @@ enabled). Activation is a separate, operator-gated step.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
 import re
 import socket
-import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import composio_distribution, jobs, safebox, wakes
+from . import composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
 
 _log = logging.getLogger("takyon.worker")
@@ -72,6 +70,23 @@ def _truncate_worker_text(value: str, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "..."
+
+
+def _parse_jsonish_output(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    candidates = [raw, *reversed([line for line in raw.splitlines() if line.strip()])]
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"items": parsed}
+    return {"raw": raw}
 
 
 def _split_x_fragment(text: str, *, limit: int = _X_POST_CHAR_LIMIT) -> list[str]:
@@ -122,54 +137,6 @@ def _split_x_thread_segments(body: str, *, limit: int = _X_POST_CHAR_LIMIT) -> l
     if current:
         segments.append(current)
     return segments
-
-
-def _xurl_home() -> Path:
-    return Path(os.environ.get("HOME") or str(Path.home())).expanduser()
-
-
-def _xurl_env(home: Path) -> dict[str, str]:
-    from .core import _runtime_env
-
-    return _runtime_env({"HOME": str(home)})
-
-
-def _parse_jsonish_output(text: str) -> dict[str, Any]:
-    raw = str(text or "").strip()
-    if not raw:
-        return {}
-    candidates = [raw, *reversed([line for line in raw.splitlines() if line.strip()])]
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-        if isinstance(parsed, list):
-            return {"items": parsed}
-    return {"raw": raw}
-
-
-def _run_xurl_json_command(command: list[str], *, home: Path, timeout: int = 90) -> dict[str, Any]:
-    proc = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        env=_xurl_env(home),
-    )
-    if proc.returncode != 0:
-        detail = _truncate_worker_text(proc.stderr or proc.stdout or "xurl command failed")
-        raise RuntimeError(detail)
-    return _parse_jsonish_output(proc.stdout or proc.stderr)
-
-
-def _try_run_xurl_json_command(command: list[str], *, home: Path, timeout: int = 30) -> dict[str, Any]:
-    try:
-        return _run_xurl_json_command(command, home=home, timeout=timeout)
-    except Exception:
-        return {}
 
 
 def _x_tool_data(payload: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -225,68 +192,6 @@ def _publish_artifact_title(subject: str, body: str) -> str:
 def _safe_x_artifact_stem(post_id: str, *, fallback: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", str(post_id or "").strip()).strip("-")
     return stem or fallback
-
-
-def _persist_xurl_shared_auth_best_effort(home: Path) -> None:
-    auth_path = home / ".xurl"
-    if not auth_path.exists():
-        return
-    try:
-        encoded = base64.b64encode(auth_path.read_bytes()).decode("ascii")
-        safebox.save_env_backed_value("XURL_SHARED_AUTH_B64_SECRET", encoded)
-    except Exception as exc:  # pragma: no cover - backup persistence should not block posting
-        _log.debug("failed to persist shared xurl auth: %s", exc)
-
-
-def _ensure_local_xurl_auth() -> tuple[str, Path]:
-    from .core import (
-        _apply_xurl_oauth1_credentials,
-        _decode_xurl_shared_auth_blob,
-        _read_xurl_shared_auth_secret,
-        _resolve_xurl_executable,
-        _xurl_auth_path,
-        _xurl_auth_status_ok,
-    )
-
-    home = _xurl_home()
-    xurl = _resolve_xurl_executable()
-    if not xurl:
-        raise RuntimeError("xurl is not installed on the worker host")
-    auth_path = _xurl_auth_path(home=str(home))
-    if _xurl_auth_status_ok(home=str(home)):
-        return xurl, auth_path
-    if _apply_xurl_oauth1_credentials(home=str(home)) and _xurl_auth_status_ok(home=str(home)):
-        _persist_xurl_shared_auth_best_effort(home)
-        return xurl, auth_path
-
-    key, value = _read_xurl_shared_auth_secret()
-    auth_text = _decode_xurl_shared_auth_blob(key, value) if key and value else ""
-    if not auth_text.strip():
-        raise RuntimeError(
-            "shared xurl auth is missing; seed /root/.xurl or configure XURL_SHARED_AUTH_B64_SECRET"
-        )
-
-    auth_path.parent.mkdir(parents=True, exist_ok=True)
-    auth_path.write_text(auth_text, encoding="utf-8")
-    os.chmod(auth_path, 0o600)
-    if not _xurl_auth_status_ok(home=str(home)):
-        raise RuntimeError("shared xurl auth is present but xurl auth status failed")
-    _persist_xurl_shared_auth_best_effort(home)
-    return xurl, auth_path
-
-
-def _xurl_identity_flags(*, home: Path) -> tuple[str, str]:
-    from .core import _xurl_default_identity
-
-    app_name, username = _xurl_default_identity(home=str(home))
-    return str(app_name or "").strip(), str(username or "").strip()
-
-
-def _xurl_auth_mode(*, home: Path) -> str:
-    from .core import _xurl_default_auth_profile
-
-    _app_name, auth_mode, _username = _xurl_default_auth_profile(home=str(home))
-    return str(auth_mode or "").strip()
 
 
 def _update_work_request(

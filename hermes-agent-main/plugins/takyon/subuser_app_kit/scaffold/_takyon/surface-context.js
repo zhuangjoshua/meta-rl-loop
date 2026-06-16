@@ -4,8 +4,8 @@
 // App code must import the kit ONLY through _takyon/ so that swap is invisible.
 export const surfaceContext = {
   business: "scaffold-dev",
-  runtimeApiBase: "",
-  frontendApiMode: "same_origin_product_host_with_prefixed_fallback",
+  runtimeApiBase: "/api/takyon/apps/scaffold-dev",
+  frontendApiMode: "prefixed_runtime_api",
   runtimeFeatures: ["auth", "account", "checkout", "generate", "records", "actions"],
   railState: {},
   routes: [],

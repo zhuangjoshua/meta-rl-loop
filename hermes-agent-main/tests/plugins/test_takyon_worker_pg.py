@@ -15,7 +15,6 @@ Two layers:
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import threading
@@ -346,210 +345,30 @@ def test_bootstrap_final_surface_refresh_runs_after_late_product_write(monkeypat
     assert result["publish"]["status"] == "published"
 
 
-def test_x_requirement_accepts_shared_xurl_auth(monkeypatch):
-    for name in ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(core, "_xurl_auth_status_ok", lambda **_kw: False)
-    monkeypatch.setattr(core, "_xurl_oauth1_auth_ready", lambda: False)
-    monkeypatch.setattr(core, "_xurl_shared_auth_ready", lambda: True)
-    assert core._missing_env_for_requirement("x") == []
+@pytest.mark.parametrize(
+    "requirement",
+    ("composio", "x", "twitter", "x_social", "meta", "metaads", "reddit", "reddit_ads"),
+)
+def test_composio_requirement_accepts_env_key(monkeypatch, requirement):
+    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-test-key")
+    assert core._missing_env_for_requirement(requirement) == []
 
 
-def test_x_requirement_accepts_oauth1_credentials(monkeypatch):
-    for name in (
-        "X_API_KEY",
-        "TWITTER_API_KEY",
-        "X_BEARER_TOKEN",
-        "TWITTER_BEARER_TOKEN",
-        "X_API_SECRET",
-        "TWITTER_API_SECRET",
-        "X_ACCESS_TOKEN",
-        "TWITTER_ACCESS_TOKEN",
-        "X_ACCESS_TOKEN_SECRET",
-        "TWITTER_ACCESS_TOKEN_SECRET",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(core, "_xurl_auth_status_ok", lambda **_kw: False)
-    monkeypatch.setattr(core, "_xurl_oauth1_auth_ready", lambda: True)
-    monkeypatch.setattr(core, "_xurl_shared_auth_ready", lambda: False)
-    assert core._missing_env_for_requirement("x") == []
-
-
-def test_xurl_auth_status_rejects_empty_status(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
-    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / ".xurl").write_text("apps: {}\n", encoding="utf-8")
-
-    class _Proc:
-        returncode = 0
-        stdout = "No apps registered. Use 'xurl auth apps add' to register one.\n"
-        stderr = ""
-
-    monkeypatch.setattr(core.subprocess, "run", lambda *args, **kwargs: _Proc())
-    assert core._xurl_auth_status_ok(home=str(home)) is False
-
-
-def test_xurl_auth_status_rejects_unauthorized_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
-    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / ".xurl").write_text("apps: {}\n", encoding="utf-8")
-
-    class _StatusProc:
-        returncode = 0
-        stdout = "shared auth present\n"
-        stderr = ""
-
-    class _WhoamiProc:
-        returncode = 0
-        stdout = '{\n  "title":"Unauthorized",\n  "status":401\n}\n'
-        stderr = ""
-
-    responses = iter((_StatusProc(), _WhoamiProc()))
-    monkeypatch.setattr(core.subprocess, "run", lambda *args, **kwargs: next(responses))
-    assert core._xurl_auth_status_ok(home=str(home)) is False
-
-
-def test_xurl_auth_status_uses_explicit_default_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
-    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / ".xurl").write_text(
-        "\n".join(
-            [
-                "apps:",
-                "  default:",
-                "    client_id: default-id",
-                "    client_secret: default-secret",
-                "  takyon-shared:",
-                "    client_id: shared-id",
-                "    client_secret: shared-secret",
-                "    default_user: vaalapp",
-                "    oauth2_tokens:",
-                "      vaalapp:",
-                "        type: oauth2",
-                "        oauth2:",
-                "          access_token: token",
-                "          refresh_token: refresh",
-                "default_app: takyon-shared",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    calls: list[list[str]] = []
-
-    class _Proc:
-        returncode = 0
-        stdout = '{"data":{"username":"vaalapp"}}\n'
-        stderr = ""
-
-    def _fake_run(command, **kwargs):
-        calls.append(list(command))
-        if command[-1] == "status":
-            status = _Proc()
-            status.stdout = "shared auth present\n"
-            return status
-        return _Proc()
-
-    monkeypatch.setattr(core.subprocess, "run", _fake_run)
-    assert core._xurl_auth_status_ok(home=str(home)) is True
-    assert calls[1] == [
-        "/usr/local/bin/xurl",
-        "--app",
-        "takyon-shared",
-        "whoami",
-        "--auth",
-        "oauth2",
-        "-u",
-        "vaalapp",
-    ]
-
-
-def test_xurl_auth_status_prefers_oauth1_when_present(tmp_path, monkeypatch):
-    monkeypatch.setattr(core, "_resolve_xurl_executable", lambda _name="xurl": "/usr/local/bin/xurl")
-    monkeypatch.setattr(core, "_runtime_env", lambda extra=None: extra or {})
-    home = tmp_path / "home"
-    home.mkdir()
-    (home / ".xurl").write_text(
-        "\n".join(
-            [
-                "apps:",
-                "  takyon-shared:",
-                "    client_id: shared-id",
-                "    client_secret: shared-secret",
-                "    default_user: vaalapp",
-                "    oauth2_tokens:",
-                "      vaalapp:",
-                "        type: oauth2",
-                "        oauth2:",
-                "          access_token: token",
-                "          refresh_token: refresh",
-                "    oauth1_token:",
-                "      type: oauth1",
-                "      oauth1:",
-                "        access_token: at",
-                "        token_secret: ts",
-                "        consumer_key: ck",
-                "        consumer_secret: cs",
-                "default_app: takyon-shared",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    calls: list[list[str]] = []
-
-    class _Proc:
-        returncode = 0
-        stdout = '{"data":{"username":"vaalapp"}}\n'
-        stderr = ""
-
-    def _fake_run(command, **kwargs):
-        calls.append(list(command))
-        if command[-1] == "status":
-            status = _Proc()
-            status.stdout = "shared auth present\n"
-            return status
-        return _Proc()
-
-    monkeypatch.setattr(core.subprocess, "run", _fake_run)
-    assert core._xurl_auth_status_ok(home=str(home)) is True
-    assert calls[1] == [
-        "/usr/local/bin/xurl",
-        "--app",
-        "takyon-shared",
-        "whoami",
-        "--auth",
-        "oauth1",
-    ]
-
-
-def test_xurl_shared_auth_ready_validates_seeded_blob(monkeypatch):
-    seen: dict[str, str] = {}
-    auth_blob = "apps:\n  shared: {}\n"
+def test_composio_requirement_accepts_safebox_backed_key(monkeypatch):
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
     monkeypatch.setattr(
-        core,
-        "_read_xurl_shared_auth_secret",
-        lambda: ("XURL_SHARED_AUTH_B64_SECRET", base64.b64encode(auth_blob.encode("utf-8")).decode("ascii")),
+        core.safebox,
+        "read_env_backed_value",
+        lambda key: "composio-test-key" if key == "COMPOSIO_API_KEY" else "",
     )
+    assert core._missing_env_for_requirement("x") == []
 
-    def _fake_status(*, home=None):
-        assert home
-        auth_path = Path(home) / ".xurl"
-        seen["home"] = str(home)
-        seen["text"] = auth_path.read_text(encoding="utf-8")
-        return False
 
-    monkeypatch.setattr(core, "_xurl_auth_status_ok", _fake_status)
-    assert core._xurl_shared_auth_ready() is False
-    assert seen["text"] == auth_blob
+@pytest.mark.parametrize("requirement", ("x", "meta", "reddit", "reddit_ads"))
+def test_composio_requirement_reports_missing_api_key(monkeypatch, requirement):
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    monkeypatch.setattr(core.safebox, "read_env_backed_value", lambda _key: "")
+    assert core._missing_env_for_requirement(requirement) == ["COMPOSIO_API_KEY"]
 
 
 def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):

@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 
 from .control_api import get_control_conn
 from . import safebox
@@ -48,8 +48,16 @@ def _expected_session_token() -> str:
 
 
 def _require_internal_session(
+    request: Request,
     session_token: str | None = Header(default=None, alias=_SESSION_HEADER_NAME),
 ) -> None:
+    # Localhost-only, server-to-server boundary. The runtime calls these endpoints over 127.0.0.1
+    # with no proxy headers; any request that transited the public reverse proxy carries
+    # X-Forwarded-* (Caddy sets them). Reject those so the creative / ad-spend gateway cannot be
+    # reached from app.fourmanifold.com even with the shared dashboard token. (The edge Caddy block
+    # on /internal/creative-gateway/* is the belt-and-suspenders.)
+    if request.headers.get("x-forwarded-host") or request.headers.get("x-forwarded-for"):
+        raise HTTPException(status_code=404, detail="not_found")
     expected = _expected_session_token()
     if not expected:
         raise HTTPException(status_code=503, detail="dashboard_session_token_unavailable")
@@ -856,6 +864,17 @@ def build_creative_gateway_router() -> APIRouter:
             if daily_budget_cents <= 0:
                 raise HTTPException(status_code=400, detail="daily_budget_cents must be positive")
             try:
+                core._assert_ad_set_budget_authorized(
+                    channel="meta",
+                    business=str(body.get("business") or "").strip(),
+                    slug=str(body.get("slug") or "").strip(),
+                    target_id=ids["adset_id"],
+                    daily_budget_cents=daily_budget_cents,
+                    safety_cap_cents=int(round(core._meta_daily_budget_cap() * 100)),
+                )
+            except core.TakyonError as exc:
+                raise HTTPException(status_code=403, detail=str(exc))
+            try:
                 core._meta_graph(
                     "POST",
                     ids["adset_id"],
@@ -1276,8 +1295,21 @@ def build_creative_gateway_router() -> APIRouter:
                 raise HTTPException(status_code=400, detail="daily_budget_micros must be positive")
             budget_scope = str(body.get("budget_scope") or "ad_group").strip().lower() or "ad_group"
             target_path = f"/ad_groups/{ids['ad_group_id']}"
+            budget_target_id = ids["ad_group_id"]
             if budget_scope == "campaign":
                 target_path = f"/campaigns/{ids['campaign_id']}"
+                budget_target_id = ids["campaign_id"]
+            try:
+                core._assert_ad_set_budget_authorized(
+                    channel="reddit",
+                    business=str(body.get("business") or "").strip(),
+                    slug=str(body.get("slug") or "").strip(),
+                    target_id=budget_target_id,
+                    daily_budget_cents=int(daily_budget_micros) // 10000,
+                    safety_cap_cents=int(round(core._reddit_daily_budget_cap() * 100)),
+                )
+            except core.TakyonError as exc:
+                raise HTTPException(status_code=403, detail=str(exc))
             try:
                 core._reddit_ads_request(
                     "PATCH",

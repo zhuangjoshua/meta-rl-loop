@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import atexit
-import base64
 import contextvars
 import hashlib
 import hmac
@@ -29,7 +28,7 @@ import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from textwrap import dedent
 from typing import Any, Iterable, Mapping
 
@@ -58,7 +57,7 @@ from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
 from .app_runtime_constants import APP_SESSION_COOKIE
-from . import composio_distribution, safebox
+from . import app_supabase_auth, composio_distribution, safebox
 
 
 TAKYON_TOOLSET = "takyon"
@@ -102,6 +101,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_grant_app_entitlement",
         "business_request_app_magic_link",
         "business_verify_app_magic_link",
+        "business_supabase_login",
         "business_read_app_account",
         "business_read_app_profile",
         "business_list_app_directory_entries",
@@ -287,14 +287,16 @@ _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
 PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "auth": {
         "owner_skill": "takyon-app-runtime",
-        "tools": ["business_request_app_magic_link", "business_verify_app_magic_link", "business_read_app_account"],
+        "tools": ["business_supabase_login", "business_request_app_magic_link", "business_verify_app_magic_link", "business_read_app_account"],
         "endpoints": [
+            ("POST", "auth/session"),
             ("POST", "auth/request"),
             ("GET", "auth/verify"),
             ("GET", "session"),
         ],
         "worker_contract": [
-            "Use Takyon magic-link and session rails instead of browser-only auth state.",
+            "Sign sub-users in through Supabase Auth (Google + email): the browser completes the Supabase OAuth flow, then POST auth/session with the Supabase access_token to mint the Takyon app session. Do not build browser-only auth state.",
+            "POST auth/request + GET auth/verify (magic-link) remain as a legacy fallback until the Supabase cutover is verified live; prefer auth/session.",
             "If auth is declared, use the canonical auth helpers directly; only block sign-in when the auth rail is explicitly marked blocked/broken or a real auth request fails.",
         ],
     },
@@ -365,7 +367,8 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "worker_contract": [
             "Backend actions are per-product TypeScript files under product/site/actions/<name>.ts, default-exporting async (payload, ctx) => result.",
             "The action name is one identity end to end: every useActionRunner(\"<name>\")/invokeAction(\"<name>\") call in the UI MUST match a real product/site/actions/<name>.ts file.",
-            "Inside an action: call the product's own rails over HTTP using ctx.base_url + ctx.session_token; there is no filesystem write, no shell, no provider credential/base-url env access, and no provider SDK or remote imports.",
+            "Inside an action, ctx IS the runtime client (the SAME API the browser UI uses): call ctx.generate(...), ctx.invokeAction(...), ctx.saveRecord(...), ctx.listRecords(...) exactly like the browser. No filesystem write, no shell, no provider credential/base-url env access, no provider SDK, no remote imports.",
+            "Copy product/site/actions/_example-generate.ts as the canonical action shape: it default-exports async (payload, ctx) => result and calls `const data = await ctx.generate({ max_tokens, system, messages }); return { reply: data.text };`. The generate rail returns { text, content, model, usage }; model and max_tokens are optional.",
             "The runtime-authority scanner rejects direct provider hosts in product source (for example api.openai.com, api.anthropic.com, generativelanguage.googleapis.com, api.mistral.ai, api.deepseek.com, openrouter.ai, api.groq.com, api.together.xyz).",
             "Do not read provider credentials or base URLs from product env in product source (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, any `TAKYON_*_API_KEY`, any `TAKYON_*_BASE_URL`).",
             "Do not import or construct provider SDKs such as `openai` or `@anthropic-ai/sdk` in product source; route AI through Takyon rails instead.",
@@ -465,6 +468,27 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
             "Use the returned {text, content, model, usage} as the only source of truth for output and spend; do not invent token counts or cost.",
         ],
     },
+    "search": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": [],
+        "endpoints": [("POST", "search")],
+        "worker_contract": [
+            "Treat POST /search on product hosts or POST <runtime_api_base>/search off-host as the public product contract for web search and URL extraction; product code must never call Tavily or any search provider directly with its own key.",
+            "That public runtime route brokers server-side through the shared Takyon search authority, which owns the provider credentials, plan/app-budget checks, and per-request spend settlement — web search is metered app usage, not free.",
+            "Request body is {operation: 'search', query, depth: 'basic'|'advanced', max_results} or {operation: 'extract', urls: [...]}. Treat 402 as out-of-credit (surface it, do not retry as if free) and 503 as search-not-configured (keep the action visible but clearly blocked; never fabricate results).",
+            "Use the returned {results, usage} as the only source of truth; do not invent search results or cost.",
+        ],
+    },
+    "analytics": {
+        "owner_skill": "takyon-app-analytics",
+        "tools": ["business_read_app_analytics"],
+        "endpoints": [],
+        "worker_contract": [
+            "Web analytics is injected automatically by the Takyon runtime into the published product <head>; do not add your own analytics or tracking scripts (Google Analytics, Plausible, a second Umami tag, Segment, etc.).",
+            "Each business shares one analytics property and is segmented by its own subdomain hostname, so never hardcode an analytics provider URL or website id in product source.",
+            "To record a custom product event, call the globally available umami.track(\"<event-name>\", { ...data }) only if it exists; never block product behavior on analytics and never fabricate analytics numbers in the UI.",
+        ],
+    },
 }
 _RUNTIME_FEATURE_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
     "billing": ("account", "checkout"),
@@ -496,7 +520,18 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
     "entitlements",
     "usage",
     "generate",
+    "search",
+    "analytics",
 )
+
+# Rails that are always active for every product and are never a per-business
+# choice. The runtime injects analytics tracking into every served product
+# <head> regardless of selection, so the product worker is always told the rail
+# is on (and to never add its own tracker). Always-on rails are NOT routed
+# through the per-business runtime_features shape machinery — keeping them out of
+# _surface_runtime_features avoids tripping the bootstrap-shell guard — they are
+# appended to the worker contract for every product instead.
+ALWAYS_ON_RUNTIME_RAILS: tuple[str, ...] = ("analytics",)
 
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY = "monthly"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
@@ -917,19 +952,25 @@ def _business_file_truth_metadata(path: str, *, session_scoped: bool, revision: 
 # requires_env when an API is not listed here.
 _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY",),
+    "composio": ("COMPOSIO_API_KEY",),
     "database": ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
     "llm": ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
-    "meta": ("META_ACCESS_TOKEN", "FACEBOOK_ACCESS_TOKEN"),
+    "meta": ("COMPOSIO_API_KEY",),
+    "metaads": ("COMPOSIO_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
     "parallel": ("PARALLEL_API_KEY",),
     "postmark": ("POSTMARK_SERVER_TOKEN", "POSTMARK_FROM_EMAIL"),
+    "reddit": ("COMPOSIO_API_KEY",),
+    "reddit_ads": ("COMPOSIO_API_KEY",),
     "stripe": ("STRIPE_SECRET_KEY",),
     "tavily": ("TAVILY_API_KEY",),
+    "twitter": ("COMPOSIO_API_KEY",),
     "vercel": ("VERCEL_TOKEN",),
-    "x": ("X_API_KEY", "TWITTER_API_KEY", "X_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"),
+    "x": ("COMPOSIO_API_KEY",),
+    "x_social": ("COMPOSIO_API_KEY",),
     "xai": ("XAI_API_KEY",),
 }
 
@@ -945,16 +986,19 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "x_social": ("x",),
 }
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
-_XURL_SHARED_AUTH_ENV_KEYS = ("XURL_SHARED_AUTH_B64_SECRET", "XURL_SHARED_AUTH_SECRET")
-_X_OAUTH1_ENV_ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
-    "consumer_key": ("X_API_KEY", "TWITTER_API_KEY"),
-    "consumer_secret": ("X_API_SECRET", "TWITTER_API_SECRET"),
-    "access_token": ("X_ACCESS_TOKEN", "TWITTER_ACCESS_TOKEN"),
-    "token_secret": ("X_ACCESS_TOKEN_SECRET", "TWITTER_ACCESS_TOKEN_SECRET"),
-}
-_X_CREDENTIAL_REQUIREMENT_LABEL = (
-    "X_API_KEY+X_API_SECRET+X_ACCESS_TOKEN+X_ACCESS_TOKEN_SECRET/TWITTER_*/valid shared xurl auth"
-)
+# The ONLY app.* writes a product customer (session principal) may commit — declared once as data,
+# consulted in _normalize_operation, never re-derived per route. Each one's _apply_operation handler
+# validates the customer's business-scoped session (so no cross-business reach); the operator-only
+# app writes (budget/plan/entitlement/surface) are deliberately absent so they stay operator-gated.
+CUSTOMER_REACHABLE_APP_WRITES = frozenset({
+    "app.record.upsert",
+    "app.record.delete",
+    "app.profile.upsert",
+    "app.directory.upsert",
+    "app.directory.disable",
+    "app.connection.set",
+    "app.usage.record",
+})
 
 
 class TakyonError(RuntimeError):
@@ -1620,9 +1664,6 @@ def _merge_product_workflow_metadata(
     else:
         merged.pop("product_workflow", None)
     return merged
-
-
-
 
 def _runtime_features_implied_by_product_workflow(product_workflow: dict[str, Any] | None) -> list[str]:
     if not isinstance(product_workflow, dict):
@@ -5831,7 +5872,12 @@ def _materialize_subuser_app_starter(
 def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     declared_runtime_features = _surface_runtime_features(surface)
     runtime_features = _surface_effective_runtime_features(surface)
-    if not runtime_features:
+    always_on = [
+        rail
+        for rail in ALWAYS_ON_RUNTIME_RAILS
+        if rail in PRODUCT_RUNTIME_RAILS and rail not in runtime_features
+    ]
+    if not runtime_features and not always_on:
         return ""
     frontend_stack = _surface_subuser_app_shape(surface).get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK
     runtime_api_base = ""
@@ -5845,8 +5891,8 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
         lines.append("- Runtime-backed features available in this shell: " + ", ".join(runtime_features))
     if runtime_api_base:
         lines.append(f"- Runtime API base: {runtime_api_base}")
-    lines.extend(["", "Selected runtime rails:"])
-    for rail in runtime_features:
+
+    def _render_rail(rail: str) -> None:
         spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
         owner = str(spec.get("owner_skill") or "unknown")
         lines.append(f"- {rail} (owner: {owner})")
@@ -5859,6 +5905,15 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
             lines.append(f"  - Canonical tools: {', '.join(tools)}")
         for item in spec.get("worker_contract") or []:
             lines.append(f"  - {str(item).strip()}")
+
+    if runtime_features:
+        lines.extend(["", "Selected runtime rails:"])
+        for rail in runtime_features:
+            _render_rail(rail)
+    if always_on:
+        lines.extend(["", "Always-on runtime rails (active for every product, not selectable):"])
+        for rail in always_on:
+            _render_rail(rail)
     return "\n".join(lines).strip()
 
 
@@ -5897,20 +5952,8 @@ def _subuser_app_worker_contract_block(
             "- Do not invent product-side server code in this scaffold.",
             "- Treat `product/site/actions/*.ts` as the product backend registry: real backend behavior lives in `product/site/actions/<name>.ts`, not `src/actions/`.",
             "- Each real action file must default-export async `(payload, ctx) => result`; do not leave doc stubs, placeholder registries, or browser wrappers in `product/site/actions/`.",
-            "- The action file imports NOTHING: no `@takyon/runtime`, no provider SDK, no remote modules, no relative `src/` imports. `ctx` already provides everything, and the deno runner uses `--no-remote` so any import fails. Do not register the handler as `export default { run }` or `export default { handler }` and do not reverse the argument order.",
-            "- Copy this exact handler shape (it is invoked as handler(payload, ctx) — payload FIRST, ctx SECOND):\n"
-            "    export default async function (payload, ctx) {\n"
-            "      const { message } = payload;\n"
-            "      const result = await ctx.generate({\n"
-            "        system: \"You are <the product's assistant>...\",\n"
-            "        messages: [{ role: \"user\", content: message }],\n"
-            "        max_tokens: 1024,\n"
-            "      });\n"
-            "      return { reply: result.text };\n"
-            "    }",
             "- Browser code reaches backend behavior through the shared runtime client's `createActionRunner(name)` / `invokeAction(name)`; do not invent a second backend path.",
-            "- Inside a product action, reach the shared rails over `ctx.base_url` + `ctx.session_token`; there is no filesystem write, no shell, and no hidden provider credential path in product source.",
-            "- For AI generation, call the injected `ctx.generate(payload)` helper (the runner POSTs the business generate rail with `ctx.base_url` + `ctx.session_token` and returns the rail JSON such as `{ text }`); never import a provider SDK or fetch a provider/`/generate` URL directly.",
+            "- Inside a product action, ctx IS the runtime client (same API as the browser): call ctx.generate(...)/ctx.invokeAction(...)/ctx.saveRecord(...)/ctx.listRecords(...) like the browser; copy product/site/actions/_example-generate.ts (it calls `const data = await ctx.generate({ max_tokens, system, messages }); return { reply: data.text };`). No filesystem write, no shell, no provider credentials in product source.",
             "- Never fake or simulate an action result client-side just to keep the UI moving; if the backend action is missing or blocked, surface the exact blocker truthfully.",
             "- Schedule-only actions self-declare in the action file with `export const trigger = \"schedule\"` and `export const schedule = \"<cron>\"`; HTTP is the default when no trigger is exported.",
             "",
@@ -6943,286 +6986,6 @@ def _resolve_runtime_executable(name: str) -> str | None:
     return shutil.which(name, path=search_path)
 
 
-def _resolve_xurl_executable() -> str | None:
-    path = _resolve_runtime_executable("xurl")
-    if path:
-        return path
-    fallback = Path.home() / ".local" / "bin" / "xurl"
-    if fallback.exists() and os.access(fallback, os.X_OK):
-        return str(fallback)
-    return None
-
-
-def _xurl_auth_path(*, home: str | None = None) -> Path:
-    base = Path(home).expanduser() if home else Path.home()
-    return base / ".xurl"
-
-
-def _xurl_default_auth_profile(*, home: str | None = None) -> tuple[str, str, str]:
-    auth_path = _xurl_auth_path(home=home)
-    if not auth_path.exists():
-        return "", "", ""
-    try:
-        import yaml
-
-        payload = yaml.safe_load(auth_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return "", "", ""
-    if not isinstance(payload, Mapping):
-        return "", "", ""
-    apps = payload.get("apps")
-    if not isinstance(apps, Mapping):
-        return "", "", ""
-    default_app = str(payload.get("default_app") or "").strip()
-    candidates: list[tuple[str, Mapping[str, Any]]] = []
-    if default_app and isinstance(apps.get(default_app), Mapping):
-        candidates.append((default_app, apps.get(default_app) or {}))
-    for name, app_payload in apps.items():
-        candidate_name = str(name or "").strip()
-        if not candidate_name or candidate_name == default_app:
-            continue
-        if isinstance(app_payload, Mapping):
-            candidates.append((candidate_name, app_payload))
-    for app_name, app_payload in candidates:
-        oauth1_token = app_payload.get("oauth1_token")
-        if isinstance(oauth1_token, Mapping) and isinstance(oauth1_token.get("oauth1"), Mapping):
-            oauth1 = oauth1_token.get("oauth1") or {}
-            if all(
-                str(oauth1.get(key) or "").strip()
-                for key in ("consumer_key", "consumer_secret", "access_token", "token_secret")
-            ):
-                return app_name, "oauth1", ""
-        default_user = str(app_payload.get("default_user") or "").strip()
-        if default_user:
-            return app_name, "oauth2", default_user
-        oauth2_tokens = app_payload.get("oauth2_tokens")
-        if isinstance(oauth2_tokens, Mapping):
-            for username in oauth2_tokens:
-                candidate = str(username or "").strip()
-                if candidate:
-                    return app_name, "oauth2", candidate
-    return "", "", ""
-
-
-def _xurl_default_identity(*, home: str | None = None) -> tuple[str, str]:
-    app_name, _auth_mode, username = _xurl_default_auth_profile(home=home)
-    return app_name, username
-
-
-def _read_x_oauth1_credentials() -> dict[str, str]:
-    creds: dict[str, str] = {}
-    for logical_name, aliases in _X_OAUTH1_ENV_ALIAS_GROUPS.items():
-        value = ""
-        for key in aliases:
-            value = str(os.getenv(key) or "").strip()
-            if value:
-                break
-            try:
-                value = str(safebox.read_env_backed_value(key) or "").strip()
-            except Exception:
-                value = ""
-            if value:
-                break
-        creds[logical_name] = value
-    return creds
-
-
-def _apply_xurl_oauth1_credentials(*, home: str | None = None) -> bool:
-    xurl = _resolve_xurl_executable()
-    if not xurl:
-        return False
-    creds = _read_x_oauth1_credentials()
-    if not all(
-        str(creds.get(key) or "").strip()
-        for key in ("consumer_key", "consumer_secret", "access_token", "token_secret")
-    ):
-        return False
-    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
-    auth_path = _xurl_auth_path(home=resolved_home)
-    auth_path.parent.mkdir(parents=True, exist_ok=True)
-    app_name, _auth_mode, _username = _xurl_default_auth_profile(home=resolved_home)
-    command = [xurl]
-    if app_name:
-        command.extend(["--app", app_name])
-    command.extend(
-        [
-            "auth",
-            "oauth1",
-            "--consumer-key",
-            creds["consumer_key"],
-            "--consumer-secret",
-            creds["consumer_secret"],
-            "--access-token",
-            creds["access_token"],
-            "--token-secret",
-            creds["token_secret"],
-        ]
-    )
-    try:
-        proc = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            timeout=20,
-            env=_runtime_env({"HOME": resolved_home}),
-        )
-    except Exception:
-        return False
-    return proc.returncode == 0
-
-
-def _xurl_oauth1_auth_ready() -> bool:
-    creds = _read_x_oauth1_credentials()
-    if not all(
-        str(creds.get(key) or "").strip()
-        for key in ("consumer_key", "consumer_secret", "access_token", "token_secret")
-    ):
-        return False
-    try:
-        with tempfile.TemporaryDirectory(prefix="takyon-xurl-oauth1-") as tmpdir:
-            if not _apply_xurl_oauth1_credentials(home=tmpdir):
-                return False
-            return _xurl_auth_status_ok(home=tmpdir)
-    except Exception:
-        return False
-
-
-def _xurl_auth_status_ok(*, home: str | None = None) -> bool:
-    xurl = _resolve_xurl_executable()
-    if not xurl:
-        return False
-    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
-    auth_path = _xurl_auth_path(home=resolved_home)
-    if not auth_path.exists():
-        return False
-    try:
-        proc = subprocess.run(
-            [xurl, "auth", "status"],
-            text=True,
-            capture_output=True,
-            timeout=15,
-            env=_runtime_env({"HOME": resolved_home}),
-        )
-    except Exception:
-        return False
-    if proc.returncode != 0:
-        return False
-    output = "\n".join(part for part in (proc.stdout, proc.stderr) if part).strip().lower()
-    if any(
-        marker in output
-        for marker in (
-            "no apps registered",
-            "no app registered",
-            "no tokens",
-            "not authenticated",
-            "no users",
-        )
-    ):
-        return False
-    app_name, auth_mode, username = _xurl_default_auth_profile(home=resolved_home)
-    identity_command = [xurl]
-    if app_name:
-        identity_command.extend(["--app", app_name])
-    identity_command.append("whoami")
-    if auth_mode:
-        identity_command.extend(["--auth", auth_mode])
-    if username:
-        identity_command.extend(["-u", username])
-    try:
-        identity = subprocess.run(
-            identity_command,
-            text=True,
-            capture_output=True,
-            timeout=20,
-            env=_runtime_env({"HOME": resolved_home}),
-        )
-    except Exception:
-        return False
-    identity_output = "\n".join(
-        part for part in (identity.stdout, identity.stderr) if part
-    ).strip().lower()
-    if identity.returncode != 0:
-        return False
-    if any(
-        marker in identity_output
-        for marker in (
-            "unauthorized",
-            '"status":401',
-            '"status": 401',
-            '"title":"unauthorized"',
-            '"title": "unauthorized"',
-            "not authenticated",
-            "forbidden",
-        )
-    ):
-        return False
-    return True
-
-
-def _read_xurl_shared_auth_secret() -> tuple[str, str]:
-    for key in _XURL_SHARED_AUTH_ENV_KEYS:
-        value = str(os.getenv(key) or "").strip()
-        if value:
-            return key, value
-        try:
-            value = str(safebox.read_env_backed_value(key) or "").strip()
-        except Exception:
-            value = ""
-        if value:
-            return key, value
-    return "", ""
-
-
-def _decode_xurl_shared_auth_blob(key: str, value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if key.endswith("_B64_SECRET"):
-        try:
-            return base64.b64decode(text.encode("utf-8"), validate=True).decode("utf-8")
-        except Exception:
-            return ""
-    return text.replace("\r\n", "\n")
-
-
-def _xurl_shared_auth_ready() -> bool:
-    key, value = _read_xurl_shared_auth_secret()
-    if not key or not value:
-        return False
-    auth_text = _decode_xurl_shared_auth_blob(key, value)
-    if not auth_text.strip():
-        return False
-    try:
-        with tempfile.TemporaryDirectory(prefix="takyon-xurl-auth-") as tmpdir:
-            home = Path(tmpdir)
-            auth_path = home / ".xurl"
-            auth_path.write_text(auth_text, encoding="utf-8")
-            try:
-                os.chmod(auth_path, 0o600)
-            except Exception:
-                pass
-            return _xurl_auth_status_ok(home=str(home))
-    except Exception:
-        return False
-
-
-def _parse_jsonish_output(text: str) -> dict[str, Any]:
-    raw = str(text or "").strip()
-    if not raw:
-        return {}
-    candidates = [raw, *reversed([line for line in raw.splitlines() if line.strip()])]
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-        if isinstance(parsed, list):
-            return {"items": parsed}
-    return {"raw": raw}
-
-
 def _composio_tool_unwrap(payload: Any) -> Any:
     current = payload
     for _ in range(4):
@@ -7243,40 +7006,6 @@ def _composio_tool_mapping(payload: Any) -> dict[str, Any]:
     return {}
 
 
-def _run_xurl_json_command(
-    command: list[str],
-    *,
-    home: str | None = None,
-    timeout: int = 90,
-) -> dict[str, Any]:
-    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
-    proc = subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        env=_runtime_env({"HOME": resolved_home}),
-    )
-    if proc.returncode != 0:
-        detail = str(proc.stderr or proc.stdout or "xurl command failed").strip()
-        raise TakyonError(detail or "xurl command failed")
-    return _parse_jsonish_output(proc.stdout or proc.stderr)
-
-
-def _xurl_metrics_request_context(*, home: str | None = None) -> tuple[str, str, str, str, str]:
-    xurl = _resolve_xurl_executable()
-    if not xurl:
-        raise TakyonError("xurl is not installed on this host")
-    resolved_home = str(Path(home).expanduser()) if home else str(Path.home())
-    if not _xurl_auth_status_ok(home=resolved_home):
-        if not _apply_xurl_oauth1_credentials(home=resolved_home):
-            raise TakyonError("xurl auth is not ready and OAuth1 credentials are not available")
-        if not _xurl_auth_status_ok(home=resolved_home):
-            raise TakyonError("xurl auth is present but not usable")
-    app_name, auth_mode, username = _xurl_default_auth_profile(home=resolved_home)
-    return resolved_home, xurl, str(app_name or "").strip(), str(auth_mode or "").strip(), str(username or "").strip()
-
-
 def _x_metrics_field_list(*, published_at: Any = None) -> list[str]:
     fields = ["created_at", "public_metrics"]
     published_dt = _parse_iso_datetime(published_at)
@@ -7291,7 +7020,7 @@ def _x_metrics_lookup(
     published_at: Any = None,
     home: str | None = None,
 ) -> dict[str, Any]:
-    del home  # X metrics now resolve through Composio, not the local xurl CLI.
+    del home  # X metrics now resolve through Composio, not a host-local X client.
     fields = _x_metrics_field_list(published_at=published_at)
     try:
         payload = composio_distribution.twitter_execute_tool(
@@ -7663,6 +7392,84 @@ def _model_from_config(*keys: str) -> str:
     return ""
 
 
+def _analytics_umami_config() -> dict[str, Any]:
+    """Read the analytics.umami.* block from config.yaml (shared source of truth)."""
+    path = get_takyon_home() / "config.yaml"
+    try:
+        import yaml
+
+        with open(path, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        umami = (data.get("analytics") or {}).get("umami")
+        if isinstance(umami, dict):
+            return umami
+    except Exception:
+        return {}
+    return {}
+
+
+_ANALYTICS_SUMMARY_CACHE: dict[tuple[str, str, int], tuple[float, dict[str, Any]]] = {}
+
+
+def _business_analytics_summary(slug: str, *, days: int = 7) -> dict[str, Any]:
+    """Best-effort web-analytics snapshot for a business's published product site.
+
+    Never raises: returns {"configured": False, "reason": ...} when analytics is
+    off/unconfigured, or {"configured": True, "ok": False, ...} when the provider
+    read fails — so pulse and tools degrade truthfully instead of faking numbers.
+    One shared Umami website is filtered to this business's own subdomain, and the
+    result is cached per (website, hostname, window) to respect the API rate limit.
+    """
+    slug = _slugify(slug)
+    days = max(1, min(int(days or 7), 365))
+    cfg = _analytics_umami_config()
+    if not cfg.get("enabled"):
+        return {"configured": False, "reason": "analytics disabled"}
+    website_id = str(cfg.get("website_id") or "").strip()
+    api_endpoint = str(cfg.get("api_endpoint") or "").strip()
+    if not website_id or not api_endpoint:
+        return {"configured": False, "reason": "analytics website_id/api_endpoint not set"}
+    try:
+        from . import umami_util
+    except Exception:
+        return {"configured": False, "reason": "analytics client unavailable"}
+    if not umami_util.umami_configured():
+        return {"configured": False, "reason": "UMAMI_API_KEY not set"}
+    try:
+        hostname = urllib.parse.urlparse(_product_publish_target(slug)).netloc
+    except Exception:
+        hostname = ""
+    cache_key = (website_id, hostname, days)
+    ttl = max(0, int(cfg.get("stats_cache_seconds") or 300))
+    now_ts = time.time()
+    cached = _ANALYTICS_SUMMARY_CACHE.get(cache_key)
+    if cached and ttl and cached[0] > now_ts:
+        return cached[1]
+    end_ms = int(now_ts * 1000)
+    start_ms = end_ms - days * 86_400_000
+    try:
+        stats = umami_util.website_stats(
+            website_id,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            api_endpoint=api_endpoint,
+            hostname=hostname,
+        )
+    except Exception as exc:  # provider error or secret-authority unavailable — degrade truthfully
+        return {"configured": True, "ok": False, "hostname": hostname, "reason": str(exc)}
+    payload = {
+        "configured": True,
+        "ok": True,
+        "provider": "umami",
+        "hostname": hostname,
+        "window_days": days,
+        "stats": stats,
+    }
+    if ttl:
+        _ANALYTICS_SUMMARY_CACHE[cache_key] = (now_ts + ttl, payload)
+    return payload
+
+
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -7684,21 +7491,28 @@ def _boolish(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def _env_requirement_value(name: str) -> str:
+    key = str(name or "").strip()
+    if not key:
+        return ""
+    if safebox.is_sensitive_env_key(key):
+        try:
+            value = safebox.read_env_backed_value(key) or ""
+        except Exception:
+            value = os.getenv(key) or ""
+    else:
+        value = os.getenv(key) or ""
+    return str(value).strip()
+
+
 def _missing_env_for_requirement(requirement: str) -> list[str]:
     key = str(requirement or "").strip()
     if not key:
         return []
-    if key.lower() == "x":
-        alias = _API_ENV_ALIASES.get("x", ())
-        if any(os.getenv(name) for name in alias):
-            return []
-        if _xurl_auth_status_ok() or _xurl_oauth1_auth_ready() or _xurl_shared_auth_ready():
-            return []
-        return [_X_CREDENTIAL_REQUIREMENT_LABEL]
     alias = _API_ENV_ALIASES.get(key.lower())
     if alias:
-        return [] if any(os.getenv(name) for name in alias) else ["/".join(alias)]
-    return [] if os.getenv(key) else [key]
+        return [] if any(_env_requirement_value(name) for name in alias) else ["/".join(alias)]
+    return [] if _env_requirement_value(key) else [key]
 
 
 def _credential_requirements(op: dict[str, Any]) -> list[str]:
@@ -9816,6 +9630,128 @@ def _product_public_asset_site_relpath(asset_slug: str, filename: str) -> str:
     return f"_takyon/assets/{safe_slug}/{safe_name}"
 
 
+def _subuser_vps_ssh_target() -> str:
+    host = str(os.getenv("TAKYON_SUBUSER_VPS_HOST") or "").strip()
+    user = str(os.getenv("TAKYON_SUBUSER_VPS_USER") or "").strip() or "root"
+    if host:
+        return host if "@" in host else f"{user}@{host}"
+    return f"{user}@134.209.123.8"
+
+
+def _subuser_vps_ssh_key_path() -> Path:
+    raw = str(os.getenv("TAKYON_SUBUSER_VPS_SSH_KEY") or "").strip()
+    return Path(raw).expanduser() if raw else (Path.home() / ".ssh" / "takyon_argon_alpha14")
+
+
+def _subuser_remote_home() -> PurePosixPath:
+    raw = str(os.getenv("TAKYON_SUBUSER_REMOTE_HOME") or "").strip()
+    path = PurePosixPath(raw or "/opt/takyon/.takyon")
+    if not path.is_absolute():
+        raise TakyonError("TAKYON_SUBUSER_REMOTE_HOME must be an absolute path")
+    return path
+
+
+def _subuser_remote_product_sites_root() -> PurePosixPath:
+    raw = str(os.getenv("TAKYON_SUBUSER_REMOTE_PRODUCT_SITES") or "").strip()
+    root = PurePosixPath(raw) if raw else (_subuser_remote_home() / "product-sites")
+    if not root.is_absolute():
+        raise TakyonError("TAKYON_SUBUSER_REMOTE_PRODUCT_SITES must be an absolute path")
+    return root
+
+
+def _subuser_remote_product_site_path(slug: str) -> PurePosixPath:
+    root = _subuser_remote_product_sites_root()
+    target = root / _slugify(slug)
+    if root not in (target, *target.parents):
+        raise TakyonError("subuser remote product site escaped product-sites root")
+    return target
+
+
+def _subuser_product_site_summary(slug: str) -> dict[str, Any]:
+    return {
+        "target": _subuser_vps_ssh_target(),
+        "path": str(_subuser_remote_product_site_path(slug)),
+    }
+
+
+def _delete_subuser_product_site(slug: str) -> dict[str, Any]:
+    summary = _subuser_product_site_summary(slug)
+    ssh = shutil.which("ssh")
+    if not ssh:
+        raise TakyonError("ssh is unavailable; cannot remove sub-user product site")
+    ssh_key = _subuser_vps_ssh_key_path()
+    if not ssh_key.exists():
+        raise TakyonError(f"sub-user VPS ssh key not found: {ssh_key}")
+
+    remote_root = _subuser_remote_product_sites_root()
+    remote_path = _subuser_remote_product_site_path(slug)
+    remote_command = dedent(
+        f"""\
+        set -euo pipefail
+        root={shlex.quote(str(remote_root))}
+        target={shlex.quote(str(remote_path))}
+        case "$target" in
+          "$root"/*) ;;
+          *)
+            echo "refusing to delete remote path outside sub-user product-sites root: $target" >&2
+            exit 64
+            ;;
+        esac
+        if [ -e "$target" ] || [ -L "$target" ]; then
+          rm -rf -- "$target"
+          echo removed
+        else
+          echo missing
+        fi
+        """
+    )
+    try:
+        proc = subprocess.run(
+            [
+                ssh,
+                "-i",
+                str(ssh_key),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                summary["target"],
+                remote_command,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=45,
+            env=_runtime_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = "\n".join(part for part in ((exc.stdout or "").strip(), (exc.stderr or "").strip()) if part)
+        raise TakyonError(
+            f"timed out removing sub-user product site for {slug}: {_truncate_text(output, 4000)}"
+        ) from exc
+    except Exception as exc:
+        raise TakyonError(f"failed to invoke ssh for sub-user product site delete: {exc}") from exc
+
+    output = "\n".join(part for part in ((proc.stdout or "").strip(), (proc.stderr or "").strip()) if part)
+    if proc.returncode != 0:
+        raise TakyonError(
+            f"sub-user product site cleanup failed for {slug}: {_truncate_text(output or f'ssh exited {proc.returncode}', 4000)}"
+        )
+
+    status = "removed"
+    stdout_lines = [line.strip().lower() for line in (proc.stdout or "").splitlines() if line.strip()]
+    if stdout_lines and stdout_lines[-1] == "missing":
+        status = "missing"
+    return {
+        **summary,
+        "removed": status == "removed",
+        "status": status,
+    }
+
+
 def _product_public_asset_publish_roots(store: "TakyonStore", business: str) -> list[Path]:
     slug = _slugify(business)
     roots: list[Path] = []
@@ -10600,7 +10536,6 @@ def _publish_product_surface_path(
             "publish_build_root": str(build_root),
             "publish_source_path": f"{rel}/{publish_source_label}" if publish_source_label != "source" else rel,
             "publish_mode": "pointer_static",
-            "activation_target": "",
             "live_build_id": build_id,
             "live_probe_status": "unknown",
             "live_probe_detail": "",
@@ -12860,6 +12795,9 @@ class TakyonStore:
         limit = max(1, min(int(limit or 10), 50))
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
+        # Best-effort web analytics, computed before the DB connection opens so a
+        # provider call never holds a SQLite connection. Never raises.
+        web_analytics = _business_analytics_summary(slug)
 
         with self._connect() as conn:
             business = self._ensure_business(conn, slug)
@@ -13179,6 +13117,7 @@ class TakyonStore:
                 },
                 "windows": computed_windows,
                 "summary": summary,
+                "web_analytics": web_analytics,
                 "deltas_from_previous_pulse": deltas,
                 "current_state": {
                     "business_age_hours": round((now_dt - created_dt).total_seconds() / 3600, 2),
@@ -13374,6 +13313,57 @@ class TakyonStore:
             elif previous_start <= created_at < period_start:
                 previous_totals["usage_events"] += 1
 
+        pageviews_series = [0 for _ in range(bucket_count)]
+        visits_series = [0 for _ in range(bucket_count)]
+        totals["pageviews"] = 0
+        totals["visits"] = 0
+        previous_totals["pageviews"] = 0
+        previous_totals["visits"] = 0
+        # Best-effort web-analytics series (Umami), aligned to the same buckets.
+        # The provider call sits outside the DB connection above and never breaks
+        # traction: any failure leaves the web series at zero.
+        try:
+            _ucfg = _analytics_umami_config()
+            _web_id = str(_ucfg.get("website_id") or "").strip()
+            _web_api = str(_ucfg.get("api_endpoint") or "").strip()
+            if _ucfg.get("enabled") and _web_id and _web_api:
+                from . import umami_util
+
+                if umami_util.umami_configured():
+                    try:
+                        _host = urllib.parse.urlparse(_product_publish_target(slug)).netloc
+                    except Exception:
+                        _host = ""
+                    _unit = {"D": "hour", "W": "day", "M": "day", "Y": "month"}[key]
+                    _web = umami_util.website_pageviews_series(
+                        _web_id,
+                        start_ms=int(previous_start.timestamp() * 1000),
+                        end_ms=int(end_exclusive.timestamp() * 1000),
+                        unit=_unit,
+                        api_endpoint=_web_api,
+                        hostname=_host,
+                    )
+
+                    def _accumulate(items: list[dict[str, Any]], series: list[int], total_key: str) -> None:
+                        for item in items:
+                            dt = _parse_iso_datetime(str(item.get("x") or ""))
+                            if dt is None:
+                                continue
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            count = int(item.get("y") or 0)
+                            idx = bucket_index(dt)
+                            if idx is not None:
+                                series[idx] += count
+                                totals[total_key] += count
+                            elif previous_start <= dt < period_start:
+                                previous_totals[total_key] += count
+
+                    _accumulate(_web.get("pageviews") or [], pageviews_series, "pageviews")
+                    _accumulate(_web.get("sessions") or [], visits_series, "visits")
+        except Exception:
+            pass
+
         points = [
             {
                 "start": bucket_start.isoformat(),
@@ -13381,6 +13371,8 @@ class TakyonStore:
                 "revenue_cents": revenue_series[index],
                 "users": users_series[index],
                 "usage_events": usage_series[index],
+                "pageviews": pageviews_series[index],
+                "visits": visits_series[index],
             }
             for index, bucket_start in enumerate(bucket_starts)
         ]
@@ -13657,6 +13649,7 @@ class TakyonStore:
                 product_service_route["exists"] = False
         cron_preview = self._delete_business_crons(slug, confirm=False) if delete_cron else {"matched": [], "removed": []}
         db_counts = self._business_delete_db_counts(conn, slug)
+        subuser_product_site = _subuser_product_site_summary(slug)
 
         result: dict[str, Any] = {
             "action": "business.delete",
@@ -13665,6 +13658,7 @@ class TakyonStore:
             "business_record": business,
             "filesystem": filesystem,
             "published_site": published_site_summary,
+            "subuser_product_site": subuser_product_site,
             "product_service": {
                 "service_root": product_service_summary,
                 "service_file": product_service_file,
@@ -13696,6 +13690,10 @@ class TakyonStore:
             result["published_site"] = {**published_site_summary, "removed": False}
         else:
             result["published_site"] = {**published_site_summary, "removed": False, "skipped": True}
+        if delete_files:
+            result["subuser_product_site"] = _delete_subuser_product_site(slug)
+        else:
+            result["subuser_product_site"] = {**subuser_product_site, "removed": False, "skipped": True}
         product_service_result = {
             "service_root": {**product_service_summary, "removed": False},
             "service_file": {**product_service_file, "removed": False},
@@ -13745,6 +13743,7 @@ class TakyonStore:
                 "filesystem": result["filesystem"],
                 "cron": result["cron"],
                 "domains": result["domains"],
+                "subuser_product_site": result["subuser_product_site"],
                 "database": result["database"],
             },
         )
@@ -13991,6 +13990,7 @@ class TakyonStore:
         idempotency_key: str,
         reason: str = "",
         actor: str = "agent",
+        principal: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._workspace_sync_cache.clear()
         if not idempotency_key or not str(idempotency_key).strip():
@@ -14011,7 +14011,7 @@ class TakyonStore:
                     raise TakyonError("idempotency_key already used for different operations")
                 return _json_loads(prior["result_json"], {"success": True, "idempotent": True})
 
-            staged = [self._normalize_operation(conn, parsed, op) for op in operations]
+            staged = [self._normalize_operation(conn, parsed, op, principal=principal) for op in operations]
 
             results: list[dict[str, Any]] = []
             with conn:
@@ -14048,12 +14048,18 @@ class TakyonStore:
                 )
             return final
 
-    def _normalize_operation(self, conn: sqlite3.Connection, parsed_scope: dict[str, str | None], op: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_operation(self, conn: sqlite3.Connection, parsed_scope: dict[str, str | None], op: dict[str, Any], *, principal: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(op, dict):
             raise TakyonError("each operation must be an object")
         action = str(op.get("action") or "").strip()
         if not action:
             raise TakyonError("operation.action is required")
+        # Plane identity carried as ONE fact, not re-derived per route. A customer-session principal
+        # (already validated business-scoped at the route via validate_session) may write only the
+        # data-declared CUSTOMER_REACHABLE_APP_WRITES set; everything else stays operator-gated. A
+        # missing principal defaults to operator, so every existing CEO/worker/cron caller is unchanged.
+        principal_kind = str((principal or {}).get("kind") or "operator")
+        is_customer_write = principal_kind == "session" and action in CUSTOMER_REACHABLE_APP_WRITES
 
         business = op.get("business") or parsed_scope.get("business")
         business_slug = _slugify(str(business)) if business else None
@@ -14102,7 +14108,8 @@ class TakyonStore:
                 raise TakyonError(f"legacy fixed-stage request kind is not allowed: {kind}")
 
         if action != "business.upsert" and business_slug:
-            self._enforce_operator_business_access(conn, business_slug)
+            if not is_customer_write:
+                self._enforce_operator_business_access(conn, business_slug)
             self._ensure_business(conn, business_slug)
         business_mode = "live"
         if business_slug and action != "business.upsert":
@@ -16369,6 +16376,7 @@ def _commit_tool_data(
     *,
     scope: str | None = None,
     store: "TakyonStore" | None = None,
+    principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     business = _business_slug(
         {
@@ -16387,6 +16395,7 @@ def _commit_tool_data(
         idempotency_key=args.get("idempotency_key") or "",
         reason=args.get("reason") or "",
         actor=args.get("actor") or "agent",
+        principal=principal,
     )
 
 
@@ -16396,9 +16405,10 @@ def _commit_tool(
     *,
     scope: str | None = None,
     store: "TakyonStore" | None = None,
+    principal: dict[str, Any] | None = None,
 ) -> str:
     try:
-        result = _commit_tool_data(args, operation, scope=scope, store=store)
+        result = _commit_tool_data(args, operation, scope=scope, store=store, principal=principal)
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -16611,6 +16621,15 @@ def handle_business_read_file(args: dict, **_: Any) -> str:
 def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
     try:
         return tool_result(_store().calculate_pulse(_resolved_business_slug(args, required=True), limit=args.get("limit") or 10))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
+    try:
+        slug = _resolved_business_slug(args, required=True)
+        days = args.get("days") or args.get("window_days") or 7
+        return tool_result(_business_analytics_summary(slug, days=int(days)))
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -17749,7 +17768,7 @@ def handle_business_upsert_app_profile(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata"),
     }
     try:
-        result = _commit_tool_data(args, operation)
+        result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = (
             result.get("results")[0]
             if isinstance(result.get("results"), list) and result.get("results")
@@ -18064,6 +18083,87 @@ def handle_business_read_app_session(args: dict, **_: Any) -> str:
                     "active": True,
                     "app_user_id": str((user_payload or {}).get("id") or ""),
                 },
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_supabase_login(args: dict, **_: Any) -> str:
+    """Sub-app login via Supabase Auth (AUTH0.md §7) — the Supabase replacement for
+    ``business_verify_app_magic_link``. Verify the Supabase access token server-side, upsert the
+    sub-user by ``supabase_user_id`` (adopting a legacy email row on first Google login), mint the
+    SAME 30-day ``app_session`` magic-link mints, and bootstrap the free entitlement on first login.
+    ``validate_session`` and everything downstream are unchanged — only the credential differs.
+    Requires the Postgres runtime + ``SUPABASE_JWT_SECRET`` configured."""
+    store = _store()
+    try:
+        business = _slugify(str(args.get("business") or ""))
+        access_token = str(args.get("access_token") or args.get("accessToken") or "").strip()
+        if not access_token:
+            raise TakyonError("access_token is required")
+        try:
+            identity = app_supabase_auth.verify_supabase_jwt(access_token)
+        except app_supabase_auth.SupabaseAuthError as exc:
+            raise TakyonError(f"supabase login failed: {exc}") from exc
+        with store._connect() as conn:
+            business_row = store._ensure_business(conn, business)
+            _enforce_business_work_focus(
+                {"action": "app.customer.upsert", "business": business},
+                str(business_row.get("work_focus") or "all"),
+            )
+            if not isinstance(conn, _PGConn):
+                raise TakyonError("supabase login requires the Postgres runtime")
+            leaves = store._app_leaves()
+            with store._leaf_conn(conn) as leaf:
+                user_record = leaves["identity"].upsert_app_user_by_supabase_id(
+                    leaf,
+                    business,
+                    identity.supabase_user_id,
+                    identity.email,
+                    name=args.get("name"),
+                )
+                if _app_user_is_service_identity(
+                    {"id": user_record.id, "email": user_record.email, "status": user_record.status}
+                ):
+                    raise TakyonError("login is not permitted for this account")
+                session, session_token = leaves["identity"].start_session(
+                    leaf, business, user_record.id
+                )
+                existing_free = any(
+                    ent.source == "manual" and ent.tier == "free"
+                    for ent in leaves["entitlements"].list_entitlements(
+                        leaf, business, app_user_id=user_record.id
+                    )
+                )
+                if not existing_free:
+                    leaves["entitlements"].grant_entitlement(
+                        leaf,
+                        business,
+                        app_user_id=user_record.id,
+                        tier="free",
+                        status="active",
+                        source="manual",
+                        metadata={"source": "supabase"},
+                    )
+                refreshed = leaves["identity"].get_app_user(
+                    leaf, business, app_user_id=user_record.id
+                )
+                leaves["profiles"].ensure_profile(
+                    leaf, business, app_user_id=user_record.id, display_name=user_record.name
+                )
+            if refreshed is None:
+                raise TakyonError("supabase login user is missing")
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                "app_user_id": refreshed.id,
+                "email": refreshed.email,
+                "tier": refreshed.tier,
+                "session_id": session.id,
+                "session_token": session_token,
+                "expires_at": str(session.expires_at),
             }
         )
     except Exception as exc:
@@ -18647,7 +18747,7 @@ def handle_business_upsert_app_directory_entry(args: dict, **_: Any) -> str:
         "attributes": args.get("attributes"),
     }
     try:
-        result = _commit_tool_data(args, operation)
+        result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
         return tool_result({"success": True, **payload})
     except Exception as exc:
@@ -18663,7 +18763,7 @@ def handle_business_disable_app_directory_entry(args: dict, **_: Any) -> str:
         "session_token": args.get("session_token"),
     }
     try:
-        result = _commit_tool_data(args, operation)
+        result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
         return tool_result({"success": True, **payload})
     except Exception as exc:
@@ -18813,7 +18913,7 @@ def handle_business_act_on_app_connection(args: dict, **_: Any) -> str:
         "connection_action": args.get("connection_action") if args.get("connection_action") is not None else args.get("state"),
     }
     try:
-        result = _commit_tool_data(args, operation)
+        result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
         return tool_result({"success": True, **payload})
     except Exception as exc:
@@ -19038,7 +19138,7 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata"),
     }
     try:
-        result = _commit_tool_data(args, operation)
+        result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = (
             result.get("results")[0]
             if isinstance(result.get("results"), list) and result.get("results")
@@ -19279,7 +19379,7 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
         "record_id": args.get("record_id") if args.get("record_id") is not None else args.get("id"),
     }
     try:
-        result = _commit_tool_data(args, operation)
+        result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = (
             result.get("results")[0]
             if isinstance(result.get("results"), list) and result.get("results")
@@ -19606,7 +19706,9 @@ def handle_business_record_app_usage(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata") or {},
         "error": args.get("error"),
     }
-    return _commit_tool(args, operation)
+    # The /usage route validates the customer session before recording (the op carries the
+    # validated app_user_id), so this is a customer-plane write, not an operator action.
+    return _commit_tool(args, operation, principal=({"kind": "session"} if args.get("app_user_id") else None))
 
 
 def handle_business_enqueue_job(args: dict, **_: Any) -> str:
@@ -20188,6 +20290,49 @@ def _business_ad_spend_backend():
     except Exception:
         from plugins.takyon import business_ad_spend as spend_backend
     return spend_backend
+
+
+def _assert_ad_set_budget_authorized(
+    *,
+    channel: str,
+    business: str,
+    slug: str,
+    target_id: str,
+    daily_budget_cents: int,
+    safety_cap_cents: int = 0,
+) -> None:
+    """Gateway-reachable budget gate (closes the launch-only cap bypass).
+
+    The runtime ad-control gateway (`creative_gateway.py` meta-control / reddit-control
+    `set_budget`) is reachable independently of the credit-checked business tool, so the cap must
+    also be enforced HERE — at the layer that actually mutates live spend. Requires the funded
+    ad-spend policy for (business, channel, slug) to exist, the target object to be the one that
+    policy launched (closes the cross-business IDOR), and the daily budget to fit the per-channel
+    safety cap + the reserved-credit cap. Reuses the same `enforce_daily_budget` the tool uses, so
+    there is one cap implementation. Raises `TakyonError` on any violation (fail-closed).
+    """
+    backend = _business_ad_spend_backend()
+    business = str(business or "").strip()
+    slug = str(slug or "").strip()
+    if not business or not slug:
+        raise TakyonError("business and slug are required to change a live ad budget")
+    try:
+        policy = _load_ad_spend_policy(business, channel=channel, slug=slug)
+    except backend.BusinessAdSpendPolicyNotFound:
+        raise TakyonError(f"no funded {channel} campaign for business={business!r} slug={slug!r}")
+    known = {str(policy.provider_group_id or ""), str(policy.provider_campaign_id or "")}
+    known.discard("")
+    if known and str(target_id or "") and str(target_id) not in known:
+        raise TakyonError("target object does not belong to this business's funded campaign")
+    try:
+        backend.enforce_daily_budget(
+            policy,
+            daily_budget_cents=int(daily_budget_cents),
+            now=datetime.now(timezone.utc),
+            safety_cap_cents=int(safety_cap_cents),
+        )
+    except backend.AdSpendCapExceeded as exc:
+        raise TakyonError(str(exc))
 
 
 def _creative_credit_unit_cost(action: str) -> int:
@@ -23320,28 +23465,15 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
             budget_usd = round(budget_usd, 2)
             budget_cents = int(round(budget_usd * 100))
             if business_mode != "test":
-                remaining_cents = max(0, int(policy.total_budget_cents) - int(policy.last_synced_spend_cents))
-                days_remaining = max(
-                    1,
-                    int(
-                        (
-                            max(
-                                1.0,
-                                ((policy.end_at if isinstance(policy.end_at, datetime) else datetime.now(timezone.utc)) - datetime.now(timezone.utc)).total_seconds(),
-                            )
-                            + 86399
-                        )
-                        // 86400
-                    ),
-                )
-                if budget_cents > remaining_cents:
-                    raise TakyonError(
-                        f"daily_budget_usd {budget_usd} exceeds the remaining reserved campaign cap of {remaining_cents / 100:.2f} USD"
+                _spend = _business_ad_spend_backend()
+                try:
+                    _spend.enforce_daily_budget(
+                        policy,
+                        daily_budget_cents=budget_cents,
+                        now=datetime.now(timezone.utc),
                     )
-                if budget_cents * days_remaining > remaining_cents:
-                    raise TakyonError(
-                        f"daily_budget_usd {budget_usd} through the remaining scheduled window exceeds the reserved campaign cap of {remaining_cents / 100:.2f} USD"
-                    )
+                except _spend.AdSpendCapExceeded as exc:
+                    raise TakyonError(str(exc))
 
         base_receipt = {
             "idempotency_key": idempotency_key,
@@ -23400,6 +23532,7 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
         _meta_config(require_token=True)
         gateway_payload = {
             "business": business,
+            "slug": slug,
             "operation": operation,
             "campaign_id": ids["campaign_id"],
             "adset_id": ids["adset_id"],
@@ -23768,10 +23901,29 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
                     settled_credits=settled_credits,
                     metadata_patch={"settled_at": _now()},
                 )
+                # D9 belt: settlement marks the policy completed, but the live adset keeps
+                # spending until its own end_time. Issue the existing pause so realized spend
+                # actually stops at the reserved cap. Best-effort: a pause failure must not break
+                # the sync (it is recorded on the receipt for the operator).
+                try:
+                    auto_pause = _call_creative_runtime_gateway(
+                        "meta-control",
+                        {
+                            "business": business,
+                            "slug": slug,
+                            "operation": "pause",
+                            "campaign_id": policy.provider_campaign_id or "",
+                            "adset_id": policy.provider_group_id or "",
+                            "ad_id": policy.provider_ad_id or "",
+                        },
+                    )
+                except Exception as exc:
+                    auto_pause = {"success": False, "error": str(exc)}
                 settlement = {
                     "settled_credits": settled_credits,
                     "balance_credits": balances.get("balance_credits"),
                     "reserved_credits": balances.get("reserved_credits"),
+                    "auto_pause": auto_pause,
                 }
             else:
                 policy = _update_ad_spend_policy(
@@ -25214,28 +25366,15 @@ def handle_business_reddit_ad_control(args: dict, **_: Any) -> str:
                 )
             if business_mode != "test":
                 budget_cents = int(round(budget_usd * 100))
-                remaining_cents = max(0, int(policy.total_budget_cents) - int(policy.last_synced_spend_cents))
-                days_remaining = max(
-                    1,
-                    int(
-                        (
-                            max(
-                                1.0,
-                                ((policy.end_at if isinstance(policy.end_at, datetime) else datetime.now(timezone.utc)) - datetime.now(timezone.utc)).total_seconds(),
-                            )
-                            + 86399
-                        )
-                        // 86400
-                    ),
-                )
-                if budget_cents > remaining_cents:
-                    raise TakyonError(
-                        f"daily_budget_usd {budget_usd} exceeds the remaining reserved campaign cap of {remaining_cents / 100:.2f} USD"
+                _spend = _business_ad_spend_backend()
+                try:
+                    _spend.enforce_daily_budget(
+                        policy,
+                        daily_budget_cents=budget_cents,
+                        now=datetime.now(timezone.utc),
                     )
-                if budget_cents * days_remaining > remaining_cents:
-                    raise TakyonError(
-                        f"daily_budget_usd {budget_usd} through the remaining scheduled window exceeds the reserved campaign cap of {remaining_cents / 100:.2f} USD"
-                    )
+                except _spend.AdSpendCapExceeded as exc:
+                    raise TakyonError(str(exc))
 
         base_receipt = {
             "idempotency_key": idempotency_key,
@@ -25297,6 +25436,7 @@ def handle_business_reddit_ad_control(args: dict, **_: Any) -> str:
                 "reddit-control",
                 {
                     "business": business,
+                    "slug": slug,
                     "operation": operation,
                     "campaign_id": ids["campaign_id"],
                     "ad_group_id": ids["ad_group_id"],
@@ -25632,10 +25772,26 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
                     settled_credits=settled_credits,
                     metadata_patch={"settled_at": _now()},
                 )
+                # D9 belt: stop the live ad group at the reserved cap (see the meta twin).
+                try:
+                    auto_pause = _call_creative_runtime_gateway(
+                        "reddit-control",
+                        {
+                            "business": business,
+                            "slug": slug,
+                            "operation": "pause",
+                            "campaign_id": policy.provider_campaign_id or "",
+                            "ad_group_id": policy.provider_group_id or "",
+                            "ad_id": policy.provider_ad_id or "",
+                        },
+                    )
+                except Exception as exc:
+                    auto_pause = {"success": False, "error": str(exc)}
                 settlement = {
                     "settled_credits": settled_credits,
                     "balance_credits": balances.get("balance_credits"),
                     "reserved_credits": balances.get("reserved_credits"),
+                    "auto_pause": auto_pause,
                 }
             else:
                 policy = _update_ad_spend_policy(
@@ -25926,19 +26082,6 @@ def _detect_legacy_product_site(root: Path) -> str:
         if candidate.exists() and candidate.is_dir() and _product_source_files(candidate, limit=1):
             return rel
     return ""
-
-
-def _legacy_surface_routes(site_root: Path) -> list[dict[str, str]]:
-    routes: list[dict[str, str]] = []
-    for child in sorted(site_root.glob("*.html"), key=lambda path: path.name.lower())[:20]:
-        if child.name == "index.html":
-            route = "/"
-            label = "Landing"
-        else:
-            route = f"/{child.stem}"
-            label = child.stem.replace("-", " ").replace("_", " ").title()
-        routes.append({"path": route, "name": label, "source": str(child.relative_to(site_root))})
-    return routes or [{"path": "/", "name": "Product surface", "source": "."}]
 
 
 def _legacy_distribution_mappings(root: Path) -> list[dict[str, str]]:
@@ -27292,6 +27435,12 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema("business_calculate_pulse", "Calculate a business pulse without mutating state.", {"business": _BUSINESS_PROP, "limit": {"type": "integer", "description": "Top grouped rows to return; default 10"}}, ["business"]),
     },
     {
+        "name": "business_read_app_analytics",
+        "description": "Read-only web analytics for a business's published product site from the shared Umami property, filtered to the business's own subdomain. Returns truthful not-configured/unavailable states instead of faked numbers.",
+        "handler": handle_business_read_app_analytics,
+        "schema": _schema("business_read_app_analytics", "Read published product-site web analytics (visitors/pageviews/visits over a window) without mutating state.", {"business": _BUSINESS_PROP, "days": {"type": "integer", "description": "Trailing window in days; default 7"}}, ["business"]),
+    },
+    {
         "name": "business_check_runtime_capabilities",
         "description": "Inspect local runtimes, package managers, and command capabilities; optionally run guarded local provisioning for supported ecosystems.",
         "handler": handle_business_check_runtime_capabilities,
@@ -27548,6 +27697,12 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Consume a product customer magic link and create a 30-day app session token.",
         "handler": handle_business_verify_app_magic_link,
         "schema": _schema("business_verify_app_magic_link", "Verify product app magic link.", {"business": _BUSINESS_PROP, "token": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "token"]),
+    },
+    {
+        "name": "business_supabase_login",
+        "description": "Verify a Supabase Auth access token (Google/email) and create a 30-day app session token.",
+        "handler": handle_business_supabase_login,
+        "schema": _schema("business_supabase_login", "Log a product customer in via Supabase Auth.", {"business": _BUSINESS_PROP, "access_token": {"type": "string"}, "name": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "access_token"]),
     },
     {
         "name": "business_read_app_account",

@@ -27,7 +27,7 @@ const I = {
   close: S("M4 4l8 8M12 4l-8 8"),
 };
 
-type Metric = "revenue" | "users" | "usage";
+type Metric = "revenue" | "users" | "usage" | "pageviews" | "visits";
 type DistTab = "x" | "video" | "ads" | "email";
 type ChannelBudgetKey = "x" | "meta" | "reddit";
 
@@ -42,6 +42,8 @@ const METRICS: Array<{ key: Metric; label: string; prefix: string }> = [
   { key: "revenue", label: "Revenue", prefix: "$" },
   { key: "users", label: "Users", prefix: "" },
   { key: "usage", label: "Usage", prefix: "" },
+  { key: "pageviews", label: "Pageviews", prefix: "" },
+  { key: "visits", label: "Visits", prefix: "" },
 ];
 
 const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
@@ -91,7 +93,17 @@ function pctDelta(current: number, previous: number) {
 function metricValue(point: TakyonBusinessTractionPoint, metric: Metric) {
   if (metric === "revenue") return Number(point.revenue_cents || 0);
   if (metric === "users") return Number(point.users || 0);
-  return Number(point.usage_events || 0);
+  if (metric === "usage") return Number(point.usage_events || 0);
+  if (metric === "pageviews") return Number(point.pageviews || 0);
+  return Number(point.visits || 0);
+}
+
+function totalForMetric(totals: TakyonBusinessTractionResponse["totals"], metric: Metric) {
+  if (metric === "revenue") return Number(totals.revenue_cents || 0);
+  if (metric === "users") return Number(totals.users || 0);
+  if (metric === "usage") return Number(totals.usage_events || 0);
+  if (metric === "pageviews") return Number(totals.pageviews || 0);
+  return Number(totals.visits || 0);
 }
 
 function seriesForMetric(points: TakyonBusinessTractionPoint[], metric: Metric) {
@@ -292,10 +304,10 @@ function Traction({
   const [metric, setMetric] = useState<Metric>("revenue");
   const points = traction?.points || [];
   const values = seriesForMetric(points, metric);
-  const totals = traction?.totals || { revenue_cents: 0, users: 0, usage_events: 0 };
-  const previous = traction?.previous_totals || { revenue_cents: 0, users: 0, usage_events: 0 };
-  const currentValue = metric === "revenue" ? totals.revenue_cents : metric === "users" ? totals.users : totals.usage_events;
-  const previousValue = metric === "revenue" ? previous.revenue_cents : metric === "users" ? previous.users : previous.usage_events;
+  const totals = traction?.totals || { revenue_cents: 0, users: 0, usage_events: 0, pageviews: 0, visits: 0 };
+  const previous = traction?.previous_totals || { revenue_cents: 0, users: 0, usage_events: 0, pageviews: 0, visits: 0 };
+  const currentValue = totalForMetric(totals, metric);
+  const previousValue = totalForMetric(previous, metric);
   const delta = pctDelta(currentValue, previousValue);
   const up = currentValue >= previousValue;
   const prefix = METRICS.find((item) => item.key === metric)?.prefix || "";

@@ -28,11 +28,9 @@ This is a pure leaf, shaped like ``jobs``/``wakes`` and seamed like the AI gatew
     (no absolute paths, no ``.``/``..`` segments, bounded depth) so an object key can never escape the
     business prefix.
 
-  * :func:`with_business_workspace` is the worker-facing integration seam: sync-down on enter, sync-up
-    on **clean** exit (and, by default, mirror deletions); on an exception it deliberately does NOT
-    sync up, so a crashed run never overwrites the last good remote state — the requeued job re-syncs
-    the last good tree. Mounting this around the worker's per-job run is the operator-gated cutover
-    step (Phase 6 left the worker loop unmounted the same way); this leaf only provides the proven seam.
+  * the worker hydrates a business at a pinned base revision and advances canonical only through an
+    explicit commit (see ``core`` ``_commit_business_workspace_revision``); there is no whole-tree
+    mirror-on-exit seam.
 
 No DB migration and no new table: the object store is the source of truth for file bytes + their
 listing; Postgres stays the source of truth for business/jobs/ledger/schedule state. (A Postgres
@@ -812,114 +810,3 @@ def sync_down(
                 (dest / rel).unlink(missing_ok=True)
                 deleted.append(rel)
     return SyncReport((), tuple(downloaded), tuple(deleted), tuple(skipped))
-
-
-@contextmanager
-def with_business_workspace(
-    backend: StorageBackend,
-    slug: str,
-    root: str | os.PathLike[str],
-    *,
-    delete_remote: bool = True,
-    delete_local: bool = True,
-    sync_on_exception: bool = False,
-) -> Iterator[Path]:
-    """Worker integration seam: sync-down on enter → yield the scratch ``root`` → sync-up on **clean**
-    exit. On an exception the body raises through WITHOUT syncing up, so a crashed run never clobbers
-    the last good remote state (the requeued job re-syncs the last good tree) unless
-    ``sync_on_exception`` is enabled for a caller that wants partial progress preserved. Mounting this
-    around the worker's per-job run is the operator-gated cutover step."""
-    root_path = Path(root).expanduser()
-    root_path.mkdir(parents=True, exist_ok=True)
-    sync_down(backend, slug, root_path, delete_local=delete_local)
-    try:
-        yield root_path
-    except BaseException as exc:
-        if sync_on_exception:
-            try:
-                sync_up(backend, slug, root_path, delete_remote=delete_remote)
-            except Exception as sync_exc:  # pragma: no cover - defensive logging path
-                logger.warning(
-                    "failed to sync partial business workspace for %s after exception: %s",
-                    slug,
-                    sync_exc,
-                    exc_info=True,
-                )
-                if hasattr(exc, "add_note"):
-                    exc.add_note(f"partial workspace sync failed for {slug}: {sync_exc}")
-        raise
-    else:
-        sync_up(backend, slug, root_path, delete_remote=delete_remote)
-
-
-@contextmanager
-def isolated_business_workspace(
-    backend: StorageBackend,
-    slug: str,
-    *,
-    owner_label: str = "",
-    scratch_parent: str | os.PathLike[str] | None = None,
-    delete_remote: bool = True,
-    delete_local: bool = True,
-    sync_on_exception: bool = False,
-) -> Iterator[Path]:
-    """Materialize one business into a private per-run scratch Takyon home.
-
-    The yielded path is a fake ``TAKYON_HOME`` root whose business workspace lives at
-    ``<home>/businesses/<slug>/...``. Callers can point ``TakyonStore`` at this home (or set the
-    session workspace root override) so business tools never write into the shared host tree during a
-    live run. The directory is removed on exit; the durable source of truth is the storage backend.
-    """
-    parent = _workspace_scratch_parent(scratch_parent)
-    safe_slug = _safe_slug(slug)
-    prefix = f"takyon-{_safe_owner_label(owner_label)}-{safe_slug}-"
-    home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()
-    try:
-        try:
-            os.chmod(home, 0o700)
-        except OSError:
-            pass
-        workspace = home / "businesses" / safe_slug
-        with with_business_workspace(
-            backend,
-            safe_slug,
-            workspace,
-            delete_remote=delete_remote,
-            delete_local=delete_local,
-            sync_on_exception=sync_on_exception,
-        ):
-            yield home
-    finally:
-        shutil.rmtree(home, ignore_errors=True)
-
-
-@contextmanager
-def mounted_business_workspace(
-    backend: StorageBackend,
-    slug: str,
-    *,
-    owner_label: str = "",
-    scratch_parent: str | os.PathLike[str] | None = None,
-    delete_local: bool = True,
-) -> Iterator[Path]:
-    """Materialize one business into a private scratch Takyon home without auto-sync on exit.
-
-    This is the minimal worker mount seam for runs that want disposable host scratch:
-    sync-down on enter, let the caller decide if/when to sync-up, always delete the scratch
-    home on exit.
-    """
-    parent = _workspace_scratch_parent(scratch_parent)
-    safe_slug = _safe_slug(slug)
-    prefix = f"takyon-{_safe_owner_label(owner_label)}-{safe_slug}-"
-    home = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent))).resolve()
-    try:
-        try:
-            os.chmod(home, 0o700)
-        except OSError:
-            pass
-        workspace = home / "businesses" / safe_slug
-        workspace.parent.mkdir(parents=True, exist_ok=True)
-        sync_down(backend, safe_slug, workspace, delete_local=delete_local)
-        yield home
-    finally:
-        shutil.rmtree(home, ignore_errors=True)

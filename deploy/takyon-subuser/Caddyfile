@@ -16,7 +16,6 @@ https:// {
 	@product {
 		host *.fourmanifold.com
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
 		reverse_proxy 127.0.0.1:9119 {
@@ -32,7 +31,6 @@ https:// {
 	@product {
 		host *.fourmanifold.com
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-		not host latexflow.fourmanifold.com e2e-postfix-05262217.fourmanifold.com longer.fourmanifold.com grantkit.fourmanifold.com inboxpilot.fourmanifold.com latexflow-0527124758.fourmanifold.com blog.fourmanifold.com
 	}
 	handle @product {
 		reverse_proxy 127.0.0.1:9119 {

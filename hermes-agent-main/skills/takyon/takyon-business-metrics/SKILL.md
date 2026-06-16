@@ -11,7 +11,7 @@ metadata:
     tags: [takyon, metrics, wake, business, conversations]
     related_skills: [takyon-market-research, takyon-distribution, takyon-build-product, takyon-conversation-followup]
     requires_toolsets: [takyon]
-    requires_tools: [business_calculate_pulse, business_read_business, business_write_file]
+    requires_tools: [business_calculate_pulse, business_read_business, business_write_file, business_read_app_analytics]
     routing:
       owns: metrics summaries, wake history, and unresolved inbound visibility
       when_to_use:
@@ -50,7 +50,8 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 - Publication paths: `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`
 - Best call points: every `/wake`, first `/create`, decisions that depend on usage/revenue/replies
 - Publication location: `metrics/summary.md`, `metrics/summary.json`, `metrics/wake-history.md`
-- Tool names used by this skill: `business_calculate_pulse`, `business_read_business`, `business_read_file`, `business_write_file`, `business_patch_file`
+- Tool names used by this skill: `business_calculate_pulse`, `business_read_business`, `business_read_file`, `business_write_file`, `business_patch_file`, `business_read_app_analytics`
+- Web analytics: `business_calculate_pulse` already carries a `web_analytics` block (visitors/pageviews/visits for this business's published site, filtered to its own subdomain). Call `business_read_app_analytics` for a focused or longer window. Both report a truthful not-configured/unavailable state instead of faking numbers — never invent traffic.
 
 ## Prerequisites
 
@@ -75,7 +76,7 @@ Use this skill to interpret deterministic business metrics, summarize what chang
 
 ## Procedure
 
-1. Call `business_calculate_pulse` and inspect the current snapshot: users, revenue, usage, jobs, controls, unresolved inbound, and recent events.
+1. Call `business_calculate_pulse` and inspect the current snapshot: users, revenue, usage, jobs, controls, unresolved inbound, recent events, and the `web_analytics` block (published-site visitors/pageviews). For a longer or focused traffic window, call `business_read_app_analytics`; if either reports not-configured/unavailable, say so rather than implying traffic.
 2. If `metrics/summary.md`, `metrics/summary.json`, or `metrics/wake-history.md` already exist, load them with `business_read_file` and compare the current pulse against the prior state. If they do not exist, create a first baseline instead of implying history that is not there.
 3. Read `research/strategy.md` before finalizing the wake output. If the pulse or follow-up evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, patch `research/strategy.md` first.
 4. If unresolved inbound or conversation volume is too noisy to summarize confidently, load `takyon-conversation-followup` and use its published `metrics/conversations/followup.md` before finalizing the metrics narrative.
