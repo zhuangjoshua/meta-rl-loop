@@ -36,5 +36,17 @@ The sub-user host serves only:
 - the narrow app-runtime rails behind those hosts
 - the product-host TLS ask gate
 
+Supabase Auth contract for this plane:
+
+- runtime sign-in expects `SUPABASE_URL`
+- runtime sign-in expects one of `SUPABASE_PUBLISHABLE_KEY` or `SUPABASE_ANON_KEY`
+- runtime sign-in can use optional `SUPABASE_JWT_SECRET` for legacy HS256 fallback, but current
+  Supabase-issued asymmetric tokens verify via JWKS
+- tracked deploy now validates that contract before restart, so future VPS deploys fail closed if auth config drifts
+
+Shared Postgres schema migrations are owned by the operator deploy rail. `deploy/takyon-subuser/deploy-runtime.sh`
+therefore defaults `TAKYON_RUN_DB_MIGRATIONS=0` to avoid replaying heavyweight shared-table DDL from the
+still-live app plane; override it only for an intentional emergency/operator-less migration run.
+
 It should not serve `app.fourmanifold.com`, dashboard chat, `/api/ws`, or
 operator/config/env surfaces.

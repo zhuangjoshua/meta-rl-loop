@@ -68,15 +68,17 @@ def _provision_session_user(
     business_slug: str,
     *,
     email: str = "cust@example.com",
-    tier: str = "free",
+    tier: str = "paid",
     included_ai_budget_microusd: int = 50_000,
 ) -> tuple[app_identity.AppUser, str]:
     plan_key = f"{tier}-plan"
+    price_cents = max(1, (int(included_ai_budget_microusd) + 9_999) // 10_000)
     app_entitlements.upsert_plan_policy(
         conn,
         business_slug,
         plan_key,
         tier=tier,
+        price_cents=price_cents,
         included_ai_budget_microusd=included_ai_budget_microusd,
     )
     link, raw_magic = app_identity.create_magic_link(conn, business_slug, email)
@@ -87,9 +89,9 @@ def _provision_session_user(
         app_user_id=session_user.app_user_id,
         tier=tier,
         status="active",
-        source="internal",
+        source="stripe",
         plan_key=plan_key,
-        metadata={"non_billing": True},
+        stripe_subscription_id=f"sub_{plan_key}",
     )
     user = app_identity.get_app_user(conn, business_slug, app_user_id=session_user.app_user_id)
     assert user is not None
@@ -237,6 +239,22 @@ def test_gateway_blocks_when_provider_unconfigured(gateway_client, pg_conn):
     assert get_usage_summary(pg_conn, slug)["committed_microusd"] == 0
 
 
+def test_gateway_requires_paid_entitlement(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    link, raw_magic = app_identity.create_magic_link(pg_conn, slug, "no-plan@example.com")
+    _session_user, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
+    assert resp.status_code == 402
+    assert resp.json()["detail"] == {"error": "subscription_required"}
+    assert list_usage_events(pg_conn, slug) == []
+
+
 def test_provider_caller_default_blocks_when_unconfigured():
     # The REAL default seam (no override): in the hermetic test env no provider key is configured,
     # so it resolves to None — which is what drives the 503 above. Proves the default itself blocks
@@ -267,6 +285,8 @@ def test_gateway_budget_exceeded_is_402(gateway_client, pg_conn):
 
 def test_gateway_user_monthly_budget_exceeded_is_402(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
+    # A tiny positive paid allowance exercises the per-user cap directly without inventing a
+    # freemium product shape.
     user, session_token = _provision_session_user(
         pg_conn,
         slug,

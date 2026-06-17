@@ -2416,6 +2416,43 @@ def test_app_session_get_dispatches_session_handler_without_account_lookup(monke
     assert calls == [{"business": "mathflow", "session_token": "session_123"}]
 
 
+def test_app_auth_session_post_sets_app_cookie(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    def fake_login_handler(args):
+        return json.dumps(
+            {
+                "success": True,
+                "business": args["business"],
+                "app_user_id": "u_123",
+                "email": "member@example.com",
+                "session_id": "sess_123",
+                "session_token": "session_cookie_123",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            }
+        )
+
+    monkeypatch.setattr(web_server, "handle_business_supabase_login", fake_login_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/auth/session",
+            json={"access_token": "supabase_access_token"},
+            headers={"Host": "mathflow.fourmanifold.com"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert "takyon_app_session=session_cookie_123" in response.headers.get("set-cookie", "")
+
+
 def test_app_session_get_returns_unauthenticated_when_cookie_is_stale(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -2442,6 +2479,40 @@ def test_app_session_get_returns_unauthenticated_when_cookie_is_stale(monkeypatc
 
     assert response.status_code == 200
     assert response.json() == {"success": True, "authenticated": False}
+    assert "takyon_app_session=" in response.headers.get("set-cookie", "")
+
+
+def test_app_session_delete_revokes_and_clears_cookie(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    calls: list[dict[str, str]] = []
+
+    def fake_delete_handler(args):
+        calls.append(args)
+        return json.dumps({"success": True, "business": args["business"], "revoked": True})
+
+    monkeypatch.setattr(web_server, "handle_business_delete_app_session", fake_delete_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.delete(
+            "/api/takyon/apps/mathflow/session",
+            headers={
+                "Host": "mathflow.fourmanifold.com",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert response.json()["revoked"] is True
+    assert calls == [{"business": "mathflow", "session_token": "session_123"}]
+    assert "takyon_app_session=" in response.headers.get("set-cookie", "")
 
 
 def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):

@@ -851,7 +851,7 @@ def _resolve_pg_action_usage_limit(
                 if str(getattr(candidate, "tier", "") or "") == resolved_user_tier:
                     plan = candidate
                     break
-        if plan is not None and str(getattr(plan, "tier", "free") or "free") != "free":
+        if plan is not None and str(getattr(plan, "tier", "") or "").strip().lower() not in {"", "free", "none", "unentitled"}:
             return resolved_user_tier, max(0, int(getattr(plan, "included_ai_budget_microusd", 0) or 0))
     return resolved_user_tier, 0
 

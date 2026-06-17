@@ -67,7 +67,7 @@ create table if not exists app_plan_policies (
     id                          uuid primary key default gen_random_uuid(),
     business_slug               text not null references businesses (slug) on delete cascade,
     plan_key                    text not null check (length(plan_key) > 0),
-    tier                        text not null default 'free' check (length(tier) > 0),
+    tier                        text not null check (length(tier) > 0),
     price_cents                 integer not null default 0 check (price_cents >= 0),
     currency                    text not null default 'usd' check (length(currency) > 0),
     billing_interval            text not null default 'month'
@@ -87,14 +87,14 @@ create table if not exists app_plan_policies (
 
 -- Per-sub-user entitlement grants. Append-a-row: each grant is its own row, and the sub-user's
 -- effective tier is resolved across their rows (status active/trialing, highest rank). status is
--- left free text (Stripe statuses pass through; only active/trialing confer a tier). A non-free
--- 'manual' grant with no Stripe evidence is rejected by the leaf, not the DB — that money-truth
--- guard is enforced in app_entitlements.py.
+-- left free text (Stripe statuses pass through; only active/trialing confer a tier). Any
+-- access-bearing grant without Stripe evidence is rejected by the leaf, not the DB — that
+-- money-truth guard is enforced in app_entitlements.py.
 create table if not exists app_entitlements (
     id                         uuid primary key default gen_random_uuid(),
     business_slug              text not null references businesses (slug) on delete cascade,
     app_user_id                uuid not null references app_users (id) on delete cascade,
-    tier                       text not null default 'free' check (length(tier) > 0),
+    tier                       text not null check (length(tier) > 0),
     status                     text not null default 'active' check (length(status) > 0),
     source                     text not null default 'manual' check (length(source) > 0),
     stripe_customer_id         text,

@@ -15,9 +15,11 @@ SAFEBOX_LOG="${TAKYON_LOCAL_SAFEBOX_LOG:-$LOCAL_DEV_ROOT/safebox.log}"
 LOCAL_STORAGE_BACKEND="${TAKYON_LOCAL_STORAGE_BACKEND:-local}"
 LOCAL_DEV_TOPUP_CENTS="${TAKYON_LOCAL_DEV_TOPUP_CENTS:-50000}"
 ALLOW_REMOTE_DB="${TAKYON_LOCAL_DEV_ALLOW_REMOTE_DB:-0}"
+LOCAL_ENFORCE_SUPABASE_AUTH="${TAKYON_LOCAL_ENFORCE_SUPABASE_AUTH:-1}"
 SKIP_CREATE_FOLLOWUP="${TAKYON_LOCAL_DEV_SKIP_CREATE_FOLLOWUP:-0}"
 CREATE_FOLLOWUP_MAX_TURNS="${TAKYON_LOCAL_DEV_CREATE_FOLLOWUP_MAX_TURNS:-12}"
 CREATE_FOLLOWUP_PROMPT="${TAKYON_LOCAL_DEV_CREATE_FOLLOWUP_PROMPT:-Immediately load and execute takyon-product-workflow in this same run. Do not stop after takyon-build-product. If the current source is still a starter shell, generic access/account UI, or / redirects instead of showing a real product-specific landing page, repair that bootstrap defect first and then continue into the real in-app product workflow. Do not stop at workflow_pending, starter access shell, or placeholder product state; keep going until there is a real landing page and a real in-app product workflow, or return one exact blocker.}"
+SUPABASE_AUTH_HELPER="$ROOT/deploy/shared/supabase-auth-env.sh"
 
 find_python() {
   local candidate
@@ -65,6 +67,17 @@ require_python() {
   echo "  $ROOT/hermes-agent-main/.venv/bin/python" >&2
   echo "  $ROOT/hermes-agent-main/venv/bin/python" >&2
   exit 1
+}
+
+validate_local_supabase_auth() {
+  if [[ "$LOCAL_ENFORCE_SUPABASE_AUTH" != "1" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$SUPABASE_AUTH_HELPER" ]]; then
+    echo "Missing Supabase auth helper: $SUPABASE_AUTH_HELPER" >&2
+    exit 1
+  fi
+  "$SUPABASE_AUTH_HELPER" validate-file "$SAFEBOX_HOME/.env" >/dev/null
 }
 
 prepare_local_database() {
@@ -289,6 +302,7 @@ safebox_healthcheck() {
 start_safebox() {
   ensure_layout
   require_python
+  validate_local_supabase_auth
 
   if safebox_healthcheck; then
     seed_local_platform_owner
@@ -406,6 +420,7 @@ Safebox URL:      $SAFEBOX_URL
 Safebox log:      $SAFEBOX_LOG
 Config source:    $SOURCE_CONFIG
 Secrets file:     $SAFEBOX_HOME/.env
+Supabase auth:    $(if "$SUPABASE_AUTH_HELPER" validate-file "$SAFEBOX_HOME/.env" >/dev/null 2>&1; then echo configured; else echo missing; fi)
 EOF
 }
 

@@ -110,6 +110,12 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://tavily.com/#pricing",
         pricing_version="tavily-2026-06",
     ),
+    # NOTE: The operator agent's web_search / web_extract / web_crawl tools meter against the active
+    # business budget at the egress point in tools/web_tools.py via the spend seam
+    # (agent/web_spend_meter.py). They price off the REAL resolved provider's `(namespace, op)` entry
+    # in this table (e.g. ("tavily", "search") below) — there is no synthetic flat ("agent", *) price.
+    # A paid provider whose `(namespace, op)` is absent here is REFUSED (fail closed), not run
+    # unpriced.
     # ── Anthropic Fable 5 ────────────────────────────────────────────────
     # New top tier above Opus. $10/$50; cache read 0.1x input, write 1.25x.
     # Source: https://platform.claude.com/docs/en/about-claude/pricing

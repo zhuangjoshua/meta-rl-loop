@@ -4,9 +4,8 @@ Phase 5 acceptance (this slice): a business defines a plan catalog and grants en
 customers (product sub-users), all scoped by business_slug. The correctness details pinned here:
   * a plan catalog is idempotent on (business_slug, plan_key); Stripe product/price ids survive a
     re-upsert that omits them (COALESCE-preserve), every other field overwrites;
-  * the MONEY-TRUTH guard: a manual non-free grant with no Stripe evidence is rejected and writes
-    NOTHING (it would fake billing state), but an explicit non-billing source / metadata flag, or
-    real Stripe evidence, lets it through;
+  * the MONEY-TRUTH guard: an entitlement with no Stripe evidence is rejected and writes
+    NOTHING (it would fake billing state); only real Stripe evidence lets it through;
   * the effective tier of a sub-user is resolved across their grants (active/trialing only,
     highest rank wins) and cached onto app_users.tier — a cancelled grant confers nothing.
 
@@ -27,6 +26,7 @@ from plugins.takyon import app_entitlements, app_identity  # noqa: E402
 from plugins.takyon.app_entitlements import (  # noqa: E402
     AppUserNotFound,
     FakeBillingRejected,
+    InvalidEntitlementTier,
     InvalidPlan,
 )
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
@@ -189,8 +189,8 @@ def test_upsert_plan_folds_validation_warnings_into_metadata(pg_conn):
 def test_list_plan_policies_orders_cheapest_first(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", price_cents=2000)
-    app_entitlements.upsert_plan_policy(pg_conn, slug, "free", price_cents=0)
     app_entitlements.upsert_plan_policy(pg_conn, slug, "mid", price_cents=1000)
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "enterprise", price_cents=4000)
     prices = [p.price_cents for p in app_entitlements.list_plan_policies(pg_conn, slug)]
     assert prices == sorted(prices)
 
@@ -198,16 +198,13 @@ def test_list_plan_policies_orders_cheapest_first(pg_conn):
 # ── entitlements: provisioning + the money-truth guard ─────────────────────────────
 
 
-def test_grant_free_entitlement_by_email_provisions_user_and_sets_tier(pg_conn):
+def test_grant_free_entitlement_is_rejected(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    ent, effective = app_entitlements.grant_entitlement(
-        pg_conn, slug, email="Alice@Example.com", name="Alice", tier="free"
-    )
-    assert effective == "free"
-    # the sub-user was provisioned as a side of the grant
-    user = app_identity.get_app_user(pg_conn, slug, email="alice@example.com")
-    assert user is not None and user.id == ent.app_user_id
-    assert user.tier == "free"  # cached onto app_users
+    with pytest.raises(InvalidEntitlementTier):
+        app_entitlements.grant_entitlement(
+            pg_conn, slug, email="Alice@Example.com", name="Alice", tier="free"
+        )
+    assert app_identity.get_app_user(pg_conn, slug, email="alice@example.com") is None
 
 
 def test_grant_paid_with_stripe_evidence_sets_paid_tier(pg_conn):
@@ -233,29 +230,29 @@ def test_grant_manual_paid_without_evidence_is_rejected_and_writes_nothing(pg_co
     user_id = _user(pg_conn, slug, "carol@example.com")
     with pytest.raises(FakeBillingRejected):
         app_entitlements.grant_entitlement(pg_conn, slug, app_user_id=user_id, tier="paid")
-    # the guard fires BEFORE any write — no entitlement row, tier stays free
+    # the guard fires BEFORE any write — no entitlement row, tier stays unentitled
     rows = pg_conn.execute(
         "select count(*) from app_entitlements where business_slug = %s and app_user_id = %s",
         (slug, user_id),
     ).fetchone()[0]
     assert rows == 0
-    assert app_identity.get_app_user(pg_conn, slug, app_user_id=user_id).tier == "free"
+    assert app_identity.get_app_user(pg_conn, slug, app_user_id=user_id).tier == "unentitled"
 
 
-def test_grant_manual_paid_allowed_with_explicit_non_billing_source(pg_conn):
+def test_grant_paid_without_evidence_rejects_even_with_non_billing_source(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, effective = app_entitlements.grant_entitlement(
-        pg_conn, slug, email="dave@example.com", tier="paid", source="comp"
-    )
-    assert effective == "paid"  # comp is an explicit non-billing grant, not a faked sale
+    with pytest.raises(FakeBillingRejected):
+        app_entitlements.grant_entitlement(
+            pg_conn, slug, email="dave@example.com", tier="paid", source="comp"
+        )
 
 
-def test_grant_manual_paid_allowed_with_metadata_non_billing(pg_conn):
+def test_grant_paid_without_evidence_rejects_even_with_non_billing_metadata(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, effective = app_entitlements.grant_entitlement(
-        pg_conn, slug, email="erin@example.com", tier="paid", metadata={"non_billing": True}
-    )
-    assert effective == "paid"
+    with pytest.raises(FakeBillingRejected):
+        app_entitlements.grant_entitlement(
+            pg_conn, slug, email="erin@example.com", tier="paid", metadata={"non_billing": True}
+        )
 
 
 # ── entitlements: effective-tier resolution ────────────────────────────────────────
@@ -264,15 +261,19 @@ def test_grant_manual_paid_allowed_with_metadata_non_billing(pg_conn):
 def test_effective_tier_picks_highest_rank_among_active(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     user_id = _user(pg_conn, slug, "frank@example.com")
-    app_entitlements.grant_entitlement(pg_conn, slug, app_user_id=user_id, tier="free")
+    pg_conn.execute(
+        "insert into app_entitlements (business_slug, app_user_id, tier, status, source, metadata) "
+        "values (%s, %s, 'free', 'active', 'legacy', '{}'::jsonb)",
+        (slug, user_id),
+    )
     _, after_paid = app_entitlements.grant_entitlement(
         pg_conn, slug, app_user_id=user_id, tier="paid", stripe_customer_id="cus_1"
     )
-    assert after_paid == "paid"  # paid outranks the still-present free grant
-    _, after_owner = app_entitlements.grant_entitlement(
-        pg_conn, slug, app_user_id=user_id, tier="owner", source="owner"
-    )
-    assert after_owner == "owner"  # owner outranks paid
+    assert after_paid == "paid"  # paid outranks and legacy free is ignored
+    with pytest.raises(FakeBillingRejected):
+        app_entitlements.grant_entitlement(
+            pg_conn, slug, app_user_id=user_id, tier="owner", source="owner"
+        )
 
 
 def test_cancelled_entitlement_does_not_confer_tier(pg_conn):
@@ -287,7 +288,7 @@ def test_cancelled_entitlement_does_not_confer_tier(pg_conn):
         status="cancelled",
         stripe_subscription_id="sub_dead",
     )
-    assert effective == "free"  # cancelled is not active/trialing → confers nothing
+    assert effective == "unentitled"  # cancelled is not active/trialing → confers nothing
 
 
 def test_resolve_user_tier_recomputes_after_out_of_band_status_change(pg_conn):
@@ -301,8 +302,8 @@ def test_resolve_user_tier_recomputes_after_out_of_band_status_change(pg_conn):
     pg_conn.execute(
         "update app_entitlements set status = 'cancelled' where id = %s", (ent.id,)
     )
-    assert app_entitlements.resolve_user_tier(pg_conn, slug, user_id) == "free"
-    assert app_identity.get_app_user(pg_conn, slug, app_user_id=user_id).tier == "free"
+    assert app_entitlements.resolve_user_tier(pg_conn, slug, user_id) == "unentitled"
+    assert app_identity.get_app_user(pg_conn, slug, app_user_id=user_id).tier == "unentitled"
 
 
 # ── entitlements: validation + scoping ─────────────────────────────────────────────
@@ -311,25 +312,48 @@ def test_resolve_user_tier_recomputes_after_out_of_band_status_change(pg_conn):
 def test_grant_by_unknown_app_user_id_raises(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     with pytest.raises(AppUserNotFound):
-        app_entitlements.grant_entitlement(pg_conn, slug, app_user_id=uuid.uuid4().hex, tier="free")
+        app_entitlements.grant_entitlement(
+            pg_conn,
+            slug,
+            app_user_id=uuid.uuid4().hex,
+            tier="paid",
+            stripe_customer_id="cus_missing",
+        )
 
 
 def test_grant_requires_user_or_email(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     with pytest.raises(ValueError):
-        app_entitlements.grant_entitlement(pg_conn, slug, tier="free")
+        app_entitlements.grant_entitlement(
+            pg_conn,
+            slug,
+            tier="paid",
+            stripe_customer_id="cus_missing_user",
+        )
 
 
 def test_grant_unknown_business_by_email_fails_loud(pg_conn):
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
-        app_entitlements.grant_entitlement(pg_conn, "ghost-biz", email="x@example.com", tier="free")
+        app_entitlements.grant_entitlement(
+            pg_conn,
+            "ghost-biz",
+            email="x@example.com",
+            tier="paid",
+            stripe_customer_id="cus_ghost",
+        )
 
 
 def test_entitlements_are_business_scoped(pg_conn):
     owner = _owner(pg_conn)
     slug_a = _business(pg_conn, owner, "A")
     slug_b = _business(pg_conn, owner, "B")
-    app_entitlements.grant_entitlement(pg_conn, slug_a, email="ivan@example.com", tier="free")
+    app_entitlements.grant_entitlement(
+        pg_conn,
+        slug_a,
+        email="ivan@example.com",
+        tier="paid",
+        stripe_customer_id="cus_a",
+    )
     # the grant in A is invisible from B
     assert app_entitlements.list_entitlements(pg_conn, slug_b) == []
     # the same email in B is a distinct sub-user with its own (empty) entitlement history
@@ -341,9 +365,15 @@ def test_list_entitlements_scoped_to_user(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     u1 = _user(pg_conn, slug, "judy@example.com")
     u2 = _user(pg_conn, slug, "karl@example.com")
-    app_entitlements.grant_entitlement(pg_conn, slug, app_user_id=u1, tier="free")
-    app_entitlements.grant_entitlement(pg_conn, slug, app_user_id=u1, tier="paid", stripe_customer_id="c")
-    app_entitlements.grant_entitlement(pg_conn, slug, app_user_id=u2, tier="free")
+    app_entitlements.grant_entitlement(
+        pg_conn, slug, app_user_id=u1, tier="paid", stripe_customer_id="cus_1"
+    )
+    app_entitlements.grant_entitlement(
+        pg_conn, slug, app_user_id=u1, tier="pro", stripe_customer_id="cus_2"
+    )
+    app_entitlements.grant_entitlement(
+        pg_conn, slug, app_user_id=u2, tier="paid", stripe_customer_id="cus_3"
+    )
     assert len(app_entitlements.list_entitlements(pg_conn, slug, app_user_id=u1)) == 2
     assert len(app_entitlements.list_entitlements(pg_conn, slug, app_user_id=u2)) == 1
     assert len(app_entitlements.list_entitlements(pg_conn, slug)) == 3

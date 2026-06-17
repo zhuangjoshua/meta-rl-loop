@@ -11,7 +11,7 @@ this pins:
     redelivery (the SQLite plain-INSERT entitlement path would double-grant) — the single-row
     lock on webhook_events is the gate;
   * checkout intents are idempotent on client_reference_id;
-  * subscription lifecycle events flip entitlement status (cancel -> tier drops to free);
+  * subscription lifecycle events flip entitlement status (cancel -> tier drops to unentitled);
   * non-paid / zero-amount / unknown-intent / ignored events are consumed without faking revenue
     or accrual.
 
@@ -431,7 +431,7 @@ def test_zero_amount_paid_records_revenue_but_no_accrual(pg_conn):
     owner = _owner(pg_conn)
     slug = _business(pg_conn, owner)
     intent = app_payments.create_checkout_intent(
-        pg_conn, slug, plan_key="free", client_reference_id="ref-zero", customer_email="z@x.com"
+        pg_conn, slug, plan_key="zero", client_reference_id="ref-zero", customer_email="z@x.com"
     )
     result = app_payments.record_webhook_and_process(
         pg_conn,
@@ -460,7 +460,7 @@ def test_checkout_missing_intent_is_consumed_without_effect(pg_conn):
 # ── subscription lifecycle ─────────────────────────────────────────────────────────────
 
 
-def test_subscription_cancel_drops_tier_to_free(pg_conn):
+def test_subscription_cancel_drops_tier_to_unentitled(pg_conn):
     owner = _owner(pg_conn)
     slug = _business(pg_conn, owner)
     intent = app_payments.create_checkout_intent(
@@ -480,8 +480,8 @@ def test_subscription_cancel_drops_tier_to_free(pg_conn):
                             event_type="customer.subscription.deleted"),
     )
     assert res["processed"]["recorded"] is True
-    assert res["processed"]["updated"][0]["tier"] == "free"
-    assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "free"
+    assert res["processed"]["updated"][0]["tier"] == "unentitled"
+    assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "unentitled"
 
 
 def test_subscription_event_for_unknown_subscription_is_noop(pg_conn):

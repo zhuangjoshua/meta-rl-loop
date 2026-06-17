@@ -10,7 +10,7 @@ Builds on `app_identity` (the sub-user spine). Two concerns, both scoped by `bus
   * per-sub-user ENTITLEMENTS (`app_entitlements`) — append-a-row grants of access. A sub-user's
     EFFECTIVE tier is resolved across their grants whose status is active/trialing (highest rank
     wins) and cached onto `app_users.tier`, mirroring the SQLite trunk's `_sync_user_tier`
-    (core.py:3545). Granting a non-free tier MANUALLY without Stripe evidence is REJECTED — that
+    (core.py:3545). Granting any access-bearing tier without Stripe evidence is REJECTED — that
     is the money-truth guard ported verbatim from core.py:5314 (a manual paid grant would fake
     billing state).
 
@@ -33,9 +33,10 @@ from dataclasses import dataclass
 
 from plugins.takyon import app_identity, app_profiles
 
-# tier → rank for resolving the effective tier; LOWER wins. Verbatim from core.py:2742.
-_TIER_RANK = {"owner": 0, "paid": 1, "pro": 1, "free": 2}
+# tier → rank for resolving the effective tier; LOWER wins.
+_TIER_RANK = {"owner": 0, "paid": 1, "pro": 1}
 _DEFAULT_TIER_RANK = 5
+_UNENTITLING_TIERS = {"", "free", "none", app_identity.UNENTITLED_TIER}
 
 _VALID_BILLING_INTERVALS = {"month", "year", "one_time"}
 _BILLING_INTERVAL_ALIASES = {
@@ -51,10 +52,6 @@ _BILLING_INTERVAL_ALIASES = {
     "one-time": "one_time",
     "single": "one_time",
 }
-
-# A non-free entitlement granted from one of these sources (or carrying metadata.non_billing) is
-# an explicit non-billing comp/internal grant, exempt from the Stripe-evidence requirement.
-_NON_BILLING_SOURCES = {"internal", "owner", "comp", "test"}
 
 # Statuses that actually confer a tier; everything else (cancelled, past_due, …) does not.
 _ACTIVE_STATUSES = ("active", "trialing")
@@ -77,7 +74,11 @@ class AppUserNotFound(EntitlementError):
 
 
 class FakeBillingRejected(EntitlementError):
-    """A manual non-free grant with no Stripe evidence would fake billing state."""
+    """A grant with no Stripe evidence would fake billing state."""
+
+
+class InvalidEntitlementTier(EntitlementError):
+    """The requested tier is unsupported for this product shape."""
 
 
 @dataclass(frozen=True)
@@ -136,11 +137,10 @@ def _json_dumps(value) -> str:
 
 
 def _normalize_plan_key(value: str) -> str:
-    """Slugify a plan key the same way the SQLite trunk's `_file_slug` does, so 'Free Plan' and
-    'free-plan' collapse to one catalog row."""
+    """Slugify a plan key the same way the SQLite trunk's `_file_slug` does."""
     raw = str(value or "").strip().lower()
     raw = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-_.")
-    return (raw or "free")[:96]
+    return (raw or "plan")[:96]
 
 
 def _normalize_billing_interval(value: str) -> str:
@@ -173,7 +173,7 @@ def plan_validation_warnings(plan_key: str, tier: str, quota: int, metadata: dic
         normalized_tier
         and normalized_key
         and normalized_tier not in normalized_key
-        and normalized_key not in {"free"}
+        and normalized_key not in {"plan"}
     ):
         warnings.append(
             "plan_key and entitlement tier differ; this can be valid for billing variants "
@@ -247,7 +247,9 @@ def upsert_plan_policy(
     COALESCE-preserved (a re-upsert that omits them keeps the prior linkage) — matching the SQLite
     upsert (core.py:5207). Unknown business → ForeignKeyViolation (fail loud)."""
     key = _normalize_plan_key(plan_key)
-    tier_value = str(tier or key or "free")
+    tier_value = str(tier or key or "paid").strip()
+    if tier_value.lower() in _UNENTITLING_TIERS:
+        raise InvalidPlan("free plan tiers are unsupported; unpaid users must have no entitlement")
     price = int(float(price_cents or 0))
     if price < 0:
         raise InvalidPlan("plan price must be non-negative")
@@ -265,7 +267,7 @@ def upsert_plan_policy(
     budget = int(float(budget_source or 0))
     if budget < 0:
         raise InvalidPlan("included_ai_budget_microusd must be non-negative")
-    if interval == "month" and str(tier_value or "free").lower() != "free":
+    if interval == "month":
         cap = _monthly_plan_price_cap_microusd(price)
         if budget > cap:
             raise InvalidPlan("included_ai_budget_microusd must be between 0 and the monthly plan price")
@@ -370,18 +372,20 @@ def _resolve_app_user_id(
 def _sync_user_tier(conn, business_slug: str, app_user_id: str) -> str:
     """Resolve the effective tier from active/trialing grants (highest rank) and cache it onto
     app_users.tier. Mirrors the SQLite `_sync_user_tier`. Caller already holds a transaction."""
-    placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    status_placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    tier_placeholders = ", ".join(["%s"] * len(_UNENTITLING_TIERS))
     rank_case = (
-        "case tier when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 "
-        f"when 'free' then 2 else {_DEFAULT_TIER_RANK} end"
+        "case lower(tier) when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 "
+        f"else {_DEFAULT_TIER_RANK} end"
     )
     row = conn.execute(
         "select tier from app_entitlements "
-        f"where business_slug = %s and app_user_id = %s and status in ({placeholders}) "
+        f"where business_slug = %s and app_user_id = %s and status in ({status_placeholders}) "
+        f"  and lower(tier) not in ({tier_placeholders}) "
         f"order by {rank_case} asc, updated_at desc limit 1",
-        (business_slug, app_user_id, *_ACTIVE_STATUSES),
+        (business_slug, app_user_id, *_ACTIVE_STATUSES, *_UNENTITLING_TIERS),
     ).fetchone()
-    tier = str(row[0]) if row is not None else "free"
+    tier = str(row[0]) if row is not None else app_identity.UNENTITLED_TIER
     conn.execute(
         "update app_users set tier = %s, updated_at = now() "
         "where business_slug = %s and id = %s",
@@ -404,7 +408,7 @@ def grant_entitlement(
     app_user_id: str | None = None,
     email: str | None = None,
     name: str | None = None,
-    tier: str = "free",
+    tier: str = "",
     status: str = "active",
     source: str = "manual",
     stripe_customer_id: str | None = None,
@@ -416,27 +420,26 @@ def grant_entitlement(
 ) -> tuple[Entitlement, str]:
     """Append an entitlement grant for a sub-user (by id or email) and return
     (Entitlement, effective_tier). Atomic: the grant insert and the app_users.tier resync commit
-    together. A manual non-free grant with no Stripe evidence and no explicit non-billing source
-    is rejected (FakeBillingRejected) — granting a paid tier with no payment proof would fake
-    billing state (core.py:5314). Supply `email` to auto-provision the sub-user; an unknown
-    business fails loud."""
-    tier_value = str(tier or "free")
+    together. Any access-bearing grant without payment proof is rejected (FakeBillingRejected).
+    Unpaid access is represented by NO entitlement row, not a `free` tier. Supply `email` to
+    auto-provision the sub-user; an unknown business fails loud."""
+    tier_value = str(tier or "").strip()
+    tier_lower = tier_value.lower()
     status_value = str(status or "active")
     source_value = str(source or "manual")
     meta = dict(metadata or {})
+    if not tier_value:
+        raise InvalidEntitlementTier("tier is required")
+    if tier_lower in _UNENTITLING_TIERS:
+        raise InvalidEntitlementTier(
+            "free entitlements are unsupported; unpaid users must have no entitlement"
+        )
     has_stripe_evidence = bool(
         stripe_customer_id or stripe_subscription_id or stripe_checkout_session_id
     )
-    explicit_non_billing = bool(meta.get("non_billing") or source_value in _NON_BILLING_SOURCES)
-    if (
-        tier_value not in {"", "free"}
-        and source_value == "manual"
-        and not has_stripe_evidence
-        and not explicit_non_billing
-    ):
+    if not has_stripe_evidence:
         raise FakeBillingRejected(
-            "manual paid entitlement would fake billing state; use Stripe/webhook evidence "
-            "or an explicit non-billing source"
+            "entitlement would fake billing state; use Stripe/webhook evidence"
         )
     with conn.transaction():
         resolved_id = _resolve_app_user_id(
@@ -498,16 +501,18 @@ def get_active_entitlement(conn, business_slug: str, app_user_id: str) -> Entitl
     Mirrors the effective-tier resolution order: only active/trialing grants count, lower tier
     rank wins, and the newest row breaks ties. This gives runtime callers the exact grant whose
     plan_key/metadata should be treated as authoritative right now."""
-    placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    status_placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    tier_placeholders = ", ".join(["%s"] * len(_UNENTITLING_TIERS))
     rank_case = (
-        "case tier when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 "
-        f"when 'free' then 2 else {_DEFAULT_TIER_RANK} end"
+        "case lower(tier) when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 "
+        f"else {_DEFAULT_TIER_RANK} end"
     )
     row = conn.execute(
         f"select {_ENT_COLUMNS} from app_entitlements "
-        f"where business_slug = %s and app_user_id = %s and status in ({placeholders}) "
+        f"where business_slug = %s and app_user_id = %s and status in ({status_placeholders}) "
+        f"  and lower(tier) not in ({tier_placeholders}) "
         f"order by {rank_case} asc, updated_at desc limit 1",
-        (business_slug, app_user_id, *_ACTIVE_STATUSES),
+        (business_slug, app_user_id, *_ACTIVE_STATUSES, *_UNENTITLING_TIERS),
     ).fetchone()
     return None if row is None else _ent_from_row(row)
 

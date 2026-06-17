@@ -337,13 +337,42 @@ def store_media(
 
 
 def get_media(store: Any, *, business_slug: str, media_id: str, session_token: str) -> dict[str, Any]:
-    if _session_user_id(store, business_slug, str(session_token or "").strip()) is None:
+    token = str(session_token or "").strip()
+    if not token:
         raise AppMediaError("app account not found")
-    row = _media_row(store, business_slug, str(media_id or "").strip())
-    if row is None:
-        raise AppMediaError("media not found")
-    content = _backend(store).get(str(row["storage_key"]))
-    return {"content": content, "mime": str(row["mime"]), "size_bytes": int(row["size_bytes"])}
+    try:
+        from .core import _PGConn, _resolve_sqlite_app_user
+    except Exception:
+        from plugins.takyon.core import _PGConn, _resolve_sqlite_app_user
+
+    with store._connect() as conn:
+        if isinstance(conn, _PGConn):
+            leaves = store._app_leaves()
+            with store._pg_app_scope(conn, business_slug, session_token=token):
+                with store._leaf_conn(conn) as leaf:
+                    user = leaves["identity"].validate_session(leaf, business_slug, token)
+                if user is None:
+                    raise AppMediaError("app account not found")
+                row = conn.execute(
+                    "SELECT * FROM app_media WHERE business_slug = ? AND media_id = ?",
+                    (business_slug, str(media_id or "").strip()),
+                ).fetchone()
+                row_dict = store._row_to_dict(row)
+        else:
+            user = _resolve_sqlite_app_user(conn, business_slug, session_token=token)
+            if not user:
+                raise AppMediaError("app account not found")
+            row = conn.execute(
+                "SELECT * FROM app_media WHERE business_slug = ? AND media_id = ?",
+                (business_slug, str(media_id or "").strip()),
+            ).fetchone()
+            row_dict = store._row_to_dict(row)
+        if row_dict is None:
+            raise AppMediaError("media not found")
+        if str(row_dict.get("app_user_id") or "") != str((getattr(user, "id", None) or user.get("id") or "")):
+            raise AppMediaError("media not found")
+    content = _backend(store).get(str(row_dict["storage_key"]))
+    return {"content": content, "mime": str(row_dict["mime"]), "size_bytes": int(row_dict["size_bytes"])}
 
 
 def delete_media(store: Any, *, business_slug: str, media_id: str, app_user_id: str) -> dict[str, Any]:

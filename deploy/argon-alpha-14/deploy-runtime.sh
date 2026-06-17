@@ -6,6 +6,7 @@ RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 BOOTSTRAP_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/bootstrap-host.sh"
 REPAIR_PRODUCT_RUNTIME_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/repair-product-runtime.sh"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
+VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
@@ -64,6 +65,11 @@ fi
 
 if [[ ! -f "$REPAIR_PRODUCT_RUNTIME_SCRIPT" ]]; then
   echo "repair script not found: $REPAIR_PRODUCT_RUNTIME_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$VERIFY_SUPABASE_AUTH_SCRIPT" ]]; then
+  echo "supabase auth verifier not found: $VERIFY_SUPABASE_AUTH_SCRIPT" >&2
   exit 1
 fi
 
@@ -249,6 +255,8 @@ result = sync_skills(quiet=False)
 if result.get('user_modified'):
     raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
 PY
+  env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' '$TAKYON_REMOTE_RUNTIME/scripts/verify-supabase-auth-runtime.py'
   if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
@@ -313,7 +321,7 @@ run_remote_smoke() {
 
 for attempt in {1..12}; do
   curl_status=0
-  if curl -fsSI \
+  if curl -fsS -o /dev/null \
     --connect-timeout "$TAKYON_SMOKE_CONNECT_TIMEOUT" \
     --max-time "$TAKYON_SMOKE_MAX_TIME" \
     "$TAKYON_SMOKE_HOST" >/dev/null; then

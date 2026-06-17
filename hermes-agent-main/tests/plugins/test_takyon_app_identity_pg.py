@@ -66,14 +66,14 @@ def _new_conn(pg_conn):
 # ── upsert_app_user ─────────────────────────────────────────────────────────────
 
 
-def test_upsert_creates_active_free_user(pg_conn):
+def test_upsert_creates_active_unentitled_user(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     user = app_identity.upsert_app_user(pg_conn, slug, "Alice@Example.com", name="Alice")
     assert user.business_slug == slug
     assert user.email == "alice@example.com"  # normalized to lowercase
     assert user.name == "Alice"
     assert user.status == "active"
-    assert user.tier == "free"  # documented default
+    assert user.tier == "unentitled"  # documented default
 
 
 def test_upsert_idempotent_same_id_reactivates_and_preserves_name(pg_conn):

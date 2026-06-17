@@ -534,8 +534,8 @@ def test_app_entitlement_upsert_email_autoprovisions_and_syncs_tier(pg_store, pg
 
 
 def test_app_entitlement_upsert_manual_paid_without_evidence_is_rejected(pg_store, pg_store_dsn):
-    # The anti-fake-billing rail survives delegation: a manual non-free grant with no Stripe evidence
-    # and no explicit non-billing source is refused by the leaf (FakeBillingRejected), surfaced to the
+    # The anti-fake-billing rail survives delegation: a non-free grant with no Stripe evidence
+    # is refused by the leaf (FakeBillingRejected), surfaced to the
     # store as TakyonError, which propagates out of commit() and rolls the whole transaction back —
     # so neither the entitlement NOR the auto-provisioned user is left behind.
     _seed_owned_business(pg_store_dsn, "fakeco", mode="test")

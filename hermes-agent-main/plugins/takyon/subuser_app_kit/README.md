@@ -11,6 +11,8 @@ Use it as a starting point, not a visual cage:
 Files:
 
 - `surface-context.js` — generated per business; exports the current surface truth.
+- `surface-context.js` also carries `auth` when the app shell has the auth rail, including the
+  public Supabase URL + publishable key the browser needs to start Google OAuth.
 - `runtime-client.js` — canonical client for `/api/takyon/apps/<slug>/...`, including account helpers such as `cancelSubscription()`.
 - `packs.js` — mode, subscription, and API pack hints for faster composition.
 - `ui-primitives.js` — small blocked/pricing/usage/API helper renderers.

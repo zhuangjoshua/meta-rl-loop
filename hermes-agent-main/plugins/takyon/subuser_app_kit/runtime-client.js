@@ -193,6 +193,10 @@ export function createSubuserRuntimeClient(context = {}) {
         body: JSON.stringify({ access_token: accessToken, ...extra }),
       });
     },
+    async logout() {
+      ensureRail("auth");
+      return jsonRequest(routeUrl("session"), { method: "DELETE" });
+    },
     async session() {
       ensureRail("auth");
       return jsonRequest(routeUrl("session"), { method: "GET" });

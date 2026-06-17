@@ -303,6 +303,20 @@ class TestRegistryResolution:
         assert result.supports_extract() is True
         assert result.is_available() is True
 
+    def test_explicit_free_provider_falls_back_when_policy_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Policy kill switch disables free backends even when explicitly configured."""
+        _ensure_plugins_loaded()
+        from agent.web_search_registry import _resolve
+
+        monkeypatch.setenv("TAKYON_DISABLE_FREE_WEB_BACKENDS", "1")
+        monkeypatch.setenv("EXA_API_KEY", "real")
+        result = _resolve("brave-free", capability="search")
+        assert result is not None
+        assert result.name == "exa"
+        assert result.is_available() is True
+
     def test_no_config_no_credentials_returns_none(
         self,
     ) -> None:

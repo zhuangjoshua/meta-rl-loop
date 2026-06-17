@@ -211,6 +211,14 @@ def _resolve_plan_for_user(conn, business_slug: str, user: app_identity.AppUser)
     return entitlement, None
 
 
+def _require_active_entitlement(entitlement) -> None:
+    if entitlement is None:
+        raise GatewayMessageError(
+            status_code=402,
+            detail={"error": "subscription_required"},
+        )
+
+
 def _feature_allowed(plan, feature_name: str) -> bool:
     metadata = plan.metadata if plan is not None and isinstance(plan.metadata, dict) else {}
     features = metadata.get("features")
@@ -231,10 +239,89 @@ def _model_allowed(plan, model: str) -> bool:
     return True
 
 
+# Per-user monthly AI cap floor. Used only after a real entitlement exists, when the business has
+# no matching plan policy or a legacy free/default plan is misconfigured with 0. It MUST stay
+# positive and bounded: 0 would 402 every fallback-capped customer on their first call, and None
+# would disable the per-user gate entirely — letting ONE subuser drain the whole business pool.
+# Bounded ($0.50) so the fallback itself can't drain the pool; raise it by configuring a plan
+# policy's included_ai_budget_microusd.
+_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD = 500_000  # $0.50
+
+
 def _user_monthly_budget_microusd(plan) -> int:
-    if plan is None or str(plan.tier or "free") == "free":
-        return 0
-    return max(0, int(plan.included_ai_budget_microusd))
+    """The per-user monthly AI allowance — the cap that stops ONE subuser from draining the whole
+    business budget. ALWAYS positive, NEVER None. For a known plan it is the tier's configured
+    ``included_ai_budget_microusd`` (so a free tier grants its real free allowance instead of being
+    forced to 0); a free/default tier left at 0 falls back to the floor so default customers are
+    never hard-blocked; paid tiers honor their configured cap exactly; no plan policy → the floor."""
+    if plan is None:
+        return _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD
+    included = max(0, int(plan.included_ai_budget_microusd))
+    if included == 0 and str(plan.tier or "free") == "free":
+        return _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD
+    return included
+
+
+def broker_provider_call(
+    conn,
+    business_slug: str,
+    *,
+    app_user,
+    plan,
+    provider: str,
+    model: str,
+    estimated_cost_microusd: int,
+    purpose: str,
+    audit_route: str,
+    do_call,
+    actual_cost,
+    reserve_metadata: dict | None = None,
+    provider_error_detail: str = "provider_error",
+):
+    """THE single metered envelope every paid product-provider call routes through — Anthropic,
+    Tavily, and any future provider. Reserve the SERVER-computed estimate against the business budget
+    under the atomic row lock (the ONE gate that can refuse spend), then call the provider, then
+    settle the actual cost — or release the hold on a provider error. A provider that reaches this
+    function cannot skip the reservation, so adding a new provider is "price it fail-closed in
+    ``usage_pricing`` + call this", never "remember to wire the budget rails." ``do_call()`` performs
+    the provider request and returns its raw response; ``actual_cost(raw)`` returns
+    ``(actual_cost_microusd, settle_kwargs)``. Returns ``(raw, reservation_key, actual_cost, settled)``."""
+    reservation_key = uuid.uuid4().hex
+    try:
+        reserve_usage(
+            conn,
+            business_slug,
+            estimated_cost_microusd=estimated_cost_microusd,
+            reservation_key=reservation_key,
+            app_user_id=app_user.id,
+            user_monthly_limit_microusd=_user_monthly_budget_microusd(plan),
+            app_user_tier=app_user.tier,
+            purpose=purpose,
+            route=audit_route,
+            provider=provider,
+            model=model,
+            metadata=reserve_metadata or {},
+        )
+    except (AppBudgetInactive, AppBudgetExceeded, AppUserBudgetExceeded, AppUserNotFound) as exc:
+        raise _gateway_reservation_error(exc) from exc
+
+    try:
+        raw = do_call()
+    except Exception as exc:
+        release_usage(conn, business_slug, reservation_key, error=str(exc))
+        raise GatewayMessageError(status_code=502, detail=provider_error_detail) from exc
+
+    cost, settle_kwargs = actual_cost(raw)
+    settled = _settle_or_hold(
+        conn,
+        business_slug,
+        reservation_key,
+        actual_cost_microusd=cost,
+        provider=provider,
+        model=model,
+        **settle_kwargs,
+    )
+    return raw, reservation_key, cost, settled
 
 
 def broker_message_for_business(
@@ -286,6 +373,7 @@ def broker_message_for_business(
         raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
 
     entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    _require_active_entitlement(entitlement)
     feature_name = str(body.get("feature") or "ai_generate").strip() or "ai_generate"
     if plan is not None and not _feature_allowed(plan, feature_name):
         raise GatewayMessageError(
@@ -297,91 +385,41 @@ def broker_message_for_business(
             status_code=403,
             detail={"error": "model_not_in_plan", "model": model},
         )
-    reservation_key = uuid.uuid4().hex
-    try:
-        reserve_usage(
-            conn,
-            business_slug,
-            estimated_cost_microusd=estimated_cost,
-            reservation_key=reservation_key,
-            app_user_id=app_user.id,
-            user_monthly_limit_microusd=_user_monthly_budget_microusd(plan),
-            app_user_tier=app_user.tier,
-            purpose=str(body.get("purpose") or "ai_generate"),
-            route=audit_route,
-            provider="anthropic",
-            model=model,
-            metadata={"cost_rate_source": rate_source},
-        )
-    except AppBudgetInactive as exc:
-        raise GatewayMessageError(
-            status_code=402,
-            detail={"error": "app_budget_inactive", "status": exc.status},
-        ) from exc
-    except AppBudgetExceeded as exc:
-        raise GatewayMessageError(
-            status_code=402,
-            detail={
-                "error": "app_budget_exceeded",
-                "hard_limit_microusd": exc.hard_limit_microusd,
-                "committed_microusd": exc.committed_microusd,
-                "requested_microusd": exc.requested_microusd,
-                "remaining_microusd": exc.remaining_microusd,
-            },
-        ) from exc
-    except AppUserBudgetExceeded as exc:
-        raise GatewayMessageError(
-            status_code=402,
-            detail={
-                "error": "app_user_budget_exceeded",
-                "app_user_id": exc.app_user_id,
-                "user_monthly_limit_microusd": exc.user_monthly_limit_microusd,
-                "committed_microusd": exc.committed_microusd,
-                "requested_microusd": exc.requested_microusd,
-                "remaining_microusd": exc.remaining_microusd,
-            },
-        ) from exc
-    except AppUserNotFound as exc:
-        raise GatewayMessageError(status_code=400, detail="unknown_app_user") from exc
+    def _anthropic_actual_cost(raw):
+        # Anthropic reports cached prompt tokens in separate buckets and EXCLUDES them from
+        # input_tokens. Bill them at their real cache rates instead of dropping them (which would
+        # undercharge true provider cost on every cached call).
+        usage = raw.get("usage") or {}
+        in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
+        out_tok = int(usage.get("output_tokens") or 0)
+        cr = int(usage.get("cache_read_input_tokens") or 0)
+        cw = int(usage.get("cache_creation_input_tokens") or 0)
+        cost = microusd_cost(model, in_tok, out_tok, cache_read_tokens=cr, cache_write_tokens=cw)
+        return cost, {
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "provider_request_id": str(raw.get("id") or ""),
+            "metadata": {"cache_read_input_tokens": cr, "cache_creation_input_tokens": cw},
+        }
 
-    try:
-        provider_response = caller(payload)
-    except Exception as exc:
-        release_usage(conn, business_slug, reservation_key, error=str(exc))
-        raise GatewayMessageError(status_code=502, detail="provider_error") from exc
+    provider_response, _reservation_key, actual_cost, _settled = broker_provider_call(
+        conn,
+        business_slug,
+        app_user=app_user,
+        plan=plan,
+        provider="anthropic",
+        model=model,
+        estimated_cost_microusd=estimated_cost,
+        purpose=str(body.get("purpose") or "ai_generate"),
+        audit_route=audit_route,
+        reserve_metadata={"cost_rate_source": rate_source},
+        do_call=lambda: caller(payload),
+        actual_cost=_anthropic_actual_cost,
+    )
 
     usage = provider_response.get("usage") or {}
     input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
     output_tokens = int(usage.get("output_tokens") or 0)
-    # Anthropic reports cached prompt tokens in separate buckets and EXCLUDES them
-    # from input_tokens. Bill them at their real cache rates instead of dropping
-    # them (which would undercharge true provider cost on every cached call).
-    cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
-    cache_write_tokens = int(usage.get("cache_creation_input_tokens") or 0)
-    actual_cost = microusd_cost(
-        model,
-        input_tokens,
-        output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-    )
-    provider_request_id = str(provider_response.get("id") or "")
-
-    _settle_or_hold(
-        conn,
-        business_slug,
-        reservation_key,
-        actual_cost_microusd=actual_cost,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        provider_request_id=provider_request_id,
-        provider="anthropic",
-        model=model,
-        metadata={
-            "cache_read_input_tokens": cache_read_tokens,
-            "cache_creation_input_tokens": cache_write_tokens,
-        },
-    )
 
     return {
         "success": True,
@@ -546,7 +584,8 @@ def broker_search_for_business(
     except TavilyPricingUnavailable as exc:
         raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
 
-    _entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    _require_active_entitlement(entitlement)
     feature_name = str(body.get("feature") or "web_search").strip() or "web_search"
     if plan is not None and not _feature_allowed(plan, feature_name):
         raise GatewayMessageError(
@@ -554,41 +593,21 @@ def broker_search_for_business(
             detail={"error": "feature_not_in_plan", "feature": feature_name},
         )
 
-    reservation_key = uuid.uuid4().hex
-    try:
-        reserve_usage(
-            conn,
-            business_slug,
-            estimated_cost_microusd=cost,
-            reservation_key=reservation_key,
-            app_user_id=app_user.id,
-            user_monthly_limit_microusd=_user_monthly_budget_microusd(plan),
-            app_user_tier=app_user.tier,
-            purpose=feature_name,
-            route=audit_route,
-            provider="tavily",
-            model=pricing_op,
-            metadata={"operation": operation, "units": units},
-        )
-    except (AppBudgetInactive, AppBudgetExceeded, AppUserBudgetExceeded, AppUserNotFound) as exc:
-        raise _gateway_reservation_error(exc) from exc
-
-    try:
-        raw = searcher({"endpoint": endpoint, "payload": provider_payload})
-    except Exception as exc:
-        release_usage(conn, business_slug, reservation_key, error=str(exc))
-        raise GatewayMessageError(status_code=502, detail="search_provider_error") from exc
-
-    # Fixed per-request price: the provider was paid, so settle the reserved amount (truth — never
-    # re-checks the cap).
-    settled = _settle_or_hold(
+    # Fixed per-request price: estimate == actual, so the held amount IS the truth on settle.
+    raw, _reservation_key, _actual_cost, settled = broker_provider_call(
         conn,
         business_slug,
-        reservation_key,
-        actual_cost_microusd=cost,
+        app_user=app_user,
+        plan=plan,
         provider="tavily",
         model=pricing_op,
-        metadata={"operation": operation, "units": units},
+        estimated_cost_microusd=cost,
+        purpose=feature_name,
+        audit_route=audit_route,
+        reserve_metadata={"operation": operation, "units": units},
+        do_call=lambda: searcher({"endpoint": endpoint, "payload": provider_payload}),
+        actual_cost=lambda _raw: (cost, {"metadata": {"operation": operation, "units": units}}),
+        provider_error_detail="search_provider_error",
     )
 
     results = (

@@ -8,6 +8,14 @@ export const surfaceContext = {
   frontendApiMode: "prefixed_runtime_api",
   runtimeFeatures: ["auth", "account", "checkout", "generate", "records", "actions"],
   railState: {},
+  auth: {
+    provider: "supabase",
+    configured: false,
+    url: "",
+    publishableKey: "",
+    googleProvider: "google",
+    redirectPath: "/app",
+  },
   routes: [],
   plans: [],
 };

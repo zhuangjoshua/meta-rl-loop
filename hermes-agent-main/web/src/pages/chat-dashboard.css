@@ -363,6 +363,82 @@
 }
 @keyframes td-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 
+.tk-dash .td-live-card,
+.tk-dash .td-receipt {
+  border: 1px solid var(--td-border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fff 0%, var(--td-surface-2) 100%);
+  padding: 14px 16px;
+}
+
+.tk-dash .td-live-title,
+.tk-dash .td-receipt-title {
+  font-family: var(--td-font-display);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -.02em;
+  margin: 0 0 8px;
+}
+
+.tk-dash .td-live-summary,
+.tk-dash .td-receipt-summary {
+  margin: 0 0 12px;
+  color: var(--td-fg-2);
+}
+
+.tk-dash .td-live-section { margin-top: 12px; }
+.tk-dash .td-live-label {
+  font-family: var(--td-font-mono);
+  font-size: 10px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--td-meta);
+  margin-bottom: 5px;
+}
+
+.tk-dash .td-live-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.tk-dash .td-live-text { margin: 0; color: var(--td-fg); }
+
+.tk-dash .td-receipt-link {
+  margin: 0 0 12px;
+  font-family: var(--td-font-mono);
+  font-size: 12px;
+}
+
+.tk-dash .td-receipt-link a { color: var(--td-accent-ink); text-decoration: underline; }
+
+.tk-dash .td-details {
+  margin-top: 14px;
+  border-top: 1px solid var(--td-border);
+  padding-top: 12px;
+}
+
+.tk-dash .td-details summary {
+  cursor: pointer;
+  font-family: var(--td-font-mono);
+  font-size: 11px;
+  letter-spacing: .05em;
+  color: var(--td-muted);
+  list-style: none;
+}
+
+.tk-dash .td-details summary::-webkit-details-marker { display: none; }
+.tk-dash .td-details summary::before {
+  content: "+";
+  display: inline-block;
+  width: 12px;
+  margin-right: 6px;
+  color: var(--td-accent-ink);
+}
+
+.tk-dash .td-details[open] summary::before { content: "−"; }
+
 /* Shared Markdown renderer hardcodes old dark-theme text-foreground; force readable ink inside warm surfaces. Links keep their accent via [&_a] utilities. */
 .tk-dash .td-prose :where(h1, h2, h3, h4, h5, h6, p, li, code, strong, em, blockquote, table, th, td) { color: var(--td-fg); }
 

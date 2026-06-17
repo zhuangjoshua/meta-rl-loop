@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from plugins.takyon import app_media
-from plugins.takyon.core import _now
+from plugins.takyon.core import _hash_token, _now
 
 
 class _MemBackend:
@@ -73,6 +73,10 @@ def _store(tmp_path: Path) -> _SQLiteStore:
         "reservation_key TEXT, purpose TEXT, route TEXT, status TEXT, estimated_cost_microusd INTEGER DEFAULT 0, "
         "actual_cost_microusd INTEGER DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER, provider_request_id TEXT, "
         "provider TEXT, model TEXT, metadata_json TEXT, error TEXT, created_at TEXT, completed_at TEXT)"
+    )
+    conn.execute(
+        "CREATE TABLE app_sessions (id TEXT, business_slug TEXT, app_user_id TEXT, token_hash TEXT, "
+        "expires_at TEXT, revoked_at TEXT, created_at TEXT)"
     )
     now = _now()
     conn.execute("INSERT INTO app_users (id, business_slug, email, created_at, updated_at) VALUES ('u1','biz','a@example.com',?,?)", (now, now))
@@ -162,16 +166,34 @@ def test_uploader_only_delete(tmp_path):
 
 def test_get_media_returns_bytes_and_mime(tmp_path):
     store = _store(tmp_path)
-    # mint a session for u1
-    store._conn.execute(
-        "CREATE TABLE app_sessions (id TEXT, business_slug TEXT, app_user_id TEXT, token_hash TEXT, "
-        "expires_at TEXT, revoked_at TEXT, created_at TEXT)"
-    )
     result = _upload(store)
-    # get_media resolves the session via core._resolve_sqlite_app_user; assert the row+bytes path directly
-    row = app_media._media_row(store, "biz", result["media_id"])
-    assert row["mime"] == "image/png"
-    assert store._backend.get(row["storage_key"]) == PNG
+    now = _now()
+    store._conn.execute(
+        "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, revoked_at, created_at) "
+        "VALUES ('s1', 'biz', 'u1', ?, ?, NULL, ?)",
+        (_hash_token("tok-u1"), "2099-01-01T00:00:00+00:00", now),
+    )
+    store._conn.commit()
+
+    fetched = app_media.get_media(store, business_slug="biz", media_id=result["media_id"], session_token="tok-u1")
+
+    assert fetched["mime"] == "image/png"
+    assert fetched["content"] == PNG
+
+
+def test_get_media_rejects_other_users_session(tmp_path):
+    store = _store(tmp_path)
+    result = _upload(store)
+    now = _now()
+    store._conn.execute(
+        "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, revoked_at, created_at) "
+        "VALUES ('s2', 'biz', 'u2', ?, ?, NULL, ?)",
+        (_hash_token("tok-u2"), "2099-01-01T00:00:00+00:00", now),
+    )
+    store._conn.commit()
+
+    with pytest.raises(app_media.AppMediaError, match="media not found"):
+        app_media.get_media(store, business_slug="biz", media_id=result["media_id"], session_token="tok-u2")
 
 
 def test_media_usage_reports_total(tmp_path):

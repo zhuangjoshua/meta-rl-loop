@@ -40,6 +40,14 @@ deploy/argon-alpha-14/takyon-dashboard.service
 
 Deploys should install that unit on the VPS before restarting `takyon-dashboard.service`.
 
+Supabase Auth contract for product subusers now rides the tracked deploy:
+
+- `SUPABASE_URL`
+- one of `SUPABASE_PUBLISHABLE_KEY` or `SUPABASE_ANON_KEY`
+- optional `SUPABASE_JWT_SECRET` for legacy HS256 fallback only
+
+The operator deploy validates that those values are readable through Safebox before restart, so a future push or fresh VPS cannot silently ship a broken subuser auth rail.
+
 This host is the current product activation node (`TAKYON_NODE_NAME=argon-alpha-14`,
 `TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14`). Product builds may happen elsewhere later,
 but only this host should hold live `product-services/<slug>` trees, write `takyon-product-*.service`

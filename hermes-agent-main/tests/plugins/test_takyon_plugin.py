@@ -3941,7 +3941,8 @@ def test_pg_magic_link_verify_creates_session_and_free_entitlement(tmp_path, mon
     assert verify["session_token"]
     assert account["success"] is True
     assert account["user"]["email"] == "tester@example.com"
-    assert any(ent["tier"] == "free" and ent["status"] == "active" for ent in account["entitlements"])
+    assert account["user"]["tier"] == "unentitled"
+    assert account["entitlements"] == []
 
 
 def test_pg_test_mode_checkout_creates_intent_on_postgres(tmp_path, monkeypatch):

@@ -169,11 +169,35 @@ class TestDDGSBackendWiring:
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
         assert web_tools._is_backend_available("ddgs") is False
 
+    def test_is_backend_available_false_when_free_backends_disabled(self, monkeypatch):
+        from tools import web_tools
+        monkeypatch.setenv("TAKYON_DISABLE_FREE_WEB_BACKENDS", "1")
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+        assert web_tools._is_backend_available("ddgs") is False
+
     def test_configured_backend_accepted(self, monkeypatch):
         from tools import web_tools
         monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
         assert web_tools._get_backend() == "ddgs"
+
+    def test_configured_backend_falls_through_to_paid_when_free_backends_disabled(self, monkeypatch):
+        from tools import web_tools
+        monkeypatch.setenv("TAKYON_DISABLE_FREE_WEB_BACKENDS", "1")
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
+        monkeypatch.setenv("EXA_API_KEY", "exa-key")
+        monkeypatch.setattr(web_tools, "_is_tool_gateway_ready", lambda: False)
+        for key in (
+            "FIRECRAWL_API_KEY",
+            "FIRECRAWL_API_URL",
+            "PARALLEL_API_KEY",
+            "TAVILY_API_KEY",
+            "SEARXNG_URL",
+            "BRAVE_SEARCH_API_KEY",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        assert web_tools._get_backend() == "exa"
 
     def test_ddgs_trails_paid_providers_in_auto_detect(self, monkeypatch):
         """Exa (priority) should win over ddgs in auto-detect."""

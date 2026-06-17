@@ -422,6 +422,50 @@ interface TakyonProgressState {
   status: ChatMessage["status"];
 }
 
+type WorkstreamKey =
+  | "research"
+  | "offer"
+  | "build"
+  | "publish"
+  | "test"
+  | "launch";
+
+type WorkstreamStatus = "pending" | "running" | "complete" | "blocked";
+
+interface WorkstreamDefinition {
+  key: WorkstreamKey;
+  label: string;
+  completeLabel: string;
+  summary: string;
+}
+
+interface WorkstreamItem {
+  key: WorkstreamKey;
+  label: string;
+  completeLabel: string;
+  status: WorkstreamStatus;
+}
+
+interface LiveWorkstreamCardData {
+  title: string;
+  summary: string;
+  items: WorkstreamItem[];
+  current?: string;
+  next?: string;
+  blocked?: string;
+}
+
+interface AssistantReceiptData {
+  title: string;
+  summary: string;
+  bullets: string[];
+  liveUrl?: string;
+  checks: string[];
+  files: string[];
+  next?: string;
+  rawDetails: string;
+}
+
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "starting",
   connecting: "connecting",
@@ -550,6 +594,345 @@ function naturalToolLabel(tool: ToolEntry, registry?: RegistryDisplayPayload): s
   if (/cron|wake|schedule/.test(text)) return "Checking schedule";
   if (/shell|exec|command/.test(text)) return "Running command";
   return humanizeJobKind(tool.name || "Action");
+}
+
+const WORKSTREAMS: WorkstreamDefinition[] = [
+  {
+    key: "research",
+    label: "Researching the market",
+    completeLabel: "Research complete",
+    summary: "I'm validating the market and choosing the first useful angle.",
+  },
+  {
+    key: "offer",
+    label: "Designing the offer",
+    completeLabel: "Offer defined",
+    summary: "I'm turning the research into a clear wedge and product direction.",
+  },
+  {
+    key: "build",
+    label: "Building the product",
+    completeLabel: "Product workflow built",
+    summary: "I'm building the first usable workflow and tightening the customer surface.",
+  },
+  {
+    key: "publish",
+    label: "Publishing the site",
+    completeLabel: "Site published",
+    summary: "I'm putting a live version online so you can review it.",
+  },
+  {
+    key: "test",
+    label: "Testing the workflow",
+    completeLabel: "Workflow verified",
+    summary: "I'm checking the live flow before I hand back the result.",
+  },
+  {
+    key: "launch",
+    label: "Preparing launch assets",
+    completeLabel: "Launch assets prepared",
+    summary: "I'm packaging the first distribution and launch materials around the workflow.",
+  },
+];
+
+const WORKSTREAM_INDEX = new Map(
+  WORKSTREAMS.map((item, index) => [item.key, index] as const),
+);
+
+function businessDisplayName(scope: ScopeState): string {
+  return scope.current?.name || scope.business || "This business";
+}
+
+function workstreamDefinition(key: WorkstreamKey): WorkstreamDefinition {
+  return WORKSTREAMS[WORKSTREAM_INDEX.get(key) ?? 0]!;
+}
+
+function detectWorkstreamKey(rawText: string): WorkstreamKey | null {
+  const text = cleanText(rawText).toLowerCase();
+  if (!text) return null;
+  if (/launch|creative|asset|campaign|distribution|outreach|ad copy|launch test/.test(text)) {
+    return "launch";
+  }
+  if (/typecheck|test|verify|validation|qa|probe|stable|loads|works end to end|works end-to-end/.test(text)) {
+    return "test";
+  }
+  if (/publish|deploy|vercel|live url|go live|domain|route verified|site live/.test(text)) {
+    return "publish";
+  }
+  if (/build|product|workflow|surface|screen|app-home|actions\/|claude_agent_task|claude worker|editing files|summary action/.test(text)) {
+    return "build";
+  }
+  if (/offer|wedge|position|pricing|surface contract|product angle|ghostwriting assistant|plan simultaneously/.test(text)) {
+    return "offer";
+  }
+  if (/research|market|competitor|customer|icp|audience|notes-to-post|market angle/.test(text)) {
+    return "research";
+  }
+  return null;
+}
+
+function detectSignalStatus(text: string, fallback: WorkstreamStatus = "running"): WorkstreamStatus {
+  const lower = cleanText(text).toLowerCase();
+  if (
+    /\b(blocked|error|failed|failure|needs attention|can't|cannot|isn't|not provisioned|unavailable)\b/.test(
+      lower,
+    )
+  ) {
+    return "blocked";
+  }
+  if (/\b(done|complete|completed|passed|succeeded|verified|ready|live)\b/.test(lower)) {
+    return "complete";
+  }
+  return fallback;
+}
+
+function detectToolWorkstreamStatus(tool: ToolEntry): WorkstreamStatus {
+  if (tool.status === "error") return "blocked";
+  if (tool.status === "done") return "complete";
+  return "running";
+}
+
+function collectWorkstreamSignals({
+  statusItems,
+  takyonProgress,
+  tools,
+}: {
+  statusItems?: string[];
+  takyonProgress?: TakyonProgressState | null;
+  tools?: ToolEntry[];
+}): Array<{ key: WorkstreamKey; status: WorkstreamStatus; detail: string }> {
+  const signals: Array<{ key: WorkstreamKey; status: WorkstreamStatus; detail: string }> = [];
+
+  for (const tool of (tools || []).slice().reverse()) {
+    const detail = cleanText(
+      [naturalToolLabel(tool), tool.context, tool.preview, tool.summary, tool.error]
+        .filter(Boolean)
+        .join(" · "),
+    ).trim();
+    const key = detectWorkstreamKey(detail || tool.name || "");
+    if (!key) continue;
+    signals.push({ key, status: detectToolWorkstreamStatus(tool), detail: detail || tool.name || "" });
+  }
+
+  for (const line of [...(takyonProgress?.lines || [])].reverse()) {
+    const detail = cleanText(line).trim();
+    const key = detectWorkstreamKey(detail);
+    if (!key) continue;
+    signals.push({ key, status: detectSignalStatus(detail), detail });
+  }
+
+  for (const line of statusItems || []) {
+    const detail = cleanText(line).trim();
+    const key = detectWorkstreamKey(detail);
+    if (!key) continue;
+    signals.push({ key, status: detectSignalStatus(detail), detail });
+  }
+
+  return signals;
+}
+
+function deriveWorkstreamItems({
+  statusItems,
+  takyonProgress,
+  tools,
+}: {
+  statusItems?: string[];
+  takyonProgress?: TakyonProgressState | null;
+  tools?: ToolEntry[];
+}): {
+  blocked?: string;
+  currentKey?: WorkstreamKey;
+  items: WorkstreamItem[];
+  next?: string;
+} {
+  const signals = collectWorkstreamSignals({ statusItems, takyonProgress, tools });
+  const blockedSignal = signals.find((item) => item.status === "blocked");
+  const runningSignal = signals.find((item) => item.status === "running");
+  const currentSignal = blockedSignal || runningSignal;
+  const completedKeys = new Set<WorkstreamKey>(
+    signals
+      .filter((item) => item.status === "complete")
+      .map((item) => item.key),
+  );
+
+  const furthestCompleteIndex = [...completedKeys].reduce(
+    (highest, key) => Math.max(highest, WORKSTREAM_INDEX.get(key) ?? -1),
+    -1,
+  );
+  const currentIndex = currentSignal ? WORKSTREAM_INDEX.get(currentSignal.key) ?? -1 : -1;
+  const inferredCompleteIndex = Math.max(furthestCompleteIndex, currentIndex - 1);
+
+  const items = WORKSTREAMS.map((definition, index) => {
+    let status: WorkstreamStatus = "pending";
+    if (completedKeys.has(definition.key) || index <= inferredCompleteIndex) {
+      status = "complete";
+    }
+    if (currentSignal?.key === definition.key) {
+      status = currentSignal.status;
+    }
+    return {
+      key: definition.key,
+      label: definition.label,
+      completeLabel: definition.completeLabel,
+      status,
+    };
+  });
+
+  const nextItem =
+    currentIndex >= 0
+      ? items.slice(currentIndex + 1).find((item) => item.status === "pending")
+      : items.find((item) => item.status === "pending");
+
+  return {
+    blocked: blockedSignal?.detail,
+    currentKey: currentSignal?.key,
+    items,
+    next: nextItem?.label,
+  };
+}
+
+function deriveLiveWorkstreamCard({
+  running,
+  scope,
+  statusItems,
+  takyonProgress,
+  tools,
+}: {
+  running: boolean;
+  scope: ScopeState;
+  statusItems?: string[];
+  takyonProgress?: TakyonProgressState | null;
+  tools?: ToolEntry[];
+}): LiveWorkstreamCardData | null {
+  const { blocked, currentKey, items, next } = deriveWorkstreamItems({
+    statusItems,
+    takyonProgress,
+    tools,
+  });
+  if (!running && !currentKey && !blocked) return null;
+  const businessName = businessDisplayName(scope);
+  const current = currentKey ? workstreamDefinition(currentKey) : null;
+  const completed = items.filter((item) => item.status === "complete");
+
+  return {
+    title: blocked
+      ? `${businessName} needs attention`
+      : completed.length === 0
+        ? `Starting ${businessName}`
+        : `${businessName} update`,
+    summary: current?.summary || "I'm moving this through the next business workstream now.",
+    items,
+    current: current?.label,
+    next,
+    blocked,
+  };
+}
+
+function extractUrls(text: string): string[] {
+  return [...cleanText(text).matchAll(/https?:\/\/[^\s)]+/g)].map((match) => match[0]);
+}
+
+function extractWorkflowBullets(text: string): string[] {
+  const bullets: string[] = [];
+  let capture = false;
+  for (const rawLine of cleanText(text).split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (capture && bullets.length > 0) break;
+      continue;
+    }
+    if (/^(built workflow|the mvp will let a user|product build started|validation status|what was built)\s*:?\s*$/i.test(line)) {
+      capture = true;
+      continue;
+    }
+    if (!capture) continue;
+    const bullet = line.replace(/^[-*•]\s+/, "").replace(/^\d+\.\s+/, "").trim();
+    if (!bullet) continue;
+    if (/\/|\.(ts|tsx|js|jsx|py|md|json)\b/i.test(bullet)) continue;
+    bullets.push(bullet);
+    if (bullets.length >= 4) break;
+  }
+  return bullets;
+}
+
+function extractChecks(text: string, liveUrl?: string): string[] {
+  const checks: string[] = [];
+  const lower = cleanText(text).toLowerCase();
+  if (/typecheck|npm run typecheck|types check|typechecked/.test(lower)) {
+    checks.push("Typecheck passed");
+  }
+  if (/publish succeeded|published clean|publishing succeeded|deployed|is live|workflow live/.test(lower) || !!liveUrl) {
+    checks.push("Publish succeeded");
+  }
+  if (/verified|validation status|stable|product loads|summary action works|live route verified|works end to end|works end-to-end/.test(lower)) {
+    checks.push("Live flow verified");
+  }
+  return checks.filter((item, index) => checks.indexOf(item) === index);
+}
+
+function extractNextStep(text: string): string | undefined {
+  const normalized = cleanText(text);
+  const labeled =
+    normalized.match(/Recommended next step:\s*([\s\S]+?)$/i)?.[1] ||
+    normalized.match(/Next(?: step)?:\s*([\s\S]+?)$/i)?.[1];
+  const sentence = (labeled || "").trim().split(/\n{2,}/)[0]?.trim();
+  if (sentence) return sentence.replace(/^[-*•]\s*/, "");
+  return undefined;
+}
+
+function looksTechnicalAssistantReceipt(text: string): boolean {
+  const normalized = cleanText(text);
+  if (!normalized.trim()) return false;
+  const pathCount = extractPaths(normalized).length;
+  return (
+    /what was built|files changed|typechecked|publish(?:ed|ing)|live url|validation status|checks|vercel|product\/site\//i.test(
+      normalized,
+    ) ||
+    (pathCount > 0 &&
+      /build|changed|typecheck|publish|verified|workflow live|live route/i.test(normalized))
+  );
+}
+
+function deriveAssistantReceipt(
+  content: string,
+  scope: ScopeState,
+): AssistantReceiptData | null {
+  if (!scope.business || !looksTechnicalAssistantReceipt(content)) return null;
+  const rawDetails = cleanText(content).trim();
+  if (!rawDetails) return null;
+  const liveUrl =
+    extractUrls(rawDetails)[0] ||
+    customerWebsiteUrl({
+      product: scope.overview?.product,
+      website: scope.overview?.artifacts?.website,
+    }) ||
+    undefined;
+  const messageSignals = deriveWorkstreamItems({
+    statusItems: rawDetails.split(/\n+/).slice(0, 24),
+    takyonProgress: null,
+    tools: [],
+  });
+  const bullets =
+    extractWorkflowBullets(rawDetails).length > 0
+      ? extractWorkflowBullets(rawDetails)
+      : messageSignals.items
+          .filter((item) => item.status === "complete")
+          .map((item) => item.completeLabel)
+          .slice(-4);
+  const checks = extractChecks(rawDetails, liveUrl);
+  const next = extractNextStep(rawDetails) || (liveUrl ? "Review the live flow and decide on the first acquisition test." : undefined);
+  return {
+    title: liveUrl ? `${businessDisplayName(scope)} is live` : `${businessDisplayName(scope)} update`,
+    summary: liveUrl
+      ? "The latest business workflow is ready for review."
+      : "The latest build completed and is ready for review.",
+    bullets,
+    liveUrl,
+    checks,
+    files: extractPaths(rawDetails),
+    next,
+    rawDetails,
+  };
 }
 
 function friendlyError(message?: string | null): string {
@@ -3328,11 +3711,12 @@ function GlobalLaunchpad({
 }) {
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("");
-  const activeTool = tools.slice().reverse().find((tool) => tool.status === "running");
+  const workstreams = deriveWorkstreamItems({ statusItems, takyonProgress, tools });
   const latestStatus =
+    workstreams.blocked ||
+    (workstreams.currentKey ? workstreamDefinition(workstreams.currentKey).label : "") ||
     latestTakyonProgressLine(takyonProgress) ||
-    activeTool?.name ||
-    statusItems[0] ||
+    recentToolLabels(tools)[0] ||
     "";
   const canCreate = canUseConnection(state) && !running && (!!name.trim() || !!goal.trim());
   const displayError = friendlyError(error);
@@ -3440,16 +3824,16 @@ function Thread({
   tools?: ToolEntry[];
 }) {
   const displayError = friendlyError(error);
-  const activeTool = (tools || []).slice().reverse().find((tool) => tool.status === "running");
-  const activityLabels = recentToolLabels(tools);
-  const takyonActivity = latestTakyonProgressLine(takyonProgress, scope.business || "");
-  const showActivity = running || !!takyonActivity;
-  const workingLabel = takyonActivity ? "Activity" : running ? "Working…" : "";
-  const activitySummary =
-    takyonActivity ||
-    (activityLabels.length > 0
-      ? activityLabels.join(" · ")
-      : activeTool?.name || (statusItems && statusItems[0]) || "Thinking");
+  const liveCard = deriveLiveWorkstreamCard({
+    running,
+    scope,
+    statusItems,
+    takyonProgress,
+    tools,
+  });
+  const visibleMessages = messages.filter(
+    (message) => !(message.role === "assistant" && message.status === "streaming"),
+  );
   return (
     <>
       <div ref={scrollerRef} className="td-thread">
@@ -3464,24 +3848,54 @@ function Thread({
             </div>
           </div>
         )}
-        {messages.length === 0 && !displayError && <ThreadWelcome scope={scope} />}
-        {messages.map((message) => (
-          <Message key={message.id} message={message} />
+        {visibleMessages.length === 0 && !displayError && <ThreadWelcome scope={scope} />}
+        {visibleMessages.map((message) => (
+          <Message key={message.id} message={message} scope={scope} />
         ))}
-        {showActivity && (
-          <div aria-live="polite" className="td-activity">
-            <div className="td-activity-line">
-              <span aria-hidden className="td-activity-dot" />
-              <span className="truncate">{workingLabel}</span>
-            </div>
-            <div className="td-activity-tokens">
-              <span className="td-activity-token">{activitySummary}</span>
-            </div>
-          </div>
-        )}
+        {liveCard && <LiveWorkstreamCard card={liveCard} />}
       </div>
       {children}
     </>
+  );
+}
+
+function LiveWorkstreamCard({ card }: { card: LiveWorkstreamCardData }) {
+  const completed = card.items.filter((item) => item.status === "complete");
+  return (
+    <div aria-live="polite" className="td-msg td-ceo">
+      <div className="td-mrole">CEO</div>
+      <div className="td-live-card">
+        <div className="td-live-title">{card.title}</div>
+        <p className="td-live-summary">{card.summary}</p>
+        {completed.length > 0 && (
+          <div className="td-live-section">
+            <div className="td-live-label">What changed</div>
+            <ul className="td-live-list">
+              {completed.map((item) => (
+                <li key={item.key}>{item.completeLabel}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {card.current && (
+          <div className="td-live-section">
+            <div className="td-live-label">Working now</div>
+            <p className="td-live-text">{card.current}</p>
+          </div>
+        )}
+        {card.blocked ? (
+          <div className="td-live-section">
+            <div className="td-live-label">Blocked</div>
+            <p className="td-live-text">{card.blocked}</p>
+          </div>
+        ) : card.next ? (
+          <div className="td-live-section">
+            <div className="td-live-label">Next</div>
+            <p className="td-live-text">{card.next}</p>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -3627,9 +4041,10 @@ function SlashPalette({
   );
 }
 
-function Message({ message }: { message: ChatMessage }) {
+function Message({ message, scope }: { message: ChatMessage; scope: ScopeState }) {
   const isUser = message.role === "user";
   const isSystem = message.role === "system";
+  const receipt = !isUser && !isSystem ? deriveAssistantReceipt(message.content, scope) : null;
 
   if (isSystem) {
     return (
@@ -3651,6 +4066,8 @@ function Message({ message }: { message: ChatMessage }) {
       <div className="td-mbody">
         {isUser ? (
           message.content
+        ) : receipt ? (
+          <AssistantReceipt receipt={receipt} />
         ) : (
           <div className="td-prose [&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface)] [&_pre]:p-2">
             <Markdown
@@ -3670,6 +4087,75 @@ function Message({ message }: { message: ChatMessage }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function AssistantReceipt({ receipt }: { receipt: AssistantReceiptData }) {
+  return (
+    <div className="td-receipt">
+      <div className="td-receipt-title">{receipt.title}</div>
+      <p className="td-receipt-summary">{receipt.summary}</p>
+      {receipt.liveUrl && (
+        <p className="td-receipt-link">
+          Live URL: <a href={receipt.liveUrl}>{receipt.liveUrl}</a>
+        </p>
+      )}
+      {receipt.bullets.length > 0 && (
+        <div className="td-live-section">
+          <div className="td-live-label">What changed</div>
+          <ul className="td-live-list">
+            {receipt.bullets.map((bullet, index) => (
+              <li key={`${bullet}-${index}`}>{bullet}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {receipt.checks.length > 0 && (
+        <div className="td-live-section">
+          <div className="td-live-label">Validation</div>
+          <ul className="td-live-list">
+            {receipt.checks.map((check, index) => (
+              <li key={`${check}-${index}`}>{check}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {receipt.next && (
+        <div className="td-live-section">
+          <div className="td-live-label">Next</div>
+          <p className="td-live-text">{receipt.next}</p>
+        </div>
+      )}
+      <details className="td-details">
+        <summary>View build details</summary>
+        {receipt.files.length > 0 && (
+          <div className="td-live-section">
+            <div className="td-live-label">Files changed</div>
+            <ul className="td-live-list">
+              {receipt.files.map((file) => (
+                <li key={file}>{file}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {receipt.checks.length > 0 && (
+          <div className="td-live-section">
+            <div className="td-live-label">Checks</div>
+            <ul className="td-live-list">
+              {receipt.checks.map((check, index) => (
+                <li key={`${check}-detail-${index}`}>{check}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="td-live-section">
+          <div className="td-live-label">Raw response</div>
+          <div className="td-prose [&_a]:text-[var(--td-accent-ink)] [&_a]:underline [&_code]:rounded [&_code]:bg-[var(--td-surface)] [&_code]:px-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:border [&_pre]:border-[var(--td-border)] [&_pre]:bg-[var(--td-surface)] [&_pre]:p-2">
+            <Markdown content={receipt.rawDetails} />
+          </div>
+        </div>
+      </details>
     </div>
   );
 }

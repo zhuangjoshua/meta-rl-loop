@@ -6,6 +6,7 @@ RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
+VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 PRODUCT_SITES_SOURCE_HOST="${TAKYON_PRODUCT_SITES_SOURCE_HOST:-root@137.184.75.57}"
 PRODUCT_SITES_SOURCE_KEY="${TAKYON_PRODUCT_SITES_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 
@@ -21,6 +22,7 @@ TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SYNC_PRODUCT_SITES="${TAKYON_SYNC_PRODUCT_SITES:-1}"
+TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
@@ -40,6 +42,11 @@ fi
 
 if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
   echo "deno bootstrap helper not found: $ENSURE_DENO_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$VERIFY_SUPABASE_AUTH_SCRIPT" ]]; then
+  echo "supabase auth verifier not found: $VERIFY_SUPABASE_AUTH_SCRIPT" >&2
   exit 1
 fi
 
@@ -126,7 +133,9 @@ result = sync_skills(quiet=False)
 if result.get('user_modified'):
     raise SystemExit(f\"bundled skill sync left user-modified entries behind: {result['user_modified']}\")
 PY
-  if grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
+  env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_HOST_ROLE=subuser TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' '$TAKYON_REMOTE_RUNTIME/scripts/verify-supabase-auth-runtime.py'
+  if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
     env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=subuser TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from plugins.takyon.core import load_takyon_env

@@ -60,11 +60,13 @@ def _throwaway_db(worker_id):
     Yields an autocommit psycopg connection to it. psycopg is imported lazily so the
     rest of the suite still collects where psycopg is absent."""
     import psycopg
+    from plugins.takyon.runtime_app import configure_takyon_pg_session
 
     dbname = f"takyon_test_{worker_id}_{uuid.uuid4().hex[:8]}"
     with psycopg.connect(_DSN, autocommit=True) as admin:
         admin.execute(f'create database "{dbname}"')
     conn = psycopg.connect(_DSN, dbname=dbname, autocommit=True)
+    configure_takyon_pg_session(conn, bypass=True)
     try:
         yield conn
     finally:

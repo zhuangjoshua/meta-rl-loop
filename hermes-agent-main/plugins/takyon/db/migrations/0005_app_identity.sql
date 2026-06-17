@@ -50,8 +50,8 @@ create extension if not exists citext;
 
 -- One product sub-user (customer) per (business, email). email is citext so the
 -- (business_slug, email) uniqueness and all lookups are case-insensitive without the
--- lower() dance the SQLite version needed. tier is business-defined (free/paid/...),
--- not constrained to a fixed set.
+-- lower() dance the SQLite version needed. tier caches the EFFECTIVE access tier; unpaid
+-- users stay `unentitled` until a real entitlement exists.
 create table if not exists app_users (
     id            uuid primary key default gen_random_uuid(),
     business_slug text not null references businesses (slug) on delete cascade,
@@ -59,7 +59,7 @@ create table if not exists app_users (
     name          text,
     status        text not null default 'active'
                       check (status in ('active', 'suspended', 'closed')),
-    tier          text not null default 'free' check (length(tier) > 0),
+    tier          text not null default 'unentitled' check (length(tier) > 0),
     metadata      jsonb not null default '{}'::jsonb,
     created_at    timestamptz not null default now(),
     updated_at    timestamptz not null default now(),

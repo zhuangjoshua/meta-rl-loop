@@ -46,6 +46,49 @@ def test_subuser_surface_context_omits_burned_customer_experience_payload():
     assert payload["runtimeFeatures"] == ["auth", "account", "generate"]
 
 
+def test_subuser_surface_context_includes_supabase_public_auth_config(monkeypatch):
+    def fake_public_env_value(*names: str) -> str:
+        if "SUPABASE_URL" in names:
+            return "https://project.supabase.co"
+        if "SUPABASE_PUBLISHABLE_KEY" in names:
+            return "sb_publishable_test"
+        return ""
+
+    monkeypatch.setattr(takyon_core, "_subuser_public_env_value", fake_public_env_value)
+
+    payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
+        {"runtime_features": ["auth"]},
+        slug="plannerly",
+    )
+
+    assert payload["auth"] == {
+        "provider": "supabase",
+        "configured": True,
+        "url": "https://project.supabase.co",
+        "publishableKey": "sb_publishable_test",
+        "googleProvider": "google",
+        "redirectPath": "/app",
+    }
+
+
+def test_subuser_surface_context_marks_supabase_auth_unconfigured_when_public_values_are_missing(monkeypatch):
+    monkeypatch.setattr(takyon_core, "_subuser_public_env_value", lambda *names: "")
+
+    payload = takyon_core._subuser_surface_context_payload(  # type: ignore[attr-defined]
+        {"runtime_features": ["auth"]},
+        slug="plannerly",
+    )
+
+    assert payload["auth"] == {
+        "provider": "supabase",
+        "configured": False,
+        "url": "",
+        "publishableKey": "",
+        "googleProvider": "google",
+        "redirectPath": "/app",
+    }
+
+
 def test_merge_subuser_app_metadata_preserves_existing_rail_truth_when_declaring_new_rail():
     metadata = takyon_core._merge_subuser_app_metadata(  # type: ignore[attr-defined]
         {

@@ -1,15 +1,18 @@
-"""Supabase sub-user JWT verifier (AUTH0.md §7) — pure verifier tests, no live Supabase.
+"""Supabase sub-user JWT verifier (AUTH0.md §7) — local verifier tests, no live Supabase.
 
 Mints tokens locally with a test secret and asserts the verifier is fail-closed: only a
 well-signed, unexpired, correctly-audienced token with a subject is accepted.
 """
 
 import time
+from types import SimpleNamespace
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from plugins.takyon import app_supabase_auth as sa
+from plugins.takyon import safebox
 
 SECRET = "test-supabase-jwt-secret-0123456789"
 SUB = "11111111-1111-1111-1111-111111111111"
@@ -65,3 +68,65 @@ def test_rejects_token_without_subject():
     )
     with pytest.raises(sa.SupabaseAuthError):
         sa.verify_supabase_jwt(bad, secret=SECRET)
+
+
+def test_verifies_es256_token_via_jwks(monkeypatch):
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+    token = jwt.encode(
+        {
+            "sub": SUB,
+            "email": "ec@example.com",
+            "aud": "authenticated",
+            "exp": int(time.time()) + 600,
+        },
+        private_key,
+        algorithm="ES256",
+        headers={"kid": "kid-1"},
+    )
+
+    class FakeJwksClient:
+        def get_signing_key_from_jwt(self, _token):
+            return SimpleNamespace(key=public_key)
+
+    monkeypatch.setattr(sa, "_jwks_client", lambda _url: FakeJwksClient())
+
+    ident = sa.verify_supabase_jwt(token, project_url="https://example.supabase.co")
+    assert ident.supabase_user_id == SUB
+    assert ident.email == "ec@example.com"
+
+
+def test_verifies_hs256_token_via_auth_server_when_secret_missing(monkeypatch):
+    token = _token()
+    monkeypatch.setattr(sa, "_jwt_secret", lambda: "")
+    monkeypatch.setattr(sa, "_publishable_key", lambda: "sb_publishable_test")
+    monkeypatch.setattr(
+        sa,
+        "_verified_user_via_auth_server",
+        lambda _token, *, project_url, publishable_key: {
+            "id": SUB,
+            "email": "user@example.com",
+            "project_url": project_url,
+            "publishable_key": publishable_key,
+        },
+    )
+
+    ident = sa.verify_supabase_jwt(token, project_url="https://example.supabase.co")
+    assert ident.supabase_user_id == SUB
+    assert ident.email == "user@example.com"
+
+
+def test_resolves_public_supabase_url_via_safebox_alias_lookup(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.setattr(
+        safebox,
+        "first_env_backed_value",
+        lambda *keys: "https://example.supabase.co" if "SUPABASE_URL" in keys else "",
+    )
+    monkeypatch.setattr(
+        safebox,
+        "read_env_backed_value",
+        lambda _key: (_ for _ in ()).throw(KeyError("non-sensitive")),
+    )
+
+    assert sa._project_url() == "https://example.supabase.co"

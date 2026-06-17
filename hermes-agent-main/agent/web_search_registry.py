@@ -33,6 +33,7 @@ through to an extract-capable backend.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Dict, List, Optional
 
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 _providers: Dict[str, WebSearchProvider] = {}
 _lock = threading.Lock()
+_DISABLE_FREE_WEB_BACKENDS_ENV = "TAKYON_DISABLE_FREE_WEB_BACKENDS"
 
 
 def register_provider(provider: WebSearchProvider) -> None:
@@ -113,6 +115,11 @@ def _read_config_key(*path: str) -> Optional[str]:
     return None
 
 
+def _env_flag_enabled(name: str) -> bool:
+    raw = str(os.getenv(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 # Legacy preference order — preserves behaviour for users who set no
 # ``web.backend`` / ``web.<capability>_backend`` config key at all. Matches
 # the historic candidate order in :func:`tools.web_tools._get_backend`
@@ -174,6 +181,8 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
 
     def _is_available_safe(p: WebSearchProvider) -> bool:
         """Wrap ``is_available()`` so a buggy provider doesn't kill resolution."""
+        if _provider_disabled_by_policy(p.name):
+            return False
         try:
             return bool(p.is_available())
         except Exception as exc:  # noqa: BLE001
@@ -186,13 +195,18 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
     if configured:
         provider = snapshot.get(configured)
         if provider is not None and _capable(provider):
-            return provider
+            if not _provider_disabled_by_policy(provider.name):
+                return provider
+            logger.debug(
+                "web backend '%s' configured but disabled by policy; falling back",
+                configured,
+            )
         if provider is None:
             logger.debug(
                 "web backend '%s' configured but not registered; falling back",
                 configured,
             )
-        else:
+        elif not _provider_disabled_by_policy(provider.name):
             logger.debug(
                 "web backend '%s' configured but does not support '%s'; falling back",
                 configured, capability,
@@ -254,6 +268,56 @@ def get_active_crawl_provider() -> Optional[WebSearchProvider]:
     """
     explicit = _read_config_key("web", "crawl_backend") or _read_config_key("web", "backend")
     return _resolve(explicit, capability="crawl")
+
+
+# ── Server-owned billing metadata ────────────────────────────────────────────
+# Whether a provider spends platform money — and under which usage_pricing
+# namespace — is decided HERE, by the server, never by the tool result or the
+# caller. `web_tools` resolves which provider actually runs, then asks this map
+# whether that provider is billable; a paid provider must reserve through the
+# spend meter before egress (agent/web_spend_meter.py).
+#
+# `pricing_namespace` is the usage_pricing provider key; the per-call pricing
+# key is `(pricing_namespace, op)` where op ∈ {"search", "extract", "crawl"}.
+# A provider absent from this map resolves to billing_mode "unknown", which the
+# spend boundary treats like "paid" and FAILS CLOSED — so a newly added paid
+# backend can never leak ungated spend by being forgotten here. A paid provider
+# whose `(namespace, op)` has no entry in agent/usage_pricing.py also fails
+# closed (unpriced = refused), by design.
+_PROVIDER_BILLING: dict[str, tuple[str, Optional[str]]] = {
+    # paid third-party APIs (spend real money per call)
+    "tavily": ("paid", "tavily"),
+    "firecrawl": ("paid", "firecrawl"),
+    "exa": ("paid", "exa"),
+    "parallel": ("paid", "parallel"),
+    "xai": ("paid", "xai"),
+    # free / self-hosted (no platform spend)
+    "searxng": ("free", None),
+    "brave-free": ("free", None),
+    "ddgs": ("free", None),
+}
+
+
+def provider_billing(name: str) -> tuple[str, Optional[str]]:
+    """Return ``(billing_mode, pricing_namespace)`` for a provider name.
+
+    ``billing_mode`` is ``"paid"``, ``"free"``, or ``"unknown"``. An unknown
+    provider (not in :data:`_PROVIDER_BILLING`) returns ``("unknown", None)`` so
+    callers fail closed rather than leak ungated spend. ``pricing_namespace`` is
+    ``None`` for free/unknown providers.
+    """
+    if not isinstance(name, str):
+        return ("unknown", None)
+    return _PROVIDER_BILLING.get(name.strip(), ("unknown", None))
+
+
+def free_web_backends_disabled() -> bool:
+    """Whether free/self-hosted web backends are policy-disabled."""
+    return _env_flag_enabled(_DISABLE_FREE_WEB_BACKENDS_ENV)
+
+
+def _provider_disabled_by_policy(name: str) -> bool:
+    return free_web_backends_disabled() and provider_billing(name)[0] == "free"
 
 
 def _reset_for_tests() -> None:

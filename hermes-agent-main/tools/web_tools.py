@@ -102,6 +102,18 @@ from agent.auxiliary_client import (
     extract_content_or_reasoning,
     get_async_text_auxiliary_client,
 )
+# Spend boundary: paid web-provider egress (search/extract/crawl) and the summarizer LLM reserve
+# against the active business budget HERE, where the actual provider is known. The provider→billing
+# classification is server-owned (web_search_registry.provider_billing); pricing is server-owned
+# (usage_pricing). A non-Takyon runtime registers no meter and is unmetered (handles are None).
+from agent.usage_pricing import CanonicalUsage, has_known_pricing
+from agent.web_search_registry import free_web_backends_disabled, provider_billing
+from agent.web_spend_meter import (
+    SpendBlocked,
+    release_paid_call,
+    reserve_paid_call,
+    settle_paid_call,
+)
 from tools.debug_helpers import DebugSession
 # Imported solely so unit tests can monkeypatch these names on
 # tools.web_tools (the firecrawl plugin reads them via its own import chain).
@@ -124,6 +136,10 @@ def _has_env(name: str) -> bool:
     val = os.getenv(name)
     return bool(val and val.strip())
 
+
+def _backend_disabled_by_policy(backend: str) -> bool:
+    return free_web_backends_disabled() and provider_billing(backend)[0] == "free"
+
 def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.takyon/config.yaml."""
     try:
@@ -141,7 +157,9 @@ def _get_backend() -> str:
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
     if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
-        return configured
+        if not _backend_disabled_by_policy(configured):
+            return configured
+        logger.info("Configured web backend '%s' is disabled by policy; falling back", configured)
 
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
@@ -158,6 +176,8 @@ def _get_backend() -> str:
         ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
+        if _backend_disabled_by_policy(backend):
+            continue
         if available:
             return backend
 
@@ -204,6 +224,8 @@ def _get_capability_backend(capability: str) -> str:
 
 def _is_backend_available(backend: str) -> bool:
     """Return True when the selected backend is currently usable."""
+    if _backend_disabled_by_policy(backend):
+        return False
     if backend == "exa":
         return _has_env("EXA_API_KEY")
     if backend == "parallel":
@@ -427,10 +449,27 @@ async def process_content_with_llm(
         return truncated
 
 
+def _approx_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token) for reserving a conservative summarizer hold before the
+    real usage is known."""
+    return max(1, len(text or "") // 4)
+
+
+def _response_usage(response: Any) -> CanonicalUsage:
+    """Pull real token usage off an auxiliary LLM response (Anthropic-style ``usage.input_tokens`` /
+    OpenAI-style ``prompt_tokens``). Returns a zero-token usage when the response carries none."""
+    u = getattr(response, "usage", None)
+    if u is None:
+        return CanonicalUsage()
+    in_tok = getattr(u, "input_tokens", 0) or getattr(u, "prompt_tokens", 0) or 0
+    out_tok = getattr(u, "output_tokens", 0) or getattr(u, "completion_tokens", 0) or 0
+    return CanonicalUsage(input_tokens=int(in_tok), output_tokens=int(out_tok))
+
+
 async def _call_summarizer_llm(
-    content: str, 
-    context_str: str, 
-    model: Optional[str], 
+    content: str,
+    context_str: str,
+    model: Optional[str],
     max_tokens: int = 20000,
     is_chunk: bool = False,
     chunk_info: str = ""
@@ -489,60 +528,104 @@ Your goal is to preserve ALL important information while reducing length. Never 
 
 Create a markdown summary that captures all key information in a well-organized, scannable format. Include important quotes and code snippets in their original formatting. Focus on actionable information, specific details, and unique insights."""
 
-    # Call the LLM with retry logic — keep retries low since summarization
-    # is a nice-to-have; the caller falls back to truncated content on failure.
+    # Resolve the auxiliary model once — needed both to make the call and to price the spend.
+    aux_client, effective_model, extra_body = _resolve_web_extract_auxiliary(model)
+    if aux_client is None or not effective_model:
+        logger.warning("No auxiliary model available for web content processing")
+        return None
+
+    # Meter the summarizer LLM at its real spend boundary (invariant #8: a paid summarizer means
+    # web_extract / web_crawl is NOT free). Only meter when the model has known pricing — an unpriced
+    # model is an operator-trusted free/local backend that summarizes without charge. Best-effort:
+    # over-budget degrades to truncated content (the caller's fallback) and never fails the
+    # already-paid extract; a settled spend is recorded only for a successful paid call.
+    # Resolve the aux route (provider + base_url) so the summarizer's spend prices correctly — a bare
+    # model name with provider=None resolves to "unknown" for anthropic/openai (only openrouter is
+    # base_url-detectable). This is the SAME resolution the aux client itself uses for this task.
+    try:
+        from agent.auxiliary_client import _resolve_task_provider_model
+
+        aux_provider, _aux_model, aux_base_url, _aux_key, _aux_mode = _resolve_task_provider_model("web_extract")
+    except Exception:
+        aux_provider, aux_base_url = None, None
+
+    est_usage: Optional[CanonicalUsage] = None
+    spend_handle = None
+    if has_known_pricing(effective_model, provider=aux_provider, base_url=aux_base_url):
+        est_usage = CanonicalUsage(
+            input_tokens=_approx_tokens(system_prompt) + _approx_tokens(user_prompt),
+            output_tokens=int(max_tokens),
+        )
+        try:
+            spend_handle = reserve_paid_call(
+                pricing_key=(aux_provider, effective_model, aux_base_url),
+                provider=str(aux_provider or "aux"),
+                op="web_summarize",
+                usage=est_usage,
+                purpose="agent_web_summarize",
+            )
+        except SpendBlocked as exc:
+            logger.info("web summarizer skipped (budget): %s", exc)
+            return None
+
+    call_kwargs = {
+        "task": "web_extract",
+        "model": effective_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+        # No explicit timeout — async_call_llm reads auxiliary.web_extract.timeout from config.yaml.
+        # Fresh configs ship with 360s; absent, the runtime default is 30s (_DEFAULT_AUX_TIMEOUT in
+        # agent/auxiliary_client.py). Slow local models should raise auxiliary.web_extract.timeout.
+    }
+    if extra_body:
+        call_kwargs["extra_body"] = extra_body
+
+    # Retry loop — keep retries low; summarization is a nice-to-have and the caller falls back to
+    # truncated content on failure. Settle on the first successful response, else release in finally.
     max_retries = 2
     retry_delay = 2
     last_error = None
-
-    for attempt in range(max_retries):
-        try:
-            aux_client, effective_model, extra_body = _resolve_web_extract_auxiliary(model)
-            if aux_client is None or not effective_model:
+    settled = False
+    try:
+        for attempt in range(max_retries):
+            try:
+                response = await async_call_llm(**call_kwargs)
+                content = extract_content_or_reasoning(response)
+                if content:
+                    actual = _response_usage(response)
+                    settle_paid_call(
+                        spend_handle,
+                        usage=actual if (actual.input_tokens or actual.output_tokens) else est_usage,
+                    )
+                    settled = True
+                    return content
+                # Reasoning-only / empty response — let the retry loop handle it
+                logger.warning("LLM returned empty content (attempt %d/%d), retrying", attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+                    continue
+                return content  # Return whatever we got after exhausting retries
+            except RuntimeError:
                 logger.warning("No auxiliary model available for web content processing")
                 return None
-            call_kwargs = {
-                "task": "web_extract",
-                "model": effective_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": max_tokens,
-                # No explicit timeout — async_call_llm reads auxiliary.web_extract.timeout
-                # from config.yaml. Fresh configs ship with 360s; if the key is absent
-                # the runtime default is 30s (_DEFAULT_AUX_TIMEOUT in
-                # agent/auxiliary_client.py). Users with slow local models should set
-                # or increase auxiliary.web_extract.timeout in config.yaml.
-            }
-            if extra_body:
-                call_kwargs["extra_body"] = extra_body
-            response = await async_call_llm(**call_kwargs)
-            content = extract_content_or_reasoning(response)
-            if content:
-                return content
-            # Reasoning-only / empty response — let the retry loop handle it
-            logger.warning("LLM returned empty content (attempt %d/%d), retrying", attempt + 1, max_retries)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
-                continue
-            return content  # Return whatever we got after exhausting retries
-        except RuntimeError:
-            logger.warning("No auxiliary model available for web content processing")
-            return None
-        except Exception as api_error:
-            last_error = api_error
-            if attempt < max_retries - 1:
-                logger.warning("LLM API call failed (attempt %d/%d): %s", attempt + 1, max_retries, str(api_error)[:100])
-                logger.warning("Retrying in %ds...", retry_delay)
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
-            else:
-                raise last_error
-    
-    return None
+            except Exception as api_error:
+                last_error = api_error
+                if attempt < max_retries - 1:
+                    logger.warning("LLM API call failed (attempt %d/%d): %s", attempt + 1, max_retries, str(api_error)[:100])
+                    logger.warning("Retrying in %ds...", retry_delay)
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 60)
+                else:
+                    raise last_error
+        return None
+    finally:
+        if spend_handle is not None and not settled:
+            release_paid_call(spend_handle, error="summarize_failed")
 
 
 async def _process_large_content_chunked(
@@ -829,7 +912,27 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 "Web search via %s: '%s' (limit: %d)",
                 provider.name, query, limit,
             )
-            response_data = provider.search(query, limit)
+            # Spend boundary: the provider is now resolved, so we know whether this call bills.
+            billing_mode, namespace = provider_billing(provider.name)
+            if billing_mode == "free":
+                response_data = provider.search(query, limit)
+            else:
+                try:
+                    spend_handle = reserve_paid_call(
+                        pricing_key=(namespace, "search"),
+                        provider=provider.name,
+                        op="web_search",
+                        units=1,
+                        purpose="agent_web_search",
+                    )
+                except SpendBlocked as exc:
+                    return tool_error(str(exc), success=False)
+                try:
+                    response_data = provider.search(query, limit)
+                except Exception:
+                    release_paid_call(spend_handle, error="provider_error")
+                    raise
+                settle_paid_call(spend_handle, units=1)
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
@@ -982,14 +1085,35 @@ async def web_extract_tool(
             # Async-or-sync dispatch: parallel + firecrawl have async
             # extract(); exa + tavily are sync.
             import inspect
-            if inspect.iscoroutinefunction(provider.extract):
-                results = await provider.extract(safe_urls, format=format)
-            else:
+
+            async def _run_extract():
+                if inspect.iscoroutinefunction(provider.extract):
+                    return await provider.extract(safe_urls, format=format)
                 # Run sync extract() in a thread so we don't block the
                 # event loop on network I/O.
-                results = await asyncio.to_thread(
-                    provider.extract, safe_urls, format=format
-                )
+                return await asyncio.to_thread(provider.extract, safe_urls, format=format)
+
+            # Spend boundary: provider resolved, URLs validated — meter per safe URL if it bills.
+            billing_mode, namespace = provider_billing(provider.name)
+            if billing_mode == "free":
+                results = await _run_extract()
+            else:
+                try:
+                    spend_handle = reserve_paid_call(
+                        pricing_key=(namespace, "extract"),
+                        provider=provider.name,
+                        op="web_extract",
+                        units=len(safe_urls),
+                        purpose="agent_web_extract",
+                    )
+                except SpendBlocked as exc:
+                    return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+                try:
+                    results = await _run_extract()
+                except Exception:
+                    release_paid_call(spend_handle, error="provider_error")
+                    raise
+                settle_paid_call(spend_handle, units=len(safe_urls))
 
         # Merge any SSRF-blocked results back in
         if ssrf_blocked:
@@ -1266,12 +1390,32 @@ async def web_crawl_tool(
             if instructions:
                 crawl_kwargs["instructions"] = instructions
 
-            if inspect.iscoroutinefunction(crawl_provider.crawl):
-                response = await crawl_provider.crawl(url, **crawl_kwargs)
+            async def _run_crawl():
+                if inspect.iscoroutinefunction(crawl_provider.crawl):
+                    return await crawl_provider.crawl(url, **crawl_kwargs)
+                return await asyncio.to_thread(crawl_provider.crawl, url, **crawl_kwargs)
+
+            # Spend boundary: crawl provider resolved — meter the call if it bills.
+            crawl_billing_mode, crawl_namespace = provider_billing(crawl_provider.name)
+            if crawl_billing_mode == "free":
+                response = await _run_crawl()
             else:
-                response = await asyncio.to_thread(
-                    crawl_provider.crawl, url, **crawl_kwargs
-                )
+                try:
+                    spend_handle = reserve_paid_call(
+                        pricing_key=(crawl_namespace, "crawl"),
+                        provider=crawl_provider.name,
+                        op="web_crawl",
+                        units=1,
+                        purpose="agent_web_crawl",
+                    )
+                except SpendBlocked as exc:
+                    return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+                try:
+                    response = await _run_crawl()
+                except Exception:
+                    release_paid_call(spend_handle, error="provider_error")
+                    raise
+                settle_paid_call(spend_handle, units=1)
 
             # Provider returns {"results": [...]} matching what the shared
             # LLM post-processing below expects.

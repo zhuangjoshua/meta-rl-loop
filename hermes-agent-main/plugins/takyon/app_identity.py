@@ -32,6 +32,7 @@ _DEFAULT_MAGIC_LINK_TTL_MINUTES = 15
 _DEFAULT_SESSION_TTL_DAYS = 30
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _VALID_APP_USER_STATUSES = {"active", "suspended", "closed"}
+UNENTITLED_TIER = "unentitled"
 
 
 class AppIdentityError(Exception):
@@ -52,7 +53,10 @@ class InactiveAppUser(AppIdentityError):
 
 @dataclass(frozen=True)
 class AppUser:
-    """One product sub-user (a business's customer). `tier` is business-defined."""
+    """One product sub-user (a business's customer).
+
+    `tier` is the cached effective access tier. Unpaid users stay `unentitled`; access-bearing
+    tiers come from the entitlement rail rather than being bootstrapped here."""
 
     id: str
     business_slug: str
@@ -145,13 +149,20 @@ def upsert_app_user(
     status_value = None if status is None else _normalize_status(status)
     with conn.transaction():
         row = conn.execute(
-            "insert into app_users (business_slug, email, name, status) values (%s, %s, %s, %s) "
+            "insert into app_users (business_slug, email, name, status, tier) values (%s, %s, %s, %s, %s) "
             "on conflict (business_slug, email) do update set "
             " status = coalesce(%s, app_users.status), "
             " name = coalesce(excluded.name, app_users.name), "
             " updated_at = now() "
             f"returning {_APP_USER_COLUMNS}",
-            (business_slug, normalized, name, status_value or "active", status_value),
+            (
+                business_slug,
+                normalized,
+                name,
+                status_value or "active",
+                UNENTITLED_TIER,
+                status_value,
+            ),
         ).fetchone()
         user = _app_user_from_row(row)
         if user.status != "active":
@@ -210,12 +221,12 @@ def create_magic_link(
     raw = _random_token()
     with conn.transaction():
         user = conn.execute(
-            "insert into app_users (business_slug, email, name, status) values (%s, %s, %s, 'active') "
+            "insert into app_users (business_slug, email, name, status, tier) values (%s, %s, %s, 'active', %s) "
             "on conflict (business_slug, email) do update set "
             " name = coalesce(excluded.name, app_users.name), "
             " updated_at = now() "
             "returning id, email, status",
-            (business_slug, _normalize_email(email), name),
+            (business_slug, _normalize_email(email), name, UNENTITLED_TIER),
         ).fetchone()
         app_user_id, normalized_email, status = str(user[0]), str(user[1]), str(user[2])
         if status != "active":
@@ -367,10 +378,10 @@ def upsert_app_user_by_supabase_id(
             ).fetchone()
         if row is None:
             row = conn.execute(
-                "insert into app_users (business_slug, email, name, status, supabase_user_id) "
-                "values (%s, %s, %s, 'active', %s) "
+                "insert into app_users (business_slug, email, name, status, tier, supabase_user_id) "
+                "values (%s, %s, %s, 'active', %s, %s) "
                 f"returning {_APP_USER_COLUMNS}",
-                (business_slug, normalized or f"{sub}@supabase.local", name, sub),
+                (business_slug, normalized or f"{sub}@supabase.local", name, UNENTITLED_TIER, sub),
             ).fetchone()
     return _app_user_from_row(row)
 

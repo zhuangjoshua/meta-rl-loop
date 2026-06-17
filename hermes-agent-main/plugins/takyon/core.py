@@ -9475,7 +9475,7 @@ def _normalize_included_ai_budget_microusd(
         raise TakyonError("included_ai_budget_microusd must be non-negative")
     interval = _normalize_billing_interval(billing_interval or "month")
     tier_value = _file_slug(str(tier or "").strip().lower(), str(tier or ""))
-    if interval == "month" and tier_value != "free":
+    if interval == "month":
         cap = _monthly_plan_price_cap_microusd(price_cents)
         if budget > cap:
             raise TakyonError("included_ai_budget_microusd must be between 0 and the monthly plan price")
@@ -9488,7 +9488,7 @@ def _plan_validation_warnings(
     warnings: list[str] = []
     normalized_key = _file_slug(plan_key, plan_key)
     normalized_tier = _file_slug(tier, tier)
-    if normalized_tier and normalized_key and normalized_tier not in normalized_key and normalized_key not in {"free"}:
+    if normalized_tier and normalized_key and normalized_tier not in normalized_key and normalized_key not in {"plan"}:
         warnings.append("plan_key and entitlement tier differ; this can be valid for billing variants but should be intentional")
     def contains_unlimited(value: Any) -> bool:
         if isinstance(value, str):
@@ -10674,7 +10674,7 @@ def _status_rank(status: str) -> int:
 
 
 def _tier_rank(tier: str) -> int:
-    return {"owner": 0, "paid": 1, "pro": 1, "free": 2}.get(tier, 5)
+    return {"owner": 0, "paid": 1, "pro": 1}.get(tier, 5)
 
 
 def _hash_operation(value: Any) -> str:
@@ -11388,7 +11388,7 @@ class TakyonStore:
               id TEXT PRIMARY KEY,
               business_slug TEXT NOT NULL,
               plan_key TEXT NOT NULL,
-              tier TEXT NOT NULL DEFAULT 'free',
+              tier TEXT NOT NULL DEFAULT 'unentitled',
               price_cents INTEGER NOT NULL DEFAULT 0,
               currency TEXT NOT NULL DEFAULT 'usd',
               billing_interval TEXT NOT NULL DEFAULT 'month',
@@ -11448,7 +11448,7 @@ class TakyonStore:
               email TEXT NOT NULL,
               name TEXT,
               status TEXT NOT NULL DEFAULT 'active',
-              tier TEXT NOT NULL DEFAULT 'free',
+              tier TEXT NOT NULL DEFAULT 'unentitled',
               metadata_json TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
@@ -11543,7 +11543,7 @@ class TakyonStore:
               id TEXT PRIMARY KEY,
               business_slug TEXT NOT NULL,
               app_user_id TEXT NOT NULL,
-              tier TEXT NOT NULL DEFAULT 'free',
+              tier TEXT NOT NULL DEFAULT 'unentitled',
               status TEXT NOT NULL DEFAULT 'active',
               source TEXT NOT NULL DEFAULT 'manual',
               stripe_customer_id TEXT,
@@ -12448,10 +12448,19 @@ class TakyonStore:
                 (slug, user_id),
             ).fetchall()
         ]
-        active = [row for row in rows if row and row.get("status") in {"active", "trialing"}]
-        tier = "free"
+        active = [
+            row
+            for row in rows
+            if row
+            and row.get("status") in {"active", "trialing"}
+            and str(row.get("tier") or "").strip().lower() not in {"", "free", "none", "unentitled"}
+        ]
+        tier = "unentitled"
         if active:
-            tier = sorted(active, key=lambda row: _tier_rank(str(row.get("tier") or "free")))[0].get("tier") or "free"
+            tier = (
+                sorted(active, key=lambda row: _tier_rank(str(row.get("tier") or "")))[0].get("tier")
+                or "unentitled"
+            )
         conn.execute("UPDATE app_users SET tier = ?, updated_at = ? WHERE business_slug = ? AND id = ?", (tier, _now(), slug, user_id))
         return str(tier)
 
@@ -14907,8 +14916,12 @@ class TakyonStore:
             }
 
         if action == "app.plan.upsert":
-            plan_key = _file_slug(str(op.get("plan_key") or "free"), "free")
-            tier = str(op.get("tier") or plan_key or "free")
+            plan_key = _file_slug(str(op.get("plan_key") or "plan"), "plan")
+            tier = str(op.get("tier") or plan_key or "paid")
+            if tier.strip().lower() in {"", "free", "none", "unentitled"}:
+                raise TakyonError(
+                    "free plan tiers are unsupported; unpaid users must have no entitlement"
+                )
             price_cents = int(float(op.get("price_cents") or op.get("price_usd_cents") or 0))
             leaves = None
             if price_cents < 0:
@@ -15094,7 +15107,7 @@ class TakyonStore:
                         email,
                         op.get("name"),
                         str(op.get("status") or "active"),
-                        str(op.get("tier") or "free"),
+                        str(op.get("tier") or "unentitled"),
                         _json_dumps(op.get("metadata") or {}),
                         now,
                         now,
@@ -15889,7 +15902,7 @@ class TakyonStore:
                             slug,
                             app_user_id=(str(op.get("app_user_id")) if op.get("app_user_id") else None),
                             email=(_normalize_email(str(op.get("email"))) if op.get("email") else None),
-                            tier=str(op.get("tier") or "free"),
+                            tier=str(op.get("tier") or ""),
                             status=str(op.get("status") or "active"),
                             source=source_value,
                             stripe_customer_id=op.get("stripe_customer_id"),
@@ -15915,7 +15928,7 @@ class TakyonStore:
                             "business_slug": slug,
                             "target_scope": target_scope,
                             "email": email,
-                            "tier": op.get("tier") or "free",
+                            "tier": op.get("tier"),
                             "metadata": {"source": "entitlement_upsert"},
                         },
                         reason=reason,
@@ -15929,16 +15942,21 @@ class TakyonStore:
                 _ensure_sqlite_app_profile(conn, slug, user_id)
                 now = _now()
                 entitlement_id = op.get("id") or uuid.uuid4().hex
-                tier_value = str(op.get("tier") or "free")
+                tier_value = str(op.get("tier") or "").strip()
                 source_value = str(op.get("source") or "manual")
                 metadata = op.get("metadata") or {}
                 if not isinstance(metadata, dict):
                     metadata = {"value": metadata}
-                has_stripe_evidence = bool(op.get("stripe_customer_id") or op.get("stripe_subscription_id") or op.get("stripe_checkout_session_id"))
-                explicit_non_billing = bool(metadata.get("non_billing") or source_value in {"internal", "owner", "comp", "test"})
-                if tier_value not in {"", "free"} and source_value == "manual" and not has_stripe_evidence and not explicit_non_billing:
+                if not tier_value:
+                    raise TakyonError("tier is required")
+                if tier_value.lower() in {"free", "none", "unentitled"}:
                     raise TakyonError(
-                        "manual paid entitlement would fake billing state; use Stripe/webhook evidence or an explicit non-billing source"
+                        "free entitlements are unsupported; unpaid users must have no entitlement"
+                    )
+                has_stripe_evidence = bool(op.get("stripe_customer_id") or op.get("stripe_subscription_id") or op.get("stripe_checkout_session_id"))
+                if not has_stripe_evidence:
+                    raise TakyonError(
+                        "entitlement would fake billing state; use Stripe/webhook evidence"
                     )
                 conn.execute(
                     """
@@ -16012,7 +16030,7 @@ class TakyonStore:
                                     if candidate.tier == resolved_user_tier:
                                         plan = candidate
                                         break
-                            if plan is not None and str(plan.tier or "free") != "free":
+                            if plan is not None and str(plan.tier or "").strip().lower() not in {"", "free", "none", "unentitled"}:
                                 user_monthly_limit_microusd = max(
                                     0, int(plan.included_ai_budget_microusd)
                                 )
@@ -17511,7 +17529,7 @@ def handle_business_upsert_app_customer(args: dict, **_: Any) -> str:
         "email": args.get("email"),
         "name": args.get("name"),
         "status": args.get("status") or "active",
-        "tier": args.get("tier") or "free",
+        "tier": args.get("tier") or "unentitled",
         "metadata": args.get("metadata") or {},
     }
     return _commit_tool(args, operation)
@@ -17928,7 +17946,7 @@ def _resolve_sqlite_app_user(
         user_id = uuid.uuid4().hex
         conn.execute(
             "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) "
-            "VALUES (?, ?, ?, NULL, 'active', 'free', ?, ?, ?)",
+            "VALUES (?, ?, ?, NULL, 'active', 'unentitled', ?, ?, ?)",
             (user_id, business_slug, normalized_email, _json_dumps({"source": create_source}), now, now),
         )
         return _store()._row_to_dict(conn.execute(
@@ -18033,7 +18051,7 @@ def handle_business_grant_app_entitlement(args: dict, **_: Any) -> str:
         "business": args.get("business"),
         "app_user_id": args.get("app_user_id"),
         "email": args.get("email"),
-        "tier": args.get("tier") or "free",
+        "tier": args.get("tier"),
         "status": args.get("status") or "active",
         "source": args.get("source") or "manual",
         "plan_key": args.get("plan_key"),
@@ -18110,7 +18128,7 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
             else:
                 user_id = uuid.uuid4().hex
                 conn.execute(
-                    "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', 'free', ?, ?, ?) "
+                    "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', 'unentitled', ?, ?, ?) "
                     "ON CONFLICT(business_slug, email) DO UPDATE SET "
                     "name = COALESCE(excluded.name, app_users.name), "
                     "updated_at = excluded.updated_at",
@@ -18208,24 +18226,7 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                     )
                     if user_record is None:
                         raise TakyonError("magic link user is missing")
-                    existing_free = any(
-                        ent.source == "manual" and ent.tier == "free"
-                        for ent in leaves["entitlements"].list_entitlements(
-                            leaf,
-                            business,
-                            app_user_id=user_record.id,
-                        )
-                    )
-                    if not existing_free:
-                        leaves["entitlements"].grant_entitlement(
-                            leaf,
-                            business,
-                            app_user_id=user_record.id,
-                            tier="free",
-                            status="active",
-                            source="manual",
-                            metadata={"source": "magic_link"},
-                        )
+                    leaves["entitlements"].resolve_user_tier(leaf, business, user_record.id)
                     refreshed = leaves["identity"].get_app_user(
                         leaf,
                         business,
@@ -18263,15 +18264,6 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                     raise TakyonError("app user is not active")
                 now = _now()
                 conn.execute("UPDATE app_magic_links SET used_at = ? WHERE id = ?", (now, link["id"]))
-                existing_free = conn.execute(
-                    "SELECT 1 FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? AND source = 'manual' AND tier = 'free' LIMIT 1",
-                    (business, user["id"]),
-                ).fetchone()
-                if not existing_free:
-                    conn.execute(
-                        "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'free', 'active', 'manual', ?, ?, ?)",
-                        (uuid.uuid4().hex, business, user["id"], _json_dumps({"source": "magic_link"}), now, now),
-                    )
                 session_token = _random_token()
                 session_id = uuid.uuid4().hex
                 conn.execute(
@@ -18383,8 +18375,9 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
     """Sub-app login via Supabase Auth (AUTH0.md §7) — the Supabase replacement for
     ``business_verify_app_magic_link``. Verify the Supabase access token server-side, upsert the
     sub-user by ``supabase_user_id`` (adopting a legacy email row on first Google login), mint the
-    SAME 30-day ``app_session`` magic-link mints, and bootstrap the free entitlement on first login.
-    ``validate_session`` and everything downstream are unchanged — only the credential differs.
+    SAME 30-day ``app_session`` magic-link mints, and leave unpaid users unentitled until a real
+    paid entitlement exists. ``validate_session`` and everything downstream are unchanged — only
+    the credential differs.
     Requires the Postgres runtime plus Supabase project config readable through Safebox
     (``SUPABASE_URL`` and a public/browser key; ``SUPABASE_JWT_SECRET`` is legacy fallback only)."""
     store = _store()
@@ -18421,22 +18414,7 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
                 session, session_token = leaves["identity"].start_session(
                     leaf, business, user_record.id
                 )
-                existing_free = any(
-                    ent.source == "manual" and ent.tier == "free"
-                    for ent in leaves["entitlements"].list_entitlements(
-                        leaf, business, app_user_id=user_record.id
-                    )
-                )
-                if not existing_free:
-                    leaves["entitlements"].grant_entitlement(
-                        leaf,
-                        business,
-                        app_user_id=user_record.id,
-                        tier="free",
-                        status="active",
-                        source="manual",
-                        metadata={"source": "supabase"},
-                    )
+                leaves["entitlements"].resolve_user_tier(leaf, business, user_record.id)
                 refreshed = leaves["identity"].get_app_user(
                     leaf, business, app_user_id=user_record.id
                 )
@@ -28104,7 +28082,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_grant_app_entitlement",
-        "description": "Grant a product customer a free or explicit non-billing entitlement. Paid billing entitlements require Stripe/webhook evidence.",
+        "description": "Grant a product customer a paid entitlement. Unpaid users should have no entitlement row; any entitlement requires Stripe/webhook evidence.",
         "handler": handle_business_grant_app_entitlement,
         "schema": _schema("business_grant_app_entitlement", "Grant product app entitlement.", {"business": _BUSINESS_PROP, "app_user_id": {"type": "string"}, "email": {"type": "string"}, "tier": {"type": "string"}, "status": {"type": "string"}, "source": {"type": "string"}, "plan_key": {"type": "string"}, "current_period_end": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "tier", "idempotency_key"]),
     },

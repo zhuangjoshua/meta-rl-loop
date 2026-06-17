@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
+SUPABASE_AUTH_HELPER="$ROOT_DIR/deploy/shared/supabase-auth-env.sh"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@67.205.158.170}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -24,6 +25,11 @@ fi
 
 if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   echo "deploy key not found: $TAKYON_VPS_KEY" >&2
+  exit 1
+fi
+
+if [[ ! -x "$SUPABASE_AUTH_HELPER" ]]; then
+  echo "supabase auth helper not found or not executable: $SUPABASE_AUTH_HELPER" >&2
   exit 1
 fi
 
@@ -67,6 +73,11 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
     echo 'TAKYON_SAFEBOX_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
     exit 1
   fi
+  bash -s -- validate-file /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  < "$SUPABASE_AUTH_HELPER"
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
