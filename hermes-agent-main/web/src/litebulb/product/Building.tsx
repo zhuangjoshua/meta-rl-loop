@@ -1,8 +1,7 @@
 import type { BuildState } from "../takyon/useTakyonLitebulb";
+import { deriveLiveWorkstreamCard, deriveWorkstreamItems } from "@/lib/takyonCeoUpdates";
 import { BulbMark } from "../shared/icons";
 import "./building.css";
-
-const PHASES = ["Understand", "Name", "Design", "Build", "Deploy", "Launch"];
 
 const clock = (index: number) => {
   const t = 9 * 3600 + 41 * 60 + 7 + index * 3;
@@ -25,8 +24,31 @@ export function Building({
   const terminal = state.terminal.length ? state.terminal : ["Booting Litebulb CEO…"];
   const done = state.status === "ready";
   const errored = state.status === "error";
-  const activeIdx = Math.min(PHASES.length - 1, Math.max(0, narration.length - 1));
-  const pct = done ? 100 : Math.min(95, Math.max(8, narration.length * 12));
+  const businessName = state.businessName.trim() || "your company";
+  const progress = deriveLiveWorkstreamCard({
+    running: !done && !errored,
+    businessName,
+    statusItems: narration,
+    progressLines: terminal,
+  });
+  const fallbackItems = deriveWorkstreamItems({
+    statusItems: narration,
+    progressLines: terminal,
+  }).items;
+  const items = progress?.items.length ? progress.items : fallbackItems;
+  const completed = items.filter((item) => item.status === "complete");
+  const current = items.find((item) => item.status === "running" || item.status === "blocked");
+  const pct = done
+    ? 100
+    : errored
+      ? Math.max(12, Math.round((completed.length / Math.max(items.length, 1)) * 100))
+      : Math.min(
+          95,
+          Math.max(
+            10,
+            Math.round(((completed.length + (current ? 0.5 : 0)) / Math.max(items.length, 1)) * 100),
+          ),
+        );
   const title = state.businessName.trim();
 
   return (
@@ -41,30 +63,86 @@ export function Building({
         </header>
 
         <div className="lb-bld__cols">
-          <div className="lb-bld__stream">
-            {narration.map((line, index) => (
-              <p key={`${index}-${line}`} className={`lb-bld__say${index === narration.length - 1 && !done && !errored ? " is-live" : ""}`}>{line}</p>
-            ))}
-            {errored && state.error && <p className="lb-bld__say is-live">{state.error}</p>}
-          </div>
+          <section className="lb-bld__card">
+            <div className="lb-bld__eyebrow">CEO update</div>
+            <h2 className="lb-bld__card-title">
+              {errored
+                ? `${businessName} needs attention`
+                : done
+                  ? `${businessName} workspace is ready`
+                  : progress?.title || `Starting ${businessName}`}
+            </h2>
+            <p className="lb-bld__card-copy">
+              {errored
+                ? (state.error || "The build needs attention before it can continue.")
+                : done
+                  ? "The first company workspace is ready. I’m handing you into the live operating surface now."
+                  : progress?.summary || "I’m moving this through the next business workstream now."}
+            </p>
+
+            {completed.length > 0 && (
+              <div className="lb-bld__section">
+                <div className="lb-bld__label">What changed</div>
+                <ul className="lb-bld__list">
+                  {completed.map((item) => (
+                    <li key={item.key}>{item.completeLabel}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {!errored && progress?.current && (
+              <div className="lb-bld__section">
+                <div className="lb-bld__label">Working now</div>
+                <p className="lb-bld__text">
+                  {progress.current}
+                  {!done && <span className="lb-bld__inline-live">▋</span>}
+                </p>
+              </div>
+            )}
+
+            {errored ? null : progress?.next ? (
+              <div className="lb-bld__section">
+                <div className="lb-bld__label">Next</div>
+                <p className="lb-bld__text">{progress.next}</p>
+              </div>
+            ) : null}
+
+            {progress?.blocked && (
+              <div className="lb-bld__section">
+                <div className="lb-bld__label">Blocked</div>
+                <p className="lb-bld__text">{progress.blocked}</p>
+              </div>
+            )}
+          </section>
 
           <aside className="lb-bld__side">
             <ol className="lb-bld__phases">
-              {PHASES.map((phase, index) => {
-                const status = done || index < activeIdx ? "done" : index === activeIdx ? "active" : "todo";
-                return (
-                  <li key={phase} className={`lb-bld__phase is-${status}`}>
-                    <span className="lb-bld__phase-ic" aria-hidden="true" />{phase}
-                  </li>
-                );
-              })}
-            </ol>
-            <div className="lb-bld__term" aria-hidden="true">
-              {terminal.map((line, index) => (
-                <div key={`${index}-${line}`} className="lb-bld__termline"><span className="lb-bld__t">{clock(index)}</span>{line}</div>
+              {items.map((item) => (
+                <li key={item.key} className={`lb-bld__phase is-${item.status}`}>
+                  <span className="lb-bld__phase-ic" aria-hidden="true" />
+                  {item.status === "complete" ? item.completeLabel : item.label}
+                </li>
               ))}
-              {!done && !errored && <div className="lb-bld__termline"><span className="lb-bld__t">{clock(terminal.length)}</span><span className="lb-bld__blink">▋</span></div>}
-            </div>
+            </ol>
+            <details className="lb-bld__details">
+              <summary>View build details</summary>
+              <div className="lb-bld__term">
+                {terminal.map((line, index) => (
+                  <div key={`${index}-${line}`} className="lb-bld__termline"><span className="lb-bld__t">{clock(index)}</span>{line}</div>
+                ))}
+                {!done && !errored && <div className="lb-bld__termline"><span className="lb-bld__t">{clock(terminal.length)}</span><span className="lb-bld__blink">▋</span></div>}
+              </div>
+              <div className="lb-bld__raw">
+                <div className="lb-bld__label">Narration</div>
+                <ul className="lb-bld__raw-list">
+                  {narration.map((line, index) => (
+                    <li key={`${index}-${line}`}>{line}</li>
+                  ))}
+                  {errored && state.error && <li>{state.error}</li>}
+                </ul>
+              </div>
+            </details>
           </aside>
         </div>
 
