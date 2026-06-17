@@ -1,5 +1,5 @@
 import type { BuildState } from "../takyon/useTakyonLitebulb";
-import { deriveLiveWorkstreamCard, deriveWorkstreamItems } from "@/lib/takyonCeoUpdates";
+import { deriveLinearArtifacts, deriveLiveWorkstreamCard, deriveWorkstreamItems } from "@/lib/takyonCeoUpdates";
 import { BulbMark } from "../shared/icons";
 import "./building.css";
 
@@ -36,6 +36,10 @@ export function Building({
     progressLines: terminal,
   }).items;
   const items = progress?.items.length ? progress.items : fallbackItems;
+  // Linear, chronological artifact feed: each artifact the CEO writes appears in
+  // first-seen order as it lands during bootstrap. Sourced append-only from the
+  // narration + terminal stream (presentation only).
+  const artifacts = deriveLinearArtifacts([...narration, ...terminal]);
   const completed = items.filter((item) => item.status === "complete");
   const current = items.find((item) => item.status === "running" || item.status === "blocked");
   const pct = done
@@ -88,6 +92,21 @@ export function Building({
                     <li key={item.key}>{item.completeLabel}</li>
                   ))}
                 </ul>
+              </div>
+            )}
+
+            {artifacts.length > 0 && (
+              <div className="lb-bld__section">
+                <div className="lb-bld__label">Artifacts</div>
+                <ol className="lb-bld__artifacts">
+                  {artifacts.map((artifact) => (
+                    <li key={artifact.path} className={`lb-bld__artifact is-${artifact.category}`}>
+                      <span className="lb-bld__artifact-ic" aria-hidden="true" />
+                      <span className="lb-bld__artifact-name">{artifact.title}</span>
+                      <span className="lb-bld__artifact-path">{artifact.path}</span>
+                    </li>
+                  ))}
+                </ol>
               </div>
             )}
 

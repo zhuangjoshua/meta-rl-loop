@@ -385,6 +385,96 @@ function extractPaths(text: string): string[] {
   return [...paths].slice(0, 8);
 }
 
+// Internal toolchain artifacts the CEO writes incidentally while building —
+// never surfaced as operator-facing deliverables (card "Dont show all raw
+// documents"). Mirrors the backend _takyon_hide_operator_output filter.
+const INTERNAL_ARTIFACT_DIR_SEGMENTS = [
+  "node_modules/",
+  "/.next/",
+  ".next/cache/",
+  "/.cache/",
+  "/__pycache__/",
+  "/.git/",
+  "/dist/",
+  "/build/",
+  "/.turbo/",
+  "/.vite/",
+];
+const INTERNAL_ARTIFACT_BASENAMES = new Set([
+  "skill.md",
+  "config.yaml",
+  "config.yml",
+  "package.json",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "uv.lock",
+  "poetry.lock",
+  "requirements.txt",
+  "pyproject.toml",
+  "tsconfig.json",
+  "vite.config.ts",
+  "vite.config.js",
+  "agents.md",
+  "claude.md",
+]);
+// Code module suffixes are internal source, not operator deliverables.
+const INTERNAL_ARTIFACT_SUFFIXES = new Set(["ts", "tsx", "js", "jsx"]);
+
+function isInternalArtifactPath(candidate: string): boolean {
+  const normalized = `/${candidate.replace(/^\/+/, "")}`.toLowerCase();
+  if (INTERNAL_ARTIFACT_DIR_SEGMENTS.some((seg) => normalized.includes(seg))) return true;
+  const base = (candidate.split("/").pop() || "").toLowerCase();
+  if (INTERNAL_ARTIFACT_BASENAMES.has(base)) return true;
+  if (base.endsWith(".lock")) return true;
+  const suffix = (base.split(".").pop() || "").toLowerCase();
+  // Keep website source files (under product/site/) visible even if .js/.ts.
+  if (INTERNAL_ARTIFACT_SUFFIXES.has(suffix) && !normalized.includes("/product/site/")) return true;
+  return false;
+}
+
+export type LinearArtifact = {
+  path: string;
+  title: string;
+  category: "research" | "product" | "launch" | "other";
+};
+
+function artifactCategory(path: string): LinearArtifact["category"] {
+  const p = path.toLowerCase();
+  if (p.startsWith("research/") || p.includes("/research/") || p.startsWith("brain/")) return "research";
+  if (p.startsWith("product/") || p.includes("/product/") || p.includes("site/")) return "product";
+  if (
+    p.startsWith("distribution/")
+    || p.startsWith("outreach/")
+    || p.startsWith("campaigns/")
+    || p.includes("/receipts/")
+  ) {
+    return "launch";
+  }
+  return "other";
+}
+
+/**
+ * Surface bootstrap artifacts linearly: scan ordered build-stream lines and
+ * return each business-meaningful artifact in first-seen (chronological,
+ * append-only) order. Internal toolchain files are filtered out. Presentation
+ * only — derived from the existing narration/terminal stream, no runtime change.
+ */
+export function deriveLinearArtifacts(lines: string[], limit = 24): LinearArtifact[] {
+  const seen = new Set<string>();
+  const artifacts: LinearArtifact[] = [];
+  for (const line of lines) {
+    for (const path of extractPaths(line)) {
+      if (seen.has(path) || isInternalArtifactPath(path)) continue;
+      seen.add(path);
+      const name = path.split("/").pop() || path;
+      artifacts.push({ path, title: name, category: artifactCategory(path) });
+      if (artifacts.length >= limit) return artifacts;
+    }
+  }
+  return artifacts;
+}
+
 function looksTechnicalAssistantReceipt(text: string): boolean {
   const normalized = cleanText(text);
   if (!normalized.trim()) return false;

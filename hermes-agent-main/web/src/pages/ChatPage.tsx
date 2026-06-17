@@ -1189,6 +1189,49 @@ function recentToolLabels(tools: ToolEntry[] | undefined): string[] {
   return recent.filter((label, index) => index === 0 || recent[index - 1] !== label);
 }
 
+// Internal toolchain directories/files the CEO writes incidentally while
+// building. They are never operator-facing deliverables, so they must not be
+// promoted in the chat deliverables list (card "Dont show all raw documents").
+const INTERNAL_PATH_SEGMENTS = [
+  "node_modules/",
+  "/.next/",
+  ".next/cache/",
+  "/.cache/",
+  "/__pycache__/",
+  "/.git/",
+  "/dist/",
+  "/build/",
+  "/.turbo/",
+  "/.vite/",
+];
+const INTERNAL_PATH_BASENAMES = new Set([
+  "skill.md",
+  "config.yaml",
+  "config.yml",
+  "package.json",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "uv.lock",
+  "poetry.lock",
+  "requirements.txt",
+  "pyproject.toml",
+  "tsconfig.json",
+  "vite.config.ts",
+  "vite.config.js",
+  "agents.md",
+  "claude.md",
+]);
+
+function isInternalDeliverablePath(candidate: string): boolean {
+  const normalized = `/${candidate.replace(/^\/+/, "")}`.toLowerCase();
+  if (INTERNAL_PATH_SEGMENTS.some((seg) => normalized.includes(seg))) return true;
+  const base = (candidate.split("/").pop() || "").toLowerCase();
+  if (INTERNAL_PATH_BASENAMES.has(base)) return true;
+  if (base.endsWith(".lock")) return true;
+  return false;
+}
+
 function extractPaths(text: string): string[] {
   const paths = new Set<string>();
   const patterns = [
@@ -1201,7 +1244,7 @@ function extractPaths(text: string): string[] {
   for (const pattern of patterns) {
     for (const match of text.matchAll(pattern)) {
       const candidate = (match[1] ?? match[0]).trim();
-      if (candidate && !candidate.includes("node_modules")) {
+      if (candidate && !isInternalDeliverablePath(candidate)) {
         paths.add(cleanText(candidate.replace(/^["'`]|["'`]$/g, "")));
       }
     }

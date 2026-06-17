@@ -41,8 +41,23 @@ const Icon = {
   chat: <S d="M2 3.5h12v7H6.5l-3 2.5v-2.5H2z" />,
 };
 
-function siteHost(name: string) {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "") + ".app";
+// Canonical product domain. Product sub-apps are served at
+// `<slug>.fourmanifold.com` (see takyon_cli/web_server._company_base_domain and
+// core._product_publish_target). The address bar must show this real canonical
+// host — never a fabricated `.app` placeholder.
+const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+
+// Canonical expected product host derived from the business slug. Used only as a
+// last-resort fallback when neither the published public_url nor the backend
+// publish_target is available yet.
+function canonicalProductHost(slug: string) {
+  const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
+  return clean ? `${clean}.${PRODUCT_BASE_DOMAIN}` : "";
+}
+
+// Strip scheme/trailing slash so the address bar reads as a clean host+path.
+function addressBarText(url: string) {
+  return (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
 }
 
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
@@ -399,9 +414,22 @@ function ProductPreview({
   publicUrl?: string;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
-  const site = publicUrl || siteHost(business.name);
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
+  // Authoritative URL resolution, best-to-fallback:
+  //   1. publicUrl       — the published canonical URL when live.
+  //   2. publish_target  — the backend's canonical expected URL (slug.fourmanifold.com)
+  //                        even before the product is published.
+  //   3. canonical host derived client-side from the slug.
+  // Never fabricate a `.app` placeholder.
+  const publishTarget = typeof product.publish_target === "string" ? product.publish_target : "";
+  const canonicalUrl = publicUrl || publishTarget || (
+    canonicalProductHost(business.slug) ? `https://${canonicalProductHost(business.slug)}/` : ""
+  );
+  const site = addressBarText(canonicalUrl) || canonicalProductHost(business.slug);
+  const addressLink = canonicalUrl || (
+    canonicalProductHost(business.slug) ? `https://${canonicalProductHost(business.slug)}/` : ""
+  );
   const previewAvailable = Boolean(product.preview_available);
   const previewPath = typeof product.preview_path === "string" ? product.preview_path : "product/site";
   const previewStatus = typeof product.preview_status === "string" ? product.preview_status : "";
@@ -437,7 +465,19 @@ function ProductPreview({
       <div className={`lb-browser lb-browser--${device}`}>
         <div className="lb-browser__chrome">
           <span className="lb-traffic"><span /><span /><span /></span>
-          <span className="lb-browser__addr">{site}</span>
+          {addressLink ? (
+            <a
+              className="lb-browser__addr"
+              href={addressLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={addressLink}
+            >
+              {site}
+            </a>
+          ) : (
+            <span className="lb-browser__addr">{site}</span>
+          )}
           <span className="lb-browser__tools">
             <span className="lb-seg2">
               <button className={device === "desktop" ? "is-on" : ""} onClick={() => setDevice("desktop")} aria-label="Desktop">{Icon.monitor}</button>
