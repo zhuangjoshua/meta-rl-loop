@@ -45,6 +45,7 @@
 .lb-set__seg button:hover { color: var(--cds-color-text-default); }
 .lb-set__seg button.is-active { background: var(--cds-color-surface-card); color: var(--cds-color-text-default); box-shadow: var(--cds-shadow-xs); }
 .lb-set__muted { color: var(--cds-color-text-soft); font-size: var(--cds-text-sm); }
+.lb-set__nudge { margin-bottom: var(--cds-space-4); padding: 10px 14px; border-radius: var(--cds-radius-md); background: var(--cds-color-surface-warning, #fff7ed); border: 1px solid var(--cds-color-border-warning, #f59e0b); color: var(--cds-color-text-default); font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); }
 .lb-set__hint { margin: 0 0 var(--cds-space-4); color: var(--cds-color-text-soft); font-size: var(--cds-text-sm); }
 .lb-set__save { margin-top: var(--cds-space-5); }
 .lb-set__planrow, .lb-set__usage { display: flex; align-items: center; justify-content: space-between; gap: 16px; }

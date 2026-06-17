@@ -58,6 +58,7 @@ function Router() {
     businesses,
     account,
     activeBusiness,
+    walletBalance,
     workspace,
     creativeCredits,
     traction,
@@ -93,6 +94,7 @@ function Router() {
   });
   const [authModal, setAuthModal] = useState<AuthMode | null>(null);
   const [settings, setSettings] = useState<SettingsSection | null>(null);
+  const [billingNudge, setBillingNudge] = useState<string>("");
   const [pendingIdea, setPendingIdea] = useState(() => readPendingIdea());
 
   const setTheme = (value: Theme) => {
@@ -134,8 +136,18 @@ function Router() {
       return;
     }
     if (buildState.status !== "idle") return;
+    // GOAL_RULES §3 gap #2: defense in depth — even if /building is reached directly, never call
+    // createBusiness until the account balance has loaded AND is positive. A null balance (account
+    // not yet loaded) must NOT silently create; bounce to billing instead of spending.
+    if (walletBalance === null) return;
+    if (walletBalance <= 0) {
+      setBillingNudge("Add credits to create a company.");
+      setSettings("billing");
+      nav("/");
+      return;
+    }
     void createBusiness(pendingIdea);
-  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState]);
+  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState, walletBalance]);
 
   useEffect(() => {
     if (path !== "/building") return;
@@ -158,11 +170,30 @@ function Router() {
       setAuthModal("signup");
       return;
     }
+    // GOAL_RULES §3 gap #2 (frontend half): never enter /building (which auto-calls createBusiness)
+    // for an operator who cannot pay. walletBalance is spendable_cents (allowance remaining + topup).
+    //   * null  → account not loaded yet: defer (do NOT create); the user can retry once it loads.
+    //   * <= 0  → no funds: open billing instead of /building and show an add-credits nudge.
+    // The backend preflight (takyon.dashboard.create → _operator_create_balance_preflight) is the
+    // authoritative gate; this is the UX guard so no /building screen is shown for a zero balance.
+    if (walletBalance === null) {
+      setBillingNudge("Loading your balance… try again in a moment.");
+      setSettings("billing");
+      return;
+    }
+    if (walletBalance <= 0) {
+      setBillingNudge("Add credits to create a company.");
+      setSettings("billing");
+      return;
+    }
     nav("/building");
   };
 
   const openSettings = (section: SettingsSection) => setSettings(section);
-  const closeSettings = () => setSettings(null);
+  const closeSettings = () => {
+    setSettings(null);
+    setBillingNudge("");
+  };
 
   let view;
   if (gated) {
@@ -236,6 +267,7 @@ function Router() {
           account={account}
           portalBusy={billingBusy}
           topupBusy={topupBusy}
+          nudge={billingNudge}
           onTheme={setTheme}
           onOpenPortal={openBillingPortal}
           onTopup={startTopup}

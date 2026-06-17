@@ -36,6 +36,28 @@ from tui_gateway.transport import (
 
 logger = logging.getLogger(__name__)
 
+_INSUFFICIENT_OPERATOR_BALANCE_CLS: Optional[type] = None
+
+
+def _insufficient_operator_balance_cls() -> type:
+    """Lazily resolve plugins.takyon.cli.InsufficientOperatorBalance (the §3 gap #2
+    company-creation balance-block exception) for the create handler's ``except`` clause, without
+    importing the heavy cli module at gateway load. Cached after first resolution; falls back to a
+    never-matching sentinel only if cli is somehow unavailable so the generic handler still runs."""
+    global _INSUFFICIENT_OPERATOR_BALANCE_CLS
+    if _INSUFFICIENT_OPERATOR_BALANCE_CLS is None:
+        try:
+            from plugins.takyon.cli import InsufficientOperatorBalance
+
+            _INSUFFICIENT_OPERATOR_BALANCE_CLS = InsufficientOperatorBalance
+        except Exception:  # pragma: no cover - cli is always importable on the create path
+            class _NeverInsufficientBalance(Exception):
+                ...
+
+            _INSUFFICIENT_OPERATOR_BALANCE_CLS = _NeverInsufficientBalance
+    return _INSUFFICIENT_OPERATOR_BALANCE_CLS
+
+
 _TAKYON_AGENT_TOOLSETS = ["takyon", "web", "skills", "todo"]
 _TAKYON_DISABLED_TOOLSETS = [
     "browser",
@@ -9819,6 +9841,11 @@ def _(rid, params: dict) -> dict:
         read_model_config = getattr(takyon_cli, "_read_model_config", lambda _store: {})
         build_bootstrap_turn = getattr(takyon_cli, "_ceo_bootstrap_turn_config", None)
         operator_user_id = _takyon_operator_user_id(session) or None
+        # GOAL_RULES §3 gap #2: zero-balance company-creation preflight. Bootstrapping a company
+        # spends real operator money, so refuse BEFORE any business row, identity resolution, or
+        # bootstrap work when the operator has no spendable balance. Raises
+        # InsufficientOperatorBalance (mapped to 4030 below); fail-open only for identity-less/dev.
+        takyon_cli._operator_create_balance_preflight(operator_user_id)
         resolved_name, slug = resolve_dashboard_create_identity(
             requested_name,
             requested_goal,
@@ -10081,6 +10108,16 @@ def _(rid, params: dict) -> dict:
                 with history_lock:
                     session["running"] = False
         return _err(rid, 4004, str(e))
+    except _insufficient_operator_balance_cls() as e:
+        # GOAL_RULES §3 gap #2: clean balance-block. Map to 4030 (insufficient operator balance) so
+        # the dashboard nudges the user to add credits instead of showing a generic create failure.
+        # No business was created (the preflight runs before any write).
+        if not started_stream:
+            history_lock = session.get("history_lock")
+            if history_lock is not None:
+                with history_lock:
+                    session["running"] = False
+        return _err(rid, 4030, str(e))
     except Exception as e:
         if not started_stream:
             history_lock = session.get("history_lock")

@@ -281,6 +281,9 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "latexflow")
     monkeypatch.setattr(
@@ -385,6 +388,9 @@ def test_takyon_dashboard_create_bootstrap_false_creates_ready_dev_business(serv
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "dev-lab")
     monkeypatch.setattr(
@@ -472,6 +478,9 @@ def test_takyon_dashboard_create_rejects_existing_normalized_slug(server, monkey
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
 
     response = server._methods["takyon.dashboard.create"](
@@ -488,6 +497,67 @@ def test_takyon_dashboard_create_rejects_existing_normalized_slug(server, monkey
     assert response["error"]["code"] == 4004
     assert "fresh slug" in response["error"]["message"]
     assert "cat-app" in response["error"]["message"]
+
+
+def test_takyon_dashboard_create_blocks_on_insufficient_operator_balance(server, monkeypatch):
+    """GOAL_RULES §3 gap #2 end-to-end: the dashboard.create method runs the operator-balance
+    preflight and, when it raises InsufficientOperatorBalance, returns a clean 4030 block and NEVER
+    calls run_takyon_command (no business is created, no bootstrap spend)."""
+    sid = "takyon-session"
+    server._sessions[sid] = {"takyon_current_business": "", "takyon_operator_user_id": "broke-user"}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class InsufficientOperatorBalance(Exception):
+        pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+    called = {"run": False, "resolve_identity": False}
+
+    def fake_preflight(operator_user_id):
+        assert operator_user_id == "broke-user"
+        raise InsufficientOperatorBalance(
+            "insufficient_balance: company creation requires a positive operator balance "
+            "(spendable 0c = allowance 0c + topup 0c)"
+        )
+
+    def fake_resolve_dashboard_create_identity(*_a, **_k):
+        called["resolve_identity"] = True  # must NOT happen — preflight runs first
+        return "Broke Co", "broke-co"
+
+    def fake_run_takyon_command(*_a, **_k):
+        called["run"] = True  # must NEVER be reached on a balance block
+        return {"success": True, "business": "broke-co", "mode": "live"}
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli.InsufficientOperatorBalance = InsufficientOperatorBalance
+    fake_cli._operator_create_balance_preflight = fake_preflight
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    # Pin the gateway's except-clause class to the one the fake preflight raises (bypass the cached
+    # lazy resolver so the block is caught deterministically regardless of test ordering).
+    monkeypatch.setattr(server, "_INSUFFICIENT_OPERATOR_BALANCE_CLS", InsufficientOperatorBalance)
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-broke-1",
+        {
+            "session_id": sid,
+            "business": "broke-co",
+            "business_name": "Broke Co",
+            "goal": "doomed idea",
+            "mode": "live",
+        },
+    )
+
+    assert response["error"]["code"] == 4030  # insufficient operator balance block
+    assert "insufficient_balance" in response["error"]["message"]
+    assert called["run"] is False  # run_takyon_command never reached → no business created
+    assert called["resolve_identity"] is False  # preflight gates before identity resolution
+    assert server._sessions[sid].get("running") in (False, None)  # session not left busy
 
 
 def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch):
@@ -521,6 +591,9 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "longer")
     monkeypatch.setattr(
@@ -599,6 +672,9 @@ def test_takyon_dashboard_create_seeds_current_name_on_first_response(server, mo
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "longer")
     monkeypatch.setattr(
@@ -676,6 +752,9 @@ def test_takyon_dashboard_create_requires_durable_business_before_streaming(serv
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "ghost")
     monkeypatch.setattr(
@@ -748,6 +827,9 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
     fake_cli.TakyonStore = FakeStore
     fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
     fake_cli.run_takyon_command = fake_run_takyon_command
+    # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
+    # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
     fake_cli._ceo_bootstrap_turn_config = fake_bootstrap_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "latexflow")
