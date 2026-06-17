@@ -448,7 +448,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     },
     "usage": {
         "owner_skill": "takyon-app-runtime",
-        "tools": ["business_configure_app_budget", "business_record_app_usage"],
+        "tools": ["business_record_app_usage"],
         "endpoints": [("GET", "account"), ("POST", "usage")],
         "worker_contract": [
             "Usage summary currently reads from the account rail and usage metering writes through POST /usage.",
@@ -17608,15 +17608,6 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
         store=store,
     )
 
-def handle_business_configure_app_budget(args: dict, **_: Any) -> str:
-    operation = {
-        "action": "app.budget.set",
-        "business": args.get("business"),
-        "hard_limit_microusd": args.get("hard_limit_microusd"),
-        "status": args.get("status") or "active",
-    }
-    return _commit_tool(args, operation)
-
 
 def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
     operation = {
@@ -28590,12 +28581,6 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Write flexible per-business memory under research/ for strategy, pricing, product, distribution, learning, and CEO notes.",
         "handler": handle_business_record_memory,
         "schema": _schema("business_record_memory", "Write business research memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
-    },
-    {
-        "name": "business_configure_app_budget",
-        "description": "Set the business product app's overall usage budget cap for one business.",
-        "handler": handle_business_configure_app_budget,
-        "schema": _schema("business_configure_app_budget", "Set product app budget cap.", {"business": _BUSINESS_PROP, "hard_limit_microusd": {"type": "integer"}, "status": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "hard_limit_microusd", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_surface_contract",

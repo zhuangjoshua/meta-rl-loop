@@ -825,6 +825,30 @@ def get_or_create_service_principal(store: Any, conn: Any, business_slug: str) -
     return created
 
 
+def _require_active_entitlement(entitlement) -> None:
+    """Mirror of ``ai_gateway._require_active_entitlement`` for the ACTION reserve path
+    (GOAL_RULES §3 gap #4). A billable action with NO active paid entitlement behind it must be
+    REFUSED before any spend is held — never silently funded by a per-business pool (invariant 9
+    removed that pool). Raises ``ActionBudgetExceeded`` carrying ``subscription_required`` so the
+    runtime surfaces the same 402-equivalent the gateway does."""
+    if entitlement is None:
+        raise ActionBudgetExceeded("subscription_required: no active paid entitlement for billable action")
+
+
+def _plan_derived_user_limit_microusd(plan) -> int:
+    """CENTRALIZED per-user-limit resolution (GOAL_RULES §3 gap #4: "centralize per-user-limit
+    resolution ... unify to plan-derived-or-0"). Delegates to THE canonical resolver
+    ``ai_gateway._user_monthly_budget_microusd`` so the action reserve path and the gateway path
+    share ONE rule: a paid plan grants exactly its ``included_ai_budget_microusd`` (the ``y``
+    term); a free / unentitled / absent plan grants 0. NEVER returns None (an uncapped per-user
+    limit would defeat the only gate)."""
+    try:
+        from .ai_gateway import _user_monthly_budget_microusd
+    except Exception:
+        from plugins.takyon.ai_gateway import _user_monthly_budget_microusd
+    return _user_monthly_budget_microusd(plan)
+
+
 def _resolve_pg_action_usage_limit(
     store: Any,
     conn: Any,
@@ -832,17 +856,33 @@ def _resolve_pg_action_usage_limit(
     business_slug: str,
     app_user_id: str | None,
     app_user_tier: str | None,
-) -> tuple[str | None, int | None]:
+) -> tuple[str | None, int]:
+    """Resolve ``(tier, per_user_limit_microusd)`` for a billable action reserve.
+
+    GOAL_RULES §3 gap #4: this path MUST require an active entitlement (mirror the gateway) and
+    return a CONCRETE per-user limit (plan-derived-or-0), NEVER an unbounded ``None`` that would
+    fall through to the (now-removed) per-business pool = ungated spend. A ``service``/null caller
+    with no active paid entitlement raises ``ActionBudgetExceeded`` (subscription_required); an
+    entitled caller resolves to its paid plan's ``included_ai_budget_microusd``."""
     resolved_user_tier = str(app_user_tier or "").strip() or None
-    if not app_user_id or str(app_user_tier or "").strip().lower() == "service":
-        return resolved_user_tier, None
 
     leaves = store._app_leaves()
     with store._leaf_conn(conn) as raw:
-        app_user = leaves["identity"].get_app_user(raw, business_slug, app_user_id=app_user_id)
+        app_user = (
+            leaves["identity"].get_app_user(raw, business_slug, app_user_id=app_user_id)
+            if app_user_id
+            else None
+        )
         if app_user is not None:
             resolved_user_tier = resolved_user_tier or str(getattr(app_user, "tier", "") or "").strip() or None
-        entitlement = leaves["entitlements"].get_active_entitlement(raw, business_slug, app_user_id)
+        entitlement = (
+            leaves["entitlements"].get_active_entitlement(raw, business_slug, app_user_id)
+            if app_user_id
+            else None
+        )
+        # Require an active paid entitlement before any billable spend is held (gap #4): a
+        # service/null-subuser action with no entitlement is refused, never pool-funded.
+        _require_active_entitlement(entitlement)
         plan = None
         if entitlement is not None and getattr(entitlement, "plan_key", None):
             plan = leaves["entitlements"].get_plan_policy(raw, business_slug, entitlement.plan_key)
@@ -851,9 +891,7 @@ def _resolve_pg_action_usage_limit(
                 if str(getattr(candidate, "tier", "") or "") == resolved_user_tier:
                     plan = candidate
                     break
-        if plan is not None and str(getattr(plan, "tier", "") or "").strip().lower() not in {"", "free", "none", "unentitled"}:
-            return resolved_user_tier, max(0, int(getattr(plan, "included_ai_budget_microusd", 0) or 0))
-    return resolved_user_tier, 0
+    return resolved_user_tier, _plan_derived_user_limit_microusd(plan)
 
 
 def reconcile_action_schedules(
@@ -1259,13 +1297,21 @@ def _reserve_usage(
         with store._connect() as conn:
             if isinstance(conn, _PGConn):
                 try:
-                    resolved_user_tier, user_monthly_limit_microusd = _resolve_pg_action_usage_limit(
-                        store,
-                        conn,
-                        business_slug=business_slug,
-                        app_user_id=app_user_id,
-                        app_user_tier=app_user_tier,
-                    )
+                    if estimate_microusd > 0:
+                        # Billable spend: require an active paid entitlement and resolve a concrete
+                        # plan-derived-or-0 per-user limit (GOAL_RULES §3 gap #4 — no ungated pool
+                        # fall-through). A free (zero-cost) action moves no money, so it is not
+                        # gated on a subscription.
+                        resolved_user_tier, user_monthly_limit_microusd = _resolve_pg_action_usage_limit(
+                            store,
+                            conn,
+                            business_slug=business_slug,
+                            app_user_id=app_user_id,
+                            app_user_tier=app_user_tier,
+                        )
+                    else:
+                        resolved_user_tier = str(app_user_tier or "").strip() or None
+                        user_monthly_limit_microusd = None
                     with store._leaf_conn(conn) as raw:
                         app_usage.reserve_usage(
                             raw,

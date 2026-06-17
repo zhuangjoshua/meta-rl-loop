@@ -6841,7 +6841,7 @@ def _build_takyon_prompt_text(
                 "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
                 "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
                 "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
-                "If the product has AI-backed customer usage, configure the business app usage budget with business_configure_app_budget before recording or enabling that usage.\n\n"
+                "If the product has AI-backed customer usage, that usage budget is funded by the active paid subscription's included AI budget (set plan pricing with business_upsert_app_plan); there is no separate operator usage-cap tool.\n\n"
                 + prompt_text
             )
     return prompt_text
