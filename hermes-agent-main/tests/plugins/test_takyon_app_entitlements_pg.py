@@ -26,6 +26,7 @@ from plugins.takyon import app_entitlements, app_identity  # noqa: E402
 from plugins.takyon.app_entitlements import (  # noqa: E402
     AppUserNotFound,
     FakeBillingRejected,
+    GrandfatheredPlanFrozen,
     InvalidEntitlementTier,
     InvalidPlan,
 )
@@ -377,3 +378,118 @@ def test_list_entitlements_scoped_to_user(pg_conn):
     assert len(app_entitlements.list_entitlements(pg_conn, slug, app_user_id=u1)) == 2
     assert len(app_entitlements.list_entitlements(pg_conn, slug, app_user_id=u2)) == 1
     assert len(app_entitlements.list_entitlements(pg_conn, slug)) == 3
+
+
+# ── grandfather guard: a live plan_key's economic terms are frozen ───────────────────
+#
+# Re-pricing a plan_key that someone is actively subscribed to would silently mutate
+# existing (grandfathered) users, because entitlements reference the live plan row, not a
+# price snapshot. The leaf refuses it; new pricing must be a NEW plan_key. There is no
+# override flag — this invariant is not bypassable by the caller.
+
+
+def _subscribe(conn, slug, plan_key, *, status="active", email="cust@example.com"):
+    """Grant an entitlement that locks `plan_key` (with Stripe evidence so it is not rejected)."""
+    user_id = _user(conn, slug, email=email)
+    app_entitlements.grant_entitlement(
+        conn,
+        slug,
+        app_user_id=user_id,
+        tier="paid",
+        status=status,
+        source="stripe",
+        stripe_subscription_id=f"sub_{uuid.uuid4().hex[:8]}",
+        plan_key=plan_key,
+    )
+    return user_id
+
+
+def test_count_active_entitlements_for_plan_counts_only_active(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=1000)
+    assert app_entitlements.count_active_entitlements_for_plan(pg_conn, slug, "pro") == 0
+    _subscribe(pg_conn, slug, "pro", email="a@example.com")
+    _subscribe(pg_conn, slug, "pro", status="canceled", email="b@example.com")
+    # canceled does not confer a tier, so it must not count toward the freeze
+    assert app_entitlements.count_active_entitlements_for_plan(pg_conn, slug, "pro") == 1
+
+
+def test_reprice_plan_without_subscribers_is_allowed(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=1000)
+    # no live subscribers → free to re-price in place
+    plan = app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    assert plan.price_cents == 2000
+
+
+def test_reprice_plan_with_active_subscriber_is_frozen(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    _subscribe(pg_conn, slug, "pro")
+    with pytest.raises(GrandfatheredPlanFrozen) as exc:
+        app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=3000)
+    assert "price_cents" in str(exc.value)
+    # the live plan row is untouched — the grandfathered subscriber keeps the old price
+    assert app_entitlements.get_plan_policy(pg_conn, slug, "pro").price_cents == 2000
+
+
+def test_freeze_covers_included_ai_budget_on_live_plan(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(
+        pg_conn, slug, "pro", tier="paid", price_cents=2000, included_ai_budget_microusd=5_000_000
+    )
+    _subscribe(pg_conn, slug, "pro")
+    # the included AI budget is an economic term; cutting it would tighten the runtime gate on
+    # an existing subscriber, so it is frozen too
+    with pytest.raises(GrandfatheredPlanFrozen) as exc:
+        app_entitlements.upsert_plan_policy(
+            pg_conn,
+            slug,
+            "pro",
+            tier="paid",
+            price_cents=2000,
+            included_ai_budget_microusd=1_000_000,
+        )
+    assert "included_ai_budget_microusd" in str(exc.value)
+
+
+def test_idempotent_reupsert_of_live_plan_is_allowed(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(
+        pg_conn, slug, "pro", tier="paid", price_cents=2000, included_ai_budget_microusd=1_000_000
+    )
+    _subscribe(pg_conn, slug, "pro")
+    # identical economic terms → no change → must NOT be refused (retries/idempotency)
+    plan = app_entitlements.upsert_plan_policy(
+        pg_conn, slug, "pro", tier="paid", price_cents=2000, included_ai_budget_microusd=1_000_000
+    )
+    assert plan.price_cents == 2000
+
+
+def test_non_economic_edit_of_live_plan_is_allowed(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    _subscribe(pg_conn, slug, "pro")
+    # editing notes / Stripe linkage while re-passing the same economic terms is fine
+    plan = app_entitlements.upsert_plan_policy(
+        pg_conn,
+        slug,
+        "pro",
+        tier="paid",
+        price_cents=2000,
+        notes="clarified copy",
+        stripe_price_id="price_live",
+    )
+    assert plan.notes == "clarified copy"
+    assert plan.stripe_price_id == "price_live"
+
+
+def test_new_plan_key_for_new_pricing_is_allowed(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    _subscribe(pg_conn, slug, "pro")
+    # the sanctioned path: mint a NEW plan_key version; the old subscriber is untouched
+    new_plan = app_entitlements.upsert_plan_policy(pg_conn, slug, "pro-2", tier="paid", price_cents=3000)
+    assert new_plan.plan_key == "pro-2"
+    assert new_plan.price_cents == 3000
+    assert app_entitlements.get_plan_policy(pg_conn, slug, "pro").price_cents == 2000

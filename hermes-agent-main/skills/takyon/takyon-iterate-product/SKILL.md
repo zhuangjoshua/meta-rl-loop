@@ -39,12 +39,14 @@ Use this skill after `takyon-build-product` and usually after `takyon-product-wo
 
 This skill is for refinement, not reinvention: sharpen one flow, strengthen conversion, clean up runtime-backed UX, or make a truthful pricing change without rebuilding the whole product.
 
+Pricing is the one change that can silently harm existing customers, so treat each `plan_key` as an immutable, versioned price offer: never re-price a `plan_key` that already has subscribers. `business_upsert_app_plan` enforces this — it refuses an in-place change to a live plan's economic terms (`tier`, `price_cents`, `currency`, `billing_interval`, `included_ai_budget_microusd`, `included_action_quota`) once that plan has active/trialing entitlements. To change pricing you mint a new `plan_key` (a new version) for new signups; existing subscribers stay grandfathered on the frozen row, which is their price snapshot. This is also the forward-compatible model: when OpenMeter later owns plan versions and entitlements, the same `plan_key`-as-version discipline carries over unchanged. Moving existing subscribers onto new pricing is a separate billing migration that is not available yet — do not fake it.
+
 ## When to Use
 
 - Use when the current product/site source already exists and the ask is "improve this" rather than "build the product from zero."
 - Use when landing, pricing, app-home, profile, or one action-backed flow needs a focused iteration.
 - Use when pricing or checkout copy must change together with the real plan catalog.
-- Use when the operator wants to raise or adjust pricing for new signups without silently mutating older paid users.
+- Use when the operator wants to raise or adjust pricing for new signups; existing paid users are grandfathered automatically because the plan tool freezes a live plan's economic terms, so you change pricing by minting a new `plan_key` version.
 - Do not use this skill for first-pass bootstrap; use `takyon-build-product`.
 - Do not use this skill for the first real in-app workflow; use `takyon-product-workflow`.
 - Do not use this skill for a major strategy, ICP, or offer reset when the business still needs fresh evidence first; use `takyon-market-research`.
@@ -89,7 +91,7 @@ This skill is for refinement, not reinvention: sharpen one flow, strengthen conv
 2. Identify the smallest real target: one page, one flow, one action, one pricing move, one paywall/account issue, or one conversion blocker.
 3. If the change touches pricing, treat the plan catalog as authoritative and mutate it with `business_upsert_app_plan`, not just copy in the UI.
 4. For monthly paid plans, keep `included_ai_budget_microusd` within the backend cap of `price_cents * 10_000`. If the requested included budget is higher, stop and report the blocker instead of faking it in copy.
-5. If the business wants higher pricing only for new signups, do not overwrite the old `plan_key` in place. Create a new sellable `plan_key` with its own Stripe price id, keep the old plan row for grandfathered subscribers, and update the product UI so new checkout routes to the intended new plan.
+5. To change pricing, mint a NEW `plan_key` version — do not try to re-price a live one. `business_upsert_app_plan` freezes a plan's economic terms (`tier`, `price_cents`, `currency`, `billing_interval`, `included_ai_budget_microusd`, `included_action_quota`) once it has active/trialing subscribers and REFUSES an in-place change with a frozen-terms error. Create a new sellable `plan_key` (e.g. `pro-2`) with its own price and Stripe price id, keep the old plan row for grandfathered subscribers, and update the product UI so new checkout routes to the new plan. If the tool returns the frozen-terms error, that is the guard working as designed — switch to a new `plan_key`; never treat it as a bug to route around. Non-economic edits (notes, metadata, Stripe linkage) to a live plan are still allowed, as long as you re-pass its current economic terms unchanged.
 6. When grandfathering exists, do not rely blindly on the scaffold defaults for public pricing:
    - `defaultSubscribePlanKey()` picks the first published plan.
    - the published plan list is ordered cheapest first.
@@ -121,7 +123,7 @@ This skill is for refinement, not reinvention: sharpen one flow, strengthen conv
 
 - Rebuilding large parts of the product when only one weak flow needed attention
 - Changing copy to a new price without changing the authoritative app plan
-- Overwriting an existing `plan_key` when the business actually wants grandfathered old subscribers
+- Trying to re-price a live `plan_key`; the tool freezes economic terms once it has subscribers, so mint a new `plan_key` version instead of fighting the gate
 - Forgetting that the default subscribe helper picks the first published plan, which can keep selling the cheapest legacy plan
 - Deleting the old plan row even though active entitlements still reference it
 - Assuming the included AI budget cap is `10%` of subscription price; the backend cap is the full monthly plan price in microusd
@@ -133,7 +135,7 @@ This skill is for refinement, not reinvention: sharpen one flow, strengthen conv
 - [ ] `product/site/` already existed and the work stayed surgical instead of becoming a full rebuild
 - [ ] Any pricing claim in the UI matches the plan catalog changed through `business_upsert_app_plan`
 - [ ] Any monthly included AI budget stays within the backend-enforced `price_cents * 10_000` cap
-- [ ] If older paid users were meant to stay grandfathered, their legacy `plan_key` was not overwritten or removed
+- [ ] A pricing change for new signups was done by minting a new `plan_key` version, not by re-pricing a plan that already has subscribers (the tool enforces this; a frozen-terms refusal means switch to a new `plan_key`)
 - [ ] Public subscribe CTAs point at the intended sellable plan, not the accidental cheapest legacy plan
 - [ ] `product/surface.md` matches the new truth
 - [ ] `product/site/_takyon/surface-context.js` was refreshed and re-checked when plans or runtime context changed
@@ -143,7 +145,7 @@ This skill is for refinement, not reinvention: sharpen one flow, strengthen conv
 
 1. Iterate from the existing product truth; do not restart the product unless the operator asked for that.
 2. Treat plan catalog mutations as authoritative runtime changes, not marketing copy.
-3. Do not mutate older paying users by reusing a live `plan_key` when the business intent is grandfathering.
+3. Change pricing by minting a new `plan_key` version; `business_upsert_app_plan` freezes a live plan's economic terms and refuses an in-place re-price, so never rely on overwriting a subscribed `plan_key`.
 4. Keep legacy plan rows while live entitlements still depend on them.
 5. Keep access/account/subscription state on the shared runtime helpers in `src/lib/hooks.ts`.
 6. Do not advertise a free plan, free tier, or free trial; the Takyon app runtime does not support that shape.
@@ -154,7 +156,8 @@ This skill is for refinement, not reinvention: sharpen one flow, strengthen conv
 | Problem | Fix |
 | --- | --- |
 | Requested included AI budget is larger than plan price | Report the backend cap truthfully and lower the included budget or raise the plan price |
-| New users should pay more but old subscribers must stay put | Create a new sellable `plan_key` and Stripe price, keep the legacy row, and explicitly route public subscribe UI to the new plan |
+| New users should pay more but old subscribers must stay put | Create a new sellable `plan_key` and Stripe price, then route public subscribe UI to it; old subscribers are grandfathered automatically because the live plan's economic terms are frozen |
+| `business_upsert_app_plan` refused with a frozen-terms error | Expected — the plan has active subscribers, so its economic terms are locked. Mint a new `plan_key` version for the new price and route new checkout to it; the old subscribers stay grandfathered. Migrating them onto new pricing is a separate billing migration (OpenMeter-owned; not available yet) |
 | The UI still sells the old cheapest plan after adding a new one | Stop using the blind default subscribe helper for that screen and target the intended public plan explicitly |
 | A grandfathered plan disappeared from the catalog | Restore the legacy plan row before active users fall back onto another tier-matched plan |
 | The improvement added an action but verification is missing | Run `business_check_runtime_capabilities`, invoke the action for real, and read back the receipt before reporting success |

@@ -81,6 +81,12 @@ class InvalidEntitlementTier(EntitlementError):
     """The requested tier is unsupported for this product shape."""
 
 
+class GrandfatheredPlanFrozen(EntitlementError):
+    """A plan_key with active/trialing subscribers cannot have its economic terms changed in
+    place. Re-pricing it would silently mutate existing (grandfathered) users; mint a new
+    plan_key (a new version) instead. This invariant is deliberately not bypassable."""
+
+
 @dataclass(frozen=True)
 class PlanPolicy:
     """One row of a business's plan catalog (unique per (business_slug, plan_key))."""
@@ -256,9 +262,9 @@ def upsert_plan_policy(
     interval = _normalize_billing_interval(billing_interval)
     if interval not in _VALID_BILLING_INTERVALS:
         raise InvalidPlan("billing_interval must be one of: month, year, one_time")
-    existing = None
-    if included_ai_budget_microusd in {None, ""}:
-        existing = get_plan_policy(conn, business_slug, key)
+    # Read the current row once: it both supplies the budget default (when omitted) and lets the
+    # grandfather guard below compare incoming vs. live economic terms.
+    existing = get_plan_policy(conn, business_slug, key)
     budget_source = (
         existing.included_ai_budget_microusd
         if existing is not None and included_ai_budget_microusd in {None, ""}
@@ -274,6 +280,44 @@ def upsert_plan_policy(
     quota = int(included_action_quota if included_action_quota is not None else 0)
     if quota < 0:
         raise InvalidPlan("included_action_quota must be non-negative")
+    # Grandfather guard: a plan_key with active/trialing subscribers has FROZEN economic terms.
+    # Re-pricing it in place would silently mutate existing (grandfathered) users — including the
+    # AI-budget gate the runtime resolves from the live plan row — because entitlements reference
+    # plan_key, not a price snapshot. The only way to change pricing is to mint a NEW plan_key (a
+    # new version); existing subscribers stay on the frozen row. There is no override flag: this is
+    # an invariant, not a toggle, so the CEO cannot bypass it. (Non-economic fields — notes,
+    # metadata, Stripe linkage — stay editable; an idempotent re-upsert with identical terms passes.)
+    if existing is not None:
+        incoming_terms = {
+            "tier": tier_value.strip().casefold(),
+            "price_cents": price,
+            "currency": str(currency or "usd").lower(),
+            "billing_interval": interval,
+            "included_ai_budget_microusd": budget,
+            "included_action_quota": quota,
+        }
+        current_terms = {
+            "tier": str(existing.tier or "").strip().casefold(),
+            "price_cents": int(existing.price_cents),
+            "currency": str(existing.currency or "usd").lower(),
+            "billing_interval": str(existing.billing_interval),
+            "included_ai_budget_microusd": int(existing.included_ai_budget_microusd),
+            "included_action_quota": int(existing.included_action_quota),
+        }
+        changed = sorted(k for k in current_terms if current_terms[k] != incoming_terms[k])
+        if changed:
+            active = count_active_entitlements_for_plan(conn, business_slug, key)
+            if active > 0:
+                raise GrandfatheredPlanFrozen(
+                    f"plan '{key}' has {active} active subscriber(s); its economic terms "
+                    f"({', '.join(changed)}) are frozen to protect grandfathered users. To change "
+                    f"pricing for new signups, create a NEW plan_key (e.g. '{key}-2') with the new "
+                    f"terms and route new checkout to it — existing subscribers stay on '{key}'. "
+                    f"Non-economic fields (notes, metadata, Stripe linkage) can still be updated on "
+                    f"'{key}' by re-passing its current economic terms unchanged. Moving existing "
+                    f"subscribers onto new pricing is a separate billing migration (OpenMeter-owned; "
+                    f"not available yet)."
+                )
     meta = dict(metadata or {})
     warnings = plan_validation_warnings(key, tier_value, quota, meta)
     if warnings:
@@ -347,6 +391,22 @@ def list_plan_policies(conn, business_slug: str) -> list[PlanPolicy]:
         (business_slug,),
     ).fetchall()
     return [_plan_from_row(r) for r in rows]
+
+
+def count_active_entitlements_for_plan(conn, business_slug: str, plan_key: str) -> int:
+    """How many active/trialing grants currently lock this plan_key. Pure read.
+
+    The plan-upsert grandfather guard reads this to decide whether a plan's economic terms are
+    frozen: you cannot re-price a plan_key that someone is actively subscribed to, because the
+    entitlement references the live plan row (not a snapshot), so a re-price would silently mutate
+    existing/grandfathered users — including their AI-budget gate. Mint a new plan_key instead."""
+    placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
+    row = conn.execute(
+        "select count(*) from app_entitlements "
+        f"where business_slug = %s and plan_key = %s and status in ({placeholders})",
+        (business_slug, _normalize_plan_key(plan_key), *_ACTIVE_STATUSES),
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 # ── entitlements ─────────────────────────────────────────────────────────────────
