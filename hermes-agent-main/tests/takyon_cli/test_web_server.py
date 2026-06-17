@@ -5883,3 +5883,102 @@ def test_media_upload_route_requires_session():
         headers={"Host": "mathflow.fourmanifold.com"},
     )
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Static-asset browser caching
+# ---------------------------------------------------------------------------
+
+
+class TestStaticAssetCaching:
+    """Cache-Control policy for static UI assets (faster successive loads)."""
+
+    def _web_server(self):
+        import takyon_cli.web_server as web_server
+
+        return web_server
+
+    def test_content_hashed_asset_is_immutable(self):
+        """Vite-fingerprinted names cache for a year and never revalidate."""
+        ws = self._web_server()
+        for name in (
+            "assets/index-DETCHpAF.js",
+            "assets/index-DETrs2Z3.css",
+            "assets/Collapse-Bold-mgICk9-_.woff2",
+            "litebulb/assets/main-AbCd1234.js",
+        ):
+            assert ws._static_cache_control(Path(name)) == ws._IMMUTABLE_CACHE_CONTROL
+
+    def test_assets_dir_flag_forces_immutable(self):
+        """Anything under a Vite assets/ tree is immutable even if the name
+        isn't obviously hashed."""
+        ws = self._web_server()
+        assert (
+            ws._static_cache_control(Path("assets/styles.css"), in_hashed_assets_dir=True)
+            == ws._IMMUTABLE_CACHE_CONTROL
+        )
+
+    def test_stable_named_static_asset_gets_bounded_ttl(self):
+        """Fonts/favicons/images keep their name across deploys, so they get a
+        day-long TTL rather than immutable caching."""
+        ws = self._web_server()
+        for name in (
+            "fonts/RulesCompressed-Regular.woff2",
+            "favicon.ico",
+            "litebulb/takyon-adapter.js",
+            "logo.png",
+        ):
+            assert ws._static_cache_control(Path(name)) == ws._STATIC_CACHE_CONTROL
+
+    def test_html_and_dynamic_types_are_never_cached(self):
+        """HTML entry points and config-ish files must stay uncached so deploys
+        and live-build flips are picked up."""
+        ws = self._web_server()
+        for name in ("index.html", "page.htm", "config.json", "robots.txt", "data.txt"):
+            assert ws._static_cache_control(Path(name)) is None
+
+    def test_looks_content_hashed(self):
+        ws = self._web_server()
+        assert ws._looks_content_hashed(Path("index-DETCHpAF.js"))
+        assert not ws._looks_content_hashed(Path("takyon-adapter.js"))
+        assert not ws._looks_content_hashed(Path("favicon.ico"))
+
+    def test_cached_file_response_sets_header(self, tmp_path):
+        """The FileResponse wrapper attaches the computed Cache-Control."""
+        ws = self._web_server()
+        hashed = tmp_path / "index-DETCHpAF.js"
+        hashed.write_text("console.log(1)")
+        resp = ws._cached_file_response(hashed, in_hashed_assets_dir=True)
+        assert resp.headers["Cache-Control"] == ws._IMMUTABLE_CACHE_CONTROL
+
+        stable = tmp_path / "favicon.ico"
+        stable.write_bytes(b"\x00")
+        assert (
+            ws._cached_file_response(stable).headers["Cache-Control"]
+            == ws._STATIC_CACHE_CONTROL
+        )
+
+    def test_cached_file_response_omits_header_for_dynamic(self, tmp_path):
+        ws = self._web_server()
+        html = tmp_path / "index.html"
+        html.write_text("<html></html>")
+        resp = ws._cached_file_response(html)
+        assert "Cache-Control" not in resp.headers
+
+    def test_product_html_stays_revalidating(self, tmp_path):
+        """Product-site HTML must not be long-cached even without analytics, so a
+        live-build pointer flip is reflected immediately."""
+        ws = self._web_server()
+        html = tmp_path / "index.html"
+        html.write_text("<html><head></head><body>hi</body></html>")
+        with patch.object(ws, "_umami_analytics_snippet", return_value=""):
+            resp = ws._product_site_file_response(html)
+        assert resp.headers["Cache-Control"] == "no-cache"
+
+    def test_product_hashed_asset_is_immutable(self, tmp_path):
+        ws = self._web_server()
+        asset = tmp_path / "app-Q1w2E3r4.js"
+        asset.write_text("x")
+        with patch.object(ws, "_umami_analytics_snippet", return_value=""):
+            resp = ws._product_site_file_response(asset)
+        assert resp.headers["Cache-Control"] == ws._IMMUTABLE_CACHE_CONTROL

@@ -8311,11 +8311,93 @@ def _inject_head_snippet(html_text: str, snippet: str) -> str:
     return snippet + html_text
 
 
+# ---------------------------------------------------------------------------
+# Static-asset browser caching
+# ---------------------------------------------------------------------------
+#
+# The dashboard and product apps are Vite SPAs whose JS/CSS/font/image bundles
+# dominate page-load time. Without explicit Cache-Control headers a bare
+# Starlette ``FileResponse`` ships no caching directive, so browsers fall back
+# to heuristic caching (or re-download the whole bundle on every visit) and
+# successive loads stay slow. These helpers attach long-lived caching to static
+# assets while leaving HTML entry points uncached so new deploys are picked up.
+#
+# Two tiers:
+#   * Content-hashed assets (Vite emits ``name-<hash>.ext`` and puts everything
+#     under ``assets/``) are immutable — the hash changes when the content does,
+#     so they can be cached for a year and never revalidated.
+#   * Stable-named static assets (top-level fonts, favicon, images) keep their
+#     filename across deploys, so they get a bounded TTL: cached across reloads
+#     within a session but refreshed within a day of a redeploy.
+
+# Static file types that are safe to cache in the browser. Deliberately excludes
+# HTML (entry points must stay uncached) and JSON (may be config the app expects
+# to fetch fresh).
+_CACHEABLE_STATIC_SUFFIXES = frozenset(
+    {
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".css",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".ico",
+        ".webp",
+        ".avif",
+        ".wasm",
+        ".map",
+    }
+)
+
+# Vite/content-hash fingerprint: ``name-HASH.ext`` with an 8+ char url-safe hash.
+_HASHED_ASSET_RE = re.compile(r"-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$")
+
+# Cache a year and never revalidate — only correct for content-hashed names.
+_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+# Stable-named static assets: cached for a day, redeploys picked up within it.
+_STATIC_CACHE_CONTROL = "public, max-age=86400"
+
+
+def _looks_content_hashed(path: Path) -> bool:
+    """True when the filename carries a Vite-style content hash."""
+    return bool(_HASHED_ASSET_RE.search(path.name))
+
+
+def _static_cache_control(path: Path, *, in_hashed_assets_dir: bool = False) -> str | None:
+    """Cache-Control value for a static asset, or None to leave it uncached.
+
+    ``in_hashed_assets_dir`` marks files served from a Vite ``assets/`` tree,
+    where every emitted name is content-hashed and therefore immutable.
+    """
+    if path.suffix.lower() not in _CACHEABLE_STATIC_SUFFIXES:
+        return None
+    if in_hashed_assets_dir or _looks_content_hashed(path):
+        return _IMMUTABLE_CACHE_CONTROL
+    return _STATIC_CACHE_CONTROL
+
+
+def _cached_file_response(path: Path, *, in_hashed_assets_dir: bool = False) -> FileResponse:
+    """FileResponse with a browser-caching header for static assets."""
+    cache_control = _static_cache_control(path, in_hashed_assets_dir=in_hashed_assets_dir)
+    headers = {"Cache-Control": cache_control} if cache_control else None
+    return FileResponse(path, headers=headers)
+
+
 def _product_site_file_response(path: Path) -> Response:
     """Serve a product-site file, injecting the analytics tag into HTML docs.
 
     Non-HTML files (JS/CSS/assets) pass straight through as a FileResponse, so
-    asset serving is unchanged; only HTML documents get the <head> injection.
+    asset serving is unchanged apart from caching; only HTML documents get the
+    <head> injection. HTML stays uncached so a live-build pointer flip is picked
+    up immediately; hashed assets are immutable, stable-named ones get a day TTL.
     """
     snippet = _umami_analytics_snippet()
     if snippet and path.suffix.lower() in (".html", ".htm"):
@@ -8327,7 +8409,10 @@ def _product_site_file_response(path: Path) -> Response:
             _inject_head_snippet(html_text, snippet),
             headers={"Cache-Control": "no-cache"},
         )
-    return FileResponse(path)
+    if path.suffix.lower() in (".html", ".htm"):
+        # HTML without analytics injection still must not be long-cached.
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+    return _cached_file_response(path)
 
 
 async def _serve_product_site_file(business: str, full_path: str = "", *, request: Request | None = None) -> Response:
@@ -9101,6 +9186,9 @@ def mount_spa(application: FastAPI):
         if asset_root not in (target, *target.parents) or not target.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
 
+        # Everything under the Vite ``assets/`` tree is content-hashed, so it is
+        # safe to cache immutably for a year — a content change yields a new
+        # filename, and the (uncached) HTML entry point references the new name.
         if target.suffix.lower() == ".css":
             prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
             css = target.read_text()
@@ -9109,9 +9197,13 @@ def mount_spa(application: FastAPI):
                     css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")
                     css = css.replace(f"url(\"{asset_dir}", f"url(\"{prefix}{asset_dir}")
                     css = css.replace(f"url('{asset_dir}", f"url('{prefix}{asset_dir}")
-            return Response(content=css, media_type="text/css")
+            return Response(
+                content=css,
+                media_type="text/css",
+                headers={"Cache-Control": _IMMUTABLE_CACHE_CONTROL},
+            )
 
-        return FileResponse(target)
+        return _cached_file_response(target, in_hashed_assets_dir=True)
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
@@ -9143,7 +9235,9 @@ def mount_spa(application: FastAPI):
             and file_path.exists()
             and file_path.is_file()
         ):
-            return FileResponse(file_path)
+            # Stable-named build files (fonts, favicon, images) get a bounded
+            # cache; HTML (e.g. a direct /index.html hit) stays uncached.
+            return _cached_file_response(file_path)
         # Operator landing: in embedded/--tui mode the business workspace IS
         # the Litebulb UI, served directly (no iframe, no React bundle).  Every
         # other route still renders the SPA shell for client-side routing.
