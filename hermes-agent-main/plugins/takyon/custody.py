@@ -20,6 +20,7 @@ Backend-agnostic: takes a psycopg connection, imports no psycopg.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
@@ -86,6 +87,8 @@ def accrue(
     *,
     stripe_ref: str | None = None,
     fee_bps: int | None = None,
+    withheld_cents: int = 0,
+    metadata: dict | None = None,
 ) -> int:
     """Record a sub-user payment: take the app fee off `gross_cents` and accrue the
     net to the owner's owed balance. Works regardless of Connect status. Idempotent on
@@ -99,7 +102,13 @@ def accrue(
         raise ValueError("gross_cents must be > 0")
     bps = app_fee_bps() if fee_bps is None else max(0, min(10000, fee_bps))
     fee = (gross_cents * bps) // 10000
-    net = gross_cents - fee
+    withheld = max(0, int(withheld_cents or 0))
+    if withheld > max(0, gross_cents - fee):
+        raise ValueError("withheld_cents must not exceed gross minus platform fee")
+    net = gross_cents - fee - withheld
+    entry_metadata = dict(metadata or {})
+    if withheld:
+        entry_metadata["withheld_cents"] = withheld
     with conn.transaction():
         acct = conn.execute(
             "select owed_balance_cents from custody_accounts "
@@ -118,9 +127,18 @@ def accrue(
         )
         conn.execute(
             "insert into custody_entries (user_id, business_slug, kind, gross_cents, "
-            "fee_cents, net_cents, stripe_ref, idempotency_key) "
-            "values (%s, %s, 'accrual', %s, %s, %s, %s, %s)",
-            (user_id, business_slug, gross_cents, fee, net, stripe_ref, idempotency_key),
+            "fee_cents, net_cents, stripe_ref, idempotency_key, metadata) "
+            "values (%s, %s, 'accrual', %s, %s, %s, %s, %s, %s::jsonb)",
+            (
+                user_id,
+                business_slug,
+                gross_cents,
+                fee,
+                net,
+                stripe_ref,
+                idempotency_key,
+                json.dumps(entry_metadata or {}, ensure_ascii=False, sort_keys=True),
+            ),
         )
     return new_owed
 

@@ -1908,6 +1908,14 @@ def product_action_handler(job: Job) -> JobRunResult:
     return JobRunResult(result=result, actual_cost_cents=0)
 
 
+def openmeter_sync_handler(job: Job) -> JobRunResult:
+    from .core import _run_openmeter_sync_job, _store
+
+    payload = job.payload if isinstance(job.payload, Mapping) else {}
+    result = _run_openmeter_sync_job(_store(), job.business_slug, payload)
+    return JobRunResult(result=result, actual_cost_cents=0)
+
+
 # The kind→handler registry the drain consults. New job kinds register here.
 HANDLERS: dict[str, jobs.Handler] = {
     "ceo_bootstrap": ceo_bootstrap_handler,
@@ -1917,6 +1925,7 @@ HANDLERS: dict[str, jobs.Handler] = {
     "claude.agent_task": claude_agent_task_handler,
     "product.surface_refresh": product_surface_refresh_handler,
     "product_action": product_action_handler,
+    "openmeter.sync": openmeter_sync_handler,
 }
 
 

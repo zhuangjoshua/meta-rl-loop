@@ -604,12 +604,12 @@ def set_subscription_status(
     patch = _json_dumps(dict(metadata or {}))
     with conn.transaction():
         targets = conn.execute(
-            "select distinct business_slug, app_user_id from app_entitlements "
+            "select distinct business_slug, app_user_id, plan_key from app_entitlements "
             "where source = 'stripe' and stripe_subscription_id = %s",
             (stripe_subscription_id,),
         ).fetchall()
         updated: list[dict] = []
-        for business_slug, app_user_id in targets:
+        for business_slug, app_user_id, plan_key in targets:
             conn.execute(
                 "update app_entitlements set status = %s, "
                 "stripe_customer_id = coalesce(%s, stripe_customer_id), "
@@ -632,7 +632,87 @@ def set_subscription_status(
                 {
                     "business_slug": business_slug,
                     "app_user_id": str(app_user_id),
+                    "plan_key": None if plan_key is None else str(plan_key),
                     "tier": tier,
                 }
             )
     return updated
+
+
+def project_openmeter_access(
+    conn,
+    business_slug: str,
+    app_user_id: str,
+    *,
+    active: bool,
+    tier: str | None = None,
+    plan_key: str | None = None,
+    current_period_end: object = None,
+    metadata: dict | None = None,
+) -> tuple[Entitlement | None, str]:
+    """Project OpenMeter access into the local entitlement rail.
+
+    OpenMeter becomes the billing/access authority, but Takyon keeps the runtime gate. This helper
+    translates one vendor access snapshot into the local `app_entitlements` rows that the existing
+    login/session/AI gateway paths already trust:
+
+    * all prior billing-sourced rows (`stripe`, prior `openmeter`) stop conferring access
+    * an active vendor snapshot becomes one fresh `source='openmeter'` entitlement row
+    * an inactive vendor snapshot leaves NO active billing entitlement row
+    * `app_users.tier` is resynced atomically in the same transaction
+
+    Manual/operator-only grants are intentionally left alone; this replaces the recurring billing
+    path, not every possible non-billing override.
+    """
+    meta = dict(metadata or {})
+    patch = _json_dumps(
+        {
+            **meta,
+            "billing_authority": "openmeter",
+        }
+    )
+    with conn.transaction():
+        exists = conn.execute(
+            "select 1 from app_users where business_slug = %s and id = %s",
+            (business_slug, app_user_id),
+        ).fetchone()
+        if exists is None:
+            raise AppUserNotFound(str(app_user_id))
+        conn.execute(
+            "update app_entitlements set status = 'cancelled', "
+            "current_period_end = coalesce(%s, current_period_end), "
+            "metadata = metadata || %s::jsonb, updated_at = now() "
+            "where business_slug = %s and app_user_id = %s "
+            "and source in ('stripe', 'openmeter') "
+            "and lower(status) not in ('cancelled', 'canceled')",
+            (
+                current_period_end,
+                patch,
+                business_slug,
+                app_user_id,
+            ),
+        )
+        entitlement = None
+        if active:
+            tier_value = str(tier or "").strip() or "paid"
+            if tier_value.lower() in _UNENTITLING_TIERS:
+                raise InvalidEntitlementTier(
+                    "openmeter access cannot project a free/unentitled billing tier"
+                )
+            row = conn.execute(
+                "insert into app_entitlements "
+                "(business_slug, app_user_id, tier, status, source, plan_key, current_period_end, metadata) "
+                "values (%s, %s, %s, 'active', 'openmeter', %s, %s, %s::jsonb) "
+                f"returning {_ENT_COLUMNS}",
+                (
+                    business_slug,
+                    app_user_id,
+                    tier_value,
+                    plan_key,
+                    current_period_end,
+                    patch,
+                ),
+            ).fetchone()
+            entitlement = _ent_from_row(row)
+        effective = _sync_user_tier(conn, business_slug, app_user_id)
+    return entitlement, effective

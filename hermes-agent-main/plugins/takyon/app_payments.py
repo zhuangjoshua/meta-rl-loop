@@ -186,6 +186,28 @@ def _epoch_to_dt(value) -> datetime | None:
     return datetime.fromtimestamp(int(value), timezone.utc)
 
 
+def _owner_payout_split(plan, gross_cents: int) -> dict[str, int]:
+    included_budget_microusd = 0
+    if plan is not None and str(getattr(plan, "billing_interval", "") or "").strip().lower() == "month":
+        included_budget_microusd = max(
+            0, int(getattr(plan, "included_ai_budget_microusd", 0) or 0)
+        )
+    platform_fee_cents = (max(0, int(gross_cents or 0)) * custody.app_fee_bps()) // 10000
+    max_withhold_cents = max(0, int(gross_cents or 0) - platform_fee_cents)
+    prepaid_withheld_cents = min(max_withhold_cents, included_budget_microusd // 10_000)
+    owner_net_cents = max(0, int(gross_cents or 0) - platform_fee_cents - prepaid_withheld_cents)
+    return {
+        "platform_fee_cents": platform_fee_cents,
+        "included_ai_budget_microusd": included_budget_microusd,
+        "prepaid_withheld_cents": prepaid_withheld_cents,
+        "prepaid_withheld_microusd": prepaid_withheld_cents * 10_000,
+        "prepaid_dust_microusd": max(
+            0, included_budget_microusd - (prepaid_withheld_cents * 10_000)
+        ),
+        "owner_net_cents": owner_net_cents,
+    }
+
+
 # --------------------------------------------------------------------------- checkout intents
 
 
@@ -507,6 +529,7 @@ def reconcile_checkout_session(
             "recorded": True,
             "business_slug": business,
             "app_user_id": intent_app_user_id,
+            "plan_key": plan_key,
             "revenue_recorded": False,
             "accrued_to_owner": False,
             "owner_user_id": None,
@@ -540,6 +563,23 @@ def reconcile_checkout_session(
         )
         app_user_id = entitlement.app_user_id
 
+    plan_policy = app_entitlements.get_plan_policy(conn, business, plan_key)
+    payout_split = _owner_payout_split(plan_policy, amount_total)
+    revenue_metadata = {
+        **metadata,
+        "pricing_split": {
+            "authority": "takyon",
+            "gross_cents": int(amount_total or 0),
+            "platform_fee_cents": payout_split["platform_fee_cents"],
+            "prepaid_withheld_cents": payout_split["prepaid_withheld_cents"],
+            "prepaid_withheld_microusd": payout_split["prepaid_withheld_microusd"],
+            "prepaid_dust_microusd": payout_split["prepaid_dust_microusd"],
+            "owner_net_cents": payout_split["owner_net_cents"],
+            "included_ai_budget_microusd": payout_split["included_ai_budget_microusd"],
+            "x_plus_y_plus_z_cents": int(amount_total or 0),
+        },
+    }
+
     revenue_recorded = False
     accrued_to_owner = False
     owner_user_id = None
@@ -565,7 +605,7 @@ def reconcile_checkout_session(
                 amount_total,
                 customer_email,
                 occurred,
-                _json_dumps(metadata),
+                _json_dumps(revenue_metadata),
             ),
         ).fetchone()
         revenue_recorded = inserted_revenue is not None
@@ -584,6 +624,8 @@ def reconcile_checkout_session(
                 amount_total,
                 custody_key,
                 stripe_ref=session_id,
+                withheld_cents=payout_split["prepaid_withheld_cents"],
+                metadata=revenue_metadata.get("pricing_split"),
             )
             accrued_to_owner = True
 
@@ -591,10 +633,16 @@ def reconcile_checkout_session(
         "recorded": True,
         "business_slug": business,
         "app_user_id": app_user_id,
+        "plan_key": plan_key,
         "revenue_recorded": revenue_recorded,
         "accrued_to_owner": accrued_to_owner,
         "owner_user_id": owner_user_id,
         "owner_owed_balance_cents": owed_balance_cents,
+        "platform_fee_cents": payout_split["platform_fee_cents"],
+        "prepaid_withheld_cents": payout_split["prepaid_withheld_cents"],
+        "prepaid_withheld_microusd": payout_split["prepaid_withheld_microusd"],
+        "owner_net_cents": payout_split["owner_net_cents"],
+        "included_ai_budget_microusd": payout_split["included_ai_budget_microusd"],
         "already_recorded": False,
     }
 
@@ -647,6 +695,7 @@ def cancel_subscription(
             "business_slug": business_slug,
             "app_user_id": app_user_id,
             "stripe_subscription_id": str(entitlement.stripe_subscription_id or ""),
+            "plan_key": entitlement.plan_key,
             "cancel_at_period_end": True,
             "current_period_end": entitlement.current_period_end,
             "stripe_subscription_status": str(
@@ -668,6 +717,7 @@ def cancel_subscription(
         "business_slug": business_slug,
         "app_user_id": app_user_id,
         "stripe_subscription_id": subscription_id,
+        "plan_key": refreshed.plan_key,
         "cancel_at_period_end": bool(
             subscription.get("cancel_at_period_end")
             or refreshed_metadata.get("cancel_at_period_end")

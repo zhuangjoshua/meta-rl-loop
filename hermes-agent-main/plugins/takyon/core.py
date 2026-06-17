@@ -16655,7 +16655,7 @@ def _commit_tool_data(
     if business:
         normalized_operation["business"] = business
     active_store = store or _store()
-    return active_store.commit(
+    result = active_store.commit(
         scope=scope or (f"business:{business}" if business else _business_scope(args)),
         operations=[normalized_operation],
         idempotency_key=args.get("idempotency_key") or "",
@@ -16663,6 +16663,381 @@ def _commit_tool_data(
         actor=args.get("actor") or "agent",
         principal=principal,
     )
+    try:
+        openmeter_sync = _maybe_openmeter_post_commit_sync(
+            active_store,
+            normalized_operation,
+            result,
+        )
+    except Exception as exc:
+        openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
+    if isinstance(openmeter_sync, dict) and openmeter_sync.get("configured") and not openmeter_sync.get("ok"):
+        queued = _queue_openmeter_sync_for_operation(
+            active_store,
+            normalized_operation,
+            result,
+        )
+        if queued is not None:
+            openmeter_sync["retry_job"] = queued
+    if openmeter_sync is not None:
+        result["openmeter_sync"] = openmeter_sync
+    return result
+
+
+def _openmeter_backend_module():
+    try:
+        from . import openmeter_backend
+    except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+        from plugins.takyon import openmeter_backend
+    return openmeter_backend
+
+
+def _openmeter_enabled() -> bool:
+    if _db_backend() != "postgres":
+        return False
+    return bool(_openmeter_backend_module().enabled())
+
+
+def _queue_openmeter_sync_job(
+    store: "TakyonStore",
+    business: str,
+    *,
+    scope: str,
+    plan_key: str | None = None,
+    app_user_id: str | None = None,
+    allow_provision: bool = False,
+) -> dict[str, Any] | None:
+    if not _openmeter_enabled():
+        return None
+    target = (
+        _file_slug(str(plan_key or ""), "plan")
+        if scope == "plan"
+        else str(app_user_id or "").strip()
+    )
+    if not target:
+        return None
+    try:
+        from . import jobs as worker_jobs
+    except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+        from plugins.takyon import jobs as worker_jobs
+    payload = {
+        "scope": scope,
+        "plan_key": plan_key,
+        "app_user_id": app_user_id,
+        "allow_provision": bool(allow_provision),
+        "estimate_cents": 0,
+    }
+    idem = f"openmeter.sync:{business}:{scope}:{target}:{uuid.uuid4().hex}"
+    with store._connect() as conn:
+        job = worker_jobs.enqueue(
+            conn,
+            business,
+            "openmeter.sync",
+            idempotency_key=idem,
+            payload=payload,
+            max_attempts=10,
+        )
+    return {
+        "job_id": job.id,
+        "kind": job.kind,
+        "status": job.status,
+        "scope": scope,
+    }
+
+
+def _run_openmeter_sync_job(
+    store: "TakyonStore",
+    business: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    scope = str(payload.get("scope") or "").strip().lower()
+    if scope == "plan":
+        plan_key = _file_slug(str(payload.get("plan_key") or ""), "plan")
+        if not plan_key:
+            raise TakyonError("openmeter sync job missing plan_key")
+        return _pg_sync_openmeter_plan(store, business, plan_key)
+    if scope == "customer":
+        app_user_id = str(payload.get("app_user_id") or "").strip()
+        if not app_user_id:
+            raise TakyonError("openmeter sync job missing app_user_id")
+        return _pg_sync_openmeter_customer(store, business, app_user_id)
+    if scope == "access":
+        app_user_id = str(payload.get("app_user_id") or "").strip()
+        if not app_user_id:
+            raise TakyonError("openmeter sync job missing app_user_id")
+        return _pg_sync_openmeter_access_projection(
+            store,
+            business,
+            app_user_id,
+            allow_provision=bool(payload.get("allow_provision")),
+        )
+    raise TakyonError(f"unsupported openmeter sync scope: {scope or 'unknown'}")
+
+
+def _pg_plan_for_runtime_user(leaves, raw, business: str, user: Any, entitlement: Any):
+    plan = None
+    if entitlement is not None and getattr(entitlement, "plan_key", None):
+        plan = leaves["entitlements"].get_plan_policy(raw, business, entitlement.plan_key)
+    if plan is None:
+        for candidate in leaves["entitlements"].list_plan_policies(raw, business):
+            if str(candidate.tier or "").strip() == str(getattr(user, "tier", "") or "").strip():
+                plan = candidate
+                break
+    return plan
+
+
+def _pg_sync_openmeter_plan(store: "TakyonStore", business: str, plan_key: str) -> dict[str, Any] | None:
+    if not _openmeter_enabled():
+        return None
+    leaves = store._app_leaves()
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            policy = leaves["entitlements"].get_plan_policy(raw, business, plan_key)
+    if policy is None:
+        return {"configured": True, "ok": False, "error": f"plan not found: {plan_key}"}
+    backend = _openmeter_backend_module()
+    mirrored = backend.sync_access_plan(policy)
+    return {
+        "configured": True,
+        "ok": True,
+        "scope": "plan",
+        "plan_key": policy.plan_key,
+        "openmeter_plan_key": mirrored.key,
+        "openmeter_plan_version": mirrored.version,
+        "openmeter_status": mirrored.status,
+    }
+
+
+def _pg_sync_openmeter_customer(
+    store: "TakyonStore", business: str, app_user_id: str
+) -> dict[str, Any] | None:
+    if not _openmeter_enabled():
+        return None
+    leaves = store._app_leaves()
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            user = leaves["identity"].get_app_user(raw, business, app_user_id=app_user_id)
+    if user is None:
+        return {"configured": True, "ok": False, "error": f"app user not found: {app_user_id}"}
+    backend = _openmeter_backend_module()
+    mirrored = backend.sync_customer(
+        business_slug=business,
+        app_user_id=user.id,
+        email=user.email,
+        name=user.name,
+    )
+    return {
+        "configured": True,
+        "ok": True,
+        "scope": "customer",
+        "app_user_id": user.id,
+        "openmeter_customer_key": backend.customer_key_for(business, user.id),
+        "openmeter_customer_id": str((mirrored or {}).get("id") or ""),
+    }
+
+
+def _pg_sync_openmeter_access_projection(
+    store: "TakyonStore",
+    business: str,
+    app_user_id: str,
+    *,
+    allow_provision: bool = False,
+) -> dict[str, Any] | None:
+    if not _openmeter_enabled():
+        return None
+    backend = _openmeter_backend_module()
+    leaves = store._app_leaves()
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            user = leaves["identity"].get_app_user(raw, business, app_user_id=app_user_id)
+            if user is None:
+                return {
+                    "configured": True,
+                    "ok": False,
+                    "scope": "access",
+                    "error": f"app user not found: {app_user_id}",
+                }
+            entitlement = leaves["entitlements"].get_active_entitlement(raw, business, user.id)
+            billing_rows = leaves["entitlements"].list_entitlements(
+                raw,
+                business,
+                app_user_id=user.id,
+            )
+            latest_billing = next(
+                (
+                    item
+                    for item in billing_rows
+                    if str(getattr(item, "source", "") or "").strip().lower()
+                    in {"stripe", "openmeter"}
+                ),
+                None,
+            )
+            policy = _pg_plan_for_runtime_user(leaves, raw, business, user, entitlement)
+    if policy is not None and str(policy.billing_interval or "").strip().lower() == "one_time":
+        return {
+            "configured": True,
+            "ok": False,
+            "scope": "access",
+            "app_user_id": app_user_id,
+            "error": "OpenMeter mirror currently skips one_time app plans",
+        }
+    backend.sync_customer(
+        business_slug=business,
+        app_user_id=user.id,
+        email=user.email,
+        name=user.name,
+    )
+    current_subscription = backend.current_subscription(
+        business_slug=business,
+        app_user_id=user.id,
+    )
+    cancel_at_period_end = bool(
+        (
+            (getattr(latest_billing, "metadata", {}) or {})
+            if latest_billing is not None
+            else {}
+        ).get("cancel_at_period_end")
+    )
+    if current_subscription is not None:
+        current_plan = (
+            current_subscription.get("plan")
+            if isinstance(current_subscription.get("plan"), dict)
+            else {}
+        )
+        current_plan_key = str(current_plan.get("key") or "").strip()
+        if entitlement is None or policy is None:
+            backend.cancel_subscription(
+                business_slug=business,
+                app_user_id=user.id,
+                timing="immediate",
+            )
+        elif cancel_at_period_end:
+            desired = backend.sync_access_plan(policy)
+            if current_plan_key != desired.key:
+                backend.ensure_subscription(
+                    business_slug=business,
+                    app_user_id=user.id,
+                    plan=desired,
+                )
+            backend.cancel_subscription(
+                business_slug=business,
+                app_user_id=user.id,
+                timing="next_billing_cycle",
+            )
+        elif allow_provision and policy is not None:
+            desired = backend.sync_access_plan(policy)
+            if current_plan_key and current_plan_key != desired.key:
+                backend.ensure_subscription(
+                    business_slug=business,
+                    app_user_id=user.id,
+                    plan=desired,
+                )
+    elif entitlement is not None and policy is not None:
+        desired = backend.sync_access_plan(policy)
+        backend.ensure_subscription(
+            business_slug=business,
+            app_user_id=user.id,
+            plan=desired,
+        )
+        if cancel_at_period_end:
+            backend.cancel_subscription(
+                business_slug=business,
+                app_user_id=user.id,
+                timing="next_billing_cycle",
+            )
+    snapshot = backend.project_customer_access(
+        business_slug=business,
+        app_user_id=user.id,
+    )
+    with store._connect() as conn:
+        with store._leaf_conn(conn) as raw:
+            projected, tier = leaves["entitlements"].project_openmeter_access(
+                raw,
+                business,
+                user.id,
+                active=bool(snapshot.has_access),
+                tier=snapshot.tier or (policy.tier if policy is not None else None),
+                plan_key=snapshot.takyon_plan_key or (policy.plan_key if policy is not None else None),
+                current_period_end=snapshot.current_period_end,
+                metadata={
+                    **snapshot.metadata,
+                    "cancel_at_period_end": cancel_at_period_end,
+                },
+            )
+    return {
+        "configured": True,
+        "ok": True,
+        "scope": "access",
+        "app_user_id": user.id,
+        "tier": tier,
+        "entitled": bool(snapshot.has_access),
+        "plan_key": snapshot.takyon_plan_key or (policy.plan_key if policy is not None else None),
+        "openmeter_customer_key": snapshot.customer_key,
+        "openmeter_subscription_id": snapshot.subscription_id,
+        "openmeter_plan_key": snapshot.openmeter_plan_key,
+        "openmeter_plan_version": snapshot.plan_version,
+        "projected_entitlement_id": getattr(projected, "id", None),
+    }
+
+
+def _maybe_openmeter_post_commit_sync(
+    store: "TakyonStore",
+    operation: Mapping[str, Any],
+    commit_result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    action = str(operation.get("action") or "").strip()
+    business = _slugify(str(operation.get("business") or operation.get("business_slug") or ""))
+    if not business:
+        return None
+    if action == "app.plan.upsert":
+        plan_key = _file_slug(str(operation.get("plan_key") or "plan"), "plan")
+        return _pg_sync_openmeter_plan(store, business, plan_key)
+    if action == "app.customer.upsert":
+        results = commit_result.get("results") if isinstance(commit_result, Mapping) else None
+        first = results[0] if isinstance(results, list) and results else {}
+        app_user_id = str((first or {}).get("app_user_id") or "").strip()
+        if not app_user_id:
+            return {
+                "configured": True,
+                "ok": False,
+                "scope": "customer",
+                "error": "app.customer.upsert committed without an app_user_id receipt",
+            }
+        result = _pg_sync_openmeter_customer(
+            store,
+            business,
+            app_user_id,
+        )
+        if result is not None:
+            return result
+    return None
+
+
+def _queue_openmeter_sync_for_operation(
+    store: "TakyonStore",
+    operation: Mapping[str, Any],
+    commit_result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    action = str(operation.get("action") or "").strip()
+    business = _slugify(str(operation.get("business") or operation.get("business_slug") or ""))
+    if not business:
+        return None
+    if action == "app.plan.upsert":
+        plan_key = _file_slug(str(operation.get("plan_key") or "plan"), "plan")
+        return _queue_openmeter_sync_job(store, business, scope="plan", plan_key=plan_key)
+    if action == "app.customer.upsert":
+        results = commit_result.get("results") if isinstance(commit_result, Mapping) else None
+        first = results[0] if isinstance(results, list) and results else {}
+        app_user_id = str((first or {}).get("app_user_id") or "").strip()
+        if not app_user_id:
+            return None
+        return _queue_openmeter_sync_job(
+            store,
+            business,
+            scope="customer",
+            app_user_id=app_user_id,
+        )
+    return None
 
 
 def _commit_tool(
@@ -18206,6 +18581,7 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                 str(business_row.get("work_focus") or "all"),
             )
             if isinstance(conn, _PGConn):
+                openmeter_sync = None
                 link_target = store._row_to_dict(conn.execute(
                     "SELECT u.id, u.email, u.status FROM app_magic_links l "
                     "JOIN app_users u ON u.business_slug = l.business_slug AND u.id = l.app_user_id "
@@ -18238,6 +18614,32 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                         app_user_id=user_record.id,
                         display_name=user_record.name,
                     )
+                if _openmeter_enabled():
+                    try:
+                        openmeter_sync = _pg_sync_openmeter_access_projection(
+                            store,
+                            business,
+                            user_record.id,
+                        )
+                    except Exception as exc:
+                        openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
+                        queued = _queue_openmeter_sync_job(
+                            store,
+                            business,
+                            scope="access",
+                            app_user_id=user_record.id,
+                        )
+                        if queued is not None:
+                            openmeter_sync["retry_job"] = queued
+                    try:
+                        with store._leaf_conn(conn) as leaf:
+                            refreshed = leaves["identity"].get_app_user(
+                                leaf,
+                                business,
+                                app_user_id=user_record.id,
+                            )
+                    except Exception:
+                        pass
                 if refreshed is None:
                     raise TakyonError("magic link user is missing")
                 user = {
@@ -18280,7 +18682,10 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                 expires_at = _future(days=30)
             store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.magic_link.verify", payload={"app_user_id": user["id"], "session_id": session_id})
             store._rewrite_app_files(conn, business)
-        return tool_result({"success": True, "business": business, "app_user_id": user["id"], "email": user["email"], "tier": tier, "session_id": session_id, "session_token": session_token, "expires_at": expires_at})
+        payload = {"success": True, "business": business, "app_user_id": user["id"], "email": user["email"], "tier": tier, "session_id": session_id, "session_token": session_token, "expires_at": expires_at}
+        if 'openmeter_sync' in locals() and openmeter_sync is not None:
+            payload["openmeter_sync"] = openmeter_sync
+        return tool_result(payload)
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -18421,20 +18826,46 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
                 leaves["profiles"].ensure_profile(
                     leaf, business, app_user_id=user_record.id, display_name=user_record.name
                 )
+            openmeter_sync = None
+            if _openmeter_enabled():
+                try:
+                    openmeter_sync = _pg_sync_openmeter_access_projection(
+                        store,
+                        business,
+                        user_record.id,
+                    )
+                except Exception as exc:
+                    openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
+                    queued = _queue_openmeter_sync_job(
+                        store,
+                        business,
+                        scope="access",
+                        app_user_id=user_record.id,
+                    )
+                    if queued is not None:
+                        openmeter_sync["retry_job"] = queued
+                try:
+                    with store._leaf_conn(conn) as leaf:
+                        refreshed = leaves["identity"].get_app_user(
+                            leaf, business, app_user_id=user_record.id
+                        )
+                except Exception:
+                    pass
             if refreshed is None:
                 raise TakyonError("supabase login user is missing")
-        return tool_result(
-            {
-                "success": True,
-                "business": business,
-                "app_user_id": refreshed.id,
-                "email": refreshed.email,
-                "tier": refreshed.tier,
-                "session_id": session.id,
-                "session_token": session_token,
-                "expires_at": str(session.expires_at),
-            }
-        )
+        payload = {
+            "success": True,
+            "business": business,
+            "app_user_id": refreshed.id,
+            "email": refreshed.email,
+            "tier": refreshed.tier,
+            "session_id": session.id,
+            "session_token": session_token,
+            "expires_at": str(session.expires_at),
+        }
+        if openmeter_sync is not None:
+            payload["openmeter_sync"] = openmeter_sync
+        return tool_result(payload)
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -18472,6 +18903,20 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             if not user:
                 raise TakyonError("app account not found")
             _maybe_reconcile_pg_completed_checkout(store, conn, business, user)
+            if isinstance(conn, _PGConn) and _openmeter_enabled():
+                try:
+                    _pg_sync_openmeter_access_projection(
+                        store,
+                        business,
+                        str(user["id"]),
+                    )
+                except Exception:
+                    _queue_openmeter_sync_job(
+                        store,
+                        business,
+                        scope="access",
+                        app_user_id=str(user["id"]),
+                    )
             with (
                 store._pg_app_scope(conn, business, app_user_id=str(user["id"]))
                 if isinstance(conn, _PGConn)
@@ -18547,13 +18992,32 @@ def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
                 },
             )
             store._rewrite_app_files(conn, business)
-        return tool_result(
-            {
-                "success": True,
-                "business": business,
-                **outcome,
-            }
-        )
+        openmeter_sync = None
+        if _openmeter_enabled():
+            try:
+                openmeter_sync = _pg_sync_openmeter_access_projection(
+                    store,
+                    business,
+                    user.id,
+                )
+            except Exception as exc:
+                openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
+                queued = _queue_openmeter_sync_job(
+                    store,
+                    business,
+                    scope="access",
+                    app_user_id=user.id,
+                )
+                if queued is not None:
+                    openmeter_sync["retry_job"] = queued
+        payload = {
+            "success": True,
+            "business": business,
+            **outcome,
+        }
+        if openmeter_sync is not None:
+            payload["openmeter_sync"] = openmeter_sync
+        return tool_result(payload)
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -19740,6 +20204,7 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
     store = _store()
     try:
         business = _slugify(str(args.get("business") or ""))
+        openmeter_sync = None
         # `price_key` is a common frontend synonym for the app plan identifier; accept it so a
         # product whose generated checkout call names the field price_key still resolves the same
         # plan. The value is validated against app_plan_policies below, so this widens only the
@@ -19770,6 +20235,52 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             plan = store._row_to_dict(conn.execute("SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?", (business, plan_key)).fetchone())
             if not plan:
                 raise TakyonError(f"app plan not found: {plan_key}")
+            checkout_metadata = dict(args.get("metadata") or {})
+            if (
+                isinstance(conn, _PGConn)
+                and _openmeter_enabled()
+                and str(plan.get("billing_interval") or "").strip().lower() != "one_time"
+            ):
+                openmeter_sync = _pg_sync_openmeter_plan(store, business, plan_key)
+                if isinstance(openmeter_sync, dict) and openmeter_sync.get("configured") and not openmeter_sync.get("ok"):
+                    queued = _queue_openmeter_sync_job(
+                        store,
+                        business,
+                        scope="plan",
+                        plan_key=plan_key,
+                    )
+                    if queued is not None:
+                        openmeter_sync["retry_job"] = queued
+                    raise TakyonError(
+                        f"OpenMeter plan sync failed before checkout: {openmeter_sync.get('error') or 'unknown error'}"
+                    )
+                app_user_id = str(args.get("app_user_id") or "").strip()
+                if app_user_id:
+                    customer_sync = _pg_sync_openmeter_customer(store, business, app_user_id)
+                    if isinstance(customer_sync, dict) and customer_sync.get("configured") and not customer_sync.get("ok"):
+                        queued = _queue_openmeter_sync_job(
+                            store,
+                            business,
+                            scope="customer",
+                            app_user_id=app_user_id,
+                        )
+                        if queued is not None:
+                            customer_sync["retry_job"] = queued
+                        raise TakyonError(
+                            f"OpenMeter customer sync failed before checkout: {customer_sync.get('error') or 'unknown error'}"
+                        )
+                    if isinstance(openmeter_sync, dict) and isinstance(customer_sync, dict):
+                        openmeter_sync = {
+                            **openmeter_sync,
+                            "customer": customer_sync,
+                        }
+                if isinstance(openmeter_sync, dict):
+                    checkout_metadata = {
+                        **checkout_metadata,
+                        "billing_authority": "openmeter",
+                        "openmeter_plan_key": openmeter_sync.get("openmeter_plan_key"),
+                        "openmeter_plan_version": openmeter_sync.get("openmeter_plan_version"),
+                    }
             if not test_mode:
                 plan = _ensure_stripe_price(conn, business, plan, str(business_row.get("name") or business))
             mode = "payment" if plan.get("billing_interval") == "one_time" else "subscription"
@@ -19779,7 +20290,7 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             metadata_column = "metadata" if isinstance(conn, _PGConn) else "metadata_json"
             conn.execute(
                 f"INSERT INTO app_checkout_intents (id, business_slug, app_user_id, plan_key, status, client_reference_id, customer_email, {metadata_column}, created_at, updated_at) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)",
-                (intent_id, business, args.get("app_user_id"), plan_key, client_reference_id, customer_email, _json_dumps(args.get("metadata") or {}), now, now),
+                (intent_id, business, args.get("app_user_id"), plan_key, client_reference_id, customer_email, _json_dumps(checkout_metadata), now, now),
             )
             params: dict[str, Any] = {
                 "mode": mode,
@@ -19841,6 +20352,7 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     "url": checkout_url,
                     "client_reference_id": client_reference_id,
                     "external_side_effects": "suppressed",
+                    "openmeter_sync": openmeter_sync,
                 })
             session = _stripe_request("checkout/sessions", params)
             conn.execute(
@@ -19849,7 +20361,7 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             )
             store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "stripe_checkout_session_id": session.get("id")})
             store._rewrite_app_files(conn, business)
-        return tool_result({
+        payload = {
             "success": True,
             "business": business,
             "plan_key": plan_key,
@@ -19858,7 +20370,10 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             "checkout_url": session.get("url"),
             "url": session.get("url"),
             "client_reference_id": client_reference_id,
-        })
+        }
+        if openmeter_sync is not None:
+            payload["openmeter_sync"] = openmeter_sync
+        return tool_result(payload)
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -20018,16 +20533,75 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
                         outcome = leaves["payments"].record_webhook_and_process(raw, event)
             except leaves["payments"].AppPaymentError as exc:
                 raise TakyonError(str(exc)) from exc
+            openmeter_sync = None
+            processed = outcome.get("processed") if isinstance(outcome, dict) else None
+            if _openmeter_enabled() and isinstance(processed, dict):
+                try:
+                    app_user_id = str(processed.get("app_user_id") or "").strip()
+                    if app_user_id:
+                        target_business = str(processed.get("business_slug") or "").strip()
+                        if not target_business:
+                            openmeter_sync = {
+                                "configured": True,
+                                "ok": False,
+                                "error": "checkout reconciliation missing business_slug",
+                            }
+                        else:
+                            openmeter_sync = _pg_sync_openmeter_access_projection(
+                                store,
+                                target_business,
+                                app_user_id,
+                                allow_provision=(str(event.get("type") or "") == "checkout.session.completed"),
+                            )
+                    else:
+                        updated = processed.get("updated")
+                        if isinstance(updated, list):
+                            syncs = []
+                            for item in updated:
+                                if not isinstance(item, dict):
+                                    continue
+                                target_business = str(item.get("business_slug") or "").strip()
+                                target_user = str(item.get("app_user_id") or "").strip()
+                                if not target_business or not target_user:
+                                    continue
+                                syncs.append(
+                                    _pg_sync_openmeter_access_projection(
+                                        store,
+                                        target_business,
+                                        target_user,
+                                    )
+                                )
+                            if syncs:
+                                openmeter_sync = syncs
+                except Exception as exc:
+                    openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
+                    app_user_id = str(processed.get("app_user_id") or "").strip()
+                    target_business = str(processed.get("business_slug") or "").strip()
+                    if app_user_id and target_business:
+                        queued = _queue_openmeter_sync_job(
+                            store,
+                            target_business,
+                            scope="access",
+                            app_user_id=app_user_id,
+                            allow_provision=(
+                                str(event.get("type") or "") == "checkout.session.completed"
+                            ),
+                        )
+                        if queued is not None and isinstance(openmeter_sync, dict):
+                            openmeter_sync["retry_job"] = queued
             # Flatten the leaf envelope ({provider_event_id, type, deduplicated, processed}) to the
             # SAME tool shape the SQLite path returns: top-level ids + `processed` = the inner
             # reconciliation dict (which is None on a deduplicated replay).
-            return tool_result({
+            payload = {
                 "success": True,
                 "provider_event_id": outcome.get("provider_event_id", event_id),
                 "type": outcome.get("type", event_type),
                 "deduplicated": outcome.get("deduplicated", False),
                 "processed": outcome.get("processed"),
-            })
+            }
+            if openmeter_sync is not None:
+                payload["openmeter_sync"] = openmeter_sync
+            return tool_result(payload)
         with store._connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO webhook_events (id, provider, provider_event_id, payload_json, created_at) VALUES (?, 'stripe', ?, ?, ?)",

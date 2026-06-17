@@ -73,6 +73,32 @@ def _expected_net(gross: int) -> int:
     return gross - (gross * custody.app_fee_bps()) // 10000
 
 
+def _expected_net_with_prepaid(gross: int, withheld_cents: int) -> int:
+    return _expected_net(gross) - max(0, int(withheld_cents or 0))
+
+
+def _monthly_plan(
+    conn,
+    business_slug: str,
+    *,
+    plan_key: str = "pro",
+    price_cents: int = 1900,
+    included_ai_budget_microusd: int = 5_000_000,
+):
+    return app_entitlements.upsert_plan_policy(
+        conn,
+        business_slug,
+        plan_key,
+        tier="paid",
+        price_cents=price_cents,
+        currency="usd",
+        billing_interval="month",
+        included_ai_budget_microusd=included_ai_budget_microusd,
+        included_action_quota=0,
+        source="operator",
+    )
+
+
 def _checkout_event(
     *,
     event_id: str,
@@ -264,6 +290,39 @@ def test_paid_checkout_accrues_to_owner_custody(pg_conn):
 
     # OWNER custody owed = gross - app fee
     assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == _expected_net(1000)
+
+
+def test_paid_checkout_withholds_monthly_included_budget_from_owner_payout(pg_conn):
+    owner = _owner(pg_conn)
+    slug = _business(pg_conn, owner)
+    _monthly_plan(
+        pg_conn,
+        slug,
+        plan_key="pro",
+        price_cents=1900,
+        included_ai_budget_microusd=5_000_000,
+    )
+    intent = app_payments.create_checkout_intent(
+        pg_conn, slug, plan_key="pro", client_reference_id="ref-split", customer_email="split@x.com"
+    )
+    result = app_payments.record_webhook_and_process(
+        pg_conn,
+        _checkout_event(
+            event_id="evt_split",
+            session_id="cs_split",
+            intent_id=intent.id,
+            email="split@x.com",
+            amount_total=1900,
+            subscription="sub_split",
+        ),
+    )
+    proc = result["processed"]
+    assert proc["prepaid_withheld_cents"] == 500
+    assert proc["included_ai_budget_microusd"] == 5_000_000
+    assert proc["owner_net_cents"] == _expected_net_with_prepaid(1900, 500)
+    assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == _expected_net_with_prepaid(
+        1900, 500
+    )
     assert custody.reconcile_custody(pg_conn, owner)["ok"] is True
 
     # paying sub-user got a paid entitlement carrying Stripe evidence
@@ -271,10 +330,10 @@ def test_paid_checkout_accrues_to_owner_custody(pg_conn):
     assert len(ents) == 1
     assert ents[0].tier == "paid"
     assert ents[0].source == "stripe"
-    assert ents[0].stripe_subscription_id == "sub_1"
-    assert ents[0].stripe_checkout_session_id == "cs_1"
+    assert ents[0].stripe_subscription_id == "sub_split"
+    assert ents[0].stripe_checkout_session_id == "cs_split"
 
-    user = app_identity.get_app_user(pg_conn, slug, email="c@x.com")
+    user = app_identity.get_app_user(pg_conn, slug, email="split@x.com")
     assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "paid"
 
 

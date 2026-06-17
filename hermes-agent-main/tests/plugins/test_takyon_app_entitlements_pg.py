@@ -493,3 +493,87 @@ def test_new_plan_key_for_new_pricing_is_allowed(pg_conn):
     assert new_plan.plan_key == "pro-2"
     assert new_plan.price_cents == 3000
     assert app_entitlements.get_plan_policy(pg_conn, slug, "pro").price_cents == 2000
+
+
+def test_project_openmeter_access_supersedes_legacy_stripe_access(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    stripe_entitlement, _ = app_entitlements.grant_entitlement(
+        pg_conn,
+        slug,
+        app_user_id=user_id,
+        tier="paid",
+        source="stripe",
+        stripe_customer_id="cus_test",
+        stripe_subscription_id="sub_test",
+        stripe_checkout_session_id="cs_test",
+        plan_key="pro",
+    )
+    projected, effective = app_entitlements.project_openmeter_access(
+        pg_conn,
+        slug,
+        user_id,
+        active=True,
+        tier="paid",
+        plan_key="pro",
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    assert projected is not None
+    assert projected.source == "openmeter"
+    assert projected.plan_key == "pro"
+    assert effective == "paid"
+    active = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
+    assert active is not None
+    assert active.id == projected.id
+    legacy = pg_conn.execute(
+        "select status from app_entitlements where id = %s",
+        (stripe_entitlement.id,),
+    ).fetchone()
+    assert legacy is not None
+    assert legacy[0] == "cancelled"
+
+
+def test_project_openmeter_access_inactive_clears_billing_entitlements(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    app_entitlements.grant_entitlement(
+        pg_conn,
+        slug,
+        app_user_id=user_id,
+        tier="paid",
+        source="stripe",
+        stripe_customer_id="cus_test",
+        stripe_subscription_id="sub_test",
+        stripe_checkout_session_id="cs_test",
+        plan_key="pro",
+    )
+    app_entitlements.project_openmeter_access(
+        pg_conn,
+        slug,
+        user_id,
+        active=True,
+        tier="paid",
+        plan_key="pro",
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    projected, effective = app_entitlements.project_openmeter_access(
+        pg_conn,
+        slug,
+        user_id,
+        active=False,
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    assert projected is None
+    assert effective == app_identity.UNENTITLED_TIER
+    assert app_entitlements.get_active_entitlement(pg_conn, slug, user_id) is None
+    statuses = [
+        row[0]
+        for row in pg_conn.execute(
+            "select status from app_entitlements where business_slug = %s and app_user_id = %s",
+            (slug, user_id),
+        ).fetchall()
+    ]
+    assert statuses
+    assert set(statuses) == {"cancelled"}
