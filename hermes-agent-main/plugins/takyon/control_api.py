@@ -323,6 +323,32 @@ def _fallback_operator_weekly_allowance_cents() -> int:
     return _env_nonnegative_int("TAKYON_OPERATOR_DEFAULT_WEEKLY_ALLOWANCE_CENTS", 10_000)
 
 
+def operator_plan_name_for_business(conn, business_slug: str) -> str | None:
+    """PURE READ — the operator (business owner)'s effective plan name, for entitlement gates such
+    as the wake-cadence floor. NO side effects: it never touches Stripe, never grants allowance,
+    never writes billing rows (unlike ``sync_operator_subscription_allowance``).
+
+    Resolution is deliberately conservative and fail-restrictive: it reads the cached
+    ``operator_billing_subscription_status`` from the owner's ``users`` row. Only when that status
+    is allowance-bearing (active/trialing) does it return the configured plan name
+    (``TAKYON_OPERATOR_DEFAULT_PLAN_NAME``, default ``DEV``); otherwise — no business, no owner, no
+    active subscription, or a plan DOWNGRADE that dropped the subscription — it returns ``None`` so
+    the caller applies the most-restrictive floor. This makes a downgrade TIGHTEN the wake-cadence
+    floor, never loosen it (Cron-scheduling acceptance #5)."""
+    row = conn.execute(
+        "select u.operator_billing_subscription_status "
+        "from businesses b join users u on u.id = b.owner_user_id "
+        "where b.slug = %s",
+        (business_slug,),
+    ).fetchone()
+    if row is None:
+        return None
+    status = str(row[0] or "none").strip().lower() or "none"
+    if status not in _ALLOWANCE_BEARING_SUBSCRIPTION_STATUSES:
+        return None
+    return _fallback_operator_plan_name()
+
+
 def _pick_operator_subscription(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     rows = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(rows, list):

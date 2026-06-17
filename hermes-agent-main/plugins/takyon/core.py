@@ -16474,15 +16474,71 @@ class TakyonStore:
             "protected": ["businesses", "workspaces", "ledger_entries", "control_states", "idempotency_keys", "files"],
         }
 
-    def _ceo_cron_prompt(self, slug: str) -> str:
+    def _ceo_cron_wake_interval_seconds(self, slug: str) -> int | None:
+        """The business's current wake cadence in seconds, read from the canonical wake_schedules
+        row (Postgres path) — or None when there is no schedule / not on Postgres. Used only to
+        decide whether *this* wake is the last one before PST midnight; never a side effect."""
+        if _db_backend() != "postgres":
+            return None
+        try:
+            from . import wakes
+        except ImportError:  # pragma: no cover - alternate load path as a top-level package
+            from plugins.takyon import wakes
+        try:
+            with self._connect() as conn:
+                with self._leaf_conn(conn) as raw:
+                    schedule = wakes.get_wake_schedule(raw, slug)
+        except Exception:  # pragma: no cover - schedule read is advisory only, never breaks a wake
+            return None
+        if schedule is None or not schedule.enabled:
+            return None
+        return int(schedule.interval_seconds) if schedule.interval_seconds else None
+
+    def _is_last_wake_of_day_pst(self, slug: str, *, now: datetime | None = None) -> bool:
+        """True when, at PST/PDT (America/Los_Angeles) wall-clock ``now``, the NEXT scheduled wake
+        would land on the following PST calendar day — i.e. this is the last wake of the day in PST.
+        Conservative: with no readable interval it returns False (no spurious daily-summary push).
+        The daily summary is written on the last wake of the day so it captures the full day."""
+        interval_seconds = self._ceo_cron_wake_interval_seconds(slug)
+        if not interval_seconds or interval_seconds <= 0:
+            return False
+        try:
+            from zoneinfo import ZoneInfo
+
+            pacific = ZoneInfo("America/Los_Angeles")
+        except Exception:  # pragma: no cover - zoneinfo/tz data missing; skip daily-summary signal
+            return False
+        current = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_pst = current.astimezone(pacific)
+        next_pst = (current + timedelta(seconds=interval_seconds)).astimezone(pacific)
+        return next_pst.date() != now_pst.date()
+
+    def _ceo_cron_prompt(self, slug: str, *, now: datetime | None = None) -> str:
+        last_wake_of_day = self._is_last_wake_of_day_pst(slug, now=now)
+        if last_wake_of_day:
+            daily_summary_line = (
+                "LAST WAKE OF THE DAY (PST): before sleeping, write today's daily summary to "
+                "metrics/summary.md via takyon-business-metrics so it captures the full PST day — "
+                "what moved, spend, traction deltas, blockers, and the plan for tomorrow. "
+            )
+        else:
+            daily_summary_line = (
+                "If (and only if) this is the last wake of the day in PST/Pacific, write today's "
+                "daily summary to metrics/summary.md via takyon-business-metrics before sleeping; "
+                "otherwise just keep metrics/summary.md current with this wake's pulse. "
+            )
         return (
             f"CEO wakeup for business:{slug}.\n"
             "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
             "Start with business_calculate_pulse to see what changed: usage, revenue, unresolved inbound, queued jobs, blockers, and recent activity. "
             "Then read research/strategy.md before choosing the next move. If new evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, update research/strategy.md before continuing. "
             "Use takyon-business-metrics to write metrics/summary.md and record a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
-            "create workspaces, enqueue jobs, and adjust the next wakeup if useful. Decide the highest "
-            "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
+            "create workspaces, enqueue jobs, and adjust the next wakeup if useful. From the evidence, decide the 1-2 highest "
+            "expected-impact moves under the business goal, budget, evidence, active campaigns, failures, and kill switches; "
+            "reason about the best next move from what actually changed, do not run a fixed checklist. Cap this wake at those "
+            "1-2 tasks: execute them, then stop and sleep until the next scheduled wake — do not keep finding more work in the same turn. Keep all business "
             "memory inside this business scope. Read prior wake notes from metrics/wake-history.md and compare "
             "this state to those notes, including business "
             "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
@@ -16500,9 +16556,12 @@ class TakyonStore:
             "the same motion. "
             "Append a compact wake snapshot to metrics/wake-history.md for future comparison. Never delete prior metrics, "
             "metric, event, conversation, ledger, job, or wake data during a wake. "
+            f"{daily_summary_line}"
             "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
             "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
-            "or outreach/marketing email delivery."
+            "or outreach/marketing email delivery. "
+            "When the 1-2 tasks are done and this wake's snapshot (and any daily summary) is written, end the turn and sleep "
+            "until the next scheduled wake; do not start additional work beyond the capped tasks."
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
@@ -16560,11 +16619,11 @@ class TakyonStore:
             from cron.jobs import parse_schedule
 
             try:
-                from . import wakes
-                from .policy import expensive_threshold_cents
+                from . import control_api, wakes
+                from .policy import expensive_threshold_cents, plan_min_wake_interval_seconds
             except ImportError:  # pragma: no cover - alternate load path as a top-level package
-                from plugins.takyon import wakes
-                from plugins.takyon.policy import expensive_threshold_cents
+                from plugins.takyon import control_api, wakes
+                from plugins.takyon.policy import expensive_threshold_cents, plan_min_wake_interval_seconds
 
             parsed = parse_schedule(schedule)
             if str(parsed.get("kind") or "") != "interval":
@@ -16575,6 +16634,21 @@ class TakyonStore:
             interval_seconds = max(60, int(parsed.get("minutes") or 0) * 60)
             with self._connect() as conn:
                 with self._leaf_conn(conn) as raw:
+                    # Plan-gate the cadence: the operator may not set a wake interval FASTER than
+                    # their subscription plan's floor. This is the ONLY write boundary for a wake
+                    # schedule (CLI /wake, the `cron.ensure_ceo_wakeup` CEO op, and /create all flow
+                    # through here), so the gate lives here, not in the pure `wakes` leaf. Resolved
+                    # server-side from the business owner — no caller-supplied plan/interval can
+                    # bypass it (authoritative inv #3: no cross-tenant / caller-supplied identity).
+                    plan_name = control_api.operator_plan_name_for_business(raw, slug)
+                    min_interval_seconds = plan_min_wake_interval_seconds(plan_name)
+                    if interval_seconds < min_interval_seconds:
+                        plan_label = plan_name or "no active subscription"
+                        raise TakyonError(
+                            f"wake cadence too fast for plan '{plan_label}': requested "
+                            f"{interval_seconds}s but the plan minimum is {min_interval_seconds}s. "
+                            "Upgrade the subscription or choose a slower cadence."
+                        )
                     existing = wakes.get_wake_schedule(raw, slug)
                     scheduled = wakes.upsert_wake_schedule(
                         raw,
