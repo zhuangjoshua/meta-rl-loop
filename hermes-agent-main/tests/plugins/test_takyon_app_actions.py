@@ -564,6 +564,104 @@ def test_settle_and_release_usage_pg_use_leaf_conn(monkeypatch):
     ]
 
 
+def _sqlite_usage_store(tmp_path):
+    """A raw in-memory SQLite conn with the (app_budgets/app_usage_events/app_entitlements) tables the
+    SQLite branch of app_actions._reserve_usage touches, plus a minimal store wrapper exposing
+    `_connect` and `_ensure_app_budget` (opening with NO pool cap — invariant 9). The SQLite branch
+    is reached because the conn is NOT a `_PGConn` (the operator store SQL runs unchanged here)."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE app_budgets (business_slug TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'active', "
+        "hard_limit_microusd INTEGER, current_period_start TEXT NOT NULL, current_period_end TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE app_usage_events (id TEXT PRIMARY KEY, business_slug TEXT NOT NULL, app_user_id TEXT, "
+        "app_user_tier TEXT, purpose TEXT NOT NULL, route TEXT NOT NULL, status TEXT NOT NULL, "
+        "estimated_cost_microusd INTEGER NOT NULL DEFAULT 0, actual_cost_microusd INTEGER NOT NULL DEFAULT 0, "
+        "metadata_json TEXT, created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE app_entitlements (id TEXT PRIMARY KEY, business_slug TEXT NOT NULL, app_user_id TEXT NOT NULL, "
+        "tier TEXT NOT NULL, status TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    now = datetime.now(timezone.utc).isoformat()
+
+    class _Store:
+        @contextmanager
+        def _connect(self):
+            yield conn
+
+        def _ensure_app_budget(self, c, slug):
+            c.execute(
+                "INSERT INTO app_budgets (business_slug, current_period_start, current_period_end) "
+                "VALUES (?, ?, ?) ON CONFLICT(business_slug) DO NOTHING",
+                (slug, "2026-06-01T00:00:00+00:00", "2026-07-01T00:00:00+00:00"),
+            )
+            row = c.execute("SELECT * FROM app_budgets WHERE business_slug = ?", (slug,)).fetchone()
+            return dict(row)
+
+    return conn, _Store(), now
+
+
+def _seed_sqlite_entitlement(conn, slug, uid, now, *, tier="paid"):
+    conn.execute(
+        "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, created_at) "
+        "VALUES (?, ?, ?, ?, 'active', 'stripe', ?)",
+        (f"ent_{uid}", slug, uid, tier, now),
+    )
+
+
+def test_reserve_usage_sqlite_billable_action_requires_active_entitlement(tmp_path):
+    """GOAL_RULES §3 gap #4 (SQLite parity). A positive-estimate action with NO active paid
+    entitlement behind it is REFUSED on the SQLite branch — mirroring the PG branch — so a
+    null/service or unentitled sub-user cannot fall through to the (invariant-9-removed) pool =
+    ungated spend. A funded sub-user is allowed; a zero-cost action is never gated."""
+    conn, store, now = _sqlite_usage_store(tmp_path)
+
+    # (1) null sub-user + positive estimate → refused (no entitlement possible).
+    with pytest.raises(app_actions.ActionBudgetExceeded, match="subscription_required"):
+        app_actions._reserve_usage(
+            store, "noentbiz",
+            reservation_key="rk-null-1", app_user_id=None, app_user_tier=None,
+            estimate_microusd=2_000, route="/api/x", metadata={},
+        )
+
+    # (2) sub-user WITHOUT an active entitlement + positive estimate → refused.
+    with pytest.raises(app_actions.ActionBudgetExceeded, match="subscription_required"):
+        app_actions._reserve_usage(
+            store, "noentbiz",
+            reservation_key="rk-unent-1", app_user_id="u_noent", app_user_tier="paid",
+            estimate_microusd=2_000, route="/api/x", metadata={},
+        )
+
+    # (3) a zero-cost (free) action is never gated, even with no entitlement.
+    app_actions._reserve_usage(
+        store, "noentbiz",
+        reservation_key="rk-free-1", app_user_id=None, app_user_tier=None,
+        estimate_microusd=0, route="/api/x", metadata={},
+    )
+    assert conn.execute("SELECT status FROM app_usage_events WHERE id = ?", ("rk-free-1",)).fetchone()[0] == "reserved"
+    # ...and the refused billable reserves wrote NOTHING (no ungated spend leaked).
+    assert conn.execute(
+        "SELECT count(*) FROM app_usage_events WHERE id IN ('rk-null-1', 'rk-unent-1')"
+    ).fetchone()[0] == 0
+
+    # (4) a funded sub-user (active paid entitlement) + positive estimate → allowed.
+    uid = "u_paid"
+    _seed_sqlite_entitlement(conn, "entbiz", uid, now)
+    app_actions._reserve_usage(
+        store, "entbiz",
+        reservation_key="rk-paid-1", app_user_id=uid, app_user_tier="paid",
+        estimate_microusd=2_000, route="/api/x", metadata={},
+    )
+    row = conn.execute(
+        "SELECT status, estimated_cost_microusd FROM app_usage_events WHERE id = ?", ("rk-paid-1",)
+    ).fetchone()
+    assert row is not None
+    assert (row[0], int(row[1])) == ("reserved", 2_000)
+
+
 def test_handle_business_invoke_app_action_rejects_during_bootstrap_before_runner(monkeypatch):
     def _unexpected_store():
         raise AssertionError("store should not be touched during ceo_bootstrap refusal")

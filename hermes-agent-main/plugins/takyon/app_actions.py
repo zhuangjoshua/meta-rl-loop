@@ -1328,6 +1328,30 @@ def _reserve_usage(
                 except (app_usage.AppBudgetExceeded, app_usage.AppUserBudgetExceeded) as exc:
                     raise ActionBudgetExceeded(str(exc)) from exc
             else:
+                # GOAL_RULES §3 gap #4 (SQLite parity with the PG branch above): a billable
+                # (positive-estimate) action MUST be backed by an active paid entitlement. After
+                # invariant 9 removed the flat per-business pool cap, the SQLite budget opens with a
+                # NULL cap too, so without this a service/null-subuser (or unentitled) action reserve
+                # would fall straight through to the insert = unbounded ungated spend. Mirror
+                # `_require_active_entitlement`: a positive estimate with no active, tier-conferring
+                # entitlement behind its sub-user is refused (subscription_required). A zero-cost
+                # (free) action moves no money and is not gated. The pool-cap check below still
+                # applies when an operator set an explicit cap.
+                if estimate_microusd > 0:
+                    entitled = None
+                    if app_user_id:
+                        entitled = conn.execute(
+                            "SELECT 1 FROM app_entitlements "
+                            "WHERE business_slug = ? AND app_user_id = ? "
+                            "AND status IN ('active', 'trialing') "
+                            "AND lower(COALESCE(tier, '')) NOT IN ('', 'free', 'none', 'unentitled') "
+                            "LIMIT 1",
+                            (business_slug, app_user_id),
+                        ).fetchone()
+                    if entitled is None:
+                        raise ActionBudgetExceeded(
+                            "subscription_required: no active paid entitlement for billable action"
+                        )
                 budget = store._ensure_app_budget(conn, business_slug)
                 # Per-business pool gate: ONLY when an explicit cap is set (invariant 9 — NULL =
                 # no pool cap, the per-subuser subscription gate is then the sole budget gate).

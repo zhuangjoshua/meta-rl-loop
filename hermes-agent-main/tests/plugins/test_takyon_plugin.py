@@ -249,12 +249,9 @@ def test_runtime_mirror_files_wait_for_real_public_surface(tmp_path, monkeypatch
         "init-runtime-guard",
     )
 
-    _commit(
-        store,
-        "business:latexflow",
-        [{"action": "app.budget.set", "business": "latexflow", "hard_limit_microusd": 7_500_000}],
-        "budget-before-surface",
-    )
+    # (Invariant 9: the former `app.budget.set` operator-cap write was removed; a business with no
+    # real public surface still must not get runtime mirror files. The init write above is enough to
+    # prove the mirror files stay absent until a real surface exists.)
 
     product_root = tmp_path / "businesses" / "latexflow" / "product"
     assert (product_root / "surface.md").exists()
@@ -284,12 +281,9 @@ def test_runtime_mirror_files_stay_absent_by_default_even_after_real_public_surf
         "surface-with-source",
     )
 
-    _commit(
-        store,
-        "business:latexflow",
-        [{"action": "app.budget.set", "business": "latexflow", "hard_limit_microusd": 7_500_000}],
-        "budget-after-surface",
-    )
+    # (Invariant 9: the former `app.budget.set` operator-cap write was removed. The real surface
+    # upsert above is the meaningful product write; runtime mirror files must still stay absent by
+    # default even after it.)
 
     product_root = tmp_path / "businesses" / "latexflow" / "product"
     assert (product_root / "surface.md").exists()

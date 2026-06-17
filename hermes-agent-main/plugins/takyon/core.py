@@ -10784,7 +10784,6 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         return
 
     product_actions = {
-        "app.budget.set",
         "app.customer.upsert",
         "app.entitlement.upsert",
         "app.plan.upsert",
@@ -14273,7 +14272,6 @@ class TakyonStore:
 
         allowed = {
             "agent.record",
-            "app.budget.set",
             "app.customer.upsert",
             "app.directory.disable",
             "app.directory.upsert",
@@ -14491,32 +14489,6 @@ class TakyonStore:
             return self._gc(conn, parsed_scope, op)
 
         assert slug is not None
-
-        if action == "app.budget.set":
-            amount = int(float(op.get("hard_limit_microusd") or op.get("amount_microusd") or 0))
-            if amount < 0:
-                raise TakyonError("app budget limit must be non-negative")
-            now = _now()
-            current = self._ensure_app_budget(conn, slug)
-            status = str(op.get("status") or current.get("status") or "active")
-            if _db_backend() == "postgres":
-                # Canonical Postgres budget write: app_usage.set_app_budget owns the app_budgets cap (it
-                # row-locks then upserts), so the operator store delegates rather than carry a second
-                # writer. Prior status is preserved when the op omits it (the `status` var above).
-                leaves = self._app_leaves()
-                try:
-                    with self._leaf_conn(conn) as raw:
-                        leaves["usage"].set_app_budget(raw, slug, hard_limit_microusd=amount, status=status)
-                except leaves["usage"].AppUsageError as exc:
-                    raise TakyonError(str(exc)) from exc
-            else:
-                conn.execute(
-                    "UPDATE app_budgets SET hard_limit_microusd = ?, status = ?, updated_at = ? WHERE business_slug = ?",
-                    (amount, status, now, slug),
-                )
-            self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"hard_limit_microusd": amount, "reason": reason, "actor": actor})
-            return {"action": action, "business": slug, "hard_limit_microusd": amount}
 
         if action == "app.surface.upsert":
             status = str(op.get("status") or "draft").strip().lower()
@@ -16049,6 +16021,20 @@ class TakyonStore:
                                 )
                             else:
                                 user_monthly_limit_microusd = 0
+                        elif actual > 0 or estimated > 0:
+                            # GOAL_RULES §3 gap #4 (self-report sibling of the app_actions reserve
+                            # fix). This is a CUSTOMER-REACHABLE product-usage write: a null-subuser
+                            # record has NO per-user entitlement to gate on, and after invariant 9 the
+                            # budget row opens with a NULL pool cap, so a positive-cost record here
+                            # would persist COMPLETED ungated spend with no money gate at all. Mirror
+                            # the action path: refuse a positive-cost record that carries no sub-user
+                            # (no active paid entitlement behind it). A zero-cost record is a pure
+                            # audit event and stays allowed.
+                            raise TakyonError(
+                                "subscription_required: positive-cost product usage record requires "
+                                "an app sub-user with an active entitlement; a null-subuser record "
+                                "may carry no positive cost"
+                            )
                         event = leaves["usage"].record_completed_usage(
                             raw,
                             slug,

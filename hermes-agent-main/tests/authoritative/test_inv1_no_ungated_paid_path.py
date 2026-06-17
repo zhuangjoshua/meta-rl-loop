@@ -336,12 +336,18 @@ def test_gap4_centralized_per_user_floor_is_unified_to_plan_or_zero():
     )
 
 
-def test_default_user_floor_constant_is_the_known_050_value():
-    """Pin the identity of the floor the gap references so the aspirational tests
-    above target the right constant: `_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD` is
-    the $0.50 (500_000 microusd) per-user floor named in §3 / invariant 9. Not a
-    catalog snapshot — it anchors WHICH value the unification must remove."""
-    assert _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD == 500_000
+def test_default_user_floor_constant_is_removed_to_zero():
+    """Post-invariant-9 contract: the $0.50 per-user free-tier FLOOR is REMOVED.
+
+    Invariant 9 / §3 gap #4 unified per-user-limit resolution to plan-derived-or-0 with NO free
+    floor, so the back-compat shim `_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD` is now 0 (`0 == "no
+    floor"`) and is NOT referenced by the resolver. This is the reconciliation of the once-self-
+    contradictory pin: it formerly asserted the live $0.50 floor (500_000); the floor having been
+    correctly zeroed, the contract this anchors is the absence of any positive floor. Not a catalog
+    snapshot — it asserts the invariant that the per-user budget can never fall back to a free
+    floor (the companion `test_gap4_centralized_per_user_floor_is_unified_to_plan_or_zero` proves
+    the resolver no longer references it at all)."""
+    assert _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

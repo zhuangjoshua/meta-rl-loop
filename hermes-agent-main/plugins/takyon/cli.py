@@ -570,8 +570,6 @@ def _format_operation_result(item: Any) -> str:
         plan = str(item.get("plan_key") or "")
         suffix = f" ({plan})" if plan else ""
         return f"app plan policy updated for business:{business}{suffix}"
-    if action == "app.budget.set" and business:
-        return f"app usage budget updated for business:{business}"
     if action in {"app.customer.upsert", "app.entitlement.upsert"} and business:
         return f"app customer/entitlement state updated for business:{business}"
     if action == "app.usage.record" and business:
@@ -2093,9 +2091,6 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
                 plan = str(item.get("plan_key") or "")
                 suffix = f" ({plan})" if plan else ""
                 lines.append(f"app plan policy updated for business:{business}{suffix}")
-        elif action == "app.budget.set":
-            if business:
-                lines.append(f"app usage budget updated for business:{business}")
         elif action in {"app.customer.upsert", "app.entitlement.upsert"}:
             if business:
                 lines.append(f"app customer/entitlement state updated for business:{business}")
