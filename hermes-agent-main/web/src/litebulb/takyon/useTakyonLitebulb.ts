@@ -242,6 +242,19 @@ function mergeHistoryMessages(prev: ChatMessage[], next: ChatMessage[]): ChatMes
     : [...prev];
   const seen = new Set(base.map((message) => `${message.who}\n${message.text}`));
   for (const message of next) {
+    // While a working assistant is still streaming richer text than the poll
+    // snapshot, do NOT also push the snapshot's trailing assistant — that would
+    // render a duplicate (flickering) agent bubble. Keep the live streaming one
+    // until history confirms the final (>= length) reply, which the
+    // replaceWorkingAssistant branch above adopts.
+    if (
+      !replaceWorkingAssistant
+      && liveWorkingAssistant
+      && message === trailingAssistant
+      && message.who === "agent"
+    ) {
+      continue;
+    }
     const key = `${message.who}\n${message.text}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -657,7 +670,21 @@ export function useTakyonLitebulb() {
     const delta = rawText(text);
     if (!delta.length) return;
     assistantDraftTextRef.current += delta;
-  }, []);
+    // Render the streamed tokens inline on the in-flight working message so the
+    // chat shows the answer building up — no blank gap, no two-stage flash when
+    // the turn completes. Presentation-only: this mirrors the same tokens the
+    // gateway already streamed into the agent's turn; it does not alter the
+    // agent's runtime/intra-turn context.
+    const id = ensureAssistantMessage();
+    const draft = assistantDraftTextRef.current;
+    setChatMessages((messages) => {
+      const next = messages.map((message) => (
+        message.id === id ? { ...message, text: draft, working: true } : message
+      ));
+      chatMessagesRef.current = next;
+      return next;
+    });
+  }, [ensureAssistantMessage]);
 
   const completeAssistantText = useCallback((text?: string) => {
     const finalText = trimText(text) || trimText(assistantDraftTextRef.current);
@@ -1404,7 +1431,20 @@ export function useTakyonLitebulb() {
           const mappedHistory = mapHistoryMessages(history);
           const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;
           setChatMessages((messages) => {
+            // Robustness guard: never blank the log while a turn is still live
+            // on the client (a streaming working message, or an in-flight
+            // live-chat turn the server snapshot hasn't caught up to yet). A
+            // transient empty/non-running history during a resume race must not
+            // wipe the user's just-sent message or the streaming reply.
+            const hasLiveWorkingMessage = messages.some(
+              (message) => message.who === "agent" && message.working,
+            );
+            const clientTurnLive =
+              sessionRunningRef.current || liveChatTurnRef.current || hasLiveWorkingMessage;
+            // Only blank the transcript when the authoritative server history
+            // has reset to empty AND nothing is live on either side.
             if (!pending && !pendingTurnMissing && mappedHistory.length === 0) {
+              if (clientTurnLive) return messages;
               chatMessagesRef.current = [];
               return [];
             }
