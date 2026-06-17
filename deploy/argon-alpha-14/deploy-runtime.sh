@@ -267,6 +267,7 @@ import psycopg
 
 load_takyon_env()
 with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=None) as conn:
+    conn.execute('select set_config($$statement_timeout$$, $$0$$, false)')
     run_migrations(conn)
 PY
   fi
