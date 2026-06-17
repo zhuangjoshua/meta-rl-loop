@@ -40,6 +40,13 @@ def _user_and_session(conn, slug: str, email: str) -> tuple[app_identity.AppUser
 
 @contextmanager
 def _customer_scope(conn, *, business_slug: str, session_token: str):
+    # Mirror production's app-customer scope (core.TakyonStore._pg_app_scope): bind the
+    # request-local GUCs AND drop to the non-bypassing `takyon_app` role (migration 0030) so the
+    # 0027 RLS policies actually bite. The fixture's login role is the superuser/owner, which
+    # PostgreSQL exempts from RLS even under FORCE — without the role switch these reads would see
+    # every customer's rows and the cross-tenant write would NOT be refused. RESET ROLE restores
+    # the privileged login role on exit (so the next test's privileged setup works).
+    conn.execute("set role takyon_app")
     conn.execute("select set_config('takyon.rls_bypass', '0', false)")
     conn.execute("select set_config('takyon.rls_business_slug', %s, false)", (business_slug,))
     conn.execute("select set_config('takyon.rls_app_user_id', '', false)")
@@ -47,6 +54,7 @@ def _customer_scope(conn, *, business_slug: str, session_token: str):
     try:
         yield
     finally:
+        conn.execute("reset role")
         configure_takyon_pg_session(conn, bypass=True)
 
 

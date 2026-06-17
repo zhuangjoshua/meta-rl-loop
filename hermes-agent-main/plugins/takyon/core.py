@@ -11212,7 +11212,18 @@ class TakyonStore:
             "takyon.rls_session_hash",
         )
         previous = {key: self._pg_current_setting(raw, key) for key in settings}
+        # The connection's login role is the privileged control-plane/runtime owner, which
+        # PostgreSQL exempts from RLS (superuser / BYPASSRLS) even under FORCE — so the 0027
+        # policies only actually deny a stray cross-tenant query if the request runs under a
+        # NON-bypassing role. Drop to the restricted `takyon_app` role (migration 0030) for the
+        # duration of this app-customer scope so the DB enforces the same per-customer boundary
+        # as the runtime; RESET ROLE returns to the privileged session-default login role on exit.
+        # The store connection is autocommit=False, so SET LOCAL is transaction-scoped and also
+        # auto-reverts at commit/rollback; the explicit reset covers a caller that holds the
+        # connection across the block. App scope is always entered from the session default role
+        # (never nested under another non-default role), so RESET ROLE is the correct restore.
         try:
+            raw.execute("set local role takyon_app")
             raw.execute("select set_config('takyon.rls_bypass', '0', true)")
             raw.execute(
                 "select set_config('takyon.rls_business_slug', %s, true)",
@@ -11228,6 +11239,7 @@ class TakyonStore:
             )
             yield conn
         finally:
+            raw.execute("reset role")
             for key, value in previous.items():
                 raw.execute("select set_config(%s, %s, true)", (key, value))
 
