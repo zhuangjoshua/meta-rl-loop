@@ -58,6 +58,12 @@ from . import safebox
 
 # Safety rails (durable hardcodes, like core's MAX_WRITE_CHARS / path containment).
 MAX_OBJECT_BYTES = 256 * 1024 * 1024  # 256 MiB — bound a single object so a sync can't OOM the host.
+# Per-operator (top-level Takyon user) object-store quota — the durable cap that keeps one operator's
+# combined business workspaces from filling the shared bucket. Counted across EVERY business the
+# operator owns (sum of their `<slug>/` prefixes), not per-business, so it can't be sidestepped by
+# spreading bytes over many businesses. Overridable per host via `TAKYON_OPERATOR_STORAGE_MAX_BYTES`.
+_DEFAULT_OPERATOR_STORAGE_MAX_BYTES = 5 * 1024 * 1024 * 1024  # 5 GiB
+_OPERATOR_STORAGE_MAX_BYTES_ENV = "TAKYON_OPERATOR_STORAGE_MAX_BYTES"
 _MAX_KEY_DEPTH = 48
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DEFAULT_LOCAL_DIRNAME = "storage"
@@ -146,6 +152,13 @@ class StorageUnconfigured(StorageError):
 
     This is the invariant-#8 block: a live sync STOPS with this reason instead of silently falling
     back to the local store or fabricating a "synced" result."""
+
+
+class StorageQuotaExceeded(StorageError):
+    """An operator's combined object-store usage would exceed its per-operator quota.
+
+    Raised at sync-up time (the write boundary) so a fail-closed gate refuses the upload BEFORE any
+    bytes land, rather than reporting an overflow after the fact."""
 
 
 def _env_backed_config_value(name: str) -> str:
@@ -531,6 +544,8 @@ class StorageBackend(Protocol):
 
     def list_digests(self, prefix: str) -> dict[str, str]: ...
 
+    def list_object_sizes(self, prefix: str) -> dict[str, int]: ...
+
 
 class LocalStorageBackend:
     """A real local-directory object store. Credential-free; the default and the test/CI tier.
@@ -582,6 +597,27 @@ class LocalStorageBackend:
             f"{safe_prefix}/{rel}" if safe_prefix else rel: dg
             for rel, dg in _walk_local_digests(base, include_excluded=True).items()
         }
+
+    def list_object_sizes(self, prefix: str) -> dict[str, int]:
+        safe_prefix = _safe_rel(prefix.rstrip("/"), field="prefix") if prefix.strip("/") else ""
+        base = (self.root / safe_prefix) if safe_prefix else self.root
+        out: dict[str, int] = {}
+        if not base.exists():
+            return out
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = [d for d in dirnames if not Path(dirpath, d).is_symlink()]
+            for name in filenames:
+                abs_path = Path(dirpath, name)
+                if abs_path.is_symlink() or _is_scratch_tempfile(name):
+                    continue
+                rel = abs_path.relative_to(base).as_posix()
+                _safe_rel(rel)
+                key = f"{safe_prefix}/{rel}" if safe_prefix else rel
+                try:
+                    out[key] = abs_path.stat().st_size
+                except OSError:
+                    continue
+        return out
 
 
 class SupabaseS3StorageBackend:
@@ -689,6 +725,16 @@ class SupabaseS3StorageBackend:
                 out[key] = dg
         return out
 
+    def list_object_sizes(self, prefix: str) -> dict[str, int]:  # pragma: no cover - live only
+        # `Size` rides the list_objects_v2 page itself — no per-object head/get — so quota
+        # accounting stays a single cheap listing even for large operators.
+        out: dict[str, int] = {}
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []) or []:
+                out[obj["Key"]] = int(obj.get("Size") or 0)
+        return out
+
 
 def get_storage_backend(*, root: str | os.PathLike[str] | None = None) -> StorageBackend:
     """Select the configured backend (the provider-selector seam).
@@ -704,6 +750,92 @@ def get_storage_backend(*, root: str | os.PathLike[str] | None = None) -> Storag
     if kind == "supabase_s3":
         return SupabaseS3StorageBackend()
     raise StorageError(f"unknown TAKYON_STORAGE_BACKEND: {kind!r} (expected 'local' or 'supabase_s3')")
+
+
+# ── per-operator quota + purge ───────────────────────────────────────────────────────────────────
+
+
+def operator_storage_max_bytes() -> int:
+    """The per-operator object-store quota in bytes (env-overridable, like app_media's quotas)."""
+    raw = str(os.getenv(_OPERATOR_STORAGE_MAX_BYTES_ENV) or "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return _DEFAULT_OPERATOR_STORAGE_MAX_BYTES
+        if parsed > 0:
+            return parsed
+    return _DEFAULT_OPERATOR_STORAGE_MAX_BYTES
+
+
+def prefix_bytes(backend: StorageBackend, prefix: str) -> int:
+    """Total bytes stored under one object-store prefix (one business's ``<slug>/`` namespace)."""
+    return sum(int(size or 0) for size in backend.list_object_sizes(prefix).values())
+
+
+def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int:
+    """Sum the operator's combined object-store usage across every business they own.
+
+    The operator is the unit of the quota (one top-level Takyon user can own many businesses), so
+    usage is aggregated over each owned business's ``<slug>/`` prefix. Slugs are de-duplicated and
+    normalized; an unsafe slug raises rather than being silently skipped (containment)."""
+    total = 0
+    seen: set[str] = set()
+    for slug in slugs:
+        safe = _safe_slug(str(slug))
+        if safe in seen:
+            continue
+        seen.add(safe)
+        total += prefix_bytes(backend, object_prefix(safe))
+    return total
+
+
+def enforce_operator_storage_quota(
+    backend: StorageBackend,
+    owned_slugs: Iterable[str],
+    incoming_bytes: int,
+    *,
+    quota_bytes: int | None = None,
+) -> int:
+    """Fail-closed gate: refuse a write that would push the operator at/over its quota.
+
+    Returns the operator's pre-write usage on success. ``incoming_bytes`` is the NET new bytes the
+    pending operation would add; the check is ``used + incoming >= quota`` so it trips *at* the limit
+    (spec: "raised at or above the per-operator limit"), never silently allowing the boundary write."""
+    limit = int(quota_bytes) if quota_bytes is not None else operator_storage_max_bytes()
+    used = operator_storage_bytes(backend, owned_slugs)
+    if used + max(0, int(incoming_bytes)) >= limit:
+        raise StorageQuotaExceeded(
+            f"operator storage quota exceeded: {used + max(0, int(incoming_bytes))}/{limit} bytes"
+        )
+    return used
+
+
+def delete_prefix(backend: StorageBackend, prefix: str) -> list[str]:
+    """Delete every object under one prefix. Returns the keys removed (sorted, deterministic).
+
+    The single canonical "purge a namespace" primitive — business-deletion and operator-deletion
+    both route through it so there is one delete path, never a copy per caller (parsimony)."""
+    keys = sorted(backend.list_digests(prefix))
+    for key in keys:
+        backend.delete(key)
+    return keys
+
+
+def purge_operator_storage(backend: StorageBackend, slugs: Iterable[str]) -> dict[str, list[str]]:
+    """Remove ALL object-store bytes for an operator across every business they own.
+
+    The operator-account-removal complement to per-business deletion: closing a Takyon user must not
+    strand their workspace objects in the bucket. Returns ``{slug: [deleted keys]}``."""
+    removed: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for slug in slugs:
+        safe = _safe_slug(str(slug))
+        if safe in seen:
+            continue
+        seen.add(safe)
+        removed[safe] = delete_prefix(backend, object_prefix(safe))
+    return removed
 
 
 # ── sync ───────────────────────────────────────────────────────────────────────────────────────
@@ -730,16 +862,44 @@ def sync_up(
     *,
     delete_remote: bool = False,
     exclude_prefixes: Iterable[str] | None = None,
+    operator_owned_slugs: Iterable[str] | None = None,
+    operator_quota_bytes: int | None = None,
 ) -> SyncReport:
     """Push the local workspace ``src_dir`` to the backend under the business prefix. Digest-incremental
     (an unchanged file is skipped). ``delete_remote=True`` mirrors local deletions to the store — only
     safe when ``src_dir`` is the complete, post-successful-run tree (the worker's clean-exit contract);
-    the raw primitive defaults to additive/idempotent."""
+    the raw primitive defaults to additive/idempotent.
+
+    When ``operator_owned_slugs`` is supplied (every business the owning operator holds, including this
+    one), the per-operator object-store quota is enforced *before* any bytes are uploaded:
+    :class:`StorageQuotaExceeded` is raised if this push would put the operator at or over the limit.
+    Caller passes the owner's slug set; this leaf never resolves ownership itself (containment)."""
     prefix = object_prefix(slug)
     src = Path(src_dir).expanduser()
     remote = backend.list_digests(prefix)  # {fullkey: digest}
     local = _walk_local_digests(src)  # {rel: digest}
     excluded = _normalize_sync_prefixes(exclude_prefixes)
+
+    if operator_owned_slugs is not None:
+        # Net new bytes this push adds to THIS business's prefix = (post-sync size of the kept local
+        # files) − (current remote size of this prefix). Anything outside this business stays counted
+        # via the operator aggregate, so the gate sees the operator's true post-write total.
+        kept_new_bytes = 0
+        for rel in local:
+            if excluded and _sync_rel_matches_prefix(rel, excluded):
+                continue
+            try:
+                kept_new_bytes += (src / rel).stat().st_size
+            except OSError:
+                continue
+        this_prefix_remote_bytes = prefix_bytes(backend, prefix)
+        incoming = max(0, kept_new_bytes - this_prefix_remote_bytes)
+        enforce_operator_storage_quota(
+            backend,
+            operator_owned_slugs,
+            incoming,
+            quota_bytes=operator_quota_bytes,
+        )
 
     uploaded: list[str] = []
     skipped: list[str] = []

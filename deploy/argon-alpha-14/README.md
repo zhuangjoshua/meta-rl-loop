@@ -65,3 +65,12 @@ Do not add a Caddy block per new normal business here. Shared dynamic
 and TLS ask gate here, then served by `deploy/takyon-subuser/Caddyfile` on the
 sub-user plane. Normal businesses should not get new per-host blocks on either
 box.
+
+The Caddyfile uses the `rate_limit` directive for edge DDoS/abuse control on the
+login/session/checkout/api surfaces (the network-layer complement to the per-user
+`api_rate_limits` app rail). Stock apt `caddy` does not ship that module, so
+`deploy/shared/ensure-caddy-ratelimit.sh` rebuilds the Caddy binary with
+`github.com/mholt/caddy-ratelimit` (xcaddy). It runs idempotently from both
+`bootstrap-host.sh` and `apply-caddyfile.sh`, so every current and future host gets
+the module through the canonical rail before `caddy validate` runs — never a
+hand-install on one box.

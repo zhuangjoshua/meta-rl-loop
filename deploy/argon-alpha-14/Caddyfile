@@ -3,9 +3,55 @@
 	on_demand_tls {
 		ask http://127.0.0.1:9119/api/product-tls/ask
 	}
+	# Edge DDoS / abuse controls (the `Robustness` Caddy gap). `rate_limit` is the
+	# mholt/caddy-ratelimit module, provisioned into the Caddy binary by
+	# deploy/argon-alpha-14/bootstrap-host.sh (xcaddy build). Each zone is a sliding
+	# window keyed per client IP ({remote_host}); a request over the window gets 429
+	# with Retry-After. This is the network-layer complement to the per-user
+	# api_rate_limits app rail (plugins/takyon/rate_limit.py), which it does not replace.
+	order rate_limit before basic_auth
 }
 
+# ── operator dashboard + control plane (app.fourmanifold.com -> :9119) ──────────────
 app.fourmanifold.com {
+	# Tightest: credential endpoints (login/session/magic-link/oauth) — brute-force surface.
+	@auth path /auth/* /api/sessions* /api/providers/oauth*
+	rate_limit @auth {
+		zone operator_auth {
+			key {remote_host}
+			events 30
+			window 1m
+		}
+	}
+
+	# Paid/form endpoints (checkout, topup, credits). Stripe-signed webhooks are
+	# deliberately NOT rate-limited here: they are signature-verified + idempotent +
+	# fail-closed in-app, arrive from shared Stripe IPs, and must survive provider retries.
+	@forms {
+		path /billing/topup/* /api/takyon/operator/topup/* /api/takyon/businesses/*/creative-credits/* /billing/checkout*
+		not path /billing/webhook /api/webhooks/*
+	}
+	rate_limit @forms {
+		zone operator_forms {
+			key {remote_host}
+			events 20
+			window 1m
+		}
+	}
+
+	# Broad API throttle (everything under /api except the signed webhooks).
+	@api {
+		path /api/*
+		not path /api/webhooks/*
+	}
+	rate_limit @api {
+		zone operator_api {
+			key {remote_host}
+			events 240
+			window 1m
+		}
+	}
+
 	reverse_proxy 127.0.0.1:9119
 }
 
