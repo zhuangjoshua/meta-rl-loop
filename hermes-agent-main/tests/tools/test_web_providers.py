@@ -332,3 +332,143 @@ class TestUnconfiguredErrorEnvelopeParity:
         assert "web_crawl requires Firecrawl" in result["error"]
         # Crucially: no per-page burying
         assert "results" not in result
+
+
+class TestWebExtractDiagnosis:
+    """`web_extract` must FAIL LOUDLY (typed error), never return a silent
+    empty result. The card's symptom ("web extraction failing") on the default
+    no-credential setup is the fail-closed path — every extract-capable backend
+    needs a key and the keyless ones are search-only. These tests lock the
+    honest failure surface so a regression can't reintroduce silent empties.
+    """
+
+    def _clear_web_creds(self, monkeypatch):
+        for k in (
+            "BRAVE_SEARCH_API_KEY",
+            "SEARXNG_URL",
+            "TAVILY_API_KEY",
+            "EXA_API_KEY",
+            "PARALLEL_API_KEY",
+            "FIRECRAWL_API_KEY",
+            "FIRECRAWL_API_URL",
+            "FIRECRAWL_GATEWAY_URL",
+            "TOOL_GATEWAY_DOMAIN",
+        ):
+            monkeypatch.delenv(k, raising=False)
+
+    def test_unconfigured_extract_returns_typed_error_not_silent_empty(self, monkeypatch):
+        import asyncio
+        from tools import web_tools
+        from agent import web_search_registry as reg
+
+        self._clear_web_creds(monkeypatch)
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {})
+        # No extract-capable backend resolvable and no active provider.
+        monkeypatch.setattr(reg, "get_active_extract_provider", lambda: None)
+        monkeypatch.setattr(reg, "get_provider", lambda name: None)
+
+        result = json.loads(
+            asyncio.run(web_tools.web_extract_tool(["https://example.com"]))
+        )
+        assert result["success"] is False
+        assert "error" in result and result["error"]
+        assert "No web extract provider configured" in result["error"]
+        # never a silent empty results list
+        assert "results" not in result
+
+    def test_search_only_backend_returns_typed_search_only_error(self, monkeypatch):
+        import asyncio
+        from tools import web_tools
+        from agent import web_search_registry as reg
+
+        class _SearchOnly:
+            name = "ddgs"
+            display_name = "DuckDuckGo"
+
+            def supports_extract(self):
+                return False
+
+        monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "ddgs")
+        monkeypatch.setattr(reg, "get_provider", lambda name: _SearchOnly())
+
+        result = json.loads(
+            asyncio.run(web_tools.web_extract_tool(["https://example.com"]))
+        )
+        assert result["success"] is False
+        assert "search-only" in result["error"]
+        # the typed error names a real extract-capable backend to switch to
+        assert "tavily" in result["error"] or "firecrawl" in result["error"]
+        assert "results" not in result
+
+    def test_spend_blocked_surfaced_as_tool_error_not_crash(self, monkeypatch):
+        import asyncio
+        from tools import web_tools
+        from agent import web_search_registry as reg
+
+        class _PaidExtract:
+            name = "tavily"
+            display_name = "Tavily"
+
+            def supports_extract(self):
+                return True
+
+            def extract(self, urls, **kwargs):  # must never be reached
+                raise AssertionError("provider.extract called despite SpendBlocked")
+
+        monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "tavily")
+        monkeypatch.setattr(reg, "get_provider", lambda name: _PaidExtract())
+        # business session, no meter registered ⇒ reserve_paid_call raises SpendBlocked
+        monkeypatch.setattr(web_tools, "provider_billing", lambda name: ("metered", "tavily"))
+
+        def _blocked(**kwargs):
+            raise web_tools.SpendBlocked("web_extract via tavily spends real money; no meter")
+
+        monkeypatch.setattr(web_tools, "reserve_paid_call", _blocked)
+
+        result = json.loads(
+            asyncio.run(web_tools.web_extract_tool(["https://example.com"]))
+        )
+        assert result["success"] is False
+        assert "error" in result
+        assert "money" in result["error"] or "meter" in result["error"]
+
+    def test_extract_returns_content_with_a_configured_backend(self, monkeypatch):
+        import asyncio
+        from tools import web_tools
+        from agent import web_search_registry as reg
+
+        class _PaidExtract:
+            name = "tavily"
+            display_name = "Tavily"
+
+            def supports_extract(self):
+                return True
+
+            def extract(self, urls, **kwargs):
+                return [
+                    {
+                        "url": urls[0],
+                        "title": "Example Domain",
+                        "content": "# Example Domain\nThis domain is for use in examples.",
+                        "error": "",
+                    }
+                ]
+
+        monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "tavily")
+        monkeypatch.setattr(reg, "get_provider", lambda name: _PaidExtract())
+        # treat as free so no meter is required in this non-business context
+        monkeypatch.setattr(web_tools, "provider_billing", lambda name: ("free", "tavily"))
+
+        result = json.loads(
+            asyncio.run(
+                web_tools.web_extract_tool(
+                    ["https://example.com"], use_llm_processing=False
+                )
+            )
+        )
+        assert "results" in result
+        assert len(result["results"]) == 1
+        entry = result["results"][0]
+        assert entry["content"]
+        assert "Example Domain" in entry["content"]
+        assert not entry.get("error")

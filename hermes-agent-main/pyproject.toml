@@ -85,6 +85,10 @@ firecrawl = ["firecrawl-py==4.17.0"]
 parallel-web = ["parallel-web==0.4.2"]
 # Image generation backends
 fal = ["fal-client==0.13.1"]
+# Gemini image generation (Nano Banana) for brand-logo rendering — only needed
+# when the Gemini key is provisioned and the logo authority route runs. Lazy-
+# installed via tools/lazy_deps.py (image.gemini); keep the pin in sync there.
+gemini = ["google-genai==1.21.0"]
 # Edge TTS — default TTS provider but still optional (users can pick
 # ElevenLabs / OpenAI / MiniMax instead).
 edge-tts = ["edge-tts==7.2.7"]

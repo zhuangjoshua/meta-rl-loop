@@ -62,6 +62,7 @@ from plugins.takyon.core import (
     handle_business_delete_app_record,
     handle_business_verify_app_magic_link,
     handle_business_static_ad_generate,
+    handle_business_generate_logo,
     handle_business_ugc_ad_generate,
     handle_business_ugc_ad_write,
     handle_business_read_channel_credit_budgets,
@@ -5410,6 +5411,237 @@ def test_business_static_ad_generate_live_charges_credits(tmp_path, monkeypatch)
         ).read_text(encoding="utf-8")
     )
     assert receipt["credits_charged"] == 2
+
+
+def test_business_generate_logo_rejects_test_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:lumen",
+        [{"action": "business.upsert", "business": "lumen", "name": "Lumen", "mode": "test"}],
+        "init-lumen-test",
+    )
+
+    result = json.loads(
+        handle_business_generate_logo(
+            {
+                "business": "lumen",
+                "idempotency_key": "lumen-logo-test-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "requires a live business" in result["error"]
+
+
+def test_business_generate_logo_zero_credits_does_not_call_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:lumen",
+        [{"action": "business.upsert", "business": "lumen", "name": "Lumen", "mode": "live"}],
+        "init-lumen-live",
+    )
+    # No creative credits granted: the preflight gate must block before the
+    # authority gateway (and thus the provider) is ever reached.
+    called: list[str] = []
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: called.append(endpoint) or {"success": True},
+    )
+
+    result = json.loads(
+        handle_business_generate_logo(
+            {
+                "business": "lumen",
+                "idempotency_key": "lumen-logo-zero-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked_insufficient_creative_credits"
+    assert called == []  # provider/authority route never invoked
+
+
+def test_business_generate_logo_live_charges_credits_and_writes_receipt(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:lumen",
+        [{"action": "business.upsert", "business": "lumen", "name": "Lumen", "mode": "live"}],
+        "init-lumen-live2",
+    )
+    _grant_creative_credits(store, "lumen", 10, "lumen-grant")
+    captured: dict[str, Any] = {}
+
+    def _fake_gateway(endpoint, payload):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        return {
+            "success": True,
+            "status": "created",
+            "asset_path": "product/brand/logos/lumen/logo.png",
+            "prompt": "icon prompt",
+            "provider": "google",
+            "model": "gemini-2.5-flash-image",
+            "provider_cost_usd": 0.039,
+            "credits_charged": 2,
+            "balance_credits": 8,
+            "reserved_credits": 0,
+        }
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", _fake_gateway)
+    synced: list[str] = []
+    monkeypatch.setattr(
+        TakyonStore,
+        "_sync_business_workspace_remote",
+        lambda self, slug: synced.append(slug),
+    )
+
+    result = json.loads(
+        handle_business_generate_logo(
+            {
+                "business": "lumen",
+                "idempotency_key": "lumen-logo-live-v1",
+                "business_context": {"category": "design tools", "tone": "playful"},
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "created"
+    assert result["asset_path"] == "product/brand/logos/lumen/logo.png"
+    assert result["provider_cost_usd"] == 0.039
+    assert captured["endpoint"] == "logo-render"
+    # brand context is passed through to the authority route
+    assert captured["payload"]["business_context"]["category"] == "design tools"
+    assert synced == ["lumen"]
+    receipt = json.loads(
+        (
+            tmp_path
+            / "businesses"
+            / "lumen"
+            / "product"
+            / "brand"
+            / "logos"
+            / "lumen"
+            / "receipt.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert receipt["credits_charged"] == 2
+    assert receipt["provider_cost_usd"] == 0.039
+    assert receipt["model"] == "gemini-2.5-flash-image"
+
+
+def test_business_generate_logo_unconfigured_key_surfaces_blocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:lumen",
+        [{"action": "business.upsert", "business": "lumen", "name": "Lumen", "mode": "live"}],
+        "init-lumen-live3",
+    )
+    _grant_creative_credits(store, "lumen", 10, "lumen-grant3")
+
+    def _fake_gateway(endpoint, payload):
+        # The authority route returns 503 gemini_image_unconfigured; the
+        # transport helper raises a TakyonError with that detail.
+        raise takyon_core.TakyonError(
+            "creative authority runtime failed (503): gemini_image_unconfigured"
+        )
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", _fake_gateway)
+
+    result = json.loads(
+        handle_business_generate_logo(
+            {
+                "business": "lumen",
+                "idempotency_key": "lumen-logo-503-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["status"] == "blocked_authority_runtime_unavailable"
+    assert "gemini_image_unconfigured" in result["error"]
+
+
+def test_logo_provider_cost_is_priced_in_usage_pricing():
+    from agent import usage_pricing
+
+    entry = usage_pricing._OFFICIAL_DOCS_PRICING.get(("google", "gemini-2.5-flash-image"))
+    assert entry is not None
+    assert entry.request_cost is not None
+    # core resolves the exact priced cost (no second hardcoded table)
+    assert takyon_core._logo_provider_cost_usd() == float(entry.request_cost)
+
+
+def test_gemini_alias_resolves_logo_key_requirement():
+    # business_generate_logo declares requires_api=["gemini"]; the alias must
+    # map to the Safebox-backed key names so credential gating can resolve it.
+    assert takyon_core._API_ENV_ALIASES["gemini"] == (
+        "TAKYON_GEMINI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    )
+
+
+def test_business_generate_logo_registered_as_authority_tool():
+    assert "business_generate_logo" in takyon_core.TAKYON_AUTHORITY_TOOL_NAMES
+    names = [d["name"] for d in takyon_core.TAKYON_TOOL_DEFINITIONS]
+    assert "business_generate_logo" in names
+
+
+def test_gemini_logo_prompt_encodes_brand_brief_and_context():
+    from plugins.takyon import creative_gateway as gw
+
+    prompt = gw._gemini_logo_prompt(
+        {"name": "Lumen", "category": "design tools", "tone": "playful"}
+    ).lower()
+    # operator-owned brand brief: flat vector, transparent, icon-only, no text
+    assert "flat vector" in prompt
+    assert "transparent" in prompt
+    assert "no text" in prompt
+    # business context steers the icon concept
+    assert "lumen" in prompt
+    assert "design tools" in prompt
+    assert "playful" in prompt
+
+
+def test_gemini_logo_prompt_defaults_without_context():
+    from plugins.takyon import creative_gateway as gw
+
+    prompt = gw._gemini_logo_prompt({"slug": "acme"}).lower()
+    assert "no text" in prompt and "transparent" in prompt
+    assert "acme" in prompt  # name falls back to slug
+
+
+def test_resolve_gemini_image_key_empty_when_unconfigured(monkeypatch):
+    from plugins.takyon import creative_gateway as gw
+
+    monkeypatch.setattr(gw.safebox, "first_env_backed_value", lambda *names: "")
+    assert gw._resolve_gemini_image_key() == ""
+
+
+def test_resolve_gemini_image_key_reads_alias(monkeypatch):
+    from plugins.takyon import creative_gateway as gw
+
+    seen = {}
+
+    def _fake(*names):
+        seen["names"] = names
+        return "  sk-gemini-xyz  "
+
+    monkeypatch.setattr(gw.safebox, "first_env_backed_value", _fake)
+    assert gw._resolve_gemini_image_key() == "sk-gemini-xyz"
+    assert seen["names"] == ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
 def test_business_set_channel_credit_budgets_persists_snapshot(tmp_path, monkeypatch):
