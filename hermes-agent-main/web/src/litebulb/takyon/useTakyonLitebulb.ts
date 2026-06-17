@@ -8,6 +8,11 @@ import {
   type TakyonOperatorBusinessSummary,
 } from "@/lib/api";
 import { GatewayClient } from "@/lib/gatewayClient";
+import {
+  deriveLiveWorkstreamCard,
+  type LiveWorkstreamCardData,
+  type ProgressToolSignal,
+} from "@/lib/takyonCeoUpdates";
 import { useAuth } from "../auth/useAuth";
 
 export type ChatMessage = {
@@ -17,9 +22,14 @@ export type ChatMessage = {
   working?: boolean;
 };
 
-export type ChatProgress = {
-  text: string;
+export type ChatProgress = LiveWorkstreamCardData & {
   live: boolean;
+};
+
+type LiveChatSignals = {
+  statusItems: string[];
+  progressLines: string[];
+  tools: ProgressToolSignal[];
 };
 
 export type BuildStatus = "idle" | "creating" | "ready" | "error";
@@ -136,6 +146,26 @@ function pushUniqueLine(lines: string[], next: string, limit = 18) {
   if (!text) return lines;
   if (lines[lines.length - 1] === text) return lines;
   return [...lines, text].slice(-limit);
+}
+
+function pushUniqueToolSignal(
+  signals: ProgressToolSignal[],
+  next: ProgressToolSignal,
+  limit = 12,
+) {
+  const normalized: ProgressToolSignal = {
+    name: trimText(next.name),
+    label: trimText(next.label),
+    context: trimText(next.context),
+    preview: trimText(next.preview),
+    summary: trimText(next.summary),
+    error: trimText(next.error),
+    status: trimText(next.status),
+  };
+  const key = JSON.stringify(normalized);
+  const previous = signals[signals.length - 1];
+  if (previous && JSON.stringify(previous) === key) return signals;
+  return [...signals, normalized].slice(-limit);
 }
 
 function shouldMirrorStatusInChat(kind: unknown) {
@@ -421,6 +451,14 @@ function createEmptyBuildState(): BuildState {
   };
 }
 
+function createEmptyLiveChatSignals(): LiveChatSignals {
+  return {
+    statusItems: [],
+    progressLines: [],
+    tools: [],
+  };
+}
+
 export function useTakyonLitebulb() {
   const auth = useAuth();
   const [homeLoading, setHomeLoading] = useState(false);
@@ -444,12 +482,19 @@ export function useTakyonLitebulb() {
   const sessionIdRef = useRef("");
   const sessionBusinessRef = useRef("");
   const assistantMessageIdRef = useRef("");
+  const assistantDraftTextRef = useRef("");
   const workspacePollRef = useRef<number | null>(null);
   const openingBusinessRef = useRef("");
   const visibleBusinessRef = useRef("");
+  const activeBusinessNameRef = useRef("");
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const sessionRunningRef = useRef(false);
   const liveChatTurnRef = useRef(false);
+  const liveChatSignalsRef = useRef<LiveChatSignals>(createEmptyLiveChatSignals());
+
+  useEffect(() => {
+    activeBusinessNameRef.current = trimText(activeBusiness?.name);
+  }, [activeBusiness?.name]);
 
   const isVisibleScope = useCallback((slug: string) => {
     return trimText(slug).toLowerCase() === visibleBusinessRef.current;
@@ -611,22 +656,14 @@ export function useTakyonLitebulb() {
   const appendAssistantText = useCallback((text: string) => {
     const delta = rawText(text);
     if (!delta.length) return;
-    const id = ensureAssistantMessage();
-    setChatMessages((messages) => {
-      const next = messages.map((message) => (
-        message.id === id
-          ? { ...message, text: `${message.text}${delta}`, working: true }
-          : message
-      ));
-      chatMessagesRef.current = next;
-      return next;
-    });
-  }, [ensureAssistantMessage]);
+    assistantDraftTextRef.current += delta;
+  }, []);
 
   const completeAssistantText = useCallback((text?: string) => {
-    const finalText = trimText(text);
+    const finalText = trimText(text) || trimText(assistantDraftTextRef.current);
     if (/^(?:\d{3}:|request timed out:|session busy|session not found)/i.test(finalText)) {
       assistantMessageIdRef.current = "";
+      assistantDraftTextRef.current = "";
       return;
     }
     const id = assistantMessageIdRef.current || (finalText ? ensureAssistantMessage() : "");
@@ -644,11 +681,13 @@ export function useTakyonLitebulb() {
       return next;
     });
     assistantMessageIdRef.current = "";
+    assistantDraftTextRef.current = "";
   }, [ensureAssistantMessage]);
 
   const discardAssistantMessage = useCallback(() => {
     const id = assistantMessageIdRef.current;
     assistantMessageIdRef.current = "";
+    assistantDraftTextRef.current = "";
     if (!id) return;
     setChatMessages((messages) => {
       const next = messages.filter((message) => (
@@ -659,31 +698,98 @@ export function useTakyonLitebulb() {
     });
   }, []);
 
-  const startChatProgress = useCallback((text = "Working…") => {
-    const line = trimText(text) || "Working…";
-    setChatProgress((current) => (
-      current?.text === line && current.live ? current : { text: line, live: true }
-    ));
+  const currentBusinessName = useCallback(() => {
+    const explicit = trimText(activeBusinessNameRef.current);
+    if (explicit) return explicit;
+    const slug = trimText(sessionBusinessRef.current || visibleBusinessRef.current);
+    return slug ? titleCaseSlug(slug) : "This business";
   }, []);
 
-  const clearChatProgress = useCallback(() => {
-    setChatProgress(null);
+  const renderLiveChatProgress = useCallback((running = liveChatTurnRef.current) => {
+    const card = deriveLiveWorkstreamCard({
+      running,
+      businessName: currentBusinessName(),
+      statusItems: liveChatSignalsRef.current.statusItems,
+      progressLines: liveChatSignalsRef.current.progressLines,
+      tools: liveChatSignalsRef.current.tools,
+    });
+    setChatProgress(card ? { ...card, live: running } : null);
+  }, [currentBusinessName]);
+
+  const resetLiveChatSignals = useCallback(() => {
+    liveChatSignalsRef.current = createEmptyLiveChatSignals();
   }, []);
+
+  const noteLiveChatProgress = useCallback((text: string) => {
+    const line = trimText(text);
+    if (!line) return;
+    liveChatSignalsRef.current = {
+      ...liveChatSignalsRef.current,
+      progressLines: pushUniqueLine(liveChatSignalsRef.current.progressLines, line, 12),
+    };
+    renderLiveChatProgress(true);
+  }, [renderLiveChatProgress]);
+
+  const noteLiveChatStatus = useCallback((text: string) => {
+    const line = trimText(text);
+    if (!line) return;
+    liveChatSignalsRef.current = {
+      ...liveChatSignalsRef.current,
+      statusItems: pushUniqueLine(liveChatSignalsRef.current.statusItems, line, 12),
+    };
+    renderLiveChatProgress(true);
+  }, [renderLiveChatProgress]);
+
+  const noteLiveChatTool = useCallback((signal: ProgressToolSignal) => {
+    liveChatSignalsRef.current = {
+      ...liveChatSignalsRef.current,
+      tools: pushUniqueToolSignal(liveChatSignalsRef.current.tools, signal, 12),
+    };
+    renderLiveChatProgress(true);
+  }, [renderLiveChatProgress]);
+
+  const startChatProgress = useCallback((_text = "Working…") => {
+    renderLiveChatProgress(true);
+  }, [renderLiveChatProgress]);
+
+  const syncPendingChatProgress = useCallback((pending: boolean) => {
+    if (!pending) {
+      resetLiveChatSignals();
+      setChatProgress(null);
+      return;
+    }
+    const hasSignals =
+      liveChatSignalsRef.current.statusItems.length > 0
+      || liveChatSignalsRef.current.progressLines.length > 0
+      || liveChatSignalsRef.current.tools.length > 0;
+    if (!hasSignals) {
+      resetLiveChatSignals();
+    }
+    renderLiveChatProgress(true);
+  }, [renderLiveChatProgress, resetLiveChatSignals]);
+
+  const clearChatProgress = useCallback(() => {
+    resetLiveChatSignals();
+    setChatProgress(null);
+  }, [resetLiveChatSignals]);
 
   const beginChatTurn = useCallback((text = "Working…") => {
     liveChatTurnRef.current = true;
+    assistantDraftTextRef.current = "";
+    resetLiveChatSignals();
     startChatProgress(text);
-  }, [startChatProgress]);
+  }, [resetLiveChatSignals, startChatProgress]);
 
   const endChatTurn = useCallback(() => {
     liveChatTurnRef.current = false;
+    assistantDraftTextRef.current = "";
     clearChatProgress();
   }, [clearChatProgress]);
 
-  const updateLiveChatProgress = useCallback((text = "Working…") => {
+  const updateLiveChatProgress = useCallback((_text = "Working…") => {
     if (!liveChatTurnRef.current) return;
-    startChatProgress(text);
-  }, [startChatProgress]);
+    renderLiveChatProgress(true);
+  }, [renderLiveChatProgress]);
 
   const replayPendingTurn = useCallback(async (
     sessionId: string,
@@ -743,6 +849,7 @@ export function useTakyonLitebulb() {
       if (!text.length) return;
       appendAssistantText(text);
       pushBuildNarration(text);
+      noteLiveChatProgress(text);
     });
     const offComplete = gateway.on("message.complete", (event) => {
       const text = trimText((event.payload as { text?: string } | undefined)?.text);
@@ -765,14 +872,14 @@ export function useTakyonLitebulb() {
       const text = trimText((event.payload as { text?: string } | undefined)?.text);
       if (!text) return;
       pushBuildNarration(text);
-      updateLiveChatProgress();
+      noteLiveChatProgress(text);
     });
     const offStatus = gateway.on("status.update", (event) => {
       const payload = (event.payload as { text?: string; kind?: string } | undefined) || {};
       const text = trimText(payload.text);
       if (text) pushBuildTerminal(text);
       if (text && shouldMirrorStatusInChat(payload.kind)) {
-        updateLiveChatProgress(text);
+        noteLiveChatStatus(text);
       }
     });
     const offToolStart = gateway.on("tool.start", (event) => {
@@ -780,12 +887,21 @@ export function useTakyonLitebulb() {
       const name = trimText(payload.name || payload.context || "tool");
       const line = `Running ${name}`;
       pushBuildTerminal(line);
-      updateLiveChatProgress(line);
+      noteLiveChatTool({
+        name,
+        context: trimText(payload.context),
+        status: "running",
+      });
     });
     const offToolComplete = gateway.on("tool.complete", (event) => {
       const payload = (event.payload as { name?: string; summary?: string } | undefined) || {};
       const text = trimText(payload.summary || payload.name || "Tool complete");
       pushBuildTerminal(text);
+      noteLiveChatTool({
+        name: trimText(payload.name),
+        summary: text,
+        status: "done",
+      });
     });
     const offError = gateway.on("error", () => {
       setSubmitting(false);
@@ -816,6 +932,9 @@ export function useTakyonLitebulb() {
     ensureGateway,
     loadTraction,
     loadWorkspace,
+    noteLiveChatProgress,
+    noteLiveChatStatus,
+    noteLiveChatTool,
     pushBuildNarration,
     pushBuildTerminal,
     tractionRange,
@@ -848,7 +967,7 @@ export function useTakyonLitebulb() {
       liveChatTurnRef.current = pending;
       sessionRunningRef.current = pending;
       setSessionRunning(pending);
-      setChatProgress(pending ? { text: "Working…", live: true } : null);
+      syncPendingChatProgress(pending);
       setChatMessages(nextMessages);
       return {
         pendingTurn,
@@ -940,6 +1059,8 @@ export function useTakyonLitebulb() {
         void replayPendingTurn(sessionIdRef.current, businessSlug, loaded.pendingTurn);
       }
     } else {
+      assistantDraftTextRef.current = "";
+      resetLiveChatSignals();
       chatMessagesRef.current = [];
       liveChatTurnRef.current = false;
       sessionRunningRef.current = false;
@@ -948,7 +1069,7 @@ export function useTakyonLitebulb() {
       setSessionRunning(false);
     }
     return sessionIdRef.current;
-  }, [ensureGateway, isVisibleScope, replayPendingTurn]);
+  }, [ensureGateway, isVisibleScope, replayPendingTurn, resetLiveChatSignals, syncPendingChatProgress]);
 
   const openBusiness = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
@@ -967,8 +1088,10 @@ export function useTakyonLitebulb() {
     try {
       visibleBusinessRef.current = businessSlug;
       assistantMessageIdRef.current = "";
+      assistantDraftTextRef.current = "";
       sessionIdRef.current = "";
       sessionBusinessRef.current = "";
+      resetLiveChatSignals();
       setWorkspace(null);
       setCreativeCredits(null);
       setTraction(null);
@@ -991,7 +1114,7 @@ export function useTakyonLitebulb() {
         openingBusinessRef.current = "";
       }
     }
-  }, [activeBusiness?.slug, businesses, ensureSession, loadBusinessHomeShell, loadCreativeCredits, loadTraction, loadWorkspace, tractionRange]);
+  }, [activeBusiness?.slug, businesses, ensureSession, loadBusinessHomeShell, loadCreativeCredits, loadTraction, loadWorkspace, resetLiveChatSignals, tractionRange]);
 
   const stopPrompt = useCallback(async (preservePendingTurn = false) => {
     const sessionId = trimText(sessionIdRef.current);
@@ -1251,13 +1374,15 @@ export function useTakyonLitebulb() {
     setWorkspace(null);
     setCreativeCredits(null);
     setTraction(null);
+    assistantDraftTextRef.current = "";
+    resetLiveChatSignals();
     chatMessagesRef.current = [];
     setChatMessages([]);
     setChatProgress(null);
     liveChatTurnRef.current = false;
     sessionRunningRef.current = false;
     setSessionRunning(false);
-  }, [auth.status, loadHome]);
+  }, [auth.status, loadHome, resetLiveChatSignals]);
 
   useEffect(() => {
     const sessionId = sessionIdRef.current;
@@ -1293,7 +1418,7 @@ export function useTakyonLitebulb() {
           liveChatTurnRef.current = pending;
           sessionRunningRef.current = pending;
           setSessionRunning(pending);
-          setChatProgress((current) => (pending ? current || { text: "Working…", live: true } : null));
+          syncPendingChatProgress(pending);
           if (!history.running && pendingTurnMissing && pendingTurn) {
             void replayPendingTurn(sessionId, businessSlug, pendingTurn);
           }
@@ -1312,7 +1437,7 @@ export function useTakyonLitebulb() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [ensureGateway, sessionRunning, submitting]);
+  }, [ensureGateway, replayPendingTurn, sessionRunning, submitting, syncPendingChatProgress]);
 
   useEffect(() => {
     if (workspacePollRef.current !== null) {

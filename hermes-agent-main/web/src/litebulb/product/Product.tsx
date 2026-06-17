@@ -8,6 +8,10 @@ import type {
   TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
 import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
+import {
+  deriveAssistantReceipt,
+  type AssistantReceiptData,
+} from "@/lib/takyonCeoUpdates";
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
 import type { SettingsSection } from "../settings/Settings";
@@ -81,6 +85,118 @@ function AgentMessageMarkdown({ text }: { text: string }) {
       >
         {text}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+function AgentReceipt({ receipt }: { receipt: AssistantReceiptData }) {
+  return (
+    <div className="lb-receipt">
+      <div className="lb-receipt__title">{receipt.title}</div>
+      <p className="lb-receipt__summary">{receipt.summary}</p>
+      {receipt.liveUrl && (
+        <p className="lb-receipt__link">
+          Live URL: <a href={receipt.liveUrl} target="_blank" rel="noreferrer">{receipt.liveUrl}</a>
+        </p>
+      )}
+      {receipt.bullets.length > 0 && (
+        <div className="lb-receipt__section">
+          <div className="lb-receipt__label">What changed</div>
+          <ul className="lb-receipt__list">
+            {receipt.bullets.map((bullet, index) => (
+              <li key={`${bullet}-${index}`}>{bullet}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {receipt.checks.length > 0 && (
+        <div className="lb-receipt__section">
+          <div className="lb-receipt__label">Validation</div>
+          <ul className="lb-receipt__list">
+            {receipt.checks.map((check, index) => (
+              <li key={`${check}-${index}`}>{check}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {receipt.next && (
+        <div className="lb-receipt__section">
+          <div className="lb-receipt__label">Next</div>
+          <p className="lb-receipt__text">{receipt.next}</p>
+        </div>
+      )}
+      <details className="lb-receipt__details">
+        <summary>View build details</summary>
+        {receipt.files.length > 0 && (
+          <div className="lb-receipt__section">
+            <div className="lb-receipt__label">Files changed</div>
+            <ul className="lb-receipt__list">
+              {receipt.files.map((file) => (
+                <li key={file}>{file}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {receipt.checks.length > 0 && (
+          <div className="lb-receipt__section">
+            <div className="lb-receipt__label">Checks</div>
+            <ul className="lb-receipt__list">
+              {receipt.checks.map((check, index) => (
+                <li key={`${check}-detail-${index}`}>{check}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="lb-receipt__section">
+          <div className="lb-receipt__label">Raw response</div>
+          <AgentMessageMarkdown text={receipt.rawDetails} />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function LiveProgressCard({ progress }: { progress: ChatProgress }) {
+  const completed = progress.items.filter((item) => item.status === "complete");
+  return (
+    <div className="lb-progress">
+      <div className="lb-progress__eyebrow">CEO update</div>
+      <div className="lb-progress__title">{progress.title}</div>
+      <p className="lb-progress__summary">{progress.summary}</p>
+      {completed.length > 0 && (
+        <div className="lb-progress__section">
+          <div className="lb-progress__label">What changed</div>
+          <ul className="lb-progress__list">
+            {completed.map((item) => (
+              <li key={item.key}>{item.completeLabel}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {progress.current && (
+        <div className="lb-progress__section">
+          <div className="lb-progress__label">Working now</div>
+          <p className="lb-progress__text">
+            {progress.current}
+            {progress.live && (
+              <span className="lb-msg__work">
+                <span className="lb-typing"><i /><i /><i /></span>
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+      {progress.blocked ? (
+        <div className="lb-progress__section">
+          <div className="lb-progress__label">Blocked</div>
+          <p className="lb-progress__text">{progress.blocked}</p>
+        </div>
+      ) : progress.next ? (
+        <div className="lb-progress__section">
+          <div className="lb-progress__label">Next</div>
+          <p className="lb-progress__text">{progress.next}</p>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -163,6 +279,7 @@ function AgentChat({
   business,
   messages,
   progress,
+  reviewUrl,
   tab,
   canStop,
   sending,
@@ -173,7 +290,8 @@ function AgentChat({
 }: {
   business: LitebulbBusiness;
   messages: ChatMessage[];
-  progress: { text: string; live: boolean } | null;
+  progress: ChatProgress | null;
+  reviewUrl?: string;
   tab: TabKey;
   canStop: boolean;
   sending: boolean;
@@ -184,11 +302,11 @@ function AgentChat({
 }) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  const progressText = (progress?.text || "").trim() || (progress?.live ? "Working…" : "");
+  const visibleMessages = messages.filter((message) => !(message.who === "agent" && message.working));
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, progressText]);
+  }, [progress, visibleMessages]);
 
   const submit = () => {
     const text = draft.trim();
@@ -213,33 +331,30 @@ function AgentChat({
       </div>
 
       <div className="lb-chat__log">
-        {messages.map((message) => (
-          <div key={message.id} className={`lb-msg lb-msg--${message.who}`}>
-            <div className="lb-msg__bubble">
-              {message.who === "agent"
-                ? (
-                    <>
-                      <AgentMessageMarkdown text={message.text} />
-                      {message.working && (
-                        <span className="lb-msg__work">
-                          <span className="lb-typing"><i /><i /><i /></span>
-                        </span>
-                      )}
-                    </>
-                  )
-                : message.text}
+        {visibleMessages.map((message) => {
+          const receipt = message.who === "agent"
+            ? deriveAssistantReceipt({
+                content: message.text,
+                businessName: business.name,
+                liveUrl: reviewUrl,
+              })
+            : null;
+          return (
+            <div key={message.id} className={`lb-msg lb-msg--${message.who}`}>
+              <div className="lb-msg__bubble">
+                {message.who === "agent"
+                  ? receipt
+                    ? <AgentReceipt receipt={receipt} />
+                    : <AgentMessageMarkdown text={message.text} />
+                  : message.text}
+              </div>
             </div>
-          </div>
-        ))}
-        {progressText && (
+          );
+        })}
+        {progress && (
           <div className="lb-msg lb-msg--agent lb-msg--progress">
             <div className="lb-msg__bubble">
-              {progressText}
-              {progress?.live && (
-                <span className="lb-msg__work">
-                  <span className="lb-typing"><i /><i /><i /></span>
-                </span>
-              )}
+              <LiveProgressCard progress={progress} />
             </div>
           </div>
         )}
@@ -433,6 +548,7 @@ export function Product({
             business={business}
             messages={chatMessages}
             progress={effectiveProgress}
+            reviewUrl={publicUrl || undefined}
             tab={tab}
             canStop={sending || Boolean(effectiveProgress?.live)}
             sending={sending}
