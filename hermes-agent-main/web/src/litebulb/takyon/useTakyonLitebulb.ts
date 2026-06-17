@@ -477,6 +477,7 @@ export function useTakyonLitebulb() {
   const [sessionRunning, setSessionRunning] = useState(false);
   const [billingBusy, setBillingBusy] = useState(false);
   const [topupBusy, setTopupBusy] = useState(false);
+  const [subscribeBusy, setSubscribeBusy] = useState<string | null>(null);
 
   const gatewayRef = useRef<GatewayClient | null>(null);
   const sessionIdRef = useRef("");
@@ -1363,6 +1364,24 @@ export function useTakyonLitebulb() {
     }
   }, [topupBusy]);
 
+  const subscribeToPlan = useCallback(async (planId: string) => {
+    const id = trimText(planId);
+    if (subscribeBusy || !id) return;
+    setSubscribeBusy(id);
+    try {
+      const result = await api.createTakyonOperatorSubscriptionCheckout(
+        id,
+        window.location.pathname + window.location.search + window.location.hash,
+      );
+      const target = trimText(result.checkout_url);
+      if (target) {
+        window.location.assign(target);
+      }
+    } finally {
+      setSubscribeBusy(null);
+    }
+  }, [subscribeBusy]);
+
   useEffect(() => {
     if (auth.status === "in") {
       void loadHome();
@@ -1483,6 +1502,7 @@ export function useTakyonLitebulb() {
     submitting,
     billingBusy,
     topupBusy,
+    subscribeBusy,
     loadHome,
     openBusiness,
     sendPrompt,
@@ -1492,5 +1512,6 @@ export function useTakyonLitebulb() {
     startCreativeCreditCheckout,
     openBillingPortal,
     startTopup,
+    subscribeToPlan,
   };
 }

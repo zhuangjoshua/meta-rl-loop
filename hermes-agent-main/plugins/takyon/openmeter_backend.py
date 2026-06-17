@@ -140,6 +140,67 @@ def sync_customer(
     return updated if isinstance(updated, dict) else {}
 
 
+_USAGE_METER_SLUG = "tk_ai_cost_microusd"
+_USAGE_EVENT_TYPE = "tk_ai_usage"
+
+
+def usage_event_subject_for(business_slug: str) -> str:
+    """OpenMeter subject key for a business's exact-cost meter (one stream per business)."""
+    return _key("tk", business_slug, "usage", max_len=128)
+
+
+def ingest_usage_event(
+    *,
+    business_slug: str,
+    reservation_key: str,
+    actual_cost_microusd: int,
+    route: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    app_user_id: str | None = None,
+    occurred_at: str | None = None,
+) -> bool:
+    """Mirror ONE settled usage event into OpenMeter for exact-cost aggregation (GOAL_RULES
+    §4: BUY the cost-aggregation/time-bucketing engine, do NOT hand-roll a time-series store).
+
+    `app_usage.py` stays the authoritative event source and ledger; this is a fire-and-forget
+    mirror that is idempotent on the reservation_key (OpenMeter dedupes on the CloudEvent id),
+    so a replayed settle never double-counts. Returns True if the event was accepted, False if
+    OpenMeter is disabled (the caller treats this as a no-op and never lets it affect the
+    ledger). Cost is carried in micro-USD as the meter value so OpenMeter can sum exact cost
+    per business per time window without us building a custom cost store.
+    """
+    if not enabled():
+        return False
+    subject = usage_event_subject_for(business_slug)
+    event_id = _key("ev", business_slug, reservation_key, max_len=200)
+    event: dict[str, Any] = {
+        "id": event_id,
+        "source": "takyon-app-usage",
+        "type": _USAGE_EVENT_TYPE,
+        "subject": subject,
+        "data": {
+            "value": str(max(0, int(actual_cost_microusd or 0))),
+            "business_slug": str(business_slug or ""),
+            "reservation_key": str(reservation_key or ""),
+            "route": str(route or ""),
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+            "app_user_id": str(app_user_id or ""),
+        },
+    }
+    if occurred_at:
+        event["time"] = str(occurred_at)
+    # CloudEvents batch ingest; OpenMeter accepts a single event object too.
+    _request_json(
+        "POST",
+        "/api/v1/events",
+        payload=event,
+        expected_status={200, 201, 204},
+    )
+    return True
+
+
 def sync_access_plan(policy: Any) -> OpenMeterPlanSnapshot:
     _require_enabled()
     cadence = billing_cadence_for(getattr(policy, "billing_interval", ""))

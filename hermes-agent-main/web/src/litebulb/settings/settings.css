@@ -66,3 +66,14 @@
 .lb-plan__feats { list-style: none; margin: 16px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; flex: 1; }
 .lb-plan__feats li { position: relative; padding-left: 20px; font-size: var(--cds-text-sm); color: var(--cds-color-text-default); }
 .lb-plan__feats li::before { content: "✓"; position: absolute; left: 0; color: var(--cds-color-success); font-weight: 700; }
+
+.lb-plans__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: clamp(12px, 1.4vw, 18px); }
+.lb-plans__card { position: relative; padding: var(--cds-space-5); border: 1px solid var(--cds-color-border-default); border-radius: var(--cds-radius-md); display: flex; flex-direction: column; gap: 6px; }
+.lb-plans__card.is-featured { border-color: var(--cds-color-brand-secondary); box-shadow: var(--cds-shadow-md); }
+.lb-plans__tag { position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: var(--cds-color-brand-secondary); color: #fff; font-size: var(--cds-text-2xs); font-weight: var(--cds-weight-bold); letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 10px; border-radius: 999px; }
+.lb-plans__name { font-weight: var(--cds-weight-semibold); font-size: var(--cds-text-md); }
+.lb-plans__price { font-size: clamp(20px, 1.8vw, 26px); font-weight: var(--cds-weight-bold); letter-spacing: -0.02em; }
+.lb-plans__per { font-size: var(--cds-text-sm); font-weight: var(--cds-weight-regular); color: var(--cds-color-text-soft); }
+.lb-plans__feats { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.lb-plans__feats li { position: relative; padding-left: 18px; font-size: var(--cds-text-sm); color: var(--cds-color-text-default); }
+.lb-plans__feats li::before { content: "✓"; position: absolute; left: 0; color: var(--cds-color-success); font-weight: 700; }

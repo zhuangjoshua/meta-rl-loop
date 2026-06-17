@@ -21,8 +21,8 @@ export const SCREENS: ScreenDef[] = [
   // ── PUBLIC (logged-out / marketing) ──
   { name: "Home (marketing)", route: "/", hash: "#/", auth: "public", file: "src/landing/Landing.tsx",
     hooks: ["Auth0: gate 'Start building' → open Auth modal"] },
-  { name: "Pricing (public)", route: "/pricing", hash: "#/pricing", auth: "public", file: "src/marketing/Pricing.tsx",
-    hooks: ["Stripe price IDs", "Auth0: CTA → Auth modal → plan select"] },
+  { name: "Pricing (public)", route: "/pricing", hash: "#/pricing", auth: "public", file: "src/litebulb/marketing/Pricing.tsx",
+    hooks: ["GET /api/takyon/public/operator/plans (config-driven tiers, no free tier)", "Auth0: CTA → Auth modal → Settings ▸ Plans checkout"] },
   { name: "FAQ / Help", route: "/faq", hash: "#/faq", auth: "public", file: "src/marketing/Faq.tsx", hooks: [] },
   { name: "Legal", route: "/terms,/privacy", hash: "#/terms", auth: "public", file: "src/marketing/Legal.tsx", hooks: [] },
 
@@ -41,8 +41,9 @@ export const SCREENS: ScreenDef[] = [
     hooks: ["Auth0: profile, email, password reset, connected accounts"] },
   { name: "Settings · Billing", route: "/settings/billing", hash: "#/settings/billing", auth: "authed", file: "src/settings/Billing.tsx",
     hooks: ["Stripe: current plan + usage", "Stripe Customer Portal (manage / invoices / payment method)"] },
-  { name: "Settings · Plans", route: "/settings/billing/plans", hash: "#/settings/billing/plans", auth: "authed", file: "src/settings/Plans.tsx",
-    hooks: ["Stripe Checkout: select tier → POST create-checkout-session → redirect"] },
+  { name: "Settings · Plans", route: "/settings/plans", hash: "#/settings/plans", auth: "authed", file: "src/litebulb/settings/Settings.tsx",
+    hooks: ["GET /api/takyon/operator/billing/plans (config-driven tier catalog)", "Stripe Checkout: select tier → POST /api/takyon/operator/billing/checkout → redirect"],
+    note: "Rendered as the 'Plans' tab in the Settings modal (multi-tier, no free tier)" },
   { name: "Settings · Referrals", route: "/settings/referrals", hash: "#/settings/referrals", auth: "authed", file: "src/settings/Referrals.tsx",
     hooks: ["referral code API"] },
   { name: "Settings · Company", route: "/settings/company/:id", hash: "#/settings/company", auth: "authed", file: "src/settings/CompanySettings.tsx",

@@ -481,7 +481,46 @@ def settle_usage(
                 business_slug, key,
             ),
         ).fetchone()
-    return _event_from_row(row)
+    settled = _event_from_row(row)
+    # Post-commit: mirror the settled cost into OpenMeter for exact-cost aggregation
+    # (GOAL_RULES §4 buy-not-build). Fire-and-forget and FAIL-SAFE — the authoritative ledger
+    # already committed above, so a mirror failure (or OpenMeter being disabled) must never
+    # raise into the caller. Idempotent on the reservation key.
+    _mirror_settled_usage_to_openmeter(settled)
+    return settled
+
+
+def _mirror_settled_usage_to_openmeter(event: "UsageEvent") -> None:
+    """Best-effort OpenMeter usage-event mirror for one settled event. Never raises."""
+    if int(getattr(event, "actual_cost_microusd", 0) or 0) <= 0:
+        return
+    try:
+        from . import openmeter_backend
+    except ImportError:  # pragma: no cover - import-shape fallback
+        try:
+            from plugins.takyon import openmeter_backend  # type: ignore
+        except Exception:
+            return
+    try:
+        if not openmeter_backend.enabled():
+            return
+        openmeter_backend.ingest_usage_event(
+            business_slug=event.business_slug,
+            reservation_key=event.reservation_key,
+            actual_cost_microusd=int(event.actual_cost_microusd or 0),
+            route=getattr(event, "route", None),
+            provider=getattr(event, "provider", None),
+            model=getattr(event, "model", None),
+            app_user_id=getattr(event, "app_user_id", None),
+            occurred_at=(
+                event.completed_at.isoformat()
+                if getattr(event, "completed_at", None) is not None
+                and hasattr(event.completed_at, "isoformat")
+                else None
+            ),
+        )
+    except Exception:  # noqa: BLE001 - a cost-mirror failure must never break a settle
+        return
 
 
 def release_usage(
