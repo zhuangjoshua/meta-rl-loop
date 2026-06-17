@@ -1283,18 +1283,22 @@ def _reserve_usage(
                     raise ActionBudgetExceeded(str(exc)) from exc
             else:
                 budget = store._ensure_app_budget(conn, business_slug)
-                committed = conn.execute(
-                    "SELECT COALESCE(SUM(CASE "
-                    "WHEN status = 'reserved' THEN estimated_cost_microusd "
-                    "WHEN status = 'completed' THEN actual_cost_microusd "
-                    "ELSE 0 END), 0) AS total "
-                    "FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
-                    (business_slug, budget["current_period_start"]),
-                ).fetchone()
-                if int(committed["total"] or 0) + estimate_microusd > int(budget["hard_limit_microusd"] or 0):
-                    raise ActionBudgetExceeded(
-                        f"app usage would exceed budget cap {budget['hard_limit_microusd']} microusd"
-                    )
+                # Per-business pool gate: ONLY when an explicit cap is set (invariant 9 — NULL =
+                # no pool cap, the per-subuser subscription gate is then the sole budget gate).
+                pool_cap = budget["hard_limit_microusd"]
+                if pool_cap is not None:
+                    committed = conn.execute(
+                        "SELECT COALESCE(SUM(CASE "
+                        "WHEN status = 'reserved' THEN estimated_cost_microusd "
+                        "WHEN status = 'completed' THEN actual_cost_microusd "
+                        "ELSE 0 END), 0) AS total "
+                        "FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
+                        (business_slug, budget["current_period_start"]),
+                    ).fetchone()
+                    if int(committed["total"] or 0) + estimate_microusd > int(pool_cap):
+                        raise ActionBudgetExceeded(
+                            f"app usage would exceed budget cap {pool_cap} microusd"
+                        )
                 existing = conn.execute(
                     "SELECT id FROM app_usage_events WHERE id = ?",
                     (reservation_key,),

@@ -93,7 +93,6 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_upsert_business",
         "business_delete_business",
         "business_set_mode",
-        "business_configure_app_budget",
         "business_refresh_product_surface",
         "business_upsert_app_plan",
         "business_upsert_app_customer",
@@ -11377,7 +11376,10 @@ class TakyonStore:
             CREATE TABLE IF NOT EXISTS app_budgets (
               business_slug TEXT PRIMARY KEY,
               status TEXT NOT NULL DEFAULT 'active',
-              hard_limit_microusd INTEGER NOT NULL DEFAULT 5000000,
+              -- Invariant 9: SENTINEL pool cap. NULL = no per-business pool cap (the per-subuser
+              -- subscription gate is the only budget gate); a non-null integer is an explicit
+              -- enforced ceiling. New budgets open with NO pool cap (NULL), not the old $5 default.
+              hard_limit_microusd INTEGER,
               current_period_start TEXT NOT NULL,
               current_period_end TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -12433,9 +12435,11 @@ class TakyonStore:
                 end = start.replace(year=start.year + 1, month=1)
             else:
                 end = start.replace(month=start.month + 1)
+            # Invariant 9: open with NO per-business pool cap (hard_limit_microusd = NULL). Budget
+            # derives from the active paid subscription's per-subuser included_ai_budget_microusd.
             conn.execute(
                 "INSERT INTO app_budgets (business_slug, status, hard_limit_microusd, current_period_start, current_period_end, created_at, updated_at) VALUES (?, 'active', ?, ?, ?, ?, ?) ON CONFLICT(business_slug) DO NOTHING",
-                (slug, 5_000_000, start.isoformat(), end.isoformat(), now, now),
+                (slug, None, start.isoformat(), end.isoformat(), now, now),
             )
             row = conn.execute("SELECT * FROM app_budgets WHERE business_slug = ?", (slug,)).fetchone()
         return self._row_to_dict(row)
@@ -13314,10 +13318,19 @@ class TakyonStore:
                     "business_age_hours": round((now_dt - created_dt).total_seconds() / 3600, 2),
                     "wake_interval_hours": round((now_dt - previous_dt).total_seconds() / 3600, 2),
                     "app_budget": {
+                        # Invariant 9: hard_limit_microusd is a sentinel — None means NO
+                        # per-business pool cap (budget derives from the paid subscription's
+                        # per-subuser included_ai_budget_microusd), so remaining is None too.
                         "status": app_budget["status"],
-                        "hard_limit_microusd": int(app_budget["hard_limit_microusd"] or 0),
+                        "hard_limit_microusd": (
+                            None if app_budget["hard_limit_microusd"] is None
+                            else int(app_budget["hard_limit_microusd"])
+                        ),
                         "spent_microusd": int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
-                        "remaining_microusd": int(app_budget["hard_limit_microusd"] or 0) - int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
+                        "remaining_microusd": (
+                            None if app_budget["hard_limit_microusd"] is None
+                            else int(app_budget["hard_limit_microusd"]) - int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0))
+                        ),
                     },
                     "active_paid_customers": int(active_entitlements["paid_customers"] or 0),
                     "mrr_cents": summary["mrr_cents"],
@@ -16064,12 +16077,16 @@ class TakyonStore:
                 if app_user_id and not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, app_user_id)).fetchone():
                     raise TakyonError(f"app user not found: {app_user_id}")
                 budget = self._ensure_app_budget(conn, slug)
-                used = conn.execute(
-                    "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
-                    (slug, budget["current_period_start"]),
-                ).fetchone()["total"]
-                if int(used or 0) + actual > int(budget["hard_limit_microusd"] or 0):
-                    raise TakyonError(f"app usage would exceed budget cap {budget['hard_limit_microusd']} microusd")
+                # Per-business pool gate: ONLY when an explicit cap is set (invariant 9 — NULL =
+                # no pool cap, the per-subuser subscription gate is then the sole budget gate).
+                pool_cap = budget["hard_limit_microusd"]
+                if pool_cap is not None:
+                    used = conn.execute(
+                        "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
+                        (slug, budget["current_period_start"]),
+                    ).fetchone()["total"]
+                    if int(used or 0) + actual > int(pool_cap):
+                        raise TakyonError(f"app usage would exceed budget cap {pool_cap} microusd")
                 now = _now()
                 conn.execute(
                     """
@@ -17092,6 +17109,14 @@ def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
     key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
     if not key:
         raise TakyonError("Stripe action requires STRIPE_SECRET_KEY")
+    # Hard rail (GOAL_RULES §0): refuse a live Stripe key (`sk_live_…`) BEFORE any network call.
+    # This deployment is restricted to Stripe test mode; a mis-provisioned live key must never
+    # reach the wire and move real money.
+    if str(key).strip().startswith("sk_live_"):
+        raise TakyonError(
+            "refusing to use a live Stripe key (sk_live_): this deployment is restricted to "
+            "Stripe test mode (sk_test_)"
+        )
     data = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode("utf-8")
     request = urllib.request.Request(
         f"https://api.stripe.com/v1/{path.lstrip('/')}",

@@ -44,7 +44,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-_DEFAULT_HARD_LIMIT_MICROUSD = 5_000_000
+# Invariant 9 (GOAL_RULES §3): there is NO flat per-business pool cap. Budget is derived from
+# the active PAID subscription's per-subuser ``included_ai_budget_microusd`` (the per-user gate),
+# never a per-business arbitrary pool. ``app_budgets.hard_limit_microusd`` is therefore a
+# SENTINEL column: NULL/None means "no per-business pool cap" (the per-subuser gate is the only
+# budget gate) and a non-null integer is an explicit, enforced per-business cap that an operator
+# may still set as a fail-closed ceiling (e.g. 0 = refuse all product spend for an unentitled
+# business). New budgets open with NO pool cap (None), not the old $5 default.
+_NO_POOL_CAP = None
 
 
 class AppUsageError(Exception):
@@ -109,11 +116,15 @@ class AppUserNotFound(AppUsageError):
 
 @dataclass(frozen=True)
 class AppBudget:
-    """One business's product AI-spend cap for the current metering period."""
+    """One business's product AI-spend pool row for the current metering period.
+
+    ``hard_limit_microusd`` is a SENTINEL (invariant 9): None means NO per-business pool cap
+    (the per-subuser subscription gate is the only budget gate); a non-null integer is an
+    explicit, enforced per-business ceiling."""
 
     business_slug: str
     status: str
-    hard_limit_microusd: int
+    hard_limit_microusd: int | None
     current_period_start: object
     current_period_end: object
 
@@ -164,7 +175,7 @@ def _budget_from_row(row) -> AppBudget:
     return AppBudget(
         business_slug=str(row[0]),
         status=str(row[1]),
-        hard_limit_microusd=int(row[2]),
+        hard_limit_microusd=None if row[2] is None else int(row[2]),
         current_period_start=row[3],
         current_period_end=row[4],
     )
@@ -206,10 +217,11 @@ def _require_app_user(conn, business_slug: str, app_user_id: str) -> None:
 
 
 def _ensure_budget_locked(conn, business_slug: str) -> AppBudget:
-    """Open the business budget at the default cap if absent, then lock its row `for update`.
-    Must be called inside a transaction. The lock serializes all concurrent reserves for the
-    business so the committed-spend aggregate is consistent. Unknown business →
-    ForeignKeyViolation (fail loud)."""
+    """Open the business budget with NO per-business pool cap if absent (invariant 9:
+    hard_limit_microusd defaults to NULL → the per-subuser subscription gate is the only budget
+    gate), then lock its row `for update`. Must be called inside a transaction. The lock
+    serializes all concurrent reserves for the business so the committed-spend aggregate is
+    consistent. Unknown business → ForeignKeyViolation (fail loud)."""
     conn.execute(
         "insert into app_budgets (business_slug) values (%s) on conflict (business_slug) do nothing",
         (business_slug,),
@@ -255,20 +267,26 @@ def _app_user_committed_microusd(conn, business_slug: str, app_user_id: str, per
 
 
 def ensure_app_budget(conn, business_slug: str) -> AppBudget:
-    """Open the business budget at the default cap if absent (idempotent), returning the row in
-    effect. Period is calendar-month UTC, fixed at creation (faithful to the SQLite trunk)."""
+    """Open the business budget with NO per-business pool cap if absent (idempotent), returning
+    the row in effect. Period is calendar-month UTC, fixed at creation (faithful to the SQLite
+    trunk)."""
     with conn.transaction():
         return _ensure_budget_locked(conn, business_slug)
 
 
 def set_app_budget(
-    conn, business_slug: str, *, hard_limit_microusd: int, status: str = "active"
+    conn, business_slug: str, *, hard_limit_microusd: int | None, status: str = "active"
 ) -> AppBudget:
-    """Set the hard cap (and optionally status) for a business, opening the row first if needed.
-    Mirrors the SQLite `app.budget.set` op (core.py:5010). Unknown business →
-    ForeignKeyViolation."""
-    if hard_limit_microusd < 0:
-        raise ValueError("hard_limit_microusd must be >= 0")
+    """Set the per-business pool sentinel (and optionally status) for a business, opening the row
+    first if needed. ``hard_limit_microusd=None`` clears the pool cap (the per-subuser
+    subscription gate is then the only budget gate); a non-negative integer sets an explicit,
+    enforced ceiling (0 = refuse all product spend). Unknown business → ForeignKeyViolation.
+
+    Note (invariant 9): this is no longer reachable from an operator tool — the
+    ``business_configure_app_budget`` cap tool was removed. It remains as the shared write
+    primitive used by tests and internal reconciliation, never as a user-facing pool override."""
+    if hard_limit_microusd is not None and hard_limit_microusd < 0:
+        raise ValueError("hard_limit_microusd must be >= 0 or None")
     if not str(status or "").strip():
         raise ValueError("status must be a non-empty string")
     with conn.transaction():
@@ -294,24 +312,34 @@ def get_usage_summary(conn, business_slug: str) -> dict:
     """Authoritative budget/remaining read for the current period: the figures a pre-flight UI
     or check should use INSTEAD of the old SQLite rendered-mirror read that the broken estimate
     pre-check relied on. Pure read; the real gate is reserve_usage. Returns
-    status/hard_limit/committed/remaining/period. If the budget was never opened, status is
-    'missing' and the cap is the default (what reserve would open it at)."""
+    status/hard_limit/committed/remaining/period.
+
+    Invariant 9: there is NO free per-business pool. A never-opened budget reports status
+    'missing' with NO pool cap (hard_limit_microusd=None) and remaining=None — it does NOT hand
+    back a flat default allowance. When a pool cap is set (a non-null integer), remaining is the
+    cap minus committed; with no pool cap (None), remaining is None (the per-subuser subscription
+    gate, not a pool, governs spend)."""
     budget = get_app_budget(conn, business_slug)
     if budget is None:
         return {
             "status": "missing",
-            "hard_limit_microusd": _DEFAULT_HARD_LIMIT_MICROUSD,
+            "hard_limit_microusd": None,
             "committed_microusd": 0,
-            "remaining_microusd": _DEFAULT_HARD_LIMIT_MICROUSD,
+            "remaining_microusd": None,
             "current_period_start": None,
             "current_period_end": None,
         }
     committed = _committed_microusd(conn, business_slug, budget.current_period_start)
+    remaining = (
+        None
+        if budget.hard_limit_microusd is None
+        else max(0, budget.hard_limit_microusd - committed)
+    )
     return {
         "status": budget.status,
         "hard_limit_microusd": budget.hard_limit_microusd,
         "committed_microusd": committed,
-        "remaining_microusd": max(0, budget.hard_limit_microusd - committed),
+        "remaining_microusd": remaining,
         "current_period_start": budget.current_period_start,
         "current_period_end": budget.current_period_end,
     }
@@ -374,13 +402,16 @@ def reserve_usage(
                     committed_microusd=user_committed,
                     requested_microusd=estimated_cost_microusd,
                 )
-        committed = _committed_microusd(conn, business_slug, budget.current_period_start)
-        if committed + estimated_cost_microusd > budget.hard_limit_microusd:
-            raise AppBudgetExceeded(
-                hard_limit_microusd=budget.hard_limit_microusd,
-                committed_microusd=committed,
-                requested_microusd=estimated_cost_microusd,
-            )
+        # Per-business pool gate: ONLY when an explicit cap is set (sentinel None = no pool cap,
+        # invariant 9 — the per-subuser subscription gate above is then the sole budget gate).
+        if budget.hard_limit_microusd is not None:
+            committed = _committed_microusd(conn, business_slug, budget.current_period_start)
+            if committed + estimated_cost_microusd > budget.hard_limit_microusd:
+                raise AppBudgetExceeded(
+                    hard_limit_microusd=budget.hard_limit_microusd,
+                    committed_microusd=committed,
+                    requested_microusd=estimated_cost_microusd,
+                )
         row = conn.execute(
             "insert into app_usage_events "
             "(business_slug, app_user_id, app_user_tier, reservation_key, purpose, route, "
@@ -559,13 +590,16 @@ def record_completed_usage(
                     committed_microusd=user_committed,
                     requested_microusd=gate_amount,
                 )
-        committed = _committed_microusd(conn, business_slug, budget.current_period_start)
-        if committed + gate_amount > budget.hard_limit_microusd:
-            raise AppBudgetExceeded(
-                hard_limit_microusd=budget.hard_limit_microusd,
-                committed_microusd=committed,
-                requested_microusd=gate_amount,
-            )
+        # Per-business pool gate: ONLY when an explicit cap is set (sentinel None = no pool cap,
+        # invariant 9 — the per-subuser subscription gate above is then the sole budget gate).
+        if budget.hard_limit_microusd is not None:
+            committed = _committed_microusd(conn, business_slug, budget.current_period_start)
+            if committed + gate_amount > budget.hard_limit_microusd:
+                raise AppBudgetExceeded(
+                    hard_limit_microusd=budget.hard_limit_microusd,
+                    committed_microusd=committed,
+                    requested_microusd=gate_amount,
+                )
         row = conn.execute(
             "insert into app_usage_events "
             "(business_slug, app_user_id, app_user_tier, reservation_key, purpose, route, "
