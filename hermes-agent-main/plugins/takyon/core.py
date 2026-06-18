@@ -12754,6 +12754,30 @@ class TakyonStore:
             if current_files == candidate_files:
                 self._track_workspace_revision(normalized, current_head)
                 return current_head
+        # Per-operator object-store quota — fail-closed on the LIVE commit chokepoint. Every durable
+        # workspace write funnels through here, so this is the one place the operator's total S3
+        # footprint is gated (the legacy sync_up quota path is test-only and never reached by a real
+        # commit). Resolve the owner of THIS business (the Postgres control-plane ``owner_user_id``),
+        # gather every slug they own, compute the NET new CAS bytes this revision would add
+        # (content-addressed dedup-aware), and refuse the write if it would put the operator at or over
+        # the 5 GiB default (TAKYON_OPERATOR_STORAGE_MAX_BYTES override). Fail OPEN only for an
+        # ownerless business (identity-less single-operator/worker runs) so those commits are never
+        # blocked — the same fail-open posture as the operator billing gates.
+        owner_row = conn.execute(
+            "SELECT owner_user_id FROM businesses WHERE slug = ?",
+            (normalized,),
+        ).fetchone()
+        owner_user_id = ""
+        if owner_row is not None:
+            owner_user_id = str(
+                (owner_row["owner_user_id"] if isinstance(owner_row, Mapping) else owner_row[0]) or ""
+            ).strip()
+        if owner_user_id:
+            owned_slugs = self._owner_business_slugs(conn, owner_user_id)
+            if normalized not in owned_slugs:
+                owned_slugs = [*owned_slugs, normalized]
+            incoming_bytes = storage.workspace_revision_incoming_bytes(backend, normalized, workspace)
+            storage.enforce_operator_storage_quota(backend, owned_slugs, incoming_bytes)
         next_revision = current_head + 1
         manifest = storage.write_workspace_revision(
             backend,

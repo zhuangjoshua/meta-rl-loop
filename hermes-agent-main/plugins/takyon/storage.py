@@ -453,6 +453,40 @@ def write_workspace_revision(
     return manifest
 
 
+def workspace_revision_incoming_bytes(
+    backend: StorageBackend,
+    slug: str,
+    root: str | os.PathLike[str],
+) -> int:
+    """Net NEW object-store bytes a :func:`write_workspace_revision` of ``root`` would add.
+
+    The canonical commit is content-addressed: each source file is stored once under its sha256 CAS
+    key (:func:`workspace_cas_key`), so a file whose digest already exists in this business's CAS
+    prefix adds zero bytes. This returns the size sum of only the *unique source digests not already
+    present remotely* — the true incremental footprint the operator quota must gate on, matching the
+    CAS dedup that the write itself performs (no double-counting an unchanged tree). Used by the live
+    commit path to feed :func:`enforce_operator_storage_quota` BEFORE any blob is uploaded."""
+    workspace_root = Path(root).expanduser().resolve()
+    digests = workspace_source_digests(workspace_root)
+    # Existing CAS digests for THIS business (the only prefix write_workspace_revision touches).
+    cas_prefix = f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/"
+    existing_cas_keys = set(backend.list_digests(cas_prefix).keys())
+    incoming = 0
+    counted: set[str] = set()
+    for rel, digest in digests.items():
+        digest_text = str(digest or "").strip().lower()
+        if not digest_text or digest_text in counted:
+            continue
+        counted.add(digest_text)
+        if workspace_cas_key(slug, digest_text) in existing_cas_keys:
+            continue  # already stored — CAS dedup means zero new bytes
+        try:
+            incoming += (workspace_root / rel).stat().st_size
+        except OSError:
+            continue
+    return incoming
+
+
 def materialize_workspace_revision(
     backend: StorageBackend,
     slug: str,

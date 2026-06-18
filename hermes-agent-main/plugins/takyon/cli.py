@@ -3505,6 +3505,17 @@ def run_takyon_command(
             raise SystemExit(
                 f"business:{slug} already exists. /{command} requires a fresh slug and will not reuse an existing business."
             )
+        # GOAL_RULES §3 gap #2 (red-team proven): canonical zero-balance company-creation gate.
+        # EVERY operator create entrypoint — dashboard.create RPC, shell /create via
+        # takyon.shell.exec, --no-auto detached create, and the bare CLI create/init/build —
+        # funnels through this single chokepoint before the business.upsert commit writes a
+        # businesses row. Refuse here so creation fails CLOSED for an operator with no spendable
+        # balance, regardless of --test/--no-auto (a create still needs balance authority).
+        # Reads the SAME billing spendable the dashboard RPC's preflight uses; fail-open only for
+        # identity-less / non-Postgres dev runs. The dashboard RPC's own call is now
+        # redundant-but-harmless. Raises InsufficientOperatorBalance (TakyonError subclass) which
+        # the dashboard maps to the 4030 balance block.
+        _operator_create_balance_preflight(resolved_operator_user_id)
         config = _read_model_config(store)
         if auto_start and not no_auto:
             _require_agent_model_config(config, model_override=model)

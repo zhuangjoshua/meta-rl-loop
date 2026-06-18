@@ -641,3 +641,54 @@ def test_store_resolves_operator_slugs_and_storage_bytes(pg_store_dsn, tmp_path,
         removed = store._purge_operator_storage(conn, owner)
     assert set(removed) == {slug_a, slug_b}
     assert storage.operator_storage_bytes(backend, [slug_a, slug_b]) == 0
+
+
+def test_canonical_commit_enforces_operator_quota_fails_closed(pg_store_dsn, tmp_path, monkeypatch):
+    """The LIVE durable commit chokepoint (``_commit_business_workspace_revision`` →
+    ``write_workspace_revision``) now enforces the per-operator storage quota. With a forced tiny
+    quota a commit whose net-new CAS bytes exceed the operator's limit fails CLOSED
+    (``StorageQuotaExceeded``) and writes NO revision row / NO blobs; a generous quota lets the same
+    commit through. This is the gap the fix closes: previously the quota lived only on the test-only
+    ``sync_up`` path and was never reached by a real commit."""
+    monkeypatch.setenv("TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS", "1")
+
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    store = TakyonStore(root=tmp_path, database_url=pg_store_dsn)
+    store._workspace_storage_backend_override = backend
+
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(pg_store_dsn, autocommit=False) as seed:
+        owner, _created, _raw = provision_user_on_first_login(seed, f"auth0|{uuid.uuid4().hex}")
+        seed.execute(
+            "INSERT INTO businesses (slug, name, owner_user_id) VALUES (%s, %s, %s)",
+            (slug, "Acme", owner),
+        )
+        seed.commit()
+
+    # Seed a local workspace with ~300 net-new source bytes.
+    ws = store._business_root(slug, sync=False)
+    (ws / "product").mkdir(parents=True, exist_ok=True)
+    (ws / "product" / "a.txt").write_bytes(b"x" * 300)
+
+    # Forced tiny quota: the 300 incoming bytes trip the gate at/over 250 → commit fails closed.
+    monkeypatch.setenv("TAKYON_OPERATOR_STORAGE_MAX_BYTES", "250")
+    with store._connect() as conn:
+        with conn:
+            with pytest.raises(storage.StorageQuotaExceeded):
+                store._commit_business_workspace_revision(
+                    conn, slug, actor="operator", reason="quota test"
+                )
+    # No revision landed and no blobs were uploaded.
+    assert storage.operator_storage_bytes(backend, [slug]) == 0
+    with store._connect() as conn:
+        assert store._business_head_revision_from_conn(conn, slug) == 0
+
+    # Generous quota: the same commit now succeeds and persists a revision + bytes.
+    monkeypatch.setenv("TAKYON_OPERATOR_STORAGE_MAX_BYTES", str(10 * 1024 * 1024))
+    with store._connect() as conn:
+        with conn:
+            rev = store._commit_business_workspace_revision(
+                conn, slug, actor="operator", reason="quota ok"
+            )
+    assert rev == 1
+    assert storage.operator_storage_bytes(backend, [slug]) >= 300
