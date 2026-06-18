@@ -14,6 +14,11 @@
 
 # ── operator dashboard + control plane (app.fourmanifold.com -> :9119) ──────────────
 app.fourmanifold.com {
+	# Compress static assets/responses at the edge. The Coscale JS bundle is ~469KB
+	# and CSS ~148KB uncompressed; zstd/gzip cuts the first-load transfer ~3-4x.
+	# Hashed assets are immutable-cached, so this only costs CPU on the cold load.
+	encode zstd gzip
+
 	# Tightest: credential endpoints (login/session/magic-link/oauth) — brute-force surface.
 	@auth path /auth/* /api/sessions* /api/providers/oauth*
 	rate_limit @auth {
@@ -70,6 +75,9 @@ https:// {
 	tls {
 		on_demand
 	}
+
+	# Compress business product sites (slug.fourmanifold.com) at the edge too.
+	encode zstd gzip
 
 	@product {
 		host *.fourmanifold.com
