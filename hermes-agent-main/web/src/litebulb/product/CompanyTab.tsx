@@ -446,16 +446,16 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
     [intentTasks],
   );
   const [expanded, setExpanded] = useState<string | null>(null);
-  const running = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "running").length;
-  const queued = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "queued").length;
   // FAILED / BLOCKED / NEEDS REVIEW all count as items needing operator attention.
   const issues = ordered.filter((task) => {
     const s = normalizeTaskStatus(asText(task.status));
     return s === "failed" || s === "blocked" || s === "needs_review";
   }).length;
+  // Intent-level summary only — the task-rollup policy bans queue mechanics
+  // ("N running · M queued"); the per-card status pills already convey RUNNING/PLANNED/etc.
   return (
     <section className="lb-card lb-act">
-      <div className="lb-h"><span className="lb-act__pulse" />Tasks<span className="lb-h__c">{running} running · {queued} queued{issues ? ` · ${issues} issue${issues === 1 ? "" : "s"}` : ""}</span></div>
+      <div className="lb-h"><span className="lb-act__pulse" />Tasks<span className="lb-h__c">{ordered.length} task{ordered.length === 1 ? "" : "s"}{issues ? ` · ${issues} need${issues === 1 ? "s" : ""} review` : ""}</span></div>
       <div className="lb-act__list">
         {ordered.map((task, index) => {
           const state = normalizeTaskStatus(asText(task.status));
