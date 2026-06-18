@@ -1242,6 +1242,44 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     )
 
 
+def _x_posted_marker_path(slug: str, job_id: str) -> Path:
+    # Durable per-job "already tweeted" marker. Lives OUTSIDE the re-materializable
+    # cache/businesses/<slug> mirror (sibling ``.x-posted`` dir) so a concurrent
+    # delete_local materialize can never prune it. This is the idempotency rail that
+    # stops a retry of a 'failed-after-publish' X job from re-tweeting/re-charging.
+    from .core import _slugify, _store
+
+    store = _store()
+    base = store._business_workspace_base().parent / ".x-posted"
+    safe_slug = _slugify(str(slug)) or "global"
+    safe_job = re.sub(r"[^A-Za-z0-9._-]+", "-", str(job_id)).strip("-") or "job"
+    return base / safe_slug / f"{safe_job}.json"
+
+
+def _read_x_posted_marker(slug: str, job_id: str) -> dict[str, Any] | None:
+    path = _x_posted_marker_path(slug, job_id)
+    try:
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_x_posted_marker(slug: str, job_id: str, marker: Mapping[str, Any]) -> None:
+    path = _x_posted_marker_path(slug, job_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(dict(marker), ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        # Best-effort durability rail; failure to persist the marker must not abort a
+        # successful publish. Worst case is the pre-existing retry hazard, not a new one.
+        pass
+
+
 def x_publish_outreach_handler(job: Job) -> JobRunResult:
     from . import business_credits as takyon_business_credits
     from . import core as takyon_core
@@ -1258,12 +1296,77 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
     reservation: dict[str, Any] | None = None
     credit_result: dict[str, Any] | None = None
     finalized = False
+
+    # Idempotency guard (money-gate integrity): if this exact job already shipped its
+    # tweet on a prior attempt (the publish succeeded but the post-publish receipt write
+    # failed and marked the job 'failed · needs retry'), a retry must NOT re-tweet or
+    # re-charge a credit. The marker captures the already-posted segments; re-entry skips
+    # posting/reservation and only re-runs the receipt recording.
+    posted_marker = _read_x_posted_marker(slug, str(job.id))
+    already_posted_segments: list[dict[str, Any]] = []
+    if isinstance(posted_marker, dict):
+        raw_segments = posted_marker.get("thread_posts")
+        if isinstance(raw_segments, list):
+            already_posted_segments = [seg for seg in raw_segments if isinstance(seg, dict)]
+
     if work_request_id:
         _update_work_request(
             slug,
             work_request_id,
             status="running",
             payload_updates={"worker_job_id": str(job.id)},
+        )
+
+    # Fully-posted retry: the tweet(s) already shipped and credits were already committed
+    # on the first attempt. Do NOT reserve/charge again. Re-derive the published result and
+    # (re)write the receipt artifacts so the job can reach a clean terminal state idempotently.
+    if already_posted_segments and bool(posted_marker.get("credits_committed")):
+        post_id = str(posted_marker.get("post_id") or "").strip()
+        post_url = str(posted_marker.get("post_url") or "").strip()
+        provider_response = dict(posted_marker.get("provider_response") or {})
+        media_records = [dict(m) for m in (posted_marker.get("media") or []) if isinstance(m, dict)]
+        credits_charged = int(posted_marker.get("credits_charged") or 0)
+        budget_bucket = str(posted_marker.get("budget_bucket") or "x").strip() or "x"
+        artifacts = _record_x_publish_result(
+            slug,
+            job_id=str(job.id),
+            payload=payload,
+            post_id=post_id or str(job.id),
+            post_url=post_url,
+            provider_response=provider_response,
+            media=media_records,
+            credits_charged=credits_charged,
+            budget_bucket=budget_bucket,
+            channel_budget=posted_marker.get("channel_budget"),
+        )
+        if work_request_id:
+            _update_work_request(
+                slug,
+                work_request_id,
+                status="completed",
+                payload_updates={
+                    "artifact_path": artifacts["artifact"],
+                    "receipt_path": artifacts["receipt"],
+                    "post_id": post_id,
+                    "post_url": post_url,
+                    "credits_charged": credits_charged,
+                    "budget_bucket": budget_bucket,
+                    "idempotent_replay": True,
+                },
+            )
+        return JobRunResult(
+            result={
+                "business_slug": slug,
+                "provider": "x",
+                "post_id": post_id,
+                "post_url": post_url,
+                "artifact_path": artifacts["artifact"],
+                "receipt_path": artifacts["receipt"],
+                "credits_charged": credits_charged,
+                "budget_bucket": budget_bucket,
+                "idempotent_replay": True,
+            },
+            actual_cost_cents=0,
         )
 
     try:
@@ -1307,11 +1410,25 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
 
     post_id = ""
     thread_posts: list[dict[str, Any]] = []
+    # Re-entry after a partial publish (some segments tweeted, then the process died before
+    # commit): resume from the durable marker so already-posted segments are NOT re-tweeted.
+    if already_posted_segments:
+        thread_posts = [dict(seg) for seg in already_posted_segments]
+        post_id = str(posted_marker.get("post_id") or "").strip()
+        provider_response_seed = posted_marker.get("provider_response")
+        provider_response_resume = dict(provider_response_seed) if isinstance(provider_response_seed, dict) else {}
+    else:
+        provider_response_resume = {}
+    posted_index_to_id = {
+        int(seg.get("index")): str(seg.get("post_id") or "")
+        for seg in thread_posts
+        if isinstance(seg.get("index"), int)
+    }
     try:
         segments = _split_x_thread_segments(body)
         if not segments:
             raise RuntimeError("x publish job is missing a body")
-        provider_response: dict[str, Any] = {}
+        provider_response: dict[str, Any] = provider_response_resume
         media_ids: list[str] = []
         media_records: list[dict[str, Any]] = []
         for raw_rel in payload.get("media_paths") or []:
@@ -1340,6 +1457,10 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             media_records.append({"path": rel, "media_id": media_id})
         current_reply_to = reply_to
         for index, segment in enumerate(segments):
+            # Idempotency: if this segment already shipped on a prior attempt, do not re-tweet it.
+            if index in posted_index_to_id:
+                current_reply_to = posted_index_to_id[index] or current_reply_to
+                continue
             arguments: dict[str, Any] = {"text": segment}
             if current_reply_to:
                 arguments["reply_in_reply_to_tweet_id"] = current_reply_to
@@ -1365,7 +1486,22 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                     "provider_response": dict(response),
                 }
             )
+            posted_index_to_id[index] = current_post_id
             current_reply_to = current_post_id
+            # Durably mark each shipped segment immediately so a crash/retry between this
+            # tweet and the credit commit cannot re-post it.
+            _write_x_posted_marker(
+                slug,
+                str(job.id),
+                {
+                    "job_id": str(job.id),
+                    "post_id": post_id,
+                    "thread_posts": thread_posts,
+                    "media": media_records,
+                    "provider_response": provider_response,
+                    "credits_committed": False,
+                },
+            )
         if len(thread_posts) > 1:
             provider_response["thread_posts"] = thread_posts
         elif media_records:
@@ -1396,6 +1532,36 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             f"https://x.com/{username}/status/{post_id}"
             if username
             else f"https://x.com/i/web/status/{post_id}"
+        )
+        # Tweet shipped AND credits committed. Persist the terminal marker BEFORE the
+        # post-publish receipt write — that artifact write is the step that historically
+        # failed under the mirror race. If it fails now, a retry replays from this marker
+        # without re-tweeting or re-charging.
+        _committed_budget_bucket = str(
+            (credit_result or {}).get("budget_bucket")
+            or (reservation or {}).get("budget_bucket")
+            or "x"
+        ).strip() or "x"
+        _committed_credits = int(
+            (credit_result or {}).get("actual_credits")
+            or (reservation or {}).get("requested_credits")
+            or 0
+        )
+        _write_x_posted_marker(
+            slug,
+            str(job.id),
+            {
+                "job_id": str(job.id),
+                "post_id": post_id,
+                "post_url": post_url,
+                "thread_posts": thread_posts,
+                "media": media_records,
+                "provider_response": provider_response,
+                "credits_committed": True,
+                "credits_charged": _committed_credits,
+                "budget_bucket": _committed_budget_bucket,
+                "channel_budget": (credit_result or {}).get("channel_budget"),
+            },
         )
         artifacts = _record_x_publish_result(
             slug,

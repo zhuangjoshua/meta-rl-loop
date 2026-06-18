@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import atexit
 import contextvars
+import errno
+try:
+    import fcntl  # POSIX advisory file locks (runtime is Linux)
+except ImportError:  # pragma: no cover - non-POSIX dev hosts
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import hmac
+import html
 import json
 import mimetypes
 import os
@@ -1047,6 +1053,16 @@ _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "x_social": ("x",),
 }
 _LEGACY_FIXED_STAGE_JOB_KINDS = {"foundation"}
+# Channel ad-launch / creative-generation work has dedicated credit-gated tools that
+# reserve creative credits, stage a real public asset, and call the live provider. A
+# generic job.enqueue with one of these kinds is a dead-end (no worker HANDLER executes
+# it) that bypasses the money gate and lets a turn fabricate a 'queued launch'. Refuse it
+# at the enqueue gate and name the real tool. Matched as substrings via _job_kind_matches.
+_GATED_CHANNEL_JOB_KIND_TOOLS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("reddit-ad", "reddit-launch", "reddit-campaign"), "business_reddit_ad_launch"),
+    (("meta-ad", "meta-launch", "meta-campaign"), "business_meta_ad_launch"),
+    (("static-ad", "static-render", "creative-generate", "creative-render", "ad-creative", "logo-render"), "business_static_ad_generate"),
+)
 # The ONLY app.* writes a product customer (session principal) may commit — declared once as data,
 # consulted in _normalize_operation, never re-derived per route. Each one's _apply_operation handler
 # validates the customer's business-scoped session (so no cross-business reach); the operator-only
@@ -2147,6 +2163,10 @@ def _subuser_surface_context_payload(
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
         "notes": str((surface or {}).get("notes") or ""),
+        # Free deterministic brand mark so the product UI can render a monogram/accent
+        # without a paid logo call. business_generate_logo (credit-gated) replaces these later.
+        "brandAccent": _brand_mark_accent(slug),
+        "brandMarkSvg": _brand_mark_svg(slug),
     }
 
 
@@ -5935,6 +5955,109 @@ def _subuser_app_scaffold_source_dir() -> Path:
     return _subuser_app_kit_source_dir() / "scaffold"
 
 
+# ---------------------------------------------------------------------------
+# Free bootstrap brand mark (favicon + monogram).
+#
+# Every freshly bootstrapped product site shipped with NO favicon, so the browser
+# tab and slug.fourmanifold.com served a 404 for /favicon.svg. The fix is a FREE,
+# deterministic SVG monogram seeded once into the scaffold's public/ dir (vite copies
+# public/ verbatim into dist/), plus matching surface-context brand keys the worker UI
+# can render. This spends NO money and makes NO provider call at bootstrap — the paid
+# business_generate_logo tool stays credit-gated and only ever replaces this seed-once
+# placeholder later, never at create time.
+# ---------------------------------------------------------------------------
+
+_BRAND_MARK_PALETTE = (
+    "#2563eb",  # blue
+    "#7c3aed",  # violet
+    "#db2777",  # pink
+    "#dc2626",  # red
+    "#ea580c",  # orange
+    "#16a34a",  # green
+    "#0891b2",  # cyan
+    "#4f46e5",  # indigo
+)
+
+
+def _brand_mark_accent(slug: str) -> str:
+    """Deterministic accent color for a business, derived from its slug. Stable across
+    rebuilds so a tab's favicon color never flickers between materializes."""
+    normalized = _slugify(str(slug or "")) or "business"
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    return _BRAND_MARK_PALETTE[digest[0] % len(_BRAND_MARK_PALETTE)]
+
+
+def _brand_mark_initials(slug: str) -> str:
+    """1-2 letter monogram from the business name (e.g. 'plant-snap' -> 'PS')."""
+    parts = [part for part in re.split(r"[^a-z0-9]+", str(slug or "").strip().lower()) if part]
+    if not parts:
+        return "T"
+    if len(parts) == 1:
+        word = parts[0]
+        return (word[:2] if len(word) >= 2 else word[:1]).upper()
+    return (parts[0][:1] + parts[1][:1]).upper()
+
+
+def _brand_mark_svg(slug: str) -> str:
+    """A free, self-contained SVG monogram favicon. No external assets, no provider call."""
+    accent = _brand_mark_accent(slug)
+    initials = html.escape(_brand_mark_initials(slug))
+    font_size = 30 if len(initials) > 1 else 38
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" '
+        f'aria-label="{html.escape(_humanize_business_slug(slug))}">'
+        f'<rect width="64" height="64" rx="14" fill="{accent}"/>'
+        f'<text x="50%" y="50%" dy="0.02em" fill="#ffffff" font-family="-apple-system,'
+        'BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif" '
+        f'font-size="{font_size}" font-weight="700" text-anchor="middle" '
+        f'dominant-baseline="central">{initials}</text>'
+        "</svg>"
+    )
+
+
+def _seed_brand_mark_assets(workspace_root: Path, *, slug: str) -> None:
+    """Seed public/favicon.svg once. Never overwrites an existing favicon (a paid
+    business_generate_logo result or a worker-authored mark wins)."""
+    favicon = workspace_root / "public" / "favicon.svg"
+    if favicon.exists():
+        return
+    try:
+        favicon.parent.mkdir(parents=True, exist_ok=True)
+        favicon.write_text(_brand_mark_svg(slug), encoding="utf-8")
+    except OSError:
+        # Best-effort seed; a missing favicon is the pre-existing state, not a new failure.
+        pass
+
+
+_FAVICON_LINK_MARKER = 'rel="icon"'
+_FAVICON_LINK_BLOCK = (
+    '    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />\n'
+    '    <link rel="apple-touch-icon" href="/favicon.svg" />\n'
+)
+
+
+def _inject_favicon_links(workspace_root: Path) -> None:
+    """Ensure the seeded index.html links the favicon. Idempotent: skips if already present.
+    The scaffold's index.html ships the links, but a business that seeded an older scaffold
+    (pre-favicon) gets them backfilled here on rebuild."""
+    index_path = workspace_root / "index.html"
+    try:
+        if not index_path.is_file():
+            return
+        text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if _FAVICON_LINK_MARKER in text or "favicon.svg" in text:
+        return
+    if "</head>" not in text:
+        return
+    updated = text.replace("</head>", _FAVICON_LINK_BLOCK + "  </head>", 1)
+    try:
+        index_path.write_text(updated, encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _materialize_subuser_app_scaffold(
     workspace_root: Path,
     *,
@@ -5973,6 +6096,11 @@ def _materialize_subuser_app_scaffold(
             destination.write_text(text, encoding="utf-8")
         else:
             shutil.copy2(path, destination)
+    # Free brand mark: seed a deterministic SVG monogram favicon (no provider call) and
+    # make sure index.html links it. vite copies public/favicon.svg verbatim into dist/,
+    # so the published slug host serves /favicon.svg instead of 404ing.
+    _seed_brand_mark_assets(workspace_root, slug=slug)
+    _inject_favicon_links(workspace_root)
 
 
 # The AppKit-owned rail wrappers + shared app shell. Unlike the worker-owned screens (app-home,
@@ -11034,6 +11162,34 @@ class _PGConn:
             pass
 
 
+@contextmanager
+def _business_mirror_lock(cache_root: Path):
+    # Serialize destructive re-materialize/commit on the SHARED local cache mirror so
+    # concurrent TakyonStore instances (2 worker drain threads, dashboard, product procs)
+    # cannot delete/rebuild files another store is mid-write. Lock file lives OUTSIDE the
+    # mirror tree so delete_local can never prune it.
+    if fcntl is None:
+        yield
+        return
+    cache_root = Path(cache_root)
+    lock_dir = cache_root.parent / ".locks"
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        yield
+        return
+    lock_path = lock_dir / (cache_root.name + ".lock")
+    fh = open(lock_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
 class TakyonStore:
     """File + Postgres-backed store for isolated business state and scoped workspaces."""
 
@@ -12026,21 +12182,22 @@ class TakyonStore:
         # fresh store per request.
         if normalized in self._workspace_sync_cache:
             return
-        head_revision = self._business_head_revision(normalized)
-        if head_revision <= 0:
-            root.mkdir(parents=True, exist_ok=True)
+        with _business_mirror_lock(root):
+            head_revision = self._business_head_revision(normalized)
+            if head_revision <= 0:
+                root.mkdir(parents=True, exist_ok=True)
+                self._workspace_sync_cache.add(normalized)
+                self._workspace_revision_cache[normalized] = 0
+                return
+            storage.materialize_workspace_revision(
+                backend,
+                normalized,
+                head_revision,
+                root,
+                delete_local=True,
+            )
             self._workspace_sync_cache.add(normalized)
-            self._workspace_revision_cache[normalized] = 0
-            return
-        storage.materialize_workspace_revision(
-            backend,
-            normalized,
-            head_revision,
-            root,
-            delete_local=True,
-        )
-        self._workspace_sync_cache.add(normalized)
-        self._workspace_revision_cache[normalized] = head_revision
+            self._workspace_revision_cache[normalized] = head_revision
 
     def _workspace_storage_backend(self) -> Any:
         from . import storage
@@ -14400,7 +14557,13 @@ class TakyonStore:
             staged = [self._normalize_operation(conn, parsed, op, principal=principal) for op in operations]
 
             results: list[dict[str, Any]] = []
-            with conn:
+            _commit_business = parsed.get("business")
+            _commit_lock = (
+                _business_mirror_lock(self._business_workspace_base() / _slugify(str(_commit_business)))
+                if _commit_business and self._workspace_root_override is None
+                else nullcontext()
+            )
+            with _commit_lock, conn:
                 for item in staged:
                     result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
                     results.append(result)
@@ -14491,6 +14654,16 @@ class TakyonStore:
             kind = str(op.get("kind") or "").strip()
             if kind in _LEGACY_FIXED_STAGE_JOB_KINDS:
                 raise TakyonError(f"legacy fixed-stage request kind is not allowed: {kind}")
+            for needles, tool_name in _GATED_CHANNEL_JOB_KIND_TOOLS:
+                if _job_kind_matches(kind, needles):
+                    raise TakyonError(
+                        f"job kind {kind!r} names a credit-gated channel ad/creative action; "
+                        f"a generic job.enqueue does not reserve credits, stage a public asset, or call the provider "
+                        f"(no worker executes this kind). Call {tool_name} directly instead. "
+                        f"For a Reddit image launch: generate the creative with business_static_ad_generate "
+                        f"(budget_bucket='reddit'), then pass the generated product/static-ads/<slug>/<file>.png on "
+                        f"post.image_path to business_reddit_ad_launch."
+                    )
 
         if action != "business.upsert" and business_slug:
             if not is_customer_write:

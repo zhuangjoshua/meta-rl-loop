@@ -4302,6 +4302,17 @@ def _append_user_message_to_session_db(sid: str, session: dict, content: Any) ->
             getattr(agent, "session_id", "") or session.get("session_key") or sid
         ).strip()
         if session_db and session_key:
+            # The messages.session_id FK (foreign_keys=ON) requires the parent sessions row
+            # to exist. The sessions row is otherwise created lazily inside run_conversation,
+            # which runs AFTER this in-flight persist — so without this idempotent
+            # INSERT OR IGNORE the append fails the FK constraint and the directive is
+            # silently dropped from the DB. ensure_session is INSERT OR IGNORE, so an
+            # already-created session is untouched.
+            session_db.ensure_session(
+                session_key,
+                source="tui",
+                model=getattr(agent, "model", None),
+            )
             session_db.append_message(
                 session_id=session_key,
                 role="user",
