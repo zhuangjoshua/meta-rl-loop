@@ -263,6 +263,14 @@ def build_creative_gateway_router() -> APIRouter:
             if not png_bytes:
                 raise RuntimeError("Gemini image generation returned empty image")
             core._atomic_write_bytes(asset_abs, png_bytes)
+            # Persist the rendered logo to canonical remote storage IMMEDIATELY, before committing
+            # the credit. The render wrote the PNG only into the LOCAL cache mirror; a concurrent
+            # ``_business_root(sync=True)`` re-materializes that mirror with ``delete_local=True`` and
+            # would wipe the logo before any later sync — charging credits for an asset that then
+            # vanishes (observed: success+2 credits, but logo.png gone on the next sync). Pushing here,
+            # while the file exists, makes the logo durable at the point of creation. Same
+            # immediate-remote-push pattern static_render already uses for ad creatives.
+            store._sync_business_workspace_remote(business)
             balances = core._commit_creative_credits(
                 reservation_key,
                 action="logo_generate",
