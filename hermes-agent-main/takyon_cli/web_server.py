@@ -7974,8 +7974,9 @@ async def get_models_analytics(days: int = 30):
 #
 # The endpoint spawns the same ``takyon --tui`` binary the CLI uses, behind
 # a POSIX pseudo-terminal, and forwards bytes + resize escapes across a
-# WebSocket.  The browser renders the ANSI through xterm.js (see
-# web/src/pages/ChatPage.tsx).
+# WebSocket.  (The legacy dashboard xterm.js renderer was removed when the
+# operator UI was consolidated onto the Coscale/Litebulb workspace; the PTY
+# bridge itself stays as a backend rail.)
 #
 # Auth: ``?token=<session_token>`` query param (browsers can't set
 # Authorization on the WS upgrade).  Same ephemeral ``_SESSION_TOKEN`` as
@@ -9219,61 +9220,34 @@ def mount_spa(application: FastAPI):
             )
         return
 
-    _index_path = WEB_DIST / "index.html"
     _litebulb_index_candidates = (
         WEB_DIST / "litebulb" / "litebulb.html",
         WEB_DIST / "litebulb" / "index.html",
     )
 
-    def _serve_index(prefix: str = ""):
-        """Return index.html with the session token + base-path injected.
-
-        ``prefix`` is the normalised ``X-Forwarded-Prefix`` (e.g. ``/takyon``)
-        or empty string when served at root.
-        """
-        html = _index_path.read_text()
-        chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
-        token_script = (
-            f'<script>window.__TAKYON_SESSION_TOKEN__="{_SESSION_TOKEN}";'
-            f"window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
-            f'window.__TAKYON_BASE_PATH__="{prefix}";</script>'
-        )
-        if prefix:
-            # Rewrite absolute asset URLs baked into the Vite build so the
-            # browser fetches them through the same proxy prefix.
-            html = html.replace('href="/assets/', f'href="{prefix}/assets/')
-            html = html.replace('src="/assets/', f'src="{prefix}/assets/')
-            html = html.replace('href="/favicon.ico"', f'href="{prefix}/favicon.ico"')
-            html = html.replace('href="/fonts/', f'href="{prefix}/fonts/')
-            html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
-            html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
-        html = html.replace("</head>", f"{token_script}</head>", 1)
-        # Operator-dashboard analytics: inject the same shared Umami tag the
-        # product sub-apps use (buy-not-build, GOAL_RULES §4). app.fourmanifold.com
-        # is segmented downstream by its own hostname. No-op when analytics is
-        # disabled/unconfigured (no faked tracking).
-        html = _inject_head_snippet(html, _umami_analytics_snippet())
-        return HTMLResponse(
-            html,
-            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
-        )
-
     def _serve_litebulb_index(prefix: str = ""):
-        """Serve the Litebulb operator workspace as the top-level document.
+        """Serve the Coscale (Litebulb) operator workspace as the top-level
+        document. This is the ONLY served UI.
 
         Litebulb is a self-contained HTML document. Older builds emitted
-        ``index.html`` while the newer unified bundle emits ``litebulb.html``.
-        Prefer the new artifact when present so ``/chat`` never serves a stale
-        legacy shell after a partial or mixed build directory sync. Falls back
-        to the SPA index when neither asset exists so the dashboard never
-        hard-fails.
+        ``index.html`` while the unified bundle emits ``litebulb.html``. Prefer
+        the new artifact when present so we never serve a stale shell after a
+        partial or mixed build-directory sync. When neither asset exists the
+        build is broken/missing, so return a clear 503 rather than silently
+        serving a removed legacy dashboard.
         """
         litebulb_index_path = next(
             (candidate for candidate in _litebulb_index_candidates if candidate.is_file()),
             None,
         )
         if litebulb_index_path is None:
-            return _serve_index(prefix)
+            return HTMLResponse(
+                "<h1>Coscale build not found</h1>"
+                "<p>The operator UI bundle is missing. Run the web build "
+                "(<code>npm run build</code>) and redeploy.</p>",
+                status_code=503,
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
         html = litebulb_index_path.read_text()
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         adapter_path = WEB_DIST / "litebulb" / "takyon-adapter.js"
@@ -9348,21 +9322,7 @@ def mount_spa(application: FastAPI):
         )
         if product_business:
             return await _serve_product_site_file(product_business, full_path, request=request)
-        request_host = _request_host(request.headers)
-        skill_lab_host = request_host == _configured_skill_lab_host()
         prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "":
-            target_path = f"{prefix}/chat" if prefix else "/chat"
-            query = str(request.url.query or "").strip()
-            if query:
-                target_path = f"{target_path}?{query}"
-            return RedirectResponse(url=target_path, status_code=307)
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and skill_lab_host and full_path == "index.html":
-            target_path = f"{prefix}/chat" if prefix else "/chat"
-            query = str(request.url.query or "").strip()
-            if query:
-                target_path = f"{target_path}?{query}"
-            return RedirectResponse(url=target_path, status_code=307)
         file_path = WEB_DIST / full_path
         # Prevent path traversal via url-encoded sequences (%2e%2e/)
         if (
@@ -9371,21 +9331,14 @@ def mount_spa(application: FastAPI):
             and file_path.exists()
             and file_path.is_file()
         ):
-            # Stable-named build files (fonts, favicon, images) get a bounded
-            # cache; HTML (e.g. a direct /index.html hit) stays uncached.
+            # Stable-named build files (litebulb bundle assets, adapter, fonts,
+            # favicon, images) get a bounded cache; HTML stays uncached.
             return _cached_file_response(file_path)
-        # Operator landing: in embedded/--tui mode the business workspace IS
-        # the Litebulb UI, served directly (no iframe, no React bundle).  Every
-        # other route still renders the SPA shell for client-side routing.
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and full_path == "chat":
-            return _serve_litebulb_index(prefix)
-        if _DASHBOARD_EMBEDDED_CHAT_ENABLED and skill_lab_host:
-            target_path = f"{prefix}/chat" if prefix else "/chat"
-            query = str(request.url.query or "").strip()
-            if query:
-                target_path = f"{target_path}?{query}"
-            return RedirectResponse(url=target_path, status_code=307)
-        return _serve_index(prefix)
+        # The Coscale (Litebulb) operator workspace is the ONLY served UI. Every
+        # host and every non-asset route renders it directly (no iframe, no
+        # legacy dashboard SPA shell). Client-side routing inside Coscale is
+        # hash-based, so a single index document serves all routes.
+        return _serve_litebulb_index(prefix)
 
 
 # ---------------------------------------------------------------------------

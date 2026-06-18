@@ -55,12 +55,15 @@ app.fourmanifold.com {
 	reverse_proxy 127.0.0.1:9119
 }
 
-skills.fourmanifold.com {
-	reverse_proxy 127.0.0.1:9119
-}
-
+# Operator keeps ONLY app.fourmanifold.com (the Coscale workspace). Every other
+# legacy operator subdomain (skills/admin/dashboard/www/research-composer)
+# permanently redirects to it so old bookmarks/links land on the one UI.
+skills.fourmanifold.com,
+admin.fourmanifold.com,
+dashboard.fourmanifold.com,
+www.fourmanifold.com,
 research-composer.fourmanifold.com {
-	reverse_proxy 127.0.0.1:9120
+	redir https://app.fourmanifold.com{uri} 308
 }
 
 https:// {
@@ -83,18 +86,9 @@ https:// {
 }
 
 :80 {
-	@research_composer host research-composer.fourmanifold.com
-	handle @research_composer {
-		reverse_proxy 127.0.0.1:9120
-	}
-
-	@skills_lab host skills.fourmanifold.com
-	handle @skills_lab {
-		reverse_proxy 127.0.0.1:9119 {
-			header_up Host skills.fourmanifold.com
-			header_up X-Forwarded-Proto https
-		}
-	}
+	# Legacy operator subdomains (skills/admin/dashboard/www/research-composer)
+	# are handled by their dedicated 308-redirect site blocks above, which match
+	# both :80 and :443 — no per-host plumbing needed here.
 
 	@app host app.fourmanifold.com
 	handle @app {
