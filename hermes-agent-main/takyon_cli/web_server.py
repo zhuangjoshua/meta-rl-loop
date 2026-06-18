@@ -1287,7 +1287,10 @@ def _has_valid_session_token(request: Request) -> bool:
     ):
         return True
 
-    if request.url.path.startswith("/api/takyon/site-preview/"):
+    _qpath = request.url.path
+    if _qpath.startswith("/api/takyon/site-preview/") or (
+        _qpath.startswith("/api/takyon/businesses/") and _qpath.endswith("/asset")
+    ):
         query_token = request.query_params.get("token", "")
         if query_token and hmac.compare_digest(query_token.encode(), _SESSION_TOKEN.encode()):
             return True
@@ -1659,6 +1662,13 @@ def _resolve_dashboard_request_principal(request: Request) -> Any | None:
     )
     if principal is not None:
         return principal
+    # A valid dashboard session token (incl. ?token= for media/site-preview that an
+    # <img>/<video>/iframe cannot header-authenticate) authenticates as the local
+    # dashboard operator even when Auth0 is otherwise required for the host.
+    if _has_valid_session_token(request):
+        local = _resolve_local_dashboard_principal(runtime_database_url=runtime_database_url)
+        if local is not None:
+            return local
     if _auth0_required_for_host(request.headers):
         return None
     return _resolve_local_dashboard_principal(runtime_database_url=runtime_database_url)
