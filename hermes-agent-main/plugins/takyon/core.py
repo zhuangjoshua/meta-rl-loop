@@ -11184,6 +11184,20 @@ class TakyonStore:
         if owner_user_id != operator_user_id:
             raise TakyonError(f"access denied for business:{business_slug}")
 
+    def enforce_operator_business_access(self, business_slug: str) -> None:
+        """Public read-side ownership gate for operator-authority business reads that do NOT route
+        through ``commit()``/``read()`` (which already enforce via ``_enforce_operator_business_access``
+        at the per-operation/per-scope layer). Operator-authority read tools that resolve their data
+        through a direct helper (creative-credit balances, product analytics, ...) must call this so an
+        unpinned/global operator turn cannot read a foreign tenant's state. Opens one short read
+        connection and delegates to the same private gate as the write path, so deny semantics match
+        exactly ("access denied for business:<slug>")."""
+        slug = str(business_slug or "").strip()
+        if not slug:
+            return
+        with self._connect() as conn:
+            self._enforce_operator_business_access(conn, slug)
+
     def _warn_unbound_operator_access(self, conn: sqlite3.Connection, business_slug: str) -> None:
         """Observe stage of the identity migration: record ONE operator.identity.unbound event per
         business per store instance, so the events stream accumulates the exact set of access paths
@@ -17582,6 +17596,7 @@ def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
 def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
     try:
         slug = _resolved_business_slug(args, required=True)
+        _store().enforce_operator_business_access(slug)
         days = args.get("days") or args.get("window_days") or 7
         return tool_result(_business_analytics_summary(slug, days=int(days)))
     except Exception as exc:
@@ -22129,6 +22144,7 @@ def handle_business_set_channel_credit_budgets(args: dict, **_: Any) -> str:
 def handle_business_read_channel_credit_budgets(args: dict, **_: Any) -> str:
     try:
         business = _resolved_business_slug(args, required=True)
+        _store().enforce_operator_business_access(business)
         snapshot = _creative_credit_budget_snapshot(business)
         snapshot["action_costs"] = _creative_credit_action_costs()
         return tool_result(
