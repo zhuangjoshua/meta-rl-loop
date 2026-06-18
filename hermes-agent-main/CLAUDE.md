@@ -369,6 +369,38 @@ The registry handles schema collection, dispatch, availability checking, and err
 
 **Agent-level tools** (todo, memory): intercepted by `run_agent.py` before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
 
+### Paid-provider secret keys live behind TK (the safebox) — never `os.environ` in a business tool
+
+Every secret that lets a business tool call a **paid** provider — model/image/video
+APIs (Gemini, FAL, OpenAI `gpt-image`), search/extract (Tavily), social/ads
+(Composio) — is held by the safebox (private secret-authority host
+`67.205.158.170`), **not** in the business runtime. On the VPS the key is **not** in
+the process env: `os.environ.get("GEMINI_API_KEY")` is **empty** there, so a tool
+that reads its key from `os.environ` both breaks the secret boundary **and** fails
+closed at runtime (observed: a logo rewrite that read `os.environ` raised
+`GEMINI_API_KEY required` on prod and never worked).
+
+Canonical pattern (`GOAL_RULES` §7) — see
+`plugins/takyon/creative_gateway.py::_resolve_gemini_image_key`:
+
+1. Resolve the key **only** in an authority route via
+   `safebox.first_env_backed_value(*ALIASES)` (e.g. aliases
+   `TAKYON_GEMINI_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY`). The business
+   runtime never reads the raw key.
+2. Pass it as an **explicit argument** to the provider client
+   (`genai.Client(api_key=...)`), never via `os.environ`.
+3. **Fail closed:** if the key is absent, return a clear `*_unconfigured` error /
+   `503` **before** any credit reserve or provider call — never proceed or
+   fabricate.
+4. Register the alias in `core._API_ENV_ALIASES` and declare `requires_api=[...]`
+   on the tool; gate the spend (creative-credit or usage rail) in the same
+   authority route.
+
+Any **new** paid-provider skill/tool resolves its key this way — same as logo
+(`business_generate_logo`), UGC, static-ad, and web-search. Reading a provider key
+from `os.environ` in a business tool is a bug: it breaks the secret boundary and
+fails on the VPS.
+
 ---
 
 ## Dependency Pinning Policy
