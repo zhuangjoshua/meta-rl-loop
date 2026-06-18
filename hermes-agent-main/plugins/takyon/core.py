@@ -26368,23 +26368,32 @@ def _reddit_launch_plan(args: dict[str, Any], cfg: Mapping[str, Any]) -> dict[st
         legacy_post_payload = {"data": legacy_post_payload_data}
         click_url = click_url or destination_url
 
+    campaign_budget_optimization = _boolish(
+        campaign.get("is_campaign_budget_optimization"), default=False
+    )
     campaign_payload = {
         "data": {
             "name": str(campaign.get("name") or f"{slug} campaign").strip(),
             "configured_status": "PAUSED",
             "objective": objective,
             "funding_instrument_id": funding_instrument_id,
-            "is_campaign_budget_optimization": False,
+            "is_campaign_budget_optimization": campaign_budget_optimization,
             "invoice_label": str(campaign.get("invoice_label") or "").strip() or None,
         }
     }
     default_launch_start = datetime.now(timezone.utc) + timedelta(hours=1)
     campaign_start = _reddit_ads_hour_iso(campaign.get("start_time"), field="campaign.start_time")
     campaign_end = _reddit_ads_hour_iso(campaign.get("end_time"), field="campaign.end_time")
-    if campaign_start:
-        campaign_payload["data"]["start_time"] = campaign_start
-    if campaign_end:
-        campaign_payload["data"]["end_time"] = campaign_end
+    # Reddit Ads rejects campaign-level start_time/end_time unless campaign budget
+    # optimization is enabled ("Cannot set start_time for a campaign without having
+    # campaign budget optimization enabled."). The live media window is enforced on the
+    # ad group (start_time/end_time + DAILY_SPEND goal) below, so only carry the schedule
+    # onto the campaign when CBO actually owns the budget.
+    if campaign_budget_optimization:
+        if campaign_start:
+            campaign_payload["data"]["start_time"] = campaign_start
+        if campaign_end:
+            campaign_payload["data"]["end_time"] = campaign_end
 
     ad_group_payload = {
         "data": {
@@ -29420,7 +29429,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "Refresh product surface source/build output to the shared slug host and write a receipt with coarse inventory evidence.",
             {
                 "business": _BUSINESS_PROP,
-                "source_path": {"type": "string", "description": "Business-relative source path; defaults to the app surface contract source_path"},
+                "source_path": {"type": "string", "description": "Business-relative source path. OMIT to use the business's anchored app-surface-contract source_path (recommended — this is almost always correct). The source_path is anchored on first publish and CANNOT be switched afterward: passing a different value (e.g. 'product' when the surface is anchored to 'product/site') is refused with an exact anchor error. Only set it to establish the anchor on a brand-new surface that has none."},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
                 "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are ignored; Takyon still requires real source/build output and will not publish fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
