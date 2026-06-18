@@ -55,6 +55,62 @@ _MUTABLE_FIELDS = frozenset(_DEFAULTS)
 
 _DEFAULT_EXPENSIVE_THRESHOLD_CENTS = 100  # a per-unit estimate over $1.00 is "expensive"
 
+# Plan-gated minimum CEO wake cadence (seconds). The operator's wake schedule may not be set
+# FASTER (smaller interval) than the minimum their subscription plan allows — faster wakes burn
+# more inference money, so cadence is an entitlement, not a free knob. This is the single source of
+# truth for plan -> floor; the wake-schedule write boundary (`core._ensure_ceo_cron`) reads it and
+# refuses a sub-floor interval. `wakes.upsert_wake_schedule` stays a pure leaf with NO plan gate.
+#
+# Keys are normalized (uppercased, stripped) plan names as they arrive from the operator's Stripe
+# subscription metadata (`takyon_plan_name`) / `TAKYON_OPERATOR_DEFAULT_PLAN_NAME`. An unknown or
+# absent plan (no active/trialing subscription) falls to the most-restrictive default floor, so a
+# plan DOWNGRADE that drops the active subscription tightens the floor rather than loosening it.
+_DEFAULT_WAKE_MIN_INTERVAL_SECONDS = 21_600  # 6h — the floor for an unknown / no-subscription plan
+_PLAN_WAKE_MIN_INTERVAL_SECONDS: dict[str, int] = {
+    "DEV": 60,  # internal/dev plan: allow tight cadences for testing
+    "SCALE": 3_600,  # 1h
+    "GROWTH": 7_200,  # 2h
+    "PRO": 10_800,  # 3h
+    "STARTER": 21_600,  # 6h
+    "FREE": 86_400,  # 24h — slowest paid-floor cadence (free has no AI budget anyway, see inv #9)
+}
+
+
+def _normalize_plan_name(plan_name: str | None) -> str:
+    return str(plan_name or "").strip().upper()
+
+
+def plan_min_wake_interval_seconds(plan_name: str | None) -> int:
+    """Minimum allowed CEO wake interval (seconds) for ``plan_name``. Single source of truth for
+    wake-cadence plan gating. Unknown / absent plan -> the conservative default floor (never faster
+    than 6h) so an EVIL caller cannot speed up wakes by hiding their plan. A specific plan's floor
+    can be overridden per-deployment with ``TAKYON_WAKE_MIN_INTERVAL_SECONDS__<PLAN>`` (e.g.
+    ``TAKYON_WAKE_MIN_INTERVAL_SECONDS__PRO=14400``); the global default floor is overridable with
+    ``TAKYON_WAKE_MIN_INTERVAL_SECONDS_DEFAULT``. All values clamp to >= 60 so the gate can never
+    invert to "no floor"."""
+    normalized = _normalize_plan_name(plan_name)
+    default_floor = _env_min_interval("TAKYON_WAKE_MIN_INTERVAL_SECONDS_DEFAULT", _DEFAULT_WAKE_MIN_INTERVAL_SECONDS)
+    if not normalized:
+        return default_floor
+    env_override = _env_min_interval(f"TAKYON_WAKE_MIN_INTERVAL_SECONDS__{normalized}", None)
+    if env_override is not None:
+        return env_override
+    base = _PLAN_WAKE_MIN_INTERVAL_SECONDS.get(normalized)
+    if base is None:
+        return default_floor
+    return max(60, int(base))
+
+
+def _env_min_interval(var: str, fallback: int | None) -> int | None:
+    raw = os.environ.get(var)
+    if raw is None or raw.strip() == "":
+        return fallback
+    try:
+        value = int(raw)
+    except ValueError:
+        return fallback
+    return max(60, value)
+
 
 class PolicyError(Exception):
     """Base for execution-policy errors."""
