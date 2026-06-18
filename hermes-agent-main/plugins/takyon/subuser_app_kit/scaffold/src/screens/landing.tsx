@@ -1,5 +1,4 @@
 import { Link } from "react-router-dom";
-import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import {
   Card,
@@ -8,7 +7,7 @@ import {
   CardHeader,
   CardTitle,
 } from "../components/ui/card";
-import { businessDisplayName } from "../lib/branding";
+import { brandMarkDataUri, businessDisplayName } from "../lib/branding";
 import { resolveViewerCta, useViewerAccess } from "../lib/hooks";
 import { useProductAuth } from "../lib/product-auth";
 
@@ -38,10 +37,21 @@ export function LandingScreen() {
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-10 px-6 py-12 sm:py-16">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <Badge variant="outline">Takyon scaffold</Badge>
-            <span className="text-sm text-muted-foreground">
-              Shared Supabase login bridge + app runtime shell
-            </span>
+            <img
+              src={brandMarkDataUri()}
+              alt={`${productName} logo`}
+              className="h-10 w-10 rounded-lg"
+              width={40}
+              height={40}
+            />
+            <div className="flex flex-col">
+              <span className="font-heading text-lg font-semibold text-foreground">
+                {productName}
+              </span>
+              <span className="text-sm text-muted-foreground">
+                Shared Supabase login bridge + app runtime shell
+              </span>
+            </div>
           </div>
           <nav className="flex flex-wrap gap-2">
             {[

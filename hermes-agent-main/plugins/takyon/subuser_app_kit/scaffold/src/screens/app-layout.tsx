@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Link, NavLink, Outlet, useSearchParams } from "react-router-dom";
-import { businessDisplayName } from "../lib/branding";
+import { brandMarkDataUri, businessDisplayName } from "../lib/branding";
 import { useProductAuth } from "../lib/product-auth";
 import { useSubscribeIntent, useViewerAccess } from "../lib/hooks";
 
@@ -27,13 +27,17 @@ export function AppLayout() {
     <div className="min-h-screen bg-background" data-takyon-scaffold="app-layout">
       <header className="border-b border-border bg-card/70 backdrop-blur">
         <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-4">
-          <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-3">
+            <img
+              src={brandMarkDataUri()}
+              alt={`${productName} logo`}
+              className="h-9 w-9 rounded-lg"
+              width={36}
+              height={36}
+            />
             <Link to="/" className="font-heading text-lg font-semibold text-foreground">
               {productName}
             </Link>
-            <p className="text-sm text-muted-foreground">
-              Shared Takyon app shell with canonical account auth and billing rails.
-            </p>
           </div>
           <nav className="flex flex-wrap items-center gap-2 text-sm">
             {[
