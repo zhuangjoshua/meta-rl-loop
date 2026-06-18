@@ -17,7 +17,6 @@ function readBasePath(): string {
 export const TAKYON_BASE_PATH = readBasePath();
 const BASE = TAKYON_BASE_PATH;
 
-import type { DashboardTheme } from "@/themes/types";
 
 // Ephemeral session token for protected endpoints.
 // Injected into index.html by the server — never fetched via API.
@@ -596,16 +595,6 @@ export const api = {
         body: JSON.stringify({ hidden }),
       },
     ),
-
-  // Dashboard themes
-  getThemes: () =>
-    fetchJSON<DashboardThemesResponse>("/api/dashboard/themes"),
-  setTheme: (name: string) =>
-    fetchJSON<{ ok: boolean; theme: string }>("/api/dashboard/theme", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
-    }),
 };
 
 export interface ActionResponse {
@@ -1213,22 +1202,6 @@ export interface OAuthPollResponse {
   status: "pending" | "approved" | "denied" | "expired" | "error";
   error_message?: string | null;
   expires_at?: number | null;
-}
-
-// ── Dashboard theme types ──────────────────────────────────────────────
-
-export interface DashboardThemeSummary {
-  description: string;
-  label: string;
-  name: string;
-  /** Full theme definition for user themes; undefined for built-ins
-   *  (which the frontend already has locally). */
-  definition?: DashboardTheme;
-}
-
-export interface DashboardThemesResponse {
-  active: string;
-  themes: DashboardThemeSummary[];
 }
 
 // ── Dashboard plugin types ─────────────────────────────────────────────

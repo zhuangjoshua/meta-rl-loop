@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build && vite build --config vite.litebulb.config.ts",
+    "dev": "vite --config vite.litebulb.config.ts",
+    "build": "tsc -b && vite build --config vite.litebulb.config.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },
