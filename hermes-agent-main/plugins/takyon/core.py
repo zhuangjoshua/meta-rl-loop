@@ -62,6 +62,12 @@ from . import app_supabase_auth, composio_distribution, safebox
 
 TAKYON_TOOLSET = "takyon"
 TAKYON_AUTHORITY_TOOLSET = "takyon-authority"
+# Operator-facing milestone categories (operator-approved taxonomy). The CEO's
+# curated update (business_post_operator_update) labels each milestone with one
+# of these; the gateway Tasks panel renders the pill. Keep in lockstep with
+# tui_gateway.server._TAKYON_TASK_CATEGORIES.
+OPERATOR_UPDATE_CATEGORIES = ("RESEARCH", "PRODUCT", "LAUNCH", "GROWTH", "OPS")
+OPERATOR_UPDATE_STATUSES = ("queued", "running", "blocked", "completed")
 DEFAULT_TAKYON_DIRNAME = "takyon"
 DEFAULT_CLAUDE_AGENT_MODEL = "claude-opus-4-7"
 MAX_READ_CHARS = 64_000
@@ -16549,6 +16555,68 @@ class TakyonStore:
             )
             return {"action": action, "business": slug, "event": event_id}
 
+        if action == "operator_update.post":
+            # The CEO's ONLY customer-facing channel. Reasoning stays internal;
+            # this records a clean headline + summary + milestone plan as a single
+            # business.operator_update event. The gateway overview reads the latest
+            # such event to set the chat "CEO update" card and to surface the
+            # milestones as the primary Tasks-panel cards (raw worker/runtime
+            # events nest under the running milestone). One canonical row per
+            # update — no parallel store.
+            headline = str(op.get("headline") or "").strip()
+            update_summary = str(op.get("summary") or "").strip()
+            if not headline:
+                raise TakyonError("operator update requires a headline")
+            if not update_summary:
+                raise TakyonError("operator update requires a 1-2 sentence summary")
+            milestones_payload: list[dict[str, Any]] = []
+            for raw_milestone in (op.get("milestones") or []):
+                if not isinstance(raw_milestone, dict):
+                    raise TakyonError("each milestone must be an object")
+                m_title = str(raw_milestone.get("title") or "").strip()
+                if not m_title:
+                    raise TakyonError("each milestone requires a title")
+                m_description = str(raw_milestone.get("description") or "").strip()
+                m_category = str(raw_milestone.get("category") or "").strip().upper()
+                if m_category not in OPERATOR_UPDATE_CATEGORIES:
+                    raise TakyonError(
+                        "milestone category must be one of "
+                        + ", ".join(OPERATOR_UPDATE_CATEGORIES)
+                    )
+                m_status = str(raw_milestone.get("status") or "running").strip().lower()
+                if m_status not in OPERATOR_UPDATE_STATUSES:
+                    raise TakyonError(
+                        "milestone status must be one of "
+                        + ", ".join(OPERATOR_UPDATE_STATUSES)
+                    )
+                milestones_payload.append(
+                    {
+                        "title": m_title[:160],
+                        "description": m_description[:280],
+                        "category": m_category,
+                        "status": m_status,
+                    }
+                )
+            event_payload = {
+                "headline": headline[:200],
+                "summary": update_summary[:400],
+                "milestones": milestones_payload,
+                "posted_at": _now(),
+            }
+            event_id = self._record_event(
+                conn,
+                scope=target_scope,
+                business_slug=slug,
+                event_type="business.operator_update",
+                payload=event_payload,
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "event": event_id,
+                "milestones": len(milestones_payload),
+            }
+
         if action == "cron.ensure_ceo_wakeup":
             result = self._ensure_ceo_cron(
                 slug,
@@ -27409,6 +27477,18 @@ def handle_business_record_event(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation, scope=operation["scope"])
 
 
+def handle_business_post_operator_update(args: dict, **_: Any) -> str:
+    operation = {
+        "action": "operator_update.post",
+        "business": args.get("business"),
+        "scope": _business_scope(args),
+        "headline": args.get("headline"),
+        "summary": args.get("summary"),
+        "milestones": args.get("milestones") or [],
+    }
+    return _commit_tool(args, operation, scope=operation["scope"])
+
+
 def handle_business_record_agent(args: dict, **_: Any) -> str:
     operation = {
         "action": "agent.record",
@@ -30082,6 +30162,38 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Record an evidence, decision, observation, or receipt-like event.",
         "handler": handle_business_record_event,
         "schema": _schema("business_record_event", "Record a business event.", {"business": _BUSINESS_PROP, "scope": {"type": "string"}, "event_type": {"type": "string"}, "payload": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "event_type", "idempotency_key"]),
+    },
+    {
+        "name": "business_post_operator_update",
+        "description": "Post the ONE customer-facing update for a business. This is the only channel the operator/customer sees in the build screen and product chat — keep all reasoning internal and never narrate plumbing, tool names, or chain-of-thought. Pass a warm plain-business `headline`, a 1-2 sentence `summary` (no jargon), and a short `milestones` plan. The summary becomes the chat 'CEO update' card; the milestones become the primary Tasks-panel cards (raw worker/runtime events nest under them).",
+        "handler": handle_business_post_operator_update,
+        "schema": _schema(
+            "business_post_operator_update",
+            "Post the customer-facing CEO update + milestone plan.",
+            {
+                "business": _BUSINESS_PROP,
+                "headline": {"type": "string", "description": "Short warm plain-business headline shown to the customer, e.g. 'Standing up your drift-detection product'. No tool names, no internal terms."},
+                "summary": {"type": "string", "description": "1-2 warm sentences in plain business language describing what is happening now. No jargon, no plumbing, no chain-of-thought."},
+                "milestones": {
+                    "type": "array",
+                    "description": "Short milestone plan (a few cards). Each is an intent milestone, not a low-level tool call.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Intent-first milestone title, e.g. 'Build the autonomous drift-detection agent'."},
+                            "description": {"type": "string", "description": "One-line plain-business description of the milestone."},
+                            "category": {"type": "string", "enum": list(OPERATOR_UPDATE_CATEGORIES), "description": "RESEARCH, PRODUCT, LAUNCH, GROWTH, or OPS."},
+                            "status": {"type": "string", "enum": list(OPERATOR_UPDATE_STATUSES), "description": "queued, running, blocked, or completed."},
+                        },
+                        "required": ["title", "category"],
+                    },
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "headline", "summary", "idempotency_key"],
+        ),
     },
     {
         "name": "business_record_agent",

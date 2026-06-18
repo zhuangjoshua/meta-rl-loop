@@ -7207,6 +7207,31 @@ def _takyon_business_overview_payload(
     product_inventory = as_dict(app.get("product_inventory"))
     source_path = brief_text(surface.get("source_path"))
 
+    # Curated CEO update (business_post_operator_update). This is the ONLY
+    # customer-facing channel: the latest business.operator_update event carries a
+    # warm headline + 1-2 sentence summary and a milestone plan. The raw assistant
+    # message stream (chain-of-thought / planning) is NEVER surfaced to the
+    # customer; the UI renders only this curated card + the milestone rollup.
+    operator_update: dict[str, Any] = {}
+    for event in as_list(summary.get("events")):
+        event_dict = as_dict(event)
+        if brief_text(event_dict.get("event_type")) != "business.operator_update":
+            continue
+        payload = event_dict.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        operator_update = as_dict(payload)
+        operator_update["updated_at"] = brief_text(
+            event_dict.get("created_at") or event_dict.get("updated_at")
+        )
+        break
+    operator_update_milestones = [
+        m for m in as_list(operator_update.get("milestones")) if isinstance(m, dict)
+    ]
+
     try:
         pulse = as_dict(store.calculate_pulse(slug, limit=5))
     except Exception as exc:
@@ -7900,7 +7925,33 @@ def _takyon_business_overview_payload(
         }
 
     task_cards: list[dict[str, Any]] = []
-    # Work-request/job cards are the PRIMARY milestone rows. Build the set of
+    # The CEO's curated milestones (business_post_operator_update) are the PRIMARY
+    # milestone rows when present: a few intent cards (title + description +
+    # category pill + status) instead of flat low-level worker labels. Raw
+    # worker/runtime events nest under the running milestone via the
+    # current_task_id grouping in _takyon_live_state_payload.
+    operator_milestone_cards: list[dict[str, Any]] = []
+    for index, milestone in enumerate(operator_update_milestones[:8]):
+        m_dict = as_dict(milestone)
+        m_title = brief_text(m_dict.get("title"))
+        if not m_title:
+            continue
+        operator_milestone_cards.append(
+            {
+                "id": f"milestone:{index}",
+                "source": "operator_update",
+                "label": m_title,
+                "title": m_title,
+                "description": brief_text(m_dict.get("description")),
+                "category": brief_text(m_dict.get("category")),
+                "status": brief_text(m_dict.get("status")) or "running",
+                "detail": brief_text(m_dict.get("description")) or m_title,
+                "tone": status_tone(m_dict.get("status")),
+                "updated_at": brief_text(operator_update.get("updated_at")),
+            }
+        )
+    task_cards.extend(operator_milestone_cards)
+    # Work-request/job cards are PRIMARY milestone rows too. Build the set of
     # known job ids first so a raw runtime/agent card carrying a work_request_id
     # can be re-parented onto its milestone card (id format "job:<id>") and the
     # existing nesting in _takyon_live_state_payload groups the raw tool calls
@@ -7977,7 +8028,18 @@ def _takyon_business_overview_payload(
     blocked_count = sum(1 for task in task_cards if task.get("tone") == "blocked")
     product_visible = bool(website)
     research_visible = bool(research_outputs)
-    if wake_health["status"] == "needs_attention":
+    operator_update_headline = brief_text(operator_update.get("headline"))
+    operator_update_summary = brief_text(operator_update.get("summary"))
+    if operator_update_headline and not blocked_count and wake_health["status"] != "needs_attention":
+        # The CEO's curated update is the authoritative customer-facing CEO-loop
+        # copy when there is no harder blocker/wake signal to surface first.
+        ceo_loop = {
+            "status": "working",
+            "headline": operator_update_headline,
+            "detail": operator_update_summary or operator_update_headline,
+            "next_action": operator_update_summary or operator_update_headline,
+        }
+    elif wake_health["status"] == "needs_attention":
         ceo_loop = {
             "status": "needs_attention",
             "headline": wake_health["headline"],
@@ -8947,6 +9009,29 @@ def _takyon_task_description(label: str, detail: str, category: str) -> str:
     return f"{lane}: {title}."[:240]
 
 
+def _takyon_attach_operator_update_copy(
+    live_state: Any, overview: dict[str, Any] | None
+) -> None:
+    """Surface the CEO's curated headline/summary on the live_state.
+
+    business_post_operator_update mirrors its warm headline + 1-2 sentence
+    summary onto overview.ceo_loop. We copy that onto the live_state so the chat
+    "CEO update" card shows the curated operator copy — never the raw assistant
+    reasoning stream. Presentation-only; does not touch the agent's turn context.
+    """
+    if not isinstance(live_state, dict) or not isinstance(overview, dict):
+        return
+    ceo_loop = overview.get("ceo_loop")
+    if not isinstance(ceo_loop, dict):
+        return
+    headline = str(ceo_loop.get("headline") or "").strip()
+    detail = str(ceo_loop.get("detail") or "").strip()
+    if headline:
+        live_state["headline"] = headline
+    if detail:
+        live_state["summary"] = detail
+
+
 def _takyon_live_state_payload(
     overview: dict[str, Any] | None,
     background_run: dict[str, Any] | None,
@@ -9392,6 +9477,9 @@ def _takyon_workspace_boot_payload(
         overview if isinstance(overview, dict) else {},
         background_run,
     )
+    _takyon_attach_operator_update_copy(
+        live_state, overview if isinstance(overview, dict) else {}
+    )
     overview_payload = dict(overview) if isinstance(overview, dict) else {}
     product_payload = dict(overview_payload.get("product") or {})
     product_payload.update(
@@ -9462,6 +9550,9 @@ def _takyon_workspace_payload(
     live_state = _takyon_live_state_payload(
         overview if isinstance(overview, dict) else {},
         background_run,
+    )
+    _takyon_attach_operator_update_copy(
+        live_state, overview if isinstance(overview, dict) else {}
     )
     overview_payload = dict(overview) if isinstance(overview, dict) else {}
     product_payload = dict(overview_payload.get("product") or {})

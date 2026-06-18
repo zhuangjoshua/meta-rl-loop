@@ -51,6 +51,7 @@ provides_tools:
   - business_record_conversation_message
   - business_update_conversation_message_status
   - business_record_event
+  - business_post_operator_update
   - business_record_agent
   - business_set_control
   - business_schedule_ceo_wakeup
