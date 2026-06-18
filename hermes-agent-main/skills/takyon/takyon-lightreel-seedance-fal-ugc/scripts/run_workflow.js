@@ -17,7 +17,11 @@ function runNode(scriptPath, args) {
   });
 
   if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || result.stdout.trim() || `Failed: ${scriptPath}`);
+    const error = new Error(
+      result.stderr.trim() || result.stdout.trim() || `Failed: ${scriptPath}`,
+    );
+    error.exitStatus = result.status;
+    throw error;
   }
   return result.stdout;
 }
@@ -47,7 +51,35 @@ function main() {
   const prompt = runNode(path.join(here, "build_lightreel_prompt.js"), [runtimePath]);
   fs.writeFileSync(promptPath, prompt);
 
-  runNode(path.join(here, "query_lightreel.js"), [promptPath, conversationPath]);
+  // query_lightreel.js is the billable provider step and is currently MONEY-GATED:
+  // it fails closed (exit 2) and writes a "blocked_missing_money_gate" receipt
+  // instead of making an ungated paid call. Surface that as a blocked run receipt
+  // and stop — do not proceed into seedancify/fal with no real conversation, and
+  // never report a successful run when the paid step was refused.
+  try {
+    runNode(path.join(here, "query_lightreel.js"), [promptPath, conversationPath]);
+  } catch (error) {
+    let gate = null;
+    try {
+      gate = JSON.parse(fs.readFileSync(conversationPath, "utf8"));
+    } catch (_) {
+      gate = null;
+    }
+    const receipt = {
+      runtime_input: path.resolve(runtimePath),
+      lightreel_prompt: promptPath,
+      lightreel_conversation: conversationPath,
+      status: gate?.status || "blocked_missing_money_gate",
+      success: false,
+      error: gate?.error || error.message,
+      missing_gate: gate?.missing_gate,
+      generated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2));
+    process.stderr.write(`${JSON.stringify(receipt, null, 2)}\n`);
+    process.exit(2);
+  }
+
   runNode(path.join(here, "seedancify.js"), [runtimePath, conversationPath, seedancifiedPath]);
   runNode(path.join(here, "build_fal_payload.js"), [runtimePath, seedancifiedPath, falPayloadPath]);
 
@@ -57,6 +89,7 @@ function main() {
     lightreel_conversation: conversationPath,
     seedancified_output: seedancifiedPath,
     fal_payload: falPayloadPath,
+    success: true,
     generated_at: new Date().toISOString(),
   };
 

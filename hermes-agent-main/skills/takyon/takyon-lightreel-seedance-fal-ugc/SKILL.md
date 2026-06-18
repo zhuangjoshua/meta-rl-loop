@@ -46,6 +46,8 @@ Use this skill to turn runtime company input into a durable creative workflow fo
 
 This skill ships with helper scripts so an agent can run the full path from runtime input to Lightreel prompt to Seedance prompt to fal payload. It does not require or expose provider secrets.
 
+> **Money gate — live Lightreel discovery is DISABLED.** A live call to `api.lightreel.ai` is a billable provider request charged against `LIGHTREEL_API_KEY`. Per the Takyon hardline rule ("No ungated paid capability"), no path may spend real money without a money gate (reserve before the call, exact price, settle on success, release on failure; unpriced = refused). The gate for Lightreel does not exist yet and Lightreel has no resolved price in `agent/usage_pricing.py`, so `scripts/query_lightreel.js` **fails closed**: it refuses the billable call and writes a `blocked_missing_money_gate` receipt instead of spending unmetered money. The non-paid prompt-build / Seedancify / fal-payload-build steps still work. See `## Money Gate (Live Discovery Disabled)` below for what must ship to re-enable it.
+
 ## When to Use
 
 - Runtime already knows the company, product category, differentiators, and creative constraints, but the team needs a reliable prompt framework.
@@ -89,12 +91,25 @@ This skill ships with helper scripts so an agent can run the full path from runt
 
 - Inspect `templates/runtime-input.example.json` and shape runtime input to match it.
 - Build the discovery prompt with `${HERMES_SKILL_DIR}/scripts/build_lightreel_prompt.js`.
-- Query Lightreel with `${HERMES_SKILL_DIR}/scripts/query_lightreel.js`.
+- Query Lightreel with `${HERMES_SKILL_DIR}/scripts/query_lightreel.js`. This step is **money-gated and currently disabled**: it fails closed (exit 2) and writes a `blocked_missing_money_gate` receipt instead of making the billable provider call. Treat the returned refusal as expected until the creative-credit gate ships; do not work around it by calling `api.lightreel.ai` directly.
 - For local Takyon runs, the helper scripts also check `TAKYON_ENV_FILE`, `$TAKYON_HOME/secrets/.env`, and `$TAKYON_HOME/.env` before failing on missing credentials.
 - Convert the returned conversation into a Seedance-safe prompt with `${HERMES_SKILL_DIR}/scripts/seedancify.js`.
 - Build the fal payload with `${HERMES_SKILL_DIR}/scripts/build_fal_payload.js`.
 - Run the full workflow with `${HERMES_SKILL_DIR}/scripts/run_workflow.js`.
 - Publish the durable workflow spec to `product/lightreel-seedance-fal-ugc-workflow.md`.
+
+## Money Gate (Live Discovery Disabled)
+
+Live Lightreel discovery spends real money and has no money gate, so it is disabled. `scripts/query_lightreel.js` fails closed and `scripts/run_workflow.js` stops with a blocked receipt rather than calling `api.lightreel.ai`. A present `LIGHTREEL_API_KEY` is not authorization to spend; the gate is. Do not bypass this by calling the provider from prose, a one-off script, or a direct HTTP request.
+
+Lightreel discovery is a fixed business-scoped creative/research action, so its canonical money rail is the creative-credit rail (the same rail behind `business_ugc_ad_generate` / `business_static_ad_generate`), not the product app usage rail. To re-enable live discovery, ship the gate the Hermes way:
+
+1. `hermes-agent-main/plugins/takyon/core.py` — add a `lightreel_discover` action to `_CREATIVE_CREDIT_COST_DEFAULTS` and `_CREATIVE_CREDIT_COST_ENVS` (a fixed operator-facing credit price).
+2. `hermes-agent-main/agent/usage_pricing.py` — add the exact Lightreel per-request provider cost (e.g. `("lightreel", "discover")` with `request_cost`). Without a resolved price the action stays refused; do not add a second pricing table in this skill.
+3. `hermes-agent-main/plugins/takyon/creative_gateway.py` — add a `/internal/creative-gateway/lightreel-render` authority route that reserves credits with `_reserve_creative_credits`, makes the live call server-side with the Safebox-backed key, commits on success (`_commit_creative_credits`) and releases on failure (`_release_creative_credits`) — mirroring `/ugc-render` and `/logo-render`.
+4. Add a `business_*` authority tool that calls that route, name it in this skill, and route discovery through the tool instead of `query_lightreel.js`.
+
+Until all four exist, the only correct behavior is the fail-closed refusal.
 
 ## Procedure
 
@@ -222,7 +237,7 @@ Workflow execution is successful when `product/lightreel-seedance-fal-ugc-run/ru
 - Forgetting the reference-image identity lock.
 - Accidentally using Seedance image-to-video semantics that treat the image as a start frame instead of using reference-to-video semantics.
 - Publishing provider keys, signed URLs, or internal storage details.
-- Running the wrapper script without `LIGHTREEL_API_KEY` when live discovery is expected.
+- Trying to "fix" the money-gate refusal by calling `api.lightreel.ai` directly, exporting the key, or restoring the old live `query_lightreel.js`. Live discovery stays disabled until the creative-credit gate ships (see `## Money Gate (Live Discovery Disabled)`).
 
 ## Verification Checklist
 
@@ -237,10 +252,11 @@ Workflow execution is successful when `product/lightreel-seedance-fal-ugc-run/ru
 ## Rules
 
 1. Never include API keys, signed URLs, or private bucket details in the skill.
-2. Treat Lightreel as the format-discovery and hook-discovery layer.
-3. Treat Seedance conversion as a renderer-safety and identity-preservation layer.
-4. Preserve the creative angle from Lightreel instead of rewriting it into generic ad copy.
-5. Keep the workflow single-person if the constraints require single-person.
+2. Never make the billable Lightreel call from this skill's ungated path. Live discovery is money-gated and disabled; the only sanctioned re-enable path is the creative-credit gate described in `## Money Gate (Live Discovery Disabled)`.
+3. Treat Lightreel as the format-discovery and hook-discovery layer.
+4. Treat Seedance conversion as a renderer-safety and identity-preservation layer.
+5. Preserve the creative angle from Lightreel instead of rewriting it into generic ad copy.
+6. Keep the workflow single-person if the constraints require single-person.
 
 ## Troubleshooting
 
