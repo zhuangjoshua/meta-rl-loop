@@ -6971,6 +6971,28 @@ def _session_business_slug() -> str:
     return _slugify(raw) if raw else ""
 
 
+def _is_worker_process() -> bool:
+    """True inside the durable worker-drain process (worker.py sets TAKYON_WORKER_PROCESS=1).
+
+    The worker process IS the trusted authority surface for worker-only operations
+    (product-surface refresh / runtime-capability provisioning): the surrounding ``jobs`` row is
+    already durable, the run is non-interactive, and the deferral routers
+    (``_defer_*_to_worker``) are deliberately inert here (``_operator_tasks_via_worker_enabled``).
+    The worker-deferred tool handler binds ``business_slug`` into the session for workspace
+    scoping, so ``_session_business_slug()`` is non-empty even on the legitimate worker; the
+    authority guards must therefore consult THIS marker, not session membership alone, to tell a
+    worker run apart from a session-bound interactive CEO turn that must keep deferring.
+    """
+    return _env_truthy("TAKYON_WORKER_PROCESS")
+
+
+def _blocks_session_bound_authority_op() -> bool:
+    """Refuse worker-only authority ops for a session-bound interactive/cron/wake CEO turn so it
+    routes through the worker plane; the worker process itself is the authority surface and is
+    permitted."""
+    return bool(_session_business_slug()) and not _is_worker_process()
+
+
 def _resolved_business_slug(args: Mapping[str, Any] | None = None, *, required: bool = False) -> str:
     args = args or {}
     requested = str(args.get("business") or args.get("business_slug") or "").strip()
@@ -17605,7 +17627,7 @@ def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
 
 def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
     try:
-        if _session_business_slug():
+        if _blocks_session_bound_authority_op():
             raise TakyonError("runtime capability provisioning is available only on the authority tool surface")
         requested = [
             str(item).strip()
@@ -18135,7 +18157,7 @@ def _product_surface_refresh_operations(
 def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
-        if _session_business_slug():
+        if _blocks_session_bound_authority_op():
             raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
         deferred = _defer_product_surface_refresh_to_worker(args)
         if deferred is not None:
