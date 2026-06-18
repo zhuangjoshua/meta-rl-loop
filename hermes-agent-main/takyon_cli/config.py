@@ -672,10 +672,16 @@ DEFAULT_CONFIG = {
         "persistent_shell": True,
     },
 
+    # Web search/extract provider selection. Extract-capable backends
+    # (firecrawl, tavily, exa, parallel, xai) each require their own API key;
+    # the keyless backends (ddgs, brave-free, searxng) are SEARCH-ONLY and
+    # cannot extract URL content. With no extract key provisioned, web_extract
+    # fails closed with a typed error rather than returning silent empty
+    # results — set extract_backend to a configured paid provider to enable it.
     "web": {
         "backend": "",           # shared fallback — applies to both search and extract
         "search_backend": "",    # per-capability override for web_search (e.g. "searxng")
-        "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
+        "extract_backend": "",   # per-capability override for web_extract (e.g. "tavily")
     },
 
     "browser": {

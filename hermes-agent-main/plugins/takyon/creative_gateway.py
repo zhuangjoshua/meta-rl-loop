@@ -11,6 +11,7 @@ durable Takyon truth outside this boundary.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import mimetypes
@@ -28,6 +29,12 @@ from . import safebox
 
 _SESSION_HEADER_NAME = "X-Takyon-Session-Token"
 _UNAUTH_HEADERS = {"WWW-Authenticate": _SESSION_HEADER_NAME}
+
+# Brand logo image generation (Nano Banana / Gemini). The model id and its
+# aliases for resolving the Safebox-backed key live here so the authority route
+# is the single place the live provider credential is touched.
+_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+_GEMINI_KEY_ALIASES = ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
 def _core():
@@ -88,8 +95,219 @@ def _meta_campaign_create_payload(plan: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _resolve_gemini_image_key() -> str:
+    """Resolve the Gemini image key from Safebox-backed env aliases.
+
+    Only the authority route calls this; the business runtime never reads the
+    raw key from ``os.environ``. Returns "" when no alias is provisioned so the
+    caller can fail closed with a 503 before any provider work.
+    """
+    try:
+        value = safebox.first_env_backed_value(*_GEMINI_KEY_ALIASES)
+    except Exception:
+        value = ""
+    return str(value or "").strip()
+
+
+def _gemini_logo_prompt(business_context: dict[str, Any]) -> str:
+    """Build the brand-logo prompt from concrete business context.
+
+    Brand brief is operator-owned (GOAL_RULES §7): flat vector, transparent
+    background, icon-only, no text. The business name / category / tone are read
+    from the passed context and steer the icon concept; they are never invented
+    here.
+    """
+    name = str(business_context.get("name") or business_context.get("slug") or "").strip()
+    category = str(
+        business_context.get("category")
+        or business_context.get("industry")
+        or business_context.get("vertical")
+        or ""
+    ).strip()
+    tone = str(
+        business_context.get("tone")
+        or business_context.get("brand_tone")
+        or business_context.get("voice")
+        or ""
+    ).strip()
+    lines = [
+        "Design a single brand logo icon.",
+        "Style: flat vector, minimal, icon-only — NO text, NO letters, NO wordmark.",
+        "Background: fully transparent (alpha channel), no backdrop, no frame.",
+        "Output one centered icon mark suitable as a scalable brand symbol.",
+    ]
+    if name:
+        lines.append(f"Brand: {name}.")
+    if category:
+        lines.append(f"Business category: {category} — let the icon evoke this domain.")
+    if tone:
+        lines.append(f"Brand tone: {tone} — reflect this feeling in form and color.")
+    return " ".join(lines)
+
+
+def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
+    """Call Gemini image generation and return PNG bytes (with alpha).
+
+    Imports the provider SDK lazily and passes the key as an explicit
+    ``genai.Client(api_key=…)`` argument — never via ``os.environ``. Raises on
+    any provider/SDK failure so the caller releases the credit reservation.
+    """
+    try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+
+        _lazy_ensure("image.gemini", prompt=False)
+    except ImportError:
+        pass
+    except Exception:  # lazy_deps surfaces install hints; fall through to import
+        pass
+
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except Exception as exc:  # provider SDK not installed
+        raise RuntimeError(
+            "google-genai is not installed; cannot render brand logo"
+        ) from exc
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=_GEMINI_IMAGE_MODEL,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+        ),
+    )
+    candidates = getattr(response, "candidates", None) or []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            inline = getattr(part, "inline_data", None)
+            data = getattr(inline, "data", None) if inline is not None else None
+            if not data:
+                continue
+            if isinstance(data, str):
+                return base64.b64decode(data)
+            return bytes(data)
+    raise RuntimeError("Gemini image generation returned no image data")
+
+
 def build_creative_gateway_router() -> APIRouter:
     router = APIRouter(prefix="/internal/creative-gateway")
+
+    @router.post("/logo-render")
+    def logo_render(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        credits = core._creative_credit_backend()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        idempotency_key = str(body.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise HTTPException(status_code=400, detail="idempotency_key is required")
+
+        # Fail closed BEFORE reserving credits or touching the provider when the
+        # key is not provisioned: 503 gemini_image_unconfigured.
+        api_key = _resolve_gemini_image_key()
+        if not api_key:
+            raise HTTPException(status_code=503, detail="gemini_image_unconfigured")
+
+        business_context = (
+            body.get("business_context")
+            if isinstance(body.get("business_context"), dict)
+            else {}
+        )
+        business_context = {**business_context, "slug": business}
+        slug = core._file_slug(str(body.get("slug") or business or "logo"), "logo")
+        publication_rel = f"product/brand/logos/{slug}"
+        asset_rel = f"{publication_rel}/logo.png"
+        asset_abs = store._resolve_business_file(business, asset_rel)
+        prompt = _gemini_logo_prompt(business_context)
+
+        # Brand-level creative: no channel bucket (budget_bucket="").
+        budget_bucket = ""
+        reservation_key = f"{idempotency_key}:creative-credits"
+        requested_credits = core._creative_credit_total_cost("logo_generate")
+        try:
+            reservation = core._reserve_creative_credits(
+                business,
+                action="logo_generate",
+                reservation_key=reservation_key,
+                budget_bucket=budget_bucket,
+                metadata={
+                    "business": business,
+                    "action": "logo_generate",
+                    "slug": slug,
+                    "asset_path": asset_rel,
+                },
+            )
+        except credits.InsufficientCreativeCredits as exc:
+            balances = credits.get_business_credit_balances(conn, business)
+            return {
+                "success": False,
+                "status": "blocked_insufficient_creative_credits",
+                "requested_credits": requested_credits,
+                "available_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "error": str(exc),
+            }
+
+        provider_cost_usd = core._logo_provider_cost_usd()
+        finalized = False
+        try:
+            png_bytes = _gemini_generate_logo_png(api_key=api_key, prompt=prompt)
+            if not png_bytes:
+                raise RuntimeError("Gemini image generation returned empty image")
+            core._atomic_write_bytes(asset_abs, png_bytes)
+            balances = core._commit_creative_credits(
+                reservation_key,
+                action="logo_generate",
+                budget_bucket=budget_bucket,
+                metadata={
+                    "business": business,
+                    "action": "logo_generate",
+                    "slug": slug,
+                    "provider": "google",
+                    "model": _GEMINI_IMAGE_MODEL,
+                    "provider_cost_usd": provider_cost_usd,
+                },
+            )
+            finalized = True
+            return {
+                "success": True,
+                "status": "created",
+                "asset_path": asset_rel,
+                "publication_dir": publication_rel,
+                "prompt": prompt,
+                "provider": "google",
+                "model": _GEMINI_IMAGE_MODEL,
+                "provider_cost_usd": provider_cost_usd,
+                "credits_charged": requested_credits,
+                "balance_credits": balances["balance_credits"],
+                "reserved_credits": balances["reserved_credits"],
+                "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "",
+            }
+        except Exception as exc:
+            if not finalized:
+                try:
+                    core._release_creative_credits(
+                        reservation_key,
+                        action="logo_generate",
+                        budget_bucket=budget_bucket,
+                        metadata={
+                            "business": business,
+                            "action": "logo_generate",
+                            "slug": slug,
+                            "error": str(exc),
+                        },
+                    )
+                except Exception:
+                    pass
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     def _create_reddit_structured_post(
         core: Any,

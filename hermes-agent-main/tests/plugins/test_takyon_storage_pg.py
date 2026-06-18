@@ -491,3 +491,153 @@ def test_live_build_pointer_uses_transaction_local_set_config(monkeypatch, tmp_p
         ("SELECT set_config('statement_timeout', ?, true)", ("2500ms",)),
         ("SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?", ("lotest",)),
     ]
+
+
+# ── per-operator storage quota + deletion (S3 storage limits per person + deletion) ─────────────────
+
+
+def _owned_business(pg_conn, owner_user_id: str) -> str:
+    """Add another business under an EXISTING operator; return its slug."""
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    pg_conn.execute(
+        "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
+        (slug, "Acme", owner_user_id),
+    )
+    return slug
+
+
+def test_list_object_sizes_reports_real_bytes(tmp_path):
+    backend = _backend(tmp_path)
+    src = tmp_path / "src"
+    (src / "research").mkdir(parents=True)
+    (src / "research" / "a.md").write_bytes(b"x" * 100)
+    (src / "research" / "b.md").write_bytes(b"y" * 250)
+    storage.sync_up(backend, "biz-x", src)
+
+    sizes = backend.list_object_sizes(storage.object_prefix("biz-x"))
+    assert sizes["biz-x/research/a.md"] == 100
+    assert sizes["biz-x/research/b.md"] == 250
+    assert storage.prefix_bytes(backend, storage.object_prefix("biz-x")) == 350
+
+
+def test_operator_storage_bytes_aggregates_across_owned_businesses(tmp_path):
+    backend = _backend(tmp_path)
+    for slug, n in (("biz-a", 100), ("biz-b", 200)):
+        src = tmp_path / slug
+        (src).mkdir()
+        (src / "f.bin").write_bytes(b"z" * n)
+        storage.sync_up(backend, slug, src)
+    # The operator owns both -> usage is the SUM, not per-business.
+    assert storage.operator_storage_bytes(backend, ["biz-a", "biz-b"]) == 300
+    # De-duplicates a repeated slug rather than double-counting.
+    assert storage.operator_storage_bytes(backend, ["biz-a", "biz-a"]) == 100
+
+
+def test_enforce_operator_quota_trips_at_or_above_limit(tmp_path):
+    backend = _backend(tmp_path)
+    src = tmp_path / "biz-a"
+    src.mkdir()
+    (src / "f.bin").write_bytes(b"z" * 900)
+    storage.sync_up(backend, "biz-a", src)
+
+    # used=900, incoming=50 -> 950 < 1000 : allowed, returns prior usage.
+    assert storage.enforce_operator_storage_quota(backend, ["biz-a"], 50, quota_bytes=1000) == 900
+    # used=900, incoming=100 -> 1000 >= 1000 : refused AT the limit.
+    with pytest.raises(storage.StorageQuotaExceeded):
+        storage.enforce_operator_storage_quota(backend, ["biz-a"], 100, quota_bytes=1000)
+
+
+def test_sync_up_enforces_operator_quota_before_uploading(tmp_path):
+    backend = _backend(tmp_path)
+    # Pre-fill another business owned by the same operator so the operator is already near the cap.
+    other = tmp_path / "biz-other"
+    other.mkdir()
+    (other / "big.bin").write_bytes(b"z" * 900)
+    storage.sync_up(backend, "biz-other", other)
+
+    src = tmp_path / "biz-new"
+    src.mkdir()
+    (src / "payload.bin").write_bytes(b"z" * 200)  # would push 900+200 over a 1000 cap
+    with pytest.raises(storage.StorageQuotaExceeded):
+        storage.sync_up(
+            backend,
+            "biz-new",
+            src,
+            operator_owned_slugs=["biz-other", "biz-new"],
+            operator_quota_bytes=1000,
+        )
+    # Fail-closed: the over-quota push uploaded nothing.
+    assert backend.list_digests(storage.object_prefix("biz-new")) == {}
+
+
+def test_business_deletion_purges_only_its_own_prefix(tmp_path):
+    backend = _backend(tmp_path)
+    for slug in ("biz-a", "biz-b"):
+        src = tmp_path / slug
+        src.mkdir()
+        (src / "f.md").write_text("data\n")
+        storage.sync_up(backend, slug, src)
+
+    removed = storage.delete_prefix(backend, storage.object_prefix("biz-a"))
+    assert removed == ["biz-a/f.md"]
+    assert backend.list_digests(storage.object_prefix("biz-a")) == {}
+    # Business B's objects survive untouched.
+    assert set(backend.list_digests(storage.object_prefix("biz-b"))) == {"biz-b/f.md"}
+
+
+def test_purge_operator_storage_removes_all_owned_business_objects(tmp_path):
+    backend = _backend(tmp_path)
+    for slug in ("biz-a", "biz-b"):
+        src = tmp_path / slug
+        src.mkdir()
+        (src / "f.md").write_text("data\n")
+        storage.sync_up(backend, slug, src)
+    # A business owned by a DIFFERENT operator must NOT be touched.
+    other = tmp_path / "biz-other"
+    other.mkdir()
+    (other / "f.md").write_text("other\n")
+    storage.sync_up(backend, "biz-other", other)
+
+    removed = storage.purge_operator_storage(backend, ["biz-a", "biz-b"])
+    assert removed == {"biz-a": ["biz-a/f.md"], "biz-b": ["biz-b/f.md"]}
+    assert backend.list_digests(storage.object_prefix("biz-a")) == {}
+    assert backend.list_digests(storage.object_prefix("biz-b")) == {}
+    assert set(backend.list_digests(storage.object_prefix("biz-other"))) == {"biz-other/f.md"}
+
+
+def test_store_resolves_operator_slugs_and_storage_bytes(pg_store_dsn, tmp_path, monkeypatch):
+    # The TakyonStore glue: owner -> owned slugs -> aggregated object-store bytes,
+    # and a full operator purge that strands no objects in the bucket. Exercised through the store's
+    # OWN connection (its ``?``->``%s`` adapter), the way the production delete rail calls it. The
+    # owner + businesses are seeded through that SAME connection so they live in the store's database.
+    monkeypatch.setenv("TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS", "1")
+
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    store = TakyonStore(root=tmp_path, database_url=pg_store_dsn)
+    store._workspace_storage_backend_override = backend
+
+    slug_a = f"biz-{uuid.uuid4().hex[:8]}"
+    slug_b = f"biz-{uuid.uuid4().hex[:8]}"
+    # Seed the owner + businesses through a RAW psycopg connection to the SAME database the store
+    # uses (control_plane speaks native ``%s``; the store adapter speaks ``?``).
+    with psycopg.connect(pg_store_dsn, autocommit=False) as seed:
+        owner, _created, _raw = provision_user_on_first_login(seed, f"auth0|{uuid.uuid4().hex}")
+        for slug in (slug_a, slug_b):
+            seed.execute(
+                "INSERT INTO businesses (slug, name, owner_user_id) VALUES (%s, %s, %s)",
+                (slug, "Acme", owner),
+            )
+        seed.commit()
+
+    for slug, n in ((slug_a, 100), (slug_b, 250)):
+        src = tmp_path / slug
+        src.mkdir()
+        (src / "f.bin").write_bytes(b"z" * n)
+        storage.sync_up(backend, slug, src)
+
+    with store._connect() as conn:
+        assert sorted(store._owner_business_slugs(conn, owner)) == sorted([slug_a, slug_b])
+        assert store._operator_storage_bytes(conn, owner) == 350
+        removed = store._purge_operator_storage(conn, owner)
+    assert set(removed) == {slug_a, slug_b}
+    assert storage.operator_storage_bytes(backend, [slug_a, slug_b]) == 0

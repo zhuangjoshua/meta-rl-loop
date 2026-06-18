@@ -3448,6 +3448,30 @@ async def get_takyon_operator_account(request: Request) -> dict[str, Any]:
     return _takyon_operator_account_payload(request, principal)
 
 
+def _operator_plans_summary() -> list[dict[str, Any]]:
+    """Config-driven operator tier menu for the account payload (price_id withheld)."""
+    try:
+        from plugins.takyon.control_api import configured_operator_plans
+
+        return [
+            {
+                "id": plan["id"],
+                "name": plan["name"],
+                "description": plan["description"],
+                "tagline": plan["tagline"],
+                "weekly_allowance_cents": int(plan["weekly_allowance_cents"] or 0),
+                "amount_cents": int(plan["amount_cents"] or 0),
+                "currency": plan["currency"],
+                "interval": plan["interval"],
+                "featured": bool(plan["featured"]),
+                "features": list(plan["features"]),
+            }
+            for plan in configured_operator_plans()
+        ]
+    except Exception:  # noqa: BLE001 - the menu is presentation-only; degrade to empty
+        return []
+
+
 def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[str, Any]:
     try:
         from plugins.takyon import billing
@@ -3528,6 +3552,7 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
             "allowance_percent_used": allowance_percent_used,
             "operator_plan_name": subscription_state.plan_name,
             "operator_plan_weekly_allowance_cents": int(subscription_state.weekly_allowance_cents or 0),
+            "operator_plans": _operator_plans_summary(),
             "allowance_period_start": (
                 balances.allowance_period_start.isoformat()
                 if getattr(balances, "allowance_period_start", None) is not None
@@ -4326,6 +4351,108 @@ async def create_takyon_operator_billing_portal(request: Request) -> dict[str, A
     return {
         "portal_url": session.get("url"),
         "customer_id": session.get("customer"),
+    }
+
+
+@app.get("/api/takyon/operator/billing/plans")
+async def list_takyon_operator_billing_plans(request: Request) -> dict[str, Any]:
+    """Operator subscription tier menu for the dashboard. The catalog is config-driven
+    (`TAKYON_OPERATOR_PLANS_JSON`) and the price_id is never exposed — checkout selects a
+    tier by `id` server-side."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    from plugins.takyon.control_api import configured_operator_plans
+
+    plans = [
+        {
+            "id": plan["id"],
+            "name": plan["name"],
+            "description": plan["description"],
+            "tagline": plan["tagline"],
+            "weekly_allowance_cents": int(plan["weekly_allowance_cents"] or 0),
+            "amount_cents": int(plan["amount_cents"] or 0),
+            "currency": plan["currency"],
+            "interval": plan["interval"],
+            "featured": bool(plan["featured"]),
+            "features": list(plan["features"]),
+        }
+        for plan in configured_operator_plans()
+    ]
+    return {"plans": plans}
+
+
+@app.get("/api/takyon/public/operator/plans")
+async def list_takyon_public_operator_plans() -> dict[str, Any]:
+    """Public (pre-auth) operator subscription tier menu for the marketing pricing page.
+    Display fields only — no price_id, no per-user state. Lets the marketing surface render
+    the real configured tiers instead of invented copy, with no free tier."""
+    return {"plans": _operator_plans_summary()}
+
+
+@app.post("/api/takyon/operator/billing/checkout")
+async def create_takyon_operator_subscription_checkout(request: Request) -> dict[str, Any]:
+    """Start a Stripe subscription checkout for the operator on a chosen tier. The tier is
+    resolved server-side from the configured catalog (`plan_id`); the operator never supplies
+    a price or amount. Missing STRIPE_SECRET_KEY ⇒ 503 (never a faked URL)."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    plan_id = str(body.get("plan_id") or "").strip()
+    if not plan_id:
+        raise HTTPException(status_code=400, detail="plan_id is required")
+    return_path = _same_origin_path(str(body.get("return_path") or "/"))
+    try:
+        from plugins.takyon.control_api import (
+            create_operator_subscription_checkout_session,
+            ensure_operator_billing_customer,
+        )
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+        import psycopg
+
+        conn = psycopg.connect(url, autocommit=True)
+        try:
+            customer = ensure_operator_billing_customer(conn, str(principal.user_id))
+            session, plan = create_operator_subscription_checkout_session(
+                str(principal.user_id),
+                plan_id=plan_id,
+                success_url=_dashboard_absolute_url(request, return_path),
+                cancel_url=_dashboard_absolute_url(request, return_path),
+                customer_id=str(customer.get("id") or "").strip() or None,
+            )
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="unknown_operator_plan") from exc
+    except ValueError as exc:
+        if "operator_email_unavailable" in str(exc):
+            raise HTTPException(status_code=409, detail="operator_email_unavailable") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - surface an honest UI error
+        message = str(exc)
+        if "STRIPE_SECRET_KEY" in message:
+            raise HTTPException(
+                status_code=503, detail="operator_subscription_unconfigured"
+            ) from exc
+        raise HTTPException(status_code=502, detail=message) from exc
+    return {
+        "checkout_url": session.get("url"),
+        "session_id": session.get("id"),
+        "plan_id": plan["id"],
+        "plan_name": plan["name"],
     }
 
 
@@ -9121,6 +9248,11 @@ def mount_spa(application: FastAPI):
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
         html = html.replace("</head>", f"{token_script}</head>", 1)
+        # Operator-dashboard analytics: inject the same shared Umami tag the
+        # product sub-apps use (buy-not-build, GOAL_RULES §4). app.fourmanifold.com
+        # is segmented downstream by its own hostname. No-op when analytics is
+        # disabled/unconfigured (no faked tracking).
+        html = _inject_head_snippet(html, _umami_analytics_snippet())
         return HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -9165,6 +9297,10 @@ def mount_spa(application: FastAPI):
         html = html.replace('src="./assets/', f'src="{prefix}/litebulb/assets/')
         html = html.replace('href="./assets/', f'href="{prefix}/litebulb/assets/')
         html = html.replace("</head>", f"{token_script}</head>", 1)
+        # Operator-dashboard analytics: the embedded Litebulb workspace IS the
+        # operator landing in --tui mode, so it gets the same shared Umami tag as
+        # the SPA index and the product sub-apps (buy-not-build, GOAL_RULES §4).
+        html = _inject_head_snippet(html, _umami_analytics_snippet())
         return HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},

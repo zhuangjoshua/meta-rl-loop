@@ -114,6 +114,11 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
 
     # ─── Image generation backends ─────────────────────────────────────────
     "image.fal": ("fal-client==0.13.1",),
+    # Gemini image generation (Nano Banana / gemini-2.5-flash-image) — only
+    # loaded by the brand-logo authority route when the Gemini key is
+    # provisioned and a logo is actually rendered. Keep in sync with the
+    # `gemini` extra in pyproject.toml.
+    "image.gemini": ("google-genai==1.21.0",),
 
     # ─── Memory providers ──────────────────────────────────────────────────
     "memory.honcho": ("honcho-ai==2.0.1",),

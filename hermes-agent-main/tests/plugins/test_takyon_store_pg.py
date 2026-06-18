@@ -51,6 +51,8 @@ is set (the pg_store_dsn fixture skips on its own when unset).
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 psycopg = pytest.importorskip("psycopg")
@@ -73,6 +75,33 @@ def _seed_owned_business(dsn: str, slug: str, *, mode: str = "test") -> None:
             "insert into businesses (slug, name, owner_user_id, mode) values (%s, %s, %s, %s)",
             (slug, slug.title(), uid, mode),
         )
+
+
+def _seed_entitled_subuser(
+    dsn: str, slug: str, *, tier: str = "paid", included_ai_budget_microusd: int = 1_000_000
+) -> str:
+    """Insert an app_users row + a PAID plan policy + an active entitlement on it for `slug`;
+    return the app_user_id. A positive-cost `app.usage.record` MUST carry such a funded sub-user
+    now that invariant-9 / gap #4 refuses null-subuser positive-cost product usage. The plan's
+    ``included_ai_budget_microusd`` is the per-subuser monthly limit, so callers that want the
+    per-business pool cap (not the per-user gate) to be the binding gate pass a generous default."""
+    plan_key = f"plan-{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        uid = conn.execute(
+            "insert into app_users (business_slug, email, tier) values (%s, %s, %s) returning id::text",
+            (slug, f"sub-{uuid.uuid4().hex[:8]}@example.com", tier),
+        ).fetchone()[0]
+        conn.execute(
+            "insert into app_plan_policies (business_slug, plan_key, tier, price_cents, "
+            "included_ai_budget_microusd) values (%s, %s, %s, %s, %s)",
+            (slug, plan_key, tier, 2000, included_ai_budget_microusd),
+        )
+        conn.execute(
+            "insert into app_entitlements (business_slug, app_user_id, tier, status, source, plan_key) "
+            "values (%s, %s, %s, 'active', 'stripe', %s)",
+            (slug, uid, tier, plan_key),
+        )
+    return uid
 
 
 def _direct_business_fk_tables(dsn: str) -> set[str]:
@@ -400,32 +429,36 @@ def _commit_one(store, slug, op, key):
     )
 
 
-def test_app_budget_set_delegates_to_app_usage_and_preserves_status(pg_store, pg_store_dsn):
-    # app.budget.set delegates to app_usage.set_app_budget (the canonical app_budgets writer). The
-    # store hoists `status = op.status or current.status or "active"` BEFORE the leaf call, so an
-    # update that omits status must keep the prior one — prove the hoist by pausing then re-capping.
-    _seed_owned_business(pg_store_dsn, "budgco", mode="test")
-    first = _commit_one(
-        pg_store, "budgco",
-        {"action": "app.budget.set", "business": "budgco", "hard_limit_microusd": 9_000_000, "status": "paused"},
-        "stageB-budget-1",
-    )
-    assert first["success"] is True
-    # Second cap with NO status field — the leaf must receive the preserved "paused".
-    second = _commit_one(
-        pg_store, "budgco",
-        {"action": "app.budget.set", "business": "budgco", "hard_limit_microusd": 3_000_000},
-        "stageB-budget-2",
-    )
-    assert second["success"] is True
-    assert second["results"][0]["hard_limit_microusd"] == 3_000_000
+def test_app_budget_set_op_is_removed_invariant9(pg_store, pg_store_dsn):
+    # Invariant 9 / parsimony: the `app.budget.set` operator-cap op was DELETED (no per-business
+    # pool override is reachable by any caller now that budget is plan-derived). The store must
+    # REFUSE the op as unknown, not silently set a flat hard_limit cap. The underlying
+    # app_usage.set_app_budget primitive survives as the internal write (exercised in app_usage
+    # tests); it is just no longer reachable through an operator op.
+    from plugins.takyon import app_usage
 
+    _seed_owned_business(pg_store_dsn, "budgco", mode="test")
+    with pytest.raises(takyon_core.TakyonError, match="unsupported operation.action: app.budget.set"):
+        _commit_one(
+            pg_store, "budgco",
+            {"action": "app.budget.set", "business": "budgco", "hard_limit_microusd": 9_000_000},
+            "stageB-budget-removed",
+        )
+    # No app_budgets row was created by the refused op.
     with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        assert conn.execute(
+            "select count(*) from app_budgets where business_slug = %s", ("budgco",)
+        ).fetchone()[0] == 0
+
+    # The internal primitive still works (it is the shared writer, just not op-reachable): set an
+    # explicit cap directly and confirm it lands with the requested status.
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        app_usage.set_app_budget(conn, "budgco", hard_limit_microusd=3_000_000, status="paused")
         row = conn.execute(
             "select hard_limit_microusd, status from app_budgets where business_slug = %s", ("budgco",)
         ).fetchone()
-        assert int(row[0]) == 3_000_000      # the leaf wrote the new cap
-        assert row[1] == "paused"            # ...and the omitted status was preserved, not reset to active
+        assert int(row[0]) == 3_000_000
+        assert row[1] == "paused"
 
 
 def test_app_plan_upsert_delegates_drops_payment_link_cols_and_folds_warnings_once(pg_store, pg_store_dsn):
@@ -563,9 +596,13 @@ def test_app_usage_record_delegates_completed_with_leaf_reservation_key_idempote
     # duplicate even under a DIFFERENT store idempotency_key (so the store's spine isn't what swallows
     # it) — re-recording the same reservation_key returns the same event and writes no second row.
     _seed_owned_business(pg_store_dsn, "useco", mode="test")
+    # A positive-cost product usage record now requires a funded sub-user (invariant 9 / gap #4):
+    # null-subuser positive-cost records are refused. Seed an entitled paying sub-user.
+    sub_id = _seed_entitled_subuser(pg_store_dsn, "useco")
     first = _commit_one(
         pg_store, "useco",
-        {"action": "app.usage.record", "business": "useco", "id": "res-1", "actual_cost_microusd": 1000},
+        {"action": "app.usage.record", "business": "useco", "id": "res-1",
+         "app_user_id": sub_id, "actual_cost_microusd": 1000},
         "stageB-usage-A",
     )
     assert first["success"] is True
@@ -575,7 +612,8 @@ def test_app_usage_record_delegates_completed_with_leaf_reservation_key_idempote
     # Same reservation_key (op id), DIFFERENT store key — reaches the leaf, which returns the prior event.
     second = _commit_one(
         pg_store, "useco",
-        {"action": "app.usage.record", "business": "useco", "id": "res-1", "actual_cost_microusd": 1000},
+        {"action": "app.usage.record", "business": "useco", "id": "res-1",
+         "app_user_id": sub_id, "actual_cost_microusd": 1000},
         "stageB-usage-B",
     )
     assert second["success"] is True
@@ -598,21 +636,28 @@ def test_app_usage_record_budget_cap_is_enforced_atomically(pg_store, pg_store_d
     # a following 200 record would make committed spend 1100 > 1000 and is refused (AppBudgetExceeded
     # -> TakyonError), leaving exactly the one accepted row. This is invariant #8: the cap is enforced,
     # not raced or silently exceeded.
+    #
+    # Invariant 9: the explicit per-business pool cap is now set via the internal primitive
+    # (app_usage.set_app_budget) — the operator `app.budget.set` op was removed. A funded sub-user
+    # with a generous per-user budget carries the records so the POOL CAP (not the per-user gate) is
+    # the binding gate under test.
+    from plugins.takyon import app_usage
+
     _seed_owned_business(pg_store_dsn, "capco", mode="test")
+    sub_id = _seed_entitled_subuser(pg_store_dsn, "capco", included_ai_budget_microusd=1_000_000)
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        app_usage.set_app_budget(conn, "capco", hard_limit_microusd=1000, status="active")
     assert _commit_one(
         pg_store, "capco",
-        {"action": "app.budget.set", "business": "capco", "hard_limit_microusd": 1000},
-        "stageB-cap-budget",
-    )["success"] is True
-    assert _commit_one(
-        pg_store, "capco",
-        {"action": "app.usage.record", "business": "capco", "id": "cap-r1", "actual_cost_microusd": 900},
+        {"action": "app.usage.record", "business": "capco", "id": "cap-r1",
+         "app_user_id": sub_id, "actual_cost_microusd": 900},
         "stageB-cap-u1",
     )["success"] is True
     with pytest.raises(takyon_core.TakyonError):
         _commit_one(
             pg_store, "capco",
-            {"action": "app.usage.record", "business": "capco", "id": "cap-r2", "actual_cost_microusd": 200},
+            {"action": "app.usage.record", "business": "capco", "id": "cap-r2",
+             "app_user_id": sub_id, "actual_cost_microusd": 200},
             "stageB-cap-u2",
         )
 
@@ -628,13 +673,33 @@ def test_app_reads_round_trip_after_delegated_writes(pg_store, pg_store_dsn):
     # After a full set of delegated app.* writes, the store's own read path (query="app", which calls
     # _app_summary) and calculate_pulse must both round-trip the Postgres rows back through dict_row +
     # the backend-agnostic metadata-column select. This is the read-side proof for Stage B.
+    #
+    # Invariant 9: the per-business pool cap is set via the internal primitive (the operator
+    # app.budget.set op was removed); the `pro` plan carries a real AI budget so its subscriber is a
+    # funded sub-user, and the positive-cost usage record is routed through that sub-user (null-subuser
+    # positive-cost records are now refused).
+    from plugins.takyon import app_usage
+
     _seed_owned_business(pg_store_dsn, "rtco", mode="test")
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        app_usage.set_app_budget(conn, "rtco", hard_limit_microusd=9_000_000, status="active")
+    cust = _commit_one(
+        pg_store, "rtco",
+        {"action": "app.customer.upsert", "business": "rtco", "email": "rt@example.com", "name": "RT"},
+        "rt-cust",
+    )
+    assert cust["success"] is True
+    rt_user_id = cust["results"][0]["app_user_id"]
     for op, key in [
-        ({"action": "app.budget.set", "business": "rtco", "hard_limit_microusd": 9_000_000}, "rt-budget"),
-        ({"action": "app.plan.upsert", "business": "rtco", "plan_key": "pro", "tier": "pro", "price_cents": 2000}, "rt-plan"),
-        ({"action": "app.customer.upsert", "business": "rtco", "email": "rt@example.com", "name": "RT"}, "rt-cust"),
-        ({"action": "app.entitlement.upsert", "business": "rtco", "email": "rt@example.com", "tier": "pro", "source": "internal"}, "rt-ent"),
-        ({"action": "app.usage.record", "business": "rtco", "id": "rt-u1", "actual_cost_microusd": 1500}, "rt-usage"),
+        ({"action": "app.plan.upsert", "business": "rtco", "plan_key": "pro", "tier": "pro",
+          "price_cents": 2000, "included_ai_budget_microusd": 5_000_000}, "rt-plan"),
+        # A paid entitlement requires Stripe evidence (anti-fake-billing guard); supply a
+        # subscription id. The per-user budget is resolved by TIER match to the `pro` plan above.
+        ({"action": "app.entitlement.upsert", "business": "rtco", "email": "rt@example.com",
+          "tier": "pro", "source": "stripe",
+          "stripe_subscription_id": "sub_rt_test"}, "rt-ent"),
+        ({"action": "app.usage.record", "business": "rtco", "id": "rt-u1",
+          "app_user_id": rt_user_id, "actual_cost_microusd": 1500}, "rt-usage"),
     ]:
         assert _commit_one(pg_store, "rtco", op, key)["success"] is True
 

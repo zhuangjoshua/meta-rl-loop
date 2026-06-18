@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
+ENSURE_CADDY_RATELIMIT_SCRIPT="$ROOT_DIR/deploy/shared/ensure-caddy-ratelimit.sh"
 
 SOURCE_HOST="${TAKYON_SOURCE_HOST:-root@137.184.75.57}"
 SOURCE_KEY="${TAKYON_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -47,9 +48,18 @@ if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$ENSURE_CADDY_RATELIMIT_SCRIPT" ]]; then
+  echo "caddy rate-limit bootstrap helper not found: $ENSURE_CADDY_RATELIMIT_SCRIPT" >&2
+  exit 1
+fi
+
 ssh "${target_ssh[@]}" "$TARGET_HOST" \
   "env TAKYON_DENO_VERSION='$TAKYON_DENO_VERSION' TAKYON_REQUIRE_SYSTEMD_RUN=1 bash -s" \
   < "$ENSURE_DENO_SCRIPT"
+
+# Provision the rate_limit module into the Caddy binary so the tracked Caddyfile
+# (edge DDoS controls) validates and reloads. Idempotent; runs on every host.
+ssh "${target_ssh[@]}" "$TARGET_HOST" "bash -s" < "$ENSURE_CADDY_RATELIMIT_SCRIPT"
 
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive

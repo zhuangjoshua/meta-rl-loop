@@ -93,7 +93,6 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_upsert_business",
         "business_delete_business",
         "business_set_mode",
-        "business_configure_app_budget",
         "business_refresh_product_surface",
         "business_upsert_app_plan",
         "business_upsert_app_customer",
@@ -121,6 +120,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_set_channel_credit_budgets",
         "business_ugc_ad_generate",
         "business_static_ad_generate",
+        "business_generate_logo",
         "business_meta_ad_launch",
         "business_meta_ad_bind_manual_launch",
         "business_meta_ad_control",
@@ -449,7 +449,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     },
     "usage": {
         "owner_skill": "takyon-app-runtime",
-        "tools": ["business_configure_app_budget", "business_record_app_usage"],
+        "tools": ["business_record_app_usage"],
         "endpoints": [("GET", "account"), ("POST", "usage")],
         "worker_contract": [
             "Usage summary currently reads from the account rail and usage metering writes through POST /usage.",
@@ -956,6 +956,7 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "database": ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
+    "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "llm": ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
     "meta": ("COMPOSIO_API_KEY",),
     "metaads": ("COMPOSIO_API_KEY",),
@@ -10785,7 +10786,6 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         return
 
     product_actions = {
-        "app.budget.set",
         "app.customer.upsert",
         "app.entitlement.upsert",
         "app.plan.upsert",
@@ -11213,7 +11213,18 @@ class TakyonStore:
             "takyon.rls_session_hash",
         )
         previous = {key: self._pg_current_setting(raw, key) for key in settings}
+        # The connection's login role is the privileged control-plane/runtime owner, which
+        # PostgreSQL exempts from RLS (superuser / BYPASSRLS) even under FORCE — so the 0027
+        # policies only actually deny a stray cross-tenant query if the request runs under a
+        # NON-bypassing role. Drop to the restricted `takyon_app` role (migration 0030) for the
+        # duration of this app-customer scope so the DB enforces the same per-customer boundary
+        # as the runtime; RESET ROLE returns to the privileged session-default login role on exit.
+        # The store connection is autocommit=False, so SET LOCAL is transaction-scoped and also
+        # auto-reverts at commit/rollback; the explicit reset covers a caller that holds the
+        # connection across the block. App scope is always entered from the session default role
+        # (never nested under another non-default role), so RESET ROLE is the correct restore.
         try:
+            raw.execute("set local role takyon_app")
             raw.execute("select set_config('takyon.rls_bypass', '0', true)")
             raw.execute(
                 "select set_config('takyon.rls_business_slug', %s, true)",
@@ -11229,6 +11240,7 @@ class TakyonStore:
             )
             yield conn
         finally:
+            raw.execute("reset role")
             for key, value in previous.items():
                 raw.execute("select set_config(%s, %s, true)", (key, value))
 
@@ -11377,7 +11389,10 @@ class TakyonStore:
             CREATE TABLE IF NOT EXISTS app_budgets (
               business_slug TEXT PRIMARY KEY,
               status TEXT NOT NULL DEFAULT 'active',
-              hard_limit_microusd INTEGER NOT NULL DEFAULT 5000000,
+              -- Invariant 9: SENTINEL pool cap. NULL = no per-business pool cap (the per-subuser
+              -- subscription gate is the only budget gate); a non-null integer is an explicit
+              -- enforced ceiling. New budgets open with NO pool cap (NULL), not the old $5 default.
+              hard_limit_microusd INTEGER,
               current_period_start TEXT NOT NULL,
               current_period_end TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -12168,9 +12183,53 @@ class TakyonStore:
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if not _remote_workspace_sync_allowed(backend_name):
             return
-        prefix = storage.object_prefix(_slugify(slug))
-        for key in sorted(backend.list_digests(prefix)):
-            backend.delete(key)
+        storage.delete_prefix(backend, storage.object_prefix(_slugify(slug)))
+
+    def _owner_business_slugs(self, conn: sqlite3.Connection, owner_user_id: str) -> list[str]:
+        """Every business slug owned by one top-level operator (the per-operator storage unit)."""
+        owner = str(owner_user_id or "").strip()
+        if not owner:
+            return []
+        rows = conn.execute(
+            "SELECT slug FROM businesses WHERE owner_user_id = ? ORDER BY slug",
+            (owner,),
+        ).fetchall()
+        slugs: list[str] = []
+        for row in rows:
+            if row is None:
+                continue
+            # Cross-backend: PG rows are dict_row (Mapping), SQLite rows are positional.
+            value = row["slug"] if isinstance(row, Mapping) else row[0]
+            if value:
+                slugs.append(str(value))
+        return slugs
+
+    def _operator_storage_bytes(self, conn: sqlite3.Connection, owner_user_id: str) -> int:
+        """Operator's combined object-store usage across every business they own."""
+        from . import storage
+
+        backend = self._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if not _remote_workspace_sync_allowed(backend_name):
+            return 0
+        return storage.operator_storage_bytes(
+            backend, self._owner_business_slugs(conn, owner_user_id)
+        )
+
+    def _purge_operator_storage(self, conn: sqlite3.Connection, owner_user_id: str) -> dict[str, list[str]]:
+        """Delete ALL object-store bytes for an operator across every owned business.
+
+        The operator-account-removal complement to per-business deletion — closing a Takyon user must
+        not strand their workspace objects in the shared bucket."""
+        from . import storage
+
+        backend = self._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if not _remote_workspace_sync_allowed(backend_name):
+            return {}
+        return storage.purge_operator_storage(
+            backend, self._owner_business_slugs(conn, owner_user_id)
+        )
 
     def _business_delete_direct_fk_tables(self, conn: sqlite3.Connection) -> list[str]:
         """Return current business-owned Postgres tables keyed directly to ``businesses.slug``.
@@ -12433,9 +12492,11 @@ class TakyonStore:
                 end = start.replace(year=start.year + 1, month=1)
             else:
                 end = start.replace(month=start.month + 1)
+            # Invariant 9: open with NO per-business pool cap (hard_limit_microusd = NULL). Budget
+            # derives from the active paid subscription's per-subuser included_ai_budget_microusd.
             conn.execute(
                 "INSERT INTO app_budgets (business_slug, status, hard_limit_microusd, current_period_start, current_period_end, created_at, updated_at) VALUES (?, 'active', ?, ?, ?, ?, ?) ON CONFLICT(business_slug) DO NOTHING",
-                (slug, 5_000_000, start.isoformat(), end.isoformat(), now, now),
+                (slug, None, start.isoformat(), end.isoformat(), now, now),
             )
             row = conn.execute("SELECT * FROM app_budgets WHERE business_slug = ?", (slug,)).fetchone()
         return self._row_to_dict(row)
@@ -13314,10 +13375,19 @@ class TakyonStore:
                     "business_age_hours": round((now_dt - created_dt).total_seconds() / 3600, 2),
                     "wake_interval_hours": round((now_dt - previous_dt).total_seconds() / 3600, 2),
                     "app_budget": {
+                        # Invariant 9: hard_limit_microusd is a sentinel — None means NO
+                        # per-business pool cap (budget derives from the paid subscription's
+                        # per-subuser included_ai_budget_microusd), so remaining is None too.
                         "status": app_budget["status"],
-                        "hard_limit_microusd": int(app_budget["hard_limit_microusd"] or 0),
+                        "hard_limit_microusd": (
+                            None if app_budget["hard_limit_microusd"] is None
+                            else int(app_budget["hard_limit_microusd"])
+                        ),
                         "spent_microusd": int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
-                        "remaining_microusd": int(app_budget["hard_limit_microusd"] or 0) - int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0)),
+                        "remaining_microusd": (
+                            None if app_budget["hard_limit_microusd"] is None
+                            else int(app_budget["hard_limit_microusd"]) - int((app_usage_total["actual"] or 0) or (app_usage_total["estimated"] or 0))
+                        ),
                     },
                     "active_paid_customers": int(active_entitlements["paid_customers"] or 0),
                     "mrr_cents": summary["mrr_cents"],
@@ -14260,7 +14330,6 @@ class TakyonStore:
 
         allowed = {
             "agent.record",
-            "app.budget.set",
             "app.customer.upsert",
             "app.directory.disable",
             "app.directory.upsert",
@@ -14478,32 +14547,6 @@ class TakyonStore:
             return self._gc(conn, parsed_scope, op)
 
         assert slug is not None
-
-        if action == "app.budget.set":
-            amount = int(float(op.get("hard_limit_microusd") or op.get("amount_microusd") or 0))
-            if amount < 0:
-                raise TakyonError("app budget limit must be non-negative")
-            now = _now()
-            current = self._ensure_app_budget(conn, slug)
-            status = str(op.get("status") or current.get("status") or "active")
-            if _db_backend() == "postgres":
-                # Canonical Postgres budget write: app_usage.set_app_budget owns the app_budgets cap (it
-                # row-locks then upserts), so the operator store delegates rather than carry a second
-                # writer. Prior status is preserved when the op omits it (the `status` var above).
-                leaves = self._app_leaves()
-                try:
-                    with self._leaf_conn(conn) as raw:
-                        leaves["usage"].set_app_budget(raw, slug, hard_limit_microusd=amount, status=status)
-                except leaves["usage"].AppUsageError as exc:
-                    raise TakyonError(str(exc)) from exc
-            else:
-                conn.execute(
-                    "UPDATE app_budgets SET hard_limit_microusd = ?, status = ?, updated_at = ? WHERE business_slug = ?",
-                    (amount, status, now, slug),
-                )
-            self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"hard_limit_microusd": amount, "reason": reason, "actor": actor})
-            return {"action": action, "business": slug, "hard_limit_microusd": amount}
 
         if action == "app.surface.upsert":
             status = str(op.get("status") or "draft").strip().lower()
@@ -16036,6 +16079,20 @@ class TakyonStore:
                                 )
                             else:
                                 user_monthly_limit_microusd = 0
+                        elif actual > 0 or estimated > 0:
+                            # GOAL_RULES §3 gap #4 (self-report sibling of the app_actions reserve
+                            # fix). This is a CUSTOMER-REACHABLE product-usage write: a null-subuser
+                            # record has NO per-user entitlement to gate on, and after invariant 9 the
+                            # budget row opens with a NULL pool cap, so a positive-cost record here
+                            # would persist COMPLETED ungated spend with no money gate at all. Mirror
+                            # the action path: refuse a positive-cost record that carries no sub-user
+                            # (no active paid entitlement behind it). A zero-cost record is a pure
+                            # audit event and stays allowed.
+                            raise TakyonError(
+                                "subscription_required: positive-cost product usage record requires "
+                                "an app sub-user with an active entitlement; a null-subuser record "
+                                "may carry no positive cost"
+                            )
                         event = leaves["usage"].record_completed_usage(
                             raw,
                             slug,
@@ -16064,12 +16121,16 @@ class TakyonStore:
                 if app_user_id and not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, app_user_id)).fetchone():
                     raise TakyonError(f"app user not found: {app_user_id}")
                 budget = self._ensure_app_budget(conn, slug)
-                used = conn.execute(
-                    "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
-                    (slug, budget["current_period_start"]),
-                ).fetchone()["total"]
-                if int(used or 0) + actual > int(budget["hard_limit_microusd"] or 0):
-                    raise TakyonError(f"app usage would exceed budget cap {budget['hard_limit_microusd']} microusd")
+                # Per-business pool gate: ONLY when an explicit cap is set (invariant 9 — NULL =
+                # no pool cap, the per-subuser subscription gate is then the sole budget gate).
+                pool_cap = budget["hard_limit_microusd"]
+                if pool_cap is not None:
+                    used = conn.execute(
+                        "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
+                        (slug, budget["current_period_start"]),
+                    ).fetchone()["total"]
+                    if int(used or 0) + actual > int(pool_cap):
+                        raise TakyonError(f"app usage would exceed budget cap {pool_cap} microusd")
                 now = _now()
                 conn.execute(
                     """
@@ -16457,15 +16518,71 @@ class TakyonStore:
             "protected": ["businesses", "workspaces", "ledger_entries", "control_states", "idempotency_keys", "files"],
         }
 
-    def _ceo_cron_prompt(self, slug: str) -> str:
+    def _ceo_cron_wake_interval_seconds(self, slug: str) -> int | None:
+        """The business's current wake cadence in seconds, read from the canonical wake_schedules
+        row (Postgres path) — or None when there is no schedule / not on Postgres. Used only to
+        decide whether *this* wake is the last one before PST midnight; never a side effect."""
+        if _db_backend() != "postgres":
+            return None
+        try:
+            from . import wakes
+        except ImportError:  # pragma: no cover - alternate load path as a top-level package
+            from plugins.takyon import wakes
+        try:
+            with self._connect() as conn:
+                with self._leaf_conn(conn) as raw:
+                    schedule = wakes.get_wake_schedule(raw, slug)
+        except Exception:  # pragma: no cover - schedule read is advisory only, never breaks a wake
+            return None
+        if schedule is None or not schedule.enabled:
+            return None
+        return int(schedule.interval_seconds) if schedule.interval_seconds else None
+
+    def _is_last_wake_of_day_pst(self, slug: str, *, now: datetime | None = None) -> bool:
+        """True when, at PST/PDT (America/Los_Angeles) wall-clock ``now``, the NEXT scheduled wake
+        would land on the following PST calendar day — i.e. this is the last wake of the day in PST.
+        Conservative: with no readable interval it returns False (no spurious daily-summary push).
+        The daily summary is written on the last wake of the day so it captures the full day."""
+        interval_seconds = self._ceo_cron_wake_interval_seconds(slug)
+        if not interval_seconds or interval_seconds <= 0:
+            return False
+        try:
+            from zoneinfo import ZoneInfo
+
+            pacific = ZoneInfo("America/Los_Angeles")
+        except Exception:  # pragma: no cover - zoneinfo/tz data missing; skip daily-summary signal
+            return False
+        current = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        now_pst = current.astimezone(pacific)
+        next_pst = (current + timedelta(seconds=interval_seconds)).astimezone(pacific)
+        return next_pst.date() != now_pst.date()
+
+    def _ceo_cron_prompt(self, slug: str, *, now: datetime | None = None) -> str:
+        last_wake_of_day = self._is_last_wake_of_day_pst(slug, now=now)
+        if last_wake_of_day:
+            daily_summary_line = (
+                "LAST WAKE OF THE DAY (PST): before sleeping, write today's daily summary to "
+                "metrics/summary.md via takyon-business-metrics so it captures the full PST day — "
+                "what moved, spend, traction deltas, blockers, and the plan for tomorrow. "
+            )
+        else:
+            daily_summary_line = (
+                "If (and only if) this is the last wake of the day in PST/Pacific, write today's "
+                "daily summary to metrics/summary.md via takyon-business-metrics before sleeping; "
+                "otherwise just keep metrics/summary.md current with this wake's pulse. "
+            )
         return (
             f"CEO wakeup for business:{slug}.\n"
             "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
             "Start with business_calculate_pulse to see what changed: usage, revenue, unresolved inbound, queued jobs, blockers, and recent activity. "
             "Then read research/strategy.md before choosing the next move. If new evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, update research/strategy.md before continuing. "
             "Use takyon-business-metrics to write metrics/summary.md and record a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
-            "create workspaces, enqueue jobs, and adjust the next wakeup if useful. Decide the highest "
-            "expected-impact move under the business goal, budget, evidence, active campaigns, failures, and kill switches. Keep all business "
+            "create workspaces, enqueue jobs, and adjust the next wakeup if useful. From the evidence, decide the 1-2 highest "
+            "expected-impact moves under the business goal, budget, evidence, active campaigns, failures, and kill switches; "
+            "reason about the best next move from what actually changed, do not run a fixed checklist. Cap this wake at those "
+            "1-2 tasks: execute them, then stop and sleep until the next scheduled wake — do not keep finding more work in the same turn. Keep all business "
             "memory inside this business scope. Read prior wake notes from metrics/wake-history.md and compare "
             "this state to those notes, including business "
             "age, app/customer/revenue/usage signals, conversations, job progress, blockers, and stale assumptions. "
@@ -16483,9 +16600,12 @@ class TakyonStore:
             "the same motion. "
             "Append a compact wake snapshot to metrics/wake-history.md for future comparison. Never delete prior metrics, "
             "metric, event, conversation, ledger, job, or wake data during a wake. "
+            f"{daily_summary_line}"
             "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
             "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
-            "or outreach/marketing email delivery."
+            "or outreach/marketing email delivery. "
+            "When the 1-2 tasks are done and this wake's snapshot (and any daily summary) is written, end the turn and sleep "
+            "until the next scheduled wake; do not start additional work beyond the capped tasks."
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
@@ -16543,11 +16663,11 @@ class TakyonStore:
             from cron.jobs import parse_schedule
 
             try:
-                from . import wakes
-                from .policy import expensive_threshold_cents
+                from . import control_api, wakes
+                from .policy import expensive_threshold_cents, plan_min_wake_interval_seconds
             except ImportError:  # pragma: no cover - alternate load path as a top-level package
-                from plugins.takyon import wakes
-                from plugins.takyon.policy import expensive_threshold_cents
+                from plugins.takyon import control_api, wakes
+                from plugins.takyon.policy import expensive_threshold_cents, plan_min_wake_interval_seconds
 
             parsed = parse_schedule(schedule)
             if str(parsed.get("kind") or "") != "interval":
@@ -16558,6 +16678,21 @@ class TakyonStore:
             interval_seconds = max(60, int(parsed.get("minutes") or 0) * 60)
             with self._connect() as conn:
                 with self._leaf_conn(conn) as raw:
+                    # Plan-gate the cadence: the operator may not set a wake interval FASTER than
+                    # their subscription plan's floor. This is the ONLY write boundary for a wake
+                    # schedule (CLI /wake, the `cron.ensure_ceo_wakeup` CEO op, and /create all flow
+                    # through here), so the gate lives here, not in the pure `wakes` leaf. Resolved
+                    # server-side from the business owner — no caller-supplied plan/interval can
+                    # bypass it (authoritative inv #3: no cross-tenant / caller-supplied identity).
+                    plan_name = control_api.operator_plan_name_for_business(raw, slug)
+                    min_interval_seconds = plan_min_wake_interval_seconds(plan_name)
+                    if interval_seconds < min_interval_seconds:
+                        plan_label = plan_name or "no active subscription"
+                        raise TakyonError(
+                            f"wake cadence too fast for plan '{plan_label}': requested "
+                            f"{interval_seconds}s but the plan minimum is {min_interval_seconds}s. "
+                            "Upgrade the subscription or choose a slower cadence."
+                        )
                     existing = wakes.get_wake_schedule(raw, slug)
                     scheduled = wakes.upsert_wake_schedule(
                         raw,
@@ -17092,6 +17227,14 @@ def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
     key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
     if not key:
         raise TakyonError("Stripe action requires STRIPE_SECRET_KEY")
+    # Hard rail (GOAL_RULES §0): refuse a live Stripe key (`sk_live_…`) BEFORE any network call.
+    # This deployment is restricted to Stripe test mode; a mis-provisioned live key must never
+    # reach the wire and move real money.
+    if str(key).strip().startswith("sk_live_"):
+        raise TakyonError(
+            "refusing to use a live Stripe key (sk_live_): this deployment is restricted to "
+            "Stripe test mode (sk_test_)"
+        )
     data = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode("utf-8")
     request = urllib.request.Request(
         f"https://api.stripe.com/v1/{path.lstrip('/')}",
@@ -17582,15 +17725,6 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
         expected_content=expected_content,
         store=store,
     )
-
-def handle_business_configure_app_budget(args: dict, **_: Any) -> str:
-    operation = {
-        "action": "app.budget.set",
-        "business": args.get("business"),
-        "hard_limit_microusd": args.get("hard_limit_microusd"),
-        "status": args.get("status") or "active",
-    }
-    return _commit_tool(args, operation)
 
 
 def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
@@ -21281,6 +21415,32 @@ def _creative_credit_total_cost(action: str, *, units: int = 1) -> int:
     return _creative_credit_unit_cost(action) * max(1, int(units or 1))
 
 
+_LOGO_IMAGE_PROVIDER = "google"
+_LOGO_IMAGE_MODEL = "gemini-2.5-flash-image"
+
+
+def _logo_provider_cost_usd() -> float:
+    """Exact per-image provider cost for the brand-logo model.
+
+    Resolved from the canonical pricing table (agent.usage_pricing); an unpriced
+    model is refused so the receipt can never claim a fabricated cost. This is
+    the single source of truth for the logo provider cost — no second hardcoded
+    table in a skill or channel tool (GOAL_RULES §4 / CLAUDE.md billing rules).
+    """
+    from agent import usage_pricing
+
+    entry = usage_pricing._OFFICIAL_DOCS_PRICING.get(
+        (_LOGO_IMAGE_PROVIDER, _LOGO_IMAGE_MODEL)
+    )
+    request_cost = getattr(entry, "request_cost", None) if entry is not None else None
+    if request_cost is None:
+        raise TakyonError(
+            f"{_LOGO_IMAGE_PROVIDER}/{_LOGO_IMAGE_MODEL} is not priced in usage_pricing; "
+            "brand logo generation is refused (no unpriced provider spend)"
+        )
+    return float(request_cost)
+
+
 def _creative_credit_balances(business: str) -> Any:
     store = _store()
     credits_backend = _creative_credit_backend()
@@ -23101,6 +23261,191 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_generate_logo(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        slug = _file_slug(str(args.get("slug") or business or "logo"), "logo")
+        publication_rel = f"product/brand/logos/{slug}"
+        asset_rel = f"{publication_rel}/logo.png"
+        receipt_rel = f"{publication_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_generate_logo",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "receipt": receipt_rel,
+                    "value": prior,
+                }
+            )
+
+        business_mode = _business_mode(store, business)
+        if business_mode == "test":
+            raise TakyonError(
+                "business_generate_logo requires a live business; brand logo generation "
+                "spends real provider money and is not stubbed in test mode"
+            )
+
+        # Operator-owned brand context (name/category/tone). The skill reads
+        # business state first and passes it; name defaults to the slug.
+        raw_context = (
+            args.get("business_context")
+            if isinstance(args.get("business_context"), Mapping)
+            else {}
+        )
+        business_context: dict[str, Any] = {
+            "slug": business,
+            "name": str(args.get("name") or raw_context.get("name") or business).strip(),
+        }
+        for key in ("category", "industry", "vertical", "tone", "brand_tone", "voice"):
+            value = raw_context.get(key) if isinstance(raw_context, Mapping) else None
+            if value:
+                business_context[key] = str(value).strip()
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "asset_path": asset_rel,
+            "publication_dir": publication_rel,
+            "business_mode": business_mode,
+            "provider": _LOGO_IMAGE_PROVIDER,
+            "model": _LOGO_IMAGE_MODEL,
+            "business_context": business_context,
+            "created_at": _now(),
+        }
+
+        # Two-half shape: preflight credit gate here in the handler; the real
+        # transaction (key resolution + provider call + reserve/commit) lives in
+        # the creative_gateway logo-render authority route. budget_bucket="" is
+        # brand-level (no channel), so the gate checks only the overall balance.
+        gateway_result = _creative_credit_preflight_gate(
+            business,
+            action="logo_generate",
+            budget_bucket="",
+            metadata=base_receipt,
+        )
+        try:
+            if gateway_result.get("success"):
+                gateway_result = _call_creative_runtime_gateway(
+                    "logo-render",
+                    {
+                        "business": business,
+                        "idempotency_key": idempotency_key,
+                        "slug": slug,
+                        "business_context": business_context,
+                    },
+                )
+        except Exception as exc:
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_generate_logo",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "error": str(exc),
+                    "value": receipt,
+                }
+            )
+
+        if not gateway_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": gateway_result.get("status") or "failed",
+                "requested_credits": gateway_result.get("requested_credits"),
+                "available_credits": gateway_result.get("available_credits"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "error": gateway_result.get("error") or "logo generation failed",
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_generate_logo",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "balance_credits": receipt.get("balance_credits"),
+                    "reserved_credits": receipt.get("reserved_credits"),
+                    "error": receipt["error"],
+                    "value": receipt,
+                }
+            )
+
+        receipt = {
+            **base_receipt,
+            "success": True,
+            "status": "created",
+            "asset_path": gateway_result.get("asset_path") or asset_rel,
+            "prompt": gateway_result.get("prompt"),
+            "provider_cost_usd": gateway_result.get("provider_cost_usd"),
+            "credits_charged": gateway_result.get("credits_charged"),
+            "balance_credits": gateway_result.get("balance_credits"),
+            "reserved_credits": gateway_result.get("reserved_credits"),
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/product:brand-logo/{slug}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "brand_logo.generate",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:receipt",
+            reason=args.get("reason") or "record brand logo generation",
+            actor=args.get("actor") or "agent",
+        )
+        store._sync_business_workspace_remote(business)
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_generate_logo",
+                "business": business,
+                "slug": slug,
+                "status": "created",
+                "publication_dir": publication_rel,
+                "asset_path": receipt["asset_path"],
+                "receipt": receipt_rel,
+                "provider_cost_usd": receipt.get("provider_cost_usd"),
+                "credits_charged": receipt.get("credits_charged"),
+                "balance_credits": receipt.get("balance_credits"),
+                "reserved_credits": receipt.get("reserved_credits"),
+                "value": receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _META_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
@@ -23115,6 +23460,7 @@ _META_VALID_CTA = {
 _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
+    "logo_generate": 2,
     "x_publish_outreach": 1,
     "reddit_publish_outreach": 1,
     "meta_ad_launch": 1,
@@ -23123,6 +23469,7 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
 _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
+    "logo_generate": "TAKYON_CREATIVE_CREDITS_LOGO",
     "x_publish_outreach": "TAKYON_CREATIVE_CREDITS_X_POST",
     "reddit_publish_outreach": "TAKYON_CREATIVE_CREDITS_REDDIT_POST",
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
@@ -28567,12 +28914,6 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema("business_record_memory", "Write business research memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
     },
     {
-        "name": "business_configure_app_budget",
-        "description": "Set the business product app's overall usage budget cap for one business.",
-        "handler": handle_business_configure_app_budget,
-        "schema": _schema("business_configure_app_budget", "Set product app budget cap.", {"business": _BUSINESS_PROP, "hard_limit_microusd": {"type": "integer"}, "status": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "hard_limit_microusd", "idempotency_key"]),
-    },
-    {
         "name": "business_upsert_app_surface_contract",
         "description": "Record the tiny business-owned product shell record: source path, routes, publish target, and runtime rails.",
         "handler": handle_business_upsert_app_surface_contract,
@@ -29153,6 +29494,33 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "input_path", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_generate_logo",
+        "description": (
+            "Generate a business-scoped brand logo with Nano Banana (Gemini gemini-2.5-flash-image): "
+            "flat vector, transparent background, icon-only, no text. Live-only and creative-credit "
+            "gated (brand-level, no channel bucket); the asset and a cost receipt land under "
+            "product/brand/logos/<slug>/. Fails closed (503) until the Gemini key is provisioned."
+        ),
+        "handler": handle_business_generate_logo,
+        "schema": _schema(
+            "business_generate_logo",
+            "Generate a transparent-background brand logo icon from business context.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {"type": "string", "description": "Optional publication slug under product/brand/logos/<slug>/; defaults to the business slug."},
+                "name": {"type": "string", "description": "Optional brand display name for the icon concept; defaults to the business name/slug."},
+                "business_context": {
+                    "type": "object",
+                    "description": "Brand context read from business state to steer the icon: {name, category|industry|vertical, tone|brand_tone|voice}. Read business_read_business / product state first; do not invent brand voice.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
         ),
     },
     {

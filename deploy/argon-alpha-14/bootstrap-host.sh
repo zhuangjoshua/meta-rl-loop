@@ -6,6 +6,7 @@ SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
+ENSURE_CADDY_RATELIMIT_SCRIPT="$ROOT_DIR/deploy/shared/ensure-caddy-ratelimit.sh"
 
 TARGET_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TARGET_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -40,6 +41,11 @@ fi
 
 if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
   echo "deno bootstrap helper not found: $ENSURE_DENO_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -f "$ENSURE_CADDY_RATELIMIT_SCRIPT" ]]; then
+  echo "caddy rate-limit bootstrap helper not found: $ENSURE_CADDY_RATELIMIT_SCRIPT" >&2
   exit 1
 fi
 
@@ -98,5 +104,9 @@ EOF
   fi
   install -d '$REMOTE_RUNTIME'
 "
+
+# Provision the rate_limit module into the Caddy binary so the tracked Caddyfile
+# (edge DDoS controls) validates and reloads. Idempotent; runs on every host.
+ssh "${target_ssh[@]}" "$TARGET_HOST" "bash -s" < "$ENSURE_CADDY_RATELIMIT_SCRIPT"
 
 echo "Operator host bootstrap complete: $TARGET_HOST"

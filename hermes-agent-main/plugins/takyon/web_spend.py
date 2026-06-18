@@ -58,6 +58,39 @@ class _Reservation:
         self.reserved_microusd = reserved_microusd
 
 
+def _operator_remaining_microusd(raw, business: str) -> int:
+    """Resolve the business OWNER's remaining operator-rail spend authority (microUSD) — the
+    NON-NULL ceiling this CEO/agent web-egress meter gates on.
+
+    This is the OPERATOR money rail (``billing.py``, Takyon-user → platform), NOT the product
+    subuser subscription rail: CEO/agent web egress is *operator* spend (it carries no
+    ``app_user_id`` and no product subscription), so it must be bounded by the operator's OWN
+    billing authority — never by a product-subuser entitlement and never by the
+    invariant-9-removed per-business pool. The authority is allowance remaining + topup balance
+    (the same two buckets ``billing.reserve`` draws from), converted cents → microUSD (×10_000).
+
+    ALWAYS returns a concrete, non-null ceiling, NEVER unbounded: an unresolvable owner or a
+    business with no billing account yields 0, which fails the call closed — the correct posture
+    for an unfunded/unknown operator (every real operator is funded by the starter allowance or a
+    topup, so a 0 here means "no money authority", not "free")."""
+    from . import billing
+
+    row = raw.execute(
+        "select owner_user_id from businesses where slug = %s", (business,)
+    ).fetchone()
+    owner_user_id = str((row[0] if row else "") or "").strip()
+    if not owner_user_id:
+        return 0
+    try:
+        balances = billing.get_billing_balances(raw, owner_user_id)
+    except billing.NoBillingAccount:
+        return 0
+    remaining_cents = max(0, int(balances.allowance_remaining_cents)) + max(
+        0, int(balances.topup_balance_cents)
+    )
+    return remaining_cents * 10_000
+
+
 class BusinessBudgetSpendMeter:
     """Reserve/settle/release a paid web call against the active business AI budget."""
 
@@ -87,6 +120,23 @@ class BusinessBudgetSpendMeter:
                 return None  # SQLite dev runtime has no app_budgets; metering is a Postgres rail
             usage_leaf = store._app_leaves()["usage"]
             with store._leaf_conn(conn) as raw:
+                # OPERATOR-RAIL CEILING — the gate invariant 9 left this meter without. The flat
+                # per-business pool cap is gone (the budget row opens with a NULL cap), and this
+                # CEO/agent web egress carries NO ``app_user_id`` / product subscription, so the
+                # per-subuser gate inside ``reserve_usage`` cannot apply either. Without a ceiling
+                # here the reserve would hold the estimate with NO money gate at all = unbounded
+                # ungated spend. Bound it to the business owner's OWN operator billing authority
+                # (``billing.py``, the Takyon-user → platform rail), a real non-null ceiling that is
+                # distinct from any product-subuser subscription. Refuse BEFORE holding when the
+                # cost exceeds that authority; the authoritative spend reservation still lands on
+                # ``app_usage`` below (which additionally enforces any explicit operator pool cap).
+                operator_ceiling = _operator_remaining_microusd(raw, business)
+                if cost > operator_ceiling:
+                    raise web_spend_meter.SpendBlocked(
+                        f"operator budget authority exhausted for business {business!r}: "
+                        f"{op} via {provider} needs {cost} microusd, operator remaining "
+                        f"{operator_ceiling} microusd"
+                    )
                 try:
                     usage_leaf.reserve_usage(
                         raw,

@@ -18,7 +18,6 @@ provides_tools:
   - business_write_file
   - business_patch_file
   - business_record_memory
-  - business_configure_app_budget
   - business_upsert_app_surface_contract
   - business_upsert_app_plan
   - business_upsert_app_customer

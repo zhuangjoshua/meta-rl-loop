@@ -239,27 +239,30 @@ def _model_allowed(plan, model: str) -> bool:
     return True
 
 
-# Per-user monthly AI cap floor. Used only after a real entitlement exists, when the business has
-# no matching plan policy or a legacy free/default plan is misconfigured with 0. It MUST stay
-# positive and bounded: 0 would 402 every fallback-capped customer on their first call, and None
-# would disable the per-user gate entirely — letting ONE subuser drain the whole business pool.
-# Bounded ($0.50) so the fallback itself can't drain the pool; raise it by configuring a plan
-# policy's included_ai_budget_microusd.
-_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD = 500_000  # $0.50
+# Invariant 9 (GOAL_RULES §3): the $0.50 per-user free-tier FLOOR IS REMOVED. There is no free
+# allowance — budget is plan-derived-or-0. This name is retained only as a 0-valued back-compat
+# shim (value 0 == "no floor"); it is NOT referenced by `_user_monthly_budget_microusd` and must
+# never be reintroduced as a positive fallback. The per-user limit is the active PAID
+# subscription's `included_ai_budget_microusd`, exactly; no plan ⇒ 0 ⇒ reserve refuses (402).
+_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD = 0
 
 
 def _user_monthly_budget_microusd(plan) -> int:
-    """The per-user monthly AI allowance — the cap that stops ONE subuser from draining the whole
-    business budget. ALWAYS positive, NEVER None. For a known plan it is the tier's configured
-    ``included_ai_budget_microusd`` (so a free tier grants its real free allowance instead of being
-    forced to 0); a free/default tier left at 0 falls back to the floor so default customers are
-    never hard-blocked; paid tiers honor their configured cap exactly; no plan policy → the floor."""
+    """THE canonical per-user monthly AI-allowance resolver (GOAL_RULES §3 gap #4: "centralize
+    per-user-limit resolution ... unify to plan-derived-or-0"). This is the per-subuser gate that
+    stops ONE subuser from draining the business and, post-invariant-9, the ONLY budget gate
+    (there is no per-business pool cap anymore). ``app_actions._plan_derived_user_limit_microusd``
+    delegates HERE so the gateway and action reserve paths share one rule.
+
+    Plan-derived-or-0 with NO free-tier floor: budget comes ONLY from the active PAID
+    subscription's ``included_ai_budget_microusd`` (the ``y`` term of x+y+z), exactly — no markup,
+    no scaling. No plan ⇒ 0 (reserve refuses → 402). A free / unentitled tier ⇒ 0 (a free tier
+    funds nothing; only a paid subscription grants budget)."""
     if plan is None:
-        return _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD
-    included = max(0, int(plan.included_ai_budget_microusd))
-    if included == 0 and str(plan.tier or "free") == "free":
-        return _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD
-    return included
+        return 0
+    if str(getattr(plan, "tier", "") or "").strip().lower() in {"", "free", "none", "unentitled"}:
+        return 0
+    return max(0, int(plan.included_ai_budget_microusd))
 
 
 def broker_provider_call(

@@ -18,21 +18,31 @@ psycopg = pytest.importorskip("psycopg")
 
 from agent import web_spend_meter  # noqa: E402
 from agent.usage_pricing import CanonicalUsage, has_known_pricing  # noqa: E402
-from plugins.takyon import app_usage, core, web_spend  # noqa: E402
+from plugins.takyon import app_usage, billing, core, web_spend  # noqa: E402
 from plugins.takyon.app_usage import list_usage_events, set_app_budget  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 
 _AUX_MODEL = "claude-opus-4-8"  # a token-priced model for the summarizer-style event
 
 
-def _provision_business(conn) -> str:
+def _provision_business(conn, *, operator_allowance_cents: int = 10_000) -> tuple[str, str]:
+    """Provision an operator + a business owned by them; return (slug, owner_user_id).
+
+    The OPERATOR money rail (billing.py) is the ceiling the web-egress meter gates on. First-login
+    provisioning already grants the production starter allowance, but we then SET the allowance to
+    exactly ``operator_allowance_cents`` (grant_allowance is a set-and-reset, not an add) so each
+    test controls the operator's authority deterministically: $100 funds normal egress, $0 models a
+    fully-exhausted operator (no money authority → web egress must fail closed)."""
     uid, _created, _raw = provision_user_on_first_login(conn, f"auth0|{uuid.uuid4().hex}")
+    # grant_allowance SETS included to this value and resets used to 0 — overriding the starter
+    # grant so the operator's authority is exactly what the test asks for (0 = exhausted).
+    billing.grant_allowance(conn, uid, operator_allowance_cents, f"test-grant:{uid}")
     slug = f"biz-{uuid.uuid4().hex[:8]}"
     conn.execute(
         "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
         (slug, "Acme", uid),
     )
-    return slug
+    return slug, uid
 
 
 class _FakeStore:
@@ -65,8 +75,8 @@ class _FakeStore:
 def metered(pg_conn, monkeypatch):
     """A provisioned business with an active budget, the real budget meter installed, and the
     session scope set. Yields the business slug."""
-    slug = _provision_business(pg_conn)
-    set_app_budget(pg_conn, slug, hard_limit_microusd=10_000_000)  # $10 headroom
+    slug, _owner = _provision_business(pg_conn)  # funded operator ($100 allowance)
+    set_app_budget(pg_conn, slug, hard_limit_microusd=10_000_000)  # $10 pool headroom
     monkeypatch.setattr(core, "_store", lambda: _FakeStore(pg_conn))
     monkeypatch.setenv("TAKYON_SESSION_BUSINESS_SLUG", slug)
     web_spend_meter.register_spend_meter(web_spend.BusinessBudgetSpendMeter())
@@ -149,6 +159,80 @@ def test_unpriced_provider_fails_closed(metered, pg_conn):
             pricing_key=("firecrawl", "search"), provider="firecrawl", op="web_search", units=1, purpose="agent_web_search"
         )
     assert _events(pg_conn, metered) == []
+
+
+def test_no_pool_cap_unfunded_operator_fails_closed(pg_conn, monkeypatch):
+    """THE HOLE invariant 9 opened on the web-egress meter. After invariant 9 the budget row opens
+    with a NULL per-business pool cap; a CEO/agent web call carries no app_user_id, so the
+    per-subuser gate inside reserve_usage cannot apply either. Without the operator-rail ceiling
+    this would reserve unbounded ungated spend. With an UNFUNDED operator (0 billing authority) and
+    NO explicit pool cap there is NO money authority — it MUST fail closed and write nothing."""
+    slug, _owner = _provision_business(pg_conn, operator_allowance_cents=0)  # unfunded operator
+    # Open the budget the way production does (no explicit pool cap → hard_limit stays NULL).
+    app_usage.ensure_app_budget(pg_conn, slug)
+    assert app_usage.get_app_budget(pg_conn, slug).hard_limit_microusd is None
+    monkeypatch.setattr(core, "_store", lambda: _FakeStore(pg_conn))
+    monkeypatch.setenv("TAKYON_SESSION_BUSINESS_SLUG", slug)
+    web_spend_meter.register_spend_meter(web_spend.BusinessBudgetSpendMeter())
+    try:
+        with pytest.raises(web_spend_meter.SpendBlocked):
+            web_spend_meter.reserve_paid_call(
+                pricing_key=("tavily", "search"), provider="tavily", op="web_search",
+                units=1, purpose="agent_web_search",
+            )
+        assert _events(pg_conn, slug) == []  # nothing reserved — no ungated spend leaked
+    finally:
+        web_spend_meter.register_spend_meter(None)
+
+
+def test_no_pool_cap_funded_operator_is_allowed(pg_conn, monkeypatch):
+    """The funded counterpart: a business whose OWNER has real operator billing authority HAS a
+    money source, so paid web egress reserves and settles normally even with NO explicit
+    per-business pool cap. Proves the operator-rail gate refuses only the unfunded case, not all
+    NULL-cap businesses, and that the ceiling is the operator rail (billing.py), not a
+    product-subuser subscription (this business has zero subscribers)."""
+    slug, _owner = _provision_business(pg_conn)  # funded operator ($100 allowance)
+    app_usage.ensure_app_budget(pg_conn, slug)
+    assert app_usage.get_app_budget(pg_conn, slug).hard_limit_microusd is None
+    monkeypatch.setattr(core, "_store", lambda: _FakeStore(pg_conn))
+    monkeypatch.setenv("TAKYON_SESSION_BUSINESS_SLUG", slug)
+    web_spend_meter.register_spend_meter(web_spend.BusinessBudgetSpendMeter())
+    try:
+        handle = web_spend_meter.reserve_paid_call(
+            pricing_key=("tavily", "search"), provider="tavily", op="web_search",
+            units=1, purpose="agent_web_search",
+        )
+        web_spend_meter.settle_paid_call(handle, units=1)
+        events = _events(pg_conn, slug)
+        assert len(events) == 1
+        assert events[0].status == "completed"
+        assert events[0].actual_cost_microusd == 8000
+    finally:
+        web_spend_meter.register_spend_meter(None)
+
+
+def test_cost_over_operator_authority_fails_closed(pg_conn, monkeypatch):
+    """The operator-rail ceiling actually BINDS: an operator funded with authority BELOW the
+    per-call cost cannot do paid web egress even though the per-business pool cap is NULL. This is
+    the non-null ceiling that replaces the invariant-9-removed pool cap.
+
+    2 cents of operator authority == 20_000 microUSD; a 3-URL tavily extract costs 3 × $0.008 ==
+    24_000 microUSD > the ceiling, so it must fail closed and write nothing."""
+    slug, _owner = _provision_business(pg_conn, operator_allowance_cents=2)  # $0.02 == 20_000 µusd
+    app_usage.ensure_app_budget(pg_conn, slug)
+    assert app_usage.get_app_budget(pg_conn, slug).hard_limit_microusd is None
+    monkeypatch.setattr(core, "_store", lambda: _FakeStore(pg_conn))
+    monkeypatch.setenv("TAKYON_SESSION_BUSINESS_SLUG", slug)
+    web_spend_meter.register_spend_meter(web_spend.BusinessBudgetSpendMeter())
+    try:
+        with pytest.raises(web_spend_meter.SpendBlocked):
+            web_spend_meter.reserve_paid_call(
+                pricing_key=("tavily", "extract"), provider="tavily", op="web_extract",
+                units=3, purpose="agent_web_extract",  # 3 × 8000 = 24_000 µusd > 20_000 ceiling
+            )
+        assert _events(pg_conn, slug) == []  # nothing reserved — ceiling held
+    finally:
+        web_spend_meter.register_spend_meter(None)
 
 
 def test_no_business_scope_is_not_metered(metered, pg_conn, monkeypatch):

@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 caddyfile="${script_dir}/Caddyfile"
+ensure_ratelimit="${script_dir}/../shared/ensure-caddy-ratelimit.sh"
 
 vps_host="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 vps_key="${TAKYON_VPS_KEY:-${HOME}/.ssh/takyon_argon_alpha14}"
@@ -15,6 +16,16 @@ if [[ ! -f "${caddyfile}" ]]; then
   echo "missing tracked Caddyfile: ${caddyfile}" >&2
   exit 1
 fi
+
+if [[ ! -f "${ensure_ratelimit}" ]]; then
+  echo "missing caddy rate-limit ensure helper: ${ensure_ratelimit}" >&2
+  exit 1
+fi
+
+# The tracked Caddyfile uses the `rate_limit` directive (edge DDoS controls), which stock apt caddy
+# lacks. Ensure the module is in the binary BEFORE `caddy validate` runs below, so a Caddyfile-only
+# deploy (the workflow path triggered when only the Caddyfile changed) self-provisions it idempotently.
+ssh "${ssh_opts[@]}" "${vps_host}" "bash -s" < "${ensure_ratelimit}"
 
 scp "${ssh_opts[@]}" "${caddyfile}" "${vps_host}:${remote_tmp}"
 ssh "${ssh_opts[@]}" "${vps_host}" "set -euo pipefail

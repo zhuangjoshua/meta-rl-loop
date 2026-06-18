@@ -46,6 +46,14 @@ def stripe_request(
     key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
     if not key:
         raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
+    # Hard rail (GOAL_RULES §0): this MVP runs Stripe in test mode only. A live secret key
+    # (`sk_live_…`) must NEVER reach the wire — refuse BEFORE any network call so a
+    # mis-provisioned live key cannot move real money. rstrip() guards a trailing-newline key.
+    if str(key).strip().startswith("sk_live_"):
+        raise StripeError(
+            "refusing to use a live Stripe key (sk_live_): this deployment is restricted to "
+            "Stripe test mode (sk_test_)"
+        )
     verb = str(method or "POST").strip().upper() or "POST"
     encoded = urllib.parse.urlencode(
         {k: v for k, v in params.items() if v is not None}

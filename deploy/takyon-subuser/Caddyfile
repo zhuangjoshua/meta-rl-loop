@@ -3,6 +3,10 @@
 	on_demand_tls {
 		ask http://127.0.0.1:9119/api/product-tls/ask
 	}
+	# Edge DDoS / abuse controls for the shared product plane. `rate_limit` is the
+	# mholt/caddy-ratelimit module, provisioned by deploy/takyon-subuser/bootstrap-host.sh
+	# (xcaddy build). Per-IP sliding windows; over-window requests get 429 + Retry-After.
+	order rate_limit before basic_auth
 }
 
 # Shared dynamic product subdomains.
@@ -18,6 +22,36 @@ https:// {
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {
+		# Tightest: product-app customer auth (magic-link verify) — credential brute-force surface.
+		@app_auth path /api/takyon/apps/*/auth/*
+		rate_limit @app_auth {
+			zone product_auth {
+				key {remote_host}
+				events 30
+				window 1m
+			}
+		}
+
+		# Paid/AI product actions (actions/generate/checkout) — each call is metered/spendful,
+		# so cap per-IP abuse at the edge before it reaches the money gates.
+		@app_actions path /api/takyon/apps/*/actions/* /api/takyon/apps/*/generate /api/takyon/apps/*/checkout
+		rate_limit @app_actions {
+			zone product_actions {
+				key {remote_host}
+				events 60
+				window 1m
+			}
+		}
+
+		# Global DDoS cap on all product traffic (static + dynamic) per client IP.
+		rate_limit {
+			zone product_all {
+				key {remote_host}
+				events 600
+				window 1m
+			}
+		}
+
 		reverse_proxy 127.0.0.1:9119 {
 			header_up Host {host}
 			header_up X-Forwarded-Proto https
@@ -33,6 +67,14 @@ https:// {
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {
+		rate_limit {
+			zone product_all_80 {
+				key {remote_host}
+				events 600
+				window 1m
+			}
+		}
+
 		reverse_proxy 127.0.0.1:9119 {
 			header_up Host {host}
 			header_up X-Forwarded-Proto https

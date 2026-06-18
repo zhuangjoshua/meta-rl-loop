@@ -10,6 +10,7 @@ import type {
 import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 import {
   deriveAssistantReceipt,
+  deriveLiveWorkstreamCard,
   type AssistantReceiptData,
 } from "@/lib/takyonCeoUpdates";
 import { Tabs, Textarea } from "../composer-ui/lib";
@@ -41,8 +42,84 @@ const Icon = {
   chat: <S d="M2 3.5h12v7H6.5l-3 2.5v-2.5H2z" />,
 };
 
-function siteHost(name: string) {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "") + ".app";
+// Canonical product domain. Product sub-apps are served at
+// `<slug>.fourmanifold.com` (see takyon_cli/web_server._company_base_domain and
+// core._product_publish_target). The address bar must show this real canonical
+// host — never a fabricated `.app` placeholder.
+const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+
+// Canonical expected product host derived from the business slug. Used only as a
+// last-resort fallback when neither the published public_url nor the backend
+// publish_target is available yet.
+function canonicalProductHost(slug: string) {
+  const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
+  return clean ? `${clean}.${PRODUCT_BASE_DOMAIN}` : "";
+}
+
+// Strip scheme/trailing slash so the address bar reads as a clean host+path.
+function addressBarText(url: string) {
+  return (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
+
+function workspaceBusinessName(
+  workspace: TakyonBusinessWorkspaceResponse | null,
+): string {
+  const slug = String(workspace?.business_slug || "").trim();
+  if (!slug) return "This business";
+  return slug
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "This business";
+}
+
+// Durable progress fallback derived from the server-mirrored `live_state`
+// snapshot (status + detail). Used when no live streaming turn is producing a
+// richer in-flight card — e.g. after a reload while a CEO bootstrap job is
+// still running. Presentation-only: it reads the workspace mirror and renders
+// the same CEO-style workstream abstraction, never the agent's turn context.
+function liveStateProgress(
+  workspace: TakyonBusinessWorkspaceResponse | null,
+): ChatProgress | null {
+  const businessName = workspaceBusinessName(workspace);
+  const liveProgress = (
+    statusValue: unknown,
+    ...parts: unknown[]
+  ): ChatProgress | null => {
+    const status = String(statusValue || "").trim().toLowerCase();
+    if (
+      !status
+      || ["done", "completed", "success", "failed", "error", "blocked", "cancelled", "idle"].includes(status)
+    ) {
+      return null;
+    }
+    const detail = parts.map((part) => String(part || "").trim()).find(Boolean);
+    const card = deriveLiveWorkstreamCard({
+      running: true,
+      businessName,
+      statusItems: detail ? [detail] : [],
+      progressLines: [status],
+    });
+    if (card) return { ...card, live: true };
+    return {
+      title: `${businessName} update`,
+      summary:
+        detail
+        || (["queued", "scheduled", "pending"].includes(status)
+          ? "Queued CEO bootstrap job."
+          : "I'm moving this through the next business workstream now."),
+      items: [],
+      live: true,
+    };
+  };
+
+  const state = workspace?.live_state;
+  if (state && typeof state === "object") {
+    const payload = state as Record<string, unknown>;
+    const progress = liveProgress(payload.status, payload.detail);
+    if (progress) return progress;
+  }
+  return null;
 }
 
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
@@ -279,6 +356,7 @@ function AgentChat({
   business,
   messages,
   progress,
+  streamingProgress,
   reviewUrl,
   tab,
   canStop,
@@ -291,6 +369,7 @@ function AgentChat({
   business: LitebulbBusiness;
   messages: ChatMessage[];
   progress: ChatProgress | null;
+  streamingProgress?: ChatProgress | null;
   reviewUrl?: string;
   tab: TabKey;
   canStop: boolean;
@@ -302,11 +381,21 @@ function AgentChat({
 }) {
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-  const visibleMessages = messages.filter((message) => !(message.who === "agent" && message.working));
+  // Live streaming card (from the active turn's tool signals) takes priority;
+  // the durable live_state card (`progress`) is the reload-safe fallback so the
+  // in-flight indicator never disappears between a turn ending and the server
+  // mirror catching up.
+  const liveCard = streamingProgress ?? progress;
+  // Keep every prior message mounted — including the in-flight working agent
+  // message — so the log never blanks or two-stage-flashes at the
+  // thinking→answer transition. The working message streams inline below.
+  const streamingAgent = messages.some(
+    (message) => message.who === "agent" && message.working && Boolean(message.text.trim()),
+  );
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [progress, visibleMessages]);
+  }, [liveCard, messages]);
 
   const submit = () => {
     const text = draft.trim();
@@ -331,8 +420,11 @@ function AgentChat({
       </div>
 
       <div className="lb-chat__log">
-        {visibleMessages.map((message) => {
-          const receipt = message.who === "agent"
+        {messages.map((message) => {
+          // Finished CEO build/publish replies collapse into a structured
+          // receipt; the in-flight working message always streams as plain
+          // markdown + a typing indicator so the transition is seamless.
+          const receipt = message.who === "agent" && !message.working
             ? deriveAssistantReceipt({
                 content: message.text,
                 businessName: business.name,
@@ -345,16 +437,25 @@ function AgentChat({
                 {message.who === "agent"
                   ? receipt
                     ? <AgentReceipt receipt={receipt} />
-                    : <AgentMessageMarkdown text={message.text} />
+                    : (
+                        <>
+                          <AgentMessageMarkdown text={message.text} />
+                          {message.working && (
+                            <span className="lb-msg__work">
+                              <span className="lb-typing"><i /><i /><i /></span>
+                            </span>
+                          )}
+                        </>
+                      )
                   : message.text}
               </div>
             </div>
           );
         })}
-        {progress && (
+        {liveCard && !streamingAgent && (
           <div className="lb-msg lb-msg--agent lb-msg--progress">
             <div className="lb-msg__bubble">
-              <LiveProgressCard progress={progress} />
+              <LiveProgressCard progress={liveCard} />
             </div>
           </div>
         )}
@@ -399,9 +500,22 @@ function ProductPreview({
   publicUrl?: string;
 }) {
   const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
-  const site = publicUrl || siteHost(business.name);
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
+  // Authoritative URL resolution, best-to-fallback:
+  //   1. publicUrl       — the published canonical URL when live.
+  //   2. publish_target  — the backend's canonical expected URL (slug.fourmanifold.com)
+  //                        even before the product is published.
+  //   3. canonical host derived client-side from the slug.
+  // Never fabricate a `.app` placeholder.
+  const publishTarget = typeof product.publish_target === "string" ? product.publish_target : "";
+  const canonicalUrl = publicUrl || publishTarget || (
+    canonicalProductHost(business.slug) ? `https://${canonicalProductHost(business.slug)}/` : ""
+  );
+  const site = addressBarText(canonicalUrl) || canonicalProductHost(business.slug);
+  const addressLink = canonicalUrl || (
+    canonicalProductHost(business.slug) ? `https://${canonicalProductHost(business.slug)}/` : ""
+  );
   const previewAvailable = Boolean(product.preview_available);
   const previewPath = typeof product.preview_path === "string" ? product.preview_path : "product/site";
   const previewStatus = typeof product.preview_status === "string" ? product.preview_status : "";
@@ -437,7 +551,19 @@ function ProductPreview({
       <div className={`lb-browser lb-browser--${device}`}>
         <div className="lb-browser__chrome">
           <span className="lb-traffic"><span /><span /><span /></span>
-          <span className="lb-browser__addr">{site}</span>
+          {addressLink ? (
+            <a
+              className="lb-browser__addr"
+              href={addressLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={addressLink}
+            >
+              {site}
+            </a>
+          ) : (
+            <span className="lb-browser__addr">{site}</span>
+          )}
           <span className="lb-browser__tools">
             <span className="lb-seg2">
               <button className={device === "desktop" ? "is-on" : ""} onClick={() => setDevice("desktop")} aria-label="Desktop">{Icon.monitor}</button>
@@ -525,7 +651,13 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
-  const effectiveProgress = chatProgress;
+  // Live streaming progress (chatProgress, derived from the active turn's tool
+  // signals) takes priority. When no turn is streaming but the server-mirrored
+  // live_state still reports running work (e.g. after a reload during a CEO
+  // bootstrap), fall back to the durable live_state card so the in-flight
+  // indicator never disappears.
+  const effectiveProgress = liveStateProgress(workspace);
+  const liveProgress = chatProgress ?? effectiveProgress;
 
   useEffect(() => {
     setTab("company");
@@ -548,9 +680,10 @@ export function Product({
             business={business}
             messages={chatMessages}
             progress={effectiveProgress}
+            streamingProgress={chatProgress}
             reviewUrl={publicUrl || undefined}
             tab={tab}
-            canStop={sending || Boolean(effectiveProgress?.live)}
+            canStop={sending || Boolean(liveProgress?.live)}
             sending={sending}
             onTab={setTab}
             onClose={() => setChatOpen(false)}

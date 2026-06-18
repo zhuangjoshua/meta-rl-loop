@@ -475,6 +475,21 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://ai.google.dev/pricing",
         pricing_version="google-pricing-2026-03-16",
     ),
+    # Gemini 2.5 Flash Image ("Nano Banana") — billed per generated image, not
+    # per token. Google prices image output at $30 / 1M output tokens with each
+    # image counting as 1290 output tokens ⇒ ~$0.039 / image. Encoded as a
+    # per-request cost so the brand-logo authority route can stamp the exact
+    # provider cost on the receipt. Without an entry here the logo path has no
+    # priced model and stays refused (fail closed, GOAL_RULES §3 inv#1).
+    (
+        "google",
+        "gemini-2.5-flash-image",
+    ): PricingEntry(
+        request_cost=Decimal("0.039"),
+        source="official_docs_snapshot",
+        source_url="https://ai.google.dev/pricing",
+        pricing_version="google-pricing-2026-03-16",
+    ),
     # AWS Bedrock — pricing per the Bedrock pricing page.
     # Bedrock charges the same per-token rates as the model provider but
     # through AWS billing.  These are the on-demand prices (no commitment).

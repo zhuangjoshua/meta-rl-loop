@@ -71,11 +71,14 @@ def _new_conn(pg_conn):
 # ── budget catalog ─────────────────────────────────────────────────────────────────
 
 
-def test_ensure_budget_opens_at_default_cap_and_is_idempotent(pg_conn):
+def test_ensure_budget_opens_with_no_pool_cap_and_is_idempotent(pg_conn):
+    # Invariant 9 (GOAL_RULES §3, migration 0029): a new budget opens with NO per-business pool
+    # cap (hard_limit_microusd = NULL). There is no flat $5 default pool; budget derives from the
+    # active paid subscription's per-subuser included_ai_budget_microusd (the per-subuser gate).
     slug = _business(pg_conn, _owner(pg_conn))
     budget = app_usage.ensure_app_budget(pg_conn, slug)
     assert budget.status == "active"
-    assert budget.hard_limit_microusd == 5_000_000  # documented default
+    assert budget.hard_limit_microusd is None  # no per-business pool cap (sentinel)
     assert isinstance(budget.current_period_start, datetime)
     assert budget.current_period_end > budget.current_period_start
     app_usage.ensure_app_budget(pg_conn, slug)  # second call must not open a second row
@@ -100,13 +103,16 @@ def test_get_budget_is_none_until_opened(pg_conn):
     assert app_usage.get_app_budget(pg_conn, slug) is None
 
 
-def test_summary_for_unopened_budget_reports_missing_at_default(pg_conn):
+def test_summary_for_unopened_budget_reports_missing_with_no_pool(pg_conn):
+    # Invariant 9: a never-opened budget must NOT hand back a free per-business pool. It reports
+    # status 'missing' with NO pool cap (hard_limit/remaining = None) — an unentitled business
+    # has 0 product budget (the per-subuser subscription gate, not a pool, governs spend).
     slug = _business(pg_conn, _owner(pg_conn))
     summary = app_usage.get_usage_summary(pg_conn, slug)
     assert summary["status"] == "missing"
-    assert summary["hard_limit_microusd"] == 5_000_000
+    assert summary["hard_limit_microusd"] is None
     assert summary["committed_microusd"] == 0
-    assert summary["remaining_microusd"] == 5_000_000
+    assert summary["remaining_microusd"] is None
 
 
 def test_set_budget_unknown_business_raises(pg_conn):

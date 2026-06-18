@@ -92,6 +92,95 @@ def test_file_response_injects_html_passes_through_assets(monkeypatch, tmp_path)
 
 
 # --------------------------------------------------------------------------- #
+# Operator-dashboard injection (main app analytics)                            #
+# --------------------------------------------------------------------------- #
+
+
+def _mount_dashboard(monkeypatch, tmp_path, *, litebulb: bool):
+    """Build a real FastAPI app whose static mount serves a fake WEB_DIST."""
+    from fastapi import FastAPI
+
+    ws._UMAMI_SNIPPET_CACHE = None
+    monkeypatch.setattr(ws, "WEB_DIST", tmp_path)
+    monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", litebulb, raising=False)
+    monkeypatch.setattr(
+        ws,
+        "load_config",
+        lambda: {
+            "analytics": {
+                "umami": {
+                    "enabled": True,
+                    "website_id": "DASH-WID",
+                    "script_src": "https://u.example/s.js",
+                }
+            }
+        },
+    )
+
+    (tmp_path / "index.html").write_text(
+        "<html><head><title>Takyon</title></head><body></body></html>",
+        encoding="utf-8",
+    )
+    if litebulb:
+        (tmp_path / "litebulb").mkdir(exist_ok=True)
+        (tmp_path / "litebulb" / "litebulb.html").write_text(
+            "<html><head><title>Workspace</title></head>"
+            '<body><script src="./takyon-adapter.js"></script></body></html>',
+            encoding="utf-8",
+        )
+
+    app = FastAPI()
+    ws.mount_spa(app)
+    return ws, app
+
+
+def test_operator_dashboard_spa_index_includes_umami(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    web_server, app = _mount_dashboard(monkeypatch, tmp_path, litebulb=False)
+    try:
+        client = TestClient(app)
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert 'data-website-id="DASH-WID"' in resp.text
+        assert 'src="https://u.example/s.js"' in resp.text
+    finally:
+        web_server._UMAMI_SNIPPET_CACHE = None
+
+
+def test_operator_dashboard_litebulb_workspace_includes_umami(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    web_server, app = _mount_dashboard(monkeypatch, tmp_path, litebulb=True)
+    try:
+        client = TestClient(app)
+        resp = client.get("/chat")
+        assert resp.status_code == 200
+        assert 'data-website-id="DASH-WID"' in resp.text
+    finally:
+        web_server._UMAMI_SNIPPET_CACHE = None
+
+
+def test_operator_dashboard_omits_umami_when_disabled(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+
+    web_server, app = _mount_dashboard(monkeypatch, tmp_path, litebulb=False)
+    web_server._UMAMI_SNIPPET_CACHE = None
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {"analytics": {"umami": {"enabled": False, "website_id": "DASH-WID"}}},
+    )
+    try:
+        client = TestClient(app)
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "DASH-WID" not in resp.text  # no faked tracking when disabled
+    finally:
+        web_server._UMAMI_SNIPPET_CACHE = None
+
+
+# --------------------------------------------------------------------------- #
 # Minimal Umami client                                                         #
 # --------------------------------------------------------------------------- #
 

@@ -147,6 +147,23 @@ export const api = {
         body: JSON.stringify({ return_path: returnPath }),
       },
     ),
+  listTakyonOperatorBillingPlans: () =>
+    fetchJSON<{ plans: TakyonOperatorPlan[] }>(
+      "/api/takyon/operator/billing/plans",
+    ),
+  listTakyonPublicOperatorPlans: () =>
+    fetchJSON<{ plans: TakyonOperatorPlan[] }>(
+      "/api/takyon/public/operator/plans",
+    ),
+  createTakyonOperatorSubscriptionCheckout: (planId: string, returnPath: string) =>
+    fetchJSON<{ checkout_url?: string; session_id?: string; plan_id?: string; plan_name?: string }>(
+      "/api/takyon/operator/billing/checkout",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan_id: planId, return_path: returnPath }),
+      },
+    ),
   createTakyonOperatorPayoutConnect: (returnPath: string) =>
     fetchJSON<{
       connect_url?: string;
@@ -640,6 +657,19 @@ export interface DashboardAuthStateResponse {
   };
 }
 
+export interface TakyonOperatorPlan {
+  id: string;
+  name: string;
+  description?: string;
+  tagline?: string;
+  weekly_allowance_cents?: number;
+  amount_cents?: number;
+  currency?: string;
+  interval?: string;
+  featured?: boolean;
+  features?: string[];
+}
+
 export interface TakyonOperatorAccountResponse {
   available: boolean;
   user_id?: string;
@@ -652,6 +682,7 @@ export interface TakyonOperatorAccountResponse {
   allowance_percent_remaining?: number | null;
   operator_plan_name?: string | null;
   operator_plan_weekly_allowance_cents?: number | null;
+  operator_plans?: TakyonOperatorPlan[];
   allowance_period_start?: string | null;
   allowance_resets_at?: string | null;
   topup_balance_cents?: number;

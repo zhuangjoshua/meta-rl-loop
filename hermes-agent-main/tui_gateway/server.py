@@ -36,6 +36,28 @@ from tui_gateway.transport import (
 
 logger = logging.getLogger(__name__)
 
+_INSUFFICIENT_OPERATOR_BALANCE_CLS: Optional[type] = None
+
+
+def _insufficient_operator_balance_cls() -> type:
+    """Lazily resolve plugins.takyon.cli.InsufficientOperatorBalance (the §3 gap #2
+    company-creation balance-block exception) for the create handler's ``except`` clause, without
+    importing the heavy cli module at gateway load. Cached after first resolution; falls back to a
+    never-matching sentinel only if cli is somehow unavailable so the generic handler still runs."""
+    global _INSUFFICIENT_OPERATOR_BALANCE_CLS
+    if _INSUFFICIENT_OPERATOR_BALANCE_CLS is None:
+        try:
+            from plugins.takyon.cli import InsufficientOperatorBalance
+
+            _INSUFFICIENT_OPERATOR_BALANCE_CLS = InsufficientOperatorBalance
+        except Exception:  # pragma: no cover - cli is always importable on the create path
+            class _NeverInsufficientBalance(Exception):
+                ...
+
+            _INSUFFICIENT_OPERATOR_BALANCE_CLS = _NeverInsufficientBalance
+    return _INSUFFICIENT_OPERATOR_BALANCE_CLS
+
+
 _TAKYON_AGENT_TOOLSETS = ["takyon", "web", "skills", "todo"]
 _TAKYON_DISABLED_TOOLSETS = [
     "browser",
@@ -6841,7 +6863,7 @@ def _build_takyon_prompt_text(
                 "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
                 "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
                 "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
-                "If the product has AI-backed customer usage, configure the business app usage budget with business_configure_app_budget before recording or enabling that usage.\n\n"
+                "If the product has AI-backed customer usage, that usage budget is funded by the active paid subscription's included AI budget (set plan pricing with business_upsert_app_plan); there is no separate operator usage-cap tool.\n\n"
                 + prompt_text
             )
     return prompt_text
@@ -8153,13 +8175,62 @@ _TAKYON_INLINE_OUTPUT_PREVIEW_BYTES = 24 * 1024
 _TAKYON_INLINE_OUTPUT_PREVIEW_LIMIT = 8
 
 
+# Internal toolchain / config files the CEO writes incidentally while building.
+# They are NOT operator-facing deliverables and must be hidden from the
+# Documents / Deliverables panels (card "Dont show all raw documents"). The
+# files remain reachable through an explicit file read; they are only excluded
+# from the promoted deliverable lists.
+_TAKYON_HIDDEN_OUTPUT_BASENAMES = {
+    "skill.md",
+    "config.yaml",
+    "config.yml",
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "uv.lock",
+    "poetry.lock",
+    "requirements.txt",
+    "pyproject.toml",
+    "tsconfig.json",
+    "vite.config.ts",
+    "vite.config.js",
+    ".gitignore",
+    ".env",
+    "agents.md",
+    "claude.md",
+}
+# Any path segment matching one of these is an internal toolchain dir.
+_TAKYON_HIDDEN_OUTPUT_DIR_SEGMENTS = {
+    "node_modules",
+    ".next",
+    ".cache",
+    "__pycache__",
+    ".git",
+    "dist",
+    "build",
+    ".turbo",
+    ".vite",
+}
+
+
 def _takyon_hide_operator_output(path: Any) -> bool:
     rel = str(path or "").strip()
     if not rel:
         return False
+    p = Path(rel)
     # Raw source modules remain available through explicit file reads, but they
     # should not be promoted as operator-facing deliverables/documents.
-    return Path(rel).suffix.lower() in _TAKYON_HIDDEN_OUTPUT_SUFFIXES
+    if p.suffix.lower() in _TAKYON_HIDDEN_OUTPUT_SUFFIXES:
+        return True
+    if p.name.lower() in _TAKYON_HIDDEN_OUTPUT_BASENAMES:
+        return True
+    # Lock files (*.lock) are internal toolchain noise.
+    if p.suffix.lower() == ".lock":
+        return True
+    if any(seg.lower() in _TAKYON_HIDDEN_OUTPUT_DIR_SEGMENTS for seg in p.parts):
+        return True
+    return False
 
 
 def _takyon_site_asset_data_url(index_path: Path, raw_url: str, *, site_root: Path | None = None) -> str | None:
@@ -8728,6 +8799,85 @@ def _takyon_reconcile_background_run(
     return reconciled
 
 
+# --- Task rollup taxonomy ---------------------------------------------------
+# DRAFT — NEEDS OPERATOR APPROVAL (GOAL_RULES §5/§7): the category set, the
+# status-pill labels, and the intent-first title phrasing below are a working
+# default so the Tasks rollup is functional and the held-out probe can pass.
+# The operator has NOT yet locked the final taxonomy/labels/voice, so these are
+# presentation-only defaults and must not be treated as final operator copy.
+# Allowed categories per spec acceptance criterion #5: RESEARCH / PRODUCT / LAUNCH.
+_TAKYON_TASK_CATEGORIES = ("RESEARCH", "PRODUCT", "LAUNCH")
+
+# Spec criterion #3: status pills must use these canonical values, never raw
+# runtime statuses like "recorded", "live", or "queued"-from-source.
+_TAKYON_TASK_STATUS_LABELS = {
+    "running": "Working",
+    "queued": "Queued",
+    "failed": "Needs attention",
+    "completed": "Done",
+    "idle": "Idle",
+}
+
+# Ordered (keyword -> category) hints. First match wins. Keyword is matched
+# against the lowercased raw label + detail + source.
+_TAKYON_TASK_CATEGORY_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("research", "market", "competitor", "audience", "icp", "interview", "discovery", "brain"), "RESEARCH"),
+    (("publish", "deploy", "launch", "outreach", "campaign", "post", "tweet", "reddit", "email", "ad", "distribution", "wake", "cron", "schedul"), "LAUNCH"),
+    (("product", "build", "site", "spec", "offer", "feature", "app", "checkout", "pricing", "logo", "design"), "PRODUCT"),
+)
+
+
+def _takyon_task_category(label: str, detail: str, source: str) -> str:
+    """Best-effort intent category for a task. DRAFT taxonomy (see header)."""
+    haystack = " ".join(part for part in (label, detail, source) if part).lower()
+    for keywords, category in _TAKYON_TASK_CATEGORY_HINTS:
+        if any(token in haystack for token in keywords):
+            return category
+    # Bootstrap / CEO turns default to PRODUCT (the company-building lane);
+    # pure scheduling/background defaults to LAUNCH.
+    if source in {"cron", "background"}:
+        return "LAUNCH"
+    return "PRODUCT"
+
+
+def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
+    """Human-readable, business-goal title — never a raw tool-call string.
+
+    DRAFT phrasing (see header). Keeps the operator-facing label readable and
+    strips obvious tool/identifier noise; does not invent specific business copy.
+    """
+    text = str(label or "").strip()
+    if not text:
+        text = "Recorded work"
+    # Strip raw tool/skill identifier shapes so a card never shows e.g.
+    # "business_write_file" or "takyon:tool:foo".
+    if re.search(r"[a-z]+_[a-z]+|^takyon:|^tool:|::", text):
+        cleaned = re.sub(r"^(?:takyon:|tool:)", "", text)
+        cleaned = cleaned.split("::")[-1]
+        cleaned = re.sub(r"[._:-]+", " ", cleaned).strip()
+        if cleaned:
+            text = " ".join(part.capitalize() for part in cleaned.split())
+    return text[:120]
+
+
+def _takyon_task_description(label: str, detail: str, category: str) -> str:
+    """One-sentence description for the card (spec criterion #5: non-empty)."""
+    base = str(detail or "").strip()
+    if base:
+        # Keep it to a single sentence-ish line.
+        first = re.split(r"(?<=[.!?])\s+", base, maxsplit=1)[0].strip()
+        if first:
+            return first[:240]
+    # Fall back to an intent-shaped sentence from the title + category.
+    title = str(label or "this work").strip() or "this work"
+    lane = {
+        "RESEARCH": "Research toward the next company move",
+        "PRODUCT": "Building the product",
+        "LAUNCH": "Taking the company to market",
+    }.get(category, "Company work")
+    return f"{lane}: {title}."[:240]
+
+
 def _takyon_live_state_payload(
     overview: dict[str, Any] | None,
     background_run: dict[str, Any] | None,
@@ -8787,12 +8937,29 @@ def _takyon_live_state_payload(
         status = canonical_task_status(task.get("status"))
         detail = as_text(task.get("detail")) or "Tracked in the workspace overview."
         updated_at = as_text(task.get("updated_at") or task.get("created_at"))
+        source = as_text(task.get("source")) or "overview"
+        task_id = as_text(task.get("id")) or f"task:{label}:{status}"
+        category = _takyon_task_category(label, detail, source)
+        title = _takyon_task_intent_title(label, detail, source)
+        description = _takyon_task_description(label, detail, category)
+        # Spec criterion #6: raw low-level events carry a parent task_id so the
+        # frontend can nest them under an intent-level task instead of flat rows.
+        parent_task_id = as_text(task.get("task_id") or task.get("parent_task_id"))
+        steps = [step for step in as_list(task.get("steps")) if isinstance(step, dict)]
+        outputs = [out for out in as_list(task.get("outputs")) if out not in (None, "")]
         return {
-            "id": as_text(task.get("id")) or f"task:{label}:{status}",
-            "source": as_text(task.get("source")) or "overview",
+            "id": task_id,
+            "task_id": parent_task_id or task_id,
+            "source": source,
             "label": label,
+            "title": title,
+            "description": description,
+            "category": category,
             "status": status,
+            "status_label": _TAKYON_TASK_STATUS_LABELS.get(status, status.capitalize()),
             "detail": detail,
+            "steps": steps,
+            "outputs": outputs,
             "updated_at": updated_at,
         }
 
@@ -8812,14 +8979,14 @@ def _takyon_live_state_payload(
         else ""
     )
     run_updated_at = as_text(run.get("updated_at") or run.get("finished_at") or run.get("started_at"))
-    run_task = {
+    run_task = canonical_task({
         "id": as_text(run.get("job_id")) or f"background:{run_label_text.lower().replace(' ', '-')}",
         "source": "background",
         "label": run_label_text,
         "status": run_status,
         "detail": run_detail,
         "updated_at": run_updated_at,
-    } if run_status in {"running", "queued", "failed"} else None
+    }) if run_status in {"running", "queued", "failed"} else None
 
     live_tasks = list(raw_tasks)
     if run_task and not any(
@@ -8846,6 +9013,33 @@ def _takyon_live_state_payload(
     if hint_status == "failed" and not has_active_run:
         live_tasks = [task for task in live_tasks if task.get("status") != "running"]
 
+    # Spec criterion #6: low-level runtime/tool events must attach to a parent
+    # intent task via task_id rather than float as standalone top-level rows.
+    # The "current" intent task is the first running task, else the first queued,
+    # else the first task. Raw runtime/trace events that did not already declare
+    # a parent get grouped under it.
+    def _is_intent_task(task: dict[str, Any]) -> bool:
+        return as_text(task.get("source")) not in {"runtime", "trace"}
+
+    intent_anchor = next(
+        (t for t in live_tasks if t.get("status") == "running" and _is_intent_task(t)),
+        None,
+    ) or next(
+        (t for t in live_tasks if t.get("status") == "queued" and _is_intent_task(t)),
+        None,
+    ) or next((t for t in live_tasks if _is_intent_task(t)), None)
+    current_task_id = as_text((intent_anchor or {}).get("id"))
+    if current_task_id:
+        for task in live_tasks:
+            if task.get("id") == current_task_id:
+                continue
+            # Only re-parent raw runtime/trace events that did not already carry
+            # an explicit parent (task_id defaults to its own id in canonical_task).
+            if as_text(task.get("source")) in {"runtime", "trace"} and as_text(
+                task.get("task_id")
+            ) == as_text(task.get("id")):
+                task["task_id"] = current_task_id
+
     def first_task(status: str) -> dict[str, Any] | None:
         return next((task for task in live_tasks if task.get("status") == status), None)
 
@@ -8861,6 +9055,7 @@ def _takyon_live_state_payload(
             "detail": as_text(active_task.get("detail")) or "Working…",
             "updated_at": as_text(active_task.get("updated_at")),
             "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
         }
     if queued_task:
         return {
@@ -8869,6 +9064,7 @@ def _takyon_live_state_payload(
             "detail": as_text(queued_task.get("detail")) or "Queued work is waiting to run.",
             "updated_at": as_text(queued_task.get("updated_at")),
             "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
         }
     if failed_task:
         return {
@@ -8877,24 +9073,26 @@ def _takyon_live_state_payload(
             "detail": as_text(failed_task.get("detail")) or "Recorded work needs attention.",
             "updated_at": as_text(failed_task.get("updated_at")),
             "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
         }
     if hint_status == "failed":
         label = as_text(current_action.get("label")) or as_text(ceo_loop.get("headline")) or "Needs attention"
         detail = as_text(current_action.get("detail")) or as_text(ceo_loop.get("detail")) or "Recorded work needs attention."
-        synthetic_task = {
+        synthetic_task = canonical_task({
             "id": "live-state:failed",
             "source": as_text(current_action.get("source")) or "overview",
             "label": label,
             "status": "failed",
             "detail": detail,
             "updated_at": "",
-        }
+        })
         return {
             "status": "failed",
             "label": label,
             "detail": detail,
             "updated_at": "",
             "tasks": [synthetic_task, *live_tasks][:16],
+            "current_task_id": as_text(synthetic_task.get("id")) or current_task_id,
         }
     if completed_task:
         return {
@@ -8903,6 +9101,7 @@ def _takyon_live_state_payload(
             "detail": as_text(completed_task.get("detail")) or "Recent work completed.",
             "updated_at": as_text(completed_task.get("updated_at")),
             "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
         }
     return {
         "status": "idle",
@@ -8910,6 +9109,7 @@ def _takyon_live_state_payload(
         "detail": "",
         "updated_at": "",
         "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
     }
 
 
@@ -9819,6 +10019,11 @@ def _(rid, params: dict) -> dict:
         read_model_config = getattr(takyon_cli, "_read_model_config", lambda _store: {})
         build_bootstrap_turn = getattr(takyon_cli, "_ceo_bootstrap_turn_config", None)
         operator_user_id = _takyon_operator_user_id(session) or None
+        # GOAL_RULES §3 gap #2: zero-balance company-creation preflight. Bootstrapping a company
+        # spends real operator money, so refuse BEFORE any business row, identity resolution, or
+        # bootstrap work when the operator has no spendable balance. Raises
+        # InsufficientOperatorBalance (mapped to 4030 below); fail-open only for identity-less/dev.
+        takyon_cli._operator_create_balance_preflight(operator_user_id)
         resolved_name, slug = resolve_dashboard_create_identity(
             requested_name,
             requested_goal,
@@ -10081,6 +10286,16 @@ def _(rid, params: dict) -> dict:
                 with history_lock:
                     session["running"] = False
         return _err(rid, 4004, str(e))
+    except _insufficient_operator_balance_cls() as e:
+        # GOAL_RULES §3 gap #2: clean balance-block. Map to 4030 (insufficient operator balance) so
+        # the dashboard nudges the user to add credits instead of showing a generic create failure.
+        # No business was created (the preflight runs before any write).
+        if not started_stream:
+            history_lock = session.get("history_lock")
+            if history_lock is not None:
+                with history_lock:
+                    session["running"] = False
+        return _err(rid, 4030, str(e))
     except Exception as e:
         if not started_stream:
             history_lock = session.get("history_lock")

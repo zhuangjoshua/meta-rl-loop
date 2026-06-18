@@ -43,6 +43,16 @@ class TopupCheckoutRequest(BaseModel):
     cancel_url: str = Field(..., min_length=1)
 
 
+class OperatorSubscriptionCheckoutRequest(BaseModel):
+    """Body for POST /v1/billing/subscription/checkout. `plan_id` selects one configured
+    operator tier; the server maps it to the tier's Stripe price (the caller never supplies
+    a price or amount, so a tier's economic terms cannot be substituted)."""
+
+    plan_id: str = Field(..., min_length=1)
+    success_url: str = Field(..., min_length=1)
+    cancel_url: str = Field(..., min_length=1)
+
+
 class CreativeCreditCheckoutRequest(BaseModel):
     """Body for POST /v1/businesses/{slug}/creative-credits/checkout."""
 
@@ -321,6 +331,194 @@ def _fallback_operator_plan_name() -> str:
 
 def _fallback_operator_weekly_allowance_cents() -> int:
     return _env_nonnegative_int("TAKYON_OPERATOR_DEFAULT_WEEKLY_ALLOWANCE_CENTS", 10_000)
+
+
+def operator_plan_name_for_business(conn, business_slug: str) -> str | None:
+    """PURE READ — the operator (business owner)'s effective plan name, for entitlement gates such
+    as the wake-cadence floor. NO side effects: it never touches Stripe, never grants allowance,
+    never writes billing rows (unlike ``sync_operator_subscription_allowance``).
+
+    Resolution is deliberately conservative and fail-restrictive: it reads the cached
+    ``operator_billing_subscription_status`` from the owner's ``users`` row. Only when that status
+    is allowance-bearing (active/trialing) does it return the configured plan name
+    (``TAKYON_OPERATOR_DEFAULT_PLAN_NAME``, default ``DEV``); otherwise — no business, no owner, no
+    active subscription, or a plan DOWNGRADE that dropped the subscription — it returns ``None`` so
+    the caller applies the most-restrictive floor. This makes a downgrade TIGHTEN the wake-cadence
+    floor, never loosen it (Cron-scheduling acceptance #5)."""
+    row = conn.execute(
+        "select u.operator_billing_subscription_status "
+        "from businesses b join users u on u.id = b.owner_user_id "
+        "where b.slug = %s",
+        (business_slug,),
+    ).fetchone()
+    if row is None:
+        return None
+    status = str(row[0] or "none").strip().lower() or "none"
+    if status not in _ALLOWANCE_BEARING_SUBSCRIPTION_STATUSES:
+        return None
+    return _fallback_operator_plan_name()
+
+
+def _operator_plan_catalog() -> list[dict[str, Any]]:
+    """Configured operator subscription tiers from `TAKYON_OPERATOR_PLANS_JSON`.
+
+    Multi-tier operator billing is BUY-not-build (GOAL_RULES §4): every tier maps to a
+    real Stripe Price (`price_id`) on a Stripe Product, and the recurring allowance/plan
+    name ride as price metadata that `sync_operator_subscription_allowance` already
+    resolves (`takyon_plan_name` / `takyon_allowance_weekly_cents`). This catalog is the
+    operator-facing menu the dashboard renders and the checkout endpoint validates a
+    chosen tier against; it never invents a price the operator did not configure in Stripe.
+
+    Shape: a JSON array of objects with `id` (stable tier key), `price_id` (Stripe price),
+    and `name`, plus optional `description`, `weekly_allowance_cents`, `amount_cents`,
+    `interval`, `featured`, `tagline`, and `features` (string list). Invalid/missing config
+    yields an empty catalog rather than crashing the boundary. As a single-tier
+    compatibility fallback, an unset catalog with `STRIPE_PRICE_PLATFORM_MONTHLY` present
+    synthesizes one default tier so the existing single price keeps working.
+    """
+    raw = _env_value("TAKYON_OPERATOR_PLANS_JSON")
+    plans: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                plan_id = str(item.get("id") or "").strip()
+                price_id = str(item.get("price_id") or item.get("priceId") or "").strip()
+                if not plan_id or not price_id or plan_id in seen:
+                    continue
+                seen.add(plan_id)
+                feature_list = item.get("features")
+                features = (
+                    [str(f).strip() for f in feature_list if str(f).strip()]
+                    if isinstance(feature_list, list)
+                    else []
+                )
+                try:
+                    weekly_allowance_cents = max(0, int(item.get("weekly_allowance_cents") or 0))
+                except (TypeError, ValueError):
+                    weekly_allowance_cents = 0
+                try:
+                    amount_cents = max(0, int(item.get("amount_cents") or 0))
+                except (TypeError, ValueError):
+                    amount_cents = 0
+                plans.append(
+                    {
+                        "id": plan_id,
+                        "price_id": price_id,
+                        "name": str(item.get("name") or plan_id),
+                        "description": str(item.get("description") or ""),
+                        "tagline": str(item.get("tagline") or ""),
+                        "weekly_allowance_cents": weekly_allowance_cents,
+                        "amount_cents": amount_cents,
+                        "currency": str(item.get("currency") or "usd").lower(),
+                        "interval": str(item.get("interval") or "month").lower(),
+                        "featured": bool(item.get("featured")),
+                        "features": features,
+                    }
+                )
+    if plans:
+        return plans
+    # Single-tier compatibility: surface the legacy single price as one default tier so a
+    # not-yet-multi-tier deployment still has a wired, checkout-able operator plan.
+    legacy_price = _env_value("STRIPE_PRICE_PLATFORM_MONTHLY")
+    if legacy_price:
+        return [
+            {
+                "id": "platform-monthly",
+                "price_id": legacy_price,
+                "name": _fallback_operator_plan_name() or "Platform",
+                "description": "",
+                "tagline": "",
+                "weekly_allowance_cents": _fallback_operator_weekly_allowance_cents(),
+                "amount_cents": 0,
+                "currency": "usd",
+                "interval": "month",
+                "featured": True,
+                "features": [],
+            }
+        ]
+    return []
+
+
+def configured_operator_plans() -> list[dict[str, Any]]:
+    """Return the configured operator subscription tiers for shared UI/read paths."""
+    return _operator_plan_catalog()
+
+
+def _operator_plan(plan_id: str) -> dict[str, Any] | None:
+    target = str(plan_id or "").strip()
+    if not target:
+        return None
+    for plan in _operator_plan_catalog():
+        if plan["id"] == target:
+            return plan
+    return None
+
+
+def create_operator_subscription_checkout_session(
+    user_id: str,
+    *,
+    plan_id: str | None = None,
+    price_id: str | None = None,
+    success_url: str,
+    cancel_url: str,
+    customer_id: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create a Stripe subscription-mode Checkout session for an operator tier.
+
+    The caller selects a tier by `plan_id` (validated against the configured catalog) or,
+    as a compatibility path, a raw catalog `price_id`. We stamp `takyon_plan_name` and
+    `takyon_allowance_weekly_cents` onto the subscription metadata so the billing webhook +
+    `sync_operator_subscription_allowance` settle the allowance for the chosen tier exactly
+    once. Money authority stays in Stripe (the price) and the existing allowance ledger;
+    this only routes the operator to the hosted checkout for a tier they picked.
+    """
+    plan: dict[str, Any] | None
+    if plan_id:
+        plan = _operator_plan(plan_id)
+        if plan is None:
+            raise LookupError(f"unknown_operator_plan:{plan_id}")
+    elif price_id:
+        target = str(price_id).strip()
+        plan = next(
+            (p for p in _operator_plan_catalog() if p["price_id"] == target),
+            None,
+        )
+        if plan is None:
+            raise LookupError(f"unknown_operator_plan_price:{price_id}")
+    else:
+        raise ValueError("plan_id or price_id is required")
+
+    params: dict[str, Any] = {
+        "mode": "subscription",
+        "client_reference_id": user_id,
+        "success_url": success_url,
+        "cancel_url": cancel_url,
+        "line_items[0][price]": plan["price_id"],
+        "line_items[0][quantity]": 1,
+        "metadata[purpose]": "operator_subscription",
+        "metadata[user_id]": user_id,
+        "metadata[takyon_plan_id]": plan["id"],
+        "metadata[takyon_plan_name]": plan["name"],
+        "subscription_data[metadata][purpose]": "operator_subscription",
+        "subscription_data[metadata][user_id]": user_id,
+        "subscription_data[metadata][takyon_plan_id]": plan["id"],
+        "subscription_data[metadata][takyon_plan_name]": plan["name"],
+    }
+    if int(plan.get("weekly_allowance_cents") or 0) > 0:
+        weekly = int(plan["weekly_allowance_cents"])
+        params["metadata[takyon_allowance_weekly_cents]"] = weekly
+        params["subscription_data[metadata][takyon_allowance_weekly_cents]"] = weekly
+    if customer_id:
+        params["customer"] = customer_id
+    session = stripe_util.stripe_request("checkout/sessions", params)
+    return session, plan
 
 
 def _pick_operator_subscription(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1244,6 +1442,70 @@ def build_control_router() -> APIRouter:
                 ) from exc
             raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
 
+    @router.get("/billing/plans")
+    def list_operator_plans(
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+    ) -> dict[str, Any]:
+        """The operator subscription tier menu (multi-tier). Each entry carries a stable
+        `id`, display fields, and the recurring allowance the tier confers — the price_id is
+        deliberately NOT exposed to the caller (checkout selects by `id` server-side, so a
+        caller can never substitute an arbitrary Stripe price)."""
+        plans = [
+            {
+                "id": plan["id"],
+                "name": plan["name"],
+                "description": plan["description"],
+                "tagline": plan["tagline"],
+                "weekly_allowance_cents": int(plan["weekly_allowance_cents"] or 0),
+                "amount_cents": int(plan["amount_cents"] or 0),
+                "currency": plan["currency"],
+                "interval": plan["interval"],
+                "featured": bool(plan["featured"]),
+                "features": list(plan["features"]),
+            }
+            for plan in configured_operator_plans()
+        ]
+        return {"plans": plans}
+
+    @router.post("/billing/subscription/checkout")
+    def create_operator_subscription_checkout(
+        body: OperatorSubscriptionCheckoutRequest,
+        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
+        conn=Depends(get_control_conn),
+    ) -> dict[str, Any]:
+        """Start a Stripe subscription checkout for the CALLER on a chosen operator tier.
+        The tier is resolved server-side from the configured catalog (`plan_id`); the price
+        the operator pays is the Stripe price on that tier, never a caller-supplied amount.
+        Requires STRIPE_SECRET_KEY; absent ⇒ 503 (never a faked URL)."""
+        try:
+            customer = ensure_operator_billing_customer(conn, principal.user_id)
+            session, plan = create_operator_subscription_checkout_session(
+                principal.user_id,
+                plan_id=body.plan_id,
+                success_url=body.success_url,
+                cancel_url=body.cancel_url,
+                customer_id=str(customer.get("id") or "").strip() or None,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="unknown_operator_plan") from exc
+        except ValueError as exc:
+            if "operator_email_unavailable" in str(exc):
+                raise HTTPException(status_code=409, detail="operator_email_unavailable") from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except stripe_util.StripeError as exc:
+            msg = str(exc)
+            if "STRIPE_SECRET_KEY" in msg:
+                raise HTTPException(
+                    status_code=503, detail="operator_subscription_unconfigured"
+                ) from exc
+            raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
+        return {
+            "checkout_url": session.get("url"),
+            "session_id": session.get("id"),
+            "plan_id": plan["id"],
+            "plan_name": plan["name"],
+        }
+
     @router.post("/billing/topup/checkout")
     def create_topup_checkout(
         body: TopupCheckoutRequest,
@@ -1330,6 +1592,41 @@ def build_control_router() -> APIRouter:
         if session.get("payment_status") not in ("paid", "no_payment_required"):
             return {"ok": True, "ignored": "unpaid"}
         purpose = str(metadata.get("purpose") or "")
+        if purpose == "operator_subscription":
+            # Subscription-mode checkout completed: settle the chosen tier's allowance for
+            # the operator. The customer.subscription.created event ALSO fires and syncs;
+            # this branch makes the checkout completion alone sufficient and idempotent —
+            # grant_allowance is keyed on the week+subscription, so the two paths converge.
+            checkout_customer_id = _stripe_customer_id(session.get("customer"))
+            user_id = str(
+                session.get("client_reference_id") or metadata.get("user_id") or ""
+            ).strip()
+            if not user_id and checkout_customer_id:
+                user_id = _resolve_operator_user_id_from_customer(conn, checkout_customer_id) or ""
+            if not user_id:
+                return {"ok": True, "ignored": "unknown_operator_customer"}
+            # Persist the checkout's Stripe customer so the refresh below can find the new
+            # subscription on Stripe (the operator may not have had a cached customer yet).
+            if checkout_customer_id:
+                billing.open_billing_account(conn, user_id)
+                existing_customer = str(
+                    _read_operator_billing_row(conn, user_id)[1] or ""
+                ).strip()
+                if existing_customer != checkout_customer_id:
+                    _persist_operator_billing_identity(
+                        conn, user_id, customer_id=checkout_customer_id
+                    )
+            state = sync_operator_subscription_allowance(conn, user_id, refresh_live=True)
+            return {
+                "ok": True,
+                "user_id": user_id,
+                "subscription_id": state.subscription_id,
+                "subscription_status": state.subscription_status,
+                "plan_name": state.plan_name,
+                "weekly_allowance_cents": state.weekly_allowance_cents,
+                "allowance_resets_at": state.allowance_resets_at,
+                "event_id": event_id,
+            }
         if purpose in {"creative_credit_pack", "creative_credit_topup"}:
             business_slug = str(
                 metadata.get("business_slug") or session.get("client_reference_id") or ""
