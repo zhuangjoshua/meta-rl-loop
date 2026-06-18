@@ -23626,14 +23626,13 @@ def _reserve_operator_task_budget(
             except billing.InsufficientBalance as exc:
                 raise TakyonError(
                     "operator budget exhausted: "
-                    f"need {exc.estimate_cents}c, allowance {exc.allowance_available_cents}c "
-                    f"+ topup {exc.topup_available_cents}c"
+                    f"need {exc.estimate_cents}c, allowance {exc.allowance_available_cents}c"
                 ) from exc
     return {
         "source": "operator_billing",
         "operator_user_id": user_id,
         "reservation_key": reservation.key,
-        "reserved_cents": int(reservation.allowance_cents + reservation.topup_cents),
+        "reserved_cents": int(reservation.allowance_cents),
         "status": "reserved",
     }
 
@@ -23690,7 +23689,6 @@ def _finalize_operator_task_budget(
         "charged_cents": charged_cents,
         "status": status,
         "allowance_remaining_cents": int(balances.allowance_remaining_cents),
-        "topup_balance_cents": int(balances.topup_balance_cents),
     }
 
 

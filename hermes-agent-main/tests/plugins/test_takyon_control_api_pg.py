@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from plugins.takyon import billing, business_credits, custody, safebox, stripe_util  # noqa: E402
 from plugins.takyon.control_api import (  # noqa: E402
     build_control_router,
+    configured_operator_plans,
     get_control_conn,
     sync_operator_subscription_allowance,
 )
@@ -50,9 +51,10 @@ def _add_business(conn, owner_id, name="Acme") -> str:
 def _topup_event(
     user_id, *, amount=2000, event_id=None, purpose="takyon_topup", payment_status="paid"
 ) -> dict:
-    """A Stripe checkout.session.completed shaped exactly like what the topup checkout
-    session produces — client_reference_id + metadata.purpose are how the webhook maps the
-    payment back to the user."""
+    """A Stripe checkout.session.completed shaped like a legacy à-la-carte topup session.
+    The operator topup buy path was removed 2026-06-18, so this purpose is now UNHANDLED by
+    the webhook — it survives only to prove the webhook ignores it (and any unknown purpose)
+    without crediting anything. client_reference_id + metadata are still the user mapping."""
     return {
         "id": event_id or f"evt_{uuid.uuid4().hex}",
         "type": "checkout.session.completed",
@@ -103,7 +105,7 @@ def _creative_credit_event(
 
 
 def _post_webhook(client, event: dict, secret: str):
-    """POST a locally-signed event to the topup webhook (no Stripe, no network)."""
+    """POST a locally-signed event to the control-plane billing webhook (no Stripe, no network)."""
     body = json.dumps(event)
     return client.post(
         "/v1/billing/webhook",
@@ -453,48 +455,45 @@ def test_read_path_runs_resolver_and_stamps_last_used(client, pg_conn):
     assert after is not None
 
 
-# --- Phase 3: flow-A topup checkout + webhook -------------------------------------
+# --- Phase 3: flow-A operator money rail (allowance-only; topup buy path REMOVED) ----
+#
+# The à-la-carte operator topup checkout endpoint was deleted 2026-06-18 — the operator
+# money rail is allowance-only (funded by the operator subscription tier), so there is no
+# longer any /v1/billing/topup/checkout route. These tests pin that the route is GONE: a
+# POST to it 404s with no Stripe work, and no faked URL is ever returned. Operator funding
+# now flows through /v1/billing/subscription/checkout + the operator_subscription webhook.
 
-def test_topup_checkout_requires_bearer(client):
-    # Valid body, no auth -> the boundary refuses before any Stripe work.
+def test_topup_checkout_route_is_gone(client):
+    # No auth header: a removed route 404s on path matching, BEFORE the auth dependency —
+    # so this can never leak a 401 that would imply the endpoint still exists.
     resp = client.post(
         "/v1/billing/topup/checkout",
         json={"amount_cents": 1000, "success_url": "https://x/ok", "cancel_url": "https://x/no"},
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 404
 
 
-def test_topup_checkout_rejects_nonpositive_amount(client, pg_conn):
+def test_topup_checkout_route_is_gone_even_with_valid_bearer(client, pg_conn):
+    # A valid operator key does not resurrect the deleted endpoint: still 404, and the body
+    # is never validated (no 422), because there is no route to bind the body to.
     uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
     resp = client.post(
         "/v1/billing/topup/checkout",
         headers=_auth(raw),
         json={"amount_cents": 0, "success_url": "https://x/ok", "cancel_url": "https://x/no"},
     )
-    assert resp.status_code == 422  # pydantic gt=0
+    assert resp.status_code == 404
 
 
-def test_topup_checkout_blocked_without_stripe_key(client, pg_conn, monkeypatch):
-    # Missing STRIPE_SECRET_KEY must block (503) with a reason, never fake a URL.
-    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
-    uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
-    resp = client.post(
-        "/v1/billing/topup/checkout",
-        headers=_auth(raw),
-        json={"amount_cents": 1000, "success_url": "https://x/ok", "cancel_url": "https://x/no"},
-    )
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == "topup_unconfigured"
-
-
-def test_topup_checkout_returns_url_and_tags_user(client, pg_conn, monkeypatch):
+def test_topup_checkout_route_never_calls_stripe(client, pg_conn, monkeypatch):
+    # The removed endpoint must not reach Stripe at all — even with a key configured, the
+    # 404 happens at routing, so stripe_request is never invoked and no URL is faked.
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
     uid, _, raw = provision_user_on_first_login(pg_conn, _sub())
-    captured: dict = {}
+    calls: list[tuple] = []
 
-    def _fake_request(path, params):
-        captured["path"] = path
-        captured["params"] = params
+    def _fake_request(path, params, *args, **kwargs):
+        calls.append((path, params))
         return {"id": "cs_test_1", "url": "https://checkout.stripe.com/c/cs_test_1"}
 
     monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
@@ -507,17 +506,68 @@ def test_topup_checkout_returns_url_and_tags_user(client, pg_conn, monkeypatch):
             "cancel_url": "https://app.example.com/no",
         },
     )
+    assert resp.status_code == 404
+    assert calls == []
+
+
+def test_operator_subscription_checkout_is_the_funding_path(client, pg_conn, monkeypatch):
+    # The replacement for the deleted topup buy path: operator funding is the SUBSCRIPTION
+    # checkout, which tags the session for the operator_subscription webhook (NOT takyon_topup)
+    # and resolves the Stripe price server-side from the chosen tier — never a caller amount.
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    monkeypatch.setenv(
+        "TAKYON_OPERATOR_PLANS_JSON",
+        json.dumps(
+            [
+                {
+                    "id": "builder",
+                    "price_id": "price_builder_1",
+                    "name": "Builder",
+                    "weekly_allowance_cents": 10_000,
+                }
+            ]
+        ),
+    )
+    uid, _, raw = provision_user_on_first_login(pg_conn, _sub(), "owner@example.com")
+    plan = configured_operator_plans()[0]
+    plan_id = plan["id"]
+    assert plan_id == "builder"
+    captured: dict = {}
+
+    def _fake_request(path, params, *args, **kwargs):
+        captured.setdefault("calls", []).append((path, dict(params)))
+        if path == "customers/search":
+            return {"data": []}  # no existing customer -> ensure creates one
+        if path == "customers":
+            return {"id": "cus_op_1"}
+        if path == "checkout/sessions":
+            captured["path"] = path
+            captured["params"] = params
+            return {"id": "cs_sub_1", "url": "https://checkout.stripe.com/c/cs_sub_1"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(stripe_util, "stripe_request", _fake_request)
+    resp = client.post(
+        "/v1/billing/subscription/checkout",
+        headers=_auth(raw),
+        json={
+            "plan_id": plan_id,
+            "success_url": "https://app.example.com/ok",
+            "cancel_url": "https://app.example.com/no",
+        },
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["checkout_url"] == "https://checkout.stripe.com/c/cs_test_1"
-    assert body["amount_cents"] == 2500
-    # The session is tagged so the webhook can credit the right user, once.
+    assert body["checkout_url"] == "https://checkout.stripe.com/c/cs_sub_1"
+    assert body["plan_id"] == plan_id
+    # The session is tagged for the operator_subscription webhook branch, keyed to the user.
     assert captured["path"] == "checkout/sessions"
     p = captured["params"]
     assert p["client_reference_id"] == uid
-    assert p["metadata[purpose]"] == "takyon_topup"
+    assert p["metadata[purpose]"] == "operator_subscription"
     assert p["metadata[user_id]"] == uid
-    assert p["line_items[0][price_data][unit_amount]"] == 2500
+    # No caller-supplied amount: a subscription checkout never has a takyon_topup unit_amount.
+    assert p.get("metadata[purpose]") != "takyon_topup"
     assert p["success_url"] == "https://app.example.com/ok"
 
 
@@ -700,22 +750,33 @@ def test_billing_webhook_rejects_bad_signature(client, monkeypatch):
     assert resp.json()["detail"] == "invalid_signature"
 
 
-def test_billing_webhook_credits_user_and_is_idempotent(client, pg_conn, monkeypatch):
+def test_billing_webhook_credits_operator_subscription_allowance_and_is_idempotent(
+    client, pg_conn, monkeypatch
+):
+    # The à-la-carte topup credit path was removed 2026-06-18 — the operator money rail is
+    # allowance-only, funded by the operator SUBSCRIPTION. So the meaningful webhook crediting
+    # invariant moved to the operator_subscription branch: it settles the chosen tier's weekly
+    # allowance (here the DEV fallback), keyed on week+plan so replays converge to one grant.
     monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
-    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
-    event = _topup_event(uid, amount=2000)
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub(), "owner@example.com")
+    event = _topup_event(uid, amount=2000, purpose="operator_subscription")
+    # subscription checkout has no payment line amount the webhook credits — purpose drives it.
 
     resp = _post_webhook(client, event, "whsec_test_xyz")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["credited_cents"] == 2000
-    assert body["topup_balance_cents"] == 2000
-    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+    assert body["user_id"] == uid
+    assert body["plan_name"] == "DEV"
+    assert body["weekly_allowance_cents"] == 10_000
+    assert billing.get_billing_balances(pg_conn, uid).allowance_included_cents == 10_000
+    # There is no topup balance bucket anymore: spendable is allowance only.
+    assert not hasattr(billing.get_billing_balances(pg_conn, uid), "topup_balance_cents")
 
-    # Replay the SAME Stripe event id -> credited exactly once (idempotent).
+    # Replay the SAME Stripe event id -> allowance settled exactly once (idempotent: the
+    # week+plan idempotency key means the second sync does not double-grant).
     resp2 = _post_webhook(client, event, "whsec_test_xyz")
     assert resp2.status_code == 200
-    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+    assert billing.get_billing_balances(pg_conn, uid).allowance_included_cents == 10_000
 
 
 def test_billing_webhook_credits_business_creative_topup_and_is_idempotent(
@@ -765,22 +826,42 @@ def test_billing_webhook_still_accepts_legacy_creative_credit_pack_events(
     assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 25
 
 
-def test_billing_webhook_ignores_non_topup(client, pg_conn, monkeypatch):
+def test_billing_webhook_ignores_unhandled_purpose(client, pg_conn, monkeypatch):
+    # An unhandled checkout purpose (here a flow-B product_subscription that does NOT belong
+    # to the control-plane money rail) is acknowledged-and-ignored, echoing the purpose back
+    # so the caller can see it was a no-op. It must not touch the operator's allowance.
     monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
     uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    before = billing.get_billing_balances(pg_conn, uid).allowance_included_cents
     resp = _post_webhook(client, _topup_event(uid, purpose="product_subscription"), "whsec_test_xyz")
     assert resp.status_code == 200
-    assert resp.json()["ignored"] == "not_a_topup"
-    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 0
+    assert resp.json()["ignored"] == "product_subscription"
+    assert billing.get_billing_balances(pg_conn, uid).allowance_included_cents == before
+
+
+def test_billing_webhook_ignores_legacy_takyon_topup_purpose(client, pg_conn, monkeypatch):
+    # The à-la-carte operator topup credit path was removed 2026-06-18: a takyon_topup purpose
+    # is now just another unhandled purpose — ignored, echoed back, and crediting NOTHING. This
+    # pins that a replayed/stragler legacy topup webhook can never resurrect a credit.
+    monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
+    uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    before = billing.get_billing_balances(pg_conn, uid).allowance_included_cents
+    resp = _post_webhook(client, _topup_event(uid, amount=2000), "whsec_test_xyz")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ignored"] == "takyon_topup"
+    assert "credited_cents" not in body  # no crediting happened
+    assert billing.get_billing_balances(pg_conn, uid).allowance_included_cents == before
 
 
 def test_billing_webhook_ignores_unpaid(client, pg_conn, monkeypatch):
     monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", "whsec_test_xyz")
     uid, _, _ = provision_user_on_first_login(pg_conn, _sub())
+    before = billing.get_billing_balances(pg_conn, uid).allowance_included_cents
     resp = _post_webhook(client, _topup_event(uid, payment_status="unpaid"), "whsec_test_xyz")
     assert resp.status_code == 200
     assert resp.json()["ignored"] == "unpaid"
-    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 0
+    assert billing.get_billing_balances(pg_conn, uid).allowance_included_cents == before
 
 
 # --- Phase 3: per-user rate limiting on the authenticated boundary ----------------

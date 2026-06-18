@@ -13,7 +13,7 @@ single-use and short-lived; a session is a 30-day bearer token. This module owns
 the guarded STATE change (mint a link, redeem it for a session, validate/revoke a
 session) — email DELIVERY is a side effect owned by the layer above (the HTTP/tool
 surface decides live-send vs. test-mode suppression and records `provider_message_id`),
-exactly as Phase 3 split `billing.topup` from the Stripe call.
+exactly as the billing layer keeps allowance accounting separate from the Stripe call.
 
 House style (matches billing.py / custody.py / policy.py): pure leaf, takes a psycopg
 connection, imports no psycopg, opens its own `conn.transaction()` per mutating op, and

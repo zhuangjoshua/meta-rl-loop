@@ -264,10 +264,10 @@ def _operator_for_business(pg_conn, slug):
 
 
 def _billing_remaining_cents(pg_conn, owner) -> int:
-    """Spendable operator authority = allowance remaining + topup, the exact two buckets
-    billing.reserve draws from and the web meter's ceiling."""
+    """Spendable operator authority = allowance remaining, the only bucket billing.reserve draws
+    from and the web meter's ceiling (the topup bucket was removed from the operator money rail)."""
     bal = billing.get_billing_balances(pg_conn, owner)
-    return max(0, int(bal.allowance_remaining_cents)) + max(0, int(bal.topup_balance_cents))
+    return max(0, int(bal.allowance_remaining_cents))
 
 
 def _funded_metered_business(pg_conn, monkeypatch, *, operator_allowance_cents):

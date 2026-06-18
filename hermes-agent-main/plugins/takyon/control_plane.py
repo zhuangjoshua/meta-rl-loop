@@ -69,14 +69,14 @@ def _ensure_starter_allowance(conn, user_id: str) -> int:
 
     This keeps "your first company is on the house" honest for both fresh Auth0
     users and the local platform owner, without resetting any account that has
-    already received allowance, topups, or spend.
+    already received allowance or spend.
     """
     included_cents = _starter_allowance_cents()
     if included_cents <= 0:
         return 0
     with conn.transaction():
         acct = conn.execute(
-            "select allowance_included_cents, allowance_used_cents, topup_balance_cents "
+            "select allowance_included_cents, allowance_used_cents "
             "from billing_accounts where user_id = %s for update",
             (user_id,),
         ).fetchone()
@@ -84,8 +84,7 @@ def _ensure_starter_allowance(conn, user_id: str) -> int:
             raise RuntimeError(f"billing account missing for user {user_id}")
         included = int(acct[0] or 0)
         used = int(acct[1] or 0)
-        topup = int(acct[2] or 0)
-        if included > 0 or used > 0 or topup > 0:
+        if included > 0 or used > 0:
             return included
         existing_entry = conn.execute(
             "select 1 from billing_entries where user_id = %s limit 1",

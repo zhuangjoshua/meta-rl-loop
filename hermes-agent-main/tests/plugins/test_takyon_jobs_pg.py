@@ -217,7 +217,7 @@ def test_run_one_reserves_settles_completes_and_moves_ledger(pg_conn):
 def test_run_one_blocks_when_budget_exhausted_without_running(pg_conn):
     # Invariant #8: a reserve the buckets cannot cover BLOCKS with a reason and runs nothing — never a
     # fabricated completion, never a charge to no one.
-    slug, uid = _provision_business(pg_conn)  # zero allowance, zero topup
+    slug, uid = _provision_business(pg_conn)  # zero allowance
     jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j", payload={"estimate_cents": 500})
     handler = _RecordingHandler(cost_cents=300)
 

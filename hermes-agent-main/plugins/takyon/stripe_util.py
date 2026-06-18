@@ -1,5 +1,5 @@
 """Self-contained Stripe REST + webhook-signature helpers for the Postgres control
-plane (flow A: top-level user topups).
+plane (flow A: top-level user subscription billing).
 
 Why a second copy of helpers that already live in core.py: core's `_stripe_request`
 and `_verify_stripe_signature` sit inside the large SQLite trunk module and raise

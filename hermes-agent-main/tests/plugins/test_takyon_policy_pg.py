@@ -122,7 +122,7 @@ def test_upsert_unknown_business_fails_loud(pg_conn):
 def test_inline_when_affordable(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 1000, "tu")
+    billing.grant_allowance(pg_conn, uid, 1000, "tu")
     d = policy.decide_execution(pg_conn, business_slug=slug, estimate_cents=100)
     assert d.outcome == "inline"
     assert d.reason == "ok"
@@ -131,8 +131,11 @@ def test_inline_when_affordable(pg_conn):
     assert d.detail["downgraded"] is False
 
 
-def test_blocked_insufficient_balance(pg_conn):
-    uid = _user(pg_conn)  # provisioned at zero balance
+def test_blocked_insufficient_balance(pg_conn, monkeypatch):
+    # Provisioning grants a starter allowance ("first company on the house"); suppress it
+    # so the account is genuinely empty and the estimate can't be covered.
+    monkeypatch.setenv("TAKYON_STARTER_ALLOWANCE_CENTS", "0")
+    uid = _user(pg_conn)  # provisioned at zero allowance
     slug = _business(pg_conn, uid)
     d = policy.decide_execution(pg_conn, business_slug=slug, estimate_cents=100)
     assert d.outcome == "blocked"
@@ -143,7 +146,7 @@ def test_blocked_insufficient_balance(pg_conn):
 def test_cheaper_downgrades_to_closest_affordable_tier(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 120, "tu")  # premium unaffordable; standard/mini fit
+    billing.grant_allowance(pg_conn, uid, 120, "tu")  # premium unaffordable; standard/mini fit
     d = policy.decide_execution(
         pg_conn,
         business_slug=slug,
@@ -161,7 +164,7 @@ def test_cheaper_downgrades_to_closest_affordable_tier(pg_conn):
 def test_job_when_runtime_exceeds_inline_and_escalation_allowed(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 1000, "tu")
+    billing.grant_allowance(pg_conn, uid, 1000, "tu")
     d = policy.decide_execution(
         pg_conn,
         business_slug=slug,
@@ -177,7 +180,7 @@ def test_job_when_runtime_exceeds_inline_and_escalation_allowed(pg_conn):
 def test_blocked_when_exceeds_inline_and_escalation_disabled(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 1000, "tu")
+    billing.grant_allowance(pg_conn, uid, 1000, "tu")
     policy.upsert_execution_policy(pg_conn, slug, allow_worker_escalation=False)
     d = policy.decide_execution(
         pg_conn,
@@ -193,7 +196,7 @@ def test_blocked_when_exceeds_inline_and_escalation_disabled(pg_conn):
 def test_blocked_expensive_branch_disallowed(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 100000, "tu")  # plenty of money…
+    billing.grant_allowance(pg_conn, uid, 100000, "tu")  # plenty of money…
     policy.upsert_execution_policy(pg_conn, slug, allow_expensive_branches=False)
     # 200 > default threshold (100) → expensive; affordable but disallowed.
     d = policy.decide_execution(pg_conn, business_slug=slug, estimate_cents=200)
@@ -216,7 +219,7 @@ def test_zero_estimate_runs_inline_even_with_no_balance(pg_conn):
 def test_business_cap_blocks_before_flow_a_runs_out(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 100000, "tu")  # flow-A is huge
+    billing.grant_allowance(pg_conn, uid, 100000, "tu")  # flow-A is huge
     policy.upsert_execution_policy(pg_conn, slug, monthly_app_budget_cents=500)
     # Consume the whole sub-cap with a business-tagged reservation (still outstanding).
     billing.reserve(pg_conn, uid, 500, "r-cap", business_slug=slug)
@@ -230,7 +233,7 @@ def test_business_cap_blocks_before_flow_a_runs_out(pg_conn):
 def test_refund_restores_cap_headroom(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 100000, "tu")
+    billing.grant_allowance(pg_conn, uid, 100000, "tu")
     policy.upsert_execution_policy(pg_conn, slug, monthly_app_budget_cents=500)
     billing.reserve(pg_conn, uid, 500, "r-ref", business_slug=slug)
     billing.refund(pg_conn, "r-ref")  # released — must NOT keep counting against the cap
@@ -242,7 +245,7 @@ def test_refund_restores_cap_headroom(pg_conn):
 def test_settled_actual_counts_toward_cap_not_the_reservation(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 100000, "tu")
+    billing.grant_allowance(pg_conn, uid, 100000, "tu")
     policy.upsert_execution_policy(pg_conn, slug, monthly_app_budget_cents=100000)
     billing.reserve(pg_conn, uid, 800, "r-settle", business_slug=slug)
     billing.settle(pg_conn, "r-settle", 300)  # spent 300, released 500 (business_slug NULL)
@@ -271,14 +274,13 @@ def test_negative_estimate_raises(pg_conn):
 def test_decision_moves_no_money_and_inserts_no_policy(pg_conn):
     uid = _user(pg_conn)
     slug = _business(pg_conn, uid)
-    billing.topup(pg_conn, uid, 1000, "tu")
+    billing.grant_allowance(pg_conn, uid, 1000, "tu")
     before = billing.get_billing_balances(pg_conn, uid)
     policy.decide_execution(pg_conn, business_slug=slug, estimate_cents=400)
     after = billing.get_billing_balances(pg_conn, uid)
     # advisory: the decision reserves nothing and leaves balances untouched
-    assert (after.allowance_used_cents, after.topup_balance_cents, after.reserved_cents) == (
+    assert (after.allowance_used_cents, after.reserved_cents) == (
         before.allowance_used_cents,
-        before.topup_balance_cents,
         before.reserved_cents,
     )
     assert _policy_rows(pg_conn, slug) == 0  # decide() never writes a policy row

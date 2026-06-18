@@ -1123,18 +1123,16 @@ def _operator_turn_estimate_cents() -> int:
 
 class InsufficientOperatorBalance(TakyonError):
     """Company creation was refused because the acting operator has no spendable balance
-    (allowance remaining + topup). Carries the exact figures so the gateway can build a precise
+    (allowance remaining). Carries the exact figures so the gateway can build a precise
     402/4030 block without leaking anything else. Distinct error type so the create handler maps it
     to the balance-block code rather than a generic create failure."""
 
-    def __init__(self, *, spendable_cents: int, allowance_remaining_cents: int, topup_balance_cents: int) -> None:
+    def __init__(self, *, spendable_cents: int, allowance_remaining_cents: int) -> None:
         self.spendable_cents = int(spendable_cents)
         self.allowance_remaining_cents = int(allowance_remaining_cents)
-        self.topup_balance_cents = int(topup_balance_cents)
         super().__init__(
             "insufficient_balance: company creation requires a positive operator balance "
-            f"(spendable {self.spendable_cents}c = allowance {self.allowance_remaining_cents}c "
-            f"+ topup {self.topup_balance_cents}c)"
+            f"(spendable {self.spendable_cents}c = allowance {self.allowance_remaining_cents}c)"
         )
 
 
@@ -1146,7 +1144,7 @@ def _operator_create_balance_preflight(operator_user_id: str | None) -> None:
     work is created.
 
     Spendable balance is the SAME quantity the dashboard surfaces as ``account.spendable_cents``:
-    allowance remaining + topup balance (web_server.py operator-account payload). ``<= 0`` ⇒ block.
+    allowance remaining (web_server.py operator-account payload). ``<= 0`` ⇒ block.
 
     Fail-OPEN only for genuinely identity-less / non-Postgres dev runs, exactly like
     ``_operator_budget_reserve``: with no resolved operator identity or no Postgres control plane
@@ -1178,16 +1176,14 @@ def _operator_create_balance_preflight(operator_user_id: str | None) -> None:
             # fail closed (zero spendable), not silently allow. § 3 (assume evil): never build a
             # company for an operator with no provable balance.
             raise InsufficientOperatorBalance(
-                spendable_cents=0, allowance_remaining_cents=0, topup_balance_cents=0
+                spendable_cents=0, allowance_remaining_cents=0
             ) from exc
         allowance_remaining = max(0, int(balances.allowance_remaining_cents))
-        topup_balance = max(0, int(balances.topup_balance_cents))
-        spendable = allowance_remaining + topup_balance
+        spendable = allowance_remaining
         if spendable <= 0:
             raise InsufficientOperatorBalance(
                 spendable_cents=spendable,
                 allowance_remaining_cents=allowance_remaining,
-                topup_balance_cents=topup_balance,
             )
     finally:
         conn.close()
@@ -1231,12 +1227,11 @@ def _operator_budget_reserve(
     except billing.InsufficientBalance as exc:
         raise TakyonError(
             "operator budget exhausted: "
-            f"need {exc.estimate_cents}c, allowance {exc.allowance_available_cents}c "
-            f"+ topup {exc.topup_available_cents}c"
+            f"need {exc.estimate_cents}c, allowance {exc.allowance_available_cents}c"
         ) from exc
     finally:
         conn.close()
-    return res.key, int(res.allowance_cents + res.topup_cents)
+    return res.key, int(res.allowance_cents)
 
 
 def _operator_budget_finalize(
@@ -1284,7 +1279,7 @@ def _operator_budget_finalize(
                 overflow_key,
                 business_slug=business_slug or None,
             )
-            overflow_reserved = int(overflow_res.allowance_cents + overflow_res.topup_cents)
+            overflow_reserved = int(overflow_res.allowance_cents)
         except billing.InsufficientBalance:
             warning = (
                 f"turn cost exceeded the reserved budget by {overflow}c; "
@@ -3209,6 +3204,7 @@ def run_takyon_command(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
 ) -> Any:
+    load_takyon_env()
     resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
     store = TakyonStore(operator_user_id=resolved_operator_user_id)
 

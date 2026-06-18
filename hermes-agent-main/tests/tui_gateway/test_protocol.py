@@ -521,7 +521,7 @@ def test_takyon_dashboard_create_blocks_on_insufficient_operator_balance(server,
         assert operator_user_id == "broke-user"
         raise InsufficientOperatorBalance(
             "insufficient_balance: company creation requires a positive operator balance "
-            "(spendable 0c = allowance 0c + topup 0c)"
+            "(spendable 0c = allowance 0c)"
         )
 
     def fake_resolve_dashboard_create_identity(*_a, **_k):
