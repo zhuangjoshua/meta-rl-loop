@@ -320,9 +320,9 @@ function TopBar({
   };
   return (
     <header className="lb-topbar">
-      <button className="lb-topbar__group lb-brand" onClick={() => onNav("/")} aria-label="Litebulb — all companies" title="All companies">
+      <button className="lb-topbar__group lb-brand" onClick={() => onNav("/")} aria-label="Coscale — all companies" title="All companies">
         <BulbMark size={22} tone="ink" />
-        <span className="lb-topbar__name">Litebulb</span>
+        <span className="lb-topbar__name">Coscale</span>
         <span className="lb-brand__caret">{Icon.caret}</span>
       </button>
 

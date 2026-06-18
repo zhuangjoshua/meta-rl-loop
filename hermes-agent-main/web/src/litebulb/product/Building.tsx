@@ -21,7 +21,7 @@ export function Building({
   onDone: () => void;
 }) {
   const narration = state.narration.length ? state.narration : [`Reading your idea — ${idea}.`];
-  const terminal = state.terminal.length ? state.terminal : ["Booting Litebulb CEO…"];
+  const terminal = state.terminal.length ? state.terminal : ["Booting Coscale CEO…"];
   const done = state.status === "ready";
   const errored = state.status === "error";
   const businessName = state.businessName.trim() || "your company";
@@ -61,7 +61,7 @@ export function Building({
         <header className="lb-bld__head">
           <span className="lb-bld__mark"><BulbMark size={26} tone="ink" /></span>
           <div className="lb-bld__head-txt">
-            <span className="lb-bld__status"><span className="lb-bld__pulse" />{done ? "Workspace ready" : errored ? "Build failed" : "Litebulb is building"}</span>
+            <span className="lb-bld__status"><span className="lb-bld__pulse" />{done ? "Workspace ready" : errored ? "Build failed" : "Coscale is building"}</span>
             {title ? <h1 className="lb-bld__name">{title}</h1> : null}
           </div>
         </header>

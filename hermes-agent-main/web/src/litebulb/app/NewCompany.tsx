@@ -14,7 +14,7 @@ export function NewCompanyView({ onCreate }: { onCreate: (idea: string) => void 
     <div className="lb-new__body">
       <span className="lb-new__eyebrow">New company</span>
       <h1 className="lb-new__title">What do you want to build?</h1>
-      <p className="lb-new__sub">One sentence is enough. Litebulb names it, builds the product, and finds your first users.</p>
+      <p className="lb-new__sub">One sentence is enough. Coscale names it, builds the product, and finds your first users.</p>
 
       <div className="lb-new__prompt">
         <textarea
@@ -48,7 +48,7 @@ export function NewCompany({ onCreate, onClose }: { onCreate: (idea: string) => 
   return (
     <div className="lb-new-page">
       <header className="lb-new__top">
-        <button className="lb-new__brand" onClick={onClose} aria-label="Back"><BulbMark size={22} tone="ink" /> Litebulb</button>
+        <button className="lb-new__brand" onClick={onClose} aria-label="Back"><BulbMark size={22} tone="ink" /> Coscale</button>
         <button className="lb-new__close" onClick={onClose} aria-label="Close">×</button>
       </header>
       <NewCompanyView onCreate={onCreate} />

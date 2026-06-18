@@ -3267,7 +3267,7 @@
     if (LIVE.assistantBubble && document.body.contains(LIVE.assistantBubble)) return LIVE.assistantBubble;
     const container = document.createElement("div");
     container.className = "m m-ceo";
-    container.innerHTML = `<div class="who">litebulb · ceo</div><div class="bubble"></div>`;
+    container.innerHTML = `<div class="who">coscale · ceo</div><div class="bubble"></div>`;
     msgs().appendChild(container);
     LIVE.assistantBubble = $(".bubble", container);
     placeActivityCardAfterLatestMessage();

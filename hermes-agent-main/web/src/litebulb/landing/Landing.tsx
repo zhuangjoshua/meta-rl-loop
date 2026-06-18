@@ -6,9 +6,9 @@ import "./landing.css";
 const SUGGESTIONS = ["AI resume builder", "Local events app", "A niche newsletter", "Shopify plugin"];
 
 const LOOP = [
-  { k: "01", t: "Describe it", d: "A sentence or two. Litebulb picks the wedge and names the company." },
+  { k: "01", t: "Describe it", d: "A sentence or two. Coscale picks the wedge and names the company." },
   { k: "02", t: "It ships", d: "A real product and a live site deploy to production." },
-  { k: "03", t: "It grows", d: "Campaigns go live. Litebulb doubles down on what converts." },
+  { k: "03", t: "It grows", d: "Campaigns go live. Coscale doubles down on what converts." },
 ];
 
 export function Landing({ onLaunch, onLogin }: { onLaunch: (idea: string) => void; onLogin: () => void }) {
@@ -27,7 +27,7 @@ export function Landing({ onLaunch, onLogin }: { onLaunch: (idea: string) => voi
         <nav className="b44-navbar lb-nav" aria-label="Primary">
           <span className="b44-navbar__brand">
             <BulbMark size={26} tone="brand" />
-            <span>Litebulb</span>
+            <span>Coscale</span>
           </span>
           <div className="b44-navbar__links">
             <button className="b44-navbar__link" type="button" onClick={() => scrollTo("lb-product")}>Product</button>
@@ -45,10 +45,10 @@ export function Landing({ onLaunch, onLogin }: { onLaunch: (idea: string) => voi
 
       {/* ── hero ── */}
       <main className="lb-hero" id="lb-product">
-        <h1 className="lb-hero-title">Turn your idea into a company.</h1>
+        <h1 className="lb-hero-title">Coscale — turn an idea into a running company.</h1>
         <p className="lb-hero-sub">
-          Litebulb ships the product, finds real users, and drives revenue —
-          autonomously, while you sleep.
+          Describe it. Coscale builds the product, launches it, and runs the
+          business — autonomously.
         </p>
 
         {/* shared hero prompt — identical to the logged-in home */}
@@ -83,7 +83,7 @@ export function Landing({ onLaunch, onLogin }: { onLaunch: (idea: string) => voi
 
       {/* ── footer ── */}
       <footer className="lb-foot">
-        <span className="lb-foot-brand"><BulbMark size={20} tone="brand" /> Litebulb</span>
+        <span className="lb-foot-brand"><BulbMark size={20} tone="brand" /> Coscale</span>
         <span className="lb-foot-meta">© 2026 Four Manifold — Private beta</span>
       </footer>
     </div>

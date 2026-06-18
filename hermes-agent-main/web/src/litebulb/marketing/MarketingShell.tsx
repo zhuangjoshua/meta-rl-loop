@@ -14,7 +14,7 @@ export function MarketingShell({
   return (
     <div className="lb-mk b44-root" data-theme="light">
       <header className="lb-mk__nav">
-        <button className="lb-mk__brand" onClick={() => onNav("/")} aria-label="Litebulb home"><BulbMark size={26} tone="brand" /> <span>Litebulb</span></button>
+        <button className="lb-mk__brand" onClick={() => onNav("/")} aria-label="Coscale home"><BulbMark size={26} tone="brand" /> <span>Coscale</span></button>
         <nav className="lb-mk__links">
           <button onClick={() => onNav("/faq")}>FAQ</button>
           <button onClick={() => onNav("/privacy")}>Privacy</button>
@@ -26,7 +26,7 @@ export function MarketingShell({
       </header>
       <main className="lb-mk__main">{children}</main>
       <footer className="lb-mk__foot">
-        <span className="lb-mk__foot-brand"><BulbMark size={18} tone="brand" /> Litebulb</span>
+        <span className="lb-mk__foot-brand"><BulbMark size={18} tone="brand" /> Coscale</span>
         <span className="lb-mk__foot-meta">© 2026 Four Manifold</span>
       </footer>
     </div>

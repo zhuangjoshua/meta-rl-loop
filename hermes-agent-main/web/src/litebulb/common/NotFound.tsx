@@ -8,7 +8,7 @@ export function NotFound({ onHome }: { onHome: () => void }) {
       <BulbMark size={40} tone="brand" />
       <div className="lb-404__code">404</div>
       <p className="lb-404__msg">That page wandered off. Let's get you back.</p>
-      <button className="b44-btn b44-btn--brand" onClick={onHome}>Back to Litebulb</button>
+      <button className="b44-btn b44-btn--brand" onClick={onHome}>Back to Coscale</button>
     </div>
   );
 }

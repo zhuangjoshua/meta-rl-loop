@@ -40,7 +40,7 @@ export function AuthModal({
         </button>
 
         <p className="lb-auth__switch">
-          {isSignup ? "Already have an account?" : "New to Litebulb?"}{" "}
+          {isSignup ? "Already have an account?" : "New to Coscale?"}{" "}
           <button onClick={onSwitch}>{isSignup ? "Log in" : "Sign up"}</button>
         </p>
         <p className="lb-auth__legal">Secured by Auth0 · by continuing you agree to the Terms.</p>

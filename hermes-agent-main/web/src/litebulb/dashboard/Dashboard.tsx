@@ -51,9 +51,9 @@ export function Dashboard({
   return (
     <div className="lb-view lb-portfolio">
       <header className="lb-pf-top">
-        <button className="lb-pf-brand" onClick={onLanding} aria-label="Litebulb">
+        <button className="lb-pf-brand" onClick={onLanding} aria-label="Coscale">
           <BulbMark size={24} tone="ink" />
-          <span>Litebulb</span>
+          <span>Coscale</span>
         </button>
         <div className="lb-pf-actions">
           <button className="lb-pf-newbtn" onClick={onNew}>+ New company</button>

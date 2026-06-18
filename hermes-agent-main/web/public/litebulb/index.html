@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>litebulb // autonomous company builder</title>
+<title>coscale // autonomous company builder</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bitter:ital,wght@0,400;0,600;1,400&family=Permanent+Marker&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
@@ -286,7 +286,7 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
 <div id="menubar">
   <div class="brand" id="reset" title="start over">
     <svg class="bulb" viewBox="0 0 24 24" width="17" height="17"><path d="M9.2 18.5h5.6V20a1.5 1.5 0 0 1-1.5 1.5h-2.6A1.5 1.5 0 0 1 9.2 20v-1.5Z"/><path d="M12 2a7 7 0 0 0-4.2 12.6c.5.4.7.8.7 1.4v.5h7v-.5c0-.6.2-1 .7-1.4A7 7 0 0 0 12 2Z"/></svg>
-    <span>litebulb</span>
+    <span>coscale</span>
   </div>
   <div id="mb-ws">
     <span class="sep">/</span>
@@ -308,7 +308,7 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
     <section class="hero land">
       <div class="eyebrow">autonomous company builder</div>
       <h1 class="hero">Turn an idea<br>into a <span class="pop">company.</span></h1>
-      <p class="lede">litebulb builds the product and runs the whole company — brand, site, customers, content — in minutes, <em>from one sentence</em>. No cofounder necessary.</p>
+      <p class="lede">coscale builds the product and runs the whole company — brand, site, customers, content — in minutes, <em>from one sentence</em>. No cofounder necessary.</p>
 
       <div class="promptbox">
         <textarea id="idea" autocomplete="off" spellcheck="false" placeholder="Describe the company you want to exist…"></textarea>
@@ -325,7 +325,7 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
     <section class="sec"><div class="land">
       <div class="sec-h">questions</div>
       <div class="faq">
-        <details><summary>Is it actually autonomous?</summary><div class="ans">Yes. Once you describe the idea, litebulb plans and executes on a recurring wake loop — and you can jump in at any time.</div></details>
+        <details><summary>Is it actually autonomous?</summary><div class="ans">Yes. Once you describe the idea, coscale plans and executes on a recurring wake loop — and you can jump in at any time.</div></details>
         <details><summary>What does it build?</summary><div class="ans">A real product (site + test-mode auth &amp; checkout), a brand, content, and an outreach engine — all live in your workspace.</div></details>
         <details><summary>Can I take over?</summary><div class="ans">Always. Chat with the CEO to redirect, pause, rename, or hand specific tasks back to yourself.</div></details>
         <details><summary>What does it cost to run?</summary><div class="ans">Everything draws from one treasury. You allocate budget to autonomous work and paid channels — nothing spends without it.</div></details>
@@ -333,12 +333,12 @@ section.sec{padding:46px 0;border-top:3px solid var(--ink)}
     </div></section>
 
     <footer class="foot">
-      <div class="brandblock"><div class="fw">litebulb</div><div class="ft">autonomous company builder.<br>made by machines · est. now</div></div>
+      <div class="brandblock"><div class="fw">coscale</div><div class="ft">autonomous company builder.<br>made by machines · est. now</div></div>
       <div class="fcol"><h>product</h><a>workspace</a><a>outreach</a><a>pricing</a></div>
       <div class="fcol"><h>company</h><a>about</a><a>blog</a><a>careers</a></div>
       <div class="fcol"><h>legal</h><a>terms</a><a>privacy</a></div>
     </footer>
-    <div class="botline land">© litebulb — type an idea, get a company</div>
+    <div class="botline land">© coscale — type an idea, get a company</div>
   </div>
 
   <!-- WORKSPACE -->
@@ -361,9 +361,9 @@ const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 const OWNER_WIN = (()=>{try{return window.parent&&window.parent!==window?window.parent:window;}catch(_e){return window;}})();
 const HAS_TAKYON_SESSION = Boolean((OWNER_WIN&&OWNER_WIN.__TAKYON_SESSION_TOKEN__)||window.__TAKYON_SESSION_TOKEN__);
 function staticNotice(msg){
-  const text=msg||'Static preview only. Open Litebulb through the Takyon dashboard to use real business data.';
+  const text=msg||'Static preview only. Open Coscale through the Takyon dashboard to use real business data.';
   const hint=$('.hint'); if(hint)hint.textContent=text;
-  const promo=$('.promo'); if(promo)promo.innerHTML=`litebulb static preview · <b>${esc(text)}</b>`;
+  const promo=$('.promo'); if(promo)promo.innerHTML=`coscale static preview · <b>${esc(text)}</b>`;
 }
 
 /* ---------- clock + menubar ---------- */
@@ -409,7 +409,7 @@ const RT={biz:null, tasks:[], seq:1, wake:0, nextWakeAt:0, paused:false, credits
 /* ---------- chat ---------- */
 const msgs=()=>$('#msgs');
 const scrollChat=()=>{const m=msgs();if(m)m.scrollTop=m.scrollHeight;};
-function addCeo(html){const d=document.createElement('div');d.className='m m-ceo';d.innerHTML=`<div class="who">litebulb · ceo</div><div class="bubble">${html}</div>`;const m=msgs();if(m){m.appendChild(d);scrollChat();}}
+function addCeo(html){const d=document.createElement('div');d.className='m m-ceo';d.innerHTML=`<div class="who">coscale · ceo</div><div class="bubble">${html}</div>`;const m=msgs();if(m){m.appendChild(d);scrollChat();}}
 function addYou(t){const d=document.createElement('div');d.className='m m-you';d.innerHTML=`<div class="who">you</div><div class="bubble">${esc(t)}</div>`;const m=msgs();if(m){m.appendChild(d);scrollChat();}}
 function addThink(t){const d=document.createElement('div');d.className='m';d.innerHTML=`<div class="think">${esc(t)}</div>`;const m=msgs();if(m){m.appendChild(d);scrollChat();}}
 const ICON={read:'⌕',edit:'✎',execute:'⚡',fetch:'↯',search:'⌗',other:'◆',think:'…'};
@@ -638,7 +638,7 @@ function seed(){
   RT.tasks[2].progress.done=1; RT.tasks[2].runs.push({profile:'product',status:'running',summary:'claimed · executing'});
 }
 function bootstrap(){
-  ceolog('<span class="sys">litebulb runtime</span> — booting CEO');
+  ceolog('<span class="sys">coscale runtime</span> — booting CEO');
   setTimeout(()=>addThink('reading the brief. scoping the smallest version that is actually real, not a demo.'),350);
   setTimeout(()=>addCeo(`Spinning up <b>${esc(RT.biz.name)}</b> in <b>live mode</b>. I build the product first, then run the company on a wake loop. Interrupt me any time — I'll re-plan around you.`),1100);
   setTimeout(()=>{addTool({kind:'other',nm:'business_upsert_business',ttl:RT.biz.slug,done:true});},1900);
