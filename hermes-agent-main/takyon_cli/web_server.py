@@ -2690,8 +2690,18 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "product_name": body.get("product_name") or business,
             "send_email": bool(body.get("send_email", True)),
         }))
-        if body.get("return_token") is not True:
+        # SECURITY (account-takeover): /auth/request is unauthenticated. The single-use magic-link
+        # token (and the verify_url that embeds it as a ?token= query param) is a redeemable login
+        # credential. In LIVE mode it must NEVER be returned to the caller — not even when the caller
+        # asks for it via return_token — because anyone who can POST /auth/request could otherwise
+        # harvest a redeemable token for any email. The raw token only leaves the server over the
+        # email channel in live mode. Only non-live/test mode may surface the token/verify_url for
+        # automated testing (and only when explicitly requested via return_token).
+        live_mode = str((payload or {}).get("mode") or "live").strip().lower() != "test"
+        surface_token = (not live_mode) and (body.get("return_token") is True)
+        if not surface_token:
             payload.pop("token", None)
+            payload.pop("verify_url", None)
         return _takyon_app_json(status, payload)
 
     if parts == ["checkout"]:

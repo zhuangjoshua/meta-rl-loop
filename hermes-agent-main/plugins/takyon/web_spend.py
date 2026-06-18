@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from typing import Any, Optional
 
 from agent import web_spend_meter
@@ -44,51 +44,70 @@ def _price_microusd(pricing_key, *, units, usage) -> Optional[int]:
     return int((Decimal(result.amount_usd) * 1_000_000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def _microusd_to_cents_ceiling(microusd: int) -> int:
+    """Convert a microUSD magnitude to whole CENTS, rounding UP. The operator billing rail
+    (``billing.py``) is denominated in cents; web spend is priced in microUSD. The HOLD must never
+    under-charge the authority, so the estimate is rounded toward +infinity — a sub-cent web cost
+    still reserves at least 1 cent, so a flood of sub-cent calls cannot stay forever free against
+    the cumulative ceiling. Settles re-clamp to the held cents (never over-charge the reservation)."""
+    return int((Decimal(int(microusd)) / Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_CEILING))
+
+
 class _Reservation:
-    """Opaque handle threaded back from reserve() to settle()/release()."""
+    """Opaque handle threaded back from reserve() to settle()/release().
 
-    __slots__ = ("business_slug", "reservation_key", "pricing_key", "provider", "model", "reserved_microusd")
+    Carries BOTH money rails so settle/release can finalize each consistently:
+    - ``business_slug`` / ``reservation_key`` finalize the per-business ``app_usage`` audit row.
+    - ``owner_user_id`` / ``billing_reserved_cents`` finalize the operator billing hold
+      (``billing.py``) — the authority gate that actually decrements the operator ceiling.
+      ``owner_user_id`` is empty / ``billing_reserved_cents`` is 0 when no billing hold was taken
+      (a zero-cost call, or — defensively — a missing billing account), so settle/release skip it."""
 
-    def __init__(self, business_slug, reservation_key, pricing_key, provider, model, reserved_microusd):
+    __slots__ = (
+        "business_slug",
+        "reservation_key",
+        "pricing_key",
+        "provider",
+        "model",
+        "reserved_microusd",
+        "owner_user_id",
+        "billing_reserved_cents",
+    )
+
+    def __init__(
+        self,
+        business_slug,
+        reservation_key,
+        pricing_key,
+        provider,
+        model,
+        reserved_microusd,
+        owner_user_id="",
+        billing_reserved_cents=0,
+    ):
         self.business_slug = business_slug
         self.reservation_key = reservation_key
         self.pricing_key = pricing_key
         self.provider = provider
         self.model = model
         self.reserved_microusd = reserved_microusd
+        self.owner_user_id = owner_user_id
+        self.billing_reserved_cents = billing_reserved_cents
 
 
-def _operator_remaining_microusd(raw, business: str) -> int:
-    """Resolve the business OWNER's remaining operator-rail spend authority (microUSD) — the
-    NON-NULL ceiling this CEO/agent web-egress meter gates on.
+def _resolve_owner_user_id(raw, business: str) -> str:
+    """Resolve the business OWNER's Takyon-user id — the identity whose OPERATOR billing authority
+    (``billing.py``, Takyon-user → platform rail) bounds this CEO/agent web egress.
 
-    This is the OPERATOR money rail (``billing.py``, Takyon-user → platform), NOT the product
-    subuser subscription rail: CEO/agent web egress is *operator* spend (it carries no
-    ``app_user_id`` and no product subscription), so it must be bounded by the operator's OWN
-    billing authority — never by a product-subuser entitlement and never by the
-    invariant-9-removed per-business pool. The authority is allowance remaining + topup balance
-    (the same two buckets ``billing.reserve`` draws from), converted cents → microUSD (×10_000).
-
-    ALWAYS returns a concrete, non-null ceiling, NEVER unbounded: an unresolvable owner or a
-    business with no billing account yields 0, which fails the call closed — the correct posture
-    for an unfunded/unknown operator (every real operator is funded by the starter allowance or a
-    topup, so a 0 here means "no money authority", not "free")."""
-    from . import billing
-
+    CEO/agent web egress is *operator* spend: it carries NO ``app_user_id`` and no product
+    subscription, so it must be bounded by the operator's OWN billing authority — never by a
+    product-subuser entitlement and never by the invariant-9-removed per-business pool. Returns the
+    owner uuid as a string, or empty when the business has no owner row (which fails the call
+    closed at the reserve, the correct posture for an unknown operator)."""
     row = raw.execute(
         "select owner_user_id from businesses where slug = %s", (business,)
     ).fetchone()
-    owner_user_id = str((row[0] if row else "") or "").strip()
-    if not owner_user_id:
-        return 0
-    try:
-        balances = billing.get_billing_balances(raw, owner_user_id)
-    except billing.NoBillingAccount:
-        return 0
-    remaining_cents = max(0, int(balances.allowance_remaining_cents)) + max(
-        0, int(balances.topup_balance_cents)
-    )
-    return remaining_cents * 10_000
+    return str((row[0] if row else "") or "").strip()
 
 
 class BusinessBudgetSpendMeter:
@@ -97,6 +116,7 @@ class BusinessBudgetSpendMeter:
     def reserve(self, *, pricing_key, provider, op, units, usage, purpose) -> Optional[_Reservation]:
         # Lazy import: core is heavy and imports plenty; importing it at module load would risk a
         # cycle. _session_business_slug reads the TRUSTED session scope (not a tool arg).
+        from . import billing
         from .core import _PGConn, _session_business_slug, _store
 
         business = _session_business_slug()
@@ -120,23 +140,58 @@ class BusinessBudgetSpendMeter:
                 return None  # SQLite dev runtime has no app_budgets; metering is a Postgres rail
             usage_leaf = store._app_leaves()["usage"]
             with store._leaf_conn(conn) as raw:
-                # OPERATOR-RAIL CEILING — the gate invariant 9 left this meter without. The flat
-                # per-business pool cap is gone (the budget row opens with a NULL cap), and this
+                # CUMULATIVE OPERATOR-AUTHORITY GATE — the hole the red-team proved. invariant 9
+                # removed the per-business pool cap (the budget row opens with a NULL cap), and this
                 # CEO/agent web egress carries NO ``app_user_id`` / product subscription, so the
-                # per-subuser gate inside ``reserve_usage`` cannot apply either. Without a ceiling
-                # here the reserve would hold the estimate with NO money gate at all = unbounded
-                # ungated spend. Bound it to the business owner's OWN operator billing authority
-                # (``billing.py``, the Takyon-user → platform rail), a real non-null ceiling that is
-                # distinct from any product-subuser subscription. Refuse BEFORE holding when the
-                # cost exceeds that authority; the authoritative spend reservation still lands on
-                # ``app_usage`` below (which additionally enforces any explicit operator pool cap).
-                operator_ceiling = _operator_remaining_microusd(raw, business)
-                if cost > operator_ceiling:
+                # per-subuser gate inside ``reserve_usage`` cannot apply either. The old fix only
+                # READ the operator ceiling and compared this single call against it — but it never
+                # DEBITED that ceiling, so the held estimate never decremented the authority and N
+                # sequential reserves each saw the full balance (120%+ of authority could be held at
+                # once). The fix: take a REAL hold on the operator billing rail (``billing.py``,
+                # Takyon-user → platform), denominated in cents. ``billing.reserve`` locks the single
+                # billing_accounts row FOR UPDATE, draws allowance-first-then-topup, and raises
+                # InsufficientBalance when the two buckets can no longer cover the estimate — so a
+                # second reserve sees the DECREMENTED remaining and fails closed. THIS is the money
+                # gate; the ``app_usage`` reserve below stays as the per-business audit row and the
+                # carrier of any explicit operator pool cap. Both holds share the SAME reservation
+                # key for idempotency, and both finalize together in settle/release.
+                owner_user_id = _resolve_owner_user_id(raw, business)
+                if not owner_user_id:
                     raise web_spend_meter.SpendBlocked(
-                        f"operator budget authority exhausted for business {business!r}: "
-                        f"{op} via {provider} needs {cost} microusd, operator remaining "
-                        f"{operator_ceiling} microusd"
+                        f"no operator owner resolvable for business {business!r}; "
+                        f"refusing ungated {op} via {provider}"
                     )
+                billing_reserved_cents = 0
+                if cost > 0:
+                    estimate_cents = _microusd_to_cents_ceiling(cost)
+                    try:
+                        # idempotency_key == reservation_key: a replay of the SAME key returns the
+                        # same split without holding twice (billing.reserve is idempotent on it).
+                        resv = billing.reserve(
+                            raw,
+                            owner_user_id,
+                            estimate_cents,
+                            key,
+                            business_slug=business,
+                            job_id=f"web_egress:{op}",
+                        )
+                    except billing.NoBillingAccount:
+                        # Every real operator is funded by the starter allowance or a topup; no
+                        # account means "no money authority", which must fail closed (not "free").
+                        raise web_spend_meter.SpendBlocked(
+                            f"operator {owner_user_id} has no billing account; "
+                            f"refusing ungated {op} via {provider}"
+                        )
+                    except billing.InsufficientBalance as exc:
+                        # The cumulative ceiling — outstanding holds + settled spend already consume
+                        # the authority, so this call cannot be covered. THIS is what stops the loop.
+                        raise web_spend_meter.SpendBlocked(
+                            f"operator budget authority exhausted for business {business!r}: "
+                            f"{op} via {provider} needs {estimate_cents} cents, operator has "
+                            f"allowance {exc.allowance_available_cents} + topup "
+                            f"{exc.topup_available_cents} cents"
+                        )
+                    billing_reserved_cents = int(resv.total_cents)
                 try:
                     usage_leaf.reserve_usage(
                         raw,
@@ -150,14 +205,23 @@ class BusinessBudgetSpendMeter:
                         metadata={"op": op, "pricing_key": [pricing_key[0], pricing_key[1]]},
                     )
                 except usage_leaf.AppBudgetExceeded:
+                    # The per-business pool cap (if an operator set one) refused — release the
+                    # billing hold we just took so it does not leak, then fail closed.
+                    if billing_reserved_cents:
+                        billing.refund(raw, key)
                     raise web_spend_meter.SpendBlocked(
                         f"business {business!r} is out of AI budget; {op} blocked"
                     )
                 except usage_leaf.AppBudgetInactive:
+                    if billing_reserved_cents:
+                        billing.refund(raw, key)
                     raise web_spend_meter.SpendBlocked(
                         f"business {business!r} AI budget is inactive; {op} blocked"
                     )
-        return _Reservation(business, key, pricing_key, str(provider), model, cost)
+        return _Reservation(
+            business, key, pricing_key, str(provider), model, cost,
+            owner_user_id=owner_user_id, billing_reserved_cents=billing_reserved_cents,
+        )
 
     def settle(self, handle: Optional[_Reservation], *, units, usage) -> None:
         if handle is None:
@@ -165,6 +229,7 @@ class BusinessBudgetSpendMeter:
         cost = _price_microusd(handle.pricing_key, units=units, usage=usage)
         if not cost:  # actual usage unavailable / zero -> reserved estimate (never undercharge)
             cost = handle.reserved_microusd
+        from . import billing
         from .core import _PGConn, _store
 
         store = _store()
@@ -181,10 +246,22 @@ class BusinessBudgetSpendMeter:
                     provider=handle.provider,
                     model=handle.model,
                 )
+                # Finalize the operator billing hold: held → spent. ``billing.settle`` asserts
+                # actual ≤ reserved (it is custody of real money), so clamp the actual cents to the
+                # held cents — the held estimate was rounded UP, so the true cost can only be ≤ it
+                # for request-priced calls; for the token-priced summarizer a real overage stays
+                # capped at the reservation (the conservative over-hold is reconcilable, an
+                # over-charge of the reservation is not). Idempotent: a replayed settle is a no-op.
+                if handle.owner_user_id and handle.billing_reserved_cents:
+                    actual_cents = min(
+                        _microusd_to_cents_ceiling(int(cost)), int(handle.billing_reserved_cents)
+                    )
+                    billing.settle(raw, handle.reservation_key, actual_cents)
 
     def release(self, handle: Optional[_Reservation], *, error) -> None:
         if handle is None:
             return
+        from . import billing
         from .core import _PGConn, _store
 
         store = _store()
@@ -199,6 +276,10 @@ class BusinessBudgetSpendMeter:
                     handle.reservation_key,
                     error=(str(error)[:500] if error else None),
                 )
+                # Return the whole operator billing hold to the authority (no spend recorded).
+                # Idempotent: a replayed/already-finalized refund is a no-op.
+                if handle.owner_user_id and handle.billing_reserved_cents:
+                    billing.refund(raw, handle.reservation_key)
 
 
 def register() -> None:

@@ -245,3 +245,139 @@ def test_no_business_scope_is_not_metered(metered, pg_conn, monkeypatch):
     )
     web_spend_meter.settle_paid_call(handle, units=1)  # no-op (nothing was reserved)
     assert _events(pg_conn, metered) == []  # no budget event created outside a business scope
+
+
+# ── CUMULATIVE OPERATOR-AUTHORITY ENFORCEMENT (the red-team hole) ─────────────────────
+#
+# The bug: the old meter READ the operator ceiling but never DEBITED it, so a hold never
+# decremented the authority. Two sequential reserves each under the per-call ceiling both held —
+# 120%+ of the operator's whole authority could be outstanding at once, driving unbounded real
+# Tavily spend in a CEO loop. These tests pin the fix: the web meter now takes a REAL billing.reserve
+# hold against billing_accounts, so outstanding holds + settled spend cannot collectively exceed the
+# operator ceiling. Each releases/settles its holds so no stale reserved row leaks.
+
+
+def _operator_for_business(pg_conn, slug):
+    return pg_conn.execute(
+        "select owner_user_id from businesses where slug = %s", (slug,)
+    ).fetchone()[0]
+
+
+def _billing_remaining_cents(pg_conn, owner) -> int:
+    """Spendable operator authority = allowance remaining + topup, the exact two buckets
+    billing.reserve draws from and the web meter's ceiling."""
+    bal = billing.get_billing_balances(pg_conn, owner)
+    return max(0, int(bal.allowance_remaining_cents)) + max(0, int(bal.topup_balance_cents))
+
+
+def _funded_metered_business(pg_conn, monkeypatch, *, operator_allowance_cents):
+    """A business whose operator authority is set EXACTLY (so the test controls the ceiling), with
+    NO explicit per-business pool cap (hard_limit stays NULL) — so the ONLY money gate is the
+    operator billing rail. Returns the slug; caller is responsible for clearing the meter."""
+    slug, owner = _provision_business(pg_conn, operator_allowance_cents=operator_allowance_cents)
+    app_usage.ensure_app_budget(pg_conn, slug)
+    assert app_usage.get_app_budget(pg_conn, slug).hard_limit_microusd is None
+    monkeypatch.setattr(core, "_store", lambda: _FakeStore(pg_conn))
+    monkeypatch.setenv("TAKYON_SESSION_BUSINESS_SLUG", slug)
+    web_spend_meter.register_spend_meter(web_spend.BusinessBudgetSpendMeter())
+    return slug, owner
+
+
+def test_two_sequential_reserves_second_fails_closed(pg_conn, monkeypatch):
+    """The headline cumulative-enforcement proof. Operator authority is funded so that a SINGLE
+    paid call (3-URL tavily extract = 24_000 µusd = 3 cents) fits, but TWO do not: authority is set
+    to 5 cents (50_000 µusd), and 2 × 24_000 = 48_000 µusd reserves 2 × ceil(24_000/10_000) = 2 × 3
+    = 6 cents > 5. The FIRST reserve holds; the SECOND must fail closed (the hole let BOTH hold)."""
+    slug, owner = _funded_metered_business(pg_conn, monkeypatch, operator_allowance_cents=5)
+    try:
+        start = _billing_remaining_cents(pg_conn, owner)
+        assert start == 5
+
+        h1 = web_spend_meter.reserve_paid_call(
+            pricing_key=("tavily", "extract"), provider="tavily", op="web_extract",
+            units=3, purpose="agent_web_extract",
+        )
+        assert h1 is not None
+        # The first hold DEBITED the operator ceiling (this is what the bug failed to do).
+        after_first = _billing_remaining_cents(pg_conn, owner)
+        assert after_first == start - 3, "first reserve must decrement operator remaining"
+
+        # The SECOND reserve sees the decremented remaining (2 cents) — 3 cents needed > 2 → closed.
+        with pytest.raises(web_spend_meter.SpendBlocked):
+            web_spend_meter.reserve_paid_call(
+                pricing_key=("tavily", "extract"), provider="tavily", op="web_extract",
+                units=3, purpose="agent_web_extract",
+            )
+        # Only ONE reserved event exists — the second never held (no 120%-of-authority overhang).
+        reserved = [e for e in _events(pg_conn, slug) if e.status == "reserved"]
+        assert len(reserved) == 1
+        assert after_first == _billing_remaining_cents(pg_conn, owner), "blocked call held nothing"
+    finally:
+        # Release every test hold — leave 0 stale reserved rows and full authority restored.
+        web_spend_meter.release_paid_call(h1, error="test_cleanup")
+        web_spend_meter.register_spend_meter(None)
+    assert _billing_remaining_cents(pg_conn, owner) == 5  # hold returned on release
+    assert [e for e in _events(pg_conn, slug) if e.status == "reserved"] == []
+
+
+def test_settle_decrements_operator_remaining(pg_conn, monkeypatch):
+    """A settled web call permanently consumes operator authority — the ceiling drops and stays
+    dropped (the bug left it unchanged: 39,480,000 → 39,480,000)."""
+    slug, owner = _funded_metered_business(pg_conn, monkeypatch, operator_allowance_cents=100)
+    try:
+        start = _billing_remaining_cents(pg_conn, owner)  # 100 cents
+        handle = web_spend_meter.reserve_paid_call(
+            pricing_key=("tavily", "search"), provider="tavily", op="web_search",
+            units=1, purpose="agent_web_search",  # $0.008 = 8_000 µusd → ceil = 1 cent hold
+        )
+        assert _billing_remaining_cents(pg_conn, owner) == start - 1  # held
+        web_spend_meter.settle_paid_call(handle, units=1)
+        # After settle the spend is permanent: remaining stays decremented (the bug's hole was here).
+        assert _billing_remaining_cents(pg_conn, owner) == start - 1
+        completed = [e for e in _events(pg_conn, slug) if e.status == "completed"]
+        assert len(completed) == 1
+        assert completed[0].actual_cost_microusd == 8000
+        # No stale reserved row left behind.
+        assert [e for e in _events(pg_conn, slug) if e.status == "reserved"] == []
+    finally:
+        web_spend_meter.register_spend_meter(None)
+
+
+def test_release_returns_operator_hold(pg_conn, monkeypatch):
+    """A released (failed) web call returns the WHOLE hold to the operator authority — remaining is
+    restored to its pre-reserve value and no spend is recorded."""
+    slug, owner = _funded_metered_business(pg_conn, monkeypatch, operator_allowance_cents=100)
+    try:
+        start = _billing_remaining_cents(pg_conn, owner)
+        handle = web_spend_meter.reserve_paid_call(
+            pricing_key=("tavily", "extract"), provider="tavily", op="web_extract",
+            units=3, purpose="agent_web_extract",  # 24_000 µusd → ceil = 3 cents hold
+        )
+        assert _billing_remaining_cents(pg_conn, owner) == start - 3  # held
+        web_spend_meter.release_paid_call(handle, error="provider_error")
+        assert _billing_remaining_cents(pg_conn, owner) == start  # hold fully returned
+        events = _events(pg_conn, slug)
+        assert all(e.status in ("failed", "released") for e in events)
+        assert all(e.actual_cost_microusd == 0 for e in events)
+    finally:
+        web_spend_meter.register_spend_meter(None)
+
+
+def test_double_reserve_same_key_holds_once(pg_conn, monkeypatch):
+    """Idempotency preserved on the billing rail: replaying the SAME reservation key against
+    billing.reserve returns the same split without holding twice (the meter generates a fresh key
+    per public reserve, but the underlying billing op must be replay-safe). Drive it directly on the
+    meter's billing hold to prove the key-level invariant."""
+    slug, owner = _funded_metered_business(pg_conn, monkeypatch, operator_allowance_cents=100)
+    try:
+        start = _billing_remaining_cents(pg_conn, owner)
+        key = f"agent:web_search:{uuid.uuid4().hex}"
+        r1 = billing.reserve(pg_conn, owner, 3, key, business_slug=slug)
+        r2 = billing.reserve(pg_conn, owner, 3, key, business_slug=slug)  # replay
+        assert r1.total_cents == r2.total_cents == 3
+        assert _billing_remaining_cents(pg_conn, owner) == start - 3  # held ONCE, not twice
+        billing.refund(pg_conn, key)
+        billing.refund(pg_conn, key)  # double refund is a no-op (first finalizer wins)
+        assert _billing_remaining_cents(pg_conn, owner) == start
+    finally:
+        web_spend_meter.register_spend_meter(None)

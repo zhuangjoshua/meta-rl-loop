@@ -8016,32 +8016,173 @@ _RUNTIME_BACKED_PATTERNS: tuple[re.Pattern[str], ...] = (
 _RESERVED_PRODUCT_RUNTIME_ROUTE_PREFIXES: tuple[str, ...] = (
     "/api/takyon/apps/",
 )
+# NOTE: This scanner is the BUILD-TIME gate. It is a best-effort static check
+# that fails toward CLOSED — a PUBLISHED product must not ship direct external
+# AI-provider calls or hardcoded provider credentials. The real, hard
+# enforcement boundary is the metered runtime gateway: all product AI must
+# route through /api/takyon/apps/<slug>/... where it is authenticated, budgeted,
+# and billed. The denylists/heuristics below catch the common bypasses; the
+# gateway is what actually prevents ungated paid spend at runtime.
 _FORBIDDEN_PROVIDER_HOSTS: tuple[str, ...] = (
+    # OpenAI / Azure OpenAI
     "api.openai.com",
+    "openai.azure.com",
+    # Anthropic
     "api.anthropic.com",
+    # Google Gemini / Vertex AI
     "generativelanguage.googleapis.com",
+    "aiplatform.googleapis.com",
+    # xAI (Grok)
+    "api.x.ai",
+    # Perplexity
+    "api.perplexity.ai",
+    # AWS Bedrock (region-qualified host; matched loosely below too)
+    "bedrock-runtime",
+    "bedrock.amazonaws.com",
+    # Cohere
+    "api.cohere.ai",
+    "api.cohere.com",
+    # Fireworks
+    "api.fireworks.ai",
+    # Anyscale
+    "api.endpoints.anyscale.com",
+    # Mistral
     "api.mistral.ai",
-    "api.deepseek.com",
-    "openrouter.ai",
-    "api.groq.com",
+    # Together
     "api.together.xyz",
+    "api.together.ai",
+    # Groq
+    "api.groq.com",
+    # DeepSeek
+    "api.deepseek.com",
+    # OpenRouter
+    "openrouter.ai",
+    # Replicate
+    "api.replicate.com",
+)
+# Loose host fragments for providers whose host is region/account-templated and
+# can't be pinned to one literal. Matched as substrings (still host-shaped).
+_FORBIDDEN_PROVIDER_HOST_FRAGMENTS: tuple[str, ...] = (
+    "bedrock-runtime",            # bedrock-runtime.<region>.amazonaws.com
+    "-aiplatform.googleapis.com", # <region>-aiplatform.googleapis.com (Vertex)
+    "aiplatform.googleapis.com",
+    ".openai.azure.com",          # <resource>.openai.azure.com
 )
 _FORBIDDEN_PROVIDER_ENV_NAMES: tuple[str, ...] = (
     "OPENAI_API_KEY",
+    "OPENAI_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_KEY",
     "ANTHROPIC_API_KEY",
+    "CLAUDE_API_KEY",
     "GOOGLE_API_KEY",
     "GEMINI_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "VERTEX_API_KEY",
+    "XAI_API_KEY",
+    "GROK_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "COHERE_API_KEY",
+    "FIREWORKS_API_KEY",
+    "ANYSCALE_API_KEY",
     "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
+    "TOGETHER_API_KEY",
+    "TOGETHERAI_API_KEY",
     "GROQ_API_KEY",
+    "DEEPSEEK_API_KEY",
     "OPENROUTER_API_KEY",
+    "REPLICATE_API_TOKEN",
+    "AWS_BEDROCK_API_KEY",
+    "HUGGINGFACE_API_KEY",
+    "HF_API_TOKEN",
 )
+# Generic shapes of hardcoded AI-provider API-key literals, matched regardless of
+# the variable / env name they are assigned to. These catch keys that are pasted
+# inline (or smuggled past a renamed env var). Conservative prefixes only, so we
+# don't false-positive on arbitrary base64 blobs.
+_FORBIDDEN_PROVIDER_KEY_LITERAL_PATTERN = re.compile(
+    r"""['"`](?:
+        sk-ant-[A-Za-z0-9_\-]{12,}        # Anthropic
+      | sk-proj-[A-Za-z0-9_\-]{12,}       # OpenAI project key
+      | sk-[A-Za-z0-9]{20,}               # OpenAI classic / generic sk- key
+      | xai-[A-Za-z0-9]{16,}              # xAI
+      | pplx-[A-Za-z0-9]{16,}             # Perplexity
+      | gsk_[A-Za-z0-9]{16,}              # Groq
+      | r8_[A-Za-z0-9]{16,}               # Replicate
+      | AIza[A-Za-z0-9_\-]{20,}           # Google API key
+      | fw_[A-Za-z0-9]{16,}               # Fireworks
+    )['"`]""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Generic detection of a direct external LLM API CALL: an LLM-shaped request path
+# (chat/completions, messages, generateContent, Vertex/aiplatform, etc.) that is
+# NOT routed through the metered runtime gateway. The gateway base is allowlisted
+# separately in _line_is_runtime_gateway_allowlisted() so normal products pass.
+_FORBIDDEN_LLM_CALL_PATH_PATTERN = re.compile(
+    r"""(?:
+        /v1/chat/completions
+      | /v1/completions
+      | /v1/messages
+      | /v1/complete
+      | /v1/responses
+      | /v1/embeddings
+      | /chat/completions
+      | :generateContent\b
+      | :streamGenerateContent\b
+      | generativelanguage\b
+      | aiplatform\b
+      | /v1/predict\b
+      | /converse\b                       # Bedrock Converse API
+      | /model/[^'"`\s]+/invoke\b          # Bedrock InvokeModel
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+_HTTP_CALL_PATTERN = re.compile(
+    r"\bfetch\s*\(|\baxios\b|\bXMLHttpRequest\b|\bhttps?://|\bnew\s+Request\s*\(|\.\s*(?:get|post|put|request)\s*\(",
+    re.IGNORECASE,
+)
+# The legitimate metered runtime gateway base — calls that target this are allowed.
+_RUNTIME_GATEWAY_ALLOWLIST_PATTERN = re.compile(
+    r"/api/takyon/apps/|createSubuserRuntimeClient|_takyon/runtime-client|runtimeApiBase",
+    re.IGNORECASE,
+)
+
+
+def _normalize_concat_string_literals(line: str) -> str:
+    """Collapse simple adjacent string-concat so obfuscated host/env/path
+    literals match. ``"api.openai" + ".com"`` -> ``"api.openai.com"`` and
+    ``"OPENAI" + "_API_KEY"`` -> ``"OPENAI_API_KEY"``. Only joins literal pairs
+    separated by ``+`` (with optional whitespace); leaves everything else intact.
+    """
+    # Repeatedly fold "<a>" + "<b>" (same or mixed simple quotes) into "<a><b>".
+    pattern = re.compile(r"""(['"`])([^'"`]*)\1\s*\+\s*(['"`])([^'"`]*)\3""")
+    prev = None
+    out = line
+    # Bounded iterations to avoid pathological loops.
+    for _ in range(12):
+        if out == prev:
+            break
+        prev = out
+        out = pattern.sub(lambda m: f'"{m.group(2)}{m.group(4)}"', out)
+    return out
+
+
+def _line_is_runtime_gateway_allowlisted(line: str) -> bool:
+    return bool(_RUNTIME_GATEWAY_ALLOWLIST_PATTERN.search(line))
+
+
+def _forbidden_host_in_line(line: str) -> bool:
+    lowered = line.lower()
+    for host in _FORBIDDEN_PROVIDER_HOSTS:
+        if host.lower() in lowered:
+            return True
+    for fragment in _FORBIDDEN_PROVIDER_HOST_FRAGMENTS:
+        if fragment.lower() in lowered:
+            return True
+    return False
+
+
 _FORBIDDEN_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
-    (
-        "direct provider host",
-        re.compile(r"\b(?:" + "|".join(re.escape(host) for host in _FORBIDDEN_PROVIDER_HOSTS) + r")\b", re.IGNORECASE),
-        "product source calls an AI provider directly",
-    ),
     (
         "provider credential or base-url env read",
         re.compile(
@@ -8060,7 +8201,23 @@ _FORBIDDEN_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
             r"require\(\s*['\"]openai['\"]\s*\)|"
             r"\bimport\b[^\n;]*['\"]@anthropic-ai/sdk['\"]|from\s+['\"]@anthropic-ai/sdk['\"]|"
             r"require\(\s*['\"]@anthropic-ai/sdk['\"]\s*\)|openai/[A-Za-z0-9_./-]+|"
-            r"anthropic\.Anthropic\s*\("
+            r"anthropic\.Anthropic\s*\(|"
+            # broaden to the other named provider SDKs
+            r"\bimport\b[^\n;]*['\"](?:@google/generative-ai|@google-cloud/vertexai|"
+            r"@anthropic-ai/bedrock-sdk|@aws-sdk/client-bedrock-runtime|cohere-ai|"
+            r"@mistralai/mistralai|together-ai|groq-sdk|replicate|@perplexity-ai/[^'\"]+|"
+            r"openai-edge)['\"]|"
+            r"from\s+['\"](?:@google/generative-ai|@google-cloud/vertexai|"
+            r"@anthropic-ai/bedrock-sdk|@aws-sdk/client-bedrock-runtime|cohere-ai|"
+            r"@mistralai/mistralai|together-ai|groq-sdk|replicate|@perplexity-ai/[^'\"]+|"
+            r"openai-edge)['\"]|"
+            r"require\(\s*['\"](?:@google/generative-ai|@google-cloud/vertexai|"
+            r"@anthropic-ai/bedrock-sdk|@aws-sdk/client-bedrock-runtime|cohere-ai|"
+            r"@mistralai/mistralai|together-ai|groq-sdk|replicate|@perplexity-ai/[^'\"]+|"
+            r"openai-edge)['\"]\s*\)|"
+            r"new\s+GoogleGenerativeAI\s*\(|new\s+CohereClient\s*\(|"
+            r"new\s+BedrockRuntimeClient\s*\(|new\s+Mistral\s*\(|new\s+Groq\s*\(|"
+            r"new\s+Replicate\s*\("
             r")",
             re.IGNORECASE,
         ),
@@ -8211,39 +8368,153 @@ def _scan_for_pretend_product_state(root: Path, *, limit: int = 25) -> list[dict
     return findings
 
 
+# Server-entrypoint shapes that must never ship in a product app, even smuggled
+# into a build/skip directory (dist/, _takyon/, references/). A product app is a
+# static client that talks only to the metered runtime gateway; any own server
+# entrypoint is a place to host ungated backend AI.
+_FORBIDDEN_SERVER_ENTRYPOINT_PATTERN = re.compile(
+    r"""(?:
+        from\s+['"](?:express|fastify|hono|koa|@hapi/hapi|next)['"]
+      | require\(\s*['"](?:express|fastify|hono|koa|@hapi/hapi|next)['"]\s*\)
+      | \b(?:app|server|httpServer)\s*\.\s*listen\s*\(
+      | \bhttp\s*\.\s*createServer\s*\(
+      | \bcreateServer\s*\(\s*\)\s*\.\s*listen\s*\(
+      | \bnew\s+Hono\s*\(
+      | \bnew\s+Koa\s*\(
+    )""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
 def _scan_for_forbidden_product_backend_code(root: Path, *, limit: int = 25) -> list[dict[str, Any]]:
-    """Detect product-source code that bypasses runtime/provider boundaries."""
+    """Detect product-source code that bypasses runtime/provider boundaries.
+
+    Build-time gate (fail toward CLOSED). It is best-effort static analysis; the
+    real enforcement boundary is the metered runtime gateway (/api/takyon/apps/),
+    which is what actually prevents ungated paid AI spend at runtime. This catches
+    the common bypasses: direct provider hosts, hardcoded provider API-key
+    literals (any env-var name), direct external LLM API calls (allowlisting only
+    the gateway base), provider-SDK imports, credential env reads, and smuggled
+    server entrypoints — including ones hidden under build/skip directories.
+    """
     findings: list[dict[str, Any]] = []
     if not root.exists():
         return findings
     for path in sorted(root.rglob("*")):
         if len(findings) >= limit:
             break
-        if not path.is_file() or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+        if not path.is_file():
             continue
-        if _product_source_is_skipped(path):
+        suffix = path.suffix.lower()
+        rel = str(path.relative_to(root))
+        skipped = _product_source_is_skipped(path)
+
+        # Server entrypoints are scanned even inside skip dirs (dist/, _takyon/,
+        # references/) so a built/copied entrypoint can't smuggle a backend in.
+        # For non-skipped source we still run the full provider/credential scan.
+        scan_provider = (not skipped) and suffix in _PRODUCT_SOURCE_EXTENSIONS
+        # Built/minified output may have a .mjs/.cjs extension; include common JS
+        # shapes for the server-entrypoint pass even outside the source set.
+        scan_entrypoint = suffix in _PRODUCT_SOURCE_EXTENSIONS or suffix in {".mjs", ".cjs"}
+        if not scan_provider and not scan_entrypoint:
             continue
+
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, OSError):
             continue
-        rel = str(path.relative_to(root))
-        for number, line in enumerate(lines, start=1):
-            for issue, pattern, blocker in _FORBIDDEN_PRODUCT_PATTERNS:
-                if not pattern.search(line):
-                    continue
+
+        for number, raw_line in enumerate(lines, start=1):
+            if len(findings) >= limit:
+                break
+            # Fold simple adjacent string-concat so obfuscated host/env/path
+            # literals ("api.openai" + ".com", "OPENAI" + "_API_KEY") match.
+            line = _normalize_concat_string_literals(raw_line)
+
+            # Smuggled server entrypoint — checked regardless of skip dir.
+            if scan_entrypoint and _FORBIDDEN_SERVER_ENTRYPOINT_PATTERN.search(line):
                 findings.append(
                     {
                         "path": rel,
                         "line": number,
-                        "issue": issue,
-                        "blocker": blocker,
-                        "snippet": line.strip()[:240],
+                        "kind": "server_entrypoint",
+                        "issue": "server entrypoint",
+                        "blocker": (
+                            "product source ships a server entrypoint"
+                            + (" smuggled into a build/skip directory" if skipped else "")
+                        ),
+                        "snippet": raw_line.strip()[:240],
                     }
                 )
-                break
-            if len(findings) >= limit:
-                break
+                continue
+
+            if not scan_provider:
+                continue
+
+            # Direct provider host (literal or loose fragment), incl. de-obfuscated.
+            if _forbidden_host_in_line(line):
+                findings.append(
+                    {
+                        "path": rel,
+                        "line": number,
+                        "issue": "direct provider host",
+                        "blocker": "product source calls an AI provider directly",
+                        "snippet": raw_line.strip()[:240],
+                    }
+                )
+                continue
+
+            # Hardcoded provider API-key literal, regardless of env-var name.
+            if _FORBIDDEN_PROVIDER_KEY_LITERAL_PATTERN.search(line):
+                findings.append(
+                    {
+                        "path": rel,
+                        "line": number,
+                        "issue": "hardcoded provider api key",
+                        "blocker": "product source ships a hardcoded AI-provider API key",
+                        "snippet": raw_line.strip()[:240],
+                    }
+                )
+                continue
+
+            # Direct external LLM API call: an HTTP call + LLM-path heuristic that
+            # is NOT routed through the allowlisted metered runtime gateway.
+            if (
+                _FORBIDDEN_LLM_CALL_PATH_PATTERN.search(line)
+                and _HTTP_CALL_PATTERN.search(line)
+                and not _line_is_runtime_gateway_allowlisted(line)
+            ):
+                findings.append(
+                    {
+                        "path": rel,
+                        "line": number,
+                        "issue": "direct external llm call",
+                        "blocker": (
+                            "product source makes a direct external LLM API call instead of "
+                            "routing through the metered runtime gateway"
+                        ),
+                        "snippet": raw_line.strip()[:240],
+                    }
+                )
+                continue
+
+            # Denylisted provider env reads / SDK imports.
+            matched = False
+            for issue, pattern, blocker in _FORBIDDEN_PRODUCT_PATTERNS:
+                if pattern.search(line):
+                    findings.append(
+                        {
+                            "path": rel,
+                            "line": number,
+                            "issue": issue,
+                            "blocker": blocker,
+                            "snippet": raw_line.strip()[:240],
+                        }
+                    )
+                    matched = True
+                    break
+            if matched:
+                continue
     return findings
 
 
@@ -17321,21 +17592,91 @@ def _queue_openmeter_sync_job(
         "estimate_cents": 0,
     }
     idem = f"openmeter.sync:{business}:{scope}:{target}:{uuid.uuid4().hex}"
-    with store._connect() as conn:
-        job = worker_jobs.enqueue(
-            conn,
-            business,
-            "openmeter.sync",
-            idempotency_key=idem,
-            payload=payload,
-            max_attempts=10,
-        )
+    # The OpenMeter access projection is a downstream usage mirror, never a login/session gate. This
+    # retry-enqueue runs inside session-minting paths (magic-link verify, OAuth/Supabase login,
+    # checkout), so it must FAIL SOFT: a queue error must never abort verification or roll back a
+    # freshly minted session. Two prior failure modes are guarded here:
+    #   * jobs.enqueue reads rows positionally (row[0]…), so it must run under ``_leaf_conn`` (tuple_row).
+    #     Passing the dict_row ``_PGConn`` wrapper made ``_row_to_job`` raise ``KeyError: 0`` whose
+    #     str() is the bare '0' the red-team saw escape the magic-link handler.
+    #   * any other enqueue/DB error is logged and swallowed; the caller still returns its sync result.
+    try:
+        with store._connect() as conn:
+            with store._leaf_conn(conn) as raw:
+                job = worker_jobs.enqueue(
+                    raw,
+                    business,
+                    "openmeter.sync",
+                    idempotency_key=idem,
+                    payload=payload,
+                    max_attempts=10,
+                )
+    except Exception as exc:  # pragma: no cover - fail-soft: never break the caller's auth/session path
+        try:
+            import logging
+
+            logging.getLogger("takyon.openmeter").warning(
+                "openmeter sync job enqueue failed (business=%s scope=%s); "
+                "continuing without retry job: %s",
+                business,
+                scope,
+                exc,
+            )
+        except Exception:
+            pass
+        return None
     return {
         "job_id": job.id,
         "kind": job.kind,
         "status": job.status,
         "scope": scope,
     }
+
+
+def _openmeter_access_projection_failsoft(
+    store: "TakyonStore",
+    business: str,
+    app_user_id: str,
+) -> dict[str, Any] | None:
+    """Fail-soft OpenMeter access-projection sync for session-minting paths (magic-link verify,
+    OAuth/Supabase login).
+
+    The access projection is a DOWNSTREAM USAGE MIRROR, never a login/session gate. A red-team proved
+    that an OpenMeter ``POST /api/customers -> 404`` raised here, and the retry-enqueue fallback then
+    raised the bare ``'0'`` (jobs.enqueue read dict_row rows positionally), escaping the auth handler
+    and rolling back the whole verify/session-mint transaction. This helper is the single canonical
+    fail-soft surface every session-minting path routes through: it attempts the projection sync, falls
+    back to a (now fail-soft) retry job, and SWALLOWS every exception — a valid credential must mint a
+    session even when OpenMeter is 404/down. Returns a best-effort sync summary for the response payload,
+    or a ``{configured, ok:false, error}`` shape; it NEVER raises."""
+    try:
+        return _pg_sync_openmeter_access_projection(store, business, app_user_id)
+    except Exception as exc:
+        summary: dict[str, Any] = {"configured": True, "ok": False, "error": str(exc)}
+        try:
+            queued = _queue_openmeter_sync_job(
+                store,
+                business,
+                scope="access",
+                app_user_id=app_user_id,
+            )
+            if queued is not None:
+                summary["retry_job"] = queued
+        except Exception:  # pragma: no cover - fail-soft: queue errors must not break auth
+            pass
+        try:
+            import logging
+
+            logging.getLogger("takyon.openmeter").warning(
+                "openmeter access projection sync failed (business=%s app_user_id=%s); "
+                "session minting continues without it: %s",
+                business,
+                app_user_id,
+                exc,
+            )
+        except Exception:
+            pass
+        return summary
 
 
 def _run_openmeter_sync_job(
@@ -19156,7 +19497,7 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                 }) + "\n")
             store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.magic_link.request", payload={"email": email, "sent": email_sent, "requested_send": send_email, "provider_message_id": provider_message_id, "external_side_effects": "suppressed" if test_mode and send_email else "sent" if email_sent else "none"})
             store._rewrite_app_files(conn, business)
-        return tool_result({"success": True, "business": business, "email": email, "magic_link_id": link_id, "token": token, "verify_url": link, "expires_at": expires_at, "email_sent": email_sent, "email_requested": send_email, "provider_message_id": provider_message_id, "external_side_effects": "suppressed" if test_mode and send_email else "sent" if email_sent else "none"})
+        return tool_result({"success": True, "business": business, "mode": "test" if test_mode else "live", "email": email, "magic_link_id": link_id, "token": token, "verify_url": link, "expires_at": expires_at, "email_sent": email_sent, "email_requested": send_email, "provider_message_id": provider_message_id, "external_side_effects": "suppressed" if test_mode and send_email else "sent" if email_sent else "none"})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -19209,22 +19550,13 @@ def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
                         display_name=user_record.name,
                     )
                 if _openmeter_enabled():
-                    try:
-                        openmeter_sync = _pg_sync_openmeter_access_projection(
-                            store,
-                            business,
-                            user_record.id,
-                        )
-                    except Exception as exc:
-                        openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
-                        queued = _queue_openmeter_sync_job(
-                            store,
-                            business,
-                            scope="access",
-                            app_user_id=user_record.id,
-                        )
-                        if queued is not None:
-                            openmeter_sync["retry_job"] = queued
+                    # The OpenMeter access projection is a downstream usage mirror, NOT a login gate.
+                    # It must never abort magic-link verification or roll back the freshly minted
+                    # session: an OpenMeter 404/outage (or any sync/enqueue error) is logged and
+                    # swallowed here so a valid token still mints a session when OpenMeter is down.
+                    openmeter_sync = _openmeter_access_projection_failsoft(
+                        store, business, user_record.id
+                    )
                     try:
                         with store._leaf_conn(conn) as leaf:
                             refreshed = leaves["identity"].get_app_user(
@@ -19422,22 +19754,12 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
                 )
             openmeter_sync = None
             if _openmeter_enabled():
-                try:
-                    openmeter_sync = _pg_sync_openmeter_access_projection(
-                        store,
-                        business,
-                        user_record.id,
-                    )
-                except Exception as exc:
-                    openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
-                    queued = _queue_openmeter_sync_job(
-                        store,
-                        business,
-                        scope="access",
-                        app_user_id=user_record.id,
-                    )
-                    if queued is not None:
-                        openmeter_sync["retry_job"] = queued
+                # Downstream usage mirror, not a login gate: an OpenMeter 404/outage must never abort
+                # Supabase/Google login or roll back the freshly minted session (see
+                # _openmeter_access_projection_failsoft).
+                openmeter_sync = _openmeter_access_projection_failsoft(
+                    store, business, user_record.id
+                )
                 try:
                     with store._leaf_conn(conn) as leaf:
                         refreshed = leaves["identity"].get_app_user(
@@ -21949,15 +22271,53 @@ def _creative_credit_int(value: Any) -> int:
 
 
 def _normalize_creative_credit_bucket(value: Any) -> str:
+    """Resolve a free-text channel/bucket label to a credit bucket key.
+
+    Precedence is exact/specific-first so an incidental substring can never
+    override a label that clearly names a channel. The live misallocation bug
+    was that the broad ``"twitter" in text`` catch-all ran before the reddit
+    check, so any reddit label that happened to contain the substring
+    ``twitter`` (e.g. ``reddit-twitter-promo``, ``r/twitter``,
+    ``twitter takeover on reddit``) was silently filed to the X bucket.
+
+    Rules:
+    - An exact bucket name (``x``/``twitter``, ``meta``/``facebook``/..., ``reddit``)
+      wins outright.
+    - Otherwise, count which distinct channels the label *mentions* as whole
+      words. If exactly one channel is named, that channel wins regardless of
+      ordering or of incidental substrings from another channel.
+    - If two or more distinct channels are named (truly ambiguous), resolve to
+      the rail's unbucketed/unknown sentinel (empty string). A confident WRONG
+      bucket is worse than unbucketed.
+    """
     text = str(value or "").strip().lower()
     if not text:
         return ""
-    if text in {"x", "twitter"} or text.startswith("x-") or "twitter" in text:
+
+    # Exact label wins outright.
+    if text in {"x", "twitter"}:
         return "x"
     if text in {"meta", "facebook", "instagram", "fb", "ig"}:
         return "meta"
     if text == "reddit":
         return "reddit"
+
+    # Whole-word channel mentions. Use word boundaries so "reddit" is not a
+    # match for an arbitrary "redditor"-like substring while still catching the
+    # channel name inside a longer label. The X bucket also accepts an "x-"
+    # prefix shorthand (e.g. "x-promo").
+    mentions: set[str] = set()
+    if re.search(r"\btwitter\b", text) or re.search(r"\bx\b", text) or text.startswith("x-"):
+        mentions.add("x")
+    if re.search(r"\b(?:meta|facebook|instagram|fb|ig)\b", text):
+        mentions.add("meta")
+    # "reddit" as a whole word, or the "r/<sub>" subreddit shorthand, signals reddit.
+    if re.search(r"\breddit\b", text) or re.search(r"\br/\w", text):
+        mentions.add("reddit")
+
+    if len(mentions) == 1:
+        return next(iter(mentions))
+    # Zero mentions, or two+ genuinely-conflicting channels -> unbucketed.
     return ""
 
 
@@ -21980,7 +22340,33 @@ def _creative_credit_default_bucket_for_action(action: Any) -> str:
 
 
 def _creative_credit_bucket_from_metadata(metadata: Any, *, action: Any = "") -> str:
+    """Resolve the credit bucket for an action + caller metadata.
+
+    The action's own hardcoded default bucket is authoritative. Live bug: a
+    ``reddit_ad_launch`` (whose action default is ``reddit``) was being charged
+    to the X bucket because caller-supplied ``ad_metadata.channel='twitter'`` /
+    ``metadata.channel='x'`` was consulted *before* the action default. A
+    channel-bound action always charges its own channel's bucket; the caller
+    cannot redirect a reddit launch's credits to X.
+
+    For generation actions that have NO hardcoded default bucket (e.g.
+    ``static_ad_generate``, ``ugc_ad_generate``), the caller-supplied
+    channel/metadata legitimately selects the bucket — but only through the
+    fixed exact-first normalizer above, so incidental substrings can't
+    misallocate it either.
+    """
     data = metadata if isinstance(metadata, Mapping) else {}
+    resolved_action = action or data.get("action")
+
+    # Action-bound bucket wins: a channel-specific action (reddit_ad_launch,
+    # x_publish_outreach, meta_ad_launch, reddit_publish_outreach) always
+    # charges its own channel's bucket regardless of caller channel/metadata.
+    action_default = _creative_credit_default_bucket_for_action(resolved_action)
+    if action_default:
+        return action_default
+
+    # Generation actions without a hardcoded default: the caller channel selects
+    # the bucket, passed through the fixed normalizer (A1).
     bucket = _normalize_creative_credit_bucket(
         data.get("budget_bucket")
         or data.get("channel_budget_bucket")
@@ -22000,7 +22386,7 @@ def _creative_credit_bucket_from_metadata(metadata: Any, *, action: Any = "") ->
         bucket = _normalize_creative_credit_bucket(candidate)
         if bucket:
             return bucket
-    return _creative_credit_default_bucket_for_action(action or data.get("action"))
+    return ""
 
 
 def _creative_credit_budget_metadata(
@@ -22023,7 +22409,12 @@ def _creative_credit_budget_metadata(
     if merged_ad_metadata:
         payload["ad_metadata"] = merged_ad_metadata
     payload["action"] = str(action or "").strip()
-    bucket = _normalize_creative_credit_bucket(budget_bucket)
+    # A channel-bound action (one with a hardcoded default bucket) always
+    # charges its own channel's bucket; an explicit caller-supplied
+    # budget_bucket cannot redirect e.g. a reddit_ad_launch onto the X bucket.
+    bucket = _creative_credit_default_bucket_for_action(action)
+    if not bucket:
+        bucket = _normalize_creative_credit_bucket(budget_bucket)
     if not bucket:
         bucket = _creative_credit_bucket_from_metadata(payload, action=action)
     if bucket:
