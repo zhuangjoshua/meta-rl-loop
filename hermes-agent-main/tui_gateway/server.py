@@ -8475,6 +8475,28 @@ def _takyon_historical_outputs_payload(store: Any, slug: str, *, limit: int = 40
                 continue
             candidates.add(path)
 
+    # Generated creatives publish under product/static-ads|ugc-ads|brand with their
+    # own receipts/manifests/specs alongside the media. Scan these dirs for MEDIA
+    # ONLY (png/jpg/mp4/…) so the ad image / UGC video / logo surface in the Media
+    # panel, without leaking the .json/.spec/.prompt receipts into Documents.
+    media_only_roots = ["product/static-ads", "product/ugc-ads", "product/brand"]
+    for rel_root in media_only_roots:
+        directory = root / rel_root
+        if not directory.exists() or not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in _TAKYON_MEDIA_SUFFIXES:
+                continue
+            try:
+                rel = str(path.relative_to(root))
+            except Exception:
+                continue
+            if _takyon_hide_operator_output(rel):
+                continue
+            candidates.add(path)
+
     outputs: list[dict[str, Any]] = []
     for path in candidates:
         try:
