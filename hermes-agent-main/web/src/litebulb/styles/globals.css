@@ -53,6 +53,34 @@ svg {
   }
 }
 
+/* ── Loading skeletons (stale-while-revalidate placeholders) ──
+   Shown while a panel revalidates in the background so a warm reload renders
+   instantly with neutral placeholders instead of an error-flash. The shimmer is
+   subtle and respects reduced-motion. */
+@keyframes lb-shimmer {
+  0% { background-position: -180px 0; }
+  100% { background-position: 180px 0; }
+}
+.lb-skel {
+  position: relative;
+  display: inline-block;
+  border-radius: 5px;
+  background: linear-gradient(
+    90deg,
+    var(--cds-color-surface-2, rgba(127, 127, 127, 0.12)) 25%,
+    var(--cds-color-surface-3, rgba(127, 127, 127, 0.22)) 50%,
+    var(--cds-color-surface-2, rgba(127, 127, 127, 0.12)) 75%
+  );
+  background-size: 360px 100%;
+  animation: lb-shimmer 1.15s ease-in-out infinite;
+  color: transparent !important;
+  user-select: none;
+}
+.lb-skel--text { min-width: 120px; height: 0.85em; vertical-align: middle; }
+@media (prefers-reduced-motion: reduce) {
+  .lb-skel { animation: none; }
+}
+
 /* ── Shared brand mark: a rounded bulb badge used in both surfaces ── */
 .lb-mark {
   display: inline-grid;

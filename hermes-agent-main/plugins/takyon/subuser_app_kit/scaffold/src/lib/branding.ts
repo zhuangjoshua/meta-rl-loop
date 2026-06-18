@@ -8,8 +8,8 @@ export function businessDisplayName(): string {
 }
 
 // Free brand mark injected by the surface-context payload (no paid logo call at bootstrap).
-// A later credit-gated business_generate_logo run replaces the seeded favicon, but these
-// remain the deterministic fallback for the product UI.
+// A later credit-gated business_generate_logo run publishes a real logo PNG into public/ and sets
+// brandLogoUrl; brandMarkDataUri() then prefers it. The monogram remains the deterministic fallback.
 export function brandAccent(): string {
   return String((surfaceContext as Record<string, unknown>).brandAccent || "#2563eb");
 }
@@ -18,7 +18,16 @@ export function brandMarkSvg(): string {
   return String((surfaceContext as Record<string, unknown>).brandMarkSvg || "");
 }
 
+// "/brand-logo.png" once a paid logo has been published into the site's public/ dir, else "".
+export function brandLogoUrl(): string {
+  return String((surfaceContext as Record<string, unknown>).brandLogoUrl || "");
+}
+
 export function brandMarkDataUri(): string {
+  // Prefer the published (paid) logo so the generated brand mark replaces the bootstrap monogram
+  // in the header and landing once business_generate_logo has run.
+  const logo = brandLogoUrl();
+  if (logo) return logo;
   const svg = brandMarkSvg();
   if (!svg) return "/favicon.svg";
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;

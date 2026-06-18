@@ -152,6 +152,25 @@
 .lb-docview__note { font-size: var(--cds-text-xs); color: var(--cds-color-text-faint); }
 .lb-docview__error { padding: 12px 14px; border-radius: var(--cds-radius-md); border: 1px solid rgba(193, 69, 69, 0.24); background: rgba(193, 69, 69, 0.08); color: var(--cds-color-error); }
 
+/* ── media (generated UGC video, ad/image creatives, logos) ── */
+.lb-media__grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+@media (max-width: 900px) { .lb-media__grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 640px) { .lb-media__grid { grid-template-columns: repeat(2, 1fr); } }
+.lb-media__item { display: flex; flex-direction: column; gap: 7px; padding: 0; border: none; background: none; cursor: pointer; text-align: left; min-width: 0; }
+.lb-media__thumb { position: relative; aspect-ratio: 1 / 1; border-radius: var(--cds-radius-md); overflow: hidden; border: 1px solid var(--cds-color-border-default); background: var(--cds-color-surface-sunken); display: grid; place-items: center; }
+.lb-media__item:hover .lb-media__thumb { border-color: var(--cds-color-border-strong); }
+.lb-media__item:focus-visible { outline: 2px solid var(--cds-color-text-link); outline-offset: 2px; }
+.lb-media__img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.lb-media__thumb.is-video { background: linear-gradient(150deg, hsl(220 30% 24%), hsl(250 35% 16%)); }
+.lb-media__playmark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: rgba(255, 255, 255, 0.92); color: #15130e; }
+.lb-media__badge { position: absolute; top: 6px; right: 6px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: rgba(9, 9, 11, 0.6); color: #fff; }
+.lb-media__meta { display: flex; flex-direction: column; min-width: 0; }
+.lb-media__name { font-size: var(--cds-text-xs); font-weight: var(--cds-weight-medium); color: var(--cds-color-text-default); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-media__role { font-size: var(--cds-text-xs); color: var(--cds-color-text-faint); }
+.lb-media__view { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.lb-media__player, .lb-media__full { max-width: 100%; max-height: 70vh; border-radius: 12px; background: #000; }
+.lb-media__open { display: inline-flex; align-items: center; gap: 6px; font-size: var(--cds-text-sm); color: var(--cds-color-text-link); }
+
 /* ── distribution ── */
 .lb-dist .lb-h { flex-wrap: wrap; }
 .lb-dist__tabs { margin-left: auto; }

@@ -71,6 +71,14 @@ type SessionTitlePayload = {
 };
 
 const LITEBULB_SESSION_STORAGE_KEY = "takyon.litebulb.sessions.v1";
+// Stale-while-revalidate cache. Last-known workspace / creative-credits / traction
+// snapshots persist across reloads in localStorage so a warm reload renders
+// instantly with real data while the network revalidation runs in the
+// background — no blank flash, no "unavailable" error-flash during normal load.
+const LITEBULB_SWR_CACHE_KEY = "takyon.litebulb.swr.v1";
+// Cap each cached entry's age so a long-stale snapshot is treated as a cold
+// load (revalidate without painting stale numbers as if fresh).
+const LITEBULB_SWR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const LITEBULB_PENDING_TURN_STORAGE_KEY = "takyon.litebulb.pendingTurns.v1";
 const LITEBULB_PENDING_CREATIVE_CREDIT_CHECKOUT_STORAGE_KEY =
   "takyon.litebulb.pendingCreativeCreditCheckout.v1";
@@ -453,6 +461,59 @@ function clearStoredLitebulbSession(slug: string) {
   }
 }
 
+type SwrSlot = "workspace" | "creativeCredits" | "traction";
+
+type SwrCacheEntry = {
+  workspace?: { at: number; value: TakyonBusinessWorkspaceResponse };
+  creativeCredits?: { at: number; value: TakyonBusinessCreativeCreditsResponse };
+  traction?: { at: number; value: TakyonBusinessTractionResponse };
+};
+
+function readSwrCache(): Record<string, SwrCacheEntry> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(LITEBULB_SWR_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, SwrCacheEntry>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function readCachedSlot<T>(slug: string, slot: SwrSlot): T | null {
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug) return null;
+  const entry = readSwrCache()[businessSlug];
+  const cached = entry ? (entry as Record<string, { at: number; value: unknown }>)[slot] : undefined;
+  if (!cached || typeof cached !== "object") return null;
+  if (!Number.isFinite(cached.at) || Date.now() - Number(cached.at) > LITEBULB_SWR_MAX_AGE_MS) {
+    return null;
+  }
+  return (cached.value as T) ?? null;
+}
+
+function writeCachedSlot(slug: string, slot: SwrSlot, value: unknown) {
+  if (typeof window === "undefined") return;
+  const businessSlug = trimText(slug).toLowerCase();
+  if (!businessSlug || value == null) return;
+  try {
+    const cache = readSwrCache();
+    const entry: SwrCacheEntry = { ...(cache[businessSlug] || {}) };
+    (entry as Record<string, { at: number; value: unknown }>)[slot] = { at: Date.now(), value };
+    cache[businessSlug] = entry;
+    // Bound the cache to the most recent businesses so localStorage cannot grow
+    // without limit across many created companies.
+    const keys = Object.keys(cache);
+    if (keys.length > 24) {
+      for (const stale of keys.slice(0, keys.length - 24)) delete cache[stale];
+    }
+    window.localStorage.setItem(LITEBULB_SWR_CACHE_KEY, JSON.stringify(cache));
+  } catch {
+    /* best effort */
+  }
+}
+
 function createEmptyBuildState(): BuildState {
   return {
     status: "idle",
@@ -549,6 +610,7 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
     const workspacePayload = await api.getTakyonBusinessHome(businessSlug);
+    writeCachedSlot(businessSlug, "workspace", workspacePayload);
     if (!isVisibleBusiness(businessSlug)) return;
     setWorkspace((current) => {
       if (!current || current.business_slug !== businessSlug) {
@@ -562,6 +624,7 @@ export function useTakyonLitebulb() {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
     const workspacePayload = await api.getTakyonBusinessWorkspace(businessSlug, 60, "full");
+    writeCachedSlot(businessSlug, "workspace", workspacePayload);
     if (!isVisibleBusiness(businessSlug)) return;
     setWorkspace(workspacePayload);
   }, [isVisibleBusiness]);
@@ -589,11 +652,15 @@ export function useTakyonLitebulb() {
         clearStoredPendingCreativeCreditCheckout();
         clearCreativeCreditCheckoutSessionIdFromUrl();
       }
+      if (payload) writeCachedSlot(businessSlug, "creativeCredits", payload);
       if (!isVisibleBusiness(businessSlug)) return;
       setCreativeCredits(payload);
     } catch {
       if (!isVisibleBusiness(businessSlug)) return;
-      setCreativeCredits(null);
+      // Never blow away a good cached value with null on a transient fetch
+      // error — that would re-introduce the "unavailable" flash. Keep the last
+      // known credits (SWR); only fall through to null when there is no cache.
+      setCreativeCredits((current) => current ?? readCachedSlot<TakyonBusinessCreativeCreditsResponse>(businessSlug, "creativeCredits"));
     }
   }, [isVisibleBusiness]);
 
@@ -693,11 +760,14 @@ export function useTakyonLitebulb() {
     if (!businessSlug) return;
     try {
       const payload = await api.getTakyonBusinessTraction(businessSlug, range);
+      if (payload) writeCachedSlot(businessSlug, "traction", payload);
       if (!isVisibleBusiness(businessSlug)) return;
       setTraction(payload);
     } catch {
       if (!isVisibleBusiness(businessSlug)) return;
-      setTraction(null);
+      // Keep last-known traction on a transient error rather than blanking the
+      // chart to its empty state (SWR).
+      setTraction((current) => current ?? readCachedSlot<TakyonBusinessTractionResponse>(businessSlug, "traction"));
     }
   }, [isVisibleBusiness]);
 
@@ -1168,9 +1238,14 @@ export function useTakyonLitebulb() {
       sessionIdRef.current = "";
       sessionBusinessRef.current = "";
       resetLiveChatSignals();
-      setWorkspace(null);
-      setCreativeCredits(null);
-      setTraction(null);
+      // Stale-while-revalidate: hydrate from the last-known cached snapshot so the
+      // panels render instantly with real data while the network revalidation
+      // (below) runs in the background. Falling back to null only when there is
+      // no cache keeps a true cold open honest (skeletons), but a warm reopen of
+      // a known business never flashes empty or "unavailable".
+      setWorkspace(readCachedSlot<TakyonBusinessWorkspaceResponse>(businessSlug, "workspace"));
+      setCreativeCredits(readCachedSlot<TakyonBusinessCreativeCreditsResponse>(businessSlug, "creativeCredits"));
+      setTraction(readCachedSlot<TakyonBusinessTractionResponse>(businessSlug, "traction"));
       chatMessagesRef.current = [];
       liveChatTurnRef.current = false;
       sessionRunningRef.current = false;

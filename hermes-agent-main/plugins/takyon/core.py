@@ -2140,11 +2140,31 @@ def _subuser_public_auth_payload(surface: dict[str, Any] | None) -> dict[str, An
     }
 
 
+# The canonical site-relative URL a published (paid) brand logo is served at. business_generate_logo
+# copies its generated PNG into the site's public/ under this name; vite copies public/ verbatim into
+# dist/, so a successful logo run makes the REAL logo replace the bootstrap monogram everywhere the UI
+# renders the brand mark (header + landing) and in the browser tab.
+_PUBLISHED_BRAND_LOGO_FILENAME = "brand-logo.png"
+_PUBLISHED_BRAND_LOGO_URL = f"/{_PUBLISHED_BRAND_LOGO_FILENAME}"
+
+
+def _published_brand_logo_url(workspace_root: Path) -> str:
+    """``/brand-logo.png`` if a paid logo PNG was published into the site's public/ dir, else "".
+    Used to make the surface-context prefer the generated logo over the deterministic monogram."""
+    try:
+        if (workspace_root / "public" / _PUBLISHED_BRAND_LOGO_FILENAME).is_file():
+            return _PUBLISHED_BRAND_LOGO_URL
+    except OSError:
+        pass
+    return ""
+
+
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
     slug: str,
     plans: list[dict[str, Any]] | None = None,
+    brand_logo_url: str = "",
 ) -> dict[str, Any]:
     shape = _surface_subuser_app_shape(surface)
     routes = _surface_routes(surface)
@@ -2164,9 +2184,12 @@ def _subuser_surface_context_payload(
         "publicUrl": str((surface or {}).get("public_url") or ""),
         "notes": str((surface or {}).get("notes") or ""),
         # Free deterministic brand mark so the product UI can render a monogram/accent
-        # without a paid logo call. business_generate_logo (credit-gated) replaces these later.
+        # without a paid logo call. business_generate_logo (credit-gated) publishes a real logo PNG
+        # into public/, and ``brandLogoUrl`` below then makes the UI prefer it over this monogram.
         "brandAccent": _brand_mark_accent(slug),
         "brandMarkSvg": _brand_mark_svg(slug),
+        # "" until a paid logo is published; "/brand-logo.png" once business_generate_logo succeeds.
+        "brandLogoUrl": str(brand_logo_url or ""),
     }
 
 
@@ -2320,7 +2343,12 @@ def _materialize_subuser_app_kit(
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
     materialized_surface = _materialized_surface_for_workspace(workspace_root, surface=surface)
-    context_payload = _subuser_surface_context_payload(materialized_surface, slug=slug, plans=plans)
+    context_payload = _subuser_surface_context_payload(
+        materialized_surface,
+        slug=slug,
+        plans=plans,
+        brand_logo_url=_published_brand_logo_url(workspace_root),
+    )
     (target_root / "surface-context.js").write_text(
         "export const surfaceContext = "
         + json.dumps(context_payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -6003,8 +6031,13 @@ def _brand_mark_svg(slug: str) -> str:
     accent = _brand_mark_accent(slug)
     initials = html.escape(_brand_mark_initials(slug))
     font_size = 30 if len(initials) > 1 else 38
+    # Browser tab favicons need INTRINSIC dimensions on the root <svg>: with only a viewBox (no
+    # width/height) Chrome and Safari load the file (200) but cannot rasterize it for the tab and
+    # silently fall back to the blank/default icon. Declaring width/height fixes the "favicon returns
+    # 200 but tab shows nothing" symptom while keeping the SVG scalable via the viewBox.
     return (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" '
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" '
+        'viewBox="0 0 64 64" role="img" '
         f'aria-label="{html.escape(_humanize_business_slug(slug))}">'
         f'<rect width="64" height="64" rx="14" fill="{accent}"/>'
         f'<text x="50%" y="50%" dy="0.02em" fill="#ffffff" font-family="-apple-system,'
@@ -6015,15 +6048,35 @@ def _brand_mark_svg(slug: str) -> str:
     )
 
 
+def _is_auto_seeded_brand_mark(text: str) -> bool:
+    """True only for OUR OWN deterministic monogram favicon (the free bootstrap mark). It carries the
+    distinctive ``role="img"`` + ``dominant-baseline="central"`` monogram signature and references no
+    external asset. A paid ``business_generate_logo`` PNG/SVG or a worker-authored mark will NOT match,
+    so the upgrade below never clobbers a real logo."""
+    if not text:
+        return False
+    signature = 'role="img"' in text and 'dominant-baseline="central"' in text and "<rect" in text
+    return signature
+
+
 def _seed_brand_mark_assets(workspace_root: Path, *, slug: str) -> None:
-    """Seed public/favicon.svg once. Never overwrites an existing favicon (a paid
-    business_generate_logo result or a worker-authored mark wins)."""
+    """Seed public/favicon.svg. Never overwrites a paid ``business_generate_logo`` result or a
+    worker-authored mark — those win. But a STALE auto-seeded monogram (e.g. an older format that
+    lacked root ``width``/``height`` and therefore did not render in browser tabs) is upgraded in place
+    to the current monogram, so existing businesses pick up the favicon-rendering fix on rebuild."""
     favicon = workspace_root / "public" / "favicon.svg"
+    current = _brand_mark_svg(slug)
     if favicon.exists():
-        return
+        try:
+            existing = favicon.read_text(encoding="utf-8")
+        except OSError:
+            return
+        # Only re-seed our own monogram, and only when it actually changed (idempotent no-op otherwise).
+        if not _is_auto_seeded_brand_mark(existing) or existing == current:
+            return
     try:
         favicon.parent.mkdir(parents=True, exist_ok=True)
-        favicon.write_text(_brand_mark_svg(slug), encoding="utf-8")
+        favicon.write_text(current, encoding="utf-8")
     except OSError:
         # Best-effort seed; a missing favicon is the pre-existing state, not a new failure.
         pass
@@ -6056,6 +6109,40 @@ def _inject_favicon_links(workspace_root: Path) -> None:
         index_path.write_text(updated, encoding="utf-8")
     except OSError:
         pass
+
+
+_PNG_FAVICON_LINK = '    <link rel="icon" type="image/png" href="/brand-logo.png" />\n'
+
+
+def _publish_brand_logo_to_site(workspace_root: Path, *, png_bytes: bytes) -> bool:
+    """Publish a generated (paid) logo PNG into the site so it REPLACES the bootstrap monogram.
+
+    Writes ``public/brand-logo.png`` (served at ``/brand-logo.png`` after vite copies public/ into
+    dist/). The surface-context's ``brandLogoUrl`` then makes the header/landing brand mark prefer it,
+    and a PNG favicon ``<link>`` is injected ahead of the SVG monogram so the browser TAB shows the
+    real logo too (a PNG icon link declared after the SVG one wins in browsers that prefer raster).
+    Returns True when the PNG was published. Best-effort: a write error leaves the monogram in place."""
+    if not png_bytes:
+        return False
+    public_dir = workspace_root / "public"
+    try:
+        public_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(public_dir / _PUBLISHED_BRAND_LOGO_FILENAME, png_bytes)
+    except OSError:
+        return False
+    # Make the browser tab favicon use the real logo: inject a PNG icon link (idempotent). Browsers
+    # that support both pick the last/most-specific icon, so the PNG mark wins over the SVG monogram.
+    index_path = workspace_root / "index.html"
+    try:
+        if index_path.is_file():
+            text = index_path.read_text(encoding="utf-8")
+            if "/brand-logo.png" not in text and "</head>" in text:
+                index_path.write_text(
+                    text.replace("</head>", _PNG_FAVICON_LINK + "  </head>", 1), encoding="utf-8"
+                )
+    except OSError:
+        pass
+    return True
 
 
 def _materialize_subuser_app_scaffold(
@@ -24274,16 +24361,38 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 }
             )
 
+        # Publish the generated PNG into the site so it REPLACES the bootstrap monogram on the live
+        # business site (header + landing via brandLogoUrl, and the browser tab via a PNG favicon).
+        # The generated asset already lives at product/brand/logos/<slug>/logo.png; copy it into the
+        # product site's public/ dir. The next surface refresh/build serves /brand-logo.png.
+        published_to_site = False
+        published_asset_rel = gateway_result.get("asset_path") or asset_rel
+        try:
+            generated_abs = store._resolve_business_file(business, published_asset_rel)
+            png_bytes = generated_abs.read_bytes() if generated_abs.is_file() else b""
+            if png_bytes:
+                source_path = _canonical_product_surface_source_path(
+                    str((args.get("source_path") or "product/site"))
+                )
+                site_root = store._resolve_business_file(business, source_path)
+                published_to_site = _publish_brand_logo_to_site(site_root, png_bytes=png_bytes)
+        except Exception:
+            # Best-effort publish: a copy failure never fails the (already-charged) generation; the
+            # asset is still recorded at product/brand/logos/<slug>/logo.png for a later rebuild.
+            published_to_site = False
+
         receipt = {
             **base_receipt,
             "success": True,
             "status": "created",
-            "asset_path": gateway_result.get("asset_path") or asset_rel,
+            "asset_path": published_asset_rel,
             "prompt": gateway_result.get("prompt"),
             "provider_cost_usd": gateway_result.get("provider_cost_usd"),
             "credits_charged": gateway_result.get("credits_charged"),
             "balance_credits": gateway_result.get("balance_credits"),
             "reserved_credits": gateway_result.get("reserved_credits"),
+            "published_to_site": published_to_site,
+            "site_logo_url": _PUBLISHED_BRAND_LOGO_URL if published_to_site else "",
         }
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         store.commit(
@@ -24315,6 +24424,8 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 "credits_charged": receipt.get("credits_charged"),
                 "balance_credits": receipt.get("balance_credits"),
                 "reserved_credits": receipt.get("reserved_credits"),
+                "published_to_site": receipt.get("published_to_site"),
+                "site_logo_url": receipt.get("site_logo_url"),
                 "value": receipt,
             }
         )

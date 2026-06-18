@@ -21,6 +21,8 @@ const I = {
   mail: S("M2 4h12v8H2zM2.5 4.5L8 8.5l5.5-4"),
   mega: S("M2.5 6.4v3.2l7.5 2.9V3.5zM10 5.4a2.6 2.6 0 010 5.2"),
   play: <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3.4l8 4.6-8 4.6z" /></svg>,
+  image: S("M2 3h12v10H2zM2 11l3.5-3.5 2.5 2.5 3-3L14 10"),
+  film: S("M2 3h12v10H2zM5 3v10M11 3v10M2 6.5h3M11 6.5h3M2 9.5h3M11 9.5h3"),
   reply: S("M2.5 3.6h11v6.2H6.7L4 12.2V9.8H2.5z", 14),
   rt: S("M4.5 5L3 6.5 4.5 8M3 6.5h7.5a1.5 1.5 0 011.5 1.5v1M11.5 11l1.5-1.5L11.5 8M13 9.5H5.5A1.5 1.5 0 014 8V7", 14),
   like: <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 13.7S2.6 10.3 2.6 6.5A2.6 2.6 0 018 4a2.6 2.6 0 015.4 2.5c0 3.8-5.4 7.2-5.4 7.2z" /></svg>,
@@ -55,6 +57,7 @@ const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
 
 const TEXT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ".json", ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".yml", ".yaml"]);
 const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
+const VIDEO_OUTPUT_SUFFIXES = new Set([".mp4", ".mov", ".webm", ".m4v"]);
 const HIDDEN_DOCUMENT_SUFFIXES = new Set([".js", ".jsx", ".ts", ".tsx"]);
 const CHANNEL_BUDGET_KEYS: ChannelBudgetKey[] = ["x", "meta", "reddit"];
 
@@ -539,6 +542,12 @@ function ChannelBudget({
     xBudget.used_credits,
   ]);
   const businessSlug = asText(workspace?.business_slug || creativeCredits?.business_slug);
+  // Distinguish "still loading / not fetched yet" (creativeCredits === null) from
+  // a confirmed-unavailable response (available === false). During a normal warm
+  // reload the value is briefly null while the background revalidation runs — we
+  // must show a neutral loading line, NOT the alarming "Creative credits are
+  // unavailable right now" copy, which previously flashed on every load.
+  const creditsConfirmedUnavailable = creativeCredits !== null && !creativeCredits.available;
   const [draftAllocations, setDraftAllocations] = useState<Record<ChannelBudgetKey, number>>(savedAllocations);
   const [saving, setSaving] = useState(false);
   const [buying, setBuying] = useState(false);
@@ -739,9 +748,15 @@ function ChannelBudget({
       </div>
       <div className="lb-bud__foot">
         <div className="lb-bud__note">
-          {creativeCredits?.available
-            ? `${spendableCredits.toLocaleString()} spendable now · ${budgetCapacity.toLocaleString()} total credits in budget scope${needsCredits ? " · Buy credits to unlock allocation." : ""}`
-            : "Creative credits are unavailable right now, so channel budgets cannot be edited."}
+          {creativeCredits?.available ? (
+            `${spendableCredits.toLocaleString()} spendable now · ${budgetCapacity.toLocaleString()} total credits in budget scope${needsCredits ? " · Buy credits to unlock allocation." : ""}`
+          ) : creditsConfirmedUnavailable ? (
+            "Creative credits are unavailable right now, so channel budgets cannot be edited."
+          ) : (
+            <span className="lb-skel lb-skel--text" style={{ minWidth: 220 }} aria-label="Loading credit balances">
+              Loading credit balances…
+            </span>
+          )}
           {creativeCredits?.available && buyCreditsValue > 0 && estimatedCheckoutAmountCents !== null
             ? <span className="lb-bud__helper">Checkout: {buyCreditsValue.toLocaleString()} credits for {formatUsdCents(estimatedCheckoutAmountCents)}.</span>
             : null}
@@ -817,7 +832,14 @@ function Documents({
   const fileCacheRef = useRef<Map<string, TakyonBusinessFileReadResponse>>(new Map());
   const pendingReadsRef = useRef<Map<string, Promise<TakyonBusinessFileReadResponse>>>(new Map());
   const operatorVisibleDeliverables = useMemo(
-    () => deliverables.filter((output) => !HIDDEN_DOCUMENT_SUFFIXES.has(outputSuffix(asText(output.path)))),
+    () =>
+      deliverables.filter((output) => {
+        const suffix = outputSuffix(asText(output.path));
+        // Hidden source modules and generated media (now owned by the dedicated
+        // Media panel) are excluded so Documents stays a clean list of readable
+        // text deliverables and media is not duplicated across two panels.
+        return !HIDDEN_DOCUMENT_SUFFIXES.has(suffix) && !MEDIA_OUTPUT_SUFFIXES.has(suffix);
+      }),
     [deliverables],
   );
   const visible = operatorVisibleDeliverables.slice(0, 6);
@@ -950,6 +972,129 @@ function Documents({
                 )}
               </>
             )}
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+const MEDIA_ROLE_LABEL: Record<string, string> = {
+  video: "UGC video",
+  ad: "Ad creative",
+  logo: "Logo",
+  image: "Image",
+  site: "Site asset",
+};
+
+function mediaRoleLabel(role: string, kind: string) {
+  const normalized = role.trim().toLowerCase();
+  if (MEDIA_ROLE_LABEL[normalized]) return MEDIA_ROLE_LABEL[normalized];
+  return kind === "video" ? "Video" : "Image";
+}
+
+function MediaThumb({
+  item,
+  slug,
+  onOpen,
+}: {
+  item: Record<string, unknown>;
+  slug: string;
+  onOpen: () => void;
+}) {
+  const path = asText(item.path);
+  const kind = asText(item.kind) || (MEDIA_OUTPUT_SUFFIXES.has(outputSuffix(path)) ? "image" : "");
+  const isVideo = kind === "video" || VIDEO_OUTPUT_SUFFIXES.has(outputSuffix(path));
+  const role = asText(item.role);
+  const title = asText(item.title) || path.split("/").pop() || "Media asset";
+  const detail = asText(item.detail) || mediaRoleLabel(role, isVideo ? "video" : "image");
+  const src = buildAssetUrl(slug, path);
+  return (
+    <button type="button" className="lb-media__item" onClick={onOpen} title={title}>
+      <span className={`lb-media__thumb${isVideo ? " is-video" : ""}`}>
+        {isVideo ? (
+          // Video must NOT load eagerly — only the lightweight play affordance
+          // shows in the grid; the actual stream loads on click in the modal.
+          <span className="lb-media__playmark" aria-hidden="true">{I.play}</span>
+        ) : (
+          // Images load lazily so the grid never blocks the dashboard render.
+          <img
+            className="lb-media__img"
+            src={src}
+            alt={title}
+            loading="lazy"
+            decoding="async"
+          />
+        )}
+        <span className="lb-media__badge">{isVideo ? I.film : I.image}</span>
+      </span>
+      <span className="lb-media__meta">
+        <span className="lb-media__name">{title}</span>
+        <span className="lb-media__role">{detail}</span>
+      </span>
+    </button>
+  );
+}
+
+function Media({
+  business,
+  media,
+}: {
+  business: LitebulbBusiness;
+  media: Array<Record<string, unknown>>;
+}) {
+  const [open, setOpen] = useState<Record<string, unknown> | null>(null);
+  const items = useMemo(
+    () => media.filter((item) => asText(item.path)).slice(0, 24),
+    [media],
+  );
+  if (!items.length) return null;
+  const openPath = asText(open?.path);
+  const openIsVideo =
+    asText(open?.kind) === "video" || VIDEO_OUTPUT_SUFFIXES.has(outputSuffix(openPath));
+  const openTitle = asText(open?.title) || openPath.split("/").pop() || "Media";
+  const openSrc = openPath ? buildAssetUrl(business.slug, openPath) : "";
+  return (
+    <>
+      <section className="lb-card lb-media">
+        <div className="lb-h">Media<span className="lb-h__c">{items.length} generated</span></div>
+        <div className="lb-media__grid">
+          {items.map((item, index) => (
+            <MediaThumb
+              key={asText(item.id) || asText(item.path) || index}
+              item={item}
+              slug={business.slug}
+              onOpen={() => setOpen(item)}
+            />
+          ))}
+        </div>
+      </section>
+
+      {open && openSrc && (
+        <Modal
+          title={openTitle}
+          sub={openPath}
+          wide
+          onClose={() => setOpen(null)}
+        >
+          <div className="lb-media__view">
+            {openIsVideo ? (
+              // Loaded only now (on open), with preload metadata, so heavy video
+              // never lags the dashboard during normal browsing.
+              <video
+                className="lb-media__player"
+                src={openSrc}
+                controls
+                autoPlay
+                preload="metadata"
+                playsInline
+              />
+            ) : (
+              <img className="lb-media__full" src={openSrc} alt={openTitle} />
+            )}
+            <a className="lb-media__open" href={openSrc} target="_blank" rel="noopener noreferrer">
+              Open original {I.ext}
+            </a>
           </div>
         </Modal>
       )}
@@ -1112,6 +1257,7 @@ export function CompanyTab({
   const liveState = useMemo(() => asRecord(workspace?.live_state), [workspace]);
   const tasks = useMemo(() => asList(liveState.tasks), [liveState]);
   const deliverables = useMemo(() => asList(workspace?.deliverables), [workspace]);
+  const media = useMemo(() => asList(workspace?.media), [workspace]);
 
   return (
     <div className="lb-comp">
@@ -1127,6 +1273,7 @@ export function CompanyTab({
           />
         </div>
         <Distribution business={business} workspace={workspace} />
+        <Media business={business} media={media} />
         <Documents business={business} deliverables={deliverables} />
       </div>
     </div>

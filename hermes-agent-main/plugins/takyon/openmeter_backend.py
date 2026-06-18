@@ -36,6 +36,7 @@ _OPENMETER_TOKEN_KEYS = (
     "TAKYON_OPENMETER_API_TOKEN",
 )
 _SUBSCRIPTION_STATUSES = ("active", "scheduled")
+_DEFAULT_LIST_PAGE_SIZE = 100
 
 
 class OpenMeterError(Exception):
@@ -124,20 +125,20 @@ def sync_customer(
             "takyon_subject_key": subject_key,
         },
     }
-    existing = _request_json(
-        "GET",
-        f"/api/v1/customers/{urllib.parse.quote(key, safe='')}",
-        allow_status={404},
-    )
+    existing = _customer_by_key(key)
     if existing is None:
-        created = _request_json("POST", "/api/v1/customers", payload=payload, expected_status={201})
-        return created if isinstance(created, dict) else {}
+        created = _request_json("POST", "/openmeter/customers", payload=payload, expected_status={201})
+        return _payload_entity(created)
+    customer_id = str(existing.get("id") or "").strip()
+    if not customer_id:
+        raise OpenMeterAPIError(f"OpenMeter customer lookup for key={key} returned no id")
     updated = _request_json(
         "PUT",
-        f"/api/v1/customers/{urllib.parse.quote(key, safe='')}",
+        f"/openmeter/customers/{urllib.parse.quote(customer_id, safe='')}",
         payload=payload,
     )
-    return updated if isinstance(updated, dict) else {}
+    entity = _payload_entity(updated)
+    return entity if entity else existing
 
 
 _USAGE_METER_SLUG = "tk_ai_cost_microusd"
@@ -194,7 +195,7 @@ def ingest_usage_event(
     # CloudEvents batch ingest; OpenMeter accepts a single event object too.
     _request_json(
         "POST",
-        "/api/v1/events",
+        "/openmeter/events",
         payload=event,
         expected_status={200, 201, 204},
     )
@@ -210,11 +211,7 @@ def sync_access_plan(policy: Any) -> OpenMeterPlanSnapshot:
     vendor_plan_key = plan_key_for(business_slug, local_plan_key)
     _ensure_feature(feature_key, f"{business_slug} app access")
     desired_metadata = _plan_metadata(policy, feature_key)
-    current = _request_json(
-        "GET",
-        f"/api/v1/plans/{urllib.parse.quote(vendor_plan_key, safe='')}",
-        allow_status={404},
-    )
+    current = _plan_by_key(vendor_plan_key)
     if isinstance(current, dict):
         current_meta = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
         if (
@@ -225,31 +222,27 @@ def sync_access_plan(policy: Any) -> OpenMeterPlanSnapshot:
             return _plan_snapshot(current)
     body = _plan_create_body(policy, feature_key, cadence, desired_metadata)
     if current is None:
-        draft = _request_json("POST", "/api/v1/plans", payload=body, expected_status={201})
+        draft = _request_json("POST", "/openmeter/plans", payload=body, expected_status={201})
     else:
+        current_id = str(current.get("id") or "").strip()
+        if not current_id:
+            raise OpenMeterAPIError(f"OpenMeter plan lookup for key={vendor_plan_key} returned no id")
         current_status = str(current.get("status") or "").strip().lower()
         if current_status == "draft":
             draft = _request_json(
                 "PUT",
-                f"/api/v1/plans/{urllib.parse.quote(str(current.get('id') or ''), safe='')}",
+                f"/openmeter/plans/{urllib.parse.quote(current_id, safe='')}",
                 payload=_plan_update_body(body),
             )
         else:
-            next_draft = _request_json(
-                "POST",
-                f"/api/v1/plans/{urllib.parse.quote(str(current.get('id') or current.get('key') or ''), safe='')}/next",
-                expected_status={201},
-            )
-            draft = _request_json(
-                "PUT",
-                f"/api/v1/plans/{urllib.parse.quote(str((next_draft or {}).get('id') or ''), safe='')}",
-                payload=_plan_update_body(body),
-            )
+            draft = _request_json("POST", "/openmeter/plans", payload=body, expected_status={201})
+    draft_entity = _payload_entity(draft)
     published = _request_json(
         "POST",
-        f"/api/v1/plans/{urllib.parse.quote(str((draft or {}).get('id') or ''), safe='')}/publish",
+        f"/openmeter/plans/{urllib.parse.quote(str(draft_entity.get('id') or ''), safe='')}/publish",
     )
-    return _plan_snapshot(published if isinstance(published, dict) else draft)
+    published_entity = _payload_entity(published)
+    return _plan_snapshot(published_entity if published_entity else draft_entity)
 
 
 def current_subscription(
@@ -259,29 +252,39 @@ def current_subscription(
 ) -> dict[str, Any] | None:
     _require_enabled()
     key = customer_key_for(business_slug, app_user_id)
+    customer = _customer_by_key(key)
+    if customer is None:
+        return None
+    customer_id = str(customer.get("id") or "").strip()
+    if not customer_id:
+        return None
     payload = _request_json(
         "GET",
-        f"/api/v1/customers/{urllib.parse.quote(key, safe='')}/subscriptions",
-        query={"status": list(_SUBSCRIPTION_STATUSES), "pageSize": 10, "page": 1},
+        "/openmeter/subscriptions",
+        query={
+            "filter[status]": list(_SUBSCRIPTION_STATUSES),
+            "page[size]": _DEFAULT_LIST_PAGE_SIZE,
+            "page[number]": 1,
+        },
         allow_status={404},
     )
-    if not isinstance(payload, dict):
-        return None
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return None
+    items = _list_payload_items(payload)
     active = [
         item
         for item in items
         if isinstance(item, dict)
+        and _subscription_matches_customer(item, customer_id=customer_id, customer_key=key)
         and str(item.get("status") or "").strip().lower() in _SUBSCRIPTION_STATUSES
     ]
     if not active:
         return None
     active.sort(
         key=lambda item: str(
-            item.get("activeFrom")
+            item.get("active_from")
+            or item.get("activeFrom")
+            or item.get("updated_at")
             or item.get("updatedAt")
+            or item.get("created_at")
             or item.get("createdAt")
             or ""
         ),
@@ -297,12 +300,19 @@ def customer_stripe_data(
 ) -> dict[str, Any] | None:
     _require_enabled()
     key = customer_key_for(business_slug, app_user_id)
+    customer = _customer_by_key(key)
+    if customer is None:
+        return None
+    customer_id = str(customer.get("id") or "").strip()
+    if not customer_id:
+        return None
     payload = _request_json(
         "GET",
-        f"/api/v1/customers/{urllib.parse.quote(key, safe='')}/stripe",
+        f"/openmeter/customers/{urllib.parse.quote(customer_id, safe='')}/billing",
         allow_status={404},
     )
-    return payload if isinstance(payload, dict) else None
+    entity = _payload_entity(payload)
+    return entity if entity else None
 
 
 def upsert_customer_stripe_data(
@@ -314,20 +324,26 @@ def upsert_customer_stripe_data(
 ) -> dict[str, Any]:
     _require_enabled()
     key = customer_key_for(business_slug, app_user_id)
+    customer = _customer_by_key(key)
+    if customer is None:
+        raise OpenMeterAPIError(f"OpenMeter customer not found for key={key}")
+    customer_id = str(customer.get("id") or "").strip()
+    if not customer_id:
+        raise OpenMeterAPIError(f"OpenMeter customer lookup for key={key} returned no id")
     payload = {
         "type": "stripe",
-        "stripeCustomerId": str(stripe_customer_id or "").strip(),
+        "stripe_customer_id": str(stripe_customer_id or "").strip(),
     }
     if stripe_default_payment_method_id:
-        payload["stripeDefaultPaymentMethodId"] = str(
+        payload["stripe_default_payment_method_id"] = str(
             stripe_default_payment_method_id
         ).strip()
     updated = _request_json(
         "PUT",
-        f"/api/v1/customers/{urllib.parse.quote(key, safe='')}/stripe",
+        f"/openmeter/customers/{urllib.parse.quote(customer_id, safe='')}/billing",
         payload=payload,
     )
-    return updated if isinstance(updated, dict) else {}
+    return _payload_entity(updated)
 
 
 def ensure_subscription(
@@ -350,7 +366,7 @@ def ensure_subscription(
             timing="immediate",
         )
     create = {
-        "customerKey": customer_key,
+        "customer": {"key": customer_key},
         "plan": {"key": plan.key, "version": int(plan.version)},
         "timing": "immediate",
         "name": f"{business_slug} {plan.key}",
@@ -358,11 +374,11 @@ def ensure_subscription(
     }
     created = _request_json(
         "POST",
-        "/api/v1/subscriptions",
+        "/openmeter/subscriptions",
         payload=create,
         expected_status={201},
     )
-    return created if isinstance(created, dict) else {}
+    return _payload_entity(created)
 
 
 def cancel_subscription(
@@ -380,10 +396,11 @@ def cancel_subscription(
         return current
     cancelled = _request_json(
         "POST",
-        f"/api/v1/subscriptions/{urllib.parse.quote(subscription_id, safe='')}/cancel",
+        f"/openmeter/subscriptions/{urllib.parse.quote(subscription_id, safe='')}/cancel",
         payload={"timing": str(timing or "immediate")},
     )
-    return cancelled if isinstance(cancelled, dict) else current
+    entity = _payload_entity(cancelled)
+    return entity if entity else current
 
 
 def project_customer_access(
@@ -393,28 +410,30 @@ def project_customer_access(
 ) -> OpenMeterAccessSnapshot:
     _require_enabled()
     customer_key = customer_key_for(business_slug, app_user_id)
+    customer = _customer_by_key(customer_key)
+    customer_id = str((customer or {}).get("id") or "").strip()
     feature_key = access_feature_key_for(business_slug)
-    raw_access = _request_json(
-        "GET",
-        f"/api/v1/customers/{urllib.parse.quote(customer_key, safe='')}/access",
-        allow_status={404},
+    raw_access = (
+        _request_json(
+            "GET",
+            f"/openmeter/customers/{urllib.parse.quote(customer_id, safe='')}/entitlement-access",
+            allow_status={404},
+        )
+        if customer_id
+        else None
     )
     current = current_subscription(business_slug=business_slug, app_user_id=app_user_id)
-    entitlement = {}
-    if isinstance(raw_access, dict):
-        entitlements = raw_access.get("entitlements")
-        if isinstance(entitlements, dict):
-            maybe = entitlements.get(feature_key)
-            entitlement = maybe if isinstance(maybe, dict) else {}
+    entitlement = _entitlement_payload(raw_access, feature_key)
     plan_ref = current.get("plan") if isinstance(current, dict) and isinstance(current.get("plan"), dict) else {}
     plan_payload = None
     plan_id = str(plan_ref.get("id") or "").strip()
     if plan_id:
         plan_payload = _request_json(
             "GET",
-            f"/api/v1/plans/{urllib.parse.quote(plan_id, safe='')}",
+            f"/openmeter/plans/{urllib.parse.quote(plan_id, safe='')}",
             allow_status={404},
         )
+        plan_payload = _payload_entity(plan_payload)
     plan_metadata = (
         plan_payload.get("metadata")
         if isinstance(plan_payload, dict) and isinstance(plan_payload.get("metadata"), dict)
@@ -423,7 +442,7 @@ def project_customer_access(
     return OpenMeterAccessSnapshot(
         customer_key=customer_key,
         feature_key=feature_key,
-        has_access=bool(entitlement.get("hasAccess")),
+        has_access=_entitlement_has_access(entitlement),
         tier=(
             str(plan_metadata.get("takyon_tier") or "").strip() or None
         ),
@@ -442,7 +461,9 @@ def project_customer_access(
         ),
         subscription_id=str(current.get("id") or "").strip() or None if isinstance(current, dict) else None,
         current_period_end=(
-            (current or {}).get("activeTo")
+            (current or {}).get("active_to")
+            or (current or {}).get("activeTo")
+            or (current or {}).get("current_period_end")
             or (current or {}).get("currentPeriodEnd")
             or (current or {}).get("endsAt")
         )
@@ -458,7 +479,7 @@ def project_customer_access(
             "openmeter_plan_version": str(
                 plan_ref.get("version") if isinstance(plan_ref, dict) and plan_ref.get("version") is not None else ""
             ),
-            "openmeter_has_access": "true" if bool(entitlement.get("hasAccess")) else "false",
+            "openmeter_has_access": "true" if _entitlement_has_access(entitlement) else "false",
         },
         raw_access=raw_access if isinstance(raw_access, dict) else {},
         raw_subscription=current if isinstance(current, dict) else None,
@@ -531,7 +552,7 @@ def _request_json(
 def _ensure_feature(feature_key: str, name: str) -> None:
     payload = {"key": feature_key, "name": name}
     try:
-        _request_json("POST", "/api/v1/features", payload=payload, expected_status={201})
+        _request_json("POST", "/openmeter/features", payload=payload, expected_status={201})
     except OpenMeterAPIError as exc:
         if "409" in str(exc) or "already exists" in str(exc).lower():
             return
@@ -551,26 +572,26 @@ def _plan_create_body(
         "name": name or "Plan",
         "description": str(getattr(policy, "notes", "") or "") or None,
         "currency": str(getattr(policy, "currency", "usd") or "usd").upper(),
-        "billingCadence": cadence,
+        "billing_cadence": cadence,
         "metadata": metadata,
         "phases": [
             {
                 "key": "default",
                 "name": "Default",
-                "rateCards": [
+                "rate_cards": [
                     {
                         "name": f"{name or 'Plan'} Access",
                         "description": str(getattr(policy, "notes", "") or "")
                         or "Takyon paid app access",
                         "key": feature_key,
-                        "featureKey": feature_key,
-                        "entitlementTemplate": {"type": "boolean"},
+                        "feature_key": feature_key,
+                        "entitlement_template": {"type": "boolean"},
                         "price": {
                             "amount": str(amount),
                             "type": "flat",
-                            "paymentTerm": "in_advance",
+                            "payment_term": "in_advance",
                         },
-                        "billingCadence": cadence,
+                        "billing_cadence": cadence,
                         "type": "flat",
                     }
                 ],
@@ -585,7 +606,7 @@ def _plan_update_body(body: dict[str, Any]) -> dict[str, Any]:
         "name": body.get("name"),
         "description": body.get("description"),
         "metadata": body.get("metadata"),
-        "billingCadence": body.get("billingCadence"),
+        "billing_cadence": body.get("billing_cadence"),
         "phases": body.get("phases") or [],
     }
 
@@ -644,6 +665,121 @@ def _plan_snapshot(payload: dict[str, Any] | None) -> OpenMeterPlanSnapshot:
         status=str(raw.get("status") or ""),
         metadata=metadata,
     )
+
+
+def _payload_entity(payload: dict[str, Any] | list[Any] | None) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            return data
+        return payload
+    return {}
+
+
+def _list_payload_items(payload: dict[str, Any] | list[Any] | None) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        items = payload.get("items")
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _customer_by_key(key: str) -> dict[str, Any] | None:
+    payload = _request_json(
+        "GET",
+        "/openmeter/customers",
+        query={"filter[key]": key},
+    )
+    for item in _list_payload_items(payload):
+        if str(item.get("key") or "").strip() == key:
+            return item
+    return None
+
+
+def _plan_by_key(key: str) -> dict[str, Any] | None:
+    payload = _request_json(
+        "GET",
+        "/openmeter/plans",
+        query={"filter[key]": key},
+    )
+    for item in _list_payload_items(payload):
+        if str(item.get("key") or "").strip() == key:
+            return item
+    return None
+
+
+def _subscription_matches_customer(
+    payload: dict[str, Any],
+    *,
+    customer_id: str,
+    customer_key: str,
+) -> bool:
+    customer = payload.get("customer") if isinstance(payload.get("customer"), dict) else {}
+    ids = {
+        str(customer.get("id") or "").strip(),
+        str(payload.get("customer_id") or "").strip(),
+        str(payload.get("customerId") or "").strip(),
+    }
+    keys = {
+        str(customer.get("key") or "").strip(),
+        str(payload.get("customer_key") or "").strip(),
+        str(payload.get("customerKey") or "").strip(),
+    }
+    return (customer_id and customer_id in ids) or (customer_key and customer_key in keys)
+
+
+def _entitlement_has_access(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for name in ("has_access", "hasAccess", "access"):
+        value = payload.get(name)
+        if value is not None:
+            return bool(value)
+    return False
+
+
+def _entitlement_payload(raw_access: dict[str, Any] | list[Any] | None, feature_key: str) -> dict[str, Any]:
+    if isinstance(raw_access, dict):
+        entitlements = raw_access.get("entitlements")
+        if isinstance(entitlements, dict):
+            direct = entitlements.get(feature_key)
+            if isinstance(direct, dict):
+                return direct
+        for key in ("data", "items", "features", "entitlement_access"):
+            collection = raw_access.get(key)
+            if isinstance(collection, dict):
+                direct = collection.get(feature_key)
+                if isinstance(direct, dict):
+                    return direct
+            if isinstance(collection, list):
+                for item in collection:
+                    if isinstance(item, dict) and _payload_feature_key(item) == feature_key:
+                        return item
+        if _payload_feature_key(raw_access) == feature_key:
+            return raw_access
+    elif isinstance(raw_access, list):
+        for item in raw_access:
+            if isinstance(item, dict) and _payload_feature_key(item) == feature_key:
+                return item
+    return {}
+
+
+def _payload_feature_key(payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    feature = payload.get("feature") if isinstance(payload.get("feature"), dict) else {}
+    return str(
+        payload.get("feature_key")
+        or payload.get("featureKey")
+        or feature.get("key")
+        or payload.get("key")
+        or ""
+    ).strip()
 
 
 def _key(*parts: str, max_len: int) -> str:

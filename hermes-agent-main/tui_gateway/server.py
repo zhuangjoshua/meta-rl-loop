@@ -8616,6 +8616,119 @@ def _takyon_workspace_deliverables_payload(
     return deliverables[: max(1, min(int(limit or 60), 120))]
 
 
+def _takyon_workspace_media_payload(
+    overview: dict[str, Any] | None,
+    outputs: list[dict[str, Any]] | None,
+    *,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    """Generated MEDIA (UGC video, ad/image creatives, logos) for the business.
+
+    Media files already land in the historical `outputs` scan (it walks
+    distribution/, campaigns/, creatives/, product/site/, etc. for image/video
+    suffixes). This filters those to the media subset and adds each campaign's
+    bound creative `asset_path` from the outreach channel receipts, so the
+    frontend can list and OPEN each asset via the authenticated `/asset` endpoint
+    (which serves bytes lazily with no-store caching — video never lags the
+    dashboard because it only loads on click).
+    """
+    def as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def as_list(value: Any) -> list[Any]:
+        return value if isinstance(value, list) else []
+
+    def as_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    def read_at(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
+
+    def media_kind(path: str) -> str:
+        suffix = Path(path).suffix.lower()
+        if suffix in _TAKYON_VIDEO_SUFFIXES:
+            return "video"
+        if suffix in _TAKYON_IMAGE_SUFFIXES:
+            return "image"
+        return ""
+
+    def media_role(path: str, kind: str) -> str:
+        lower = path.lower()
+        if "logo" in lower:
+            return "logo"
+        if kind == "video":
+            return "video"
+        if any(token in lower for token in ("/ad", "ad_", "ad-", "creative", "campaign", "/meta/", "/reddit/", "/x/")):
+            return "ad"
+        if lower.startswith("product/site/"):
+            return "site"
+        return "image"
+
+    by_path: dict[str, dict[str, Any]] = {}
+
+    def add(path: str, *, title: str = "", detail: str = "", at: int = 0, source: str = "") -> None:
+        rel = as_text(path)
+        if not rel:
+            return
+        kind = media_kind(rel)
+        if not kind:
+            return
+        if _takyon_hide_operator_output(rel):
+            return
+        role = media_role(rel, kind)
+        current = by_path.get(rel)
+        item = {
+            "id": f"media:{rel}",
+            "path": rel,
+            "title": as_text(title) or Path(rel).name,
+            "detail": as_text(detail) or ("Generated video" if kind == "video" else f"Generated {role}" if role != "image" else "Generated image"),
+            "kind": kind,
+            "role": role,
+            "source": as_text(source) or "workspace",
+            "at": read_at(at),
+        }
+        if current is None or read_at(item.get("at")) >= read_at(current.get("at")):
+            by_path[rel] = {**(current or {}), **item}
+
+    for output in outputs or []:
+        if not isinstance(output, dict):
+            continue
+        add(
+            output.get("path"),
+            title=output.get("title"),
+            detail=output.get("detail"),
+            at=output.get("at") or output.get("updated_at") or output.get("created_at"),
+            source=output.get("source") or "workspace",
+        )
+
+    # Campaign-bound creatives from the outreach channel receipts (ad image/video
+    # the CEO generated and bound to a launched campaign). These may live under a
+    # channel publish dir that the generic scan covers, but binding them by the
+    # receipt's asset_path guarantees the launched creative is listed.
+    overview_dict = as_dict(overview)
+    channels = as_dict(as_dict(as_dict(overview_dict.get("artifacts")).get("outreach")).get("channels"))
+    for channel_name, channel in channels.items():
+        for campaign in as_list(as_dict(channel).get("campaigns")):
+            campaign_dict = as_dict(campaign)
+            asset_path = as_text(campaign_dict.get("asset_path"))
+            if not asset_path:
+                continue
+            label = as_text(campaign_dict.get("campaign_name")) or as_text(campaign_dict.get("slug"))
+            add(
+                asset_path,
+                title=label or Path(asset_path).name,
+                detail=f"{as_text(channel_name).upper() or 'Ad'} campaign creative",
+                source=f"campaign:{as_text(channel_name)}",
+            )
+
+    media = list(by_path.values())
+    media.sort(key=lambda item: read_at(item.get("at")), reverse=True)
+    return media[: max(1, min(int(limit or 40), 80))]
+
+
 def _takyon_workspace_preview_payload(
     overview: dict[str, Any] | None,
     outputs: list[dict[str, Any]] | None,
@@ -8965,6 +9078,63 @@ _TAKYON_TASK_STATUS_LABELS = {
     "idle": "Idle",
 }
 
+# Default workstream milestone scaffold shown on a FRESH bootstrap, before the
+# CEO has authored any curated `business_post_operator_update` milestones. The
+# Tasks panel must never fall back to a single generic "Background work is
+# running." / "Claude Agent Task" row: it should show the named business
+# workstreams the bootstrap is actually moving through. These are intent-level
+# milestone cards (title + category + status) — raw worker/runtime/job events
+# re-parent under the running one via the existing milestone nesting. Mirrors the
+# frontend WORKSTREAMS ladder (web/src/lib/takyonCeoUpdates.ts) so the operator
+# sees the same business phases whether the card is driven by live signals or by
+# this server-side scaffold. The first card is RUNNING (the bootstrap's active
+# phase), the rest PLANNED, until the CEO posts its own milestone plan which then
+# takes precedence.
+_TAKYON_BOOTSTRAP_WORKSTREAMS: tuple[tuple[str, str, str], ...] = (
+    ("Research the market", "RESEARCH", "Validate the wedge and choose the first useful angle."),
+    ("Build the product", "PRODUCT", "Build the first usable customer workflow and product surface."),
+    ("Publish the site", "LAUNCH", "Put a live version online so it can be reviewed."),
+    ("Verify the workflow", "PRODUCT", "Check the live flow end to end before handing it back."),
+    ("Prepare launch", "GROWTH", "Package the first distribution and launch materials around the workflow."),
+)
+
+
+def _takyon_bootstrap_milestone_scaffold(
+    run_status: str,
+    run_updated_at: str,
+) -> list[dict[str, Any]]:
+    """Named workstream milestone cards for a fresh bootstrap with no curated plan.
+
+    Returns one intent-level card per default business workstream. The first card
+    is RUNNING when the bootstrap run is active (else PLANNED); the remainder are
+    PLANNED. Callers gate this on there being a live bootstrap/background run and
+    no real intent/milestone tasks yet, so it never overrides the CEO's own
+    `business_post_operator_update` milestones once those exist.
+    """
+    first_status = "running" if str(run_status or "").strip().lower() == "running" else "queued"
+    cards: list[dict[str, Any]] = []
+    for index, (title, category, description) in enumerate(_TAKYON_BOOTSTRAP_WORKSTREAMS):
+        status = first_status if index == 0 else "queued"
+        cards.append(
+            {
+                "id": f"bootstrap-milestone:{index}",
+                "task_id": f"bootstrap-milestone:{index}",
+                "source": "operator_update",
+                "label": title,
+                "title": title,
+                "description": description,
+                "category": category,
+                "status": status,
+                "status_label": _TAKYON_TASK_STATUS_LABELS.get(status, status.capitalize()),
+                "detail": description,
+                "steps": [],
+                "outputs": [],
+                "updated_at": str(run_updated_at or ""),
+            }
+        )
+    return cards
+
+
 # Ordered (keyword -> category) hints. First match wins. Keyword is matched
 # against the lowercased raw label + detail + source.
 _TAKYON_TASK_CATEGORY_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -9174,10 +9344,10 @@ def _takyon_live_state_payload(
     run_status = canonical_task_status(run.get("status"))
     run_label_text = run_label(as_text(run.get("kind")))
     run_detail = as_text(run.get("detail")) or (
-        "CEO bootstrap is queued." if run_status == "queued"
-        else "CEO bootstrap is running." if run_status == "running" and run_label_text == "CEO bootstrap"
-        else "Background work is queued." if run_status == "queued"
-        else "Background work is running." if run_status == "running"
+        "Setting up the business and starting the first workstream." if run_status == "queued" and run_label_text == "CEO bootstrap"
+        else "Working through the business workstreams now." if run_status == "running" and run_label_text == "CEO bootstrap"
+        else "Queued and waiting to run." if run_status == "queued"
+        else "Working on this now." if run_status == "running"
         else ""
     )
     run_updated_at = as_text(run.get("updated_at") or run.get("finished_at") or run.get("started_at"))
@@ -9198,6 +9368,46 @@ def _takyon_live_state_payload(
         for task in live_tasks
     ):
         live_tasks.insert(0, run_task)
+
+    # Fresh-bootstrap milestone scaffold. When a CEO bootstrap / background run is
+    # live (running or queued) but the CEO has NOT yet authored any curated
+    # milestone plan and there are no real intent-level tasks recorded, seed the
+    # named business workstreams so the Tasks panel shows meaningful cards
+    # (Research / Build the product / Publish the site …) instead of a lone
+    # "Background work is running." / generic worker row. The raw bootstrap run
+    # row then nests under the running scaffold card via the milestone nesting
+    # below. This never fires once the CEO posts its own operator_update
+    # milestones (those create operator_update-source intent tasks) or once any
+    # other intent task exists, so the curated plan always wins.
+    _SCAFFOLD_INTENT_SOURCES = {"operator_update", "task_rollup"}
+    # Raw labels that are CEO-loop plumbing, not a real business milestone. A
+    # bootstrap/wake/turn job row must NOT count as a "real intent" or it would
+    # suppress the scaffold on the exact fresh-bootstrap turn it is meant for.
+    _SCAFFOLD_PLUMBING_LABELS = {
+        "",
+        "Recorded work",
+        "CEO bootstrap",
+        "CEO wake",
+        "CEO turn",
+        "Work request",
+        "Background run",
+    }
+    bootstrap_is_live = bool(
+        run_task and run_status in {"running", "queued"} and run_label_text == "CEO bootstrap"
+    )
+    has_real_intent = any(
+        as_text(task.get("source")) in _SCAFFOLD_INTENT_SOURCES
+        or (
+            as_text(task.get("source")) not in {"runtime", "trace", "background"}
+            and as_text(task.get("label")) not in _SCAFFOLD_PLUMBING_LABELS
+        )
+        for task in raw_tasks
+    )
+    if bootstrap_is_live and not has_real_intent:
+        scaffold = _takyon_bootstrap_milestone_scaffold(run_status, run_updated_at)
+        # Prepend the scaffold so the named workstreams lead; the raw bootstrap
+        # run row stays so its low-level events nest under the running card.
+        live_tasks = [*scaffold, *live_tasks]
 
     hint_candidates = [
         canonical_hint_status(current_action.get("status")),
@@ -9552,12 +9762,14 @@ def _takyon_workspace_boot_payload(
         )
     )
     overview_payload["product"] = product_payload
+    media = _takyon_workspace_media_payload(overview_payload, [])
     return {
         "business_slug": slug,
         "current": current if isinstance(current, dict) else {},
         "overview": overview_payload,
         "outputs": [],
         "deliverables": deliverables,
+        "media": media,
         "background_run": background_run,
         "live_state": live_state,
     }
@@ -9626,12 +9838,17 @@ def _takyon_workspace_payload(
         )
     )
     overview_payload["product"] = product_payload
+    media = _takyon_workspace_media_payload(
+        overview_payload,
+        outputs if isinstance(outputs, list) else [],
+    )
     return {
         "business_slug": slug,
         "current": current,
         "overview": overview_payload,
         "outputs": outputs if isinstance(outputs, list) else [],
         "deliverables": deliverables,
+        "media": media,
         "background_run": background_run,
         "live_state": live_state,
     }
@@ -9682,6 +9899,7 @@ def _takyon_dashboard_state_payload(
         "overview": workspace.get("overview") or {},
         "outputs": workspace.get("outputs") or [],
         "deliverables": workspace.get("deliverables") or [],
+        "media": workspace.get("media") or [],
         "background_run": workspace.get("background_run"),
         "live_state": workspace.get("live_state") or {},
         "auto_switched_business": auto_slug or "",

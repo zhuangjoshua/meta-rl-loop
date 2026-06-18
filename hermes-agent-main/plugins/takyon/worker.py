@@ -2095,11 +2095,55 @@ def product_action_handler(job: Job) -> JobRunResult:
 
 
 def openmeter_sync_handler(job: Job) -> JobRunResult:
+    """Run an ``openmeter.sync`` job FAIL-SOFT: the OpenMeter access/customer/plan sync is a downstream
+    usage MIRROR, never a runtime gate and never a CEO-recoverable blocker. A degraded mirror (provider
+    404/timeout/transport error, misconfigured ``OPENMETER_URL``, missing target, anything) must NOT
+    turn into a ``failed``/``blocked`` job — that becomes a "Resolve Openmeter sync failure" task that
+    burns CEO recovery cycles and counts toward "N blockers need CEO recovery" on a fresh business.
+
+    So this handler swallows every error and returns a ``completed`` JobRunResult carrying a truthful
+    ``{ok: False, degraded: True, error}`` summary instead of raising. The local ``app_usage_events``
+    rail is the source of truth for usage/entitlement; OpenMeter is a best-effort analytics mirror, so a
+    completed-but-degraded job is the honest receipt — the mirror stays stale (visible in the result)
+    until the operator fixes ``OPENMETER_URL``/token, but no business task goes FAILED."""
     from .core import _run_openmeter_sync_job, _store
 
     payload = job.payload if isinstance(job.payload, Mapping) else {}
-    result = _run_openmeter_sync_job(_store(), job.business_slug, payload)
-    return JobRunResult(result=result, actual_cost_cents=0)
+    scope = str(payload.get("scope") or "").strip().lower()
+    try:
+        result = _run_openmeter_sync_job(_store(), job.business_slug, payload)
+        summary = result if isinstance(result, Mapping) else {}
+        if summary.get("configured") and not summary.get("ok"):
+            # The sync ran but the mirror is degraded (e.g. provider 404). Log-and-skip silently; the
+            # job COMPLETES with the truthful degraded summary so it never becomes a recoverable blocker.
+            _log.info(
+                "openmeter sync mirror degraded (business=%s scope=%s); non-fatal, job completes: %s",
+                job.business_slug,
+                scope or "unknown",
+                summary.get("error"),
+            )
+            return JobRunResult(
+                result={**dict(summary), "degraded": True, "non_fatal": True}, actual_cost_cents=0
+            )
+        return JobRunResult(result=result, actual_cost_cents=0)
+    except Exception as exc:  # fail-soft: a degraded mirror is NEVER a CEO-recoverable blocker
+        _log.warning(
+            "openmeter sync job degraded (business=%s scope=%s); non-fatal mirror, job completes: %s",
+            job.business_slug,
+            scope or "unknown",
+            exc,
+        )
+        return JobRunResult(
+            result={
+                "configured": True,
+                "ok": False,
+                "degraded": True,
+                "non_fatal": True,
+                "scope": scope or None,
+                "error": str(exc),
+            },
+            actual_cost_cents=0,
+        )
 
 
 # The kind→handler registry the drain consults. New job kinds register here.

@@ -12,6 +12,7 @@ import {
   businessHasShipped,
   deriveAssistantReceipt,
   deriveLiveWorkstreamCard,
+  sanitizeCustomerReply,
   type AssistantReceiptData,
 } from "@/lib/takyonCeoUpdates";
 import { Tabs, Textarea } from "../composer-ui/lib";
@@ -438,6 +439,13 @@ function AgentChat({
         liveUrl: reviewUrl,
       })
     : null;
+  // A finished reply that is NOT a technical build/publish receipt is a normal
+  // conversational CEO answer. Render it directly in the default view — but only
+  // the customer-safe prose: sanitizeCustomerReply drops any line naming a tool,
+  // skill, worker, file path, or build/deploy step. If nothing safe remains, the
+  // bubble is suppressed and the content stays only under the opt-in raw log.
+  const conversationalReply =
+    finishedReply && !receipt ? sanitizeCustomerReply(finishedReply.text) : "";
   const rawTranscript = agentMessages
     .map((message) => message.text.trim())
     .filter(Boolean);
@@ -474,6 +482,13 @@ function AgentChat({
           <div className="lb-msg lb-msg--agent">
             <div className="lb-msg__bubble">
               <AgentReceipt receipt={receipt} />
+            </div>
+          </div>
+        )}
+        {!liveCard && !receipt && conversationalReply && (
+          <div className="lb-msg lb-msg--agent">
+            <div className="lb-msg__bubble">
+              <AgentMessageMarkdown text={conversationalReply} />
             </div>
           </div>
         )}

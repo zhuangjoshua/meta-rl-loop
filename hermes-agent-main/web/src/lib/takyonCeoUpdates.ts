@@ -539,6 +539,47 @@ function looksTechnicalAssistantReceipt(text: string): boolean {
   );
 }
 
+// Internal runtime jargon that must never reach customer-visible chat. A line
+// that mentions any of these is plumbing (tool/skill/worker/build mechanics) and
+// is dropped from the default conversational reply — it lives only under the
+// opt-in "View raw assistant log". Mirrors the CEO-prompt ban list in
+// plugins/takyon/prompts/ceo.md so the UI fails safe even if the model slips.
+const CUSTOMER_PLUMBING_PATTERNS: RegExp[] = [
+  /\b(business_[a-z_]+|takyon[-_][a-z-]+|claude[ _-]?agent|claude_agent_task)\b/i,
+  /\b(skill|worker lane|site worker|surface contract|app account|app shell|subuser|toolset|work request|work-request)\b/i,
+  /\b(bootstrap|scaffold|provision|upsert|runtime rail|workspace|delegate|delegated)\b/i,
+  /\b(npm|pnpm|yarn|tsc|typecheck|vite|vercel|deploy(?:ed|ing|ment)?|webpack|eslint|pytest|py_compile)\b/i,
+  /\b(actions\/|screens\/|src\/|product\/site\/|metrics\/|distribution\/|research\/)/i,
+  new RegExp(`\\b[\\w.-]+\\.(?:${TEXT_EXTENSIONS})\\b`, "i"),
+  /\b(executing|running)\s+[`'"]?[a-z]/i,
+  /\bI'?ll (?:load|invoke|call|delegate|run the)\b/i,
+];
+
+/**
+ * Strip internal plumbing from a plain (non-receipt) CEO reply so it can render
+ * directly in the default customer chat. Drops any line that names a tool,
+ * skill, worker, file path, or build/deploy step, keeping only warm
+ * business-outcome prose. Returns "" when nothing customer-safe remains (the
+ * caller then suppresses the bubble and leaves the content only under the opt-in
+ * raw log). Presentation-only — it never alters the agent's actual reply.
+ */
+export function sanitizeCustomerReply(content: string): string {
+  const normalized = cleanText(content).trim();
+  if (!normalized) return "";
+  const kept: string[] = [];
+  for (const rawLine of normalized.split(/\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      // Preserve paragraph breaks between kept content.
+      if (kept.length && kept[kept.length - 1] !== "") kept.push("");
+      continue;
+    }
+    if (CUSTOMER_PLUMBING_PATTERNS.some((pattern) => pattern.test(line))) continue;
+    kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function deriveAssistantReceipt({
   content,
   businessName,

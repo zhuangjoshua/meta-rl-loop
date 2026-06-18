@@ -56,7 +56,7 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" \
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates curl rsync caddy docker.io
+  apt-get install -y ca-certificates curl rsync caddy docker.io ffmpeg
   if ! command -v xurl >/dev/null 2>&1; then
     curl -fsSL https://raw.githubusercontent.com/xdevplatform/xurl/main/install.sh | bash
   fi

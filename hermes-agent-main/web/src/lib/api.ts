@@ -810,12 +810,24 @@ export interface TakyonBusinessFileReadResponse {
   truncated?: boolean;
 }
 
+export interface TakyonBusinessMediaItem {
+  id?: string;
+  path: string;
+  title?: string;
+  detail?: string;
+  kind?: "image" | "video";
+  role?: "image" | "video" | "ad" | "logo" | "site";
+  source?: string;
+  at?: number;
+}
+
 export interface TakyonBusinessWorkspaceResponse {
   business_slug: string;
   current?: Record<string, unknown>;
   overview?: Record<string, unknown>;
   outputs?: unknown[];
   deliverables?: unknown[];
+  media?: TakyonBusinessMediaItem[];
   background_run?: Record<string, unknown> | null;
   live_state?: Record<string, unknown> | null;
 }
