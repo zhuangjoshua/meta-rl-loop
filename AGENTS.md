@@ -211,7 +211,7 @@ Hardcode only durable rails and safety primitives: business isolation, path cont
 When changing CEO/runtime behavior, edit the stable CEO prompt at `hermes-agent-main/plugins/takyon/prompts/ceo.md`, the active Takyon skills under `hermes-agent-main/skills/takyon/`, and the relevant tool/cron/harness source. In particular:
 
 - `plugins/takyon/prompts/ceo.md` is the stable state-aware router prompt.
-- `takyon-claude-agent-sdk` / `business_claude_agent_task` is the bounded Claude Agent SDK path for business-scoped workspace edits.
+- The bounded Claude Agent SDK worker lane for business-scoped workspace edits is the `business_claude_agent_task` tool (registered in `plugins/takyon/core.py` and `plugins/takyon/plugin.yaml`, running `hermes-agent-main/scripts/takyon-claude-agent-task.mjs` in a hardened docker sandbox). It is a coding worker, not a Takyon skill, so do not look for a `takyon-claude-agent-sdk` `SKILL.md` in the Hermes skills index.
 - Do not reintroduce generic Hermes `delegate_task` into normal Takyon CEO runs; the coding worker lane above is the one special worker path.
 - `takyon-app-runtime` and the canonical app tools own product customer auth, magic links, sessions, app customers/subusers, entitlements, plan policy, checkout, Stripe webhook reconciliation, revenue, and usage budgets.
 - `takyon-business-metrics`, `takyon-market-research`, `takyon-build-product`, `takyon-distribution`, `takyon-x`, `takyon-reddit`, and `takyon-conversation-followup` own the remaining active business methods.
