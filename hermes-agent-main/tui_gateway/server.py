@@ -8025,6 +8025,29 @@ def _takyon_business_overview_payload(
             "updated_at": job.get("last_run") or job.get("next_run") or "",
         })
 
+    # Side-channel milestone rollup. The Tasks-panel PRIMARY rows are produced by
+    # a SEPARATE auxiliary LLM call (tui_gateway.task_rollup) over the raw trace
+    # assembled above — NOT by a CEO tool call, so it never enters the CEO's
+    # conversation context or breaks prompt caching ("like a message delta").
+    # It is cached by a hash of the trace with a short TTL (only re-summarizes on
+    # change) and fails open (returns [] → deterministic labels below stand).
+    # The CEO's own curated operator_update milestones, when present, are an
+    # explicit override and take precedence over the auto rollup.
+    if not operator_milestone_cards:
+        try:
+            from tui_gateway.task_rollup import summarize_task_milestones
+
+            rollup_cards = summarize_task_milestones(slug, task_cards)
+        except Exception:
+            rollup_cards = []
+        if rollup_cards:
+            for card in rollup_cards:
+                card["tone"] = card.get("tone") or status_tone(card.get("status"))
+            # Prepend so the milestone rows are the primary intent anchors; the
+            # raw job/runtime/agent rows nest under them in
+            # _takyon_live_state_payload.
+            task_cards = [*rollup_cards, *task_cards]
+
     blocked_count = sum(1 for task in task_cards if task.get("tone") == "blocked")
     product_visible = bool(website)
     research_visible = bool(research_outputs)
@@ -9189,21 +9212,50 @@ def _takyon_live_state_payload(
     def _is_intent_task(task: dict[str, Any]) -> bool:
         return as_text(task.get("source")) not in {"runtime", "trace"}
 
-    intent_anchor = next(
-        (t for t in live_tasks if t.get("status") == "running" and _is_intent_task(t)),
-        None,
-    ) or next(
-        (t for t in live_tasks if t.get("status") == "queued" and _is_intent_task(t)),
-        None,
-    ) or next((t for t in live_tasks if _is_intent_task(t)), None)
+    # The side-channel rollup milestones (source "task_rollup") and the CEO's
+    # curated operator_update milestones are the PRIMARY intent rows. When such
+    # milestone rows are present, prefer them as the anchor and nest the raw
+    # work rows (jobs/agent/runtime/trace/background/cron) underneath, so the
+    # panel shows milestone cards on top with low-level worker events grouped
+    # under them rather than as flat sibling rows.
+    _MILESTONE_SOURCES = {"task_rollup", "operator_update"}
+
+    def _is_milestone_task(task: dict[str, Any]) -> bool:
+        return as_text(task.get("source")) in _MILESTONE_SOURCES
+
+    has_milestone = any(_is_milestone_task(t) for t in live_tasks)
+
+    def _pick_anchor(predicate) -> dict[str, Any] | None:
+        return (
+            next((t for t in live_tasks if t.get("status") == "running" and predicate(t)), None)
+            or next((t for t in live_tasks if t.get("status") == "queued" and predicate(t)), None)
+            or next((t for t in live_tasks if predicate(t)), None)
+        )
+
+    if has_milestone:
+        intent_anchor = _pick_anchor(_is_milestone_task) or _pick_anchor(_is_intent_task)
+    else:
+        intent_anchor = _pick_anchor(_is_intent_task)
     current_task_id = as_text((intent_anchor or {}).get("id"))
     if current_task_id:
+        # When a milestone anchor leads, raw work rows nest under it. Otherwise
+        # only the low-level runtime/trace events nest (legacy behavior — job and
+        # operator_update milestone rows stay as their own top-level intents).
+        nestable_sources = (
+            {"runtime", "trace", "job", "agent", "background", "cron"}
+            if has_milestone
+            else {"runtime", "trace"}
+        )
         for task in live_tasks:
             if task.get("id") == current_task_id:
                 continue
-            # Only re-parent raw runtime/trace events that did not already carry
-            # an explicit parent (task_id defaults to its own id in canonical_task).
-            if as_text(task.get("source")) in {"runtime", "trace"} and as_text(
+            # Never nest one milestone under another; keep every milestone row
+            # as a top-level primary card.
+            if _is_milestone_task(task):
+                continue
+            # Only re-parent rows that did not already carry an explicit parent
+            # (task_id defaults to its own id in canonical_task).
+            if as_text(task.get("source")) in nestable_sources and as_text(
                 task.get("task_id")
             ) == as_text(task.get("id")):
                 task["task_id"] = current_task_id
