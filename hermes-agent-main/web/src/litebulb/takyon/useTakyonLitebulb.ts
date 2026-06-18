@@ -1239,7 +1239,7 @@ export function useTakyonLitebulb() {
       businessSlug: "",
       businessName: "",
       narration: [`Reading your idea — ${idea}.`],
-      terminal: ["Booting Litebulb CEO…"],
+      terminal: ["Booting Coscale CEO…"],
       error: "",
     });
     setSubmitting(true);

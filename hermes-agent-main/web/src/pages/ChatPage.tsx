@@ -1586,7 +1586,7 @@ export default function ChatPage() {
   const [cronError, setCronError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(() =>
     typeof window !== "undefined" && !window.__TAKYON_SESSION_TOKEN__
-      ? "Session token unavailable. Open this page through the Litebulb dashboard server."
+      ? "Session token unavailable. Open this page through the Coscale dashboard server."
       : null,
   );
   const [rightOpen, setRightOpen] = useState(false);
@@ -3501,7 +3501,7 @@ function BizSidebar({
         <span className="td-mark">
           <Lightbulb className="h-4 w-4" strokeWidth={2} />
         </span>
-        <span className="td-name">Litebulb</span>
+        <span className="td-name">Coscale</span>
       </div>
 
       <div className="min-h-0">
@@ -4075,7 +4075,7 @@ function SlashPalette({
               {item.display || item.text}
             </span>
             <span className="block min-w-0 flex-1 truncate text-xs text-[var(--td-muted)]">
-              {item.description || item.meta || "Litebulb command"}
+              {item.description || item.meta || "Coscale command"}
             </span>
           </button>
         ))}

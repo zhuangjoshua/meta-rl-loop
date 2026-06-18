@@ -31,8 +31,8 @@ function HomeNav({ user, account, onNav, onOpenSettings, onLogout }: {
     : "Wallet";
   return (
     <header className="lb-homenav">
-      <button className="lb-homenav__brand" onClick={() => onNav("/")} aria-label="Litebulb home">
-        <BulbMark size={26} tone="ink" /> <span>Litebulb</span>
+      <button className="lb-homenav__brand" onClick={() => onNav("/")} aria-label="Coscale home">
+        <BulbMark size={26} tone="ink" /> <span>Coscale</span>
       </button>
       <div className="lb-homenav__acct">
         <button className="lb-homenav__wallet" onClick={() => { onOpenSettings("billing"); close(); }} aria-label="Open billing">
