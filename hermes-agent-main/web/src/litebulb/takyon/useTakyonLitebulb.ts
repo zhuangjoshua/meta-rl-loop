@@ -9,6 +9,7 @@ import {
 } from "@/lib/api";
 import { GatewayClient } from "@/lib/gatewayClient";
 import {
+  businessHasShipped,
   deriveLiveWorkstreamCard,
   type LiveWorkstreamCardData,
   type ProgressToolSignal,
@@ -505,10 +506,20 @@ export function useTakyonLitebulb() {
   const sessionRunningRef = useRef(false);
   const liveChatTurnRef = useRef(false);
   const liveChatSignalsRef = useRef<LiveChatSignals>(createEmptyLiveChatSignals());
+  // Whether the active business is already past its first bootstrap (shipped a
+  // product / has prior history). Kept in a ref so the live-chat card derivation
+  // can read it without re-subscribing the streaming callbacks. When true, a
+  // transient empty live-state must never reset the card to the bootstrap
+  // "Starting <business> / Researching the market" placeholder.
+  const pastBootstrapRef = useRef(false);
 
   useEffect(() => {
     activeBusinessNameRef.current = trimText(activeBusiness?.name);
   }, [activeBusiness?.name]);
+
+  useEffect(() => {
+    pastBootstrapRef.current = businessHasShipped(workspace);
+  }, [workspace]);
 
   const isVisibleScope = useCallback((slug: string) => {
     return trimText(slug).toLowerCase() === visibleBusinessRef.current;
@@ -740,6 +751,7 @@ export function useTakyonLitebulb() {
       statusItems: liveChatSignalsRef.current.statusItems,
       progressLines: liveChatSignalsRef.current.progressLines,
       tools: liveChatSignalsRef.current.tools,
+      pastBootstrap: pastBootstrapRef.current,
     });
     setChatProgress(card ? { ...card, live: running } : null);
   }, [currentBusinessName]);

@@ -9,6 +9,7 @@ import type {
 } from "@/lib/api";
 import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 import {
+  businessHasShipped,
   deriveAssistantReceipt,
   deriveLiveWorkstreamCard,
   type AssistantReceiptData,
@@ -82,6 +83,10 @@ function liveStateProgress(
   workspace: TakyonBusinessWorkspaceResponse | null,
 ): ChatProgress | null {
   const businessName = workspaceBusinessName(workspace);
+  // A business that has already shipped a product must never replay the
+  // bootstrap "Starting <business> / Researching the market" placeholder when
+  // the mirrored live_state is momentarily empty or generic.
+  const pastBootstrap = businessHasShipped(workspace);
   const liveProgress = (
     statusValue: unknown,
     ...parts: unknown[]
@@ -99,6 +104,7 @@ function liveStateProgress(
       businessName,
       statusItems: detail ? [detail] : [],
       progressLines: [status],
+      pastBootstrap,
     });
     if (card) return { ...card, live: true };
     return {
@@ -107,7 +113,9 @@ function liveStateProgress(
         detail
         || (["queued", "scheduled", "pending"].includes(status)
           ? "Queued CEO bootstrap job."
-          : "I'm moving this through the next business workstream now."),
+          : pastBootstrap
+            ? "I'm on this — picking up where the last workstream left off."
+            : "I'm moving this through the next business workstream now."),
       items: [],
       live: true,
     };
