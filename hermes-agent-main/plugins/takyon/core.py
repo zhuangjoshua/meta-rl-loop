@@ -533,6 +533,60 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
 # appended to the worker contract for every product instead.
 ALWAYS_ON_RUNTIME_RAILS: tuple[str, ...] = ("analytics",)
 
+# Product chat tone presets — the operator-selectable VOICE for the customer-facing
+# product chat/assistant (the Litebulb-built product app's AI surface), NOT the operator
+# CEO shell. This is a per-business choice recorded on the surface contract
+# (`metadata.subuser_app.chat_tone`) via `business_upsert_app_surface_contract`, mirrored
+# into `product/surface.md`, and injected into the product-build worker contract for the
+# `generate` rail so the generated product assistant speaks in the selected voice. There is
+# no global hardcoded product-chat tone: a business with no selection resolves to "default".
+# `worker_contract` lines are appended to the `generate` rail guidance the product worker
+# receives; they steer how the generated product chat assistant's system prompt is written.
+PRODUCT_CHAT_TONE_PRESETS: dict[str, dict[str, Any]] = {
+    "default": {
+        "label": "Default product assistant",
+        "summary": "Neutral, clear, helpful product-assistant voice with no imposed personality.",
+        "worker_contract": [
+            "Product chat tone: default. Write the product assistant's system prompt for a clear, helpful, neutral voice; do not impose a named personality, and keep replies appropriate to the product's own brand.",
+        ],
+    },
+    "poke": {
+        "label": "Poke (short, warm, proactive)",
+        "summary": "Short, warm, lightly playful replies with no corporate hedging that always end on a proactive next step.",
+        "worker_contract": [
+            "Product chat tone: poke (operator-approved). Bake this voice into the product assistant's system prompt so every customer-facing reply follows it:",
+            "  - Keep replies SHORT — 1-3 sentences by default; expand only when the customer explicitly asks for depth.",
+            "  - Warm and lightly playful, never stiff or corporate; zero hedging, throat-clearing, or filler preambles like \"I have completed\" / \"you may wish to consider\".",
+            "  - Always end with a proactive next step or a question that moves the customer forward.",
+            "  - At most one emoji per reply; never over-explain.",
+            "  - Voice example — instead of \"I have completed the analysis and identified several potential approaches you may wish to consider\", write \"Done — 3 angles, my pick's #2. Want me to run it?\".",
+            "  - This shapes voice only; never weaken factual accuracy, the runtime /generate contract, spend gating, or blocked-state honesty to hit the tone.",
+        ],
+    },
+}
+DEFAULT_PRODUCT_CHAT_TONE = "default"
+
+
+def _normalize_product_chat_tone(raw: Any) -> str:
+    """Resolve an operator-supplied product-chat tone to a known preset key.
+
+    Unknown/blank values fall back to the neutral ``default`` preset rather than
+    inventing a voice — the registry is the source of truth for selectable tones.
+    """
+
+    text = str(raw or "").strip().lower()
+    if text in PRODUCT_CHAT_TONE_PRESETS:
+        return text
+    return DEFAULT_PRODUCT_CHAT_TONE
+
+
+def _surface_product_chat_tone(surface: dict[str, Any] | None) -> str:
+    """Read the selected product-chat tone preset key from the surface contract."""
+
+    payload = _surface_subuser_app_metadata(surface)
+    return _normalize_product_chat_tone(payload.get("chat_tone"))
+
+
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY = "monthly"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER = "paid"
 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS = 1_900
@@ -6004,6 +6058,8 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
     if runtime_api_base:
         lines.append(f"- Runtime API base: {runtime_api_base}")
 
+    chat_tone = _surface_product_chat_tone(surface)
+
     def _render_rail(rail: str) -> None:
         spec = PRODUCT_RUNTIME_RAILS.get(rail, {})
         owner = str(spec.get("owner_skill") or "unknown")
@@ -6017,6 +6073,15 @@ def _runtime_ui_contract_block(surface: dict[str, Any] | None) -> str:
             lines.append(f"  - Canonical tools: {', '.join(tools)}")
         for item in spec.get("worker_contract") or []:
             lines.append(f"  - {str(item).strip()}")
+        # The generate rail is the customer-facing product-chat/assistant path: inject the
+        # per-business product-chat tone preset here so the generated product assistant's
+        # system prompt is written in the operator-selected voice. Default preset still
+        # emits its (neutral) contract so the selection is always explicit in the worker
+        # guidance rather than silently absent.
+        if rail == "generate":
+            preset = PRODUCT_CHAT_TONE_PRESETS.get(chat_tone) or PRODUCT_CHAT_TONE_PRESETS[DEFAULT_PRODUCT_CHAT_TONE]
+            for item in preset.get("worker_contract") or []:
+                lines.append(f"  {str(item).rstrip()}" if str(item).startswith("  ") else f"  - {str(item).strip()}")
 
     if runtime_features:
         lines.extend(["", "Selected runtime rails:"])
@@ -12712,6 +12777,9 @@ class TakyonStore:
             else "- Bootstrap shell rails available now: not applicable",
             f"- Publish target: {surface_for_files.get('publish_target') or _product_publish_target(slug)}",
             f"- Notes: {surface_for_files.get('notes') or 'not set'}",
+            (
+                lambda _tone: f"- Product chat tone: {_tone} — {(PRODUCT_CHAT_TONE_PRESETS.get(_tone) or {}).get('summary') or 'neutral product-assistant voice.'}"
+            )(_surface_product_chat_tone(surface_for_files)),
         ]
         surface_lines.extend(["", "## Routes", ""])
         routes = surface_for_files.get("routes") or []
@@ -14626,6 +14694,18 @@ class TakyonStore:
                 rail_state=op.get("rail_state"),
                 frontend_stack=frontend_stack_value,
             )
+            # Product-chat tone preset (customer-facing product assistant voice). Omitted
+            # tone keeps the prior selection; any value normalizes to a known preset, so a
+            # stray string can never inject an unknown voice into the build worker contract.
+            requested_tone = op.get("tone")
+            resolved_tone = _normalize_product_chat_tone(
+                requested_tone
+                if requested_tone is not None
+                else _surface_product_chat_tone(existing)
+            )
+            subuser_app_payload = metadata.get("subuser_app")
+            if isinstance(subuser_app_payload, dict):
+                subuser_app_payload["chat_tone"] = resolved_tone
             metadata.pop("customer_experience", None)
             metadata.pop("product_workflow", None)
             _validate_frontend_stack_runtime_feature_contract(
@@ -17735,6 +17815,7 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "runtime_api_base": args.get("runtime_api_base"),
         "runtime_features": args.get("runtime_features"),
         "rail_state": args.get("rail_state"),
+        "tone": args.get("tone"),
         "routes": args.get("routes") or [],
         "publish_target": args.get("publish_target"),
         "notes": args.get("notes") or "",
@@ -28926,6 +29007,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "runtime_api_base": {"type": "string"},
                 "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared shared backend rails for this app surface. Bootstrap app shells are pinned to auth/account/profile/checkout."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
+                "tone": {"type": "string", "enum": ["default", "poke"], "description": "Voice preset for the customer-facing product chat/assistant (the generate rail), NOT the operator CEO shell. 'default' is neutral; 'poke' is short, warm, lightly playful, no corporate hedging, always ends on a proactive next step. Recorded on the surface contract and injected into the product-build worker so the generated product assistant speaks in this voice. Omit to keep the current selection (defaults to 'default')."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
                 "notes": {"type": "string"},
