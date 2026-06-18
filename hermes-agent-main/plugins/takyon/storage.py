@@ -254,20 +254,42 @@ def _safe_owner_label(value: str) -> str:
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
+    # A concurrent ``materialize_workspace_revision(delete_local=True)`` on the SAME local cache
+    # dest (e.g. the other worker drain thread re-materializing the business workspace) can delete
+    # the parent directory between our ``mkdir`` and ``mkstemp``/``replace`` — a transient ENOENT.
+    # Recreate the parent and retry a bounded number of times so a durable workspace write is never
+    # lost to a momentary directory-wipe race. (The business mirror flock that used to serialize
+    # this was removed because it deadlocked the worker; see core._business_mirror_lock.)
+    last_exc: FileNotFoundError | None = None
+    for _attempt in range(4):
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+        except FileNotFoundError as exc:
+            last_exc = exc
+            continue
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            return
+        except FileNotFoundError as exc:
+            last_exc = exc
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            continue
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    if last_exc is not None:
+        raise last_exc
 
 
 def _read_file_bytes(path: Path) -> bytes:

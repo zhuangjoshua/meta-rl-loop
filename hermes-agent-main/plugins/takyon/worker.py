@@ -39,6 +39,7 @@ import os
 import re
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -333,14 +334,33 @@ def _record_x_publish_result(
             "received_at": published_at,
         },
     ]
-    store = TakyonStore()
-    store.commit(
-        scope=f"business:{slug}",
-        operations=operations,
-        idempotency_key=f"x-publish-artifact:{job_id}:{post_id}",
-        reason="worker recorded live X publish receipt",
-        actor="worker",
-    )
+    # Record the receipt + conversation durably. Under the 2-thread worker, a concurrent commit
+    # for another job re-materializes this business's local cache mirror with delete_local=True,
+    # which can wipe the workspace dir mid-apply and surface as a transient FileNotFoundError. The
+    # control-plane DB write is idempotent (keyed by the idempotency_key below), so retrying the
+    # whole commit on that ENOENT is safe: the next attempt re-materializes and re-writes the
+    # artifacts. This makes the X-publish receipt/conversation persist even when a peer thread
+    # wipes the mirror concurrently. (The mirror flock that used to serialize this deadlocked the
+    # worker and was removed; see core._business_mirror_lock.)
+    idem = f"x-publish-artifact:{job_id}:{post_id}"
+    last_enoent: FileNotFoundError | None = None
+    for _attempt in range(5):
+        store = TakyonStore()
+        try:
+            store.commit(
+                scope=f"business:{slug}",
+                operations=operations,
+                idempotency_key=idem,
+                reason="worker recorded live X publish receipt",
+                actor="worker",
+            )
+            return {"artifact": artifact_rel, "receipt": receipt_rel}
+        except FileNotFoundError as exc:
+            last_enoent = exc
+            time.sleep(0.1 * (_attempt + 1))
+            continue
+    if last_enoent is not None:
+        raise last_enoent
     return {"artifact": artifact_rel, "receipt": receipt_rel}
 
 

@@ -697,11 +697,13 @@ def build_creative_gateway_router() -> APIRouter:
 
         _render_lock_stack = _ExitStack()
         try:
-            mirror_root = store._business_workspace_base() / core._slugify(business)
-            _render_lock_stack.enter_context(core._business_mirror_lock(mirror_root))
-            # Resolve the workspace root ONCE up front (this is the only sync); the render
-            # subprocess writes into this exact local cache tree, and the held lock keeps any
-            # other store from re-materializing it out from under us.
+            # The business mirror flock that used to wrap this critical section deadlocked the
+            # worker and provided no real safety, so it is gone (see core._business_mirror_lock).
+            # The render output is protected instead by an IMMEDIATE remote-storage push below and
+            # by ``sync=False`` reads off the just-written local tree. Resolve the workspace root
+            # ONCE up front (this is the only sync); the render subprocess writes into this exact
+            # local cache tree. If a concurrent re-materialize wipes it, the remote push has
+            # already durably captured the asset and the manifest read falls through cleanly.
             business_root = store._business_root(business)
             run = subprocess.run(
                 cmd,
@@ -840,7 +842,8 @@ def build_creative_gateway_router() -> APIRouter:
                     pass
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         finally:
-            # Release the mirror lock on every exit path (success returns, error raise).
+            # The mirror flock is gone (deadlock); this stack is now empty but kept so the
+            # render critical section retains a single structural exit point.
             _render_lock_stack.close()
 
     @router.post("/meta-launch")

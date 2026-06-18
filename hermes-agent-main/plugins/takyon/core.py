@@ -7257,11 +7257,24 @@ def _atomic_write_payload(path: Path, data: bytes) -> None:
 
 def _append_jsonl(path: Path, value: Any) -> None:
     line = _json_dumps(value) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.flush()
-        os.fsync(handle.fileno())
+    # A concurrent workspace re-materialize (``delete_local=True``) can delete the parent
+    # directory between our ``mkdir`` and ``open`` — a transient ``FileNotFoundError`` on the
+    # cache mirror. Recreate the parent and retry a bounded number of times so a durable append
+    # (e.g. the X-publish conversation corpus) is never lost to a momentary directory-wipe race.
+    last_exc: FileNotFoundError | None = None
+    for _attempt in range(4):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return
+        except FileNotFoundError as exc:
+            last_exc = exc
+            continue
+    if last_exc is not None:
+        raise last_exc
 
 
 def _read_text_limited(path: Path, limit: int = MAX_READ_CHARS) -> str:
@@ -11226,69 +11239,35 @@ class _PGConn:
             pass
 
 
-# Per-thread reentrancy guard for the business mirror flock. ``flock`` is per
-# open-file-description, NOT recursive: if a thread that already holds the
-# exclusive lock on a cache root opens a SECOND fd and requests ``LOCK_EX`` on
-# the same file, the second request blocks forever waiting on the first — a
-# same-thread self-deadlock. ``commit()`` takes the lock and then calls
-# ``_apply_operation`` → ``_resolve_business_file`` → ``_sync_business_workspace_cache``,
-# which re-enters this lock, so the nested acquisition must be a no-op for the
-# holding thread while still serializing across threads and processes. Keyed by
-# (thread ident, resolved lock path) so a different thread/process still blocks
-# on the real OS flock.
-_MIRROR_LOCK_DEPTH: dict[tuple[int, str], int] = {}
-_MIRROR_LOCK_DEPTH_GUARD = threading.Lock()
-
-
+# Business mirror lock: intentionally a NO-OP.
+#
+# A prior fix wrapped the cache-mirror materialize + ``commit()`` critical section in a
+# per-business POSIX ``flock``. That flock provided no real safety yet deadlocked the worker:
+#
+#   * ``flock`` is per open-file-description, NOT recursive. ``commit()`` took the lock (fd #1)
+#     and then re-entered via ``_apply_operation`` → ``_resolve_business_file`` →
+#     ``_sync_business_workspace_cache``, which opened a SECOND fd and requested ``LOCK_EX`` on
+#     the same already-held file → permanent same-thread self-deadlock.
+#   * The reentrancy guard keyed on ``threading.get_ident()``, so the worker's TWO drain threads
+#     (``TAKYON_WORKER_CONCURRENCY`` default 2) did NOT coalesce: one thread held the flock while
+#     inside the sqlite ``conn`` (DB/futex lock), the other blocked on the flock forever — a
+#     lock-order inversion (flock-then-DB on one fd, DB-then-flock on another). Live symptom: an X
+#     publish shipped the tweet and committed the credit, then the receipt/conversation write hung
+#     with the job stuck ``status=running`` and ``locks_lock_inode_wait`` on the .lock inode.
+#
+# The actual concurrent-wipe protections are elsewhere and sufficient:
+#   * ``creative_gateway`` pushes the rendered asset to remote storage immediately after render.
+#   * ``_atomic_write_payload`` and ``_append_jsonl`` recreate the parent dir and retry on the
+#     transient ENOENT a concurrent ``delete_local=True`` re-materialize can cause.
+#
+# So this lock adds only deadlock. It is kept as a no-op context manager (rather than deleted)
+# so the two existing ``with _business_mirror_lock(...)`` call sites stay valid; do not
+# reintroduce a per-fd flock here. If cross-thread serialization is ever genuinely required, use a
+# single shared per-slug ``threading.RLock`` acquired in a consistent order BEFORE any DB
+# connection, never a per-fd flock.
 @contextmanager
 def _business_mirror_lock(cache_root: Path):
-    # Serialize destructive re-materialize/commit on the SHARED local cache mirror so
-    # concurrent TakyonStore instances (2 worker drain threads, dashboard, product procs)
-    # cannot delete/rebuild files another store is mid-write. Lock file lives OUTSIDE the
-    # mirror tree so delete_local can never prune it.
-    if fcntl is None:
-        yield
-        return
-    cache_root = Path(cache_root)
-    lock_dir = cache_root.parent / ".locks"
-    try:
-        lock_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        yield
-        return
-    lock_path = lock_dir / (cache_root.name + ".lock")
-    reentry_key = (threading.get_ident(), str(lock_path.resolve()))
-    # If THIS thread already holds the OS flock for this cache root, a nested
-    # acquisition must not open a second fd and re-flock (which would deadlock
-    # against our own held lock). Just bump the depth and yield.
-    with _MIRROR_LOCK_DEPTH_GUARD:
-        held = _MIRROR_LOCK_DEPTH.get(reentry_key, 0)
-        if held:
-            _MIRROR_LOCK_DEPTH[reentry_key] = held + 1
-    if held:
-        try:
-            yield
-        finally:
-            with _MIRROR_LOCK_DEPTH_GUARD:
-                remaining = _MIRROR_LOCK_DEPTH.get(reentry_key, 1) - 1
-                if remaining > 0:
-                    _MIRROR_LOCK_DEPTH[reentry_key] = remaining
-                else:
-                    _MIRROR_LOCK_DEPTH.pop(reentry_key, None)
-        return
-    fh = open(lock_path, "a+")
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        with _MIRROR_LOCK_DEPTH_GUARD:
-            _MIRROR_LOCK_DEPTH[reentry_key] = 1
-        yield
-    finally:
-        with _MIRROR_LOCK_DEPTH_GUARD:
-            _MIRROR_LOCK_DEPTH.pop(reentry_key, None)
-        try:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        finally:
-            fh.close()
+    yield
 
 
 class TakyonStore:
@@ -14658,13 +14637,12 @@ class TakyonStore:
             staged = [self._normalize_operation(conn, parsed, op, principal=principal) for op in operations]
 
             results: list[dict[str, Any]] = []
-            _commit_business = parsed.get("business")
-            _commit_lock = (
-                _business_mirror_lock(self._business_workspace_base() / _slugify(str(_commit_business)))
-                if _commit_business and self._workspace_root_override is None
-                else nullcontext()
-            )
-            with _commit_lock, conn:
+            # No business mirror flock here: it deadlocked the worker (commit re-entered the
+            # per-fd flock through _sync_business_workspace_cache, and the two drain threads did
+            # not coalesce). Durable writes below go through _atomic_write_payload / _append_jsonl,
+            # which retry on the transient ENOENT a concurrent re-materialize can cause, so the
+            # critical section is safe without the lock. See _business_mirror_lock.
+            with conn:
                 for item in staged:
                     result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
                     results.append(result)
