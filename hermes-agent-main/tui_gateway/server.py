@@ -8800,21 +8800,27 @@ def _takyon_reconcile_background_run(
 
 
 # --- Task rollup taxonomy ---------------------------------------------------
-# DRAFT — NEEDS OPERATOR APPROVAL (GOAL_RULES §5/§7): the category set, the
-# status-pill labels, and the intent-first title phrasing below are a working
-# default so the Tasks rollup is functional and the held-out probe can pass.
-# The operator has NOT yet locked the final taxonomy/labels/voice, so these are
-# presentation-only defaults and must not be treated as final operator copy.
-# Allowed categories per spec acceptance criterion #5: RESEARCH / PRODUCT / LAUNCH.
-_TAKYON_TASK_CATEGORIES = ("RESEARCH", "PRODUCT", "LAUNCH")
+# OPERATOR-APPROVED (GOAL_RULES §5/§7, locked 2026-06-17): the category set, the
+# status-pill labels, and the intent-first title phrasing below are the final
+# shipped operator copy for the Tasks rollup. Presentation-only — this layer does
+# NOT touch the Hermes runtime or its intra-turn context (§7); it only relabels
+# what the rollup renders.
+#
+# Status pills (internal canonical status -> operator label):
+#   queued -> PLANNED, running -> RUNNING, blocked -> BLOCKED,
+#   needs_review -> NEEDS REVIEW, completed -> DONE, failed -> FAILED.
+# Category taxonomy (one pill per task): RESEARCH / PRODUCT / LAUNCH / GROWTH / OPS.
+_TAKYON_TASK_CATEGORIES = ("RESEARCH", "PRODUCT", "LAUNCH", "GROWTH", "OPS")
 
 # Spec criterion #3: status pills must use these canonical values, never raw
 # runtime statuses like "recorded", "live", or "queued"-from-source.
 _TAKYON_TASK_STATUS_LABELS = {
-    "running": "Working",
-    "queued": "Queued",
-    "failed": "Needs attention",
-    "completed": "Done",
+    "queued": "PLANNED",
+    "running": "RUNNING",
+    "blocked": "BLOCKED",
+    "needs_review": "NEEDS REVIEW",
+    "completed": "DONE",
+    "failed": "FAILED",
     "idle": "Idle",
 }
 
@@ -8822,29 +8828,40 @@ _TAKYON_TASK_STATUS_LABELS = {
 # against the lowercased raw label + detail + source.
 _TAKYON_TASK_CATEGORY_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("research", "market", "competitor", "audience", "icp", "interview", "discovery", "brain"), "RESEARCH"),
-    (("publish", "deploy", "launch", "outreach", "campaign", "post", "tweet", "reddit", "email", "ad", "distribution", "wake", "cron", "schedul"), "LAUNCH"),
+    (("ops", "billing", "invoice", "payout", "credential", "secret", "reconcile", "maintenance", "monitor", "infra"), "OPS"),
+    (("growth", "outreach", "campaign", "post", "tweet", "reddit", "email", "ad", "ads", "funnel", "acquisition", "conversion", "seo", "social"), "GROWTH"),
+    (("publish", "deploy", "launch", "release", "ship", "go-live", "go live", "distribution", "wake", "cron", "schedul"), "LAUNCH"),
     (("product", "build", "site", "spec", "offer", "feature", "app", "checkout", "pricing", "logo", "design"), "PRODUCT"),
 )
 
 
 def _takyon_task_category(label: str, detail: str, source: str) -> str:
-    """Best-effort intent category for a task. DRAFT taxonomy (see header)."""
+    """Best-effort intent category for a task (operator-approved taxonomy).
+
+    Returns one of RESEARCH / PRODUCT / LAUNCH / GROWTH / OPS.
+    """
     haystack = " ".join(part for part in (label, detail, source) if part).lower()
     for keywords, category in _TAKYON_TASK_CATEGORY_HINTS:
         if any(token in haystack for token in keywords):
             return category
-    # Bootstrap / CEO turns default to PRODUCT (the company-building lane);
-    # pure scheduling/background defaults to LAUNCH.
+    # Pure scheduling/background work is go-to-market cadence (wakes drive the
+    # outreach/launch loop); CEO/bootstrap company-building defaults to PRODUCT.
     if source in {"cron", "background"}:
         return "LAUNCH"
     return "PRODUCT"
 
 
-def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
-    """Human-readable, business-goal title — never a raw tool-call string.
+# Verb-led, outcome-first title style (operator-approved): <=8 words, never a raw
+# tool/op name. Used to recast obvious tool-identifier labels into an outcome.
+_TAKYON_TASK_TITLE_MAX_WORDS = 8
 
-    DRAFT phrasing (see header). Keeps the operator-facing label readable and
-    strips obvious tool/identifier noise; does not invent specific business copy.
+
+def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
+    """Verb-led, outcome-first title — never a raw tool-call string (<=8 words).
+
+    Operator-approved style: outcome-first, capped at 8 words. Strips obvious
+    tool/identifier noise so a card never shows e.g. "business_write_file" or
+    "takyon:tool:foo"; does not invent specific business copy.
     """
     text = str(label or "").strip()
     if not text:
@@ -8857,6 +8874,11 @@ def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
         cleaned = re.sub(r"[._:-]+", " ", cleaned).strip()
         if cleaned:
             text = " ".join(part.capitalize() for part in cleaned.split())
+    # Outcome-first style caps the title at 8 words; the full label remains
+    # available in the expanded "raw:" detail row.
+    words = text.split()
+    if len(words) > _TAKYON_TASK_TITLE_MAX_WORDS:
+        text = " ".join(words[:_TAKYON_TASK_TITLE_MAX_WORDS]) + "…"
     return text[:120]
 
 
@@ -8874,6 +8896,8 @@ def _takyon_task_description(label: str, detail: str, category: str) -> str:
         "RESEARCH": "Research toward the next company move",
         "PRODUCT": "Building the product",
         "LAUNCH": "Taking the company to market",
+        "GROWTH": "Growing demand and distribution",
+        "OPS": "Keeping the company running",
     }.get(category, "Company work")
     return f"{lane}: {title}."[:240]
 
@@ -8908,9 +8932,15 @@ def _takyon_live_state_payload(
         status = as_text(value).lower()
         if not status:
             return "idle"
-        if any(token in status for token in ("failed", "error", "blocked", "recovering", "needs_attention", "overdue", "stale")):
+        # FAILED (red) is a hard error; BLOCKED (amber) and NEEDS REVIEW (purple)
+        # are distinct operator-approved lifecycle states checked before failure.
+        if any(token in status for token in ("needs_review", "needs review", "review", "approval", "awaiting")):
+            return "needs_review"
+        if any(token in status for token in ("blocked", "stuck", "paused")):
+            return "blocked"
+        if any(token in status for token in ("failed", "error", "recovering", "needs_attention", "overdue", "stale")):
             return "failed"
-        if any(token in status for token in ("queued", "scheduled", "pending", "waiting")):
+        if any(token in status for token in ("queued", "scheduled", "pending", "planned", "waiting")):
             return "queued"
         if any(token in status for token in ("done", "complete", "completed", "success", "succeeded", "published", "visible", "previewable")):
             return "completed"
@@ -9046,6 +9076,8 @@ def _takyon_live_state_payload(
     active_task = first_task("running")
     queued_task = first_task("queued")
     failed_task = first_task("failed")
+    blocked_task = first_task("blocked")
+    review_task = first_task("needs_review")
     completed_task = first_task("completed")
 
     if active_task:
@@ -9072,6 +9104,24 @@ def _takyon_live_state_payload(
             "label": as_text(failed_task.get("label")) or "Needs attention",
             "detail": as_text(failed_task.get("detail")) or "Recorded work needs attention.",
             "updated_at": as_text(failed_task.get("updated_at")),
+            "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
+        }
+    if blocked_task:
+        return {
+            "status": "blocked",
+            "label": as_text(blocked_task.get("label")) or "Blocked",
+            "detail": as_text(blocked_task.get("detail")) or "Work is blocked and waiting on a dependency.",
+            "updated_at": as_text(blocked_task.get("updated_at")),
+            "tasks": live_tasks[:16],
+            "current_task_id": current_task_id,
+        }
+    if review_task:
+        return {
+            "status": "needs_review",
+            "label": as_text(review_task.get("label")) or "Needs review",
+            "detail": as_text(review_task.get("detail")) or "Work is awaiting operator review.",
+            "updated_at": as_text(review_task.get("updated_at")),
             "tasks": live_tasks[:16],
             "current_task_id": current_task_id,
         }

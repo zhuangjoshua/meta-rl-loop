@@ -340,34 +340,42 @@ function Traction({
   );
 }
 
-// Canonical task status set (mirrors the backend canonical_task in
-// tui_gateway/server.py). The backend already emits a spec-compliant `status`
+// Canonical task status set — operator-approved pill labels (GOAL_RULES §5/§7,
+// locked 2026-06-17), mirroring the backend canonical_task in
+// tui_gateway/server.py. The backend already emits a spec-compliant `status`
 // and `status_label`; this normaliser is only a defensive fallback for older
 // payloads so the pill never shows a raw runtime status like "recorded".
+//   queued -> PLANNED, running -> RUNNING, blocked -> BLOCKED,
+//   needs_review -> NEEDS REVIEW, completed -> DONE, failed -> FAILED.
 const TASK_STATUS_LABELS: Record<string, string> = {
-  running: "Working",
-  queued: "Queued",
-  failed: "Needs attention",
-  completed: "Done",
+  queued: "PLANNED",
+  running: "RUNNING",
+  blocked: "BLOCKED",
+  needs_review: "NEEDS REVIEW",
+  completed: "DONE",
+  failed: "FAILED",
   idle: "Idle",
 };
 
 function normalizeTaskStatus(value: string): keyof typeof TASK_STATUS_LABELS {
   const status = value.toLowerCase();
-  if (status.includes("fail") || status.includes("error") || status.includes("block")) return "failed";
+  if (status.includes("review") || status.includes("approval") || status.includes("awaiting") || status === "needs_review") return "needs_review";
+  if (status.includes("block") || status.includes("stuck") || status.includes("paused")) return "blocked";
+  if (status.includes("fail") || status.includes("error")) return "failed";
   if (status.includes("running") || status.includes("working") || status.includes("live") || status.includes("active")) return "running";
-  if (status.includes("queue") || status.includes("pending") || status.includes("schedul") || status.includes("wait")) return "queued";
+  if (status.includes("queue") || status.includes("planned") || status.includes("pending") || status.includes("schedul") || status.includes("wait")) return "queued";
   if (status.includes("done") || status.includes("complete") || status.includes("success")) return "completed";
   return "idle";
 }
 
-// DRAFT taxonomy — NEEDS OPERATOR APPROVAL (GOAL_RULES §5/§7). Category pill
-// colours/labels are a working presentation default; the operator has not
-// locked the final category taxonomy or pill copy yet.
+// Operator-approved category taxonomy (GOAL_RULES §5/§7, locked 2026-06-17):
+// one pill per task, drawn from RESEARCH / PRODUCT / LAUNCH / GROWTH / OPS.
 const TASK_CATEGORY_LABELS: Record<string, string> = {
   RESEARCH: "Research",
   PRODUCT: "Product",
   LAUNCH: "Launch",
+  GROWTH: "Growth",
+  OPS: "Ops",
 };
 
 function taskCategory(value: string): string {
@@ -437,7 +445,11 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const running = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "running").length;
   const queued = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "queued").length;
-  const issues = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "failed").length;
+  // FAILED / BLOCKED / NEEDS REVIEW all count as items needing operator attention.
+  const issues = ordered.filter((task) => {
+    const s = normalizeTaskStatus(asText(task.status));
+    return s === "failed" || s === "blocked" || s === "needs_review";
+  }).length;
   return (
     <section className="lb-card lb-act">
       <div className="lb-h"><span className="lb-act__pulse" />Tasks<span className="lb-h__c">{running} running · {queued} queued{issues ? ` · ${issues} issue${issues === 1 ? "" : "s"}` : ""}</span></div>
