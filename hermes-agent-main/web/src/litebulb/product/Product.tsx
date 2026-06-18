@@ -158,7 +158,7 @@ function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
 
 const MENU: string[][] = [
   ["My portfolio", "New company"],
-  ["Billing", "Profile settings"],
+  ["Plans & billing", "Profile settings"],
   ["FAQ"],
   ["Log out"],
 ];
@@ -170,7 +170,7 @@ const MENU_ROUTES: Record<string, string> = {
 };
 
 const MENU_SETTINGS: Record<string, SettingsSection> = {
-  Billing: "billing",
+  "Plans & billing": "billing",
   "Profile settings": "profile",
 };
 

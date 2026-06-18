@@ -1,9 +1,18 @@
-import { useState } from "react";
-import type { TakyonOperatorAccountResponse } from "@/lib/api";
+import { useEffect, useState } from "react";
+import {
+  api,
+  type TakyonBusinessCreativeCreditPack,
+  type TakyonOperatorAccountResponse,
+} from "@/lib/api";
 import type { Theme } from "../App";
+import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import { useAuth } from "../auth/useAuth";
-import { Button, Card, Divider, FormField, Input } from "../composer-ui/lib";
+import { Button, Card, Divider, FormField, Input, Select } from "../composer-ui/lib";
 import "./settings.css";
+
+// Fixed top-up presets (USD cents) for adding operator wallet funds. These map
+// straight to the real /api/takyon/operator/topup/checkout amount_cents body.
+const TOPUP_PRESETS_CENTS = [1000, 2500, 5000, 10000];
 
 export type SettingsSection = "profile" | "billing" | "plans";
 
@@ -39,6 +48,7 @@ export function Settings(props: {
   section: SettingsSection;
   theme: Theme;
   account: TakyonOperatorAccountResponse | null;
+  businesses?: LitebulbBusiness[];
   portalBusy: boolean;
   topupBusy: boolean;
   nudge?: string;
@@ -47,22 +57,83 @@ export function Settings(props: {
   onOpenPortal: () => void;
   onTopup: (amountCents: number) => void;
   onSubscribe?: (planId: string) => void;
+  onBuyCreditPack?: (slug: string, packId: string) => Promise<void> | void;
   onClose: () => void;
 }) {
   const {
     section,
     theme,
     account,
+    businesses,
     portalBusy,
+    topupBusy,
     nudge,
     subscribeBusy,
     onTheme,
     onOpenPortal,
+    onTopup,
     onSubscribe,
+    onBuyCreditPack,
     onClose,
   } = props;
   const { user } = useAuth();
   const [sec, setSec] = useState<SettingsSection>(section);
+  const businessList = businesses ?? [];
+  const [creditBusinessSlug, setCreditBusinessSlug] = useState<string>(
+    () => businessList[0]?.slug ?? "",
+  );
+  const [creditPacks, setCreditPacks] = useState<TakyonBusinessCreativeCreditPack[]>([]);
+  const [creditPacksLoading, setCreditPacksLoading] = useState(false);
+  const [creditPacksError, setCreditPacksError] = useState("");
+  const [buyingPackId, setBuyingPackId] = useState("");
+
+  // Default the credit-pack business selector to the first owned business once
+  // the operator's business list arrives.
+  useEffect(() => {
+    if (creditBusinessSlug) return;
+    const first = businessList[0]?.slug ?? "";
+    if (first) setCreditBusinessSlug(first);
+  }, [businessList, creditBusinessSlug]);
+
+  // Load the configured creative-credit packs for the selected business. Packs
+  // are business-scoped (control-plane Stripe), so the operator picks which
+  // business the purchase credits. Read-only fetch; checkout is gated server-side.
+  useEffect(() => {
+    if (sec !== "billing" || !creditBusinessSlug) {
+      setCreditPacks([]);
+      return;
+    }
+    let cancelled = false;
+    setCreditPacksLoading(true);
+    setCreditPacksError("");
+    api
+      .getTakyonBusinessCreativeCreditPacks(creditBusinessSlug)
+      .then((payload) => {
+        if (cancelled) return;
+        setCreditPacks(payload.packs ?? []);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCreditPacks([]);
+        setCreditPacksError("Creative credit packs are unavailable for this business.");
+      })
+      .finally(() => {
+        if (!cancelled) setCreditPacksLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sec, creditBusinessSlug]);
+
+  const buyPack = async (packId: string) => {
+    if (!onBuyCreditPack || !creditBusinessSlug || !packId) return;
+    setBuyingPackId(packId);
+    try {
+      await onBuyCreditPack(creditBusinessSlug, packId);
+    } finally {
+      setBuyingPackId("");
+    }
+  };
   const allowanceIncluded = Number(account?.allowance_included_cents || 0);
   const weeklyIncluded = Number(account?.operator_plan_weekly_allowance_cents || allowanceIncluded || 0);
   const reservedUsagePercent = allowanceIncluded > 0
@@ -183,7 +254,74 @@ export function Settings(props: {
                 {(Number(account?.reserved_topup_cents || 0) > 0) && (
                   <div className="lb-set__usage"><span>Reserved funds</span><span className="lb-set__muted">{formatUsd(account?.reserved_topup_cents ?? null)}</span></div>
                 )}
+                <Divider className="lb-set__rule" />
+                <div className="lb-set__card-h">Add funds</div>
+                <p className="lb-set__hint">Top up your operator wallet to keep companies running past the included weekly allowance.</p>
+                <div className="lb-set__topup" role="group" aria-label="Top up amount">
+                  {TOPUP_PRESETS_CENTS.map((amount) => (
+                    <Button
+                      key={amount}
+                      variant="secondary"
+                      size="small"
+                      disabled={topupBusy}
+                      onClick={() => onTopup(amount)}
+                    >
+                      {topupBusy ? "Opening checkout…" : `Add ${formatUsd(amount)}`}
+                    </Button>
+                  ))}
+                </div>
               </Card>
+
+              <Card variant="outline" className="lb-set__card">
+                <div className="lb-set__card-h">Creative credits</div>
+                <p className="lb-set__hint">Buy fixed creative-credit packs for ad image / video generation and campaign actions. Credits are scoped to a company.</p>
+                {businessList.length === 0 ? (
+                  <div className="lb-set__muted">Create a company to buy creative credits.</div>
+                ) : (
+                  <>
+                    <FormField label="Company">
+                      <Select
+                        value={creditBusinessSlug}
+                        onChange={(event) => setCreditBusinessSlug(event.target.value)}
+                      >
+                        {businessList.map((biz) => (
+                          <option key={biz.slug} value={biz.slug}>{biz.name}</option>
+                        ))}
+                      </Select>
+                    </FormField>
+                    {creditPacksLoading ? (
+                      <div className="lb-set__muted">Loading packs…</div>
+                    ) : creditPacksError ? (
+                      <div className="lb-set__muted">{creditPacksError}</div>
+                    ) : creditPacks.length === 0 ? (
+                      <div className="lb-set__muted">No creative-credit packs are configured yet.</div>
+                    ) : (
+                      <div className="lb-packs">
+                        {creditPacks.map((pack) => {
+                          const busy = buyingPackId === pack.id;
+                          return (
+                            <div key={pack.id} className="lb-packs__card">
+                              <div className="lb-packs__name">{pack.name || `${pack.credits ?? 0} credits`}</div>
+                              <div className="lb-packs__credits">{Number(pack.credits || 0)} credits</div>
+                              {pack.description ? <div className="lb-set__muted">{pack.description}</div> : null}
+                              <div className="lb-packs__price">{formatUsd(pack.amount_cents ?? null)}</div>
+                              <Button
+                                variant="primary"
+                                size="small"
+                                disabled={busy || !onBuyCreditPack}
+                                onClick={() => void buyPack(pack.id)}
+                              >
+                                {busy ? "Opening checkout…" : "Buy pack"}
+                              </Button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
+              </Card>
+
               <Card variant="outline" className="lb-set__card">
                 <div className="lb-set__card-h">Stripe</div>
                 <div className="lb-set__row">

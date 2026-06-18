@@ -78,3 +78,13 @@
 .lb-plans__feats { list-style: none; margin: 8px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; flex: 1; }
 .lb-plans__feats li { position: relative; padding-left: 18px; font-size: var(--cds-text-sm); color: var(--cds-color-text-default); }
 .lb-plans__feats li::before { content: "✓"; position: absolute; left: 0; color: var(--cds-color-success); font-weight: 700; }
+
+/* top-up presets — add operator wallet funds */
+.lb-set__topup { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* creative-credit packs — fixed-price packs per company */
+.lb-packs { margin-top: var(--cds-space-4); display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: clamp(12px, 1.4vw, 18px); }
+.lb-packs__card { padding: var(--cds-space-5); border: 1px solid var(--cds-color-border-default); border-radius: var(--cds-radius-md); display: flex; flex-direction: column; gap: 6px; }
+.lb-packs__name { font-weight: var(--cds-weight-semibold); font-size: var(--cds-text-md); }
+.lb-packs__credits { color: var(--cds-color-text-soft); font-size: var(--cds-text-sm); }
+.lb-packs__price { font-size: clamp(18px, 1.6vw, 22px); font-weight: var(--cds-weight-bold); letter-spacing: -0.02em; margin-top: 2px; }

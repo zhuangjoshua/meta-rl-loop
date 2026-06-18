@@ -77,6 +77,7 @@ function Router() {
     createBusiness,
     saveChannelCreditBudgets,
     startCreativeCreditCheckout,
+    startCreativeCreditPackCheckout,
     openBillingPortal,
     startTopup,
     subscribeToPlan,
@@ -273,6 +274,7 @@ function Router() {
           section={settings}
           theme={theme}
           account={account}
+          businesses={businesses}
           portalBusy={billingBusy}
           topupBusy={topupBusy}
           nudge={billingNudge}
@@ -281,6 +283,7 @@ function Router() {
           onOpenPortal={openBillingPortal}
           onTopup={startTopup}
           onSubscribe={subscribeToPlan}
+          onBuyCreditPack={startCreativeCreditPackCheckout}
           onClose={closeSettings}
         />
       )}

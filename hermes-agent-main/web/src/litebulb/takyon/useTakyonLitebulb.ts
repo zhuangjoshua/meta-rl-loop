@@ -647,6 +647,47 @@ export function useTakyonLitebulb() {
     window.location.assign(checkoutUrl);
   }, []);
 
+  // Fixed creative-credit pack purchase for a chosen business. Reuses the same
+  // control-plane Stripe checkout the per-business panel uses, but keyed by the
+  // configured pack id (operator picks the business on the Plans & Billing page).
+  const startCreativeCreditPackCheckout = useCallback(async (slug: string, packId: string) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    const pack = trimText(packId);
+    if (!businessSlug || !pack) return;
+    const cancelPath = window.location.pathname + window.location.search + window.location.hash;
+    const successUrl = new URL(window.location.href);
+    successUrl.searchParams.set(
+      LITEBULB_CREATIVE_CREDIT_CHECKOUT_SESSION_QUERY_KEY,
+      "{CHECKOUT_SESSION_ID}",
+    );
+    const successPath = `${successUrl.pathname}${successUrl.search}${successUrl.hash}`.replace(
+      encodeURIComponent("{CHECKOUT_SESSION_ID}"),
+      "{CHECKOUT_SESSION_ID}",
+    );
+    const checkout = await api.createTakyonBusinessCreativeCreditCheckout(
+      businessSlug,
+      {
+        packId: pack,
+        successPath,
+        cancelPath,
+      },
+    );
+    const checkoutUrl = trimText(checkout.checkout_url);
+    if (!checkoutUrl) {
+      throw new Error("Creative credit checkout unavailable.");
+    }
+    const sessionId = trimText(checkout.session_id);
+    if (sessionId) {
+      writeStoredPendingCreativeCreditCheckout({
+        businessSlug,
+        sessionId,
+        credits: Number(checkout.credits || 0),
+        createdAt: Date.now(),
+      });
+    }
+    window.location.assign(checkoutUrl);
+  }, []);
+
   const loadTraction = useCallback(async (slug: string, range: "D" | "W" | "M" | "Y") => {
     const businessSlug = trimText(slug).toLowerCase();
     if (!businessSlug) return;
@@ -1557,6 +1598,7 @@ export function useTakyonLitebulb() {
     createBusiness,
     saveChannelCreditBudgets,
     startCreativeCreditCheckout,
+    startCreativeCreditPackCheckout,
     openBillingPortal,
     startTopup,
     subscribeToPlan,

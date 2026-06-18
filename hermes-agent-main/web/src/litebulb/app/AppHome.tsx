@@ -49,7 +49,7 @@ function HomeNav({ user, account, onNav, onOpenSettings, onLogout }: {
             <div className="lb-menu-scrim" onClick={close} />
             <div className="lb-homenav__menu" role="menu">
               <button role="menuitem" onClick={() => { onOpenSettings("profile"); close(); }}>Profile settings</button>
-              <button role="menuitem" onClick={() => { onOpenSettings("billing"); close(); }}>Billing</button>
+              <button role="menuitem" onClick={() => { onOpenSettings("billing"); close(); }}>Plans &amp; billing</button>
               <button role="menuitem" onClick={() => { onNav("/faq"); close(); }}>Help &amp; FAQ</button>
               <div className="lb-homenav__menu-sep" />
               <button role="menuitem" onClick={() => { onLogout(); close(); }}>Log out</button>
