@@ -276,18 +276,60 @@ export function deriveWorkstreamItems({
   };
 }
 
+/**
+ * True when the business has moved past its first bootstrap — it has a
+ * published/publishing product, a built product surface, or any prior history.
+ * Derived from the canonical workspace mirror (`overview.product` + outputs),
+ * never from the agent's turn context. Callers pass the result as
+ * `pastBootstrap` so the live card never replays the bootstrap "Starting…"
+ * placeholder on a transient empty live-state (reconnect, restart, idle).
+ */
+export function businessHasShipped(
+  workspace: { overview?: Record<string, unknown> | null; outputs?: unknown[] | null } | null | undefined,
+): boolean {
+  if (!workspace) return false;
+  const overview = (workspace.overview || {}) as Record<string, unknown>;
+  const product = (overview.product || {}) as Record<string, unknown>;
+  const publicUrl = typeof product.public_url === "string" ? product.public_url.trim() : "";
+  if (publicUrl) return true;
+  const publishStatus = String(product.publish_status || "").trim().toLowerCase();
+  if (publishStatus && !["", "missing", "none", "pending", "queued"].includes(publishStatus)) {
+    return true;
+  }
+  const publishTarget = typeof product.publish_target === "string" ? product.publish_target.trim() : "";
+  if (publishTarget) return true;
+  const sourcePath = typeof product.source_path === "string" ? product.source_path.trim() : "";
+  if (sourcePath) return true;
+  if (product.preview_available === true) return true;
+  const productStatus = String(product.status || "").trim().toLowerCase();
+  if (productStatus && !["", "missing", "none"].includes(productStatus)) return true;
+  const outputs = Array.isArray(workspace.outputs) ? workspace.outputs : [];
+  return outputs.some((item) => {
+    const output = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+    const path = typeof output.path === "string" ? output.path : "";
+    return path.startsWith("product/");
+  });
+}
+
 export function deriveLiveWorkstreamCard({
   running,
   businessName,
   statusItems,
   progressLines,
   tools,
+  pastBootstrap = false,
 }: {
   running: boolean;
   businessName: string;
   statusItems?: string[];
   progressLines?: string[];
   tools?: ProgressToolSignal[];
+  // When true, the business is already past its first bootstrap, so the card
+  // must NOT fall back to the bootstrap "Starting <business> / Researching the
+  // market" placeholder. With no parseable workstream signal it stays a neutral
+  // "<business> update" with no fabricated phase ladder — the last known real
+  // update (or a stable idle state) shows instead of replaying bootstrap.
+  pastBootstrap?: boolean;
 }): LiveWorkstreamCardData | null {
   const { blocked, currentKey, items, next } = deriveWorkstreamItems({
     statusItems,
@@ -297,17 +339,26 @@ export function deriveLiveWorkstreamCard({
   if (!running && !currentKey && !blocked) return null;
   const current = currentKey ? workstreamDefinition(currentKey) : null;
   const completed = items.filter((item) => item.status === "complete");
+  // Only a genuine first bootstrap (no shipped product, no parsed progress yet)
+  // may show the "Starting…" copy and the default phase ladder. A business that
+  // has already shipped keeps a neutral update with no invented phases so a
+  // momentary empty live-state cannot reset it to "Researching the market".
+  const isFirstBootstrap = !pastBootstrap && completed.length === 0 && !currentKey;
 
   return {
     title: blocked
       ? `${businessName} needs attention`
-      : completed.length === 0
+      : isFirstBootstrap
         ? `Starting ${businessName}`
         : `${businessName} update`,
-    summary: current?.summary || "I'm moving this through the next business workstream now.",
-    items,
+    summary:
+      current?.summary
+      || (isFirstBootstrap
+        ? "I'm moving this through the next business workstream now."
+        : "I'm on this — picking up where the last workstream left off."),
+    items: pastBootstrap && !currentKey && completed.length === 0 ? [] : items,
     current: current?.label,
-    next,
+    next: pastBootstrap && !currentKey && completed.length === 0 ? undefined : next,
     blocked,
   };
 }
