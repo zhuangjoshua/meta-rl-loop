@@ -9121,6 +9121,11 @@ def mount_spa(application: FastAPI):
             html = html.replace('href="/ds-assets/', f'href="{prefix}/ds-assets/')
             html = html.replace('src="/ds-assets/', f'src="{prefix}/ds-assets/')
         html = html.replace("</head>", f"{token_script}</head>", 1)
+        # Operator-dashboard analytics: inject the same shared Umami tag the
+        # product sub-apps use (buy-not-build, GOAL_RULES §4). app.fourmanifold.com
+        # is segmented downstream by its own hostname. No-op when analytics is
+        # disabled/unconfigured (no faked tracking).
+        html = _inject_head_snippet(html, _umami_analytics_snippet())
         return HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
@@ -9165,6 +9170,10 @@ def mount_spa(application: FastAPI):
         html = html.replace('src="./assets/', f'src="{prefix}/litebulb/assets/')
         html = html.replace('href="./assets/', f'href="{prefix}/litebulb/assets/')
         html = html.replace("</head>", f"{token_script}</head>", 1)
+        # Operator-dashboard analytics: the embedded Litebulb workspace IS the
+        # operator landing in --tui mode, so it gets the same shared Umami tag as
+        # the SPA index and the product sub-apps (buy-not-build, GOAL_RULES §4).
+        html = _inject_head_snippet(html, _umami_analytics_snippet())
         return HTMLResponse(
             html,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},

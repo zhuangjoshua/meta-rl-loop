@@ -120,6 +120,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_set_channel_credit_budgets",
         "business_ugc_ad_generate",
         "business_static_ad_generate",
+        "business_generate_logo",
         "business_meta_ad_launch",
         "business_meta_ad_bind_manual_launch",
         "business_meta_ad_control",
@@ -955,6 +956,7 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "database": ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
+    "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "llm": ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
     "meta": ("COMPOSIO_API_KEY",),
     "metaads": ("COMPOSIO_API_KEY",),
@@ -21401,6 +21403,32 @@ def _creative_credit_total_cost(action: str, *, units: int = 1) -> int:
     return _creative_credit_unit_cost(action) * max(1, int(units or 1))
 
 
+_LOGO_IMAGE_PROVIDER = "google"
+_LOGO_IMAGE_MODEL = "gemini-2.5-flash-image"
+
+
+def _logo_provider_cost_usd() -> float:
+    """Exact per-image provider cost for the brand-logo model.
+
+    Resolved from the canonical pricing table (agent.usage_pricing); an unpriced
+    model is refused so the receipt can never claim a fabricated cost. This is
+    the single source of truth for the logo provider cost — no second hardcoded
+    table in a skill or channel tool (GOAL_RULES §4 / CLAUDE.md billing rules).
+    """
+    from agent import usage_pricing
+
+    entry = usage_pricing._OFFICIAL_DOCS_PRICING.get(
+        (_LOGO_IMAGE_PROVIDER, _LOGO_IMAGE_MODEL)
+    )
+    request_cost = getattr(entry, "request_cost", None) if entry is not None else None
+    if request_cost is None:
+        raise TakyonError(
+            f"{_LOGO_IMAGE_PROVIDER}/{_LOGO_IMAGE_MODEL} is not priced in usage_pricing; "
+            "brand logo generation is refused (no unpriced provider spend)"
+        )
+    return float(request_cost)
+
+
 def _creative_credit_balances(business: str) -> Any:
     store = _store()
     credits_backend = _creative_credit_backend()
@@ -23221,6 +23249,191 @@ def handle_business_static_ad_generate(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_generate_logo(args: dict, **_: Any) -> str:
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        slug = _file_slug(str(args.get("slug") or business or "logo"), "logo")
+        publication_rel = f"product/brand/logos/{slug}"
+        asset_rel = f"{publication_rel}/logo.png"
+        receipt_rel = f"{publication_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_generate_logo",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "receipt": receipt_rel,
+                    "value": prior,
+                }
+            )
+
+        business_mode = _business_mode(store, business)
+        if business_mode == "test":
+            raise TakyonError(
+                "business_generate_logo requires a live business; brand logo generation "
+                "spends real provider money and is not stubbed in test mode"
+            )
+
+        # Operator-owned brand context (name/category/tone). The skill reads
+        # business state first and passes it; name defaults to the slug.
+        raw_context = (
+            args.get("business_context")
+            if isinstance(args.get("business_context"), Mapping)
+            else {}
+        )
+        business_context: dict[str, Any] = {
+            "slug": business,
+            "name": str(args.get("name") or raw_context.get("name") or business).strip(),
+        }
+        for key in ("category", "industry", "vertical", "tone", "brand_tone", "voice"):
+            value = raw_context.get(key) if isinstance(raw_context, Mapping) else None
+            if value:
+                business_context[key] = str(value).strip()
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "asset_path": asset_rel,
+            "publication_dir": publication_rel,
+            "business_mode": business_mode,
+            "provider": _LOGO_IMAGE_PROVIDER,
+            "model": _LOGO_IMAGE_MODEL,
+            "business_context": business_context,
+            "created_at": _now(),
+        }
+
+        # Two-half shape: preflight credit gate here in the handler; the real
+        # transaction (key resolution + provider call + reserve/commit) lives in
+        # the creative_gateway logo-render authority route. budget_bucket="" is
+        # brand-level (no channel), so the gate checks only the overall balance.
+        gateway_result = _creative_credit_preflight_gate(
+            business,
+            action="logo_generate",
+            budget_bucket="",
+            metadata=base_receipt,
+        )
+        try:
+            if gateway_result.get("success"):
+                gateway_result = _call_creative_runtime_gateway(
+                    "logo-render",
+                    {
+                        "business": business,
+                        "idempotency_key": idempotency_key,
+                        "slug": slug,
+                        "business_context": business_context,
+                    },
+                )
+        except Exception as exc:
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": "blocked_authority_runtime_unavailable",
+                "error": str(exc),
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_generate_logo",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "error": str(exc),
+                    "value": receipt,
+                }
+            )
+
+        if not gateway_result.get("success"):
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "status": gateway_result.get("status") or "failed",
+                "requested_credits": gateway_result.get("requested_credits"),
+                "available_credits": gateway_result.get("available_credits"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "error": gateway_result.get("error") or "logo generation failed",
+            }
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_generate_logo",
+                    "business": business,
+                    "slug": slug,
+                    "status": receipt["status"],
+                    "receipt": receipt_rel,
+                    "balance_credits": receipt.get("balance_credits"),
+                    "reserved_credits": receipt.get("reserved_credits"),
+                    "error": receipt["error"],
+                    "value": receipt,
+                }
+            )
+
+        receipt = {
+            **base_receipt,
+            "success": True,
+            "status": "created",
+            "asset_path": gateway_result.get("asset_path") or asset_rel,
+            "prompt": gateway_result.get("prompt"),
+            "provider_cost_usd": gateway_result.get("provider_cost_usd"),
+            "credits_charged": gateway_result.get("credits_charged"),
+            "balance_credits": gateway_result.get("balance_credits"),
+            "reserved_credits": gateway_result.get("reserved_credits"),
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/product:brand-logo/{slug}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "brand_logo.generate",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:receipt",
+            reason=args.get("reason") or "record brand logo generation",
+            actor=args.get("actor") or "agent",
+        )
+        store._sync_business_workspace_remote(business)
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_generate_logo",
+                "business": business,
+                "slug": slug,
+                "status": "created",
+                "publication_dir": publication_rel,
+                "asset_path": receipt["asset_path"],
+                "receipt": receipt_rel,
+                "provider_cost_usd": receipt.get("provider_cost_usd"),
+                "credits_charged": receipt.get("credits_charged"),
+                "balance_credits": receipt.get("balance_credits"),
+                "reserved_credits": receipt.get("reserved_credits"),
+                "value": receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _META_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
@@ -23235,6 +23448,7 @@ _META_VALID_CTA = {
 _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
+    "logo_generate": 2,
     "x_publish_outreach": 1,
     "reddit_publish_outreach": 1,
     "meta_ad_launch": 1,
@@ -23243,6 +23457,7 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
 _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
+    "logo_generate": "TAKYON_CREATIVE_CREDITS_LOGO",
     "x_publish_outreach": "TAKYON_CREATIVE_CREDITS_X_POST",
     "reddit_publish_outreach": "TAKYON_CREATIVE_CREDITS_REDDIT_POST",
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
@@ -29267,6 +29482,33 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "input_path", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_generate_logo",
+        "description": (
+            "Generate a business-scoped brand logo with Nano Banana (Gemini gemini-2.5-flash-image): "
+            "flat vector, transparent background, icon-only, no text. Live-only and creative-credit "
+            "gated (brand-level, no channel bucket); the asset and a cost receipt land under "
+            "product/brand/logos/<slug>/. Fails closed (503) until the Gemini key is provisioned."
+        ),
+        "handler": handle_business_generate_logo,
+        "schema": _schema(
+            "business_generate_logo",
+            "Generate a transparent-background brand logo icon from business context.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {"type": "string", "description": "Optional publication slug under product/brand/logos/<slug>/; defaults to the business slug."},
+                "name": {"type": "string", "description": "Optional brand display name for the icon concept; defaults to the business name/slug."},
+                "business_context": {
+                    "type": "object",
+                    "description": "Brand context read from business state to steer the icon: {name, category|industry|vertical, tone|brand_tone|voice}. Read business_read_business / product state first; do not invent brand voice.",
+                },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
         ),
     },
     {
