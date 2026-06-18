@@ -386,6 +386,24 @@ function taskCategory(value: string): string {
   return TASK_CATEGORY_LABELS[cat] ? cat : "PRODUCT";
 }
 
+// Dedup category: the category already shows in the side pill, so a title that
+// redundantly leads with its own category word ("Research Reading Tracker App
+// Market" under the "Research" pill) drops that leading word. Deterministic +
+// safe: strip only the FIRST word, only when it matches the resolved category
+// label, and never blank the title.
+function titleWithoutLeadingCategory(title: string, category: string): string {
+  const t = title.trim();
+  const label = (TASK_CATEGORY_LABELS[category] || "").trim();
+  if (!label) return t;
+  const firstWord = t.split(/\s+/)[0] || "";
+  const firstNorm = firstWord.toLowerCase().replace(/[^a-z]/g, "");
+  if (firstNorm && firstNorm === label.toLowerCase()) {
+    const rest = t.slice(firstWord.length).trim();
+    return rest || t;
+  }
+  return t;
+}
+
 function TaskDetail({ task }: { task: Record<string, unknown> }) {
   const description = asText(task.description) || asText(task.detail);
   const outputs = (Array.isArray(task.outputs) ? task.outputs : []).map((o) => asText(o)).filter(Boolean);
@@ -462,7 +480,7 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
           const id = asText(task.id) || String(index);
           const category = taskCategory(asText(task.category));
           const statusLabel = asText(task.status_label) || TASK_STATUS_LABELS[state] || state;
-          const title = asText(task.title) || asText(task.label) || "Recorded work";
+          const title = titleWithoutLeadingCategory(asText(task.title) || asText(task.label) || "Recorded work", category);
           const description = asText(task.description) || asText(task.detail) || "Tracked in the workspace overview.";
           const isOpen = expanded === id;
           return (
@@ -479,10 +497,14 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
                     <span className="lb-act__name">{title}</span>
                     <span className="lb-task__pills">
                       <span className={`lb-task__pill lb-task__pill--cat is-${category.toLowerCase()}`}>{TASK_CATEGORY_LABELS[category]}</span>
-                      <span className={`lb-task__pill lb-task__pill--status is-${state}`}>{statusLabel}</span>
+                      {state !== "running" && (
+                        <span className={`lb-task__pill lb-task__pill--status is-${state}`}>{statusLabel}</span>
+                      )}
                     </span>
                   </span>
-                  <span className="lb-act__ev"><span className="lb-act__evtxt">{description}</span></span>
+                  {!isOpen && (
+                    <span className="lb-act__ev"><span className="lb-act__evtxt">{description}</span></span>
+                  )}
                 </span>
               </button>
               {isOpen && <TaskDetail task={task} />}

@@ -257,46 +257,28 @@ function AgentReceipt({ receipt }: { receipt: AssistantReceiptData }) {
   );
 }
 
+// Renders a CEO update as a normal agent conversation turn — a thinking
+// indicator while live, then the CEO's message as flowing text — NOT a
+// structured card with a phase checklist (operator clarification 2026-06-18).
 function LiveProgressCard({ progress }: { progress: ChatProgress }) {
   const completed = progress.items.filter((item) => item.status === "complete");
   return (
-    <div className="lb-progress">
-      <div className="lb-progress__eyebrow">CEO update</div>
-      <div className="lb-progress__title">{progress.title}</div>
-      <p className="lb-progress__summary">{progress.summary}</p>
-      {completed.length > 0 && (
-        <div className="lb-progress__section">
-          <div className="lb-progress__label">What changed</div>
-          <ul className="lb-progress__list">
-            {completed.map((item) => (
-              <li key={item.key}>{item.completeLabel}</li>
-            ))}
-          </ul>
+    <div className="lb-ceomsg">
+      {progress.live && (
+        <div className="lb-ceomsg__think">
+          <span className="lb-msg__work"><span className="lb-typing"><i /><i /><i /></span></span>
+          {progress.current ? <span className="lb-ceomsg__think-txt">{progress.current}</span> : null}
         </div>
       )}
-      {progress.current && (
-        <div className="lb-progress__section">
-          <div className="lb-progress__label">Working now</div>
-          <p className="lb-progress__text">
-            {progress.current}
-            {progress.live && (
-              <span className="lb-msg__work">
-                <span className="lb-typing"><i /><i /><i /></span>
-              </span>
-            )}
-          </p>
-        </div>
+      {progress.title ? <div className="lb-ceomsg__title">{progress.title}</div> : null}
+      {progress.summary ? <p className="lb-ceomsg__p">{progress.summary}</p> : null}
+      {completed.length > 0 && (
+        <p className="lb-ceomsg__p"><strong>What changed:</strong> {completed.map((item) => item.completeLabel).join(" · ")}</p>
       )}
       {progress.blocked ? (
-        <div className="lb-progress__section">
-          <div className="lb-progress__label">Blocked</div>
-          <p className="lb-progress__text">{progress.blocked}</p>
-        </div>
+        <p className="lb-ceomsg__p"><strong>Blocked:</strong> {progress.blocked}</p>
       ) : progress.next ? (
-        <div className="lb-progress__section">
-          <div className="lb-progress__label">Next</div>
-          <p className="lb-progress__text">{progress.next}</p>
-        </div>
+        <p className="lb-ceomsg__p"><strong>Next:</strong> {progress.next}</p>
       ) : null}
     </div>
   );
@@ -472,7 +454,7 @@ function AgentChat({
           </div>
         ))}
         {liveCard && (
-          <div className="lb-msg lb-msg--agent lb-msg--progress">
+          <div className="lb-msg lb-msg--agent">
             <div className="lb-msg__bubble">
               <LiveProgressCard progress={liveCard} />
             </div>

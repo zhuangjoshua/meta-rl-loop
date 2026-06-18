@@ -41,18 +41,6 @@ export function Building({
   // narration + terminal stream (presentation only).
   const artifacts = deriveLinearArtifacts([...narration, ...terminal]);
   const completed = items.filter((item) => item.status === "complete");
-  const current = items.find((item) => item.status === "running" || item.status === "blocked");
-  const pct = done
-    ? 100
-    : errored
-      ? Math.max(12, Math.round((completed.length / Math.max(items.length, 1)) * 100))
-      : Math.min(
-          95,
-          Math.max(
-            10,
-            Math.round(((completed.length + (current ? 0.5 : 0)) / Math.max(items.length, 1)) * 100),
-          ),
-        );
   const title = state.businessName.trim();
 
   return (
@@ -136,14 +124,6 @@ export function Building({
           </section>
 
           <aside className="lb-bld__side">
-            <ol className="lb-bld__phases">
-              {items.map((item) => (
-                <li key={item.key} className={`lb-bld__phase is-${item.status}`}>
-                  <span className="lb-bld__phase-ic" aria-hidden="true" />
-                  {item.status === "complete" ? item.completeLabel : item.label}
-                </li>
-              ))}
-            </ol>
             <details className="lb-bld__details">
               <summary>View build details</summary>
               <div className="lb-bld__term">
@@ -166,12 +146,11 @@ export function Building({
         </div>
 
         <div className="lb-bld__foot">
-          <div className="lb-bld__bar"><span style={{ width: `${pct}%` }} /></div>
           {done
             ? <button className="b44-btn b44-btn--brand lb-bld__enter" onClick={onDone}>{title ? `Enter ${title} →` : "Enter workspace →"}</button>
             : errored
               ? <span className="lb-bld__pct">failed</span>
-              : <span className="lb-bld__pct">{pct}%</span>}
+              : null}
         </div>
       </div>
     </div>
