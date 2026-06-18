@@ -22334,6 +22334,45 @@ def _logo_provider_cost_usd() -> float:
     return float(request_cost)
 
 
+# A UGC video ad is two provider calls: one reference still (gpt-image-2) and the
+# rendered video (Kling v3 Pro image-to-video, billed per second). Both prices live
+# in the canonical table (agent.usage_pricing) — never a second table in the skill.
+_UGC_IMAGE_PROVIDER = "openai"
+_UGC_IMAGE_MODEL = "gpt-image-2"
+_UGC_VIDEO_PROVIDER = "fal"
+_UGC_VIDEO_MODEL = "kling-video/v3/pro/image-to-video"
+
+
+def _ugc_provider_cost_usd(seconds: Any) -> float:
+    """Exact provider cost for a UGC video ad: one reference still (gpt-image-2)
+    plus the rendered video seconds (Kling v3 Pro, per-second).
+
+    Resolved from the canonical pricing table (agent.usage_pricing); an unpriced
+    model is refused so the receipt can never claim a fabricated cost — the single
+    source of truth for UGC provider cost, no second hardcoded table in the skill
+    (GOAL_RULES §4 / CLAUDE.md exact-cost rule).
+    """
+    from agent import usage_pricing
+
+    img = usage_pricing._OFFICIAL_DOCS_PRICING.get((_UGC_IMAGE_PROVIDER, _UGC_IMAGE_MODEL))
+    vid = usage_pricing._OFFICIAL_DOCS_PRICING.get((_UGC_VIDEO_PROVIDER, _UGC_VIDEO_MODEL))
+    img_cost = getattr(img, "request_cost", None) if img is not None else None
+    vid_per_second = getattr(vid, "request_cost", None) if vid is not None else None
+    if img_cost is None or vid_per_second is None:
+        raise TakyonError(
+            "ugc video ad provider models are not priced in usage_pricing "
+            f"({_UGC_IMAGE_PROVIDER}/{_UGC_IMAGE_MODEL}, {_UGC_VIDEO_PROVIDER}/{_UGC_VIDEO_MODEL}); "
+            "receipt refused (no unpriced provider spend)"
+        )
+    try:
+        secs = float(seconds or 0.0)
+    except (TypeError, ValueError):
+        secs = 0.0
+    if secs < 0:
+        secs = 0.0
+    return round(float(img_cost) + secs * float(vid_per_second), 6)
+
+
 def _creative_credit_balances(business: str) -> Any:
     store = _store()
     credits_backend = _creative_credit_backend()
@@ -23712,6 +23751,9 @@ def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
             raise TakyonError("idempotency_key is required")
 
         record = _ugc_ad_record(args)
+        # Exact provider cost from the canonical pricing table (gpt-image-2 still +
+        # Kling v3 Pro per-second video) — a truthful receipt, no fabricated number.
+        record["provider_cost_usd"] = _ugc_provider_cost_usd(record.get("seconds"))
         asset_path = store._resolve_business_file(business, record["path"])
         publication_dir = asset_path.parent
         publication_rel = str(publication_dir.relative_to(store._business_root(business)))
@@ -23733,6 +23775,7 @@ def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
                         "path": record["path"],
                         "seconds": record.get("seconds"),
                         "n_clips": record.get("n_clips"),
+                        "provider_cost_usd": record.get("provider_cost_usd"),
                         "script": record.get("script"),
                         "publication_dir": publication_rel,
                     },

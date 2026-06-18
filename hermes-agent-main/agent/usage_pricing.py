@@ -490,6 +490,33 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://ai.google.dev/pricing",
         pricing_version="google-pricing-2026-03-16",
     ),
+    # OpenAI gpt-image-2 (Images API) — billed per generated image by quality+size.
+    # The UGC reference still is rendered at HIGH quality, 9:16 portrait (864x1536),
+    # which OpenAI prices in the high/portrait tier at ~$0.25/image. Encoded as a
+    # per-request cost so the UGC ad receipt can stamp the exact provider cost
+    # (CLAUDE.md exact-cost rule); without an entry the UGC path is refused (inv#1).
+    (
+        "openai",
+        "gpt-image-2",
+    ): PricingEntry(
+        request_cost=Decimal("0.25"),
+        source="official_docs_snapshot",
+        source_url="https://openai.com/api/pricing/",
+        pricing_version="openai-image-pricing-2026-06-18",
+    ),
+    # Kling Video v3 Pro (image-to-video) via fal.ai — billed PER SECOND of output
+    # video: $0.112/s with audio off (the mode the UGC pipeline uses). Encoded as a
+    # per-SECOND request_cost; the UGC receipt multiplies it by the rendered seconds.
+    # Source: https://fal.ai/models/fal-ai/kling-video/v3/pro/image-to-video
+    (
+        "fal",
+        "kling-video/v3/pro/image-to-video",
+    ): PricingEntry(
+        request_cost=Decimal("0.112"),
+        source="official_docs_snapshot",
+        source_url="https://fal.ai/models/fal-ai/kling-video/v3/pro/image-to-video",
+        pricing_version="fal-kling-pricing-2026-06-18",
+    ),
     # AWS Bedrock — pricing per the Bedrock pricing page.
     # Bedrock charges the same per-token rates as the model provider but
     # through AWS billing.  These are the on-demand prices (no commitment).
