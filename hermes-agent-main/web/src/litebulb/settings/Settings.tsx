@@ -5,10 +5,11 @@ import { useAuth } from "../auth/useAuth";
 import { Button, Card, Divider, FormField, Input } from "../composer-ui/lib";
 import "./settings.css";
 
-export type SettingsSection = "profile" | "billing";
+export type SettingsSection = "profile" | "billing" | "plans";
 
 const TABS: Array<{ key: SettingsSection; label: string }> = [
   { key: "profile", label: "Profile" },
+  { key: "plans", label: "Plans" },
   { key: "billing", label: "Billing" },
 ];
 
@@ -41,9 +42,11 @@ export function Settings(props: {
   portalBusy: boolean;
   topupBusy: boolean;
   nudge?: string;
+  subscribeBusy?: string | null;
   onTheme: (t: Theme) => void;
   onOpenPortal: () => void;
   onTopup: (amountCents: number) => void;
+  onSubscribe?: (planId: string) => void;
   onClose: () => void;
 }) {
   const {
@@ -52,8 +55,10 @@ export function Settings(props: {
     account,
     portalBusy,
     nudge,
+    subscribeBusy,
     onTheme,
     onOpenPortal,
+    onSubscribe,
     onClose,
   } = props;
   const { user } = useAuth();
@@ -102,6 +107,54 @@ export function Settings(props: {
                   <button type="button" className={theme === "dark" ? "is-active" : ""} onClick={() => onTheme("dark")}>Dark</button>
                 </div>
               </div>
+            </Card>
+          )}
+
+          {sec === "plans" && (
+            <Card variant="outline" className="lb-set__card lb-plans">
+              <div className="lb-set__card-h">Plans</div>
+              {(() => {
+                const plans = account?.operator_plans ?? [];
+                const currentPlan = String(account?.operator_plan_name || "").trim();
+                if (plans.length === 0) {
+                  return <div className="lb-set__muted">No subscription tiers are configured yet.</div>;
+                }
+                return (
+                  <div className="lb-plans__grid">
+                    {plans.map((plan) => {
+                      const isCurrent = currentPlan !== "" && currentPlan === plan.name;
+                      const busy = subscribeBusy === plan.id;
+                      return (
+                        <div key={plan.id} className={`lb-plans__card${plan.featured ? " is-featured" : ""}`}>
+                          {plan.featured && <span className="lb-plans__tag">Most popular</span>}
+                          <div className="lb-plans__name">{plan.name}</div>
+                          {plan.amount_cents ? (
+                            <div className="lb-plans__price">
+                              {formatUsd(plan.amount_cents)}
+                              <span className="lb-plans__per">/{plan.interval || "month"}</span>
+                            </div>
+                          ) : null}
+                          {plan.tagline ? <div className="lb-set__muted">{plan.tagline}</div> : null}
+                          {plan.weekly_allowance_cents ? (
+                            <div className="lb-set__muted">{formatUsd(plan.weekly_allowance_cents)} weekly included usage</div>
+                          ) : null}
+                          {plan.features && plan.features.length > 0 ? (
+                            <ul className="lb-plans__feats">{plan.features.map((f) => <li key={f}>{f}</li>)}</ul>
+                          ) : null}
+                          <Button
+                            variant={plan.featured ? "primary" : "secondary"}
+                            size="small"
+                            disabled={isCurrent || busy || !onSubscribe}
+                            onClick={() => onSubscribe?.(plan.id)}
+                          >
+                            {isCurrent ? "Current plan" : busy ? "Opening checkout…" : `Choose ${plan.name}`}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </Card>
           )}
 

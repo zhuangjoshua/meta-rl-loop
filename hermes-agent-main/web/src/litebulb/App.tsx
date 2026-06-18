@@ -69,6 +69,7 @@ function Router() {
     submitting,
     billingBusy,
     topupBusy,
+    subscribeBusy,
     resetBuildState,
     openBusiness,
     sendPrompt,
@@ -78,6 +79,7 @@ function Router() {
     startCreativeCreditCheckout,
     openBillingPortal,
     startTopup,
+    subscribeToPlan,
     setTractionRange,
   } = useTakyonLitebulb();
   const path = usePath();
@@ -117,7 +119,13 @@ function Router() {
 
   useEffect(() => {
     if (!path.startsWith("/settings")) return;
-    setSettings(path === "/settings/billing" ? "billing" : "profile");
+    setSettings(
+      path === "/settings/billing"
+        ? "billing"
+        : path === "/settings/plans"
+          ? "plans"
+          : "profile",
+    );
   }, [path]);
 
   useEffect(() => {
@@ -268,9 +276,11 @@ function Router() {
           portalBusy={billingBusy}
           topupBusy={topupBusy}
           nudge={billingNudge}
+          subscribeBusy={subscribeBusy}
           onTheme={setTheme}
           onOpenPortal={openBillingPortal}
           onTopup={startTopup}
+          onSubscribe={subscribeToPlan}
           onClose={closeSettings}
         />
       )}
