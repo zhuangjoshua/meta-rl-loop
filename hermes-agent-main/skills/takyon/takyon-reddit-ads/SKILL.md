@@ -73,7 +73,7 @@ allowlisting or approval from Reddit to access**. The real live gates are:
 Three hard layers stay separate:
 
 - **Asset / post layer** — the existing promoted post id or the public creative URLs used to create one.
-  Owned by upstream creative work and the business publish target. This skill does not regenerate assets, but it can stage a finished local business asset into a public URL when the publish target is reachable. Missing creative is a blocker, not a license to invent `placehold.co`, mock, fixture, or stub media.
+  Owned by upstream creative work and the business publish target. This skill does not regenerate assets itself, but **when the Reddit channel has allocated creative credits and the required asset does not exist yet, that allocation IS the approval to generate it: route upstream to `takyon-static-ad-creative-generator` (image) or `ugc-video-ad` (video) in the SAME flow, let them reserve from the channel bucket, then launch from the generated asset — do NOT stage the campaign and stop at `blocked_needs_creative` waiting for a separate operator approval.** Only treat missing creative as a hard blocker when the channel has no credits to fund generation or no provider is available. Missing creative is never a license to invent `placehold.co`, mock, fixture, or stub media.
 - **Launch/control layer** — the campaign objects + explicit activate/pause/budget changes.
   Owned here, lives under `distribution/`, and runs through the guarded
   **`business_reddit_ad_launch`** and **`business_reddit_ad_control`** tools.
