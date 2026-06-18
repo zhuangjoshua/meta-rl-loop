@@ -78,6 +78,20 @@
 @keyframes lb-bld-rise { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
 @keyframes lb-bld-blink { 50% { opacity: 0; } }
 
+/* linear artifact feed: each artifact appears in chronological order as it lands */
+.lb-bld__artifacts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lb-bld__artifact {
+  display: flex; align-items: baseline; gap: 9px; font-size: var(--cds-text-sm);
+  color: var(--cds-color-text-default);
+  animation: lb-bld-rise 0.35s ease-out;
+}
+.lb-bld__artifact-ic { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--cds-color-text-faint); transform: translateY(-1px); }
+.lb-bld__artifact.is-research .lb-bld__artifact-ic { background: var(--cds-color-info-bold, #2563eb); }
+.lb-bld__artifact.is-product .lb-bld__artifact-ic { background: var(--cds-color-accent-bold, #7c3aed); }
+.lb-bld__artifact.is-launch .lb-bld__artifact-ic { background: var(--cds-color-success-bold); }
+.lb-bld__artifact-name { font-weight: var(--cds-weight-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-bld__artifact-path { font-size: var(--cds-text-xs); color: var(--cds-color-text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
 /* build side: workstreams + details */
 .lb-bld__side { display: flex; flex-direction: column; gap: 18px; }
 .lb-bld__phases { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }

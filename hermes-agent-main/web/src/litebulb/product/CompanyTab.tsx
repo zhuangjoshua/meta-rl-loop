@@ -340,39 +340,141 @@ function Traction({
   );
 }
 
-function normalizeTaskStatus(value: string) {
+// Canonical task status set (mirrors the backend canonical_task in
+// tui_gateway/server.py). The backend already emits a spec-compliant `status`
+// and `status_label`; this normaliser is only a defensive fallback for older
+// payloads so the pill never shows a raw runtime status like "recorded".
+const TASK_STATUS_LABELS: Record<string, string> = {
+  running: "Working",
+  queued: "Queued",
+  failed: "Needs attention",
+  completed: "Done",
+  idle: "Idle",
+};
+
+function normalizeTaskStatus(value: string): keyof typeof TASK_STATUS_LABELS {
   const status = value.toLowerCase();
   if (status.includes("fail") || status.includes("error") || status.includes("block")) return "failed";
-  if (status.includes("running") || status.includes("working")) return "live";
-  if (status.includes("done") || status.includes("complete") || status.includes("success")) return "done";
-  return "queued";
+  if (status.includes("running") || status.includes("working") || status.includes("live") || status.includes("active")) return "running";
+  if (status.includes("queue") || status.includes("pending") || status.includes("schedul") || status.includes("wait")) return "queued";
+  if (status.includes("done") || status.includes("complete") || status.includes("success")) return "completed";
+  return "idle";
 }
 
-function Activity({ tasks }: { tasks: Array<Record<string, unknown>> }) {
-  const visible = [
-    ...tasks.filter((task) => normalizeTaskStatus(asText(task.status)) !== "done"),
-    ...tasks.filter((task) => normalizeTaskStatus(asText(task.status)) === "done"),
-  ];
-  const running = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "live").length;
-  const queued = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "queued").length;
-  const issues = visible.filter((task) => normalizeTaskStatus(asText(task.status)) === "failed").length;
+// DRAFT taxonomy — NEEDS OPERATOR APPROVAL (GOAL_RULES §5/§7). Category pill
+// colours/labels are a working presentation default; the operator has not
+// locked the final category taxonomy or pill copy yet.
+const TASK_CATEGORY_LABELS: Record<string, string> = {
+  RESEARCH: "Research",
+  PRODUCT: "Product",
+  LAUNCH: "Launch",
+};
+
+function taskCategory(value: string): string {
+  const cat = value.trim().toUpperCase();
+  return TASK_CATEGORY_LABELS[cat] ? cat : "PRODUCT";
+}
+
+function TaskDetail({ task }: { task: Record<string, unknown> }) {
+  const description = asText(task.description) || asText(task.detail);
+  const outputs = (Array.isArray(task.outputs) ? task.outputs : []).map((o) => asText(o)).filter(Boolean);
+  const steps = asList(task.steps);
+  return (
+    <div className="lb-task__detail">
+      {description && (
+        <div className="lb-task__goal">
+          <span className="lb-task__goal-h">Goal</span>
+          <span className="lb-task__goal-t">{description}</span>
+        </div>
+      )}
+      {outputs.length > 0 && (
+        <div className="lb-task__outs">
+          <span className="lb-task__goal-h">Outputs</span>
+          <ul className="lb-task__outlist">
+            {outputs.map((out, i) => <li key={i}>{out}</li>)}
+          </ul>
+        </div>
+      )}
+      {steps.length > 0 && (
+        <ol className="lb-task__steps">
+          {steps.map((step, i) => {
+            const done = normalizeTaskStatus(asText(step.status)) === "completed";
+            return (
+              <li key={asText(step.id) || i} className={done ? "is-done" : ""}>
+                <span className="lb-task__step-mark" aria-hidden="true">{done ? "✓" : "○"}</span>
+                <span className="lb-task__step-t">{asText(step.label) || asText(step.title) || `Step ${i + 1}`}</span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {/* Raw tool-call name only shown here, in the expanded detail (spec #4). */}
+      {asText(task.label) && asText(task.label) !== asText(task.title) && (
+        <div className="lb-task__raw">raw: {asText(task.label)}</div>
+      )}
+    </div>
+  );
+}
+
+function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
+  // Only intent-level tasks are top-level rows; raw tool calls carry a task_id
+  // pointing at a parent (spec #6), so nested events are not listed flat here.
+  const intentTasks = useMemo(
+    () => tasks.filter((task) => {
+      const id = asText(task.id);
+      const parent = asText(task.task_id);
+      return !parent || parent === id;
+    }),
+    [tasks],
+  );
+  const ordered = useMemo(
+    () => [
+      ...intentTasks.filter((task) => normalizeTaskStatus(asText(task.status)) !== "completed"),
+      ...intentTasks.filter((task) => normalizeTaskStatus(asText(task.status)) === "completed"),
+    ],
+    [intentTasks],
+  );
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const running = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "running").length;
+  const queued = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "queued").length;
+  const issues = ordered.filter((task) => normalizeTaskStatus(asText(task.status)) === "failed").length;
   return (
     <section className="lb-card lb-act">
-      <div className="lb-h"><span className="lb-act__pulse" />Activity<span className="lb-h__c">{running} running · {queued} queued{issues ? ` · ${issues} issue${issues === 1 ? "" : "s"}` : ""}</span></div>
+      <div className="lb-h"><span className="lb-act__pulse" />Tasks<span className="lb-h__c">{running} running · {queued} queued{issues ? ` · ${issues} issue${issues === 1 ? "" : "s"}` : ""}</span></div>
       <div className="lb-act__list">
-        {visible.map((task, index) => {
+        {ordered.map((task, index) => {
           const state = normalizeTaskStatus(asText(task.status));
+          const id = asText(task.id) || String(index);
+          const category = taskCategory(asText(task.category));
+          const statusLabel = asText(task.status_label) || TASK_STATUS_LABELS[state] || state;
+          const title = asText(task.title) || asText(task.label) || "Recorded work";
+          const description = asText(task.description) || asText(task.detail) || "Tracked in the workspace overview.";
+          const isOpen = expanded === id;
           return (
-            <div key={asText(task.id) || index} className={`lb-act__task is-${state}`}>
-              <span className="lb-act__dot" aria-hidden="true" />
-              <span className="lb-act__main">
-                <span className="lb-act__row"><span className="lb-act__name">{asText(task.label) || "Recorded work"}</span><span className="lb-act__meta">{asText(task.status) || state}</span></span>
-                <span className="lb-act__ev"><span className="lb-act__evtxt">{asText(task.detail) || "Tracked in the workspace overview."}</span></span>
-              </span>
+            <div key={id} className={`lb-act__task lb-task is-${state} ${isOpen ? "is-open" : ""}`}>
+              <button
+                type="button"
+                className="lb-task__head"
+                aria-expanded={isOpen}
+                onClick={() => setExpanded(isOpen ? null : id)}
+              >
+                <span className="lb-act__dot" aria-hidden="true" />
+                <span className="lb-act__main">
+                  <span className="lb-act__row">
+                    <span className="lb-act__name">{title}</span>
+                    <span className="lb-task__pills">
+                      <span className={`lb-task__pill lb-task__pill--cat is-${category.toLowerCase()}`}>{TASK_CATEGORY_LABELS[category]}</span>
+                      <span className={`lb-task__pill lb-task__pill--status is-${state}`}>{statusLabel}</span>
+                    </span>
+                  </span>
+                  <span className="lb-act__ev"><span className="lb-act__evtxt">{description}</span></span>
+                </span>
+              </button>
+              {isOpen && <TaskDetail task={task} />}
             </div>
           );
         })}
-        {!visible.length && <div className="lb-empty">No live activity yet.</div>}
+        {!ordered.length && <div className="lb-empty">No live tasks yet.</div>}
       </div>
     </section>
   );
@@ -1004,7 +1106,7 @@ export function CompanyTab({
       <div className="lb-comp__inner">
         <Traction traction={traction} range={tractionRange} onRangeChange={onTractionRangeChange} />
         <div className="lb-comp__fold">
-          <Activity tasks={tasks} />
+          <Tasks tasks={tasks} />
           <ChannelBudget
             workspace={workspace}
             creativeCredits={creativeCredits}
