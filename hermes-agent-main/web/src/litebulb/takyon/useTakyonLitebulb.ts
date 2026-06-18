@@ -760,16 +760,6 @@ export function useTakyonLitebulb() {
     liveChatSignalsRef.current = createEmptyLiveChatSignals();
   }, []);
 
-  const noteLiveChatProgress = useCallback((text: string) => {
-    const line = trimText(text);
-    if (!line) return;
-    liveChatSignalsRef.current = {
-      ...liveChatSignalsRef.current,
-      progressLines: pushUniqueLine(liveChatSignalsRef.current.progressLines, line, 12),
-    };
-    renderLiveChatProgress(true);
-  }, [renderLiveChatProgress]);
-
   const noteLiveChatStatus = useCallback((text: string) => {
     const line = trimText(text);
     if (!line) return;
@@ -887,9 +877,14 @@ export function useTakyonLitebulb() {
     const offDelta = gateway.on("message.delta", (event) => {
       const text = rawText((event.payload as { text?: string } | undefined)?.text);
       if (!text.length) return;
+      // Raw assistant text (the CEO's chain-of-thought / planning) is captured
+      // only for the collapsed, off-by-default debug transcript and the
+      // build-screen narration disclosure — it is NEVER fed into the visible
+      // "CEO update" progress card. The customer-facing card is driven by the
+      // curated update (business_post_operator_update) plus structured tool/status
+      // signals, so no internal reasoning can leak through the card derivation.
       appendAssistantText(text);
       pushBuildNarration(text);
-      noteLiveChatProgress(text);
     });
     const offComplete = gateway.on("message.complete", (event) => {
       const text = trimText((event.payload as { text?: string } | undefined)?.text);
@@ -911,8 +906,9 @@ export function useTakyonLitebulb() {
       if (!["thinking.delta", "reasoning.delta", "reasoning.available"].includes(event.type)) return;
       const text = trimText((event.payload as { text?: string } | undefined)?.text);
       if (!text) return;
+      // Reasoning/thinking stays in the collapsed build-narration disclosure only;
+      // never into the visible CEO update card (no chain-of-thought to customer).
       pushBuildNarration(text);
-      noteLiveChatProgress(text);
     });
     const offStatus = gateway.on("status.update", (event) => {
       const payload = (event.payload as { text?: string; kind?: string } | undefined) || {};
@@ -972,7 +968,6 @@ export function useTakyonLitebulb() {
     ensureGateway,
     loadTraction,
     loadWorkspace,
-    noteLiveChatProgress,
     noteLiveChatStatus,
     noteLiveChatTool,
     pushBuildNarration,

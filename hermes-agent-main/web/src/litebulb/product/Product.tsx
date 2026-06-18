@@ -124,6 +124,21 @@ function liveStateProgress(
   const state = workspace?.live_state;
   if (state && typeof state === "object") {
     const payload = state as Record<string, unknown>;
+    // Prefer the CEO's curated headline + summary (business_post_operator_update)
+    // when present — this is the warm, customer-facing copy that replaces the raw
+    // assistant reasoning stream entirely.
+    const headline = String(payload.headline || "").trim();
+    const summary = String(payload.summary || "").trim();
+    if (headline || summary) {
+      return {
+        title: headline || `${businessName} update`,
+        summary: summary || "I'm on this — here's the latest on your company.",
+        items: [],
+        live: !["done", "completed", "success", "failed", "error", "idle"].includes(
+          String(payload.status || "").trim().toLowerCase(),
+        ),
+      };
+    }
     const progress = liveProgress(payload.status, payload.detail);
     if (progress) return progress;
   }
@@ -394,12 +409,6 @@ function AgentChat({
   // in-flight indicator never disappears between a turn ending and the server
   // mirror catching up.
   const liveCard = streamingProgress ?? progress;
-  // Keep every prior message mounted — including the in-flight working agent
-  // message — so the log never blanks or two-stage-flashes at the
-  // thinking→answer transition. The working message streams inline below.
-  const streamingAgent = messages.some(
-    (message) => message.who === "agent" && message.working && Boolean(message.text.trim()),
-  );
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -411,6 +420,27 @@ function AgentChat({
     setDraft("");
     onSend(text);
   };
+
+  // The customer NEVER sees the CEO's raw assistant reasoning / chain-of-thought.
+  // We render only what the customer should see: their own messages, the curated
+  // CEO update card (from the live_state mirror / business_post_operator_update),
+  // a structured receipt for finished build/publish replies, and — collapsed and
+  // off by default — the raw transcript under a "details" disclosure for debug.
+  const userMessages = messages.filter((message) => message.who === "user");
+  const agentMessages = messages.filter((message) => message.who === "agent");
+  const finishedReply = [...agentMessages]
+    .reverse()
+    .find((message) => !message.working && Boolean(message.text.trim()));
+  const receipt = finishedReply
+    ? deriveAssistantReceipt({
+        content: finishedReply.text,
+        businessName: business.name,
+        liveUrl: reviewUrl,
+      })
+    : null;
+  const rawTranscript = agentMessages
+    .map((message) => message.text.trim())
+    .filter(Boolean);
 
   return (
     <aside className="lb-chat">
@@ -428,44 +458,34 @@ function AgentChat({
       </div>
 
       <div className="lb-chat__log">
-        {messages.map((message) => {
-          // Finished CEO build/publish replies collapse into a structured
-          // receipt; the in-flight working message always streams as plain
-          // markdown + a typing indicator so the transition is seamless.
-          const receipt = message.who === "agent" && !message.working
-            ? deriveAssistantReceipt({
-                content: message.text,
-                businessName: business.name,
-                liveUrl: reviewUrl,
-              })
-            : null;
-          return (
-            <div key={message.id} className={`lb-msg lb-msg--${message.who}`}>
-              <div className="lb-msg__bubble">
-                {message.who === "agent"
-                  ? receipt
-                    ? <AgentReceipt receipt={receipt} />
-                    : (
-                        <>
-                          <AgentMessageMarkdown text={message.text} />
-                          {message.working && (
-                            <span className="lb-msg__work">
-                              <span className="lb-typing"><i /><i /><i /></span>
-                            </span>
-                          )}
-                        </>
-                      )
-                  : message.text}
-              </div>
-            </div>
-          );
-        })}
-        {liveCard && !streamingAgent && (
+        {userMessages.map((message) => (
+          <div key={message.id} className="lb-msg lb-msg--user">
+            <div className="lb-msg__bubble">{message.text}</div>
+          </div>
+        ))}
+        {liveCard && (
           <div className="lb-msg lb-msg--agent lb-msg--progress">
             <div className="lb-msg__bubble">
               <LiveProgressCard progress={liveCard} />
             </div>
           </div>
+        )}
+        {!liveCard && receipt && (
+          <div className="lb-msg lb-msg--agent">
+            <div className="lb-msg__bubble">
+              <AgentReceipt receipt={receipt} />
+            </div>
+          </div>
+        )}
+        {rawTranscript.length > 0 && (
+          <details className="lb-chat__rawlog">
+            <summary>View raw assistant log</summary>
+            {rawTranscript.map((text, index) => (
+              <div key={`raw-${index}`} className="lb-chat__rawentry">
+                <AgentMessageMarkdown text={text} />
+              </div>
+            ))}
+          </details>
         )}
         <div ref={endRef} />
       </div>

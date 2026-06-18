@@ -160,6 +160,83 @@ def test_failed_branch_still_exposes_canonical_task_fields():
     assert failed["category"] in {"RESEARCH", "PRODUCT", "LAUNCH"}
 
 
+# ── Curated operator update: business_post_operator_update → card + milestones ──
+
+def test_operator_update_milestones_become_primary_intent_cards():
+    """A curated CEO update (business_post_operator_update) lands its milestones as
+    primary intent cards (title/description/category/status), and the running
+    milestone is the anchor that raw runtime/tool events nest under."""
+    overview = {
+        "tasks": [
+            # Operator-authored milestone (source operator_update) — the PRIMARY card.
+            {
+                "id": "milestone:0",
+                "source": "operator_update",
+                "label": "Build the autonomous drift-detection agent",
+                "title": "Build the autonomous drift-detection agent",
+                "description": "Connect to a model API and track prediction patterns for customers.",
+                "category": "PRODUCT",
+                "status": "running",
+                "detail": "Connect to a model API and track prediction patterns for customers.",
+            },
+            # Raw worker trace that should NOT be a top-level row — it nests under
+            # the running milestone.
+            {
+                "id": "trace-1",
+                "source": "runtime",
+                "label": "Claude Agent Task",
+                "status": "running",
+                "detail": "tool: write_file product/site/index.html",
+            },
+        ],
+    }
+    payload = server._takyon_live_state_payload(overview, None)
+    tasks = {t["id"]: t for t in payload["tasks"]}
+    milestone = tasks["milestone:0"]
+    # The CEO-chosen milestone text/category survive verbatim (not re-derived).
+    assert milestone["title"] == "Build the autonomous drift-detection agent"
+    assert milestone["description"] == (
+        "Connect to a model API and track prediction patterns for customers."
+    )
+    assert milestone["category"] == "PRODUCT"
+    assert milestone["status_label"] == "RUNNING"
+    # The milestone is the intent anchor; the raw worker trace nests under it.
+    assert payload["current_task_id"] == "milestone:0"
+    assert tasks["trace-1"]["task_id"] == "milestone:0"
+
+
+def test_operator_update_copy_surfaces_on_live_state():
+    """The curated headline + summary (mirrored onto ceo_loop) is copied onto the
+    live_state so the chat 'CEO update' card shows curated copy, not raw text."""
+    live_state = {"status": "running", "label": "x", "detail": "y", "tasks": []}
+    server._takyon_attach_operator_update_copy(
+        live_state,
+        {
+            "ceo_loop": {
+                "status": "working",
+                "headline": "Standing up your drift-detection product",
+                "detail": "I'm wiring the monitoring agent and putting the first page online.",
+            }
+        },
+    )
+    assert live_state["headline"] == "Standing up your drift-detection product"
+    assert live_state["summary"] == (
+        "I'm wiring the monitoring agent and putting the first page online."
+    )
+
+
+def test_operator_update_categories_match_gateway_taxonomy():
+    """The CEO-facing milestone category taxonomy (core.OPERATOR_UPDATE_CATEGORIES)
+    stays in lockstep with the gateway Tasks-panel taxonomy so a posted milestone
+    category always renders a valid pill (no parallel taxonomy)."""
+    from plugins.takyon import core
+
+    assert tuple(core.OPERATOR_UPDATE_CATEGORIES) == server._TAKYON_TASK_CATEGORIES
+    # Every operator-update status maps to a canonical Tasks-panel pill label.
+    for status in core.OPERATOR_UPDATE_STATUSES:
+        assert status in server._TAKYON_TASK_STATUS_LABELS
+
+
 # ── Dont show all raw documents: internal files are hidden ──────────────────
 
 def test_hide_operator_output_filters_internal_files():

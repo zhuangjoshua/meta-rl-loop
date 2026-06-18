@@ -220,6 +220,21 @@
 .lb-receipt__details summary::-webkit-details-marker { display: none; }
 .lb-receipt__details[open] { display: flex; flex-direction: column; gap: 12px; }
 .lb-receipt__details[open] summary { color: var(--cds-color-text-default); }
+/* Raw assistant transcript — collapsed and OFF by default. The customer-facing
+   chat shows only the curated CEO update card + milestone rollup; the raw
+   reasoning stream never renders as a visible bubble and lives here for debug. */
+.lb-chat__rawlog { margin-top: 4px; }
+.lb-chat__rawlog summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--cds-text-xs);
+  font-weight: var(--cds-weight-semibold);
+  color: var(--cds-color-text-soft);
+}
+.lb-chat__rawlog summary::-webkit-details-marker { display: none; }
+.lb-chat__rawlog[open] { display: flex; flex-direction: column; gap: 8px; }
+.lb-chat__rawlog[open] summary { color: var(--cds-color-text-default); margin-bottom: 4px; }
+.lb-chat__rawentry { font-size: var(--cds-text-xs); color: var(--cds-color-text-soft); }
 .lb-chat__input { flex: none; display: flex; gap: 8px; padding: var(--cds-space-3) var(--cds-space-4); border-top: 1px solid var(--cds-color-border-divider); align-items: center; }
 .lb-chat__input .Input { flex: 1; min-height: 44px; }
 .lb-chat__stop,
