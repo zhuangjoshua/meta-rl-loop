@@ -10,10 +10,6 @@ import { useAuth } from "../auth/useAuth";
 import { Button, Card, Divider, FormField, Input, Select } from "../composer-ui/lib";
 import "./settings.css";
 
-// Fixed top-up presets (USD cents) for adding operator wallet funds. These map
-// straight to the real /api/takyon/operator/topup/checkout amount_cents body.
-const TOPUP_PRESETS_CENTS = [1000, 2500, 5000, 10000];
-
 export type SettingsSection = "profile" | "billing" | "plans";
 
 const TABS: Array<{ key: SettingsSection; label: string }> = [
@@ -50,12 +46,10 @@ export function Settings(props: {
   account: TakyonOperatorAccountResponse | null;
   businesses?: LitebulbBusiness[];
   portalBusy: boolean;
-  topupBusy: boolean;
   nudge?: string;
   subscribeBusy?: string | null;
   onTheme: (t: Theme) => void;
   onOpenPortal: () => void;
-  onTopup: (amountCents: number) => void;
   onSubscribe?: (planId: string) => void;
   onBuyCreditPack?: (slug: string, packId: string) => Promise<void> | void;
   onClose: () => void;
@@ -66,12 +60,10 @@ export function Settings(props: {
     account,
     businesses,
     portalBusy,
-    topupBusy,
     nudge,
     subscribeBusy,
     onTheme,
     onOpenPortal,
-    onTopup,
     onSubscribe,
     onBuyCreditPack,
     onClose,
@@ -248,28 +240,6 @@ export function Settings(props: {
                 <div className="lb-set__usage"><span>Weekly included</span><span className="lb-set__muted">{formatUsd(weeklyIncluded)}</span></div>
                 <div className="lb-set__usage"><span>Used this week</span><span className="lb-set__muted">{formatPercent(account?.allowance_percent_used ?? null)}</span></div>
                 <div className="lb-set__usage"><span>Reserved usage</span><span className="lb-set__muted">{formatPercent(reservedUsagePercent)}</span></div>
-                {(Number(account?.topup_balance_cents || 0) > 0) && (
-                  <div className="lb-set__usage"><span>Extra funds</span><span className="lb-set__muted">{formatUsd(account?.topup_balance_cents ?? null)}</span></div>
-                )}
-                {(Number(account?.reserved_topup_cents || 0) > 0) && (
-                  <div className="lb-set__usage"><span>Reserved funds</span><span className="lb-set__muted">{formatUsd(account?.reserved_topup_cents ?? null)}</span></div>
-                )}
-                <Divider className="lb-set__rule" />
-                <div className="lb-set__card-h">Add funds</div>
-                <p className="lb-set__hint">Top up your operator wallet to keep companies running past the included weekly allowance.</p>
-                <div className="lb-set__topup" role="group" aria-label="Top up amount">
-                  {TOPUP_PRESETS_CENTS.map((amount) => (
-                    <Button
-                      key={amount}
-                      variant="secondary"
-                      size="small"
-                      disabled={topupBusy}
-                      onClick={() => onTopup(amount)}
-                    >
-                      {topupBusy ? "Opening checkout…" : `Add ${formatUsd(amount)}`}
-                    </Button>
-                  ))}
-                </div>
               </Card>
 
               <Card variant="outline" className="lb-set__card">

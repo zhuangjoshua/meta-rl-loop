@@ -141,15 +141,6 @@ export const api = {
       undefined,
       "operator home",
     ),
-  createTakyonOperatorTopupCheckout: (amountCents: number, returnPath: string) =>
-    fetchJSON<{ checkout_url?: string; session_id?: string; amount_cents?: number }>(
-      "/api/takyon/operator/topup/checkout",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount_cents: amountCents, return_path: returnPath }),
-      },
-    ),
   createTakyonOperatorBillingPortal: (returnPath: string) =>
     fetchJSON<{ portal_url?: string; customer_id?: string }>(
       "/api/takyon/operator/billing/portal",
@@ -687,10 +678,8 @@ export interface TakyonOperatorAccountResponse {
   operator_plans?: TakyonOperatorPlan[];
   allowance_period_start?: string | null;
   allowance_resets_at?: string | null;
-  topup_balance_cents?: number;
   reserved_cents?: number;
   reserved_allowance_cents?: number;
-  reserved_topup_cents?: number;
   spendable_cents?: number;
   operator_subscription_status?: string;
   owed_balance_cents?: number;

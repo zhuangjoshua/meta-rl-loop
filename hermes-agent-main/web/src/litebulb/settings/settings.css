@@ -79,8 +79,6 @@
 .lb-plans__feats li { position: relative; padding-left: 18px; font-size: var(--cds-text-sm); color: var(--cds-color-text-default); }
 .lb-plans__feats li::before { content: "✓"; position: absolute; left: 0; color: var(--cds-color-success); font-weight: 700; }
 
-/* top-up presets — add operator wallet funds */
-.lb-set__topup { display: flex; flex-wrap: wrap; gap: 8px; }
 
 /* creative-credit packs — fixed-price packs per company */
 .lb-packs { margin-top: var(--cds-space-4); display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: clamp(12px, 1.4vw, 18px); }

@@ -551,7 +551,6 @@ export function useTakyonLitebulb() {
   const [submitting, setSubmitting] = useState(false);
   const [sessionRunning, setSessionRunning] = useState(false);
   const [billingBusy, setBillingBusy] = useState(false);
-  const [topupBusy, setTopupBusy] = useState(false);
   const [subscribeBusy, setSubscribeBusy] = useState<string | null>(null);
 
   const gatewayRef = useRef<GatewayClient | null>(null);
@@ -1497,23 +1496,6 @@ export function useTakyonLitebulb() {
     }
   }, [billingBusy]);
 
-  const startTopup = useCallback(async (amountCents: number) => {
-    if (topupBusy || amountCents <= 0) return;
-    setTopupBusy(true);
-    try {
-      const result = await api.createTakyonOperatorTopupCheckout(
-        amountCents,
-        window.location.pathname + window.location.search + window.location.hash,
-      );
-      const target = trimText(result.checkout_url);
-      if (target) {
-        window.location.assign(target);
-      }
-    } finally {
-      setTopupBusy(false);
-    }
-  }, [topupBusy]);
-
   const subscribeToPlan = useCallback(async (planId: string) => {
     const id = trimText(planId);
     if (subscribeBusy || !id) return;
@@ -1664,7 +1646,6 @@ export function useTakyonLitebulb() {
     resetBuildState,
     submitting,
     billingBusy,
-    topupBusy,
     subscribeBusy,
     loadHome,
     openBusiness,
@@ -1675,7 +1656,6 @@ export function useTakyonLitebulb() {
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,
-    startTopup,
     subscribeToPlan,
   };
 }
