@@ -343,9 +343,15 @@ def test_unentitled_business_reserve_refused_at_zero_budget(pg_conn):
     """
     # An unknown business would fail the FK; create the minimal business row the
     # app_budgets FK points at.
+    # businesses.owner_user_id is NOT NULL (0001 identity spine); seed an owner row
+    # directly (same pattern as inv1/inv2 — no login/key-minting needed for an FK target).
+    owner_id = pg_conn.execute(
+        "insert into users (auth0_sub) values (%s) returning id",
+        ("auth0|inv9-owner",),
+    ).fetchone()[0]
     pg_conn.execute(
-        "insert into businesses (slug, mode) values (%s, %s) on conflict (slug) do nothing",
-        ("inv9biz", "test"),
+        "insert into businesses (slug, name, owner_user_id, mode) values (%s, %s, %s, %s) on conflict (slug) do nothing",
+        ("inv9biz", "inv9biz", owner_id, "live"),
     )
     # Model "no paid subscription" as an explicit 0 hard cap.
     app_usage.set_app_budget(pg_conn, "inv9biz", hard_limit_microusd=0, status="active")
