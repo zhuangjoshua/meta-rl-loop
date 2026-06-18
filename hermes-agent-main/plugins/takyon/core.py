@@ -7210,37 +7210,49 @@ def _safe_relpath(value: str, *, field: str = "path") -> Path:
 def _atomic_write_text(path: Path, content: str) -> None:
     if len(content) > MAX_WRITE_CHARS:
         raise TakyonError(f"content is too large for {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    _atomic_write_payload(path, content.encode("utf-8"))
 
 
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
+    _atomic_write_payload(path, content)
+
+
+def _atomic_write_payload(path: Path, data: bytes) -> None:
+    # Write via a sibling temp file + rename so readers never observe a partial file.
+    # A concurrent workspace re-materialize (``delete_local=True``) can delete the parent
+    # directory between our ``mkdir`` and ``mkstemp`` — that surfaces as a transient
+    # ``FileNotFoundError`` on the cache mirror. Recreate the parent and retry a bounded number
+    # of times so a durable write is not lost to a momentary directory-wipe race.
+    last_exc: FileNotFoundError | None = None
+    for _attempt in range(4):
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+        except FileNotFoundError as exc:
+            last_exc = exc
+            continue
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+            return
+        except FileNotFoundError as exc:
+            last_exc = exc
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            continue
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    if last_exc is not None:
+        raise last_exc
 
 
 def _append_jsonl(path: Path, value: Any) -> None:
@@ -10239,6 +10251,45 @@ def _probe_public_asset_url(url: str) -> tuple[bool, str]:
         return False, f"public asset probe failed: {exc}"
 
 
+def _publish_public_asset_to_live_build_artifact(
+    store: "TakyonStore",
+    business: str,
+    *,
+    site_rel: str,
+    source_abs: Path,
+) -> dict[str, Any]:
+    """Write a staged public asset into the live build's REMOTE artifact.
+
+    The product-serving node materializes each immutable build (keyed by
+    ``live_build_id``) from remote object storage, so a public asset must live in
+    that build artifact to be reachable off this operator node. Returns a small
+    status dict; never raises — reachability is verified separately by the caller,
+    which keeps an unreachable URL a hard blocker.
+    """
+    result: dict[str, Any] = {"published": False, "build_id": None, "reason": ""}
+    try:
+        from . import storage
+
+        backend = store._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if backend_name not in {"supabase_s3", "local"}:
+            result["reason"] = f"unsupported storage backend: {backend_name or 'none'}"
+            return result
+        build_id = live_build_pointer(business)
+        if not build_id:
+            result["reason"] = "no live build pointer"
+            return result
+        rel = _safe_relpath(site_rel, field="site_rel").as_posix()
+        data = source_abs.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        backend.put(storage.build_object_key(_slugify(business), build_id, rel), data, digest=digest)
+        result.update({"published": True, "build_id": build_id, "object_rel": rel, "sha256": digest})
+        return result
+    except Exception as exc:
+        result["reason"] = str(exc)
+        return result
+
+
 def _stage_business_public_asset(
     store: "TakyonStore",
     business: str,
@@ -10278,6 +10329,18 @@ def _stage_business_public_asset(
         _copy_product_public_asset(source_abs, site_abs)
         _make_product_publish_path_traversable(publish_root)
 
+    # Publish the asset into the canonical REMOTE build artifact for the live build.
+    # The product is served from a separate node that materializes each immutable build
+    # (keyed by ``live_build_id``) from remote object storage — a copy that only touches this
+    # operator node's local product-site filesystem is invisible to the serving node. Writing
+    # the asset into the live build's remote artifact makes it part of the durable, served
+    # build so a fresh materialization (or a serving node that has not yet cached the build)
+    # picks it up. Best-effort: reachability is still verified below, and an unreachable URL
+    # remains a hard blocker rather than a silent success.
+    build_publish = _publish_public_asset_to_live_build_artifact(
+        store, business, site_rel=site_rel, source_abs=source_abs
+    )
+
     public_url = _product_public_asset_url(
         business,
         site_rel,
@@ -10309,6 +10372,7 @@ def _stage_business_public_asset(
         "public_url_verified": verified,
         "verified_at": _now() if verified else "",
         "blocker": blocker,
+        "live_build_publish": build_publish,
         "created_at": _now(),
     }
     _atomic_write_text(
@@ -11162,6 +11226,20 @@ class _PGConn:
             pass
 
 
+# Per-thread reentrancy guard for the business mirror flock. ``flock`` is per
+# open-file-description, NOT recursive: if a thread that already holds the
+# exclusive lock on a cache root opens a SECOND fd and requests ``LOCK_EX`` on
+# the same file, the second request blocks forever waiting on the first — a
+# same-thread self-deadlock. ``commit()`` takes the lock and then calls
+# ``_apply_operation`` → ``_resolve_business_file`` → ``_sync_business_workspace_cache``,
+# which re-enters this lock, so the nested acquisition must be a no-op for the
+# holding thread while still serializing across threads and processes. Keyed by
+# (thread ident, resolved lock path) so a different thread/process still blocks
+# on the real OS flock.
+_MIRROR_LOCK_DEPTH: dict[tuple[int, str], int] = {}
+_MIRROR_LOCK_DEPTH_GUARD = threading.Lock()
+
+
 @contextmanager
 def _business_mirror_lock(cache_root: Path):
     # Serialize destructive re-materialize/commit on the SHARED local cache mirror so
@@ -11179,11 +11257,34 @@ def _business_mirror_lock(cache_root: Path):
         yield
         return
     lock_path = lock_dir / (cache_root.name + ".lock")
+    reentry_key = (threading.get_ident(), str(lock_path.resolve()))
+    # If THIS thread already holds the OS flock for this cache root, a nested
+    # acquisition must not open a second fd and re-flock (which would deadlock
+    # against our own held lock). Just bump the depth and yield.
+    with _MIRROR_LOCK_DEPTH_GUARD:
+        held = _MIRROR_LOCK_DEPTH.get(reentry_key, 0)
+        if held:
+            _MIRROR_LOCK_DEPTH[reentry_key] = held + 1
+    if held:
+        try:
+            yield
+        finally:
+            with _MIRROR_LOCK_DEPTH_GUARD:
+                remaining = _MIRROR_LOCK_DEPTH.get(reentry_key, 1) - 1
+                if remaining > 0:
+                    _MIRROR_LOCK_DEPTH[reentry_key] = remaining
+                else:
+                    _MIRROR_LOCK_DEPTH.pop(reentry_key, None)
+        return
     fh = open(lock_path, "a+")
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        with _MIRROR_LOCK_DEPTH_GUARD:
+            _MIRROR_LOCK_DEPTH[reentry_key] = 1
         yield
     finally:
+        with _MIRROR_LOCK_DEPTH_GUARD:
+            _MIRROR_LOCK_DEPTH.pop(reentry_key, None)
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:

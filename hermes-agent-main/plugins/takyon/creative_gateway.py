@@ -681,16 +681,40 @@ def build_creative_gateway_router() -> APIRouter:
             }
 
         finalized = False
+        # Hold the business mirror lock across the ENTIRE render → manifest-read →
+        # remote-push critical section. The render subprocess writes its PNG(s) +
+        # manifest.json only into the local cache mirror; without the lock a concurrent
+        # ``_business_root(sync=True)`` from another store (the embedded business session,
+        # a worker drain thread, the dashboard render path) re-materializes that mirror with
+        # ``delete_local=True`` and deletes the freshly rendered files mid-flight — which
+        # surfaced as "manifest.json: No such file or directory" even though the render
+        # itself succeeded, and could charge a credit for an image that then vanished.
+        # The mirror lock is now per-thread reentrant (see ``_business_mirror_lock``), so the
+        # nested ``_resolve_business_file`` calls below do not self-deadlock against it. The
+        # lock is entered via ExitStack to avoid re-indenting the whole block; it is released
+        # in the ``finally`` together with any credit release on error.
+        from contextlib import ExitStack as _ExitStack
+
+        _render_lock_stack = _ExitStack()
         try:
+            mirror_root = store._business_workspace_base() / core._slugify(business)
+            _render_lock_stack.enter_context(core._business_mirror_lock(mirror_root))
+            # Resolve the workspace root ONCE up front (this is the only sync); the render
+            # subprocess writes into this exact local cache tree, and the held lock keeps any
+            # other store from re-materializing it out from under us.
+            business_root = store._business_root(business)
             run = subprocess.run(
                 cmd,
-                cwd=str(store._business_root(business)),
+                cwd=str(business_root),
                 capture_output=True,
                 text=True,
                 check=False,
             )
             manifest_rel = f"{publication_rel}/manifest.json"
-            manifest_abs = store._resolve_business_file(business, manifest_rel)
+            # Read the manifest the subprocess just wrote WITHOUT re-syncing (``sync=False``):
+            # the files live in ``business_root`` already and the lock guarantees they are
+            # still present.
+            manifest_abs = store._resolve_business_file(business, manifest_rel, sync=False)
             manifest: dict[str, Any] = {}
             if manifest_abs.is_file():
                 try:
@@ -699,6 +723,20 @@ def build_creative_gateway_router() -> APIRouter:
                     manifest = {}
             succeeded = int(manifest.get("succeeded") or 0)
             failed = int(manifest.get("failed") or 0)
+            # Persist the freshly rendered image bytes to canonical remote storage
+            # IMMEDIATELY, before returning. The render subprocess wrote the PNG(s) only
+            # into the local cache mirror; any concurrent ``_business_root(sync=True)`` from
+            # another store re-materializes that mirror with ``delete_local=True`` and would
+            # wipe the in-flight render before the caller's own remote sync runs. Pushing
+            # here (while the files exist) makes the render durable at the point of creation
+            # so the credit commit below is never charged for an image that then vanishes.
+            if succeeded > 0:
+                try:
+                    store._sync_business_workspace_remote(business)
+                except Exception:
+                    # A failed remote push must not silently drop a charged render; surface
+                    # it so the outer handler releases credits instead of committing.
+                    raise
             if run.returncode != 0:
                 if succeeded > 0:
                     balances = core._commit_creative_credits(
@@ -801,6 +839,9 @@ def build_creative_gateway_router() -> APIRouter:
                 except Exception:
                     pass
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            # Release the mirror lock on every exit path (success returns, error raise).
+            _render_lock_stack.close()
 
     @router.post("/meta-launch")
     def meta_launch(

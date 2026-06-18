@@ -8491,6 +8491,67 @@ def _materialize_product_site_from_storage(business: str, build_id: str) -> Path
         materialize_lock.release()
 
 
+def _hydrate_missing_build_asset_from_storage(
+    slug: str, build_id: str, rel: str, target: Path, root: Path
+) -> Path | None:
+    """Fetch one missing build asset from the remote build artifact and cache it locally.
+
+    Used when a concrete file (suffixed asset) is absent from the locally materialized
+    build but may have been published into the build's remote artifact after this node
+    cached the build (e.g. an ad creative staged by the creative pipeline). Returns the
+    local path on success, or None if the object is absent / on any error. Path containment
+    is enforced and the bytes are integrity-checked against the stored digest.
+    """
+    normalized_build_id = str(build_id or "").strip().lower()
+    if not normalized_build_id:
+        return None
+    target = target.resolve()
+    if root not in (target, *target.parents):
+        return None
+    try:
+        from plugins.takyon.storage import (
+            build_object_key,
+            digest_bytes,
+            get_storage_backend,
+        )
+    except Exception as exc:
+        _log.warning("build asset hydrate imports failed for %s: %s", slug, exc)
+        return None
+    try:
+        backend = get_storage_backend()
+    except Exception as exc:
+        _log.warning("build asset hydrate backend unavailable for %s: %s", slug, exc)
+        return None
+    try:
+        key = build_object_key(slug, normalized_build_id, rel)
+    except Exception:
+        return None
+    try:
+        digests = backend.list_digests(key)
+    except Exception:
+        digests = {}
+    if key not in digests:
+        return None
+    try:
+        data = backend.get(key)
+    except Exception as exc:
+        _log.warning("build asset hydrate get failed for %s:%s: %s", slug, rel, exc)
+        return None
+    expected = str(digests.get(key) or "").strip().lower()
+    if expected and digest_bytes(data) != expected:
+        _log.warning("build asset hydrate integrity mismatch for %s:%s", slug, rel)
+        return None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{target.name}.hydrate.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+    except Exception as exc:
+        _log.warning("build asset hydrate write failed for %s:%s: %s", slug, rel, exc)
+        return None
+    return target if target.is_file() else None
+
+
 _UMAMI_SNIPPET_CACHE: "str | None" = None
 
 
@@ -8715,6 +8776,17 @@ async def _serve_product_site_file(business: str, full_path: str = "", *, reques
         spa_index = (site_root / "index.html").resolve()
         if root in (spa_index, *spa_index.parents) and spa_index.is_file():
             return _product_site_file_response(spa_index)
+    else:
+        # The build is materialized locally (index.html present) so a full re-materialize
+        # never runs, but a concrete asset (e.g. a public ad creative) may have been published
+        # into the build's REMOTE artifact AFTER this node cached the build. Rather than serve a
+        # stale 404 for an asset that exists in canonical storage, fetch that single object from
+        # the remote build artifact, write it into the local materialized build (so subsequent
+        # requests are fast), and serve it. Only suffixed files take this path; integrity is
+        # checked against the stored digest.
+        hydrated = _hydrate_missing_build_asset_from_storage(slug, build_id, rel, target, root)
+        if hydrated is not None:
+            return _product_site_file_response(hydrated)
     detail = {
         "error": "product site file not found",
         "business": slug,
