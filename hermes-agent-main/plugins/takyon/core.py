@@ -228,6 +228,12 @@ WORKER_CAPABILITY_CONTRACT = """Hermes delegated worker capability contract:
 - If a task needs unsupported external execution or authority actions, finish the local source work you can do and report the blocker in your final summary.
 - The path namespace `/api/takyon/apps/` is platform-reserved and served by the runtime, so product source must not define custom handlers under it.
 """
+PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
+- This is a customer-facing product workspace. Diagnosing a build error is NOT done; only a green build is done.
+- Before you finish, you MUST run `npm run build` and `npm run typecheck` in this workspace and confirm BOTH exit green. Run them yourself with Bash — do not assume, do not just describe the fix.
+- `tsc --noEmit` rejects unused variables/imports and type errors; remove them. Do not leave the workspace with a failing build or typecheck.
+- If you cannot land BOTH green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining build/typecheck error and the file(s) involved, so Takyon hand-patches instead of cold re-delegating. A plain "I inspected the workspace" or a diagnosis without a green build is a failure, not a success.
+"""
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
 - Write files relative to the current working directory.
@@ -29308,6 +29314,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     worker_instruction_parts.append(guidance_block)
                 if _workspace_needs_customer_ai_copy_contract(workspace_rel):
                     worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
+                    worker_instruction_parts.append(PRODUCT_BUILD_GATE_CONTRACT)
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
                     worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
                     runtime_ui_contract = _runtime_ui_contract_block(current_surface)
@@ -29334,7 +29341,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 "maxTurns": max_turns,
                 "timeoutMs": timeout_ms,
                 "maxBudgetUsd": budget_usd,
-                "allowBash": bool(_workspace_needs_runtime_ui_contract(workspace_rel)),
+                "allowBash": bool(
+                    _workspace_needs_runtime_ui_contract(workspace_rel)
+                    or _workspace_needs_customer_ai_copy_contract(workspace_rel)
+                ),
             }
 
             surface = surface_for_worker if isinstance(surface_for_worker, dict) else {}
@@ -29596,14 +29606,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 # Warm in-session retry on a fixable build/typecheck failure: rather than bail to the
                 # CEO (which re-delegates a fresh COLD worker pass), feed the exact build error back to
                 # the agent on the SAME warm workspace so it fixes its own defect in one pass. Bounded
-                # to a single retry; forbidden-source / durability blockers are NOT retried here (they
+                # to two warm retries; forbidden-source / durability blockers are NOT retried here (they
                 # fall through to the normal blocked path).
                 should_retry_surface_build = (
                     bool(surface_refresh)
                     and surface_refresh.get("status") == "failed"
                     and not _surface_refresh_has_forbidden_source_blockers(surface_refresh)
                     and customer_facing_product_workspace
-                    and len(surface_build_retries) < 1
+                    and len(surface_build_retries) < 2
                 )
                 if should_retry_surface_build:
                     build_error = str((surface_refresh or {}).get("error") or "product build/typecheck failed").strip()
@@ -29635,6 +29645,30 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     )
                     continue
                 break
+            # Warm-retry budget exhausted but the customer-facing product build is STILL failing on a
+            # non-forbidden build/typecheck error: the worker diagnosed-but-did-not-fix. Classify this
+            # as BLOCKED (not a generic publish failure) so _claude_agent_summary_is_blocked flags it and
+            # ceo.md rule #8's anti-re-delegation guard routes it to a hand-patch instead of a cold
+            # re-delegation loop. Forbidden-source blockers are handled by the dedicated block below.
+            surface_build_still_failed = (
+                bool(surface_refresh)
+                and surface_refresh.get("status") == "failed"
+                and not _surface_refresh_has_forbidden_source_blockers(surface_refresh)
+                and customer_facing_product_workspace
+                and bool(surface_build_retries)
+            )
+            if surface_build_still_failed:
+                sdk_result["blocked"] = True
+                sdk_result["success"] = False
+                exhausted_build_error = (
+                    _surface_refresh_exact_blocker(surface_refresh or {})
+                    or str((surface_refresh or {}).get("error") or "").strip()
+                    or "product build/typecheck still failing after warm retries"
+                )
+                exhausted_blocked_summary = _blocked_message(exhausted_build_error)
+                if not _claude_agent_summary_is_blocked(sdk_result.get("summary")):
+                    sdk_result["summary"] = exhausted_blocked_summary
+                sdk_result.setdefault("error", exhausted_blocked_summary)
             if _surface_refresh_has_forbidden_source_blockers(surface_refresh):
                 sdk_result["blocked"] = True
                 blocked_summary = _blocked_message(_surface_refresh_exact_blocker(surface_refresh or {}))

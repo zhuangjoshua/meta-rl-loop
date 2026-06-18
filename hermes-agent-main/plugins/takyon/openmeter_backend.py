@@ -258,11 +258,15 @@ def current_subscription(
     customer_id = str(customer.get("id") or "").strip()
     if not customer_id:
         return None
+    # NOTE: do not send filter[status] as a repeated query param. The
+    # Kong/OpenMeter gateway rejects multi-value filter[status]
+    # (urlencode(..., doseq=True) emits filter[status]=active&filter[status]=scheduled)
+    # with a 400 "repeated query parameter not allowed". Fetch the customer's
+    # subscriptions unfiltered and narrow to _SUBSCRIPTION_STATUSES in Python below.
     payload = _request_json(
         "GET",
         "/openmeter/subscriptions",
         query={
-            "filter[status]": list(_SUBSCRIPTION_STATUSES),
             "page[size]": _DEFAULT_LIST_PAGE_SIZE,
             "page[number]": 1,
         },
