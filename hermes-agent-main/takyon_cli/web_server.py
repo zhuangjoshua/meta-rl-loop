@@ -4178,6 +4178,25 @@ def _read_takyon_business_workspace(
     limit: int = 50,
     view: str = "full",
 ) -> dict[str, Any]:
+    normalized_view = str(view or "full").strip().lower() or "full"
+    return _takyon_business_read_cached(
+        "workspace",
+        operator_user_id,
+        business,
+        normalized_view,
+        lambda: _read_takyon_business_workspace_uncached(
+            operator_user_id, business, limit=limit, view=normalized_view
+        ),
+    )
+
+
+def _read_takyon_business_workspace_uncached(
+    operator_user_id: str,
+    business: str,
+    *,
+    limit: int = 50,
+    view: str = "full",
+) -> dict[str, Any]:
     from tui_gateway.server import _takyon_workspace_payload
 
     payload = _takyon_workspace_payload(
@@ -4204,6 +4223,24 @@ def _read_takyon_business_workspace(
 
 
 def _read_takyon_business_traction(
+    operator_user_id: str,
+    business: str,
+    *,
+    range_key: str = "M",
+) -> dict[str, Any]:
+    normalized_range = str(range_key or "M")
+    return _takyon_business_read_cached(
+        "traction",
+        operator_user_id,
+        business,
+        normalized_range,
+        lambda: _read_takyon_business_traction_uncached(
+            operator_user_id, business, range_key=normalized_range
+        ),
+    )
+
+
+def _read_takyon_business_traction_uncached(
     operator_user_id: str,
     business: str,
     *,
@@ -8114,6 +8151,18 @@ _PRODUCT_HOST_BUSINESS_CACHE_MAX = 2048
 _PRODUCT_LIVE_BUILD_POINTER_CACHE_LOCK = threading.Lock()
 _PRODUCT_LIVE_BUILD_POINTER_CACHE: dict[str, tuple[float, str | None]] = {}
 _PRODUCT_LIVE_BUILD_POINTER_CACHE_MAX = 2048
+
+# Short read-through cache for the authenticated business workspace/home/traction reads that the
+# embedded litebulb dashboard polls (the "$19" revenue tile + chat shell). Each underlying read
+# fans out into dozens of serialized queries against Supabase's remote pgbouncer (~20ms each), so a
+# cold render is multiple seconds. A few-second TTL collapses repeat polls and concurrent tabs into
+# one backend render while staying fresh enough that operators see new state promptly. Keyed by
+# (operator_user_id, slug, kind, view) so cache entries never cross operators or businesses. A
+# committed write constructs a fresh store and bumps the business head revision, so the only
+# staleness window is the TTL itself.
+_TAKYON_BUSINESS_READ_CACHE_LOCK = threading.Lock()
+_TAKYON_BUSINESS_READ_CACHE: dict[tuple[str, str, str, str], tuple[float, dict[str, Any]]] = {}
+_TAKYON_BUSINESS_READ_CACHE_MAX = 2048
 _PRODUCT_SITE_MATERIALIZE_LOCK = threading.Lock()
 _PRODUCT_SITE_MATERIALIZE_LOCKS: dict[str, threading.Lock] = {}
 
@@ -8132,6 +8181,58 @@ _PRODUCT_LIVE_BUILD_POINTER_TTL_SECONDS = max(
     0.1,
     _env_float("TAKYON_PRODUCT_LIVE_BUILD_POINTER_TTL_SECONDS", 3.0),
 )
+# The litebulb dashboard polls these reads on an ~8s workspace / ~2.5s refresh cadence, and a cold
+# workspace render can take several seconds, so the TTL is set above the poll interval: each
+# business renders at most once per window and every intervening poll (plus concurrent tabs) is an
+# instant cache hit. Kept modest so operators still see new state within a few seconds.
+_TAKYON_BUSINESS_READ_CACHE_TTL_SECONDS = max(
+    0.0,
+    _env_float("TAKYON_BUSINESS_READ_CACHE_TTL_SECONDS", 12.0),
+)
+
+
+def _takyon_business_read_cached(
+    kind: str,
+    operator_user_id: str,
+    slug: str,
+    view: str,
+    loader,
+) -> dict[str, Any]:
+    """Read-through cache wrapper for the litebulb dashboard business reads.
+
+    ``loader`` is called only on a miss/expiry and must return the read payload dict. Setting the
+    TTL to 0 disables caching (always loads), which keeps the path honest for tests/operators that
+    want strong-read freshness."""
+    ttl = _TAKYON_BUSINESS_READ_CACHE_TTL_SECONDS
+    key = (str(operator_user_id or ""), str(slug or ""), str(kind or ""), str(view or ""))
+    now = time.monotonic()
+    if ttl > 0:
+        with _TAKYON_BUSINESS_READ_CACHE_LOCK:
+            cached = _TAKYON_BUSINESS_READ_CACHE.get(key)
+            if cached is not None:
+                expires_at, payload = cached
+                if expires_at > now:
+                    return payload
+                _TAKYON_BUSINESS_READ_CACHE.pop(key, None)
+
+    payload = loader()
+
+    if ttl > 0 and isinstance(payload, dict):
+        with _TAKYON_BUSINESS_READ_CACHE_LOCK:
+            if len(_TAKYON_BUSINESS_READ_CACHE) >= _TAKYON_BUSINESS_READ_CACHE_MAX:
+                stale = [
+                    k
+                    for k, (expires_at, _payload) in _TAKYON_BUSINESS_READ_CACHE.items()
+                    if expires_at <= now
+                ]
+                for k in stale:
+                    _TAKYON_BUSINESS_READ_CACHE.pop(k, None)
+                while len(_TAKYON_BUSINESS_READ_CACHE) >= _TAKYON_BUSINESS_READ_CACHE_MAX:
+                    _TAKYON_BUSINESS_READ_CACHE.pop(next(iter(_TAKYON_BUSINESS_READ_CACHE)))
+            _TAKYON_BUSINESS_READ_CACHE[key] = (now + ttl, payload)
+    return payload
+
+
 _PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS = max(
     0.1,
     _env_float("TAKYON_PRODUCT_SITE_POINTER_RESOLVE_TIMEOUT_SECONDS", 2.0),

@@ -147,15 +147,21 @@ def _enforce_database_url_policy(value: str) -> str:
 
 
 def configure_takyon_pg_session(conn, *, bypass: bool = True) -> None:
-    """Initialize the Takyon app-plane RLS GUCs on an already-open psycopg connection."""
-    defaults = {
-        "takyon.rls_bypass": "1" if bypass else "0",
-        "takyon.rls_business_slug": "",
-        "takyon.rls_app_user_id": "",
-        "takyon.rls_session_hash": "",
-    }
-    for key, value in defaults.items():
-        conn.execute("select set_config(%s, %s, false)", (key, value))
+    """Initialize the Takyon app-plane RLS GUCs on an already-open psycopg connection.
+
+    All four GUCs are set in a SINGLE statement/round-trip. Every store connection runs this on
+    open, and the live DATABASE_URL is Supabase's remote pgbouncer (~20ms/round-trip), so issuing
+    four separate ``set_config`` calls cost ~80ms of pure latency per connection — multiplied
+    across the many short-lived connections a dashboard render opens. One combined SELECT keeps the
+    exact same per-key semantics (local=false, session scope) at a quarter of the round-trips."""
+    conn.execute(
+        "select"
+        " set_config('takyon.rls_bypass', %s, false),"
+        " set_config('takyon.rls_business_slug', '', false),"
+        " set_config('takyon.rls_app_user_id', '', false),"
+        " set_config('takyon.rls_session_hash', '', false)",
+        ("1" if bypass else "0",),
+    )
 
 
 # Process-static memo of the resolved no-explicit DB-URL env value (see resolve_database_url).

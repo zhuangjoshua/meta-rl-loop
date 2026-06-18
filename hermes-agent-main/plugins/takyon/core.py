@@ -11972,12 +11972,19 @@ class TakyonStore:
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if backend_name not in {"supabase_s3", "local"}:
             return
-        head_revision = self._business_head_revision(normalized)
-        if (
-            normalized in self._workspace_sync_cache
-            and self._workspace_revision_cache.get(normalized) == head_revision
-        ):
+        # ``_business_root`` is called dozens of times per workspace render, and each
+        # ``_business_head_revision`` re-query opens a fresh pooled connection that carries four
+        # ``set_config`` RLS GUC round-trips to Supabase's pgbouncer (~120ms apiece) — tens of
+        # redundant round-trips per render that dominated dashboard read latency. Once this store
+        # instance has materialized a slug at a given revision, the canonical workspace is a fixed
+        # read snapshot for the store's lifetime, so trust the in-process cache and skip the
+        # re-query. A mutating ``read``/commit clears ``_workspace_sync_cache`` (or
+        # ``_track_workspace_revision`` updates it), so a reused session store still re-syncs after
+        # a write; cross-render staleness is impossible because the dashboard read path builds a
+        # fresh store per request.
+        if normalized in self._workspace_sync_cache:
             return
+        head_revision = self._business_head_revision(normalized)
         if head_revision <= 0:
             root.mkdir(parents=True, exist_ok=True)
             self._workspace_sync_cache.add(normalized)
@@ -12009,7 +12016,14 @@ class TakyonStore:
         normalized = _slugify(slug)
         if self._workspace_root_override is not None:
             return int(self._workspace_base_revision.get(normalized, 0) or 0)
-        return int(self._workspace_revision_cache.get(normalized, self._business_head_revision(normalized)) or 0)
+        # ``dict.get(key, default)`` evaluates ``default`` eagerly, so the previous one-liner issued a
+        # ``_business_head_revision`` DB round-trip on EVERY call even when the revision was already
+        # cached in-process. This is called once per workspace-truth stamp (many times per render),
+        # so fetch from the DB only on an actual cache miss.
+        cached = self._workspace_revision_cache.get(normalized)
+        if cached is None:
+            cached = self._business_head_revision(normalized)
+        return int(cached or 0)
 
     def _workspace_truth(self, business: str | None = None) -> dict[str, Any]:
         normalized = _slugify(business) if business else ""
