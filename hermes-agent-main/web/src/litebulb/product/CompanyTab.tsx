@@ -1151,6 +1151,7 @@ function MailRow({ title, detail }: { title: string; detail: string }) {
 
 function Distribution({ business, workspace }: { business: LitebulbBusiness; workspace: TakyonBusinessWorkspaceResponse | null }) {
   const [tab, setTab] = useState<DistTab>("x");
+  const [openAd, setOpenAd] = useState<Record<string, unknown> | null>(null);
   const overview = asRecord(workspace?.overview);
   const posts = asList(overview.posts);
   const outputs = asList(workspace?.outputs);
@@ -1160,9 +1161,16 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
     const source = asText(item.source).toLowerCase();
     return source === "x" || source.startsWith("x-") || source.includes("twitter");
   });
-  const videoItems = outputs.filter((item) => {
+  // Video tab is videos only — generated image/ad creatives now live under Ads.
+  const videoItems = outputs.filter((item) => asText(item.kind).toLowerCase() === "video");
+  // Generated ad-image creatives (static-ads) belong under Ads next to the campaigns
+  // that spend on them, not buried in the generic Media gallery. The path fallback keeps
+  // this correct even if the backend media_role payload hasn't redeployed yet.
+  const adCreatives = asList(workspace?.media).filter((item) => {
     const kind = asText(item.kind).toLowerCase();
-    return kind === "video" || (kind === "image" && asText(item.detail).toLowerCase().includes("asset"));
+    if (kind === "video") return false;
+    const role = asText(item.role).toLowerCase();
+    return role === "ad" || asText(item.path).toLowerCase().includes("static-ad");
   });
   const adItems = [
     ...asList(asRecord(outreachChannels.meta).campaigns),
@@ -1174,6 +1182,7 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
   });
 
   return (
+    <>
     <section className="lb-card lb-dist">
       <div className="lb-h">
         Distribution<span className="lb-h__c">current channel outputs for {business.name}</span>
@@ -1209,6 +1218,18 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
 
       {tab === "ads" && (
         <div className="lb-ads">
+          {adCreatives.length > 0 && (
+            <div className="lb-media__grid lb-ads__creatives">
+              {adCreatives.slice(0, 8).map((item, index) => (
+                <MediaThumb
+                  key={asText(item.id) || asText(item.path) || index}
+                  item={item}
+                  slug={business.slug}
+                  onOpen={() => setOpenAd(item)}
+                />
+              ))}
+            </div>
+          )}
           {adItems.slice(0, 4).map((item, index) => {
             const dailyBudget = Number(item.actual_daily_budget_usd || item.daily_budget_usd || 0);
             const metrics: string[] = [];
@@ -1218,7 +1239,7 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
             if (latestMetrics.clicks) metrics.push(`${formatCount(Number(latestMetrics.clicks || 0))} clicks`);
             return <AdCard key={asText(item.slug) || index} title={asText(item.campaign_name) || asText(item.slug) || "Campaign"} detail={metrics.join(" · ") || asText(item.status) || "Recorded campaign"} />;
           })}
-          {!adItems.length && <div className="lb-empty">No ad campaigns recorded yet.</div>}
+          {!adItems.length && !adCreatives.length && <div className="lb-empty">No ad creatives or campaigns recorded yet.</div>}
         </div>
       )}
 
@@ -1229,6 +1250,20 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
         </div>
       )}
     </section>
+    {openAd && (() => {
+      const adPath = asText(openAd.path);
+      const adSrc = adPath ? buildAssetUrl(business.slug, adPath) : "";
+      if (!adSrc) return null;
+      return (
+        <Modal title={asText(openAd.title) || adPath.split("/").pop() || "Ad creative"} sub={adPath} wide onClose={() => setOpenAd(null)}>
+          <div className="lb-media__view">
+            <img className="lb-media__full" src={adSrc} alt={asText(openAd.title) || "Ad creative"} />
+            <a className="lb-media__open" href={adSrc} target="_blank" rel="noopener noreferrer">Open original {I.ext}</a>
+          </div>
+        </Modal>
+      );
+    })()}
+    </>
   );
 }
 

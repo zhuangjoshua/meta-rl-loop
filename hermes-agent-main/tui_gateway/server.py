@@ -8683,7 +8683,7 @@ def _takyon_workspace_media_payload(
             return "logo"
         if kind == "video":
             return "video"
-        if any(token in lower for token in ("/ad", "ad_", "ad-", "creative", "campaign", "/meta/", "/reddit/", "/x/")):
+        if any(token in lower for token in ("static-ad", "/ads/", "/ad", "ad_", "ad-", "creative", "campaign", "/meta/", "/reddit/", "/x/")):
             return "ad"
         if lower.startswith("product/site/"):
             return "site"
