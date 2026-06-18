@@ -10,7 +10,7 @@ metadata:
     category: takyon
     tags: [takyon, product, website, app, offer]
     related_skills: [takyon-market-research, takyon-app-runtime, takyon-product-workflow, takyon-distribution]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_upsert_app_surface_contract, business_upsert_app_plan, business_claude_agent_task, business_refresh_product_surface]
   takyon:
     scope: business

@@ -11,7 +11,7 @@ metadata:
     category: takyon
     tags: [takyon, ads, performance-marketing, creative, static-ad, image-generation, meta, instagram, facebook, gpt-image]
     related_skills: [takyon-meta-ads, takyon-reddit-ads, takyon-distribution, ugc-video-ad]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_read_file, business_list_files, business_static_ad_generate]
     routing:
       owns: Per-business static performance-ad image creative generation from brief to spec, prompt, QA bundle, and live image render.

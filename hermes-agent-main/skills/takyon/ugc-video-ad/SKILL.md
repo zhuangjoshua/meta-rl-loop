@@ -11,7 +11,7 @@ metadata:
     category: takyon
     tags: [ugc, video, ad, kling, marketing]
     related_skills: [takyon-meta-ads, takyon-reddit-ads, takyon-distribution]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_ugc_ad_generate]
     routing:
       owns: per-business UGC video ad asset generation from brief to finished mp4, script, and reference image

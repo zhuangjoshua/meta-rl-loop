@@ -11,7 +11,7 @@ metadata:
     category: takyon
     tags: [takyon, brand, logo, identity, creative, image-generation, gemini, nano-banana]
     related_skills: [takyon-static-ad-creative-generator, takyon-build-product]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_read_file, business_list_files, business_generate_logo]
     routing:
       owns: Per-business brand logo icon generation (flat vector, transparent background, icon-only) through the credit-gated logo authority route.

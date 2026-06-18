@@ -10,7 +10,7 @@ metadata:
     category: takyon
     tags: [takyon, app-runtime, auth, profile, checkout, billing, entitlements]
     related_skills: [takyon-build-product, takyon-business-metrics]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_upsert_app_plan, business_request_app_magic_link, business_create_app_checkout, business_check_runtime_capabilities, business_invoke_app_action, business_send_app_email, business_list_app_media]
     routing:
       owns: auth, sessions, checkout, entitlements, billing, usage, backend product actions, and runtime wiring for the business app

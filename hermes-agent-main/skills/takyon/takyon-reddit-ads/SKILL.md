@@ -11,7 +11,7 @@ metadata:
     category: takyon
     tags: [takyon, reddit, ads, paid, distribution, image, video, carousel]
     related_skills: [ugc-video-ad, static-ad-creative-generator, takyon-distribution, takyon-business-metrics, takyon-meta-ads]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools:
       [
         business_read_business,

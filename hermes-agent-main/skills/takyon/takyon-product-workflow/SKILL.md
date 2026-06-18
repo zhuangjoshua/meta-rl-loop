@@ -10,7 +10,7 @@ metadata:
     category: takyon
     tags: [takyon, product, workflow, app, mvp]
     related_skills: [takyon-build-product, takyon-app-runtime, takyon-market-research]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_claude_agent_task, business_refresh_product_surface]
   takyon:
     scope: business
