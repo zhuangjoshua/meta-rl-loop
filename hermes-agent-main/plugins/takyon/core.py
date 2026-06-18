@@ -16691,7 +16691,13 @@ class TakyonStore:
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
-        return ["takyon", "web", "skills", "todo"]
+        # The CEO operator role owns the spendful business methods (logo/ad/x-search/app-plan/etc.),
+        # which live in the quarantined ``takyon-authority`` toolset so they never leak into generic
+        # Hermes/sub-agent/product-runtime contexts. The CEO turn is exactly the role meant to call
+        # them, so it must carry that toolset; the tools themselves are fail-closed money gates, and
+        # the worker-only operations (refresh_product_surface / runtime-capability provisioning)
+        # self-guard against session-bound calls regardless of toolset membership.
+        return ["takyon", TAKYON_AUTHORITY_TOOLSET, "web", "skills", "todo"]
 
     def _refresh_business_ceo_cron_prompt(self, slug: str) -> dict[str, Any]:
         from cron.jobs import list_jobs, update_job

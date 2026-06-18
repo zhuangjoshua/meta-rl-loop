@@ -1441,7 +1441,12 @@ def _ceo_bootstrap_turn_config(
             business_name=business_name,
         ),
         "ephemeral_system_prompt": _load_ceo_prompt(),
-        "enabled_toolsets": ["takyon", "web", "skills"],
+        # Same CEO toolset as the interactive/cron turns: ``takyon-authority`` carries the spendful
+        # business methods this first-business turn legitimately drives (e.g. app-plan/access-shell
+        # provisioning). They stay quarantined in their own toolset (never folded into ``takyon``) so
+        # they cannot leak into generic Hermes/sub-agent/product-runtime contexts; the tools are
+        # fail-closed money gates and worker-only operations self-guard against session-bound calls.
+        "enabled_toolsets": ["takyon", "takyon-authority", "web", "skills"],
         "disabled_toolsets": [
             "cronjob",
             "messaging",
@@ -3031,7 +3036,12 @@ def _run_agent_with_meta(
             business_slug=current_business,
             agent_kwargs={
                 "max_iterations": max_turns,
-                "enabled_toolsets": ["takyon", "web", "skills", "todo"],
+                # ``takyon-authority`` carries the CEO's spendful business methods (logo/ad/x-search/
+                # app-plan/checkout/etc.); they are quarantined into a separate toolset so they never
+                # leak into generic Hermes contexts, but the operator CEO turn is the role that owns
+                # them. They are fail-closed money gates; worker-only operations self-guard against
+                # session-bound calls regardless of toolset membership.
+                "enabled_toolsets": ["takyon", "takyon-authority", "web", "skills", "todo"],
                 "disabled_toolsets": [
                     "cronjob",
                     "messaging",

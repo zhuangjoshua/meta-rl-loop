@@ -303,7 +303,7 @@ def test_ceo_wake_prompt_includes_outreach_lifecycle(tmp_path):
     assert "takyon-business-metrics" in prompt
     assert "takyon-conversation-followup" in prompt
     assert "business_conversation_agent_task" not in prompt
-    assert store._ceo_cron_toolsets() == ["takyon", "web", "skills", "todo"]
+    assert store._ceo_cron_toolsets() == ["takyon", "takyon-authority", "web", "skills", "todo"]
 
 
 def test_runtime_capability_check_reports_requested_commands():

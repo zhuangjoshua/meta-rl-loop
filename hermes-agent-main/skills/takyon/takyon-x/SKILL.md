@@ -10,7 +10,7 @@ metadata:
     category: takyon
     tags: [takyon, x, twitter, distribution, replies, copywriting, hooks, threads, viral, voice]
     related_skills: [takyon-distribution, takyon-business-metrics, takyon-conversation-followup, takyon-market-research]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools:
       [
         business_read_business,

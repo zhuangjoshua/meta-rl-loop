@@ -11,7 +11,7 @@ metadata:
     category: takyon
     tags: [takyon, meta, facebook, instagram, ads, paid, distribution, ugc, image]
     related_skills: [ugc-video-ad, static-ad-creative-generator, takyon-distribution, takyon-business-metrics]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools:
       [
         business_read_business,

@@ -10,7 +10,7 @@ metadata:
     category: takyon
     tags: [takyon, product, iteration, pricing, checkout, app]
     related_skills: [takyon-build-product, takyon-product-workflow, takyon-app-runtime, takyon-market-research]
-    requires_toolsets: [takyon]
+    requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_upsert_app_plan, business_upsert_app_surface_contract, business_claude_agent_task, business_refresh_product_surface, business_check_runtime_capabilities, business_invoke_app_action]
     routing:
       owns: Surgical post-bootstrap product improvements across the existing Takyon landing, app flow, pricing, and truthful runtime-backed UX.
