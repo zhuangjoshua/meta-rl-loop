@@ -1121,6 +1121,78 @@ def _operator_turn_estimate_cents() -> int:
     return max(0, int(expensive_threshold_cents() or 0))
 
 
+class InsufficientOperatorBalance(TakyonError):
+    """Company creation was refused because the acting operator has no spendable balance
+    (allowance remaining + topup). Carries the exact figures so the gateway can build a precise
+    402/4030 block without leaking anything else. Distinct error type so the create handler maps it
+    to the balance-block code rather than a generic create failure."""
+
+    def __init__(self, *, spendable_cents: int, allowance_remaining_cents: int, topup_balance_cents: int) -> None:
+        self.spendable_cents = int(spendable_cents)
+        self.allowance_remaining_cents = int(allowance_remaining_cents)
+        self.topup_balance_cents = int(topup_balance_cents)
+        super().__init__(
+            "insufficient_balance: company creation requires a positive operator balance "
+            f"(spendable {self.spendable_cents}c = allowance {self.allowance_remaining_cents}c "
+            f"+ topup {self.topup_balance_cents}c)"
+        )
+
+
+def _operator_create_balance_preflight(operator_user_id: str | None) -> None:
+    """Refuse company creation up front when the acting operator has no money to pay for it
+    (GOAL_RULES §3 gap #2: zero-balance company-creation preflight). The CEO bootstrap a new company
+    triggers spends real provider money on the operator billing rail, so building a company page for
+    an operator who cannot pay is an ungated-spend hole — block BEFORE any business row or bootstrap
+    work is created.
+
+    Spendable balance is the SAME quantity the dashboard surfaces as ``account.spendable_cents``:
+    allowance remaining + topup balance (web_server.py operator-account payload). ``<= 0`` ⇒ block.
+
+    Fail-OPEN only for genuinely identity-less / non-Postgres dev runs, exactly like
+    ``_operator_budget_reserve``: with no resolved operator identity or no Postgres control plane
+    there is no billing account to read and local development must not be blocked. On the Postgres
+    plane WITH a resolved operator, a missing billing account is treated as zero spendable (an
+    unfunded operator), so it fails CLOSED — assume the caller may be trying to create without
+    paying (§3)."""
+    from .core import _db_backend
+
+    user_id = _resolved_operator_user_id(operator_user_id)
+    if not user_id or _db_backend() != "postgres":
+        return  # no billing plane to gate on (dev / identity-less) — do not block local creation
+
+    import psycopg
+
+    try:
+        from . import billing
+        from .runtime_app import resolve_database_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import billing
+        from plugins.takyon.runtime_app import resolve_database_url
+
+    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    try:
+        try:
+            balances = billing.get_billing_balances(conn, user_id)
+        except billing.NoBillingAccount as exc:
+            # On the Postgres plane a resolved operator with NO billing account has no funding ⇒
+            # fail closed (zero spendable), not silently allow. § 3 (assume evil): never build a
+            # company for an operator with no provable balance.
+            raise InsufficientOperatorBalance(
+                spendable_cents=0, allowance_remaining_cents=0, topup_balance_cents=0
+            ) from exc
+        allowance_remaining = max(0, int(balances.allowance_remaining_cents))
+        topup_balance = max(0, int(balances.topup_balance_cents))
+        spendable = allowance_remaining + topup_balance
+        if spendable <= 0:
+            raise InsufficientOperatorBalance(
+                spendable_cents=spendable,
+                allowance_remaining_cents=allowance_remaining,
+                topup_balance_cents=topup_balance,
+            )
+    finally:
+        conn.close()
+
+
 def _operator_budget_reserve(
     *,
     operator_user_id: str,

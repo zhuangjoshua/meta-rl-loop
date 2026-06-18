@@ -40,6 +40,7 @@ export function Settings(props: {
   account: TakyonOperatorAccountResponse | null;
   portalBusy: boolean;
   topupBusy: boolean;
+  nudge?: string;
   onTheme: (t: Theme) => void;
   onOpenPortal: () => void;
   onTopup: (amountCents: number) => void;
@@ -50,6 +51,7 @@ export function Settings(props: {
     theme,
     account,
     portalBusy,
+    nudge,
     onTheme,
     onOpenPortal,
     onClose,
@@ -105,6 +107,9 @@ export function Settings(props: {
 
           {sec === "billing" && (
             <>
+              {nudge ? (
+                <div className="lb-set__nudge" role="status">{nudge}</div>
+              ) : null}
               <Card variant="outline" className="lb-set__card">
                 <div className="lb-set__card-h">Operator wallet</div>
                 <div className="lb-set__planrow">
