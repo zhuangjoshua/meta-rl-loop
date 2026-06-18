@@ -12169,9 +12169,53 @@ class TakyonStore:
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
         if not _remote_workspace_sync_allowed(backend_name):
             return
-        prefix = storage.object_prefix(_slugify(slug))
-        for key in sorted(backend.list_digests(prefix)):
-            backend.delete(key)
+        storage.delete_prefix(backend, storage.object_prefix(_slugify(slug)))
+
+    def _owner_business_slugs(self, conn: sqlite3.Connection, owner_user_id: str) -> list[str]:
+        """Every business slug owned by one top-level operator (the per-operator storage unit)."""
+        owner = str(owner_user_id or "").strip()
+        if not owner:
+            return []
+        rows = conn.execute(
+            "SELECT slug FROM businesses WHERE owner_user_id = ? ORDER BY slug",
+            (owner,),
+        ).fetchall()
+        slugs: list[str] = []
+        for row in rows:
+            if row is None:
+                continue
+            # Cross-backend: PG rows are dict_row (Mapping), SQLite rows are positional.
+            value = row["slug"] if isinstance(row, Mapping) else row[0]
+            if value:
+                slugs.append(str(value))
+        return slugs
+
+    def _operator_storage_bytes(self, conn: sqlite3.Connection, owner_user_id: str) -> int:
+        """Operator's combined object-store usage across every business they own."""
+        from . import storage
+
+        backend = self._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if not _remote_workspace_sync_allowed(backend_name):
+            return 0
+        return storage.operator_storage_bytes(
+            backend, self._owner_business_slugs(conn, owner_user_id)
+        )
+
+    def _purge_operator_storage(self, conn: sqlite3.Connection, owner_user_id: str) -> dict[str, list[str]]:
+        """Delete ALL object-store bytes for an operator across every owned business.
+
+        The operator-account-removal complement to per-business deletion — closing a Takyon user must
+        not strand their workspace objects in the shared bucket."""
+        from . import storage
+
+        backend = self._workspace_storage_backend()
+        backend_name = str(getattr(backend, "name", "") or "").strip().lower()
+        if not _remote_workspace_sync_allowed(backend_name):
+            return {}
+        return storage.purge_operator_storage(
+            backend, self._owner_business_slugs(conn, owner_user_id)
+        )
 
     def _business_delete_direct_fk_tables(self, conn: sqlite3.Connection) -> list[str]:
         """Return current business-owned Postgres tables keyed directly to ``businesses.slug``.

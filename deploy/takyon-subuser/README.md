@@ -50,3 +50,11 @@ still-live app plane; override it only for an intentional emergency/operator-les
 
 It should not serve `app.fourmanifold.com`, dashboard chat, `/api/ws`, or
 operator/config/env surfaces.
+
+The Caddyfile uses `rate_limit` for edge DDoS/abuse control on the shared product plane
+(a global per-IP cap plus tighter per-IP zones on product-app auth and metered
+actions/generate/checkout). Stock apt `caddy` lacks that module, so
+`deploy/shared/ensure-caddy-ratelimit.sh` rebuilds the Caddy binary with
+`github.com/mholt/caddy-ratelimit` (xcaddy), run idempotently from both
+`bootstrap-host.sh` and `apply-caddyfile.sh` so every current and future host gets it
+through the canonical rail before `caddy validate`.
