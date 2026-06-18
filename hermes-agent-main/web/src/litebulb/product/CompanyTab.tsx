@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  TAKYON_BASE_PATH,
   api,
+  buildTakyonBusinessAssetUrl,
   type TakyonBusinessCreativeCreditsResponse,
   type TakyonBusinessFileReadResponse,
   type TakyonBusinessTractionPoint,
@@ -162,7 +162,7 @@ function inlinePreviewFile(
 }
 
 function buildAssetUrl(slug: string, path: string) {
-  return `${TAKYON_BASE_PATH}/api/takyon/businesses/${encodeURIComponent(slug)}/asset?path=${encodeURIComponent(path)}`;
+  return buildTakyonBusinessAssetUrl(slug, path);
 }
 
 function channelAllocatedCredits(channel: Record<string, unknown>) {

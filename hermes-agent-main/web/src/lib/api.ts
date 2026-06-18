@@ -98,6 +98,19 @@ export function buildTakyonBusinessSitePreviewFrameUrl(slug: string, path = "pro
   return `${BASE}/api/takyon/site-preview/${encodeURIComponent(businessSlug)}?${query.toString()}`;
 }
 
+// Authenticated URL for a generated business asset (image/video/logo). Browsers can't
+// set the Authorization header on <img>/<video>/<a target=_blank>, so carry the dashboard
+// session token as a ?token= query param (the /asset endpoint accepts it, same as site-preview).
+export function buildTakyonBusinessAssetUrl(slug: string, path: string): string {
+  const businessSlug = String(slug || "").trim();
+  const assetPath = String(path || "").trim();
+  if (!businessSlug || !assetPath) return "";
+  const token = readSessionToken();
+  const query = new URLSearchParams({ path: assetPath });
+  if (token) query.set("token", token);
+  return `${BASE}/api/takyon/businesses/${encodeURIComponent(businessSlug)}/asset?${query.toString()}`;
+}
+
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getDashboardAuthState: async () => {
