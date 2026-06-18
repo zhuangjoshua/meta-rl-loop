@@ -109,3 +109,4 @@ This skill does **not** define the whole product workflow. It gets the site and 
 6. Do not invent deep product workflow doctrine here.
 7. Do not probe actions or fake the post-sign-in product loop here.
 8. Do not ship visible starter/scaffold UI as the product.
+9. Do not advertise a free plan, free tier, or any trial (including a paid "7-day free trial" or "Start Free Trial" CTA); the only offer is a monthly paid subscription.
