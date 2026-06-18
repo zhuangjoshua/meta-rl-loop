@@ -112,6 +112,36 @@ def test_raw_runtime_events_group_under_current_task_id():
     assert tasks["intent-1"]["task_id"] == "intent-1"
 
 
+def test_work_request_payload_milestone_surfaces_on_card():
+    """A work-request job whose payload carries an operator-facing milestone
+    (title/description/category) surfaces those verbatim on the card instead of
+    the static job_label/job_detail."""
+    overview = {
+        "tasks": [
+            {
+                "id": "job:wr-1",
+                "source": "job",
+                # The job loop maps the CEO milestone title->label / description->detail
+                # and also passes them explicitly so they survive verbatim.
+                "label": "Build the drift-detection agent",
+                "title": "Build the drift-detection agent",
+                "description": "Stand up the monitoring agent that flags model drift for customers.",
+                "category": "PRODUCT",
+                "status": "running",
+                "detail": "Stand up the monitoring agent that flags model drift for customers.",
+            },
+        ],
+    }
+    task = _tasks_for(overview)[0]
+    # Operator-facing milestone text wins over any static job_label humanisation.
+    assert task["title"] == "Build the drift-detection agent"
+    assert task["description"] == (
+        "Stand up the monitoring agent that flags model drift for customers."
+    )
+    # The CEO-chosen category is honoured, not re-derived heuristically.
+    assert task["category"] == "PRODUCT"
+
+
 def test_failed_branch_still_exposes_canonical_task_fields():
     """Regression guard: the failed/stale-running branch still emits the new fields."""
     payload = server._takyon_live_state_payload(

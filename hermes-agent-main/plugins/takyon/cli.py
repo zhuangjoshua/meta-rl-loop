@@ -1326,7 +1326,11 @@ def _business_bootstrap_instruction(
         "- Load only takyon-market-research, takyon-x, and takyon-distribution via skill_view. Do not load any other skill during bootstrap.",
         "- After completing each step, move to the next immediately.",
         "- Use exactly the business name above. Do not invent a second company, umbrella brand, or product name.",
+        "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (researching the market, designing the product, putting the site online, drafting the launch post) — never the runtime plumbing.",
         "- Never surface raw internal platform/tool/runtime strings in the visible reply. Do not quote TAKYON_* flags, docker path diagnostics, workspace-mode errors, or similar internals; summarize blockers in normal operator language instead.",
+        "- Forbidden in any customer-visible sentence: \"bootstrap\", \"site worker\", \"scaffold\"/\"scaffolding\", \"upsert\"/\"upserted\", \"provision\"/\"provisioned\", \"app account\", \"workspace exists\"/\"workspace ready\" (say \"your company space\" instead), \"runtime\", \"surface contract\", \"app shell\", \"kit\", any tool name (business_upsert_*, business_claude_agent_task, etc.), and verbatim tool/web-access limitations like \"publicly cached\".",
+        "- If a web or tool capability is limited, say it plainly to the customer, e.g. \"I'm working from the sources I can reach right now\", without naming the mechanism.",
+        "- These forbidden terms apply only to the VISIBLE reply shown to the customer. The internal directives in this instruction (which deliberately use words like bootstrap, surface contract, scaffold, upsert, and tool names to steer you) are not customer-visible and stay as written.",
         "",
         "## Steps",
         "",
@@ -1417,6 +1421,7 @@ def _business_bootstrap_instruction(
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
         "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
+        "When the landing page and /app access shell are up and unblocked, name the next move explicitly: continue into takyon-product-workflow to build the real /app MVP (the gated in-app workflow), since the landing + access shell is a starting point, not the finished product. Describe this in warm customer-facing business language, not internal skill or tool names.",
     ]
     return "\n".join(lines)
 

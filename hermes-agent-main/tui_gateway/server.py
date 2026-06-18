@@ -7316,6 +7316,10 @@ def _takyon_business_overview_payload(
     for job in as_list(summary.get("jobs"))[:8]:
         job_dict = as_dict(job)
         payload = as_dict(job_dict.get("payload"))
+        # The CEO may author an operator-facing milestone intent on the job
+        # payload (title/description/category) plus a work_request_id linking
+        # raw runtime/tool events back to this milestone. Carry those through so
+        # the Tasks panel can show milestone cards instead of raw tool calls.
         jobs.append(
             {
                 "id": brief_text(job_dict.get("id")),
@@ -7326,6 +7330,10 @@ def _takyon_business_overview_payload(
                 "label": job_label(job_dict.get("kind") or job_dict.get("type") or job_dict.get("name")),
                 "detail": job_detail({**job_dict, "payload": payload}),
                 "tone": status_tone(job_dict.get("status") or job_dict.get("state")),
+                "title": brief_text(payload.get("title") or payload.get("summary")),
+                "description": brief_text(payload.get("description") or payload.get("why_now")),
+                "category": brief_text(payload.get("category")),
+                "work_request_id": brief_text(payload.get("work_request_id")),
             }
         )
 
@@ -7370,6 +7378,9 @@ def _takyon_business_overview_payload(
                     "label": "CEO or worker run",
                     "detail": ", ".join(detail_parts) or summary_text or error_text or brief_text(run.get("prompt"))[:160] or "Run recorded in audit trail.",
                     "tone": status_tone(run.get("status")),
+                    # Worker runs record the milestone work_request_id they served;
+                    # carry it so the card can nest under that milestone row.
+                    "work_request_id": brief_text(result.get("work_request_id")),
                 }
             )
             if source or workspace or brief_text(run.get("scope")).startswith(f"business:{slug}/workspace:"):
@@ -7463,6 +7474,10 @@ def _takyon_business_overview_payload(
                     "label": label,
                     "detail": brief_text(trace_payload.get("detail") if trace_payload else detail) or brief_text(payload.get("command")) or "Runtime event recorded.",
                     "tone": status_tone(trace_payload.get("status") if trace_payload else trace_status(status)),
+                    # Trace events emitted inside a worker task carry the active
+                    # run_id (the milestone work_request_id); carry it so the raw
+                    # tool card nests under that milestone instead of floating.
+                    "work_request_id": brief_text(payload.get("run_id") or trace_payload.get("run_id")),
                 }
             )
         trace_entries = [trace_by_key[key] for key in reversed(trace_order)]
@@ -7885,8 +7900,20 @@ def _takyon_business_overview_payload(
         }
 
     task_cards: list[dict[str, Any]] = []
+    # Work-request/job cards are the PRIMARY milestone rows. Build the set of
+    # known job ids first so a raw runtime/agent card carrying a work_request_id
+    # can be re-parented onto its milestone card (id format "job:<id>") and the
+    # existing nesting in _takyon_live_state_payload groups the raw tool calls
+    # underneath. If the work_request_id is not resolvable, leave the raw card
+    # as a standalone row (current behavior).
+    known_job_ids = {brief_text(job.get("id")) for job in jobs[:8] if brief_text(job.get("id"))}
+
+    def _milestone_parent_id(work_request_id: str) -> str:
+        wr = brief_text(work_request_id)
+        return f"job:{wr}" if wr and wr in known_job_ids else ""
+
     for event in runtime_events[:6]:
-        task_cards.append({
+        event_card = {
             "id": f"runtime:{event.get('id')}",
             "source": "runtime",
             "label": event.get("label") or "CEO live trace",
@@ -7894,19 +7921,33 @@ def _takyon_business_overview_payload(
             "detail": event.get("detail") or "",
             "tone": event.get("tone") or status_tone(event.get("status")),
             "updated_at": event.get("updated_at") or "",
-        })
+        }
+        parent_id = _milestone_parent_id(event.get("work_request_id"))
+        if parent_id:
+            event_card["task_id"] = parent_id
+        task_cards.append(event_card)
     for job in jobs[:8]:
-        task_cards.append({
+        # Prefer the CEO-authored milestone intent (title/description/category)
+        # over the static job_label/job_detail; fall back to the old values when
+        # absent. The explicit title/description/category are passed through so
+        # the canonical task surfaces them verbatim as a milestone card.
+        job_card = {
             "id": f"job:{job.get('id')}",
             "source": "job",
-            "label": job.get("label") or human_kind(job.get("kind")),
+            "label": job.get("title") or job.get("label") or human_kind(job.get("kind")),
             "status": job.get("status") or "recorded",
-            "detail": job.get("detail") or "",
+            "detail": job.get("description") or job.get("detail") or "",
             "tone": job.get("tone") or status_tone(job.get("status")),
             "updated_at": job.get("updated_at") or job.get("created_at") or "",
-        })
+            "category": job.get("category") or "",
+        }
+        if job.get("title"):
+            job_card["title"] = job.get("title")
+        if job.get("description"):
+            job_card["description"] = job.get("description")
+        task_cards.append(job_card)
     for run in agent_runs[:4]:
-        task_cards.append({
+        run_card = {
             "id": f"agent:{run.get('id')}",
             "source": "agent",
             "label": run.get("label") or "CEO run",
@@ -7914,7 +7955,11 @@ def _takyon_business_overview_payload(
             "detail": run.get("detail") or "Run recorded in audit trail.",
             "tone": run.get("tone") or status_tone(run.get("status")),
             "updated_at": run.get("updated_at") or "",
-        })
+        }
+        parent_id = _milestone_parent_id(run.get("work_request_id"))
+        if parent_id:
+            run_card["task_id"] = parent_id
+        task_cards.append(run_card)
     for job in cron_jobs[:4]:
         label = "CEO wake loop" if re.search(r"takyon-ceo|ceo", brief_text(job.get("name")), re.I) else brief_text(job.get("name") or "Scheduled work")
         task_cards.append({
@@ -8969,9 +9014,17 @@ def _takyon_live_state_payload(
         updated_at = as_text(task.get("updated_at") or task.get("created_at"))
         source = as_text(task.get("source")) or "overview"
         task_id = as_text(task.get("id")) or f"task:{label}:{status}"
-        category = _takyon_task_category(label, detail, source)
-        title = _takyon_task_intent_title(label, detail, source)
-        description = _takyon_task_description(label, detail, category)
+        # Prefer an explicit CEO-authored milestone category/title/description
+        # when the card carries one (e.g. a work-request job whose payload set
+        # title/description/category); the heuristics below are fallbacks only.
+        explicit_category = as_text(task.get("category")).upper()
+        category = (
+            explicit_category
+            if explicit_category in _TAKYON_TASK_CATEGORIES
+            else _takyon_task_category(label, detail, source)
+        )
+        title = as_text(task.get("title")) or _takyon_task_intent_title(label, detail, source)
+        description = as_text(task.get("description")) or _takyon_task_description(label, detail, category)
         # Spec criterion #6: raw low-level events carry a parent task_id so the
         # frontend can nest them under an intent-level task instead of flat rows.
         parent_task_id = as_text(task.get("task_id") or task.get("parent_task_id"))

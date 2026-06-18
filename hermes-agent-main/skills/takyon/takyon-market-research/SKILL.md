@@ -55,7 +55,7 @@ Use this skill to reduce uncertainty about who the business should serve, what t
 
 - The Takyon toolset must be available.
 - Start from canonical business state, not from stray notes: use `business_read_business` first, then `business_read_file` for the specific research or metrics files you need.
-- If outside research tools are available, use them only to gather evidence; still publish the durable result through Takyon business files.
+- You MUST gather live evidence before writing any decision memo: run `web_search` for the decision at hand, then `web_extract` on the most relevant URLs the search returns. Do not write `research/market.md` from memory. Every URL you actually used must be logged in `research/sources.jsonl`. Still publish the durable result through Takyon business files.
 
 ## References
 
@@ -117,10 +117,11 @@ Use this skill to reduce uncertainty about who the business should serve, what t
 2. Prefer dated, source-backed evidence over generic advice.
 3. Label hypotheses as hypotheses.
 4. Do not invent customer demand, competitor traction, or pricing evidence.
+5. Never assert any web limitation you did not get from a real `web_search`/`web_extract` tool error. Do not claim the web is "limited to publicly cached content" (that exact phrasing is banned) or otherwise confabulate a web restriction to justify skipping research. If a tool genuinely errors, quote the real error and degrade as described in Troubleshooting; otherwise you must actually search and extract.
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| Web access is unavailable | Record the blocker and do only local synthesis |
+| Web access seems unavailable | Attempt `web_search`/`web_extract` for real first. Only after a call returns an actual error envelope (budget/SpendBlocked, no-provider configured, or a provider error) may you record that exact blocker and degrade to local synthesis. In that case the memo MUST label its claims as domain-knowledge hypotheses, not sourced evidence. |
 | Evidence is thin or contradictory | Preserve the contradiction and name the exact gap |
