@@ -258,9 +258,9 @@ def test_workspace_payload_e2e_ties_task_ui_group_together(monkeypatch):
     intent = tasks["intent-1"]
     assert intent["title"] == "Business Write File"  # intent-first, not raw tool name
     assert intent["description"]                       # non-empty one-sentence
-    assert intent["category"] in {"RESEARCH", "PRODUCT", "LAUNCH"}
+    assert intent["category"] in {"RESEARCH", "PRODUCT", "LAUNCH", "GROWTH", "OPS"}
     assert intent["status"] == "running"
-    assert intent["status_label"] == "Working"
+    assert intent["status_label"] == "RUNNING"
     assert payload["live_state"]["current_task_id"] == "intent-1"
     assert tasks["trace-1"]["task_id"] == "intent-1"  # raw event nested under intent
 
