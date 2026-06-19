@@ -20489,9 +20489,18 @@ def handle_business_delete_app_session(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
-                    with store._pg_app_scope(conn, business, session_token=session_token):
-                        with store._leaf_conn(conn) as leaf:
-                            revoked = leaves["identity"].revoke_session(leaf, business, session_token)
+                    # Session revoke is an identity MUTATION (UPDATE app_sessions). By the 0030
+                    # RLS-role design, identity/session mutation stays on the PRIVILEGED
+                    # operator/runtime path: the restricted `takyon_app` role that _pg_app_scope
+                    # drops to holds SELECT-only on app_sessions (0030), so revoking under that
+                    # scope raises "permission denied for table app_sessions" — the customer can
+                    # never sign out AND the session stays live server-side. The presented
+                    # session_token IS the authorization: revoke_session scopes the UPDATE by
+                    # business_slug + token_hash, so a caller can only revoke the exact session
+                    # whose raw token they hold — symmetric with the privileged session MINT in
+                    # handle_business_supabase_login (start_session), which is also unscoped.
+                    with store._leaf_conn(conn) as leaf:
+                        revoked = leaves["identity"].revoke_session(leaf, business, session_token)
                 except leaves["identity"].AppIdentityError as exc:
                     raise TakyonError(str(exc)) from exc
             else:
