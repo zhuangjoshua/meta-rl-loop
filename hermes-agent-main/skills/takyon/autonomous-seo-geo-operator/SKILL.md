@@ -5,11 +5,11 @@ description: >-
   product/site source, understanding the business from real copy, then making 1-5
   honest SEO/GEO changes: metadata, schema/JSON-LD, internal links, sitemap,
   robots.txt, llms.txt, and a few strategic BOFU pages. Publishes bounded
-  product/site updates plus a canonical visibility report. Runs with NO paid APIs
-  and NO hosted services; optionally sharpens prioritization with Google Search
-  Console, OpenSEO, DataForSEO, or SERP MCPs IF they are already connected. Never
-  fabricates rankings, volumes, reviews, prices, logos, testimonials,
-  integrations, or "best/#1" claims.
+  product/site updates plus a canonical visibility report. Runs without paid APIs
+  by default; optionally sharpens prioritization with Google Search Console,
+  Google Keyword Planner, OpenSEO, DataForSEO, or SERP MCPs if they are already
+  connected. Never fabricates rankings, volumes, reviews, prices, logos,
+  testimonials, integrations, or "best/#1" claims.
 version: 1.0.0
 author: saialisetty1
 license: Proprietary
@@ -20,7 +20,7 @@ metadata:
     category: takyon
     tags: [takyon, seo, geo, aeo, ai-search, schema, json-ld, metadata, internal-linking, llms-txt, sitemap, robots, content, bofu]
     related_skills: [takyon-build-product, takyon-business-metrics, takyon-market-research]
-    requires_toolsets: [takyon, takyon-authority]
+    requires_toolsets: [takyon]
     requires_tools:
       [
         business_read_business,
@@ -30,15 +30,16 @@ metadata:
         business_patch_file,
         business_claude_agent_task,
         business_refresh_product_surface,
+        business_seo_query_data,
       ]
     routing:
       owns: >-
         Per-business search-visibility audits and bounded SEO/GEO improvements
-        across product-site source, plus a canonical visibility report, with no paid APIs.
+        across product-site source, plus a canonical visibility report, with no paid APIs by default.
       when_to_use:
         - A business product/site needs improved search or AI-answer visibility through honest metadata, schema, internal-linking, sitemap, robots.txt, llms.txt, or a few BOFU pages.
         - The operator wants a small, reviewable SEO/GEO pass grounded in existing product truth and site source.
-        - Optional GSC, OpenSEO, DataForSEO, or SERP context is available and should sharpen prioritization without blocking the run.
+        - Optional GSC, Google Keyword Planner, OpenSEO, DataForSEO, or SERP context is available and should sharpen prioritization without blocking the run.
       do_not_use_for:
         - Off-page work needing real external action (backlink outreach, buying links, posting to social/forums) — out of scope.
         - Fabricating keyword volumes, rankings, reviews, testimonials, or competitor claims — explicitly forbidden, not a capability.
@@ -69,10 +70,10 @@ chooses the **1-5 highest-leverage changes** for this run, implements them
 BOFU pages), runs quality gates, and writes a concise visibility report.
 
 It is a **skill, not a platform**. It requires no SaaS, no database, no workers, no
-hosting, and **no paid APIs**. Google Search Console, OpenSEO, DataForSEO, and SERP
-tools are treated as *optional accelerators*: if one is already connected as an MCP
-it sharpens prioritization, but its absence never blocks a run and never licenses
-inventing numbers.
+hosting, and **no paid APIs by default**. Google Search Console, Google Keyword
+Planner, OpenSEO, DataForSEO, and SERP tools are treated as *optional accelerators*:
+if one is already connected as an MCP it sharpens prioritization, but its absence
+never blocks a run and never licenses inventing numbers.
 
 GEO/AEO here is **SEO applied to AI surfaces**, not a separate discipline: ~92% of AI
 Overview citations come from top-10 ranking pages, so ranking fundamentals come first
@@ -105,9 +106,9 @@ clarity) sit on top.
 
 - **Primary roots:** `product/`, `metrics/`
 - **Publication paths:** `product/site/`, `metrics/seo/seo-geo-report-<YYYY-MM-DD>.md`
-- **Default data source:** the repo itself (always available). External SEO data is optional.
+- **Data source priority:** prefer live GSC (`business_seo_query_data`) for demand/prioritization when it returns rows; fall back to repo inspection (always available) when GSC is empty or missing. The technical/on-page audit always runs against the repo.
 - **Budget per run:** 1-5 meaningful changes. Keep the diff reviewable.
-- **Tool names used by this skill:** `business_read_business`, `business_read_file`, `business_list_files`, `business_write_file`, `business_patch_file`, `business_claude_agent_task`, `business_refresh_product_surface`
+- **Tool names used by this skill:** `business_read_business`, `business_read_file`, `business_list_files`, `business_write_file`, `business_patch_file`, `business_claude_agent_task`, `business_refresh_product_surface`, `business_seo_query_data`
 - **Bundled scripts** (zero deps, read-only, run against the target repo):
   - `scripts/extract-routes.ts` — detect framework + enumerate routes
   - `scripts/check-metadata.ts` — title/meta/H1/canonical/OG/schema/thinness lint
@@ -138,10 +139,20 @@ clarity) sit on top.
 - **A live URL.** If provided AND a browser/fetch tool is available (Claude-in-Chrome,
   the preview MCP, or `WebFetch`), crawl a *small* sample to compare rendered output
   vs. source. Otherwise rely on local route inspection.
-- **Google Search Console** (e.g. an `mcp-gsc` / `google-search-console-mcp` server),
-  or a **pasted GSC Performance CSV export**. Unlocks striking-distance (positions
-  11-20), position-aware CTR gaps, opportunity scoring, cannibalization, and decline
-  alerts.
+- **Google Search Console** — two ways in. (1) **Native, preferred:** the built-in
+  `business_seo_query_data` tool (modes `gsc-sites`, `gsc-query`) reads GSC directly,
+  authenticating **headlessly** via a Google service-account key when
+  `GSC_SERVICE_ACCOUNT_FILE` is set (browser-OAuth fallback via `GSC_CLIENT_SECRETS_FILE`
+  otherwise). Assume the subdomain's URL-prefix property already exists — it is registered
+  at bootstrap / website creation, not by this skill — so query it directly (e.g.
+  `https://<slug>.fourmanifold.com/`) for isolated metrics rather than the parent domain
+  property, which mixes all subdomains together. If `gsc-sites` shows the property is
+  missing, treat that as a bootstrap gap to report, not something to fix here. (2) Or an
+  `mcp-gsc` / `google-search-console-mcp` server. Unlocks striking-distance (positions
+  11-20), position-aware CTR gaps, opportunity scoring, cannibalization, and decline alerts.
+- **Google Keyword Planner** (Google Ads API or pasted exports). Use it for demand
+  validation, close-variant discovery, geo/language fit, and rough competition/bid
+  signals when GSC does not expose enough query variety.
 - **OpenSEO / DataForSEO / SERP MCP** for keyword/SERP/competitor validation.
 - **Discover optional tools, do not assume them:** run a `ToolSearch` for keywords
   like `search console`, `gsc`, `openseo`, `dataforseo`, `serp`, `keyword`. If a
@@ -149,20 +160,43 @@ clarity) sit on top.
   *inferred* strategy and label it as such. **Never fail because an optional source is
   missing.**
 
+### Data-Backed Query Workflow
+
+Use Search Console and Keyword Planner together, but for different jobs:
+
+- **Search Console answers:** which queries already surface a page, how often they
+  surface, whether the page gets clicks, where the page tends to rank, and whether
+  one page is stealing demand from another.
+- **Keyword Planner answers:** what adjacent or broader terms are worth targeting,
+  whether those terms have measurable demand, which close variants exist, and how
+  competitive or expensive they may be in the market.
+
+Treat GSC as the source of truth for page-specific reality and Keyword Planner as the
+source of truth for demand expansion around that reality. Do not invent volumes,
+rankings, or intent from either source.
+
 ## Data Source Priority
 
-Use the highest-confidence source available; degrade gracefully; never fabricate.
+Prefer the highest-confidence **demand signal** available; degrade gracefully; never
+fabricate. Repo inspection is always run for the technical/on-page audit — you can only
+fix a missing title, broken link, or invalid schema by reading the source — so the
+priority below governs which source drives **prioritization and keyword/demand
+decisions**, not whether the technical audit happens.
 
-1. **DEFAULT — repo inspection + inferred strategy (always on).** Render mode, HTML,
-   existing schema, headings, internal links, robots.txt, sitemaps, content depth,
-   detected business type. Every workflow must reach a useful result from this alone.
-2. **Optional — pasted GSC CSV export.** Real demand data without any API.
-3. **Optional — live GSC connection (MCP/API).** Use a stable 28-day window ending
-   ~3 days ago with confirmed/final data; never compare a partial recent period
-   against a complete prior one.
-4. **Optional — free fallbacks.** Bing Webmaster Tools, a `site:` search for
+1. **PREFERRED — live GSC via `business_seo_query_data` (`gsc-sites`, `gsc-query`).**
+   Real queries, impressions, clicks, and positions for the exact subdomain property,
+   authenticated headlessly via the service account. Use a stable 28-day window ending
+   ~3 days ago with confirmed/final data; never compare a partial recent period against
+   a complete prior one. When it returns rows, **lead with it** and label findings
+   **data-backed**.
+2. **FALLBACK — repo inspection + inferred strategy (always available).** Render mode,
+   HTML, existing schema, headings, internal links, robots.txt, sitemaps, content depth,
+   detected business type. When GSC has no data — e.g. a newly registered subdomain with
+   no impressions yet — infer target queries from product/category/ICP/use cases and
+   label them **inferred**. Every run must still reach a useful result from this alone.
+3. **Optional — free fallbacks.** Bing Webmaster Tools, a `site:` search for
    indexation, pure on-page heuristics.
-5. **Optional — live SERP / OpenSEO / DataForSEO.** Difficulty/intent/competitor
+4. **Optional — live SERP / OpenSEO / DataForSEO.** Difficulty/intent/competitor
    proxy (who ranks, SERP features, ranking page formats). When unavailable, infer
    difficulty and intent directly from the live SERP if you can read one; if not, use
    qualitative on-page judgment.
@@ -217,7 +251,10 @@ The common path:
    business source path.
 4. Read the homepage + key pages and README/docs/package metadata to understand the
    business (see Procedure step 1). If optional GSC/OpenSEO/SERP tools are available,
-   use them to sharpen prioritization without making them required.
+   use them to sharpen prioritization without making them required. If the SEO query
+   data tool is available, call `business_seo_query_data` in `gsc-query` mode for the
+   target page and `keyword-historical` mode for the surviving query themes before
+   rewriting titles, meta descriptions, H1s, and body copy.
 5. Pick the **1-5** highest-leverage changes (see Decision Principles in Procedure
    step 5). For each new page, fill `templates/page-brief.md` first.
 6. Use `business_write_file` / `business_patch_file` for small edits and
@@ -283,28 +320,81 @@ penalty (Critical) comes before any micro-tweak — an unindexed page earns zero
 
 ### 4. Optional data (sharpen, never require)
 
-If GSC is available (live or pasted CSV): find pages with impressions but low CTR
-(judge CTR against a *position-aware* benchmark, not a flat number), queries ranking
-positions 11-20 (striking distance, impressions > ~100), pages losing clicks (>20%
-period-over-period), queries with no matching page, and high-impression queries with
-weak titles/meta. If OpenSEO/SERP is available: validate keyword variants, intent,
-competitor page patterns, related questions, SERP features. **Otherwise infer** target
-queries from product/category/ICP/use cases and mark them *inferred, not measured*.
+If GSC is available, use these fields:
+
+- `query` and `page` to identify which terms already attach to which page.
+- `clicks`, `impressions`, `ctr`, and `position` to prioritize opportunities.
+- `date` or a stable date range to compare like-for-like windows.
+- `country`, `device`, and `searchAppearance` when they materially affect the query
+  mix or SERP shape.
+
+If Keyword Planner is available, use these fields:
+
+- `avg_monthly_searches` to gauge demand bands.
+- `competition` and `competition_index` to estimate market pressure.
+- `low_top_of_page_bid_micros` and `high_top_of_page_bid_micros` as commercial-value
+  proxies, not as rankings.
+- `monthly_search_volumes` to spot seasonality.
+- `close_variants` to find wording options that stay on intent.
+
+Use `keyword-ideas` when you want Google Ads to expand a seed topic or page URL into
+adjacent keywords. Use `keyword-historical` when you already have a narrowed list and
+want to validate demand, competition, and seasonality for those exact terms.
+
+Recommended sequence:
+
+1. Start with GSC page-query rows for the target page and identify the queries that
+   already generate impressions.
+2. Filter to queries with meaningful impressions, reasonable relevance, or striking-
+   distance positions.
+3. Use `keyword-ideas` on the surviving query set or page URL to discover adjacent
+   keywords, then discard variants that are clearly off-intent.
+4. Use `keyword-historical` on the surviving shortlist to validate demand and
+   commercial signals for the exact terms you might write into the page.
+5. Pick one primary target query theme per page and a short list of supporting
+   variants; rewrite titles, meta descriptions, H1s, and existing body copy to match
+   that theme without changing page structure.
+6. If GSC and Keyword Planner disagree, prefer GSC for current page intent and use
+   Keyword Planner only to choose the best phrasing among relevant options.
+
+If OpenSEO/SERP is available: validate keyword variants, intent, competitor page
+patterns, related questions, SERP features. **Otherwise infer** target queries from
+product/category/ICP/use cases and mark them *inferred, not measured*.
 
 ### 5. Choose 1-5 high-leverage changes
 
 Pick by **leverage = (impact × winnability) / effort**, capped at 1-5 per run:
 
-- Resolve **veto/critical** issues first (broken links, self-contradictory data,
-  fabricated/invalid schema, indexing blockers, clickbait title mismatch).
+- **Order of changes — apply in this sequence:**
+  1. **Site errors / blockers first.** Broken links, indexing blockers (accidental
+     noindex / robots blocks), invalid or self-contradictory schema, clickbait title
+     mismatch, plus the on-page defects the audit scripts flag (missing title/meta,
+     missing/duplicate H1, orphan pages). An unindexed or broken page earns zero, so
+     these precede every keyword optimization.
+  2. **Data-backed keyword updates.** When GSC (and Keyword Planner) return data,
+     optimize the highest-upside pages toward *measured* queries — scored per the
+     bullet below — and label them data-backed.
+  3. **Inferred keyword updates — fallback only.** If GSC has no data for the page
+     (e.g. a newly registered subdomain with no impressions yet), infer target queries
+     from product/category/ICP/use cases and optimize toward them, labeled inferred.
+     Do not spend run budget on inferred keyword work while data-backed opportunities
+     from step 2 remain.
 - Prioritize by **business fit and opportunity, not raw volume**: Opportunity ≈
   (Volume × Intent Value) / Difficulty, where intent weights informational = 1,
-  commercial = 2, transactional = 3. With GSC data, rank by quantified upside
+  commercial = 2, transactional = 3, navigational = 4. Treat navigational as brand
+  or page-finding intent and use it mainly for homepage/title alignment rather than
+  body-copy expansion. With GSC data, rank by quantified upside
   (impressions × (target_CTR − current_CTR)) and favor striking-distance pages.
-- **Small/new sites → BOFU-first:** optimize homepage metadata/H1/H2s; create 1-3
-  use-case pages; add 1-2 comparison/alternative/problem pages if justified; add FAQ
-  + Organization/WebSite/SoftwareApplication schema; add llms.txt; add internal links;
-  sanity-check sitemap/robots.
+- **Default to existing-page optimization only.** Unless the operator explicitly asks
+  for structural expansion, do not create routes, directories, or files for additional
+  pages, and do not add new homepage sections, nav items, tabs, footer link groups,
+  accordions, FAQ blocks, or other new information-architecture elements. Use the run
+  budget on strengthening existing titles, meta descriptions, headings, answer-first
+  copy, schema, internal links, sitemap/robots, and `llms.txt`.
+- **Small/new sites → BOFU-first within existing pages:** optimize homepage metadata,
+  H1/H2s, commercial copy inside current sections, Organization/WebSite/
+  SoftwareApplication schema, llms.txt, and internal links before considering any page
+  creation or new on-page sections.
 - Prefer changes that **unblock or compound** (an indexing fix, a pillar that anchors
   a cluster) over isolated tweaks.
 
@@ -315,21 +405,28 @@ indicator to watch. List everything you deliberately skipped (and why) in the re
 ### 6. Make the changes
 
 Implement using the framework's own conventions (see Page Creation Rules and
-Optimization Rules). For each new page, fill `templates/page-brief.md` first. Add
-internal links **both ways** (existing → new and new → relevant pages). Keep diffs
-small and idiomatic to the surrounding code. Use `business_write_file` or
-`business_patch_file` for narrow edits, and `business_claude_agent_task` when the site
-work spans multiple files or needs a bounded implementation worker.
+Optimization Rules). **Do not create new pages unless the operator explicitly asked for
+page creation.** In existing-page-only mode, also preserve the current information
+architecture: do not add new homepage sections, top-nav items, footer nav items, tabs,
+accordions, comparison tables, FAQ blocks, or other new layout modules unless the
+operator explicitly asked for structural changes. If page creation is explicitly
+requested, fill `templates/page-brief.md` first and add internal links **both ways**
+(existing → new and new → relevant pages). Keep diffs small and idiomatic to the
+surrounding code. Use `business_write_file` or `business_patch_file` for narrow edits,
+and `business_claude_agent_task` when the site work spans multiple files or needs a
+bounded implementation worker.
 
 ### 7. GEO / AEO pass
 
 On the changed/created pages, apply the AI-search levers (details in *Optimization
 Rules → GEO/AEO* and the checklist): answer-first opening (direct answer in the first
 40-60 words), standalone 25-60 word definitions for core terms, question-style
-headings, self-contained sourced/dated facts, Q&A/FAQ blocks, tables/lists, and
-server-rendered content + schema. Create or update **`/llms.txt`** with concise,
-grounded company/product/category summaries and key URLs (treat llms.txt as low-cost
-optionality, not a promised ranking lever).
+headings, self-contained sourced/dated facts, and server-rendered content + schema.
+In existing-page-only mode, prefer rewriting within current sections and heading slots;
+do not append Q&A/FAQ blocks, new tables, or other new sections unless the operator
+explicitly asked for structural expansion. Create or update **`/llms.txt`** with
+concise, grounded company/product/category summaries and key URLs (treat llms.txt as
+low-cost optionality, not a promised ranking lever).
 
 ### 8. Quality gates, report, and verification
 
@@ -340,6 +437,10 @@ blocker truthfully in the report or `product/surface.md`. Never claim a deploy,
 ranking win, merge, or publication state without receipts or evidence.
 
 ## Page Creation Rules
+
+Page creation is **opt-in only**. By default this skill should not add any new pages.
+Only enter this section when the operator explicitly asks for new pages or explicitly
+approves page creation for the current run.
 
 Fill `templates/page-brief.md` before writing any page. One page = one clear search
 intent, one H1, descriptive H2s, an above-the-fold value prop, an FAQ where useful,
@@ -370,7 +471,10 @@ Concise here; the full checklists live in `references/seo-checklist.md`.
 keyword + value prop + CTA; titles must honestly match the page (no clickbait);
 primary keyword placed naturally in title/first ~100 words/an H2/URL — never stuffed;
 strong above-the-fold value prop; descriptive internal links in and out; clear CTA; no
-duplicate or thin content; natural keyword variants.
+duplicate or thin content; natural keyword variants. In existing-page-only mode,
+preserve the current section structure and navigation; rewrite within existing sections
+instead of appending new sections or nav items. Do not significantly increase the word
+count on existing pages unless absolutely necessary.
 
 **Technical** — confirm key pages are indexable (not accidentally noindex/blocked);
 robots.txt doesn't block important paths, CSS, or JS; canonical present where the
@@ -395,9 +499,11 @@ important enough; don't over-link.
 
 **GEO/AEO** — answer-first openings; standalone 25-60 word definitions; question-style
 headings mirroring real prompts; high factual density (specific, dated, attributed);
-Q&A/FAQ blocks; comparison tables and scannable lists; server-rendered content +
-schema; consistent entity naming + `Organization`/`Person` `sameAs`; create/update
-`/llms.txt`. Present GEO patterns as directionally sound, never as guarantees.
+server-rendered content + schema; consistent entity naming + `Organization`/`Person`
+`sameAs`; create/update `/llms.txt`. In existing-page-only mode, apply these levers by
+rewriting current copy and headings rather than adding new FAQ blocks, comparison
+tables, or other new sections. Present GEO patterns as directionally sound, never as
+guarantees.
 
 **Truthfulness (non-negotiable)** — never fabricate ratings, reviews, prices, offers,
 rankings, volumes, difficulty, CTR, testimonials, customer quotes, case-study
@@ -462,7 +568,7 @@ and secondary.
 
 ## Common Pitfalls
 
-- Requiring GSC or any paid API — they are always optional; degrade to repo + CSV +
+- Requiring GSC or any paid API — they are always optional; degrade to repo +
   heuristics and label confidence.
 - Treating GEO/AEO as separate from SEO, or overselling llms.txt as a ranking signal.
 - Adding `FAQPage`/`HowTo` schema everywhere (HowTo rich results are deprecated; FAQ is

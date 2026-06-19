@@ -148,6 +148,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_schedule_ceo_wakeup",
         "business_gc",
         "business_upgrade_businesses",
+        "business_seo_add_property",
     }
 )
 
@@ -31052,6 +31053,528 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+# ===========================================================================
+# business_seo_add_property — register a subdomain as a URL-prefix property in
+# Google Search Console under the operator's service account.
+#
+# Credential source: the full service-account JSON key (which embeds the
+# private key) lives in the Takyon Safebox under the sensitive secret
+# GSC_SERVICE_ACCOUNT_KEY and is read through the Safebox authority — never a
+# key file on disk and never browser OAuth. The same service account backs both
+# the read-write (this tool) and read-only (business_seo_query_data) Search
+# Console services; only the requested scope differs.
+#
+# The parent domain (e.g. sc-domain:fourmanifold.com) is assumed already
+# verified and owned by this service account; this tool only registers
+# subdomains under that owner-verified parent. The API has no endpoint to grant
+# ownership, so the one-time parent verification/grant is done in the GSC UI.
+# ===========================================================================
+_GSC_SERVICE_ACCOUNT_ENV = "GSC_SERVICE_ACCOUNT_KEY"  # Safebox secret: service-account JSON content
+
+
+def _seo_build_credentials(scopes: list[str]) -> Any:
+    """Build Google service-account credentials from the Safebox-held key.
+
+    The service-account JSON (client_email + private_key + token_uri) is stored
+    as a sensitive Safebox secret under GSC_SERVICE_ACCOUNT_KEY and read via the
+    Takyon Safebox authority — no key file on disk, no OAuth browser flow. The
+    one service account serves both the readonly and read-write scopes; callers
+    pass the scope they need.
+    """
+    raw = str(safebox.read_env_backed_value(_GSC_SERVICE_ACCOUNT_ENV) or "").strip()
+    if not raw:
+        raise TakyonError(
+            "Google Search Console access needs the service-account credential in Safebox "
+            f"under {_GSC_SERVICE_ACCOUNT_ENV}; it is not configured."
+        )
+    try:
+        from google.oauth2 import service_account
+    except Exception as exc:  # pragma: no cover - import guard
+        raise TakyonError(
+            "Google Search Console support requires google-api-python-client and google-auth"
+        ) from exc
+    try:
+        info = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise TakyonError(
+            f"{_GSC_SERVICE_ACCOUNT_ENV} must contain the service-account JSON key content"
+        ) from exc
+    return service_account.Credentials.from_service_account_info(info, scopes=scopes)
+
+
+def _seo_build_search_console_service_rw():
+    """Build a Search Console service with read-write scope (webmasters)."""
+    try:
+        from googleapiclient.discovery import build
+    except Exception as exc:  # pragma: no cover - import guard
+        raise TakyonError(
+            "Google Search Console support requires google-api-python-client and google-auth"
+        ) from exc
+
+    credentials = _seo_build_credentials(["https://www.googleapis.com/auth/webmasters"])
+    return build("webmasters", "v3", credentials=credentials, cache_discovery=False)
+
+
+def _seo_list_search_console_sites(service) -> list[dict[str, Any]]:
+    response = service.sites().list().execute()
+    return response.get("siteEntry", [])
+
+
+def _seo_add_gsc_property(service, site_url: str) -> dict[str, Any]:
+    """Add a URL-prefix property to Search Console after verifying it is a
+    subdomain of an already owner-level-verified property in the account.
+
+    Returns a result dict with success, site_url, parent, and already_existed.
+    """
+    from urllib.parse import urlparse
+
+    site_url = site_url.rstrip("/") + "/"
+
+    parsed = urlparse(site_url)
+    if parsed.scheme not in ("http", "https"):
+        raise TakyonError(f"site_url must start with http:// or https://, got: {site_url}")
+
+    host = parsed.hostname or ""
+    if not host:
+        raise TakyonError(f"Could not parse hostname from site_url: {site_url}")
+
+    sites = _seo_list_search_console_sites(service)
+    owner_entries = [
+        s for s in sites
+        if s.get("permissionLevel") in ("siteOwner", "siteFullUser")
+    ]
+    if not owner_entries:
+        raise TakyonError(
+            "No owner-level properties found in this Search Console account. "
+            "Verify a root domain before adding subdomains."
+        )
+
+    # Find a verified parent that covers the target hostname.
+    parent: str | None = None
+    for entry in owner_entries:
+        entry_url = entry["siteUrl"]
+        if entry_url.startswith("sc-domain:"):
+            domain = entry_url[len("sc-domain:"):]
+            if host == domain or host.endswith("." + domain):
+                parent = entry_url
+                break
+        else:
+            parent_host = urlparse(entry_url).hostname or ""
+            if parent_host and (host == parent_host or host.endswith("." + parent_host)):
+                parent = entry_url
+                break
+
+    if parent is None:
+        owner_list = ", ".join(e["siteUrl"] for e in owner_entries)
+        raise TakyonError(
+            f"{site_url} is not a subdomain of any owner-level property. "
+            f"Approved properties: {owner_list}"
+        )
+
+    existing_urls = {s["siteUrl"] for s in sites}
+    if site_url in existing_urls:
+        return {"success": True, "site_url": site_url, "parent": parent, "already_existed": True}
+
+    service.sites().add(siteUrl=site_url).execute()
+    return {"success": True, "site_url": site_url, "parent": parent, "already_existed": False}
+
+
+def handle_business_seo_add_property(args: dict, **_: Any) -> str:
+    try:
+        site_url = str(args.get("site_url") or "").strip()
+        if not site_url:
+            raise TakyonError("site_url is required")
+        service = _seo_build_search_console_service_rw()
+        result = _seo_add_gsc_property(service, site_url)
+        return tool_result(result)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+# ===========================================================================
+# business_seo_query_data — read-only Search Console + Google Keyword Planner
+# evidence for SEO/GEO decisions. One business-scoped tool, four modes:
+#   gsc-sites          → list accessible Search Console properties
+#   gsc-query          → page/query metrics (clicks/impressions/ctr/position)
+#   keyword-historical → Keyword Planner demand/competition for a known list
+#   keyword-ideas      → Keyword Planner expansion of a seed topic/page URL
+#
+# Both APIs are optional and read-only (no ad spend, no cost): each mode raises
+# a clear TakyonError when its creds/packages are missing, so the skill degrades
+# to repo-inferred strategy rather than failing. GSC auth reuses the shared
+# Safebox service-account resolver (_seo_build_credentials, above) with the
+# readonly scope; Keyword Planner reads its separate Google Ads credentials
+# through the same Safebox gate (no os.getenv side door, no on-disk key file).
+# ===========================================================================
+_DEFAULT_GEO_TARGET_ID = "2840"   # United States
+_DEFAULT_LANGUAGE_ID = "1000"     # English
+
+
+def _strip_customer_id(customer_id: str) -> str:
+    """Normalise a Google Ads customer id to bare digits (strip dashes/space)."""
+    return str(customer_id or "").replace("-", "").replace(" ", "").strip()
+
+
+def _seo_resolve_sensitive_env(name: str) -> str:
+    """Resolve a sensitive credential strictly through the Takyon safebox gate.
+
+    One path for every SEO-tool secret: the value comes from the safebox
+    authority — fetched from the remote secret server with the
+    ``TAKYON_SAFEBOX_TOKEN`` "tk key" on client planes, or read from the
+    Safebox-host's own ``.env`` when this process IS the authority. There is no
+    bare ``os.getenv`` side door for secrets. Returns "" when the safebox has no
+    value or is unavailable, so callers can raise one uniform error.
+    """
+    try:
+        from . import safebox
+
+        return str(safebox.read_env_backed_value(name) or "").strip()
+    except Exception:
+        return ""
+
+
+def _seo_require_sensitive_env(name: str) -> str:
+    """Resolve a required sensitive credential or raise a clear TakyonError."""
+    value = _seo_resolve_sensitive_env(name)
+    if not value:
+        raise TakyonError(
+            f"{name} is required but could not be resolved from the Takyon safebox"
+        )
+    return value
+
+
+def _seo_build_search_console_service():
+    """Build a Search Console service with readonly scope (webmasters.readonly)."""
+    try:
+        from googleapiclient.discovery import build
+    except Exception as exc:  # pragma: no cover - import guard
+        raise TakyonError(
+            "Google Search Console support requires google-api-python-client and google-auth"
+        ) from exc
+
+    credentials = _seo_build_credentials(["https://www.googleapis.com/auth/webmasters.readonly"])
+    return build("searchconsole", "v1", credentials=credentials, cache_discovery=False)
+
+
+def _seo_query_search_console(
+    service,
+    *,
+    site_url: str,
+    start_date: str,
+    end_date: str,
+    dimensions: list[str] | None = None,
+    row_limit: int = 1000,
+    start_row: int = 0,
+    search_type: str = "web",
+    dimension_filters: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "rowLimit": row_limit,
+        "startRow": start_row,
+        "type": search_type,
+    }
+    if dimensions:
+        body["dimensions"] = dimensions
+    if dimension_filters:
+        body["dimensionFilterGroups"] = [
+            {
+                "groupType": "and",
+                "filters": dimension_filters,
+            }
+        ]
+    return service.searchanalytics().query(siteUrl=site_url, body=body).execute()
+
+
+def _seo_build_google_ads_client(
+    customer_id: str | None = None,
+    login_customer_id: str | None = None,
+):
+    try:
+        from google.ads.googleads.client import GoogleAdsClient
+    except Exception as exc:  # pragma: no cover - import guard
+        raise TakyonError("Google Keyword Planner support requires the google-ads package") from exc
+
+    # Every Google Ads secret resolves through the same Safebox gate (tk key) as
+    # the GSC service account — no bare os.getenv side door and no on-disk
+    # credential file. The customer-id fields below are account identifiers, not
+    # secrets, so they stay on plain env (the safebox refuses non-sensitive keys).
+    config: dict[str, Any] = {
+        "developer_token": _seo_require_sensitive_env("GOOGLE_ADS_DEVELOPER_TOKEN"),
+        "client_id": _seo_require_sensitive_env("GOOGLE_ADS_CLIENT_ID"),
+        "client_secret": _seo_require_sensitive_env("GOOGLE_ADS_CLIENT_SECRET"),
+        "refresh_token": _seo_require_sensitive_env("GOOGLE_ADS_REFRESH_TOKEN"),
+        "use_proto_plus": True,
+    }
+
+    resolved_login_customer_id = login_customer_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+    if resolved_login_customer_id:
+        config["login_customer_id"] = _strip_customer_id(resolved_login_customer_id)
+
+    linked_customer_id = os.getenv("GOOGLE_ADS_LINKED_CUSTOMER_ID")
+    if linked_customer_id:
+        config["linked_customer_id"] = _strip_customer_id(linked_customer_id)
+
+    return GoogleAdsClient.load_from_dict(config)
+
+
+def _seo_generate_keyword_historical_metrics(
+    client,
+    *,
+    customer_id: str,
+    keywords: list[str],
+    language_id: str = _DEFAULT_LANGUAGE_ID,
+    geo_target_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not keywords:
+        raise TakyonError("keywords must not be empty")
+
+    googleads_service = client.get_service("GoogleAdsService")
+    keyword_plan_idea_service = client.get_service("KeywordPlanIdeaService")
+    request = client.get_type("GenerateKeywordHistoricalMetricsRequest")
+
+    request.customer_id = _strip_customer_id(customer_id)
+    request.keywords.extend(keywords)
+
+    for geo_target_id in (geo_target_ids or [_DEFAULT_GEO_TARGET_ID]):
+        request.geo_target_constants.append(
+            googleads_service.geo_target_constant_path(str(geo_target_id))
+        )
+
+    request.keyword_plan_network = client.enums.KeywordPlanNetworkEnum.GOOGLE_SEARCH
+    request.language = googleads_service.language_constant_path(str(language_id))
+
+    response = keyword_plan_idea_service.generate_keyword_historical_metrics(request=request)
+
+    rows: list[dict[str, Any]] = []
+    for result in response.results:
+        metrics = result.keyword_metrics
+        rows.append(
+            {
+                "keyword": result.text,
+                "close_variants": list(result.close_variants),
+                "avg_monthly_searches": metrics.avg_monthly_searches,
+                "competition": str(metrics.competition),
+                "competition_index": metrics.competition_index,
+                "low_top_of_page_bid_micros": metrics.low_top_of_page_bid_micros,
+                "high_top_of_page_bid_micros": metrics.high_top_of_page_bid_micros,
+                "monthly_search_volumes": [
+                    {
+                        "year": month.year,
+                        "month": month.month.name,
+                        "monthly_searches": month.monthly_searches,
+                    }
+                    for month in metrics.monthly_search_volumes
+                ],
+            }
+        )
+    return rows
+
+
+def _seo_generate_keyword_ideas(
+    client,
+    *,
+    customer_id: str,
+    keywords: list[str] | None = None,
+    page_url: str | None = None,
+    language_id: str = _DEFAULT_LANGUAGE_ID,
+    geo_target_ids: list[str] | None = None,
+    include_adult_keywords: bool = False,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    googleads_service = client.get_service("GoogleAdsService")
+    keyword_plan_idea_service = client.get_service("KeywordPlanIdeaService")
+    request = client.get_type("GenerateKeywordIdeasRequest")
+
+    request.customer_id = _strip_customer_id(customer_id)
+    request.language = googleads_service.language_constant_path(str(language_id))
+    request.keyword_plan_network = client.enums.KeywordPlanNetworkEnum.GOOGLE_SEARCH
+    request.include_adult_keywords = bool(include_adult_keywords)
+
+    for geo_target_id in (geo_target_ids or [_DEFAULT_GEO_TARGET_ID]):
+        request.geo_target_constants.append(
+            googleads_service.geo_target_constant_path(str(geo_target_id))
+        )
+
+    keyword_seed_terms = [str(item).strip() for item in (keywords or []) if str(item).strip()]
+    normalized_page_url = str(page_url or "").strip()
+    if keyword_seed_terms and normalized_page_url and hasattr(request, "keyword_and_url_seed"):
+        request.keyword_and_url_seed.keywords.extend(keyword_seed_terms)
+        request.keyword_and_url_seed.url = normalized_page_url
+    elif keyword_seed_terms:
+        request.keyword_seed.keywords.extend(keyword_seed_terms)
+    elif normalized_page_url:
+        request.url_seed.url = normalized_page_url
+    else:
+        raise TakyonError("keyword-ideas requires keywords and/or page_url")
+
+    response = keyword_plan_idea_service.generate_keyword_ideas(request=request)
+
+    rows: list[dict[str, Any]] = []
+    for result in response:
+        metrics = getattr(result, "keyword_idea_metrics", None)
+        rows.append(
+            {
+                "keyword": getattr(result, "text", ""),
+                "avg_monthly_searches": getattr(metrics, "avg_monthly_searches", None),
+                "competition": str(getattr(metrics, "competition", "")),
+                "competition_index": getattr(metrics, "competition_index", None),
+                "low_top_of_page_bid_micros": getattr(metrics, "low_top_of_page_bid_micros", None),
+                "high_top_of_page_bid_micros": getattr(metrics, "high_top_of_page_bid_micros", None),
+                "monthly_search_volumes": [
+                    {
+                        "year": month.year,
+                        "month": month.month.name,
+                        "monthly_searches": month.monthly_searches,
+                    }
+                    for month in getattr(metrics, "monthly_search_volumes", [])
+                ],
+                "close_variants": list(getattr(result, "close_variants", []) or []),
+            }
+        )
+    return rows[: max(1, int(limit))]
+
+
+def handle_business_seo_query_data(args: dict, **_: Any) -> str:
+    try:
+        mode = str(args.get("mode") or "").strip().lower()
+        if not mode:
+            raise TakyonError("mode is required")
+
+        if mode == "gsc-sites":
+            service = _seo_build_search_console_service()
+            sites = _seo_list_search_console_sites(service)
+            return tool_result({"success": True, "mode": mode, "site_entries": sites, "count": len(sites)})
+
+        if mode == "gsc-query":
+            site_url = str(args.get("site_url") or "").strip()
+            start_date = str(args.get("start_date") or "").strip()
+            end_date = str(args.get("end_date") or "").strip()
+            if not site_url:
+                raise TakyonError("site_url is required for gsc-query")
+            if not start_date or not end_date:
+                raise TakyonError("start_date and end_date are required for gsc-query")
+            dimensions = [
+                str(item).strip()
+                for item in _as_list(args.get("dimensions") or ["query", "page"])
+                if str(item).strip()
+            ]
+            filters: list[dict[str, Any]] | None = None
+            page_filter = str(args.get("page_filter") or "").strip()
+            if page_filter:
+                filters = [{"dimension": "page", "operator": "equals", "expression": page_filter}]
+            service = _seo_build_search_console_service()
+            response = _seo_query_search_console(
+                service,
+                site_url=site_url,
+                start_date=start_date,
+                end_date=end_date,
+                dimensions=dimensions or None,
+                row_limit=int(args.get("row_limit") or 1000),
+                start_row=int(args.get("start_row") or 0),
+                search_type=str(args.get("search_type") or "web").strip() or "web",
+                dimension_filters=filters,
+            )
+            rows = list(response.get("rows") or [])
+            return tool_result(
+                {
+                    "success": True,
+                    "mode": mode,
+                    "site_url": site_url,
+                    "date_range": {"start_date": start_date, "end_date": end_date},
+                    "dimensions": dimensions,
+                    "row_count": len(rows),
+                    "totals": {
+                        "clicks": response.get("clicks"),
+                        "impressions": response.get("impressions"),
+                        "ctr": response.get("ctr"),
+                        "position": response.get("position"),
+                    },
+                    "response": response,
+                }
+            )
+
+        if mode == "keyword-historical":
+            customer_id = str(args.get("customer_id") or "").strip()
+            if not customer_id:
+                raise TakyonError("customer_id is required for keyword-historical")
+            raw_keywords = [
+                str(item).strip() for item in _as_list(args.get("keywords")) if str(item).strip()
+            ]
+            if not raw_keywords:
+                raise TakyonError("keywords are required for keyword-historical")
+            client = _seo_build_google_ads_client(
+                customer_id=customer_id,
+                login_customer_id=str(args.get("login_customer_id") or "").strip() or None,
+            )
+            rows = _seo_generate_keyword_historical_metrics(
+                client,
+                customer_id=customer_id,
+                keywords=raw_keywords,
+                language_id=str(args.get("language_id") or _DEFAULT_LANGUAGE_ID).strip() or _DEFAULT_LANGUAGE_ID,
+                geo_target_ids=[
+                    str(item).strip()
+                    for item in _as_list(args.get("geo_target_ids") or [_DEFAULT_GEO_TARGET_ID])
+                    if str(item).strip()
+                ],
+            )
+            return tool_result(
+                {
+                    "success": True,
+                    "mode": mode,
+                    "customer_id": customer_id,
+                    "keywords": raw_keywords,
+                    "row_count": len(rows),
+                    "rows": rows,
+                }
+            )
+
+        if mode == "keyword-ideas":
+            customer_id = str(args.get("customer_id") or "").strip()
+            if not customer_id:
+                raise TakyonError("customer_id is required for keyword-ideas")
+            raw_keywords = [
+                str(item).strip() for item in _as_list(args.get("keywords")) if str(item).strip()
+            ]
+            page_url = str(args.get("page_url") or args.get("url_seed") or "").strip()
+            if not raw_keywords and not page_url:
+                raise TakyonError("keyword-ideas requires keywords and/or page_url")
+            client = _seo_build_google_ads_client(
+                customer_id=customer_id,
+                login_customer_id=str(args.get("login_customer_id") or "").strip() or None,
+            )
+            rows = _seo_generate_keyword_ideas(
+                client,
+                customer_id=customer_id,
+                keywords=raw_keywords,
+                page_url=page_url or None,
+                language_id=str(args.get("language_id") or _DEFAULT_LANGUAGE_ID).strip() or _DEFAULT_LANGUAGE_ID,
+                geo_target_ids=[
+                    str(item).strip()
+                    for item in _as_list(args.get("geo_target_ids") or [_DEFAULT_GEO_TARGET_ID])
+                    if str(item).strip()
+                ],
+                include_adult_keywords=_boolish(args.get("include_adult_keywords"), default=False),
+                limit=int(args.get("limit") or 100),
+            )
+            return tool_result(
+                {
+                    "success": True,
+                    "mode": mode,
+                    "customer_id": customer_id,
+                    "keywords": raw_keywords,
+                    "page_url": page_url,
+                    "row_count": len(rows),
+                    "rows": rows,
+                }
+            )
+
+        raise TakyonError("mode must be one of: gsc-sites, gsc-query, keyword-historical, keyword-ideas")
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 TAKYON_TOOL_DEFINITIONS = [
     {
         "name": "business_list_businesses",
@@ -32403,6 +32926,52 @@ TAKYON_TOOL_DEFINITIONS = [
                 "confirm": {"type": "boolean", "description": "Alias for apply=true"},
             },
             [],
+        ),
+    },
+    {
+        "name": "business_seo_add_property",
+        "description": "Register a subdomain as a URL-prefix property in Google Search Console under the operator's service account. Idempotent; verifies the URL sits under an owner-verified parent property.",
+        "handler": handle_business_seo_add_property,
+        "schema": _schema(
+            "business_seo_add_property",
+            "Register a URL-prefix property in Google Search Console. The URL must be a subdomain of an already owner-verified property in the account (e.g. sc-domain:fourmanifold.com).",
+            {
+                "site_url": {"type": "string", "description": "The subdomain URL to register, e.g. https://acme.fourmanifold.com"},
+            },
+            ["site_url"],
+        ),
+    },
+    {
+        "name": "business_seo_query_data",
+        "description": "Read Search Console and Google Keyword Planner query evidence for SEO/GEO decisions (read-only, no ad spend). Modes degrade gracefully when creds are missing.",
+        "handler": handle_business_seo_query_data,
+        "schema": _schema(
+            "business_seo_query_data",
+            "Read Search Console and Google Keyword Planner data for SEO/GEO prioritization. All modes are read-only; each raises a clear error (not a failure) when its credentials are absent.",
+            {
+                "mode": {
+                    "type": "string",
+                    "enum": ["gsc-sites", "gsc-query", "keyword-historical", "keyword-ideas"],
+                    "description": "gsc-sites = list accessible Search Console properties; gsc-query = pull page/query metrics for a date range; keyword-historical = fetch demand/competition for a narrowed keyword list; keyword-ideas = expand a seed page/topic into adjacent keywords.",
+                },
+                "site_url": {"type": "string", "description": "Search Console property identifier like sc-domain:example.com or a URL property (gsc-query)."},
+                "start_date": {"type": "string", "description": "YYYY-MM-DD for gsc-query."},
+                "end_date": {"type": "string", "description": "YYYY-MM-DD for gsc-query."},
+                "dimensions": {"type": "array", "items": {"type": "string"}, "description": "Search Console dimensions such as query, page, country, or device (gsc-query). Default [query, page]."},
+                "page_filter": {"type": "string", "description": "Optional exact page URL filter for gsc-query."},
+                "row_limit": {"type": "integer", "description": "Maximum rows for gsc-query; default 1000."},
+                "start_row": {"type": "integer", "description": "Search Console paging start row; default 0."},
+                "search_type": {"type": "string", "description": "Search Console type, default web."},
+                "customer_id": {"type": "string", "description": "Google Ads customer ID for keyword-historical and keyword-ideas."},
+                "login_customer_id": {"type": "string", "description": "Google Ads manager (MCC) account ID if required for routing."},
+                "keywords": {"type": "array", "items": {"type": "string"}, "description": "Seed keywords for Keyword Planner historical metrics or idea expansion."},
+                "page_url": {"type": "string", "description": "Optional page URL for keyword-ideas URL seeding."},
+                "language_id": {"type": "string", "description": "Google Ads language constant ID; default 1000 (English)."},
+                "geo_target_ids": {"type": "array", "items": {"type": "string"}, "description": "Repeatable Google Ads geo target IDs; default 2840 (United States)."},
+                "include_adult_keywords": {"type": "boolean", "description": "Whether Keyword Planner should include adult keywords for keyword-ideas. Default false."},
+                "limit": {"type": "integer", "description": "Maximum returned rows for keyword-ideas; default 100."},
+            },
+            ["mode"],
         ),
     },
 ]

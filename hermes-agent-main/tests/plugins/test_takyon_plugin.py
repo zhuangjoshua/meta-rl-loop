@@ -5607,6 +5607,235 @@ def test_business_generate_logo_registered_as_authority_tool():
     assert "business_generate_logo" in names
 
 
+def test_business_seo_add_property_registered_as_authority_tool():
+    assert "business_seo_add_property" in takyon_core.TAKYON_AUTHORITY_TOOL_NAMES
+    names = [d["name"] for d in takyon_core.TAKYON_TOOL_DEFINITIONS]
+    assert "business_seo_add_property" in names
+
+
+class _FakeGscSites:
+    """Duck-typed Search Console sites() resource backed by an in-memory list."""
+
+    def __init__(self, sites: list[dict[str, Any]], added: list[str]):
+        self._sites = sites
+        self._added = added
+
+    def list(self):
+        outer = self
+
+        class _Exec:
+            def execute(self):
+                return {"siteEntry": list(outer._sites)}
+
+        return _Exec()
+
+    def add(self, siteUrl: str):
+        outer = self
+
+        class _Exec:
+            def execute(self):
+                outer._added.append(siteUrl)
+                outer._sites.append(
+                    {"siteUrl": siteUrl, "permissionLevel": "siteUnverifiedUser"}
+                )
+                return {}
+
+        return _Exec()
+
+
+class _FakeGscService:
+    def __init__(self, sites: list[dict[str, Any]]):
+        self._sites = sites
+        self.added: list[str] = []
+
+    def sites(self):
+        return _FakeGscSites(self._sites, self.added)
+
+
+def test_seo_add_gsc_property_registers_subdomain_under_owner_parent():
+    service = _FakeGscService(
+        [{"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"}]
+    )
+    result = takyon_core._seo_add_gsc_property(service, "https://acme.fourmanifold.com")
+    assert result == {
+        "success": True,
+        "site_url": "https://acme.fourmanifold.com/",
+        "parent": "sc-domain:fourmanifold.com",
+        "already_existed": False,
+    }
+    assert service.added == ["https://acme.fourmanifold.com/"]
+
+
+def test_seo_add_gsc_property_is_idempotent_when_already_present():
+    service = _FakeGscService(
+        [
+            {"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"},
+            {"siteUrl": "https://acme.fourmanifold.com/", "permissionLevel": "siteOwner"},
+        ]
+    )
+    result = takyon_core._seo_add_gsc_property(service, "https://acme.fourmanifold.com/")
+    assert result["already_existed"] is True
+    assert service.added == []
+
+
+def test_seo_add_gsc_property_rejects_url_outside_owner_verified_parent():
+    service = _FakeGscService(
+        [{"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"}]
+    )
+    with pytest.raises(TakyonError):
+        takyon_core._seo_add_gsc_property(service, "https://acme.example.com/")
+
+
+def test_seo_add_gsc_property_requires_http_scheme():
+    service = _FakeGscService(
+        [{"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"}]
+    )
+    with pytest.raises(TakyonError):
+        takyon_core._seo_add_gsc_property(service, "ftp://acme.fourmanifold.com/")
+
+
+def test_handle_business_seo_add_property_requires_site_url():
+    out = json.loads(takyon_core.handle_business_seo_add_property({}))
+    assert out["success"] is False
+    assert "site_url" in out["error"].lower()
+
+
+def test_seo_build_credentials_reads_service_account_from_safebox(monkeypatch):
+    # The credential source is the Safebox secret GSC_SERVICE_ACCOUNT_KEY, not a
+    # key file on disk. With no secret configured it fails closed before any
+    # Google client import — so this holds regardless of google-auth presence.
+    seen: list[str] = []
+
+    def _fake_read(key: str) -> str:
+        seen.append(key)
+        return ""
+
+    monkeypatch.setattr(takyon_core.safebox, "read_env_backed_value", _fake_read)
+    with pytest.raises(TakyonError) as excinfo:
+        takyon_core._seo_build_credentials(["https://www.googleapis.com/auth/webmasters"])
+    assert seen == ["GSC_SERVICE_ACCOUNT_KEY"]
+    assert "GSC_SERVICE_ACCOUNT_KEY" in str(excinfo.value)
+
+
+def test_business_seo_query_data_registered_in_plain_takyon_toolset():
+    # Read-only data tool: belongs in the general "takyon" toolset alongside the
+    # other read tools the SEO skill requires (requires_toolsets: [takyon]),
+    # NOT the side-effecting "takyon-authority" toolset.
+    names = [d["name"] for d in takyon_core.TAKYON_TOOL_DEFINITIONS]
+    assert "business_seo_query_data" in names
+    assert "business_seo_query_data" not in takyon_core.TAKYON_AUTHORITY_TOOL_NAMES
+    assert takyon_toolset_name("business_seo_query_data") == "takyon"
+
+
+def test_handle_business_seo_query_data_requires_mode():
+    out = json.loads(takyon_core.handle_business_seo_query_data({}))
+    assert out["success"] is False
+    assert "mode" in out["error"].lower()
+
+
+def test_handle_business_seo_query_data_rejects_unknown_mode():
+    out = json.loads(takyon_core.handle_business_seo_query_data({"mode": "nope"}))
+    assert out["success"] is False
+    assert "mode must be one of" in out["error"].lower()
+
+
+def test_handle_business_seo_query_data_gsc_query_requires_site_url_and_dates():
+    out = json.loads(takyon_core.handle_business_seo_query_data({"mode": "gsc-query"}))
+    assert out["success"] is False
+    assert "site_url" in out["error"].lower()
+
+    out = json.loads(
+        takyon_core.handle_business_seo_query_data(
+            {"mode": "gsc-query", "site_url": "sc-domain:acme.fourmanifold.com"}
+        )
+    )
+    assert out["success"] is False
+    assert "start_date" in out["error"].lower() or "end_date" in out["error"].lower()
+
+
+def test_handle_business_seo_query_data_keyword_modes_validate_inputs():
+    out = json.loads(
+        takyon_core.handle_business_seo_query_data({"mode": "keyword-historical"})
+    )
+    assert out["success"] is False
+    assert "customer_id" in out["error"].lower()
+
+    out = json.loads(
+        takyon_core.handle_business_seo_query_data(
+            {"mode": "keyword-historical", "customer_id": "123-456-7890"}
+        )
+    )
+    assert out["success"] is False
+    assert "keywords" in out["error"].lower()
+
+    out = json.loads(takyon_core.handle_business_seo_query_data({"mode": "keyword-ideas"}))
+    assert out["success"] is False
+    assert "customer_id" in out["error"].lower()
+
+    out = json.loads(
+        takyon_core.handle_business_seo_query_data(
+            {"mode": "keyword-ideas", "customer_id": "123-456-7890"}
+        )
+    )
+    assert out["success"] is False
+    assert "keywords" in out["error"].lower() or "page_url" in out["error"].lower()
+
+
+def test_strip_customer_id_normalizes_dashes_and_spaces():
+    assert takyon_core._strip_customer_id("123-456-7890") == "1234567890"
+    assert takyon_core._strip_customer_id(" 123 456 7890 ") == "1234567890"
+    assert takyon_core._strip_customer_id(None) == ""
+
+
+def test_seo_resolve_sensitive_env_is_strict_safebox_gated(monkeypatch):
+    # Strict gate: every secret resolves through the safebox authority, even when
+    # the same name is also present in the process env — no os.getenv side door.
+    from plugins.takyon import safebox as takyon_safebox
+
+    monkeypatch.setenv("GOOGLE_ADS_CLIENT_SECRET", "local-env-should-be-ignored")
+    seen: list[str] = []
+
+    def _read(key):
+        seen.append(key)
+        return "gated-secret"
+
+    monkeypatch.setattr(takyon_safebox, "read_env_backed_value", _read)
+    assert (
+        takyon_core._seo_resolve_sensitive_env("GOOGLE_ADS_CLIENT_SECRET")
+        == "gated-secret"
+    )
+    assert seen == ["GOOGLE_ADS_CLIENT_SECRET"]
+
+
+def test_seo_resolve_sensitive_env_empty_when_safebox_unavailable(monkeypatch):
+    # If the safebox has no value or is unavailable, resolve returns "" so callers
+    # can raise one uniform error (never a silent os.getenv fallback).
+    from plugins.takyon import safebox as takyon_safebox
+
+    def _unavailable(_key):
+        raise takyon_safebox.SafeboxAuthorityUnavailable("no authority configured")
+
+    monkeypatch.setattr(takyon_safebox, "read_env_backed_value", _unavailable)
+    assert takyon_core._seo_resolve_sensitive_env("GOOGLE_ADS_REFRESH_TOKEN") == ""
+
+
+def test_seo_require_sensitive_env_raises_when_unresolved(monkeypatch):
+    from plugins.takyon import safebox as takyon_safebox
+
+    monkeypatch.setattr(takyon_safebox, "read_env_backed_value", lambda k: "")
+    with pytest.raises(TakyonError) as exc:
+        takyon_core._seo_require_sensitive_env("GOOGLE_ADS_DEVELOPER_TOKEN")
+    assert "safebox" in str(exc.value).lower()
+
+
+def test_google_ads_client_id_is_safebox_sensitive():
+    # client_id has no sensitive suffix, so it is explicitly allowlisted; otherwise
+    # the safebox gate would refuse to serve it.
+    from plugins.takyon import safebox as takyon_safebox
+
+    assert takyon_safebox.is_sensitive_env_key("GOOGLE_ADS_CLIENT_ID")
+
+
 def test_gemini_logo_prompt_encodes_brand_brief_and_context():
     from plugins.takyon import creative_gateway as gw
 
