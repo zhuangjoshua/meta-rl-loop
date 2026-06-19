@@ -21,6 +21,11 @@ export type ChatMessage = {
   who: "agent" | "user";
   text: string;
   working?: boolean;
+  // Wall-clock ms for ordering against the curated chat_stream (whose items
+  // carry an ISO posted_at). User messages are stamped with Date.now() on send;
+  // messages reconstructed from server history have no timestamp (the history
+  // payload carries no created_at) and fall back to insertion order.
+  ts?: number;
 };
 
 export type ChatProgress = LiveWorkstreamCardData & {
@@ -43,6 +48,9 @@ export type BuildState = {
   narration: string[];
   terminal: string[];
   error: string;
+  // Numeric JSON-RPC error code from takyon.dashboard.create on failure (0 = none).
+  // 4030 = out of credits (route to Plans & Billing); other codes = generic hard error.
+  errorCode: number;
 };
 
 export type LitebulbBusiness = {
@@ -53,6 +61,14 @@ export type LitebulbBusiness = {
   status: string;
   tagline: string;
   meta: string;
+  // Real published product URL (https://<slug>.fourmanifold.com or a recorded
+  // public_url). Always populated from the canonical host so the company card
+  // never shows a fabricated `.app` placeholder.
+  productUrl: string;
+  // Published brand-logo asset path (e.g. product/brand/logos/brand-logo.png),
+  // when a paid logo has been generated for the business. Empty until then —
+  // the card falls back to a monogram chip.
+  logoPath: string;
 };
 
 type HistoryPayload = {
@@ -129,6 +145,17 @@ function isMissingSessionError(error: unknown) {
   return /session not found|4001/i.test(message);
 }
 
+// Canonical product domain — product sub-apps are served at
+// `<slug>.fourmanifold.com` (mirrors product/Product.tsx canonicalProductHost and
+// core._product_publish_target). Used to derive a REAL product URL for the
+// company card whenever the backend payload omits an explicit public_url.
+const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+
+function canonicalProductUrl(slug: string) {
+  const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
+  return clean ? `https://${clean}.${PRODUCT_BASE_DOMAIN}` : "";
+}
+
 function businessMeta(item: TakyonOperatorBusinessSummary) {
   const mode = trimText(item.mode || item.state || item.status || "live");
   if (!mode) return "Business";
@@ -139,6 +166,12 @@ function mapBusiness(item: TakyonOperatorBusinessSummary): LitebulbBusiness {
   const slug = trimText(item.slug).toLowerCase();
   const name = trimText(item.name) || titleCaseSlug(slug || "business");
   const goal = trimText(item.goal);
+  // Prefer a backend-recorded public URL; otherwise derive the canonical host so
+  // the card embed/address always points at the REAL product, never a `.app`.
+  const productUrl = trimText(item.product_url) || canonicalProductUrl(slug);
+  // Logo is the recorded published-asset PATH (resolved through the authenticated
+  // /asset endpoint by the card). Empty until a paid logo is generated.
+  const logoPath = trimText(item.logo_url);
   return {
     slug,
     name,
@@ -147,6 +180,8 @@ function mapBusiness(item: TakyonOperatorBusinessSummary): LitebulbBusiness {
     status: trimText(item.status || item.state || "active") || "active",
     tagline: goal || name,
     meta: businessMeta(item),
+    productUrl,
+    logoPath,
   };
 }
 
@@ -412,6 +447,9 @@ function pendingTurnMessage(pendingTurn: PendingTurn): ChatMessage {
     id: pendingTurn.id,
     who: "user",
     text: pendingTurn.text,
+    // The send-time wall clock so the user bubble orders correctly against the
+    // CEO's curated chat_stream narration (which is keyed by ISO posted_at).
+    ts: Number(pendingTurn.createdAt) || Date.now(),
   };
 }
 
@@ -523,7 +561,26 @@ function createEmptyBuildState(): BuildState {
     narration: [],
     terminal: [],
     error: "",
+    errorCode: 0,
   };
+}
+
+// Turn a raw create failure into a clean, human, customer-safe sentence. Strips
+// the leading JSON-RPC `<code>:` prefix and any tool/path internals; gives a
+// purpose-built line for the known codes (4030 out-of-credits, 4004 input/bounce).
+function humanizeCreateError(error: unknown, code: number): string {
+  if (code === 4030) {
+    return "You’re out of credits. Subscribe to a plan to create a company.";
+  }
+  const raw = error instanceof Error ? error.message : "";
+  // Drop a leading numeric "5051: " / "4004: " prefix and collapse whitespace.
+  const cleaned = raw.replace(/^\s*\d{3,4}\s*:\s*/, "").trim();
+  if (!cleaned) return "Something went wrong creating your company. Please try again.";
+  // Avoid surfacing obvious tool/worker internals; fall back to a generic line.
+  if (/business_|claude[_\s-]?agent|workspace root|traceback/i.test(cleaned)) {
+    return "Something went wrong creating your company. Please try again.";
+  }
+  return cleaned;
 }
 
 function createEmptyLiveChatSignals(): LiveChatSignals {
@@ -1221,7 +1278,7 @@ export function useTakyonLitebulb() {
     if (!businessSlug) return;
     if (openingBusinessRef.current === businessSlug) return;
     const matched = businesses.find((item) => item.slug === businessSlug)
-      || { slug: businessSlug, name: titleCaseSlug(businessSlug), goal: "", mode: "live", status: "active", tagline: titleCaseSlug(businessSlug), meta: "Live mode" };
+      || { slug: businessSlug, name: titleCaseSlug(businessSlug), goal: "", mode: "live", status: "active", tagline: titleCaseSlug(businessSlug), meta: "Live mode", productUrl: canonicalProductUrl(businessSlug), logoPath: "" };
     visibleBusinessRef.current = businessSlug;
     if (activeBusiness?.slug === businessSlug && sessionBusinessRef.current === businessSlug) {
       setActiveBusiness((current) => (
@@ -1363,6 +1420,7 @@ export function useTakyonLitebulb() {
       narration: [`Reading your idea — ${idea}.`],
       terminal: ["Booting Coscale CEO…"],
       error: "",
+      errorCode: 0,
     });
     setSubmitting(true);
     try {
@@ -1440,6 +1498,8 @@ export function useTakyonLitebulb() {
         status: "active",
         tagline: idea,
         meta: "Live mode",
+        productUrl: canonicalProductUrl(businessSlug),
+        logoPath: "",
       });
       setWorkspace({
         business_slug: businessSlug,
@@ -1468,11 +1528,19 @@ export function useTakyonLitebulb() {
       setSessionRunning(Boolean(result?.streaming));
       return businessSlug;
     } catch (error) {
+      // Preserve the numeric error code (set on the Error by gatewayClient) so the
+      // router can branch — 4030 out-of-credits → Plans & Billing; other → home.
+      const code =
+        error && typeof error === "object" && typeof (error as { code?: unknown }).code === "number"
+          ? (error as { code: number }).code
+          : 0;
+      const human = humanizeCreateError(error, code);
       setBuildState((state) => ({
         ...state,
         status: "error",
-        error: error instanceof Error ? error.message : "Failed to create company.",
-        terminal: pushUniqueLine(state.terminal, error instanceof Error ? error.message : "Failed to create company."),
+        error: human,
+        errorCode: code,
+        terminal: pushUniqueLine(state.terminal, human),
       }));
       setSubmitting(false);
       liveChatTurnRef.current = false;
@@ -1645,6 +1713,7 @@ export function useTakyonLitebulb() {
     buildState,
     resetBuildState,
     submitting,
+    sessionRunning,
     billingBusy,
     subscribeBusy,
     loadHome,

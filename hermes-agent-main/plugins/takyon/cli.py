@@ -885,6 +885,33 @@ def _preferred_public_business_slug(value: str) -> str:
         counter += 1
 
 
+def _resolve_free_public_business_slug(store: "TakyonStore", value: str) -> str:
+    """Return the preferred public slug, auto-incrementing past any existing business.
+
+    The preferred slug already avoids reserved infra subdomains. On top of that, when
+    the resolved slug already names a created business, append ``-2``, ``-3``, ... until
+    a free, non-reserved slug is found so a duplicate create succeeds under a new slug
+    instead of hard-failing on collision. Bounded and slug-length clamped.
+    """
+    preferred = _preferred_public_business_slug(value)
+    if not _business_exists(store, preferred):
+        return preferred
+
+    max_len = 80
+    base = preferred
+    for counter in range(2, 1000):
+        suffix = f"-{counter}"
+        trimmed = base[: max_len - len(suffix)].rstrip("-_")
+        candidate = _slugify(f"{trimmed}{suffix}" if trimmed else f"site{suffix}")
+        if _is_reserved_public_subdomain(candidate):
+            continue
+        if not _business_exists(store, candidate):
+            return candidate
+    # Exhausted the bounded range; fall back to a unique suffix so creation never blocks.
+    unique = _slugify(f"{base[: max_len - 9].rstrip('-_')}-{uuid.uuid4().hex[:6]}")
+    return unique or _slugify(f"site-{uuid.uuid4().hex[:6]}")
+
+
 def _resolve_dashboard_create_identity(
     name: str,
     goal: str,
@@ -1106,6 +1133,12 @@ def _resolved_operator_user_id(operator_user_id: str | None = None) -> str:
     return str(os.getenv("TAKYON_OPERATOR_USER_ID") or "").strip()
 
 
+# Authoritative operator-wallet gate for company creation: creating a business requires STRICTLY
+# more than this percent of the plan-funded period allowance remaining, and consumes exactly this
+# percent of the period allowance on create. Backend source of truth — never trust the client.
+_CREATE_ALLOWANCE_GATE_PERCENT = 3
+
+
 def _operator_turn_estimate_cents() -> int:
     raw = str(os.getenv("TAKYON_OPERATOR_TURN_ESTIMATE_CENTS") or "").strip()
     if raw:
@@ -1122,36 +1155,57 @@ def _operator_turn_estimate_cents() -> int:
 
 
 class InsufficientOperatorBalance(TakyonError):
-    """Company creation was refused because the acting operator has no spendable balance
-    (allowance remaining). Carries the exact figures so the gateway can build a precise
-    402/4030 block without leaking anything else. Distinct error type so the create handler maps it
-    to the balance-block code rather than a generic create failure."""
+    """Company creation was refused because the acting operator's plan-funded allowance is at or
+    below the create floor (>3% of the period allowance remaining). Carries the exact figures so the
+    gateway can build a precise 402/4030 block without leaking anything else. Distinct error type so
+    the create handler maps it to the balance-block code rather than a generic create failure."""
 
-    def __init__(self, *, spendable_cents: int, allowance_remaining_cents: int) -> None:
+    def __init__(
+        self,
+        *,
+        spendable_cents: int,
+        allowance_remaining_cents: int,
+        allowance_included_cents: int = 0,
+        percent_remaining: float = 0.0,
+        required_percent: float = _CREATE_ALLOWANCE_GATE_PERCENT,
+    ) -> None:
         self.spendable_cents = int(spendable_cents)
         self.allowance_remaining_cents = int(allowance_remaining_cents)
+        self.allowance_included_cents = int(allowance_included_cents)
+        self.percent_remaining = float(percent_remaining)
+        self.required_percent = float(required_percent)
         super().__init__(
-            "insufficient_balance: company creation requires a positive operator balance "
-            f"(spendable {self.spendable_cents}c = allowance {self.allowance_remaining_cents}c)"
+            "insufficient_balance: company creation requires "
+            f">{self.required_percent:g}% remaining "
+            f"(have {self.percent_remaining:g}%, allowance remaining "
+            f"{self.allowance_remaining_cents}c of {self.allowance_included_cents}c)"
         )
 
 
-def _operator_create_balance_preflight(operator_user_id: str | None) -> None:
-    """Refuse company creation up front when the acting operator has no money to pay for it
-    (GOAL_RULES §3 gap #2: zero-balance company-creation preflight). The CEO bootstrap a new company
-    triggers spends real provider money on the operator billing rail, so building a company page for
-    an operator who cannot pay is an ungated-spend hole — block BEFORE any business row or bootstrap
-    work is created.
+def _operator_create_balance_preflight(
+    operator_user_id: str | None,
+    *,
+    business_slug: str | None = None,
+) -> None:
+    """Authoritatively gate AND charge company creation on the operator wallet (the plan-funded
+    allowance). Backend source of truth — never trust the client. The CEO bootstrap of a new company
+    spends real provider money on the operator billing rail, so building a company for an operator
+    who cannot pay is an ungated-spend hole. This is the single create chokepoint both the shell
+    /create and the dashboard create RPC funnel through.
 
-    Spendable balance is the SAME quantity the dashboard surfaces as ``account.spendable_cents``:
-    allowance remaining (web_server.py operator-account payload). ``<= 0`` ⇒ block.
+    Rules (atomic, fail-closed):
+    - REQUIRE ``allowance_percent_remaining > 3`` — the SAME percent the dashboard surfaces
+      (``remaining / included * 100``, web_server.py operator-account payload). At or below 3% ⇒
+      refuse with ``InsufficientOperatorBalance`` (mapped to the 4030 balance block).
+    - DECREMENT 3% of the period allowance (``included * 3 / 100`` cents) on create by consuming it
+      through the billing rail (reserve → settle), so the wallet authoritatively drops by 3% per
+      created company. Idempotent on the business slug so a retried create never double-charges.
 
     Fail-OPEN only for genuinely identity-less / non-Postgres dev runs, exactly like
     ``_operator_budget_reserve``: with no resolved operator identity or no Postgres control plane
     there is no billing account to read and local development must not be blocked. On the Postgres
-    plane WITH a resolved operator, a missing billing account is treated as zero spendable (an
-    unfunded operator), so it fails CLOSED — assume the caller may be trying to create without
-    paying (§3)."""
+    plane WITH a resolved operator, a missing billing account or a zero/empty allowance is treated as
+    unfunded, so it fails CLOSED — assume the caller may be trying to create without paying (§3)."""
     from .core import _db_backend
 
     user_id = _resolved_operator_user_id(operator_user_id)
@@ -1173,18 +1227,118 @@ def _operator_create_balance_preflight(operator_user_id: str | None) -> None:
             balances = billing.get_billing_balances(conn, user_id)
         except billing.NoBillingAccount as exc:
             # On the Postgres plane a resolved operator with NO billing account has no funding ⇒
-            # fail closed (zero spendable), not silently allow. § 3 (assume evil): never build a
-            # company for an operator with no provable balance.
+            # fail closed. § 3 (assume evil): never build a company for an operator with no
+            # provable balance.
             raise InsufficientOperatorBalance(
-                spendable_cents=0, allowance_remaining_cents=0
+                spendable_cents=0,
+                allowance_remaining_cents=0,
+                allowance_included_cents=0,
+                percent_remaining=0.0,
             ) from exc
+        allowance_included = max(0, int(balances.allowance_included_cents))
         allowance_remaining = max(0, int(balances.allowance_remaining_cents))
-        spendable = allowance_remaining
-        if spendable <= 0:
+        # A zero/empty period allowance can never clear the >3% floor — fail closed without a
+        # division-by-zero. percent_remaining is the dashboard-surfaced figure.
+        percent_remaining = (
+            (allowance_remaining / allowance_included) * 100.0
+            if allowance_included > 0
+            else 0.0
+        )
+        # Require STRICTLY more than 3% remaining. Compare on cents (remaining*100 > 3*included)
+        # to avoid float rounding at the boundary.
+        if allowance_included <= 0 or (
+            allowance_remaining * 100 <= _CREATE_ALLOWANCE_GATE_PERCENT * allowance_included
+        ):
             raise InsufficientOperatorBalance(
-                spendable_cents=spendable,
+                spendable_cents=allowance_remaining,
                 allowance_remaining_cents=allowance_remaining,
+                allowance_included_cents=allowance_included,
+                percent_remaining=round(percent_remaining, 1),
             )
+        # Two callers funnel here for one create: the dashboard create RPC runs a slug-LESS pre-check
+        # (operator known, slug not resolved yet), then the create chokepoint inside run_takyon_command
+        # runs the REAL gate WITH the resolved slug. Only the slug-bearing call performs the
+        # authoritative DECREMENT; the slug-less pre-check stays a read-only gate (no side effect) so
+        # it cannot double-charge. Both still fail closed on the >3% floor above.
+        if not str(business_slug or "").strip():
+            return
+        # Authoritative decrement: consume 3% of the period allowance on create. Round so a tiny
+        # allowance still charges at least 1c (never a free create once past the gate).
+        charge_cents = max(
+            1, (allowance_included * _CREATE_ALLOWANCE_GATE_PERCENT + 99) // 100
+        )
+        # Idempotent per create: keyed on the resolved slug so a retried create reuses the same
+        # reservation and never double-charges. reserve → settle drives allowance_used up by
+        # charge_cents.
+        reservation_key = _idempotency_key(
+            "operator-create-charge", str(business_slug).strip(), str(_CREATE_ALLOWANCE_GATE_PERCENT)
+        )
+        try:
+            # This charge is OPERATOR-scoped (the operator's plan allowance), and it runs at the
+            # create chokepoint BEFORE the businesses row is committed, so it must NOT tag the
+            # reservation with the new slug — billing_entries.business_slug carries an FK to
+            # businesses(slug), and that row does not exist yet. The slug is already baked into the
+            # idempotency key for create-specific replay safety.
+            res = billing.reserve(
+                conn,
+                user_id,
+                charge_cents,
+                reservation_key,
+                business_slug=None,
+            )
+        except billing.InsufficientBalance as exc:
+            # Race: allowance fell below the charge between the read and the reserve. Fail closed.
+            raise InsufficientOperatorBalance(
+                spendable_cents=allowance_remaining,
+                allowance_remaining_cents=allowance_remaining,
+                allowance_included_cents=allowance_included,
+                percent_remaining=round(percent_remaining, 1),
+            ) from exc
+        # Settle the full reservation at the held amount so the 3% is permanently consumed (not
+        # released). Idempotent: a replayed key returns the same reservation and re-settling is a
+        # no-op (first finalizer wins).
+        billing.settle(conn, reservation_key, int(res.allowance_cents))
+    finally:
+        conn.close()
+
+
+# Free starter creative credits granted to every new business on create so the bootstrap logo and
+# first X post auto-run instead of failing closed on a 0-credit balance. 3 credits = X (1) + logo (2).
+_BUSINESS_BOOTSTRAP_FREE_CREDITS = 3
+
+
+def _seed_business_free_credits(slug: str) -> None:
+    """Open the business creative-credit account and grant the free starter pack on create.
+
+    Idempotent on the slug (``business_credits.grant_credits`` no-ops on a replayed idempotency_key),
+    so a retried create never re-grants. Fail-open only for non-Postgres dev runs, where there is no
+    creative-credit ledger to seed and local creation must not be blocked. This makes the bootstrap
+    logo + first X auto-run; without it both fail closed on a zero credit balance."""
+    from .core import _db_backend
+
+    business_slug = str(slug or "").strip()
+    if not business_slug or _db_backend() != "postgres":
+        return  # no creative-credit ledger to seed (dev / non-Postgres)
+
+    import psycopg
+
+    try:
+        from . import business_credits
+        from .runtime_app import resolve_database_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import business_credits
+        from plugins.takyon.runtime_app import resolve_database_url
+
+    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    try:
+        business_credits.open_business_credit_account(conn, business_slug)
+        business_credits.grant_credits(
+            conn,
+            business_slug,
+            _BUSINESS_BOOTSTRAP_FREE_CREDITS,
+            idempotency_key=f"{business_slug}-bootstrap-free-seed",
+            metadata={"reason": "bootstrap free starter (X+logo)"},
+        )
     finally:
         conn.close()
 
@@ -1318,7 +1472,7 @@ def _business_bootstrap_instruction(
         "- Do NOT call business_read_business, business_read_file, or business_list_files before acting.",
         "- Do NOT call todo or update task lists at any point.",
         "- Do NOT call skills_list.",
-        "- Load only takyon-market-research, takyon-x, and takyon-distribution via skill_view. Do not load any other skill during bootstrap.",
+        "- Load only takyon-market-research, takyon-brand-logo, takyon-x, and takyon-distribution via skill_view. Do not load any other skill during bootstrap.",
         "- After completing each step, move to the next immediately.",
         "- Use exactly the business name above. Do not invent a second company, umbrella brand, or product name.",
         "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (researching the market, designing the product, putting the site online, drafting the launch post) — never the runtime plumbing.",
@@ -1330,33 +1484,57 @@ def _business_bootstrap_instruction(
         "",
         "## Steps",
         "",
-        "### 1. Research",
-        "Load takyon-market-research (skill_view) and execute its procedure.",
-        "Write research/strategy.md with: customer, problem, offer, why they care now, X angle.",
-        "Gather enough evidence to make product and X claims truthful, then stop researching.",
+        "### 1. Fast landing research (just enough to publish the landing)",
+        "Goal: get the customer a real, branded landing page live FAST. Do the SMALLEST research that makes the landing copy truthful, then move on — do NOT run the full market-research procedure before the first publish.",
+        "Load takyon-market-research (skill_view) and run only the lightweight pass that pins down: who the customer is (ICP), the core problem, the offer, and one launch angle.",
+        "Write that into research/strategy.md as the initial landing brief. Mark it as the fast pass; you will deepen it in step 3 after the landing is live.",
+        "Stop researching as soon as the landing claims can be truthful. The deeper market/X research is deferred to step 3 so it overlaps the rest of bootstrap instead of blocking the first landing publish.",
         "",
-        "### 2. Product surface + site build",
+        "### 2. Product surface + landing build (publish the landing FIRST)",
         "Call business_upsert_app_surface_contract with:",
         "- source_path: product/site",
         "- runtime_features: auth, account, profile, checkout",
         "- routes: / (landing page), /app (sign-in + subscription gate), and /app/profile (account page)",
+        "",
+        "This seeds the COMPLETE app kit up front (landing, the /app access shell, the /app/profile account page, support, and the shared auth/checkout/account rails). The two build passes below only change WHEN each screen is customized and published; they never change the final fileset. The end state must be the same complete app kit as a single-pass build.",
         "",
         "If the app shell is monthly paid, call business_upsert_app_plan for the canonical `monthly` plan before the site worker runs so the existing checkout rail has a real plan object to use.",
         "- Use the researched monthly price when it is already known.",
         "- Set `included_ai_budget_microusd` together with `price_cents`.",
         "- If pricing is not settled yet, keep the canonical starter monthly plan instead of leaving checkout planless.",
         "",
-        "Then call business_claude_agent_task with:",
+        "#### 2a. Build and publish the landing page FIRST",
+        "Get a real, branded landing page live as fast as possible so the customer sees their site within the first couple of minutes. Call business_claude_agent_task with:",
         "- workspace: product/site",
-        "- instruction: Use the pinned Vite scaffold materialized in the workspace as the runtime rail base. Keep the shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts` while making the landing and access screens business-specific. Choose one coherent visual direction from the brief and the provided style packs, then follow it consistently without blending packs.",
+        "- instruction: Use the pinned Vite scaffold materialized in the workspace as the runtime rail base. Keep the shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts` while making the landing page business-specific. Choose one coherent visual direction from the brief and the provided style packs, then follow it consistently without blending packs.",
         '- guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"] so the delegated site worker receives the shared design method plus the available shared style packs.',
-        "- instruction addendum: for `/app` and `/app/profile`, keep subscription/account truth on the shared AppKit hooks in `src/lib/hooks.ts`. Treat the account rail as `user` plus `entitlements[]`, and do not hand-roll gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or ad hoc `client.account()` parsing.",
+        "- Scope this pass to ONLY the landing route `/`: customize `src/screens/landing.tsx` so it is a truthful, branded landing page. Do NOT edit `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, or `src/screens/profile.tsx` in this pass — those are customized in 2b.",
+        "- Keep the shared Vite route skeleton and the seeded `/app`, `/app/profile`, and support routes intact; do not delete or stub any seeded screen. They stay as the seeded app kit until 2b refines them.",
+        "- refresh_surface: true",
         "",
-        "Build the landing page at / now.",
-        "Execution order inside product/site:",
-        "- First customize `/` so `src/screens/landing.tsx` is a truthful branded landing page.",
-        "- Second make `/app` a thin sign-in/subscription access gate by refining `src/screens/app-layout.tsx` and `src/screens/app-home.tsx` on the existing Hermes/Takyon auth + checkout rails.",
-        "- Third make `/app/profile` the truthful account/subscription page in `src/screens/profile.tsx` on the existing account + profile rails.",
+        "This 2a pass with `refresh_surface: true` PUBLISHES AND SERVES the landing immediately on its own: the worker's `surface_refresh.publish.status` should come back `published` and the live site at the customer host serves the new landing right away, with the still-seeded real `/app` access shell shipping behind sign-in until 2b refines it. The landing does NOT wait for 2b to be served — confirm `surface_refresh.publish.status == \"published\"` and a real `public_url` in this pass's structured result before continuing.",
+        "",
+        "Inspect the structured result from this first business_claude_agent_task. Trust only its exact success/blocker and surface_refresh publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, the rest of the app kit, or X.",
+        "",
+        "#### 2a.1. Register Search Console (immediately after the landing publishes)",
+        "As soon as 2a reports `surface_refresh.publish.status == \"published\"` for the landing, register the live site with Google Search Console — do this BEFORE 2b so the single fast idempotent call is front-loaded onto the already-live landing instead of being pushed past the budget by the heavier 2b pass.",
+        "Call business_register_search_console with the business and a fresh idempotency_key. It injects the google-site-verification META tag onto BOTH the live published landing and the source template (so Google can verify it now AND the 2b appkit publish carries the tag forward), then registers the URL-prefix property.",
+        "This is live-only, key-behind-TK, and fails closed on its own: if it returns blocked_search_console_unconfigured (the verification key is not provisioned) or any other blocker, record that exact blocker in research/strategy.md and continue to 2b — do not fabricate a verification and do not stop the whole build for it.",
+        "",
+        "#### 2b. Add the real logo, then finish the /app access shell + profile",
+        "Once the landing page has published in 2a:",
+        "",
+        "First, generate the real brand logo so it lands before the next publish serves it. Load takyon-brand-logo (skill_view) and follow its procedure: assemble `business_context` ({name, category, tone}) from the research you wrote in research/strategy.md (do not invent brand voice), then call business_generate_logo with the business, a fresh idempotency_key, and that business_context. The tool publishes /brand-logo.png plus a real PNG favicon onto the live site; the 2b publish below serves them, replacing the seeded monogram placeholder. business_generate_logo is live-only and creative-credit gated and fails closed on its own: if it returns insufficient credits or an unconfigured provider key, record that exact blocker in research/strategy.md, leave the seeded monogram placeholder in place, and continue with the rest of 2b — do not fabricate a logo and do not stop the whole build for it.",
+        "",
+        "Then finish the access shell and account page in a SECOND business_claude_agent_task with:",
+        "- workspace: product/site",
+        "- instruction: Use the same pinned Vite scaffold and the same single coherent visual direction you chose for the landing page in 2a — match the landing brand exactly, do not introduce a second style. Keep the shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`.",
+        '- guidance_skills: ["claude-design", "claude-design-openai", "claude-design-stripe", "claude-design-superhuman", "claude-design-vibrant", "claude-design-doodle"] so this pass receives the same shared design method and style packs.',
+        "- instruction addendum: for `/app` and `/app/profile`, keep subscription/account truth on the shared AppKit hooks in `src/lib/hooks.ts`. Treat the account rail as `user` plus `entitlements[]`, and do not hand-roll gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or ad hoc `client.account()` parsing.",
+        "- Scope this pass to the access shell and account page on the EXISTING seeded auth + checkout rails:",
+        "  - Make `/app` a thin sign-in/subscription access gate by refining `src/screens/app-layout.tsx` and `src/screens/app-home.tsx`.",
+        "  - Make `/app/profile` the truthful account/subscription page in `src/screens/profile.tsx` on the existing account + profile rails.",
+        "- Do not edit `src/screens/landing.tsx` again unless a small correction is required to keep it consistent with the brand; 2a already published it.",
         "- Do not spend bootstrap time editing `src/screens/support.tsx` unless explicitly asked.",
         "- Keep the shared Vite route skeleton intact unless a small route-level correction is required for correctness.",
         "- Stop once `/`, `/app`, and `/app/profile` are truthful and publishable; do not spend first-pass time inventing the real product workflow.",
@@ -1399,7 +1577,11 @@ def _business_bootstrap_instruction(
         "If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there.",
         "Do not paraphrase a different platform diagnosis and do not continue to X as if the product build completed.",
         "",
-        "### 3. X post",
+        "### 3. Deepen research (now the landing is live)",
+        "The landing is already published and registered, so the heavier market/X research no longer blocks the customer seeing their site. Now run the full takyon-market-research procedure to deepen research/strategy.md beyond the fast landing brief from step 1: expand the customer/problem evidence, validate the offer and pricing, and lock the X angle.",
+        "Update research/strategy.md in place; this deeper pass informs the X post in step 4 and the later in-app workflow. Keep all claims truthful and evidence-backed; stop once the X claims are sound.",
+        "",
+        "### 4. X post",
         "Load takyon-x (skill_view) and execute its procedure to draft and publish one X post about this business.",
         "Use research findings to make the post truthful and compelling.",
         "Before any live X publish or paid creative/ad action, call business_read_channel_credit_budgets. If the required bucket cannot cover the action cost, record that exact blocker in research/strategy.md and stop before enqueueing or launching the spendful step.",
@@ -3498,20 +3680,29 @@ def run_takyon_command(
             auto_default=auto_default,
         )
         if _business_exists(store, slug):
-            raise SystemExit(
-                f"business:{slug} already exists. /{command} requires a fresh slug and will not reuse an existing business."
-            )
-        # GOAL_RULES §3 gap #2 (red-team proven): canonical zero-balance company-creation gate.
-        # EVERY operator create entrypoint — dashboard.create RPC, shell /create via
-        # takyon.shell.exec, --no-auto detached create, and the bare CLI create/init/build —
-        # funnels through this single chokepoint before the business.upsert commit writes a
-        # businesses row. Refuse here so creation fails CLOSED for an operator with no spendable
-        # balance, regardless of --test/--no-auto (a create still needs balance authority).
-        # Reads the SAME billing spendable the dashboard RPC's preflight uses; fail-open only for
-        # identity-less / non-Postgres dev runs. The dashboard RPC's own call is now
-        # redundant-but-harmless. Raises InsufficientOperatorBalance (TakyonError subclass) which
-        # the dashboard maps to the 4030 balance block.
-        _operator_create_balance_preflight(resolved_operator_user_id)
+            # Creating a fresh business must never reuse an existing one, but a slug
+            # collision (e.g. the same idea created twice) should NOT strand the operator.
+            # Auto-pick the next free, non-reserved slug so creation succeeds under a new
+            # slug instead of hard-failing. This is the single create chokepoint that both
+            # the shell /create and the dashboard create RPC funnel through.
+            free_slug = _resolve_free_public_business_slug(store, slug)
+            if free_slug == slug or _business_exists(store, free_slug):
+                raise SystemExit(
+                    f"business:{slug} already exists and a free alternative slug could not be derived."
+                )
+            slug = free_slug
+        # Authoritative operator-wallet gate (GOAL_RULES §3 gap #2, red-team proven). EVERY operator
+        # create entrypoint — dashboard.create RPC, shell /create via takyon.shell.exec, --no-auto
+        # detached create, and the bare CLI create/init/build — funnels through this single
+        # chokepoint before the business.upsert commit writes a businesses row. It REQUIRES the
+        # operator's plan-funded allowance to be STRICTLY above 3% remaining and CONSUMES 3% of the
+        # period allowance on create, atomically through the billing rail. Fails CLOSED for an
+        # operator under the floor regardless of --test/--no-auto (a create still needs balance
+        # authority), and is idempotent on the slug so a retried create never double-charges.
+        # Fail-open only for identity-less / non-Postgres dev runs. The dashboard RPC's own call is
+        # redundant-but-harmless. Raises InsufficientOperatorBalance (TakyonError subclass) which the
+        # dashboard maps to the 4030 balance block.
+        _operator_create_balance_preflight(resolved_operator_user_id, business_slug=slug)
         config = _read_model_config(store)
         if auto_start and not no_auto:
             _require_agent_model_config(config, model_override=model)
@@ -3530,6 +3721,11 @@ def run_takyon_command(
         business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
         if str(business_record.get("slug") or "").strip() != slug:
             raise RuntimeError(f"business creation did not persist for {slug}")
+        # Free starter creative-credit seed: open the business creative-credit account and grant 3
+        # FREE credits (enough for the bootstrap X post = 1 + logo = 2) so the bootstrap logo and
+        # first X auto-run instead of failing closed on a 0-credit balance. Idempotent on the slug;
+        # a retried create re-grants nothing. Fail-open only for non-Postgres dev runs.
+        _seed_business_free_credits(slug)
         active_mode = "live"
         if auto_start:
             bootstrap_job = _enqueue_pg_ceo_bootstrap(

@@ -3611,13 +3611,32 @@ def _takyon_operator_businesses_payload(principal: Any) -> dict[str, Any]:
     try:
         from plugins.takyon.core import TakyonStore
 
+        from plugins.takyon.core import _canonical_product_url
+
         store = TakyonStore(operator_user_id=str(principal.user_id))
         with store._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM businesses WHERE owner_user_id = ? ORDER BY updated_at DESC LIMIT ?",
                 (str(principal.user_id), 200),
             ).fetchall()
-        items = [store._row_to_dict(row) for row in rows]
+            items = [store._row_to_dict(row) for row in rows]
+            for item in items:
+                # Enrich each card with a real product URL and logo asset path.
+                # The businesses table has no logo_url/product_url column, so
+                # without this the card always falls back to the grey monogram.
+                try:
+                    slug = str(item.get("slug") or "").strip()
+                    if not slug:
+                        continue
+                    try:
+                        item["product_url"] = _canonical_product_url(store, conn, slug)
+                    except Exception:  # noqa: BLE001 - URL is best-effort
+                        item["product_url"] = f"https://{slug}.fourmanifold.com"
+                    logo_rel = "product/site/public/brand-logo.png"
+                    logo_abs = store._resolve_business_file(slug, logo_rel, sync=False)
+                    item["logo_url"] = logo_rel if logo_abs.is_file() else ""
+                except Exception as item_exc:  # noqa: BLE001 - one bad business must not blank the list
+                    _log.warning("dashboard business card enrich failed for %r: %s", item.get("slug"), item_exc)
         return {
             "available": True,
             "businesses": items,

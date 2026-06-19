@@ -16,7 +16,11 @@
   transition: transform 0.18s var(--cds-ease-out), box-shadow 0.18s var(--cds-ease-out);
 }
 .lb-coCard:hover .lb-coCard__thumb { transform: translateY(-4px); box-shadow: var(--cds-shadow-lg); }
-.lb-coCard__name { margin-top: 14px; font-weight: var(--cds-weight-semibold); font-size: var(--cds-text-lg); letter-spacing: -0.01em; color: var(--cds-color-text-default); }
+/* Brand row: small logo + company name, left-aligned under the tile. */
+.lb-coCard__brand { display: flex; align-items: center; gap: 9px; margin-top: 14px; min-width: 0; }
+.lb-coCard__logo { flex: none; width: 22px; height: 22px; border-radius: 6px; object-fit: cover; background: var(--cds-color-surface-sunken); border: 1px solid var(--cds-color-border-default); }
+.lb-coCard__logo--mono { display: grid; place-items: center; font-size: 12px; font-weight: var(--cds-weight-semibold); line-height: 1; color: var(--cds-color-text-soft); }
+.lb-coCard__name { font-weight: var(--cds-weight-semibold); font-size: var(--cds-text-lg); letter-spacing: -0.01em; color: var(--cds-color-text-default); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lb-coCard__meta { margin-top: 2px; font-size: var(--cds-text-sm); color: var(--cds-color-text-soft); }
 .lb-coCard__thumb--new { display: grid; place-items: center; background: var(--cds-color-surface-sunken); border-style: dashed; border-color: var(--cds-color-border-strong); }
 .lb-coCard__plus { font-size: 13cqw; font-weight: 200; line-height: 1; color: var(--cds-color-text-faint); }
@@ -25,7 +29,20 @@
 .lb-thumb { width: 100%; height: 100%; display: flex; flex-direction: column; background: #fff; font-family: var(--cds-font-sans); }
 .lb-thumb__bar { flex: none; height: 9%; min-height: 13px; display: flex; align-items: center; gap: 1.2cqw; padding: 0 3cqw; background: var(--cds-color-surface-sunken); border-bottom: 1px solid rgba(0, 0, 0, 0.06); }
 .lb-thumb__bar i { width: 1.5cqw; height: 1.5cqw; border-radius: 50%; background: rgba(0, 0, 0, 0.16); }
-.lb-thumb__url { margin-left: 2cqw; font-size: 2.4cqw; font-weight: 500; color: rgba(0, 0, 0, 0.34); }
+.lb-thumb__url { margin-left: 2cqw; font-size: 2.4cqw; font-weight: 500; color: rgba(0, 0, 0, 0.34); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Live landing embed: an oversized iframe of the real site, scaled down so the
+   full page reads as a miniature. The frame is rendered at a desktop logical
+   width then scaled to the container width via an inline transform measured in
+   JS (LandingThumb); pointer-events are off so the whole card stays one click
+   target. */
+.lb-thumb__view { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #fff; }
+.lb-thumb__view .lb-thumb__page { position: absolute; inset: 0; }
+.lb-thumb__frame {
+  position: absolute; top: 0; left: 0;
+  border: 0; background: #fff; pointer-events: none;
+  transform-origin: top left; transition: opacity 0.2s ease;
+}
 .lb-thumb__page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .lb-thumb__nav { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 2cqw; padding: 3.2cqw 4cqw 0; }
 .lb-thumb__brand { display: inline-flex; align-items: center; gap: 1.6cqw; font-size: 3cqw; font-weight: 800; letter-spacing: -0.01em; color: #1b1a16; }

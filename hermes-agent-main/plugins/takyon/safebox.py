@@ -57,6 +57,7 @@ _EXACT_SENSITIVE_ENV_KEYS = frozenset(
         "AUTH0_CLIENT_SECRET",
         "AUTH0_SECRET",
         "DATABASE_URL",
+        "DATAFORSEO_LOGIN",
         "POSTGRES_PRISMA_URL",
         "POSTGRES_URL",
     }
@@ -386,8 +387,13 @@ def _write_user_api_key_state(state: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     os.chmod(tmp_path, 0o600)
-    tmp_path.replace(path)
-    os.chmod(path, 0o600)
+    # Use the shared atomic_replace so a root-run authority write preserves the
+    # registry's service-user ownership (same class of bug as the .env flip that
+    # 502'd the dashboard); a plain rename would re-own it to the writer.
+    from utils import atomic_replace
+
+    real_path = atomic_replace(str(tmp_path), str(path))
+    os.chmod(real_path, 0o600)
 
 
 @contextmanager

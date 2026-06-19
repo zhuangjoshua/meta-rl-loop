@@ -7,18 +7,17 @@ import type {
   TakyonBusinessTractionResponse,
   TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
-import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 import {
-  businessHasShipped,
-  deriveAssistantReceipt,
-  deriveLiveWorkstreamCard,
+  chatStreamAgentMessages,
   sanitizeCustomerReply,
-  type AssistantReceiptData,
+  workspaceChatRunning,
+  workspaceChatSummary,
+  type ChatStreamMessage,
 } from "@/lib/takyonCeoUpdates";
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
 import type { SettingsSection } from "../settings/Settings";
-import type { ChatMessage, ChatProgress, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
+import type { ChatMessage, LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import { CompanyTab } from "./CompanyTab";
 import { BulbMark } from "../shared/icons";
 import "./product.css";
@@ -75,75 +74,39 @@ function workspaceBusinessName(
     .join(" ") || "This business";
 }
 
-// Durable progress fallback derived from the server-mirrored `live_state`
-// snapshot (status + detail). Used when no live streaming turn is producing a
-// richer in-flight card — e.g. after a reload while a CEO bootstrap job is
-// still running. Presentation-only: it reads the workspace mirror and renders
-// the same CEO-style workstream abstraction, never the agent's turn context.
-function liveStateProgress(
+// Durable one-liner derived from the server-mirrored `live_state` snapshot. Used
+// only when the chat transcript has no agent messages yet — e.g. after a reload
+// while a CEO bootstrap job is still running, before any conversational line has
+// streamed in. It renders as a SINGLE plain assistant bubble (not a card, no
+// phase ladder, no "What changed"). Presentation-only: it reads the workspace
+// mirror's curated headline/summary, never the agent's raw turn context.
+function liveStateOneLiner(
   workspace: TakyonBusinessWorkspaceResponse | null,
-): ChatProgress | null {
+): string {
   const businessName = workspaceBusinessName(workspace);
-  // A business that has already shipped a product must never replay the
-  // bootstrap "Starting <business> / Researching the market" placeholder when
-  // the mirrored live_state is momentarily empty or generic.
-  const pastBootstrap = businessHasShipped(workspace);
-  const liveProgress = (
-    statusValue: unknown,
-    ...parts: unknown[]
-  ): ChatProgress | null => {
-    const status = String(statusValue || "").trim().toLowerCase();
-    if (
-      !status
-      || ["done", "completed", "success", "failed", "error", "blocked", "cancelled", "idle"].includes(status)
-    ) {
-      return null;
-    }
-    const detail = parts.map((part) => String(part || "").trim()).find(Boolean);
-    const card = deriveLiveWorkstreamCard({
-      running: true,
-      businessName,
-      statusItems: detail ? [detail] : [],
-      progressLines: [status],
-      pastBootstrap,
-    });
-    if (card) return { ...card, live: true };
-    return {
-      title: `${businessName} update`,
-      summary:
-        detail
-        || (["queued", "scheduled", "pending"].includes(status)
-          ? "Queued CEO bootstrap job."
-          : pastBootstrap
-            ? "I'm on this — picking up where the last workstream left off."
-            : "I'm moving this through the next business workstream now."),
-      items: [],
-      live: true,
-    };
-  };
-
   const state = workspace?.live_state;
-  if (state && typeof state === "object") {
-    const payload = state as Record<string, unknown>;
-    // Prefer the CEO's curated headline + summary (business_post_operator_update)
-    // when present — this is the warm, customer-facing copy that replaces the raw
-    // assistant reasoning stream entirely.
-    const headline = String(payload.headline || "").trim();
-    const summary = String(payload.summary || "").trim();
-    if (headline || summary) {
-      return {
-        title: headline || `${businessName} update`,
-        summary: summary || "I'm on this — here's the latest on your company.",
-        items: [],
-        live: !["done", "completed", "success", "failed", "error", "idle"].includes(
-          String(payload.status || "").trim().toLowerCase(),
-        ),
-      };
-    }
-    const progress = liveProgress(payload.status, payload.detail);
-    if (progress) return progress;
+  if (!state || typeof state !== "object") return "";
+  const payload = state as Record<string, unknown>;
+  // Prefer the CEO's curated, customer-facing summary (business_post_operator_update)
+  // over the headline; fall back to a warm, human, result-led line for an
+  // in-flight status. The raw summary/headline/detail can still carry internal
+  // plumbing wording, so every branch that returns them runs through
+  // sanitizeCustomerReply first — a banned status-log line ("I'm on this …",
+  // tool/skill/path nouns) is stripped and we fall through to the warm copy.
+  const summary = sanitizeCustomerReply(String(payload.summary || ""));
+  if (summary) return summary;
+  const headline = sanitizeCustomerReply(String(payload.headline || ""));
+  if (headline) return headline;
+  const status = String(payload.status || "").trim().toLowerCase();
+  const detail = sanitizeCustomerReply(String(payload.detail || ""));
+  if (detail) return detail;
+  if (["queued", "scheduled", "pending"].includes(status)) {
+    return `Getting ${businessName} set up now — I'll update you here in a moment.`;
   }
-  return null;
+  if (["running", "active"].includes(status)) {
+    return `Working on ${businessName} now — I'll update you here in a moment.`;
+  }
+  return "";
 }
 
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
@@ -190,96 +153,17 @@ function AgentMessageMarkdown({ text }: { text: string }) {
   );
 }
 
-function AgentReceipt({ receipt }: { receipt: AssistantReceiptData }) {
+// A standalone agent row that contains ONLY the animated thinking dots — its own
+// bubble, its own vertical space. Shown while the turn is running and before any
+// customer-facing text has arrived; the message bubble replaces it once text
+// streams in (mirrors Claude/OpenAI: thinking → reply). The dots NEVER stack on
+// top of message words.
+function ThinkingRow() {
   return (
-    <div className="lb-receipt">
-      <div className="lb-receipt__title">{receipt.title}</div>
-      <p className="lb-receipt__summary">{receipt.summary}</p>
-      {receipt.liveUrl && (
-        <p className="lb-receipt__link">
-          Live URL: <a href={receipt.liveUrl} target="_blank" rel="noreferrer">{receipt.liveUrl}</a>
-        </p>
-      )}
-      {receipt.bullets.length > 0 && (
-        <div className="lb-receipt__section">
-          <div className="lb-receipt__label">What changed</div>
-          <ul className="lb-receipt__list">
-            {receipt.bullets.map((bullet, index) => (
-              <li key={`${bullet}-${index}`}>{bullet}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {receipt.checks.length > 0 && (
-        <div className="lb-receipt__section">
-          <div className="lb-receipt__label">Validation</div>
-          <ul className="lb-receipt__list">
-            {receipt.checks.map((check, index) => (
-              <li key={`${check}-${index}`}>{check}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {receipt.next && (
-        <div className="lb-receipt__section">
-          <div className="lb-receipt__label">Next</div>
-          <p className="lb-receipt__text">{receipt.next}</p>
-        </div>
-      )}
-      <details className="lb-receipt__details">
-        <summary>View build details</summary>
-        {receipt.files.length > 0 && (
-          <div className="lb-receipt__section">
-            <div className="lb-receipt__label">Files changed</div>
-            <ul className="lb-receipt__list">
-              {receipt.files.map((file) => (
-                <li key={file}>{file}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        {receipt.checks.length > 0 && (
-          <div className="lb-receipt__section">
-            <div className="lb-receipt__label">Checks</div>
-            <ul className="lb-receipt__list">
-              {receipt.checks.map((check, index) => (
-                <li key={`${check}-detail-${index}`}>{check}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-        <div className="lb-receipt__section">
-          <div className="lb-receipt__label">Raw response</div>
-          <AgentMessageMarkdown text={receipt.rawDetails} />
-        </div>
-      </details>
-    </div>
-  );
-}
-
-// Renders a CEO update as a normal agent conversation turn — a thinking
-// indicator while live, then the CEO's message as flowing text — NOT a
-// structured card with a phase checklist (operator clarification 2026-06-18).
-function LiveProgressCard({ progress }: { progress: ChatProgress }) {
-  const completed = progress.items.filter((item) => item.status === "complete");
-  return (
-    <div className="lb-ceomsg">
-      {progress.live && (
-        <div className="lb-ceomsg__think">
-          <span className="lb-msg__work"><span className="lb-typing"><i /><i /><i /></span></span>
-          {progress.current ? <span className="lb-ceomsg__think-txt">{progress.current}</span> : null}
-        </div>
-      )}
-      {progress.title ? <div className="lb-ceomsg__title">{progress.title}</div> : null}
-      {progress.summary ? <p className="lb-ceomsg__p">{progress.summary}</p> : null}
-      {completed.length > 0 && (
-        <p className="lb-ceomsg__p"><strong>What changed:</strong> {completed.map((item) => item.completeLabel).join(" · ")}</p>
-      )}
-      {progress.blocked ? (
-        <p className="lb-ceomsg__p"><strong>Blocked:</strong> {progress.blocked}</p>
-      ) : progress.next ? (
-        <p className="lb-ceomsg__p"><strong>Next:</strong> {progress.next}</p>
-      ) : null}
+    <div className="lb-msg lb-msg--agent">
+      <div className="lb-msg__bubble lb-msg__bubble--think" aria-label="Assistant is thinking">
+        <span className="lb-typing"><i /><i /><i /></span>
+      </div>
     </div>
   );
 }
@@ -361,11 +245,12 @@ type TabKey = "product" | "company";
 function AgentChat({
   business,
   messages,
-  progress,
-  streamingProgress,
-  reviewUrl,
+  agentStream,
+  chatSummary,
+  chatRunning,
+  liveStateLine,
   tab,
-  canStop,
+  running,
   sending,
   onTab,
   onClose,
@@ -373,12 +258,29 @@ function AgentChat({
   onStop,
 }: {
   business: LitebulbBusiness;
+  // The raw client transcript. ONLY the user bubbles are taken from here; the
+  // agent bubbles come from `agentStream` (the curated, customer-safe
+  // chat_stream), never from the raw history/delta assistant messages which are
+  // the CEO's chain-of-thought.
   messages: ChatMessage[];
-  progress: ChatProgress | null;
-  streamingProgress?: ChatProgress | null;
-  reviewUrl?: string;
+  // The curated CEO narration parsed from workspace.chat_stream (ordered
+  // oldest→newest). These are the ONLY agent bubbles rendered.
+  agentStream: ChatStreamMessage[];
+  // Durable end-of-turn summary mirrored from workspace.chat_summary. The
+  // chat_stream's last message usually already carries it; this is a fallback.
+  chatSummary?: string;
+  // The backend's authoritative chat_running flag (live_state.chat_running);
+  // used together with the client's own `running` to drive the thinking dots.
+  chatRunning: boolean;
+  // Durable one-line status from the server-mirrored live_state, used ONLY as a
+  // single plain assistant bubble when there is no chat_stream yet (e.g. a cold
+  // reload mid-bootstrap before any curated message exists). Never a card.
+  liveStateLine?: string;
   tab: TabKey;
-  canStop: boolean;
+  // TRUE in-flight signal (an active prompt submit or a live gateway turn). The
+  // stop affordance is shown ONLY while this is true; never derived from a
+  // durable live_state mirror.
+  running: boolean;
   sending: boolean;
   onTab: (tab: TabKey) => void;
   onClose: () => void;
@@ -386,51 +288,111 @@ function AgentChat({
   onStop: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  // Optimistic stop state: reflect the interrupt immediately on click, then clear
+  // once the turn actually ends (running flips false).
+  const [stopping, setStopping] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
-  // Live streaming card (from the active turn's tool signals) takes priority;
-  // the durable live_state card (`progress`) is the reload-safe fallback so the
-  // in-flight indicator never disappears between a turn ending and the server
-  // mirror catching up.
-  const liveCard = streamingProgress ?? progress;
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [liveCard, messages]);
+  // The optimistic "stopping" affordance is only meaningful while a turn is
+  // actually running; when running flips false the Stop button unmounts (Send
+  // takes its place), so a stale flag can never show. Deriving it (rather than
+  // clearing it in an effect) keeps the indicator truthful without a
+  // setState-in-effect cascade.
+  const isStopping = stopping && running;
 
   const submit = () => {
     const text = draft.trim();
     if (!text) return;
+    // A fresh turn clears any prior optimistic stop state.
+    setStopping(false);
     setDraft("");
     onSend(text);
   };
 
-  // The customer NEVER sees the CEO's raw assistant reasoning / chain-of-thought.
-  // We render only what the customer should see: their own messages, the curated
-  // CEO update card (from the live_state mirror / business_post_operator_update),
-  // a structured receipt for finished build/publish replies, and — collapsed and
-  // off by default — the raw transcript under a "details" disclosure for debug.
-  const userMessages = messages.filter((message) => message.who === "user");
-  const agentMessages = messages.filter((message) => message.who === "agent");
-  const finishedReply = [...agentMessages]
-    .reverse()
-    .find((message) => !message.working && Boolean(message.text.trim()));
-  const receipt = finishedReply
-    ? deriveAssistantReceipt({
-        content: finishedReply.text,
-        businessName: business.name,
-        liveUrl: reviewUrl,
-      })
-    : null;
-  // A finished reply that is NOT a technical build/publish receipt is a normal
-  // conversational CEO answer. Render it directly in the default view — but only
-  // the customer-safe prose: sanitizeCustomerReply drops any line naming a tool,
-  // skill, worker, file path, or build/deploy step. If nothing safe remains, the
-  // bubble is suppressed and the content stays only under the opt-in raw log.
-  const conversationalReply =
-    finishedReply && !receipt ? sanitizeCustomerReply(finishedReply.text) : "";
-  const rawTranscript = agentMessages
-    .map((message) => message.text.trim())
-    .filter(Boolean);
+  // Build the conversational transcript by MERGING two ordered streams:
+  //   • USER bubbles — taken only from `messages` (who === 'user'). The raw
+  //     history/delta AGENT messages are deliberately DROPPED here: they are the
+  //     CEO's chain-of-thought and must never reach the customer.
+  //   • AGENT bubbles — the curated, customer-safe chat_stream (`agentStream`).
+  // Ordering: every item with a wall-clock ts (user send time, or the stream
+  // item's posted_at) sorts by ts; items without a ts keep their relative
+  // insertion order (stable). A bootstrap (no user messages) reads as just the
+  // chat_stream in order; a follow-up reads as the user message then the CEO's
+  // narration. Each agent bubble is re-sanitized (belt-and-suspenders); a
+  // message with nothing safe left is omitted. There is NO card, NO phase
+  // ladder, and NO "What changed" panel.
+  type TranscriptEntry = {
+    id: string;
+    who: "agent" | "user";
+    text: string;
+    ts?: number;
+    order: number;
+  };
+  const userEntries: TranscriptEntry[] = messages
+    .filter((message) => message.who === "user")
+    .map((message, index) => ({
+      id: message.id,
+      who: "user" as const,
+      text: message.text.trim(),
+      ts: typeof message.ts === "number" && Number.isFinite(message.ts) ? message.ts : undefined,
+      // User messages sort before an agent stream item sharing the same ms.
+      order: index * 2,
+    }))
+    .filter((entry) => Boolean(entry.text));
+  const agentEntries: TranscriptEntry[] = agentStream
+    .map((item, index) => ({
+      id: item.id,
+      who: "agent" as const,
+      text: sanitizeCustomerReply(item.text),
+      ts: typeof item.ts === "number" && Number.isFinite(item.ts) ? item.ts : undefined,
+      order: index * 2 + 1,
+    }))
+    .filter((entry) => Boolean(entry.text));
+  // Stable merge: timestamped entries interleave by ts; entries without a ts
+  // hold their relative position (their `order` breaks ties deterministically).
+  const bubbles = [...userEntries, ...agentEntries].sort((a, b) => {
+    if (a.ts != null && b.ts != null && a.ts !== b.ts) return a.ts - b.ts;
+    return a.order - b.order;
+  });
+  const hasAgentBubble = agentEntries.length > 0;
+  // The thinking dots are a STANDALONE agent row (their own bubble, their own
+  // vertical space, always at the tail) — they never stack on the words.
+  //   • The backend's chat_running flag is authoritative: while the CEO turn is
+  //     running the dots show even when curated narration is already the tail
+  //     (the turn is still in flight; more is coming).
+  //   • The client's own in-flight signal (`running`, e.g. a just-submitted
+  //     prompt with no curated reply yet) also shows dots, but yields the moment
+  //     a fresh agent bubble lands at the tail so the streamed reply isn't
+  //     shadowed by a duplicate indicator.
+  const lastBubble = bubbles[bubbles.length - 1];
+  const tailIsAgentText = lastBubble?.who === "agent";
+  const isRunning = chatRunning || running;
+  // The durable end-of-turn summary. The chat_stream's last message already
+  // carries it, so we only surface a standalone summary bubble when it is not
+  // already the tail agent text (avoids a duplicate). Settled state only.
+  const summaryText = (chatSummary || "").trim();
+  const showSummary =
+    !isRunning
+    && Boolean(summaryText)
+    && summaryText !== (tailIsAgentText ? lastBubble!.text.trim() : "");
+  // A turn is "in flight" when the client is actively sending (`running`, the same
+  // signal the Stop button uses) OR the backend mirror says a turn is genuinely
+  // running AND it has not yet settled into an end-of-turn summary. This re-admits
+  // the mirror for the cold-reload-mid-turn case (running=false but a real turn is
+  // in flight, with an existing agent bubble) WITHOUT resurrecting the forever-spin
+  // P0: the instant a summary lands — or the server stops reporting 'running' —
+  // turnInFlight goes false and the dots clear. The Stop button stays gated on
+  // `running` only, so it can never show with nothing to stop.
+  const turnInFlight = running || (chatRunning && !showSummary && !summaryText);
+  const showThinking = turnInFlight && !tailIsAgentText;
+  // On a cold reload with no chat_stream yet, surface the durable live_state
+  // one-liner as a single plain assistant bubble so the chat is never blank —
+  // but only when there is no curated agent bubble and no summary to show.
+  const showLiveStateLine = !hasAgentBubble && !showSummary && Boolean(liveStateLine);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [bubbles.length, showThinking, showSummary, showLiveStateLine]);
 
   return (
     <aside className="lb-chat">
@@ -448,42 +410,34 @@ function AgentChat({
       </div>
 
       <div className="lb-chat__log">
-        {userMessages.map((message) => (
-          <div key={message.id} className="lb-msg lb-msg--user">
-            <div className="lb-msg__bubble">{message.text}</div>
-          </div>
-        ))}
-        {liveCard && (
-          <div className="lb-msg lb-msg--agent">
-            <div className="lb-msg__bubble">
-              <LiveProgressCard progress={liveCard} />
+        {bubbles.map((entry) =>
+          entry.who === "user" ? (
+            <div key={entry.id} className="lb-msg lb-msg--user">
+              <div className="lb-msg__bubble">{entry.text}</div>
             </div>
-          </div>
-        )}
-        {!liveCard && receipt && (
-          <div className="lb-msg lb-msg--agent">
-            <div className="lb-msg__bubble">
-              <AgentReceipt receipt={receipt} />
-            </div>
-          </div>
-        )}
-        {!liveCard && !receipt && conversationalReply && (
-          <div className="lb-msg lb-msg--agent">
-            <div className="lb-msg__bubble">
-              <AgentMessageMarkdown text={conversationalReply} />
-            </div>
-          </div>
-        )}
-        {rawTranscript.length > 0 && (
-          <details className="lb-chat__rawlog">
-            <summary>View raw assistant log</summary>
-            {rawTranscript.map((text, index) => (
-              <div key={`raw-${index}`} className="lb-chat__rawentry">
-                <AgentMessageMarkdown text={text} />
+          ) : (
+            <div key={entry.id} className="lb-msg lb-msg--agent">
+              <div className="lb-msg__bubble">
+                <AgentMessageMarkdown text={entry.text} />
               </div>
-            ))}
-          </details>
+            </div>
+          ),
         )}
+        {showSummary && (
+          <div className="lb-msg lb-msg--agent">
+            <div className="lb-msg__bubble">
+              <AgentMessageMarkdown text={summaryText} />
+            </div>
+          </div>
+        )}
+        {showLiveStateLine && (
+          <div className="lb-msg lb-msg--agent">
+            <div className="lb-msg__bubble">
+              <AgentMessageMarkdown text={liveStateLine!} />
+            </div>
+          </div>
+        )}
+        {showThinking && <ThinkingRow />}
         <div ref={endRef} />
       </div>
 
@@ -500,16 +454,23 @@ function AgentChat({
           placeholder="Change anything…"
           rows={2}
         />
-        <button
-          className="lb-chat__stop"
-          disabled={!canStop}
-          onClick={onStop}
-          aria-label="Stop"
-          type="button"
-        >
-          {Icon.stop}
-        </button>
-        <button className="lb-chat__send" disabled={sending} onClick={submit} aria-label="Send">{Icon.send}</button>
+        {running ? (
+          <button
+            className="lb-chat__stop"
+            disabled={isStopping}
+            onClick={() => {
+              setStopping(true);
+              onStop();
+            }}
+            aria-label="Stop"
+            title={isStopping ? "Stopping…" : "Stop"}
+            type="button"
+          >
+            {Icon.stop}
+          </button>
+        ) : (
+          <button className="lb-chat__send" disabled={sending} onClick={submit} aria-label="Send">{Icon.send}</button>
+        )}
       </div>
     </aside>
   );
@@ -541,16 +502,17 @@ function ProductPreview({
   const addressLink = canonicalUrl || (
     canonicalProductHost(business.slug) ? `https://${canonicalProductHost(business.slug)}/` : ""
   );
-  const previewAvailable = Boolean(product.preview_available);
-  const previewPath = typeof product.preview_path === "string" ? product.preview_path : "product/site";
   const previewStatus = typeof product.preview_status === "string" ? product.preview_status : "";
   const outputs = Array.isArray(workspace?.outputs) ? workspace.outputs : [];
   const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
   const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
   const productStatus = typeof product.status === "string" ? product.status : "";
-  const frameUrl = previewAvailable
-    ? buildTakyonBusinessSitePreviewFrameUrl(business.slug, previewPath)
-    : "";
+  // Embed the PUBLIC published landing (slug.fourmanifold.com) directly — it is a
+  // public page, so the preview needs no operator auth / sign-in. Only embed once it
+  // is actually published; otherwise fall through to the "building" / "no preview yet"
+  // state below (an unpublished slug has no live landing to show).
+  const isPublished = previewStatus === "published" || publishStatus === "published";
+  const frameUrl = isPublished && canonicalUrl ? canonicalUrl : "";
   const hasLocalSource = Boolean(
     sourcePath
     || outputs.some((item) => {
@@ -637,8 +599,8 @@ export function Product({
   tractionRange,
   theme,
   chatMessages,
-  chatProgress,
   sending,
+  sessionRunning,
   onTheme,
   onNav,
   onLogout,
@@ -656,8 +618,8 @@ export function Product({
   tractionRange: "D" | "W" | "M" | "Y";
   theme: Theme;
   chatMessages: ChatMessage[];
-  chatProgress: ChatProgress | null;
   sending: boolean;
+  sessionRunning: boolean;
   onTheme: (theme: Theme) => void;
   onNav: (hash: string) => void;
   onLogout: () => void;
@@ -676,13 +638,22 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
-  // Live streaming progress (chatProgress, derived from the active turn's tool
-  // signals) takes priority. When no turn is streaming but the server-mirrored
-  // live_state still reports running work (e.g. after a reload during a CEO
-  // bootstrap), fall back to the durable live_state card so the in-flight
-  // indicator never disappears.
-  const effectiveProgress = liveStateProgress(workspace);
-  const liveProgress = chatProgress ?? effectiveProgress;
+  // Durable one-line status from the server-mirrored live_state. Rendered as a
+  // single plain assistant bubble only when there is no curated chat_stream yet
+  // (e.g. a reload mid-bootstrap) — never as a card or a phase ladder.
+  const liveStateLine = liveStateOneLiner(workspace);
+  // The curated, customer-safe CEO narration. These (not the raw history/delta
+  // assistant messages) are the ONLY agent bubbles in the transcript, so no
+  // mid-thought planner/reasoning text can ever render as conversation.
+  const agentStream = chatStreamAgentMessages(workspace);
+  const chatSummary = workspaceChatSummary(workspace);
+  const chatRunning = workspaceChatRunning(workspace);
+  // TRUE in-flight running signal for the stop affordance and the thinking dots:
+  // an in-flight prompt submit (`sending`) or a live session turn reported by the
+  // gateway (`sessionRunning`). Deliberately NOT derived from any durable
+  // live_state mirror, which can stay "running" after the turn ended — that is
+  // exactly what kept the dots floating when nothing was actually running.
+  const running = sending || sessionRunning;
 
   useEffect(() => {
     setTab("company");
@@ -704,11 +675,12 @@ export function Product({
           <AgentChat
             business={business}
             messages={chatMessages}
-            progress={effectiveProgress}
-            streamingProgress={chatProgress}
-            reviewUrl={publicUrl || undefined}
+            agentStream={agentStream}
+            chatSummary={chatSummary || undefined}
+            chatRunning={chatRunning}
+            liveStateLine={liveStateLine || undefined}
             tab={tab}
-            canStop={sending || Boolean(liveProgress?.live)}
+            running={running}
             sending={sending}
             onTab={setTab}
             onClose={() => setChatOpen(false)}

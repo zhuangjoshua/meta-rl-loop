@@ -4,6 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 caddyfile="${script_dir}/Caddyfile"
 ensure_ratelimit="${script_dir}/../shared/ensure-caddy-ratelimit.sh"
+ensure_cloudflare_origin_cert="${script_dir}/../shared/ensure-cloudflare-origin-cert.sh"
 
 vps_host="${TAKYON_VPS_HOST:-root@134.209.123.8}"
 vps_key="${TAKYON_VPS_KEY:-${HOME}/.ssh/takyon_argon_alpha14}"
@@ -22,10 +23,17 @@ if [[ ! -f "${ensure_ratelimit}" ]]; then
   exit 1
 fi
 
+if [[ ! -f "${ensure_cloudflare_origin_cert}" ]]; then
+  echo "missing Cloudflare origin cert ensure helper: ${ensure_cloudflare_origin_cert}" >&2
+  exit 1
+fi
+
 # The tracked Caddyfile uses the `rate_limit` directive (edge DDoS controls), which stock apt caddy
 # lacks. Ensure the module is in the binary BEFORE `caddy validate` runs below, so a Caddyfile-only
 # deploy (the workflow path triggered when only the Caddyfile changed) self-provisions it idempotently.
 ssh "${ssh_opts[@]}" "${vps_host}" "bash -s" < "${ensure_ratelimit}"
+
+TARGET_HOST="${vps_host}" TARGET_KEY="${vps_key}" "${ensure_cloudflare_origin_cert}"
 
 scp "${ssh_opts[@]}" "${caddyfile}" "${vps_host}:${remote_tmp}"
 ssh "${ssh_opts[@]}" "${vps_host}" "set -euo pipefail

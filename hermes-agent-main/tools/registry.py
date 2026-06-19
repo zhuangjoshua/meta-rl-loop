@@ -46,9 +46,11 @@ def _module_registers_tools(module_path: Path) -> bool:
     to call ``registry.register()`` inside a function are not picked up.
     """
     try:
-        source = module_path.read_text(encoding="utf-8")
+        source = module_path.read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(source, filename=str(module_path))
-    except (OSError, SyntaxError):
+    except (OSError, SyntaxError, ValueError, UnicodeDecodeError):
+        # A single unreadable/binary file (e.g. a macOS AppleDouble "._*" sidecar,
+        # or any non-UTF-8 byte) must never abort tool discovery for the whole agent.
         return False
 
     return any(_is_registry_register_call(stmt) for stmt in tree.body)
@@ -61,6 +63,7 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
         f"tools.{path.stem}"
         for path in sorted(tools_path.glob("*.py"))
         if path.name not in {"__init__.py", "registry.py", "mcp_tool.py"}
+        and not path.name.startswith(".")  # skip dotfiles / macOS AppleDouble "._*" sidecars
         and _module_registers_tools(path)
     ]
 

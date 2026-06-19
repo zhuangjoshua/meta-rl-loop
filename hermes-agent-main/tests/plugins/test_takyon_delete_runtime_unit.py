@@ -87,6 +87,21 @@ def test_delete_business_removes_product_runtime_surfaces(tmp_path, monkeypatch)
     assert "latexflow.fourmanifold.com" not in caddyfile.read_text(encoding="utf-8")
 
 
+def test_clear_stale_supabase_business_cache_removes_deleted_business_cache(tmp_path):
+    store = TakyonStore(tmp_path)
+    slug = "longer"
+    root = tmp_path / "cache" / "businesses" / slug
+    root.mkdir(parents=True)
+    (root / "product" / "site" / "README.md").parent.mkdir(parents=True)
+    (root / "product" / "site" / "README.md").write_text("stale cache\n", encoding="utf-8")
+    store._workspace_storage_backend_kind = types.MethodType(lambda self: "supabase_s3", store)
+
+    cleared = store._clear_stale_supabase_business_cache(slug, root)
+
+    assert cleared is True
+    assert not root.exists()
+
+
 def test_delete_subuser_product_site_uses_tracked_ssh_defaults(tmp_path, monkeypatch):
     key_path = tmp_path / "takyon_argon_alpha14"
     key_path.write_text("dummy-key\n", encoding="utf-8")

@@ -138,6 +138,81 @@ def test_atomic_json_write_preserves_symlink_permissions(tmp_path: Path) -> None
     assert mode == 0o644, f"permissions drifted after symlinked write: {oct(mode)}"
 
 
+# ─── Ownership preservation (root-run secret write must not flip owner) ────
+
+
+def test_atomic_replace_restores_owner_when_writer_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A privileged writer must not silently re-own the target.
+
+    Regression for the takyon-dashboard 502: ``takyon secret set`` run as
+    root rewrote ``/opt/takyon/.takyon/.env`` via ``_save_env_value_direct``
+    → ``atomic_replace``; the rename installed a root-owned inode and the
+    ``takyon`` service user could no longer read the file. ``atomic_replace``
+    must restore the target's original uid/gid after the rename.
+    """
+    if not hasattr(os, "chown"):
+        pytest.skip("POSIX-only")
+
+    import utils
+
+    target = tmp_path / ".env"
+    target.write_text("OLD=1\n", encoding="utf-8")
+    tmp = _write_tmp(tmp_path, "NEW=2\n")
+
+    prev_owner = (995, 987)  # service user before the write
+
+    class _FakeStat:
+        def __init__(self, uid: int, gid: int) -> None:
+            self.st_uid = uid
+            self.st_gid = gid
+            self.st_mode = 0o100600
+
+    calls = {"stat": 0}
+    real_target = os.path.realpath(str(target))
+
+    def fake_stat(p, *a, **k):
+        # Pre-replace stat reports the service user; post-replace reports the
+        # root inode that the rename just installed.
+        if calls["stat"] == 0:
+            calls["stat"] += 1
+            return _FakeStat(*prev_owner)
+        return _FakeStat(0, 0)
+
+    chown_calls: list = []
+    monkeypatch.setattr(utils.os, "stat", fake_stat)
+    monkeypatch.setattr(utils.os, "chown", lambda p, u, g: chown_calls.append((str(p), u, g)))
+
+    utils.atomic_replace(tmp, target)
+
+    assert chown_calls == [(real_target, 995, 987)]
+    assert target.read_text(encoding="utf-8") == "NEW=2\n"
+
+
+def test_atomic_replace_no_chown_when_owner_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case (caller owns the file) must not call chown at all —
+    otherwise an unprivileged user would hit a needless PermissionError."""
+    if not hasattr(os, "chown"):
+        pytest.skip("POSIX-only")
+
+    import utils
+
+    target = tmp_path / "plain.txt"
+    target.write_text("old\n", encoding="utf-8")
+    tmp = _write_tmp(tmp_path, "new\n")
+
+    chown_calls: list = []
+    monkeypatch.setattr(utils.os, "chown", lambda p, u, g: chown_calls.append((str(p), u, g)))
+
+    utils.atomic_replace(tmp, target)
+
+    assert chown_calls == []
+    assert target.read_text(encoding="utf-8") == "new\n"
+
+
 # ─── Broken-symlink edge case ─────────────────────────────────────────────
 
 

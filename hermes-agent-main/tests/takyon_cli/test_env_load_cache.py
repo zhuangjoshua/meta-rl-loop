@@ -121,7 +121,7 @@ def test_save_env_value_invalidates_cache(tmp_path, monkeypatch):
     invalidate_env_cache()
 
     env_path = tmp_path / ".env"
-    env_path.write_text("EXISTING_KEY=old\n", encoding="utf-8")
+    env_path.write_text("EXISTING_VAR=old\n", encoding="utf-8")
 
     monkeypatch.setattr(config_mod, "get_env_path", lambda: env_path)
     monkeypatch.setattr(config_mod, "ensure_takyon_home", lambda: None)
@@ -131,18 +131,18 @@ def test_save_env_value_invalidates_cache(tmp_path, monkeypatch):
     try:
         # Prime the cache.
         first = load_env()
-        assert first.get("EXISTING_KEY") == "old"
+        assert first.get("EXISTING_VAR") == "old"
 
-        save_env_value("NEW_KEY", "shiny")
+        save_env_value("NEW_VAR", "shiny")
 
         # Same-second writes on coarse-mtime filesystems would normally
         # let stale cache survive; invalidate_env_cache() inside the
         # writer makes the next read see the new key.
         result = load_env()
-        assert result.get("NEW_KEY") == "shiny"
-        assert result.get("EXISTING_KEY") == "old"
+        assert result.get("NEW_VAR") == "shiny"
+        assert result.get("EXISTING_VAR") == "old"
     finally:
-        monkeypatch.delenv("NEW_KEY", raising=False)
+        monkeypatch.delenv("NEW_VAR", raising=False)
         invalidate_env_cache()
 
 
@@ -164,16 +164,31 @@ def test_remove_env_value_invalidates_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "_secure_file", lambda _p: None)
     monkeypatch.setattr(config_mod, "is_managed", lambda: False)
 
-    save_env_value("DOOMED_KEY", "value")
-    assert load_env().get("DOOMED_KEY") == "value"
+    save_env_value("DOOMED_VAR", "value")
+    assert load_env().get("DOOMED_VAR") == "value"
 
     try:
-        removed = remove_env_value("DOOMED_KEY")
+        removed = remove_env_value("DOOMED_VAR")
         assert removed is True
-        assert "DOOMED_KEY" not in load_env()
+        assert "DOOMED_VAR" not in load_env()
     finally:
-        monkeypatch.delenv("DOOMED_KEY", raising=False)
+        monkeypatch.delenv("DOOMED_VAR", raising=False)
         invalidate_env_cache()
+
+
+def test_get_env_value_prefers_remote_safebox_for_openai_api_key(monkeypatch):
+    from plugins.takyon import safebox
+    from takyon_cli.config import get_env_value
+
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    monkeypatch.setenv("OPENAI_API_KEY", "local-openai-key")
+    monkeypatch.setattr(
+        safebox,
+        "read_env_backed_value",
+        lambda key: "remote-openai-key" if key == "OPENAI_API_KEY" else "",
+    )
+
+    assert get_env_value("OPENAI_API_KEY") == "remote-openai-key"
 
 
 def test_load_env_handles_missing_file():

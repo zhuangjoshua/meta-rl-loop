@@ -692,3 +692,87 @@ def test_canonical_commit_enforces_operator_quota_fails_closed(pg_store_dsn, tmp
             )
     assert rev == 1
     assert storage.operator_storage_bytes(backend, [slug]) >= 300
+
+
+def _seed_quota_free_business(pg_store_dsn, tmp_path, monkeypatch):
+    """A store + local backend + empty business with the storage gates relaxed for commit tests."""
+    monkeypatch.setenv("TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS", "1")
+    monkeypatch.setenv("TAKYON_OPERATOR_STORAGE_MAX_BYTES", str(64 * 1024 * 1024))
+    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+    store = TakyonStore(root=tmp_path, database_url=pg_store_dsn)
+    store._workspace_storage_backend_override = backend
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    with psycopg.connect(pg_store_dsn, autocommit=False) as seed:
+        owner, _created, _raw = provision_user_on_first_login(seed, f"auth0|{uuid.uuid4().hex}")
+        seed.execute(
+            "INSERT INTO businesses (slug, name, owner_user_id) VALUES (%s, %s, %s)",
+            (slug, "Acme", owner),
+        )
+        seed.commit()
+    return store, slug
+
+
+def test_stale_base_conflict_on_commentary_surface_auto_resolves_to_head(pg_store_dsn, tmp_path, monkeypatch):
+    """A stale committer whose ONLY conflict is the generated commentary render product/surface.md no
+    longer hard-fails ("stale workspace base"). The conflict auto-resolves to head's committed render
+    (commentary carries no authoritative state — the real publish pointer lives in the
+    app_surface_contracts DB row), while the committer's genuine source change is preserved. This is
+    the bootstrap thrash fix: business_upsert_app_surface_contract / business_refresh_product_surface /
+    the build-worker sync all re-render surface.md against slightly different bases and used to thrash."""
+    store, slug = _seed_quota_free_business(pg_store_dsn, tmp_path, monkeypatch)
+    ws = store._business_root(slug, sync=False)
+    (ws / "product" / "site").mkdir(parents=True, exist_ok=True)
+
+    # r1 — base: a real source file + the generated commentary render.
+    (ws / "product" / "site" / "app.tsx").write_text("export const A = 1\n", encoding="utf-8")
+    (ws / "product" / "surface.md").write_text("# Product Surface\nrender v1\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r1 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r1", expected_base_revision=0)
+    assert r1 == 1
+
+    # r2 — upstream advances head by re-rendering ONLY surface.md (app.tsx untouched).
+    (ws / "product" / "surface.md").write_text("# Product Surface\nrender v2 (head)\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r2 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r2", expected_base_revision=r1)
+    assert r2 == 2
+
+    # Stale committer pinned to r1: a real source edit PLUS its own (different) surface.md render.
+    (ws / "product" / "site" / "app.tsx").write_text("export const A = 2\n", encoding="utf-8")
+    (ws / "product" / "surface.md").write_text("# Product Surface\nrender v3 (stale local)\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r3 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r3", expected_base_revision=r1)
+    # No raise; a new revision lands.
+    assert r3 == 3
+
+    # Head's surface render won (the stale local render was dropped); the real source edit survived.
+    assert (ws / "product" / "surface.md").read_text(encoding="utf-8") == "# Product Surface\nrender v2 (head)\n"
+    assert (ws / "product" / "site" / "app.tsx").read_text(encoding="utf-8") == "export const A = 2\n"
+
+
+def test_stale_base_conflict_on_substantive_source_still_raises(pg_store_dsn, tmp_path, monkeypatch):
+    """A genuine concurrent edit to a SUBSTANTIVE file (real product source) must still hard-fail — the
+    commentary carve-out must not silently merge away real conflicting source changes."""
+    store, slug = _seed_quota_free_business(pg_store_dsn, tmp_path, monkeypatch)
+    ws = store._business_root(slug, sync=False)
+    (ws / "product" / "site").mkdir(parents=True, exist_ok=True)
+
+    (ws / "product" / "site" / "app.tsx").write_text("export const A = 1\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r1 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r1", expected_base_revision=0)
+
+    # Upstream advances head by editing the SAME source file.
+    (ws / "product" / "site" / "app.tsx").write_text("export const A = 2\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r2", expected_base_revision=r1)
+
+    # Stale committer pinned to r1 makes a THIRD, different edit to the same source file → true conflict.
+    (ws / "product" / "site" / "app.tsx").write_text("export const A = 3\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            with pytest.raises(core_module.TakyonError, match="stale workspace base"):
+                store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r3", expected_base_revision=r1)

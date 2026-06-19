@@ -65,8 +65,8 @@ function Router() {
     tractionRange,
     buildState,
     chatMessages,
-    chatProgress,
     submitting,
+    sessionRunning,
     billingBusy,
     subscribeBusy,
     resetBuildState,
@@ -166,6 +166,40 @@ function Router() {
     return () => window.clearTimeout(timer);
   }, [buildState.businessSlug, buildState.status, path]);
 
+  // Never strand the user on the /building loading screen after a hard failure.
+  // 4030 (out of credits) is the one error with a clear destination: auto-route to
+  // Plans & Billing with a subscribe nudge, mirroring the pre-create guard above.
+  // Every OTHER hard error stays on the build screen, which now renders the human
+  // message plus a Back / Try-again control (see Building.tsx) — actionable, not stranded.
+  useEffect(() => {
+    if (path !== "/building") return;
+    if (buildState.status !== "error") return;
+    if (buildState.errorCode !== 4030) return;
+    // Clear the pending idea so re-entering /building doesn't immediately re-create.
+    setPendingIdea("");
+    setBillingNudge(buildState.error || "Subscribe to a plan to create a company.");
+    setSettings("plans");
+    nav("/");
+  }, [buildState.status, buildState.errorCode, buildState.error, path]);
+
+  // Build-screen exits for the non-4030 errored state. Try-again clears the build
+  // and re-enters /building (which re-runs createBusiness); Back returns home.
+  const retryBuild = () => {
+    const idea = (buildState.goal || pendingIdea).trim();
+    resetBuildState();
+    if (idea) {
+      setPendingIdea(idea);
+      nav("/building");
+    } else {
+      nav("/app/new");
+    }
+  };
+  const exitBuild = () => {
+    resetBuildState();
+    setPendingIdea("");
+    nav("/");
+  };
+
   const gated = AUTHED(path) && auth.status === "out";
 
   const startBuild = (idea: string) => {
@@ -227,7 +261,16 @@ function Router() {
   } else if (path === "/app/new") {
     view = <NewCompany onCreate={startBuild} onClose={() => nav("/")} />;
   } else if (path === "/building") {
-    view = <Building idea={pendingIdea} state={buildState} onDone={() => buildState.businessSlug && nav(`/app/c/${buildState.businessSlug}`)} />;
+    view = (
+      <Building
+        idea={pendingIdea}
+        state={buildState}
+        workspace={workspace}
+        onDone={() => buildState.businessSlug && nav(`/app/c/${buildState.businessSlug}`)}
+        onRetry={retryBuild}
+        onBack={exitBuild}
+      />
+    );
   } else if (path.startsWith("/app/c/")) {
     view = activeBusiness && activeBusiness.slug === businessRouteSlug ? (
       <Product
@@ -239,8 +282,8 @@ function Router() {
         tractionRange={tractionRange}
         theme={theme}
         chatMessages={chatMessages}
-        chatProgress={chatProgress}
         sending={submitting}
+        sessionRunning={sessionRunning}
         onTheme={setTheme}
         onNav={nav}
         onLogout={auth.logout}

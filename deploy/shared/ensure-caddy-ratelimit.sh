@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Ensure the host's Caddy binary includes the HTTP rate-limit module
-# (github.com/mholt/caddy-ratelimit). The tracked Caddyfiles use the `rate_limit`
-# directive for edge DDoS/abuse control, and stock apt `caddy` does NOT ship that
-# module — so `caddy validate` (run by apply-caddyfile.sh) would reject the config
-# and the deploy rail would fail. This script makes the binary self-consistent with
-# the tracked config: idempotent, run over SSH via `bash -s` exactly like
-# ensure-deno.sh, and applied on EVERY host (current + future) through each host's
-# bootstrap-host.sh, never hand-installed on one box.
+# (github.com/mholt/caddy-ratelimit) AND the tracked minimum Caddy version.
+# The tracked Caddyfiles now rely on both the `rate_limit` directive and newer
+# global server options such as trusted_proxies, so an older binary can be
+# "partly working" yet still reject the real production config. This script
+# makes the binary self-consistent with the tracked config: idempotent, run
+# over SSH via `bash -s` exactly like ensure-deno.sh, and applied on EVERY host
+# (current + future) through each host's bootstrap-host.sh/apply-caddyfile.sh,
+# never hand-installed on one box.
 set -euo pipefail
 
 RATELIMIT_MODULE="github.com/mholt/caddy-ratelimit"
@@ -14,12 +15,14 @@ CADDY_VERSION="${TAKYON_CADDY_VERSION:-2.8.4}"
 GO_VERSION="${TAKYON_CADDY_GO_VERSION:-1.23.4}"
 GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
 
-has_ratelimit() {
-  command -v caddy >/dev/null 2>&1 && caddy list-modules 2>/dev/null | grep -qx "http.handlers.rate_limit"
+has_required_caddy() {
+  command -v caddy >/dev/null 2>&1 \
+    && caddy list-modules 2>/dev/null | grep -qx "http.handlers.rate_limit" \
+    && caddy version 2>/dev/null | grep -Eq "(^|v)${CADDY_VERSION}([[:space:]]|$)"
 }
 
-if has_ratelimit; then
-  echo "caddy already has the rate_limit module; nothing to do"
+if has_required_caddy; then
+  echo "caddy already has rate_limit and required version ${CADDY_VERSION}; nothing to do"
   exit 0
 fi
 
@@ -61,9 +64,10 @@ if [[ "${caddy_was_active}" == "1" ]]; then
   systemctl start caddy
 fi
 
-# Fail closed: the module MUST be present now, or the tracked Caddyfile would not validate.
-if ! has_ratelimit; then
-  echo "ERROR: caddy still lacks the rate_limit module after rebuild" >&2
+# Fail closed: the module AND version MUST be present now, or the tracked Caddyfile
+# would not validate consistently across hosts.
+if ! has_required_caddy; then
+  echo "ERROR: caddy still lacks rate_limit or required version ${CADDY_VERSION} after rebuild" >&2
   exit 1
 fi
-echo "caddy rebuilt with rate_limit module (${RATELIMIT_MODULE})"
+echo "caddy rebuilt with rate_limit module (${RATELIMIT_MODULE}) and version ${CADDY_VERSION}"

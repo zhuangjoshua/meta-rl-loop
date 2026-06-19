@@ -88,14 +88,19 @@ async function getSessionToken(): Promise<string> {
   throw new Error("Session token not available — page must be served by the Takyon dashboard server");
 }
 
-export function buildTakyonBusinessSitePreviewFrameUrl(slug: string, path = "product/site"): string {
-  const businessSlug = String(slug || "").trim();
+// The product preview embeds the business's PUBLIC published landing directly
+// (https://<slug>.fourmanifold.com/). That page is public, so the preview needs NO
+// operator auth / sign-in. The previous same-origin /api/takyon/site-preview operator
+// endpoint returned {"detail":"Auth0 login required"} inside the iframe — the Auth0
+// session cookie does not ride a cross-origin sub-resource request, and the ?token=
+// fallback resolved the wrong (empty) "local" operator on prod rather than the Auth0
+// operator that owns the businesses. The product host sets no X-Frame-Options/CSP, so
+// a direct cross-origin iframe loads fine; callers fall back to a skeleton / "building"
+// state for businesses whose landing is not published yet (the iframe simply errors).
+export function buildTakyonBusinessSitePreviewFrameUrl(slug: string): string {
+  const businessSlug = String(slug || "").trim().toLowerCase();
   if (!businessSlug) return "";
-  const normalizedPath = String(path || "").trim() || "product/site";
-  const token = readSessionToken();
-  const query = new URLSearchParams({ path: normalizedPath });
-  if (token) query.set("token", token);
-  return `${BASE}/api/takyon/site-preview/${encodeURIComponent(businessSlug)}?${query.toString()}`;
+  return `https://${businessSlug}.fourmanifold.com/`;
 }
 
 // Authenticated URL for a generated business asset (image/video/logo). Browsers can't
@@ -708,6 +713,12 @@ export interface TakyonOperatorBusinessSummary {
   status?: string;
   state?: string;
   reason?: string;
+  // Optional enrichment from the operator-home payload. When the backend records
+  // a published public URL / brand logo for the business it surfaces them here;
+  // the frontend always falls back to the canonical `<slug>.fourmanifold.com`
+  // host (and a same-origin site-preview embed) so these may be absent.
+  product_url?: string;
+  logo_url?: string;
 }
 
 export interface TakyonOperatorBusinessesResponse {

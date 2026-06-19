@@ -221,7 +221,16 @@ def _ensure_budget_locked(conn, business_slug: str) -> AppBudget:
     hard_limit_microusd defaults to NULL → the per-subuser subscription gate is the only budget
     gate), then lock its row `for update`. Must be called inside a transaction. The lock
     serializes all concurrent reserves for the business so the committed-spend aggregate is
-    consistent. Unknown business → ForeignKeyViolation (fail loud)."""
+    consistent. Unknown business → ForeignKeyViolation (fail loud).
+
+    Weekly rollover (migration 0035): the row's period is the ISO-week window. Migration 0035 set
+    the column DEFAULTS to date_trunc('week', now()), but NEW-row defaults alone never advance an
+    already-open row — without a runtime roll the window would pin forever and committed spend would
+    never reset next week. So, still under the row lock, if the selected period has elapsed
+    (current_period_end <= now()), atomically advance it to the current ISO week before returning.
+    Because _committed_microusd aggregates events with created_at >= current_period_start, advancing
+    the window starts the customer's weekly allowance fresh — the intended "resets weekly" behavior.
+    """
     conn.execute(
         "insert into app_budgets (business_slug) values (%s) on conflict (business_slug) do nothing",
         (business_slug,),
@@ -230,7 +239,15 @@ def _ensure_budget_locked(conn, business_slug: str) -> AppBudget:
         f"select {_BUDGET_COLUMNS} from app_budgets where business_slug = %s for update",
         (business_slug,),
     ).fetchone()
-    return _budget_from_row(row)
+    rolled = conn.execute(
+        "update app_budgets set "
+        " current_period_start = date_trunc('week', now()), "
+        " current_period_end = date_trunc('week', now()) + interval '1 week', "
+        " updated_at = now() "
+        f"where business_slug = %s and current_period_end <= now() returning {_BUDGET_COLUMNS}",
+        (business_slug,),
+    ).fetchone()
+    return _budget_from_row(rolled if rolled is not None else row)
 
 
 def _committed_microusd(conn, business_slug: str, period_start) -> int:
@@ -268,8 +285,9 @@ def _app_user_committed_microusd(conn, business_slug: str, app_user_id: str, per
 
 def ensure_app_budget(conn, business_slug: str) -> AppBudget:
     """Open the business budget with NO per-business pool cap if absent (idempotent), returning
-    the row in effect. Period is calendar-month UTC, fixed at creation (faithful to the SQLite
-    trunk)."""
+    the row in effect. Period is the ISO week (migration 0035): the row opens on the current
+    date_trunc('week', now()) window and _ensure_budget_locked rolls it forward each week so
+    committed spend resets weekly."""
     with conn.transaction():
         return _ensure_budget_locked(conn, business_slug)
 
@@ -308,11 +326,27 @@ def get_app_budget(conn, business_slug: str) -> AppBudget | None:
     return None if row is None else _budget_from_row(row)
 
 
+def _microusd_to_usd(value: int | None) -> float | None:
+    """Present a microUSD integer as a 2-decimal USD float for the UI. None passes through (an
+    absent figure must stay absent, not render as $0.00). The microUSD integer remains the
+    authoritative number; this is a display projection only."""
+    if value is None:
+        return None
+    return round(int(value) / 1_000_000, 2)
+
+
 def get_usage_summary(conn, business_slug: str) -> dict:
     """Authoritative budget/remaining read for the current period: the figures a pre-flight UI
     or check should use INSTEAD of the old SQLite rendered-mirror read that the broken estimate
     pre-check relied on. Pure read; the real gate is reserve_usage. Returns
-    status/hard_limit/committed/remaining/period.
+    status/hard_limit/committed/remaining/period plus a $-denominated projection for the UI.
+
+    The unit the customer sees is dollars over a WEEKLY period (the period is the ISO-week window
+    fixed in the app_budgets row — see migration 0035): ``period_unit='week'`` and the ``*_usd``
+    fields are the dollar projection of the authoritative microUSD figures, so the Plans & Billing
+    surface renders a "$ weekly allocation" without each caller re-deriving the conversion or the
+    period unit. The microUSD integers remain the source of truth; the dollar fields are display
+    only.
 
     Invariant 9: there is NO free per-business pool. A never-opened budget reports status
     'missing' with NO pool cap (hard_limit_microusd=None) and remaining=None — it does NOT hand
@@ -328,6 +362,11 @@ def get_usage_summary(conn, business_slug: str) -> dict:
             "remaining_microusd": None,
             "current_period_start": None,
             "current_period_end": None,
+            # $-denominated weekly projection for the UI (microUSD figures above stay authoritative).
+            "period_unit": "week",
+            "hard_limit_usd": None,
+            "committed_usd": 0.0,
+            "remaining_usd": None,
         }
     committed = _committed_microusd(conn, business_slug, budget.current_period_start)
     remaining = (
@@ -342,6 +381,11 @@ def get_usage_summary(conn, business_slug: str) -> dict:
         "remaining_microusd": remaining,
         "current_period_start": budget.current_period_start,
         "current_period_end": budget.current_period_end,
+        # $-denominated weekly projection for the UI (microUSD figures above stay authoritative).
+        "period_unit": "week",
+        "hard_limit_usd": _microusd_to_usd(budget.hard_limit_microusd),
+        "committed_usd": _microusd_to_usd(committed),
+        "remaining_usd": _microusd_to_usd(remaining),
     }
 
 

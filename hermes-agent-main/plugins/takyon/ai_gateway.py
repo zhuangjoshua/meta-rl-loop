@@ -33,6 +33,8 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
+from agent.usage_pricing import usage_markup_bps
+
 from .ai_provider import (
     AnthropicPricingUnavailable,
     TavilyPricingUnavailable,
@@ -40,9 +42,9 @@ from .ai_provider import (
     anthropic_payload,
     anthropic_rates_microusd_per_token,
     anthropic_text,
+    billed_microusd_cost,
     call_anthropic,
     call_tavily,
-    microusd_cost,
     tavily_key,
     tavily_request_microusd,
 )
@@ -368,7 +370,9 @@ def broker_message_for_business(
 
     estimated_output_tokens = int(payload.get("max_tokens") or 0)
     try:
-        estimated_cost = microusd_cost(
+        # The usage rail reserves the BILLED estimate (provider cost + usage markup); the realized
+        # provider estimate is recorded alongside it for money-truth.
+        estimated_realized_cost, estimated_cost = billed_microusd_cost(
             model, estimated_input_tokens, estimated_output_tokens
         )
         rate_source = anthropic_rates_microusd_per_token(model)[2]
@@ -391,18 +395,27 @@ def broker_message_for_business(
     def _anthropic_actual_cost(raw):
         # Anthropic reports cached prompt tokens in separate buckets and EXCLUDES them from
         # input_tokens. Bill them at their real cache rates instead of dropping them (which would
-        # undercharge true provider cost on every cached call).
+        # undercharge true provider cost on every cached call). The usage rail settles the BILLED
+        # amount (realized provider cost + usage markup); realized is recorded in metadata for
+        # money-truth so a settled row carries both numbers.
         usage = raw.get("usage") or {}
         in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
         out_tok = int(usage.get("output_tokens") or 0)
         cr = int(usage.get("cache_read_input_tokens") or 0)
         cw = int(usage.get("cache_creation_input_tokens") or 0)
-        cost = microusd_cost(model, in_tok, out_tok, cache_read_tokens=cr, cache_write_tokens=cw)
-        return cost, {
+        realized_cost, billed = billed_microusd_cost(
+            model, in_tok, out_tok, cache_read_tokens=cr, cache_write_tokens=cw
+        )
+        return billed, {
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "provider_request_id": str(raw.get("id") or ""),
-            "metadata": {"cache_read_input_tokens": cr, "cache_creation_input_tokens": cw},
+            "metadata": {
+                "cache_read_input_tokens": cr,
+                "cache_creation_input_tokens": cw,
+                "realized_cost_microusd": realized_cost,
+                "billed_cost_microusd": billed,
+            },
         }
 
     provider_response, _reservation_key, actual_cost, _settled = broker_provider_call(
@@ -415,7 +428,12 @@ def broker_message_for_business(
         estimated_cost_microusd=estimated_cost,
         purpose=str(body.get("purpose") or "ai_generate"),
         audit_route=audit_route,
-        reserve_metadata={"cost_rate_source": rate_source},
+        reserve_metadata={
+            "cost_rate_source": rate_source,
+            "usage_markup_bps": usage_markup_bps(),
+            "estimated_realized_cost_microusd": estimated_realized_cost,
+            "estimated_billed_cost_microusd": estimated_cost,
+        },
         do_call=lambda: caller(payload),
         actual_cost=_anthropic_actual_cost,
     )

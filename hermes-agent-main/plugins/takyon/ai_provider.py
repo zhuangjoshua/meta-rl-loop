@@ -20,7 +20,13 @@ import urllib.error
 import urllib.request
 from decimal import ROUND_CEILING, Decimal
 
-from agent.usage_pricing import CanonicalUsage, estimate_usage_cost, get_pricing_entry
+from agent.usage_pricing import (
+    CanonicalUsage,
+    billed_cost,
+    estimate_usage_cost,
+    get_pricing_entry,
+    usage_markup_bps,
+)
 
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -35,16 +41,47 @@ def _env(name: str, default: str = "") -> str:
     return str(os.getenv(name) or default).strip()
 
 
-def anthropic_key() -> str:
-    """The SHARED platform provider key, resolved server-side. Tries the takyon_cli auth helper
-    first, then ANTHROPIC_API_KEY / ANTHROPIC_TOKEN. Returns "" when none is configured — callers
-    MUST treat "" as blocked (invariant #8), never as permission to proceed keyless."""
+def _safebox_env_value(*names: str) -> str:
+    resolved_names = [str(name or "").strip() for name in names if str(name or "").strip()]
+    if not resolved_names:
+        return ""
     try:
-        from takyon_cli.auth import get_anthropic_key
+        from . import safebox
 
-        return str(get_anthropic_key() or "").strip()
+        value = str(safebox.first_env_backed_value(*resolved_names) or "").strip()
     except Exception:
-        return _env("ANTHROPIC_API_KEY") or _env("ANTHROPIC_TOKEN")
+        value = ""
+    if value:
+        return value
+    return next((_env(name) for name in resolved_names if _env(name)), "")
+
+
+def anthropic_env() -> dict[str, str]:
+    """Anthropic auth env for runtime callers.
+
+    Resolve from Safebox first so operator/subuser runtimes do not require local raw provider
+    secrets. ``CLAUDE_CODE_OAUTH_TOKEN`` is normalized onto ``ANTHROPIC_TOKEN`` because the Claude
+    worker lane consumes the latter.
+    """
+    resolved: dict[str, str] = {}
+    api_key = _safebox_env_value("ANTHROPIC_API_KEY")
+    token = _safebox_env_value("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    if api_key:
+        resolved["ANTHROPIC_API_KEY"] = api_key
+    if token:
+        resolved["ANTHROPIC_TOKEN"] = token
+    return resolved
+
+
+def anthropic_key() -> str:
+    """The SHARED platform provider key, resolved server-side.
+
+    Safebox is authoritative when configured; local env remains a compatibility fallback. Returns
+    ``""`` when none is configured — callers MUST treat that as blocked (invariant #8), never as
+    permission to proceed keyless.
+    """
+    resolved = anthropic_env()
+    return resolved.get("ANTHROPIC_API_KEY") or resolved.get("ANTHROPIC_TOKEN", "")
 
 
 def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
@@ -79,18 +116,32 @@ def _anthropic_pricing_source_label(model: str) -> str:
 def anthropic_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, str]:
     input_override = _env("TAKYON_APP_ANTHROPIC_INPUT_MICROUSD_PER_TOKEN")
     output_override = _env("TAKYON_APP_ANTHROPIC_OUTPUT_MICROUSD_PER_TOKEN")
-    if input_override or output_override:
-        return (
-            Decimal(input_override or "3"),
-            Decimal(output_override or "15"),
-            "env",
-        )
     entry = get_pricing_entry(model, provider="anthropic")
-    if (
+    canonical_unavailable = (
         entry is None
         or entry.input_cost_per_million is None
         or entry.output_cost_per_million is None
-    ):
+    )
+    if input_override or output_override:
+        # A PARTIAL override must never silently guess the unset side. The old code
+        # defaulted the missing rate to a hardcoded Sonnet-ish 3/15 — the one place a
+        # price was produced outside the canonical table. Fill the unset side from the
+        # EXACT canonical entry instead; if that side is also unpriced, fail closed.
+        if (not input_override or not output_override) and canonical_unavailable:
+            raise AnthropicPricingUnavailable(
+                f"partial Anthropic rate override for model {model!r}, but no exact "
+                f"canonical pricing exists to fill the other side"
+            )
+        input_rate = (
+            Decimal(input_override) if input_override
+            else entry.input_cost_per_million / _ONE_MILLION  # type: ignore[union-attr]
+        )
+        output_rate = (
+            Decimal(output_override) if output_override
+            else entry.output_cost_per_million / _ONE_MILLION  # type: ignore[union-attr]
+        )
+        return (input_rate, output_rate, "env")
+    if canonical_unavailable:
         raise AnthropicPricingUnavailable(
             f"no exact Anthropic pricing is configured for model {model!r}"
         )
@@ -145,6 +196,31 @@ def microusd_cost(
     return int(
         (result.amount_usd * _ONE_MILLION).to_integral_value(rounding=ROUND_CEILING)
     )
+
+
+def billed_microusd_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> tuple[int, int]:
+    """The product usage rail's charge for one Anthropic call: ``(realized, billed)`` in microUSD.
+
+    ``realized`` is the EXACT provider cost from ``microusd_cost`` (unchanged — fail-closed: an
+    unpriced model raises ``AnthropicPricingUnavailable`` here, never charges). ``billed`` is the
+    customer-facing amount the usage budget reserves/settles against: ``realized`` plus the
+    configured usage markup (``usage.markup_bps``, default 25%) via ``usage_pricing.billed_cost``.
+    ``billed`` is ALWAYS >= ``realized`` (the customer is never charged below provider cost). The
+    caller records BOTH so the ledger keeps money-truth (realized) and revenue-truth (billed)."""
+    realized = microusd_cost(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
+    return realized, billed_cost(realized)
 
 
 def estimate_input_tokens(messages: list[dict], system: str) -> int:

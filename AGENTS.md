@@ -291,6 +291,14 @@ Use `/status`, `/pulse`, `/files`, `/read`, `/cron list`, and `/cron tick` insid
 
 When the operator wants live monitoring, run the shell in a terminal visible to Codex or ask them to paste output. Codex can inspect the shared terminal output, but cannot see an unrelated external Terminal window unless its output is provided.
 
+### Browser E2E is the final acceptance gate — on a brand-new business, every time
+
+For the dashboard/product experience (`app.fourmanifold.com` and the live `<slug>.fourmanifold.com` product site), the **final** acceptance check for ANY change set is a **brand-new business created end-to-end through the browser UI**, exercised as a real user across every change. Poking at an existing business — signing in, re-running a tool, reloading a page — is **debugging/exploration only**; it is NOT the acceptance gate, because existing businesses were built under older code and skip the current bootstrap path. The loop is: batch fixes → deploy to BOTH hosts (operator + subuser) → create ONE fresh business in the browser → verify all changes on it as a user → fix what failed → create ANOTHER fresh business → repeat until clean. Never declare a change done on existing-business checks alone.
+
+### Parallel build agents run on Opus 4.8
+
+When fanning out implementation work to parallel agents (the Workflow tool or the Agent tool), pin them to **Opus 4.8** (`model: 'opus'`). Do not let a parallel lane silently run on a cheaper tier.
+
 ## Agent Behavior
 
 Do not stop at analysis because the workspace is dirty. There may be existing user or previous-agent edits. Read the relevant files, preserve unrelated changes, and make the requested change in the canonical location.

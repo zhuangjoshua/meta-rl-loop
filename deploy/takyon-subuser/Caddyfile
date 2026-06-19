@@ -1,7 +1,9 @@
 {
 	auto_https disable_redirects
-	on_demand_tls {
-		ask http://127.0.0.1:9119/api/product-tls/ask
+	servers {
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP X-Forwarded-For
 	}
 	# Edge DDoS / abuse controls for the shared product plane. `rate_limit` is the
 	# mholt/caddy-ratelimit module, provisioned by deploy/takyon-subuser/bootstrap-host.sh
@@ -9,13 +11,23 @@
 	order rate_limit before basic_auth
 }
 
+(fourmanifold_cloudflare_origin_tls) {
+	tls /etc/ssl/certs/fourmanifold-cloudflare-origin.crt /etc/ssl/private/fourmanifold-cloudflare-origin.key
+}
+
+(fourmanifold_edge_only) {
+	@origin_bypass {
+		not remote_ip 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32 127.0.0.1/8 ::1/128 10.116.0.0/20
+	}
+	respond @origin_bypass "forbidden" 403
+}
+
 # Shared dynamic product subdomains.
 # The app runtime itself decides whether a hostname belongs to a real business;
 # Caddy only forwards eligible product hosts to the sub-user plane.
-https:// {
-	tls {
-		on_demand
-	}
+*.fourmanifold.com {
+	import fourmanifold_cloudflare_origin_tls
+	import fourmanifold_edge_only
 
 	@product {
 		host *.fourmanifold.com
@@ -26,7 +38,7 @@ https:// {
 		@app_auth path /api/takyon/apps/*/auth/*
 		rate_limit @app_auth {
 			zone product_auth {
-				key {remote_host}
+				key {client_ip}
 				events 30
 				window 1m
 			}
@@ -37,7 +49,7 @@ https:// {
 		@app_actions path /api/takyon/apps/*/actions/* /api/takyon/apps/*/generate /api/takyon/apps/*/checkout
 		rate_limit @app_actions {
 			zone product_actions {
-				key {remote_host}
+				key {client_ip}
 				events 60
 				window 1m
 			}
@@ -46,7 +58,7 @@ https:// {
 		# Global DDoS cap on all product traffic (static + dynamic) per client IP.
 		rate_limit {
 			zone product_all {
-				key {remote_host}
+				key {client_ip}
 				events 600
 				window 1m
 			}
@@ -62,6 +74,8 @@ https:// {
 }
 
 :80 {
+	import fourmanifold_edge_only
+
 	@product {
 		host *.fourmanifold.com
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
@@ -69,7 +83,7 @@ https:// {
 	handle @product {
 		rate_limit {
 			zone product_all_80 {
-				key {remote_host}
+				key {client_ip}
 				events 600
 				window 1m
 			}

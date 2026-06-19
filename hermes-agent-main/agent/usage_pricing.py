@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any, Dict, Literal, Optional
 
 from agent.model_metadata import fetch_endpoint_model_metadata, fetch_model_metadata
@@ -490,6 +490,20 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://ai.google.dev/pricing",
         pricing_version="google-pricing-2026-03-16",
     ),
+    # Gemini 3.1 Flash Image — current flash image model (successor to 2.5 Flash
+    # Image). It honors the transparent-background request the 2.5 model ignored and
+    # renders a cleaner, higher-resolution icon. Same flash-image billing tier;
+    # ~$0.039/image (re-verify against Google's current 3.1 image pricing). Without
+    # an entry the brand-logo path stays refused (fail closed, GOAL_RULES §3 inv#1).
+    (
+        "google",
+        "gemini-3.1-flash-image",
+    ): PricingEntry(
+        request_cost=Decimal("0.039"),
+        source="official_docs_snapshot",
+        source_url="https://ai.google.dev/pricing",
+        pricing_version="google-pricing-2026-03-16",
+    ),
     # OpenAI gpt-image-2 (Images API) — billed per generated image by quality+size.
     # The UGC reference still is rendered at HIGH quality, 9:16 portrait (864x1536),
     # which OpenAI prices in the high/portrait tier at ~$0.25/image. Encoded as a
@@ -943,6 +957,66 @@ def has_known_pricing(
     entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
     return entry is not None
 
+
+# ── usage → dollars: the realized→billed markup ────────────────────────────────
+# The product usage rail must bill the customer ABOVE the realized provider cost so the
+# platform is never underwater on a single call. The markup is a basis-point factor over the
+# EXACT provider cost — never a heuristic family price, never a second pricing table. Default
+# 25% (2500 bps). The operator edits it in config.yaml under `usage.markup_bps` (a non-secret
+# runtime setting, not a .env key). Env `TAKYON_USAGE_MARKUP_BPS` is honored as a deploy-time
+# override that wins over config so a node can be tuned without rewriting config.yaml.
+#
+# Invariant (fail-closed money truth): billed_cost is ceil(realized * (1 + bps/10000)) and is
+# ALWAYS >= the realized provider cost (a negative/garbage bps clamps to 0 markup, never below
+# cost). It is purely a multiplier on an ALREADY-PRICED amount — it can never turn an unpriced
+# (None) realized cost into a charge. The unpriced model still refuses upstream (the caller
+# raises before reaching here), so the fail-closed contract is unchanged.
+_DEFAULT_USAGE_MARKUP_BPS = 2500  # 25%
+_BPS_DENOMINATOR = Decimal("10000")
+
+
+def usage_markup_bps() -> int:
+    """The active usage markup in basis points (1% = 100 bps). Resolution order:
+    `TAKYON_USAGE_MARKUP_BPS` env override → `usage.markup_bps` in config.yaml → 25% default.
+    Clamped to >= 0 (a negative or unparsable value yields 0 markup — bill at exact cost, never
+    below it). Read fresh per call so an operator edit takes effect without a process restart."""
+    import os
+
+    raw = os.getenv("TAKYON_USAGE_MARKUP_BPS")
+    if raw is None or not str(raw).strip():
+        raw = None
+        try:
+            import yaml  # local import: usage_pricing stays import-light
+            from takyon_constants import get_takyon_home
+
+            path = get_takyon_home() / "config.yaml"
+            with open(path, encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+            usage_cfg = data.get("usage")
+            if isinstance(usage_cfg, dict) and usage_cfg.get("markup_bps") is not None:
+                raw = usage_cfg.get("markup_bps")
+        except Exception:
+            raw = None
+    if raw is None:
+        return _DEFAULT_USAGE_MARKUP_BPS
+    try:
+        bps = int(Decimal(str(raw)))
+    except Exception:
+        return _DEFAULT_USAGE_MARKUP_BPS
+    return max(0, bps)
+
+
+def billed_cost(realized_microusd: int, *, markup_bps: Optional[int] = None) -> int:
+    """Convert a REALIZED provider cost (microUSD) into the BILLED customer cost (microUSD):
+    ceil(realized * (1 + markup_bps/10000)). The billed amount is what the usage rail reserves
+    and settles against the customer's budget; the realized amount is recorded alongside it for
+    money-truth. ALWAYS >= realized (markup clamps to >= 0), so the platform is never charged
+    below provider cost. ``markup_bps`` defaults to the active config/env value; pass it
+    explicitly only to bill a fixed rate. ``realized_microusd`` is clamped to >= 0."""
+    realized = max(0, int(realized_microusd))
+    bps = usage_markup_bps() if markup_bps is None else max(0, int(markup_bps))
+    billed = (Decimal(realized) * (_BPS_DENOMINATOR + Decimal(bps))) / _BPS_DENOMINATOR
+    return int(billed.to_integral_value(rounding=ROUND_CEILING))
 
 
 def format_duration_compact(seconds: float) -> str:

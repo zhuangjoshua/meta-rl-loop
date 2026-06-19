@@ -90,6 +90,56 @@ def test_forbidden_product_scanner_allows_runtime_client_usage(tmp_path):
     assert _scan_for_forbidden_product_backend_code(site) == []
 
 
+def test_forbidden_product_scanner_ignores_node_modules_dependency_entrypoints(tmp_path):
+    """Regression: installed dependencies (vite, express, hono, …) legitimately contain
+    server-entrypoint patterns inside node_modules, which is NEVER part of the published artifact
+    (the pinned Vite scaffold ships only dist/). Scanning it produced a false positive that flagged
+    Vite's own node_modules/vite/dist/node/ dev-server code as a "forbidden server entrypoint",
+    forcing the CEO to hand-add a .takyonignore on every build. node_modules must be excluded from
+    the scan entirely."""
+    site = tmp_path / "product" / "site"
+    vite_internal = site / "node_modules" / "vite" / "dist" / "node"
+    vite_internal.mkdir(parents=True)
+    (vite_internal / "cli.js").write_text(
+        "const server = await createServer(config);\nserver.listen(5173);\n", encoding="utf-8"
+    )
+    express_pkg = site / "node_modules" / "express" / "lib"
+    express_pkg.mkdir(parents=True)
+    (express_pkg / "application.js").write_text(
+        "const app = express();\napp.listen(3000);\n", encoding="utf-8"
+    )
+    assert _scan_for_forbidden_product_backend_code(site) == []
+
+
+def test_forbidden_product_scanner_still_flags_entrypoint_smuggled_into_dist(tmp_path):
+    """The node_modules carve-out must NOT weaken the real protection: a server entrypoint smuggled
+    into the PUBLISHED build output (dist/) is still a finding — dist/ ships, node_modules does not."""
+    site = tmp_path / "product" / "site"
+    dist = site / "dist" / "assets"
+    dist.mkdir(parents=True)
+    (dist / "server.mjs").write_text("const app = express();\napp.listen(8080);\n", encoding="utf-8")
+
+    findings = _scan_for_forbidden_product_backend_code(site)
+
+    assert any(
+        f.get("kind") == "server_entrypoint" and f["path"].startswith("dist/") for f in findings
+    ), findings
+
+
+def test_forbidden_product_scanner_still_flags_entrypoint_in_product_source(tmp_path):
+    """A real server entrypoint in product source is still flagged (unchanged behavior)."""
+    site = tmp_path / "product" / "site"
+    src = site / "src"
+    src.mkdir(parents=True)
+    (src / "server.ts").write_text(
+        "import http from 'http';\nhttp.createServer(handler).listen(3000);\n", encoding="utf-8"
+    )
+
+    findings = _scan_for_forbidden_product_backend_code(site)
+
+    assert any(f.get("kind") == "server_entrypoint" for f in findings), findings
+
+
 def test_bounded_product_inventory_flags_reserved_runtime_namespace_without_runtime_credit(tmp_path):
     business_root = tmp_path / "businesses" / "latexflow"
     site = business_root / "product" / "site"

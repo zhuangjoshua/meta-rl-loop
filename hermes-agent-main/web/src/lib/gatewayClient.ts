@@ -231,9 +231,14 @@ export class GatewayClient {
       this.pending.delete(id);
       clearTimeout(p.timer);
 
-      const err = msg.error as { message?: string } | undefined;
-      if (err) p.reject(new Error(err.message ?? "request failed"));
-      else p.resolve(msg.result);
+      const err = msg.error as { message?: string; code?: number } | undefined;
+      if (err) {
+        // Preserve the JSON-RPC numeric error code on the thrown Error so callers
+        // (e.g. createBusiness) can branch on it — 4030 out-of-credits vs 5051 hard error.
+        const e = new Error(err.message ?? "request failed");
+        if (typeof err.code === "number") Object.assign(e, { code: err.code });
+        p.reject(e);
+      } else p.resolve(msg.result);
       return;
     }
 
@@ -331,8 +336,14 @@ export class GatewayClient {
         throw new Error(`${res.status}: ${text}`);
       }
       const msg = await res.json();
-      const err = msg.error as { message?: string } | undefined;
-      if (err) throw new Error(err.message ?? "request failed");
+      const err = msg.error as { message?: string; code?: number } | undefined;
+      if (err) {
+        // Preserve the JSON-RPC numeric error code on the thrown Error so callers
+        // (e.g. createBusiness) can branch on it — 4030 out-of-credits vs 5051 hard error.
+        const e = new Error(err.message ?? "request failed");
+        if (typeof err.code === "number") Object.assign(e, { code: err.code });
+        throw e;
+      }
       if (this._state !== "open") this.setState("polling");
       return msg.result as T;
     } catch (err) {

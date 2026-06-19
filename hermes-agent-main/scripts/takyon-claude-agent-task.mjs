@@ -255,8 +255,14 @@ async function main() {
   if (!isSubpath(root, cwd)) {
     throw new Error("cwd must be inside the business root");
   }
-  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_TOKEN) {
-    throw new Error("ANTHROPIC_API_KEY or ANTHROPIC_TOKEN is required");
+  const anthropicApiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  const anthropicToken = String(
+    process.env.ANTHROPIC_TOKEN || process.env.CLAUDE_CODE_OAUTH_TOKEN || ""
+  ).trim();
+  if (!anthropicApiKey && !anthropicToken) {
+    throw new Error(
+      "ANTHROPIC_API_KEY, ANTHROPIC_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN is required"
+    );
   }
 
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
@@ -283,8 +289,8 @@ async function main() {
             abortController,
             cwd,
             env: {
-              ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-              ANTHROPIC_TOKEN: process.env.ANTHROPIC_TOKEN,
+              ANTHROPIC_API_KEY: anthropicApiKey,
+              ANTHROPIC_TOKEN: anthropicToken,
               CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent"
             },
             model,

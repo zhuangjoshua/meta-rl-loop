@@ -90,6 +90,11 @@ def test_read_env_backed_value_rejects_non_sensitive_keys(monkeypatch):
         safebox.read_env_backed_value("OPENAI_BASE_URL")
 
 
+def test_dataforseo_credentials_are_safebox_sensitive():
+    assert safebox.is_sensitive_env_key("DATAFORSEO_LOGIN") is True
+    assert safebox.is_sensitive_env_key("DATAFORSEO_PASSWORD") is True
+
+
 def test_read_env_backed_value_requires_remote_or_safebox_host(monkeypatch):
     monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
     monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)

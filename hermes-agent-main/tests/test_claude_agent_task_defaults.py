@@ -824,6 +824,62 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
     assert "/etc/group,readonly" in " ".join(run_cmd)
 
 
+def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    from tools.environments import docker as docker_env
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: None)
+    monkeypatch.setattr(docker_env, "_host_user_identity_mount_args", lambda user_spec: [])
+    monkeypatch.setattr(docker_env, "_build_security_args", lambda run_as_host_user=False: [])
+    monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(takyon_core, "_docker_claude_worker_binary_mounts", lambda **kwargs: ([], {}))
+
+    def fake_first_env_backed_value(*names):
+        if names == ("ANTHROPIC_API_KEY",):
+            return "remote-api-key"
+        if names == ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            return "remote-oauth-token"
+        return ""
+
+    monkeypatch.setattr(takyon_core.safebox, "first_env_backed_value", fake_first_env_backed_value)
+    monkeypatch.setattr(takyon_core.safebox, "read_env_backed_value", lambda key: "")
+
+    run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={
+            "business": "latexflow",
+            "workspace": "product/site",
+            "instruction": "Build the product shell.",
+        },
+        workspace_path=workspace,
+        timeout_ms=30_000,
+    )
+
+    joined = " ".join(run_cmd)
+    assert "ANTHROPIC_API_KEY=remote-api-key" in joined
+    assert "ANTHROPIC_TOKEN=remote-oauth-token" in joined
+
+
+def test_missing_env_for_requirement_accepts_safebox_backed_anthropic_token(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    def fake_read_env_backed_value(name: str) -> str:
+        return "remote-oauth-token" if name == "ANTHROPIC_TOKEN" else ""
+
+    monkeypatch.setattr(takyon_core.safebox, "read_env_backed_value", fake_read_env_backed_value)
+
+    assert takyon_core._missing_env_for_requirement("anthropic") == []
+
+
 def test_claude_agent_task_returns_worker_failure_diagnostics(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 

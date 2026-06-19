@@ -28,9 +28,9 @@ Usage:
   deploy/shared/provision-safebox-secret.sh UMAMI_API_KEY
 
 What it does:
-  1. Upserts the key into the local workspace secret files.
+  1. Upserts the key into the local workspace secret files when it is not Safebox-only.
   2. Upserts the key into the local-dev Safebox secret file.
-  3. Upserts the key into BOTH operator-host env files.
+  3. Upserts the key into BOTH operator-host env files when it is not Safebox-only.
   4. Upserts the key into BOTH Safebox-host env files.
   5. Refreshes the live remote Safebox authority via takyon-cli secret set.
 
@@ -42,6 +42,17 @@ EOF
 
 is_valid_key_name() {
   [[ "${1:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+
+is_safebox_only_key() {
+  case "${1:-}" in
+    OPENAI_API_KEY|ANTHROPIC_API_KEY|ANTHROPIC_TOKEN|CLAUDE_CODE_OAUTH_TOKEN|AUTH0_CLIENT_SECRET|AUTH0_SECRET|COMPOSIO_API_KEY|POSTMARK_SERVER_TOKEN|STRIPE_SECRET_KEY|STRIPE_WEBHOOK_SECRET|STRIPE_BILLING_WEBHOOK_SECRET|SUPABASE_JWT_SECRET|SUPABASE_S3_ACCESS_KEY_ID|SUPABASE_S3_SECRET_ACCESS_KEY|TAVILY_API_KEY|UMAMI_API_KEY|VERCEL_TOKEN)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 encode_base64() {
@@ -196,16 +207,24 @@ if [[ ! -f "$TAKYON_SAFEBOX_VPS_KEY" ]]; then
   exit 1
 fi
 
-"$UPSERT_SCRIPT" upsert-file "$LOCAL_WORKSPACE_SECRETS" "$key_name"
-"$UPSERT_SCRIPT" upsert-file "$LOCAL_WORKSPACE_HOME_ENV" "$key_name"
+if is_safebox_only_key "$key_name"; then
+  echo "Skipping local workspace env mirrors for Safebox-only key $key_name"
+else
+  "$UPSERT_SCRIPT" upsert-file "$LOCAL_WORKSPACE_SECRETS" "$key_name"
+  "$UPSERT_SCRIPT" upsert-file "$LOCAL_WORKSPACE_HOME_ENV" "$key_name"
+fi
 "$UPSERT_SCRIPT" upsert-file "$LOCAL_DEV_SAFEBOX_ENV" "$key_name"
 
-remote_upsert_files \
-  "$TAKYON_VPS_HOST" \
-  "$TAKYON_VPS_KEY" \
-  "$key_name" \
-  "$TAKYON_REMOTE_OPERATOR_SECRETS" \
-  "$TAKYON_REMOTE_HOME/.env"
+if is_safebox_only_key "$key_name"; then
+  echo "Skipping operator host env mirrors for Safebox-only key $key_name"
+else
+  remote_upsert_files \
+    "$TAKYON_VPS_HOST" \
+    "$TAKYON_VPS_KEY" \
+    "$key_name" \
+    "$TAKYON_REMOTE_OPERATOR_SECRETS" \
+    "$TAKYON_REMOTE_HOME/.env"
+fi
 
 remote_upsert_files \
   "$TAKYON_SAFEBOX_VPS_HOST" \
@@ -216,4 +235,8 @@ remote_upsert_files \
 
 refresh_live_remote_safebox "$key_name"
 
-echo "Provisioned $key_name across local files, operator source files, Safebox source files, and the live remote Safebox authority."
+if is_safebox_only_key "$key_name"; then
+  echo "Provisioned $key_name across the Safebox source files and live remote Safebox authority."
+else
+  echo "Provisioned $key_name across local files, operator source files, Safebox source files, and the live remote Safebox authority."
+fi

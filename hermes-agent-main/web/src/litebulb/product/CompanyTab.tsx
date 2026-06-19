@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import {
   api,
   buildTakyonBusinessAssetUrl,
@@ -55,7 +58,6 @@ const RANGE_LABEL: Record<"D" | "W" | "M" | "Y", string> = {
   Y: "this year",
 };
 
-const TEXT_OUTPUT_SUFFIXES = new Set([".md", ".txt", ".json", ".js", ".css", ".html", ".ts", ".tsx", ".jsx", ".yml", ".yaml"]);
 const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
 const VIDEO_OUTPUT_SUFFIXES = new Set([".mp4", ".mov", ".webm", ".m4v"]);
 const HIDDEN_DOCUMENT_SUFFIXES = new Set([".js", ".jsx", ".ts", ".tsx"]);
@@ -371,6 +373,19 @@ function normalizeTaskStatus(value: string): keyof typeof TASK_STATUS_LABELS {
   return "idle";
 }
 
+// Freshest live worker-progress text for a running task: pick the most recently
+// updated child activity (the long Claude-worker phase emits these), preferring
+// an in-flight one, and read its human label/detail. Empty when nothing yet.
+function latestRunningActivity(activities: Array<Record<string, unknown>>): string {
+  if (!activities.length) return "";
+  const sorted = [...activities].sort(
+    (a, b) => asText(b.updated_at).localeCompare(asText(a.updated_at)),
+  );
+  const active = sorted.find((a) => normalizeTaskStatus(asText(a.status)) === "running");
+  const pick = active || sorted[0];
+  return asText(pick.title) || asText(pick.label) || asText(pick.detail) || asText(pick.description);
+}
+
 // Operator-approved category taxonomy (GOAL_RULES §5/§7, locked 2026-06-17):
 // one pill per task, drawn from RESEARCH / PRODUCT / LAUNCH / GROWTH / OPS.
 const TASK_CATEGORY_LABELS: Record<string, string> = {
@@ -404,10 +419,37 @@ function titleWithoutLeadingCategory(title: string, category: string): string {
   return t;
 }
 
-function TaskDetail({ task }: { task: Record<string, unknown> }) {
+// Compact clock for the nested activity log timestamps.
+function activityTime(value: string): string {
+  const raw = asText(value);
+  if (!raw) return "";
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function TaskDetail({
+  task,
+  activities = [],
+}: {
+  task: Record<string, unknown>;
+  // Nested child rows (steps / activities) whose task_id points at this task.
+  // Rendered as the task LOG so the hierarchy reads company -> task -> activity.
+  activities?: Array<Record<string, unknown>>;
+}) {
   const description = asText(task.description) || asText(task.detail);
   const outputs = (Array.isArray(task.outputs) ? task.outputs : []).map((o) => asText(o)).filter(Boolean);
   const steps = asList(task.steps);
+  // Canonical link captured on the task (e.g. the live X post URL, spec #19).
+  const openUrl = asText(task.open_url);
+  // Order the activity log oldest -> newest so it reads as an append-only log.
+  const orderedActivities = useMemo(
+    () =>
+      [...activities].sort(
+        (a, b) => asText(a.updated_at).localeCompare(asText(b.updated_at)),
+      ),
+    [activities],
+  );
   return (
     <div className="lb-task__detail">
       {description && (
@@ -415,6 +457,17 @@ function TaskDetail({ task }: { task: Record<string, unknown> }) {
           <span className="lb-task__goal-h">Goal</span>
           <span className="lb-task__goal-t">{description}</span>
         </div>
+      )}
+      {openUrl && (
+        <a
+          className="lb-task__open"
+          href={openUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(event) => event.stopPropagation()}
+        >
+          View post {I.ext}
+        </a>
       )}
       {outputs.length > 0 && (
         <div className="lb-task__outs">
@@ -437,6 +490,39 @@ function TaskDetail({ task }: { task: Record<string, unknown> }) {
           })}
         </ol>
       )}
+      {/* Nested task LOG: the child steps/activities recorded under this task
+          (parent task -> child activities), rendered from the backend task_id
+          parent links (spec #1). */}
+      {orderedActivities.length > 0 && (
+        <div className="lb-task__log">
+          <span className="lb-task__goal-h">Activity</span>
+          <ul className="lb-task__loglist">
+            {orderedActivities.map((activity, i) => {
+              const state = normalizeTaskStatus(asText(activity.status));
+              const label =
+                asText(activity.title) || asText(activity.label) || asText(activity.detail) || `Activity ${i + 1}`;
+              const detail = asText(activity.description) || asText(activity.detail);
+              const when = activityTime(asText(activity.updated_at));
+              const statusLabel = asText(activity.status_label) || TASK_STATUS_LABELS[state] || state;
+              return (
+                <li key={asText(activity.id) || i} className={`lb-task__logitem is-${state}`}>
+                  <span className="lb-task__logdot" aria-hidden="true" />
+                  <span className="lb-task__logmain">
+                    <span className="lb-task__logrow">
+                      <span className="lb-task__logtitle">{label}</span>
+                      {when && <span className="lb-task__logtime">{when}</span>}
+                    </span>
+                    {detail && detail !== label && (
+                      <span className="lb-task__logdetail">{detail}</span>
+                    )}
+                  </span>
+                  <span className={`lb-task__pill lb-task__pill--status is-${state}`}>{statusLabel}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {/* Raw tool-call name only shown here, in the expanded detail (spec #4). */}
       {asText(task.label) && asText(task.label) !== asText(task.title) && (
         <div className="lb-task__raw">raw: {asText(task.label)}</div>
@@ -446,8 +532,10 @@ function TaskDetail({ task }: { task: Record<string, unknown> }) {
 }
 
 function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
-  // Only intent-level tasks are top-level rows; raw tool calls carry a task_id
-  // pointing at a parent (spec #6), so nested events are not listed flat here.
+  // Only intent-level tasks are top-level rows; raw tool calls / runtime steps
+  // carry a task_id pointing at a parent (spec #6), so nested events are not
+  // listed flat here — they are grouped under their parent and rendered as the
+  // expanded task LOG (parent task -> child steps/activities).
   const intentTasks = useMemo(
     () => tasks.filter((task) => {
       const id = asText(task.id);
@@ -456,6 +544,21 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
     }),
     [tasks],
   );
+  // Group every child row by its parent task_id so each intent card can render
+  // its own nested activity log. Children are rows whose task_id points at a
+  // DIFFERENT task id (canonical_task defaults task_id to its own id for roots).
+  const childrenByParent = useMemo(() => {
+    const map = new Map<string, Array<Record<string, unknown>>>();
+    for (const task of tasks) {
+      const id = asText(task.id);
+      const parent = asText(task.task_id);
+      if (!parent || parent === id) continue;
+      const list = map.get(parent) || [];
+      list.push(task);
+      map.set(parent, list);
+    }
+    return map;
+  }, [tasks]);
   const ordered = useMemo(
     () => [
       ...intentTasks.filter((task) => normalizeTaskStatus(asText(task.status)) !== "completed"),
@@ -482,7 +585,20 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
           const statusLabel = asText(task.status_label) || TASK_STATUS_LABELS[state] || state;
           const title = titleWithoutLeadingCategory(asText(task.title) || asText(task.label) || "Recorded work", category);
           const description = asText(task.description) || asText(task.detail) || "Tracked in the workspace overview.";
+          // Canonical link captured on the task (e.g. the live X post URL the X
+          // tool persists, spec #19). When present the row shows a clickable
+          // "View post" anchor; stopPropagation keeps a click from toggling the card.
+          const openUrl = asText(task.open_url);
           const isOpen = expanded === id;
+          const childActivities = childrenByParent.get(asText(task.id)) || [];
+          // Live worker-progress line for a RUNNING task: the long Claude-worker
+          // phase emits nested activity rows (surfaced by tui_gateway into the
+          // running task). Show the freshest one inline — even collapsed — so the
+          // operator sees real movement instead of a blank wait. Falls back to the
+          // task's own running detail when no child activity has landed yet.
+          const liveProgress = state === "running"
+            ? (latestRunningActivity(childActivities) || asText(task.detail) || description)
+            : "";
           return (
             <div key={id} className={`lb-act__task lb-task is-${state} ${isOpen ? "is-open" : ""}`}>
               <button
@@ -502,12 +618,28 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
                       )}
                     </span>
                   </span>
-                  {!isOpen && (
+                  {state === "running" ? (
+                    <span className="lb-act__live">
+                      <span className="lb-act__live-bar" aria-hidden="true"><i /></span>
+                      <span className="lb-act__live-txt">{liveProgress}</span>
+                    </span>
+                  ) : !isOpen ? (
                     <span className="lb-act__ev"><span className="lb-act__evtxt">{description}</span></span>
-                  )}
+                  ) : null}
                 </span>
               </button>
-              {isOpen && <TaskDetail task={task} />}
+              {openUrl && (
+                <a
+                  className="lb-task__open"
+                  href={openUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  View post {I.ext}
+                </a>
+              )}
+              {isOpen && <TaskDetail task={task} activities={childActivities} />}
             </div>
           );
         })}
@@ -843,6 +975,89 @@ function ChannelBudget({
   );
 }
 
+// Suffixes that read as prose (rendered as a typeset markdown "paper").
+const PROSE_DOCUMENT_SUFFIXES = new Set([".md", ".markdown", ".txt", ""]);
+
+// Pretty-print JSON when it parses; otherwise return the raw text unchanged.
+function prettyJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+/* Readable-document reader. Replaces the dark raw <pre> with a centered serif
+   "paper" sheet over a dimmed/blurred scrim: italic-serif title top-left, CLOSE
+   top-right, real typographic hierarchy (headings/lists/code) for prose, a tidy
+   pretty-printed block for JSON, and scrolls for long documents. Media / ad
+   image+video previews keep the generic Modal — only readable documents change. */
+function DocumentModal({
+  title,
+  path,
+  preview,
+  onClose,
+}: {
+  title: string;
+  path: string;
+  preview: DocumentPreviewState;
+  onClose: () => void;
+}) {
+  const suffix = outputSuffix(asText(preview.file?.path || path));
+  const content = asText(preview.file?.content);
+  const isProse = PROSE_DOCUMENT_SUFFIXES.has(suffix);
+  const isJson = suffix === ".json";
+  return (
+    <div className="lb-paper-scrim" onClick={onClose}>
+      <div
+        className="lb-paper"
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button className="lb-paper__close" type="button" onClick={onClose} aria-label="Close">
+          {I.close}<span>Close</span>
+        </button>
+        <div className="lb-paper__sheet">
+          <header className="lb-paper__head">
+            <h1 className="lb-paper__title">{title}</h1>
+            {path ? <div className="lb-paper__path">{path}</div> : null}
+          </header>
+          <div className="lb-paper__body">
+            {!preview.file && preview.loading && <div className="lb-paper__note">Loading document…</div>}
+            {!preview.file && !preview.loading && preview.error && (
+              <div className="lb-paper__error">{preview.error}</div>
+            )}
+            {preview.file && (
+              <>
+                {content ? (
+                  isProse ? (
+                    <div className="lb-paper__prose">
+                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{content}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <pre className={`lb-paper__code${isJson ? " is-json" : ""}`}>
+                      {isJson ? prettyJson(content) : content}
+                    </pre>
+                  )
+                ) : (
+                  <div className="lb-paper__note">This document is empty.</div>
+                )}
+                {preview.loading && <div className="lb-paper__note">Loading the rest of the document…</div>}
+                {!preview.loading && preview.error && <div className="lb-paper__note">{preview.error}</div>}
+                {preview.file?.truncated && (
+                  <div className="lb-paper__note">Preview truncated to the first portion of the document.</div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Documents({
   business,
   deliverables,
@@ -973,29 +1188,12 @@ function Documents({
       </section>
 
       {preview && (
-        <Modal
+        <DocumentModal
           title={asText(preview.output.title) || asText(preview.output.path) || "Document"}
-          sub={asText(preview.output.path)}
-          wide
+          path={asText(preview.output.path)}
+          preview={preview}
           onClose={() => setPreview(null)}
-        >
-          <div className="lb-docview">
-            {!preview.file && preview.loading && <div className="lb-empty">Loading file preview…</div>}
-            {!preview.file && !preview.loading && preview.error && <div className="lb-docview__error">{preview.error}</div>}
-            {preview.file && (
-              <>
-                <pre className={`lb-docview__code${TEXT_OUTPUT_SUFFIXES.has(outputSuffix(asText(preview.file?.path || preview.output.path))) ? "" : " is-plain"}`}>
-                  {asText(preview.file?.content) || "File is empty."}
-                </pre>
-                {preview.loading && <div className="lb-docview__note">Loading the rest of the file…</div>}
-                {!preview.loading && preview.error && <div className="lb-docview__note">{preview.error}</div>}
-                {preview.file?.truncated && (
-                  <div className="lb-docview__note">Preview truncated to the first portion of the file.</div>
-                )}
-              </>
-            )}
-          </div>
-        </Modal>
+        />
       )}
     </>
   );

@@ -80,10 +80,9 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
 ssh "${source_ssh[@]}" "$SOURCE_HOST" 'bash -s' <<'EOF' | ssh "${target_ssh[@]}" "$TARGET_HOST" "tar -C '$REMOTE_ROOT' -xf -"
 set -euo pipefail
 cd /opt/takyon
+# The sub-user plane fetches Safebox-backed secrets at runtime; do not mirror raw secrets/.env
+# from the operator source host into this public host bootstrap rail.
 paths=(hermes-agent-main .takyon/.env .takyon/config.yaml)
-if [ -f secrets/.env ]; then
-  paths+=(secrets/.env)
-fi
 if [ -d .takyon/product-sites ]; then
   paths+=(.takyon/product-sites)
 fi

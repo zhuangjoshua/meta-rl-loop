@@ -1,7 +1,7 @@
 """Postgres integration tests for the polsia2 REPLACE cutover (mediationplan.md
 Ground Truth, 2026-05-30: takyon OWNS public; polsia2's rows are disposable).
 
-Proves four robustness properties of the replace, all on a real throwaway Postgres
+Proves five robustness properties of the replace, all on a real throwaway Postgres
 (never mocks), so the destructive live step is designed and verified locally first:
 
   1. The forward migrations (0001/0002) FAIL LOUD — they do not silently bind via
@@ -15,6 +15,10 @@ Proves four robustness properties of the replace, all on a real throwaway Postgr
   3. The teardown is a pure no-op on a clean database.
   4. Re-running the teardown after takyon ALREADY owns the tables is a no-op that
      NEVER destroys takyon data (the guard is the inverse of 0001/0002's guards).
+  5. Phase 2 (the full orphan wipe applied live 2026-06-19) drops the enumerated
+     prior-generation tables — even with an inter-orphan FK and in any order, via
+     `drop ... cascade` — while a table whose name is NOT on the list survives
+     untouched.
 
 Skips unless psycopg is importable and TAKYON_TEST_PG_DSN is set.
 """
@@ -236,3 +240,71 @@ def test_retire_preserves_takyon_data_on_rerun(pg_conn):
         ).fetchone()[0]
         == 1
     )
+
+
+def test_retire_phase2_wipes_orphan_legacy_tables(pg_conn_raw):
+    # Phase 2 is the full orphan wipe deferred by the SCOPE note and applied live on
+    # 2026-06-19: the 98 prior-generation tables that the takyon migrations do NOT own
+    # and nothing current references. Stand up a REPRESENTATIVE handful (one per legacy
+    # family), including a parent→child FK between two listed orphans to prove the
+    # `drop ... cascade` loop handles dependencies regardless of array order…
+    pg_conn_raw.execute("create table public.profiles (id uuid primary key default gen_random_uuid())")
+    pg_conn_raw.execute("create table public.company_sites (id uuid primary key default gen_random_uuid())")
+    pg_conn_raw.execute("create table public.meta_ads (id uuid primary key default gen_random_uuid())")
+    pg_conn_raw.execute("create table public.business_documents (id uuid primary key default gen_random_uuid())")
+    pg_conn_raw.execute(
+        "create table public.generated_app_builds (id uuid primary key default gen_random_uuid())"
+    )
+    # child references parent; both are on the wipe list, and the parent sorts BEFORE the
+    # child in the array — so dropping the parent first must cascade-clear this FK rather
+    # than raise a dependency error.
+    pg_conn_raw.execute(
+        "create table public.generated_app_build_steps ("
+        "  id uuid primary key default gen_random_uuid(),"
+        "  build_id uuid not null references public.generated_app_builds (id) on delete cascade"
+        ")"
+    )
+    # …plus an innocent table whose name is NOT on the 98-name list: it must SURVIVE.
+    pg_conn_raw.execute("create table public.survivor_not_legacy (id uuid primary key default gen_random_uuid())")
+
+    _retire(pg_conn_raw)
+
+    for orphan in (
+        "profiles",
+        "company_sites",
+        "meta_ads",
+        "business_documents",
+        "generated_app_builds",
+        "generated_app_build_steps",
+    ):
+        assert not _table_exists(pg_conn_raw, orphan), f"{orphan} should have been wiped by phase 2"
+    # The non-listed table is untouched — the wipe is an explicit enumeration, never a
+    # schema-wide drop.
+    assert _table_exists(pg_conn_raw, "survivor_not_legacy")
+
+    # Idempotent: a second run is a pure no-op (every drop is `if exists`) and still
+    # leaves the survivor alone.
+    _retire(pg_conn_raw)
+    assert _table_exists(pg_conn_raw, "survivor_not_legacy")
+
+
+def test_retire_phase2_never_touches_canonical_tables(pg_conn):
+    # pg_conn has the full canonical schema (all migrations applied). Running the teardown
+    # against a DB takyon fully owns must not drop a single canonical table — Phase 1's
+    # shape guards skip, and Phase 2's array contains zero canonical names (and self-aborts
+    # if one ever leaks in).
+    before = pg_conn.execute(
+        "select count(*) from information_schema.tables "
+        "where table_schema='public' and table_type='BASE TABLE'"
+    ).fetchone()[0]
+
+    _retire(pg_conn)
+
+    after = pg_conn.execute(
+        "select count(*) from information_schema.tables "
+        "where table_schema='public' and table_type='BASE TABLE'"
+    ).fetchone()[0]
+    assert after == before, "teardown dropped a canonical table"
+    # Spot-check load-bearing canonical tables are still present and usable.
+    for canon in ("businesses", "billing_accounts", "events", "jobs", "app_usage_events"):
+        assert _table_exists(pg_conn, canon)

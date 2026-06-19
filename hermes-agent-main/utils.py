@@ -75,10 +75,42 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
 
     Returns the resolved real path used for the replace, so callers that
     need to re-apply permissions can target it instead of the symlink.
+
+    Ownership is preserved the same way the mode is (``_restore_file_mode``):
+    ``os.replace`` installs the ``tmp_path`` inode — owned by the *calling*
+    process — in place of ``target``. When a privileged (root) process
+    rewrites a file owned by a service user (e.g. ``takyon secret set`` run
+    as root persisting a secret into ``/opt/takyon/.takyon/.env`` via
+    ``_save_env_value_direct``), the file silently flips to ``root:root``.
+    The service user can then no longer read it, crash-looping the unit
+    (observed: takyon-dashboard 502 on ``PermissionError: [Errno 13]
+    .../.env``). Capture the target's uid/gid before the rename and restore
+    it after, so a root writer can never re-own a service file. Non-root
+    callers that can't chown degrade quietly — the mode is preserved anyway.
     """
     target_str = str(target)
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
+
+    prev_owner: "tuple[int, int] | None" = None
+    if hasattr(os, "chown"):
+        try:
+            st = os.stat(real_path)
+            prev_owner = (st.st_uid, st.st_gid)
+        except OSError:
+            prev_owner = None
+
     os.replace(str(tmp_path), real_path)
+
+    if prev_owner is not None:
+        try:
+            cur = os.stat(real_path)
+            if (cur.st_uid, cur.st_gid) != prev_owner:
+                os.chown(real_path, prev_owner[0], prev_owner[1])
+        except OSError:
+            # A non-privileged caller cannot restore foreign ownership; the
+            # mode is preserved by the caller, so degrade rather than fail.
+            pass
+
     return real_path
 
 

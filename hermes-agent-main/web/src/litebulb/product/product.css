@@ -367,10 +367,9 @@
   .lb-chat-dock.is-closed { width: 0; box-shadow: none; }
 }
 
-/* CEO update rendered as a conversation turn (thinking -> message), not a card
-   with a phase checklist (operator clarification 2026-06-18). */
-.lb-ceomsg__think { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; opacity: 0.8; font-size: 13px; }
-.lb-ceomsg__think-txt { color: var(--lb-muted, #6b7280); }
-.lb-ceomsg__title { font-weight: 600; margin-bottom: 4px; }
-.lb-ceomsg__p { margin: 0 0 6px; line-height: 1.55; }
-.lb-ceomsg__p:last-child { margin-bottom: 0; }
+/* Standalone thinking row: the animated dots live in their OWN agent bubble with
+   their own vertical space — never stacked on top of message words. Shown only
+   while a turn is truly running and before any reply text arrives; the reply
+   bubble then takes its place (mirrors Claude: thinking -> reply). */
+.lb-msg__bubble--think { display: inline-flex; align-items: center; min-height: 20px; }
+.lb-msg__bubble--think .lb-typing { color: var(--cds-color-text-soft); }

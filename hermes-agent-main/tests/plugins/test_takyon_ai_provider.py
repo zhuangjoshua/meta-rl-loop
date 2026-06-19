@@ -5,6 +5,8 @@ import pytest
 from plugins.takyon.ai_provider import (
     AnthropicPricingUnavailable,
     anthropic_payload,
+    anthropic_env,
+    anthropic_key,
     microusd_cost,
     tavily_request_microusd,
     TavilyPricingUnavailable,
@@ -31,6 +33,40 @@ def test_microusd_cost_uses_exact_model_catalog():
 def test_microusd_cost_blocks_unknown_anthropic_model():
     with pytest.raises(AnthropicPricingUnavailable):
         microusd_cost("claude-imaginary-99", 100, 20)
+
+
+def test_anthropic_env_prefers_safebox_over_local_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "local-api-key")
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "local-token")
+
+    def fake_first_env_backed_value(*names):
+        if names == ("ANTHROPIC_API_KEY",):
+            return "remote-api-key"
+        if names == ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            return "remote-token"
+        return ""
+
+    monkeypatch.setattr("plugins.takyon.safebox.first_env_backed_value", fake_first_env_backed_value)
+
+    assert anthropic_env() == {
+        "ANTHROPIC_API_KEY": "remote-api-key",
+        "ANTHROPIC_TOKEN": "remote-token",
+    }
+
+
+def test_anthropic_key_falls_back_to_claude_code_oauth_token(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    def fake_first_env_backed_value(*names):
+        if names == ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            return "remote-oauth-token"
+        return ""
+
+    monkeypatch.setattr("plugins.takyon.safebox.first_env_backed_value", fake_first_env_backed_value)
+
+    assert anthropic_key() == "remote-oauth-token"
 
 
 def test_tavily_request_microusd_uses_exact_catalog_entries():

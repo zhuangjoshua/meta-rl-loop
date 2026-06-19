@@ -33,7 +33,7 @@ _UNAUTH_HEADERS = {"WWW-Authenticate": _SESSION_HEADER_NAME}
 # Brand logo image generation (Nano Banana / Gemini). The model id and its
 # aliases for resolving the Safebox-backed key live here so the authority route
 # is the single place the live provider credential is touched.
-_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 _GEMINI_KEY_ALIASES = ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
@@ -112,10 +112,13 @@ def _resolve_gemini_image_key() -> str:
 def _gemini_logo_prompt(business_context: dict[str, Any]) -> str:
     """Build the brand-logo prompt from concrete business context.
 
-    Brand brief is operator-owned (GOAL_RULES §7): flat vector, transparent
-    background, icon-only, no text. The business name / category / tone are read
-    from the passed context and steer the icon concept; they are never invented
-    here.
+    Brand brief is operator-owned (GOAL_RULES §7): flat vector, icon-only, no
+    text. Gemini (gemini-*-flash-image / Nano Banana) ignores a "transparent"
+    instruction and bakes an opaque/checkerboard background, so the prompt asks
+    for a SOLID PURE-WHITE backdrop instead; ``_gemini_generate_logo_png`` then
+    keys that white out to a real alpha channel after generation. The business
+    name / category / tone are read from the passed context and steer the icon
+    concept; they are never invented here.
     """
     name = str(business_context.get("name") or business_context.get("slug") or "").strip()
     category = str(
@@ -133,7 +136,10 @@ def _gemini_logo_prompt(business_context: dict[str, Any]) -> str:
     lines = [
         "Design a single brand logo icon.",
         "Style: flat vector, minimal, icon-only — NO text, NO letters, NO wordmark.",
-        "Background: fully transparent (alpha channel), no backdrop, no frame.",
+        "Render the icon CENTERED on a SOLID PURE-WHITE (#FFFFFF) background with "
+        "generous padding around it.",
+        "Clean flat-vector opaque art: NO drop shadow, NO gradient, NO checkerboard, "
+        "NO photographic texture.",
         "Output one centered icon mark suitable as a scalable brand symbol.",
     ]
     if name:
@@ -145,12 +151,80 @@ def _gemini_logo_prompt(business_context: dict[str, Any]) -> str:
     return " ".join(lines)
 
 
+def _key_white_background_to_alpha(png_bytes: bytes) -> bytes:
+    """Turn the solid-white logo backdrop into a REAL alpha channel.
+
+    Gemini bakes an opaque white background (it ignores "transparent"), so the
+    prompt asks for a pure-white backdrop and this step keys that white out to
+    real transparency. The ramp converts near-white pixels to alpha over a band
+    (min-channel ``<=230`` stays fully opaque, ``>=250`` becomes fully
+    transparent, linear in between) so anti-aliased edges fade smoothly instead
+    of leaving a hard white halo, then crops to the alpha bounding box for tight
+    framing.
+
+    FAIL-SAFE: if Pillow/numpy are unavailable or post-processing raises, the
+    ORIGINAL bytes are returned untouched — a logo with a baked white background
+    is still a usable logo, and this must never crash the already-charged render.
+    """
+    if not png_bytes:
+        return png_bytes
+    try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+
+        _lazy_ensure("image.logo_postprocess", prompt=False)
+    except ImportError:
+        pass
+    except Exception:  # lazy_deps surfaces install hints; fall through to import
+        pass
+
+    try:
+        import io
+
+        import numpy as np
+        from PIL import Image
+    except Exception:
+        # Pillow/numpy not importable — return the opaque-white PNG unchanged.
+        return png_bytes
+
+    try:
+        with Image.open(io.BytesIO(png_bytes)) as im:
+            rgba = im.convert("RGBA")
+        arr = np.asarray(rgba).astype(np.float32)
+        rgb = arr[..., :3]
+        alpha = arr[..., 3]
+        # Per-pixel "whiteness" = the darkest channel. A pure-white pixel has
+        # min-channel 255; a saturated/dark icon pixel has a low min-channel.
+        min_channel = rgb.min(axis=2)
+        lo, hi = 230.0, 250.0
+        # Linear ramp: keyed alpha 255 at/below lo, 0 at/above hi.
+        keyed = np.clip((hi - min_channel) / (hi - lo), 0.0, 1.0) * 255.0
+        new_alpha = np.minimum(alpha, keyed)
+        out = arr.copy()
+        out[..., 3] = new_alpha
+        out_img = Image.fromarray(out.astype(np.uint8), mode="RGBA")
+        # Tight framing: crop to the non-transparent bounding box when present.
+        bbox = out_img.getbbox()
+        if bbox:
+            out_img = out_img.crop(bbox)
+        buf = io.BytesIO()
+        out_img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        # Any post-processing failure must not lose the rendered (charged) asset.
+        return png_bytes
+
+
 def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
-    """Call Gemini image generation and return PNG bytes (with alpha).
+    """Call Gemini image generation and return PNG bytes with a real alpha channel.
 
     Imports the provider SDK lazily and passes the key as an explicit
     ``genai.Client(api_key=…)`` argument — never via ``os.environ``. Raises on
     any provider/SDK failure so the caller releases the credit reservation.
+
+    Gemini bakes an opaque/checkerboard background even when asked for
+    transparency, so the prompt requests a solid pure-white backdrop and the raw
+    PNG is post-processed (``_key_white_background_to_alpha``) into real alpha
+    before returning. Post-processing fails safe to the original bytes.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -186,9 +260,8 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
             data = getattr(inline, "data", None) if inline is not None else None
             if not data:
                 continue
-            if isinstance(data, str):
-                return base64.b64decode(data)
-            return bytes(data)
+            raw = base64.b64decode(data) if isinstance(data, str) else bytes(data)
+            return _key_white_background_to_alpha(raw)
     raise RuntimeError("Gemini image generation returned no image data")
 
 
@@ -258,18 +331,46 @@ def build_creative_gateway_router() -> APIRouter:
 
         provider_cost_usd = core._logo_provider_cost_usd()
         finalized = False
+        published_to_site = False
+        publish_skipped_reason = ""
+        site_logo_url = ""
         try:
             png_bytes = _gemini_generate_logo_png(api_key=api_key, prompt=prompt)
             if not png_bytes:
                 raise RuntimeError("Gemini image generation returned empty image")
             core._atomic_write_bytes(asset_abs, png_bytes)
+            # Publish the PNG into the live product site IN THIS PROCESS, while the freshly written
+            # bytes are guaranteed present in the local cache mirror. ``asset_abs`` was resolved with
+            # the default ``sync=True`` above, so the mirror is materialized; resolve the site root
+            # with ``sync=False`` so we do NOT re-materialize (that would re-run the mirror with
+            # ``delete_local=True`` and wipe the just-written logo — the exact hazard static_render
+            # documents for its render output). This writes product/site/public/brand-logo.png plus
+            # the injected PNG-favicon <link>, so the single ``_sync_business_workspace_remote`` below
+            # commits BOTH the brand asset AND the published site files in one revision. The core.py
+            # handler reads ``published_to_site`` / ``site_logo_url`` from this response instead of
+            # re-publishing off a stale mirror.
+            try:
+                source_path = core._canonical_product_surface_source_path("product/site")
+                site_root = store._resolve_business_file(business, source_path, sync=False)
+                published_to_site = bool(
+                    core._publish_brand_logo_to_site(site_root, png_bytes=png_bytes)
+                )
+                if published_to_site:
+                    site_logo_url = "/brand-logo.png"
+                else:
+                    publish_skipped_reason = "publish_returned_false"
+            except Exception as publish_exc:
+                # Best-effort publish: never crash the already-rendered (about-to-be-charged) logo.
+                published_to_site = False
+                publish_skipped_reason = f"publish_failed: {publish_exc}"
             # Persist the rendered logo to canonical remote storage IMMEDIATELY, before committing
             # the credit. The render wrote the PNG only into the LOCAL cache mirror; a concurrent
             # ``_business_root(sync=True)`` re-materializes that mirror with ``delete_local=True`` and
             # would wipe the logo before any later sync — charging credits for an asset that then
             # vanishes (observed: success+2 credits, but logo.png gone on the next sync). Pushing here,
-            # while the file exists, makes the logo durable at the point of creation. Same
-            # immediate-remote-push pattern static_render already uses for ad creatives.
+            # while both the asset AND the published site files exist, makes them durable at the point
+            # of creation. Same immediate-remote-push pattern static_render already uses for ad
+            # creatives.
             store._sync_business_workspace_remote(business)
             balances = core._commit_creative_credits(
                 reservation_key,
@@ -298,6 +399,9 @@ def build_creative_gateway_router() -> APIRouter:
                 "balance_credits": balances["balance_credits"],
                 "reserved_credits": balances["reserved_credits"],
                 "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "",
+                "published_to_site": published_to_site,
+                "site_logo_url": site_logo_url,
+                "publish_skipped_reason": publish_skipped_reason or None,
             }
         except Exception as exc:
             if not finalized:
