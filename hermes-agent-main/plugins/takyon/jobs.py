@@ -390,7 +390,7 @@ def run_one(
                 business_slug=job.business_slug,
                 job_id=str(job.id),
             )
-            reserved = res.allowance_cents + res.topup_cents
+            reserved = res.allowance_cents
         except billing.InsufficientBalance as exc:
             block(
                 conn,

@@ -108,15 +108,29 @@ class _FakePluginContext:
 
 @pytest.fixture(autouse=True)
 def _isolated_takyon_pg_env(monkeypatch, tmp_path, pg_store_dsn):
+    # Force LOCAL safebox authority so env-resolution (DATABASE_URL etc.) reads this test
+    # process's os.environ — under the rig TAKYON_SAFEBOX_URL is set, which would otherwise
+    # route resolution to the out-of-process safebox stub that never sees the monkeypatched
+    # DATABASE_URL. Canonical PG-test pattern (see test_takyon_operator_tiers_pg.py).
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|takyon-plugin-tests")
+    # The DB-URL resolver memoises process-wide; each test gets a fresh throwaway DB, so clear the
+    # memo at setup (and teardown) so a prior test's now-dropped DSN can't leak into this test.
+    from plugins.takyon.runtime_app import reset_database_url_cache
+
+    reset_database_url_cache()
     user_id, _ = TakyonStore(root=tmp_path, database_url=pg_store_dsn).seed_platform_owner()
     import psycopg
 
     from plugins.takyon import billing
 
     with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
-        billing.topup(conn, user_id, 50_000, "takyon-plugin-tests-topup")
+        billing.grant_allowance(conn, user_id, 50_000, "takyon-plugin-tests-allowance")
+    try:
+        yield
+    finally:
+        reset_database_url_cache()
 
 
 def _commit(store: TakyonStore, scope: str, operations: list[dict], key: str):

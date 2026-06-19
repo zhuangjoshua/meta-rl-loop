@@ -222,6 +222,9 @@ function buildPrompt(input) {
   const noteRule = normalizedWorkspace === "product/site" || normalizedWorkspace.startsWith("product/site/")
     ? "For product/site work, reflect durable truth in the source itself and your final summary. Do not create helper markdown, request files, verification notes, or scratch docs unless the instruction explicitly asks for them."
     : "If durable business truth changes, write a concise note into an appropriate file in this workspace or a child path.";
+  const buildGate = input.allowBash
+    ? "Customer-facing product build gate (HARD): before you finish you MUST run `npm run build` and `npm run typecheck` and confirm BOTH exit green. Diagnosing the error is not done; only a green build is done. If you cannot land both green this pass, do NOT report success — your FINAL line MUST start with BLOCKED: followed by the exact remaining build/typecheck error and the file(s) involved."
+    : "";
   return [
     "You are a Claude Agent SDK worker called by Takyon for one bounded business-scoped task.",
     "",
@@ -232,6 +235,7 @@ function buildPrompt(input) {
     "",
     "Do not claim external execution happened. If the task needs a vendor/API/payment/deploy/posting action you cannot perform, report the blocker in the final summary instead of pretending it ran.",
     "Do not create request/spec/verification markdown files unless the instruction explicitly asks for them.",
+    ...(buildGate ? ["", buildGate] : []),
     "",
     `Business: ${input.business}`,
     `Workspace: ${input.workspace || "."}`,

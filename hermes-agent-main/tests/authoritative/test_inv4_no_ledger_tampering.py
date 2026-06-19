@@ -17,12 +17,12 @@ WHOLE money surface — not one card:
 
 Grounding (every symbol below was confirmed by reading the real source before this
 test was written):
-  * ``billing.settle``  (billing.py:240) refuses ``actual_cents > a_resv + t_resv`` with a
-    ValueError, and is a no-op on replay via ``_finalized`` (billing.py:265, :431).
-  * ``billing.refund``  (billing.py:296) is a no-op on replay via ``_finalized``.
-  * ``billing.reconcile_billing`` (billing.py:368) proves cached == ledger and flags
-    ``allowance_oversold`` / ``reserved_*_negative`` / ``allowance_used`` /
-    ``topup_balance`` drift.
+  * ``billing.settle`` refuses ``actual_cents > a_resv`` (the reserved allowance) with a
+    ValueError, and is a no-op on replay via ``_finalized``.
+  * ``billing.refund`` is a no-op on replay via ``_finalized``.
+  * ``billing.reconcile_billing`` proves cached == ledger and flags
+    ``allowance_oversold`` / ``reserved_allowance_negative`` / ``allowance_used`` drift.
+    (The à-la-carte topup bucket was removed 2026-06-18; the rail is allowance-only.)
   * ``business_credits.commit_credits`` (business_credits.py:321) refuses
     ``spent > reserve.amount_credits`` (line 367) and is a no-op on replay (the
     ``prior`` commit/release guard, line 358).
@@ -100,8 +100,8 @@ def test_all_three_ledger_rails_expose_reserve_finalize_api():
     """Every money rail must expose the reserve -> (settle|commit | release|refund)
     envelope. A missing finalizer is a tampering surface (spend with no way to record
     actual / release the hold)."""
-    # billing: reserve -> settle | refund (+ reconcile)
-    for name in ("reserve", "settle", "refund", "reconcile_billing", "topup", "grant_allowance"):
+    # billing: reserve -> settle | refund (+ reconcile, grant_allowance for the flow-A credit)
+    for name in ("reserve", "settle", "refund", "reconcile_billing", "grant_allowance"):
         assert callable(getattr(billing, name)), f"billing.{name} missing"
     # app_usage: reserve -> settle | release
     for name in ("reserve_usage", "settle_usage", "release_usage"):
@@ -117,13 +117,13 @@ def test_all_three_ledger_rails_expose_reserve_finalize_api():
 
 def test_billing_settle_refuses_over_settle_in_source():
     """billing.settle must reject actual_cents that exceeds the reserved total. Confirmed
-    in source: ``if actual_cents > a_resv + t_resv: raise ValueError(...)``. We assert the
-    guard structurally so deleting it (letting a caller settle MORE than they reserved =
-    minting money) turns this RED."""
+    in source: ``if actual_cents > a_resv: raise ValueError(...)``. We assert the guard
+    structurally so deleting it (letting a caller settle MORE than they reserved = minting
+    money) turns this RED."""
     src = _func_source(billing.settle)
     tree = _func_ast(billing.settle)
     # A comparison of the actual against the reserved sum, guarding a ValueError.
-    assert "actual_cents > a_resv + t_resv" in src, (
+    assert "actual_cents > a_resv" in src, (
         "billing.settle lost its actual<=reserved guard"
     )
     ve = _raises_valueerror_nodes(tree)
@@ -244,19 +244,18 @@ def test_reserve_paths_are_idempotent_on_their_key_in_source():
 # --------------------------------------------------------------------------------------
 
 def test_reconcile_billing_recomputes_from_ledger_and_flags_drift_in_source():
-    """reconcile_billing must (a) recompute used/topup from the append-only entries,
+    """reconcile_billing must (a) recompute allowance_used from the append-only entries,
     (b) flag cached != ledger drift, (c) flag negative outstanding reservations, and
-    (d) flag oversold allowance. Confirmed in source."""
+    (d) flag oversold allowance. Confirmed in source. (The rail is allowance-only since the
+    topup bucket was removed 2026-06-18.)"""
     src = _func_source(billing.reconcile_billing)
     # Recompute from the ledger, not from the cached account columns.
     assert "from billing_entries" in src
-    assert "calc_used" in src and "calc_topup" in src
+    assert "calc_used" in src
     # Cached-vs-ledger drift comparisons.
     assert "calc_used != used" in src
-    assert "calc_topup != topup_bal" in src
     # Negative outstanding reservation and oversold allowance are surfaced.
     assert "reserved_allowance < 0" in src
-    assert "reserved_topup < 0" in src
     assert "used > included" in src
     # The result's ok flag is the negation of any drift.
     assert '"ok": not drift' in src
@@ -319,7 +318,7 @@ def test_pg_billing_settle_replay_is_a_noop_no_double_charge(pg_conn):
     billing.settle(pg_conn, rk, 10)  # malicious cheaper re-settle -> still a no-op
     after_replays = billing.get_billing_balances(pg_conn, uid)
     assert after_replays.allowance_used_cents == after_first.allowance_used_cents
-    assert after_replays.topup_balance_cents == after_first.topup_balance_cents
+    assert after_replays.allowance_remaining_cents == after_first.allowance_remaining_cents
     assert after_replays.reserved_cents == 0
     # And a replay that ALSO tries to over-settle (actual > reserved) is refused outright,
     # not silently absorbed — the over-settle guard fires before the no-op path.

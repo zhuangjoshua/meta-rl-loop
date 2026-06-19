@@ -366,3 +366,11 @@
   .lb-chat-dock { position: absolute; z-index: 4; height: 100%; width: min(360px, 86vw); box-shadow: var(--cds-shadow-overlay); }
   .lb-chat-dock.is-closed { width: 0; box-shadow: none; }
 }
+
+/* CEO update rendered as a conversation turn (thinking -> message), not a card
+   with a phase checklist (operator clarification 2026-06-18). */
+.lb-ceomsg__think { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; opacity: 0.8; font-size: 13px; }
+.lb-ceomsg__think-txt { color: var(--lb-muted, #6b7280); }
+.lb-ceomsg__title { font-weight: 600; margin-bottom: 4px; }
+.lb-ceomsg__p { margin: 0 0 6px; line-height: 1.55; }
+.lb-ceomsg__p:last-child { margin-bottom: 0; }

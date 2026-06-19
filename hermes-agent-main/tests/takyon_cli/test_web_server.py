@@ -513,7 +513,6 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
         allowance_included_cents=2000,
         allowance_remaining_cents=1900,
         allowance_used_cents=100,
-        topup_balance_cents=300,
         reserved_cents=700,
         allowance_period_start=None,
         allowance_resets_at=None,
@@ -533,7 +532,6 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
             "drift": {},
             "reserved_cents": 100,
             "reserved_allowance_cents": 100,
-            "reserved_topup_cents": 0,
         },
     )
     monkeypatch.setattr(
@@ -566,14 +564,18 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["available"] is True
     assert result["reserved_cents"] == 100
     assert result["reserved_allowance_cents"] == 100
-    assert result["reserved_topup_cents"] == 0
+    # Topup is gone from the operator (flow-A) rail: no topup-derived keys should leak
+    # into the operator-account payload anymore.
+    assert "reserved_topup_cents" not in result
+    assert "topup_balance_cents" not in result
     assert result["allowance_remaining_cents"] == 1900
     assert result["allowance_percent_remaining"] == 95.0
     assert result["allowance_percent_used"] == 5.0
     assert result["operator_plan_name"] == "DEV"
     assert result["operator_plan_weekly_allowance_cents"] == 2000
-    assert result["topup_balance_cents"] == 300
-    assert result["spendable_cents"] == 2200
+    # Spendable is allowance-only now (no topup balance to add).
+    assert result["spendable_cents"] == 1900
+    assert result["spendable_cents"] == result["allowance_remaining_cents"]
     assert result["owned_business_count"] == 2
 
 

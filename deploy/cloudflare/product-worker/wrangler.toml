@@ -1,0 +1,50 @@
+# Cloudflare Worker that serves Takyon product static sites from R2 at the edge
+# and forwards everything else (/api/* and reserved operator hosts) to the real
+# origin (operator Caddy at 137.184.75.57) unchanged.
+#
+# Deploy:  wrangler deploy        (see README.md)
+# Tail:    wrangler tail takyon-product-worker
+
+name = "takyon-product-worker"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# ── R2 binding ──────────────────────────────────────────────────────────────
+# Read-only at runtime (the worker only GETs `<slug>/current` and
+# `<slug>/<build_id>/<rel>`). The bucket holds ONLY public built dist; nothing
+# private is ever written here. The publish side (VPS) writes with an S3 token
+# resolved via the env-backed/TK pattern, NOT through this worker.
+[[r2_buckets]]
+binding = "PRODUCT_SITES"
+bucket_name = "product-sites"
+
+# ── Origin pin ──────────────────────────────────────────────────────────────
+# Grey-clouded (DNS-only, NOT proxied) hostname that resolves to the VPS and is
+# NOT itself on this Worker's route, so the passthrough subrequest reaches the
+# real origin instead of re-entering the Worker. The original Host header is
+# preserved, so Caddy still matches the per-business product block and serves the
+# Cloudflare origin cert. See README.md "API passthrough" for the DNS record.
+[vars]
+ORIGIN_HOST = "origin.fourmanifold.com"
+
+# ── Routes ──────────────────────────────────────────────────────────────────
+# Bind to every product subdomain via the wildcard. SECURITY (redteam must-fix #1):
+# the reserved operator hosts (app/skills/www/admin/dashboard/research-composer) must
+# NOT have this Worker in front — in particular app.fourmanifold.com's `/api/pty`
+# WebSocket-upgrade and `/api/events` SSE must reach operator Caddy directly, never
+# through the Worker's resolveOverride passthrough. At deploy, add a MORE-SPECIFIC
+# zone route per reserved host mapped to NO worker ("(none)") — a more-specific route
+# takes precedence over the wildcard, so the Worker is simply not invoked for them.
+# The in-code RESERVED_HOSTS forward-to-origin in worker.js is DEFENSE-IN-DEPTH ONLY,
+# not the primary guard. See RUNBOOK "reserved-host exclusion" step. Verify the
+# operator chat WebSocket (/api/pty) + /api/events SSE after binding the wildcard.
+#
+# NOTE: do NOT add a route for `origin.fourmanifold.com` — that record must stay
+# off the Worker route (and grey-clouded) so it can serve as the loop-free origin.
+routes = [
+  { pattern = "*.fourmanifold.com/*", zone_name = "fourmanifold.com" },
+]
+# Reserved-host exclusions (added at deploy via the CF API / dashboard, NOT here —
+# wrangler.toml routes only ADD routes for THIS worker; "(none)" carve-outs are
+# zone-level): app.fourmanifold.com/*, skills.fourmanifold.com/*, www.fourmanifold.com/*,
+# admin.fourmanifold.com/*, dashboard.fourmanifold.com/*, research-composer.fourmanifold.com/*

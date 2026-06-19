@@ -63,7 +63,7 @@ def test_zero_balance_create_blocks_before_business_row(monkeypatch):
     def _blocking_preflight(operator_user_id):
         called["preflight"] += 1
         raise InsufficientOperatorBalance(
-            spendable_cents=0, allowance_remaining_cents=0, topup_balance_cents=0
+            spendable_cents=0, allowance_remaining_cents=0
         )
 
     monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", _blocking_preflight)
@@ -117,7 +117,7 @@ def test_preflight_runs_before_commit_for_bare_init(monkeypatch):
     def _blocking_preflight(operator_user_id):
         order.append("preflight")
         raise InsufficientOperatorBalance(
-            spendable_cents=0, allowance_remaining_cents=0, topup_balance_cents=0
+            spendable_cents=0, allowance_remaining_cents=0
         )
 
     orig_commit = store.commit

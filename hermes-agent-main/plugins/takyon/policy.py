@@ -14,8 +14,7 @@ Inputs it reads:
     are allowed, and an OPTIONAL monthly sub-cap (`monthly_app_budget_cents`). An
     absent row means conservative documented defaults (we do NOT auto-insert on read).
   * flow-A balances via `billing.get_billing_balances` — allowance remaining (a
-    metering unit, never money) plus topup money, both already net of outstanding
-    reservations.
+    metering unit, never money), net of outstanding reservations.
   * a caller-supplied cost estimate (optionally priced per tier).
 
 The monthly sub-cap is a guardrail, NOT a second wallet: the real balance is always
@@ -309,7 +308,7 @@ def decide_execution(
     requested_est = candidates[effective_tier]
 
     balances = billing.get_billing_balances(conn, user_id)
-    flow_a_available = max(0, balances.allowance_remaining_cents) + balances.topup_balance_cents
+    flow_a_available = max(0, balances.allowance_remaining_cents)
 
     cap = policy.monthly_app_budget_cents
     if cap is not None:

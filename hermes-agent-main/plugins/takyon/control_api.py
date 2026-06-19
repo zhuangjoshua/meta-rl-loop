@@ -31,18 +31,6 @@ _BEARER_PREFIX = "Bearer "
 _UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
 
 
-class TopupCheckoutRequest(BaseModel):
-    """Body for POST /v1/billing/topup/checkout. `amount_cents` is exact money the user
-    pays in (flow A — topups ARE money, unlike allowance). success_url/cancel_url are
-    where Stripe returns the user after hosted checkout; the caller supplies them, mirroring
-    the product-checkout convention, so the server never invents or open-redirects to a
-    target it picked."""
-
-    amount_cents: int = Field(..., gt=0)
-    success_url: str = Field(..., min_length=1)
-    cancel_url: str = Field(..., min_length=1)
-
-
 class OperatorSubscriptionCheckoutRequest(BaseModel):
     """Body for POST /v1/billing/subscription/checkout. `plan_id` selects one configured
     operator tier; the server maps it to the tier's Stripe price (the caller never supplies
@@ -136,33 +124,6 @@ def _read_operator_payout_row(conn, user_id: str, *, for_update: bool = False):
     if row is None:
         raise LookupError(f"user_not_found:{user_id}")
     return row
-
-
-def create_topup_checkout_session(
-    user_id: str,
-    *,
-    amount_cents: int,
-    success_url: str,
-    cancel_url: str,
-    customer_id: str | None = None,
-) -> dict[str, Any]:
-    params = {
-        "mode": "payment",
-        "client_reference_id": user_id,
-        "success_url": success_url,
-        "cancel_url": cancel_url,
-        "line_items[0][quantity]": 1,
-        "line_items[0][price_data][currency]": "usd",
-        "line_items[0][price_data][unit_amount]": amount_cents,
-        "line_items[0][price_data][product_data][name]": "Takyon balance top-up",
-        "metadata[purpose]": "takyon_topup",
-        "metadata[user_id]": user_id,
-        "payment_intent_data[metadata][purpose]": "takyon_topup",
-        "payment_intent_data[metadata][user_id]": user_id,
-    }
-    if customer_id:
-        params["customer"] = customer_id
-    return stripe_util.stripe_request("checkout/sessions", params)
 
 
 def _read_operator_billing_row(conn, user_id: str, *, for_update: bool = False):
@@ -786,7 +747,7 @@ def ensure_operator_billing_customer(
                     },
                 )
             except stripe_util.StripeError:
-                # Portal/topup should still work if metadata backfill fails.
+                # Portal/checkout should still work if metadata backfill fails.
                 pass
         return existing
 
@@ -1249,9 +1210,8 @@ def build_control_router() -> APIRouter:
     def get_me(
         principal: ResolvedPrincipal = Depends(_rate_limited_principal),
     ) -> dict[str, Any]:
-        # Identity projection only. Topup balance (money) + allowance (opaque
-        # "included usage") join here once the billing/custody ledgers exist; we do
-        # NOT fabricate them in the meantime.
+        # Identity projection only. Allowance (opaque "included usage") joins here once
+        # the billing/custody ledgers exist; we do NOT fabricate it in the meantime.
         return {"user_id": principal.user_id, "status": principal.status}
 
     @router.get("/me/payouts")
@@ -1506,49 +1466,18 @@ def build_control_router() -> APIRouter:
             "plan_name": plan["name"],
         }
 
-    @router.post("/billing/topup/checkout")
-    def create_topup_checkout(
-        body: TopupCheckoutRequest,
-        principal: ResolvedPrincipal = Depends(_rate_limited_principal),
-        conn=Depends(get_control_conn),
-    ) -> dict[str, Any]:
-        """Create a Stripe Checkout session that tops up the CALLER's own balance (flow A).
-        client_reference_id + metadata.purpose=takyon_topup let the billing webhook credit
-        the right user exactly once when payment completes. Requires STRIPE_SECRET_KEY; if
-        it is absent the call is blocked (503) with a reason — never a faked URL."""
-        try:
-            customer = ensure_operator_billing_customer(conn, principal.user_id)
-            session = create_topup_checkout_session(
-                principal.user_id,
-                amount_cents=body.amount_cents,
-                success_url=body.success_url,
-                cancel_url=body.cancel_url,
-                customer_id=str(customer.get("id") or "").strip() or None,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except stripe_util.StripeError as exc:
-            msg = str(exc)
-            if "STRIPE_SECRET_KEY" in msg:
-                raise HTTPException(status_code=503, detail="topup_unconfigured") from exc
-            raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
-        return {
-            "checkout_url": session.get("url"),
-            "session_id": session.get("id"),
-            "amount_cents": body.amount_cents,
-        }
-
     @router.post("/billing/webhook")
     async def billing_webhook(
         request: Request,
         conn=Depends(get_control_conn),
     ) -> dict[str, Any]:
-        """Dedicated control-plane webhook for flow-A topups — SEPARATE from the product
-        (flow B) webhook so it carries its OWN signing secret. Verifies the raw body with
+        """Dedicated control-plane (flow-A) webhook — SEPARATE from the product (flow B)
+        webhook so it carries its OWN signing secret. Verifies the raw body with
         STRIPE_BILLING_WEBHOOK_SECRET; if that secret is absent the event is NOT trusted and
-        we return 503 so Stripe retries — crediting is never faked around a missing
-        credential. A paid checkout.session.completed bearing metadata.purpose=takyon_topup
-        credits the user once, idempotent on the Stripe event id."""
+        we return 503 so Stripe retries — nothing is ever faked around a missing credential.
+        It settles operator subscription allowance (`operator_subscription` +
+        `customer.subscription.*`) and business creative-credit packs, each idempotent on the
+        Stripe event id."""
         raw = (await request.body()).decode("utf-8")
         signature = request.headers.get("stripe-signature", "")
         try:
@@ -1667,18 +1596,6 @@ def build_control_router() -> APIRouter:
                 "reserved_credits": balances.reserved_credits,
                 "event_id": event_id,
             }
-        if purpose != "takyon_topup":
-            return {"ok": True, "ignored": "not_a_topup"}
-        user_id = session.get("client_reference_id") or metadata.get("user_id")
-        amount = int(session.get("amount_total") or 0)
-        if not user_id or amount <= 0 or not event_id:
-            return {"ok": True, "ignored": "incomplete_session"}
-        new_balance = billing.topup(conn, user_id, amount, idempotency_key=event_id)
-        return {
-            "ok": True,
-            "credited_cents": amount,
-            "topup_balance_cents": new_balance,
-            "event_id": event_id,
-        }
+        return {"ok": True, "ignored": purpose or "unhandled_purpose"}
 
     return router

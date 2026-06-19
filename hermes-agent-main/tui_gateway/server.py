@@ -6625,6 +6625,19 @@ def _takyon_business_home_snapshot(
             }
         )
     if product_blocker:
+        # The stored publish blocker is usually a raw build/deploy error (npm/vite
+        # output, absolute paths, stack frames). The founder must never see that —
+        # replace anything that looks like build machinery with a plain reassurance,
+        # but pass an already-clean business-level message straight through.
+        _pb_low = product_blocker.lower()
+        _pb_is_technical = any(
+            tok in _pb_low
+            for tok in (
+                "npm", "pnpm", "yarn", "vite", "tsc", "typecheck", "build failed",
+                "error during", "exit ", "traceback", "node/bin", "/opt/", "src/",
+                ".ts", ".js", "stderr", "command failed", "exited with", "error:",
+            )
+        )
         task_cards.insert(
             0,
             {
@@ -6632,7 +6645,11 @@ def _takyon_business_home_snapshot(
                 "source": "product",
                 "label": "Product publish blocker",
                 "status": "blocked",
-                "detail": product_blocker,
+                "detail": (
+                    "The latest version didn't publish cleanly — I'm fixing it and will republish."
+                    if _pb_is_technical
+                    else product_blocker
+                ),
                 "tone": "blocked",
                 "updated_at": as_text(surface.get("published_at") or surface.get("updated_at")),
             },
@@ -7913,26 +7930,26 @@ def _takyon_business_overview_payload(
     if active_cron and overdue_cron:
         wake_health = {
             "status": "needs_attention",
-            "headline": "CEO wakeups are scheduled but appear overdue.",
-            "detail": "Run /cron tick or start the Takyon gateway so scheduled CEO checks can fire.",
+            "headline": "I've fallen a little behind on my check-ins.",
+            "detail": "My regular check-ins are overdue — send me a message and I'll catch up right away.",
         }
     elif active_cron and never_ran_cron:
         wake_health = {
             "status": "watching",
-            "headline": "CEO wakeups are scheduled and waiting for their first run.",
-            "detail": "The next wake should review evidence, blockers, replies, and the next highest-impact move.",
+            "headline": "My first check-in is lined up.",
+            "detail": "I'll look at how things are going, anything that's stuck, new replies, and pick the next move that matters most.",
         }
     elif active_cron:
         wake_health = {
             "status": "watching",
-            "headline": "CEO wake loop is active.",
-            "detail": "Scheduled wakes keep checking customer signal, blocked work, and the next move.",
+            "headline": "I'm checking in on your business regularly.",
+            "detail": "I keep an eye on customer interest, anything that's stuck, and the best next move.",
         }
     else:
         wake_health = {
             "status": "quiet",
-            "headline": "No CEO wake loop is visible.",
-            "detail": "Use /wake for one run or /create --schedule when creating the next business.",
+            "headline": "I'm not on a regular check-in schedule yet.",
+            "detail": "Message me anytime to keep building, or ask me to check in on a schedule.",
         }
 
     task_cards: list[dict[str, Any]] = []
@@ -8078,35 +8095,39 @@ def _takyon_business_overview_payload(
             "status": "needs_attention",
             "headline": wake_health["headline"],
             "detail": wake_health["detail"],
-            "next_action": "Run /cron tick or wake the CEO now.",
+            "next_action": "Send me a message and I'll pick up right where we left off.",
         }
     elif blocked_count:
         ceo_loop = {
             "status": "recovering",
-            "headline": f"{blocked_count} blocker{'s' if blocked_count != 1 else ''} need CEO recovery.",
-            "detail": "Blocked work is preserved as tasks instead of disappearing into logs.",
-            "next_action": "Open Tasks, resolve a gate, or wake the CEO to choose a recovery move.",
+            "headline": (
+                "Working through a few snags before the next step."
+                if blocked_count != 1
+                else "Working through a snag before the next step."
+            ),
+            "detail": "I've kept the open items on your task list so nothing slips — I'll clear them and keep moving.",
+            "next_action": "Look them over under Tasks, or leave it with me.",
         }
     elif not research_visible:
         ceo_loop = {
             "status": "research_first",
-            "headline": "Research is the next visible company-building move.",
-            "detail": "No research files are visible in the business workspace yet.",
-            "next_action": "Create durable research notes, then decide the next business move from evidence.",
+            "headline": "Next up: getting to know your market.",
+            "detail": "I'm learning your customers and competition before I start building.",
+            "next_action": "I'll use what I find to decide the first move.",
         }
     elif product_visible:
         ceo_loop = {
             "status": "working",
-            "headline": "Product preview is available.",
-            "detail": "A customer-facing surface exists; keep checking it against the visible research files.",
-            "next_action": "Open the preview or continue research.",
+            "headline": "Your preview is ready to look at.",
+            "detail": "There's a working version of your product you can open and react to.",
+            "next_action": "Take a look and tell me what to change.",
         }
     else:
         ceo_loop = {
             "status": "working",
-            "headline": "The company has strategy context and is ready for the next move.",
-            "detail": "Use research, outreach, creative, or product work based on evidence.",
-            "next_action": "Wake the CEO or pick a focused task.",
+            "headline": "Ready for the next move.",
+            "detail": "I've got what I need and I'm ready to keep building.",
+            "next_action": "Tell me what to focus on, or I'll pick the highest-impact step.",
         }
 
     status_cards = [
@@ -8683,7 +8704,7 @@ def _takyon_workspace_media_payload(
             return "logo"
         if kind == "video":
             return "video"
-        if any(token in lower for token in ("/ad", "ad_", "ad-", "creative", "campaign", "/meta/", "/reddit/", "/x/")):
+        if any(token in lower for token in ("static-ad", "/ads/", "/ad", "ad_", "ad-", "creative", "campaign", "/meta/", "/reddit/", "/x/")):
             return "ad"
         if lower.startswith("product/site/"):
             return "site"

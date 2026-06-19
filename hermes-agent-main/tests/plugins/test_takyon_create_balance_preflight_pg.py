@@ -5,8 +5,9 @@ against real Postgres. This is the gate the ``takyon.dashboard.create`` gateway 
 any business row or bootstrap spend, so an operator with no spendable balance cannot have a company
 page built (which would spend real provider money on the operator billing rail).
 
-Spendable balance == allowance remaining + topup balance (the same quantity the dashboard surfaces
-as ``account.spendable_cents``). The preflight fails OPEN only for identity-less / non-Postgres dev.
+Spendable balance == allowance remaining (the same quantity the dashboard surfaces as
+``account.spendable_cents``; the operator money rail is allowance-only). The preflight fails OPEN
+only for identity-less / non-Postgres dev.
 
 Skips unless psycopg is importable and TAKYON_TEST_PG_DSN is set (see tests/conftest.py).
 """
@@ -48,15 +49,15 @@ def _preflight_pointed_at(pg_conn, monkeypatch):
 
 
 def test_zero_balance_operator_is_blocked(pg_conn, monkeypatch):
-    """An operator whose spendable balance is drained to zero (starter allowance reset to 0, no
-    topup) MUST be refused company creation with InsufficientOperatorBalance.
+    """An operator whose spendable balance is drained to zero (starter allowance reset to 0) MUST be
+    refused company creation with InsufficientOperatorBalance.
 
     NOTE: provisioning grants a $1 starter allowance, so zero-balance is the *post-exhaustion* state
     — modelled here by resetting the included allowance to 0."""
     uid = _provision_operator(pg_conn)
     billing.grant_allowance(pg_conn, uid, 0, f"drain:{uid}")  # exhaust the starter allowance
     bal = billing.get_billing_balances(pg_conn, uid)
-    assert bal.allowance_remaining_cents == 0 and bal.topup_balance_cents == 0  # truly empty
+    assert bal.allowance_remaining_cents == 0  # truly empty (allowance is the only money rail)
     with _preflight_pointed_at(pg_conn, monkeypatch):
         with pytest.raises(InsufficientOperatorBalance) as exc:
             cli._operator_create_balance_preflight(uid)
@@ -66,11 +67,11 @@ def test_zero_balance_operator_is_blocked(pg_conn, monkeypatch):
 
 def test_fresh_operator_starter_allowance_is_allowed(pg_conn, monkeypatch):
     """A freshly provisioned operator carries the $1 starter allowance (spendable > 0), so the
-    preflight lets them create their first company without a topup. Proves the gate blocks only a
-    genuinely empty wallet, not every new operator."""
+    preflight lets them create their first company. Proves the gate blocks only a genuinely empty
+    wallet, not every new operator."""
     uid = _provision_operator(pg_conn)
     bal = billing.get_billing_balances(pg_conn, uid)
-    assert bal.allowance_remaining_cents + bal.topup_balance_cents > 0  # starter funds present
+    assert bal.allowance_remaining_cents > 0  # starter allowance present
     with _preflight_pointed_at(pg_conn, monkeypatch):
         cli._operator_create_balance_preflight(uid)  # must NOT raise
 
@@ -84,14 +85,15 @@ def test_operator_with_allowance_is_allowed(pg_conn, monkeypatch):
         cli._operator_create_balance_preflight(uid)  # must NOT raise
 
 
-def test_operator_with_only_topup_is_allowed(pg_conn, monkeypatch):
-    """Spendable counts topup too: an operator with no allowance but a positive topup balance can
-    create (proves the gate is allowance_remaining + topup, not allowance alone)."""
+def test_operator_refunded_allowance_after_drain_is_allowed(pg_conn, monkeypatch):
+    """Spendable tracks the CURRENT allowance, not a one-time starter grant: an operator whose
+    starter allowance was drained to zero, then re-funded via a fresh ``grant_allowance``, can create
+    again (proves the gate re-reads allowance_remaining each time, the sole operator money rail)."""
     uid = _provision_operator(pg_conn)
     billing.grant_allowance(pg_conn, uid, 0, f"drain:{uid}")  # zero out the starter allowance
-    billing.topup(pg_conn, uid, 1500, f"topup:{uid}")  # $15 purchased credit
+    billing.grant_allowance(pg_conn, uid, 1500, f"refund:{uid}")  # $15 fresh allowance period
     bal = billing.get_billing_balances(pg_conn, uid)
-    assert bal.allowance_remaining_cents == 0 and bal.topup_balance_cents == 1500
+    assert bal.allowance_remaining_cents == 1500
     with _preflight_pointed_at(pg_conn, monkeypatch):
         cli._operator_create_balance_preflight(uid)  # must NOT raise
 

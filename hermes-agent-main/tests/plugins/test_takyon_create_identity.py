@@ -227,7 +227,7 @@ def test_resolve_dashboard_create_identity_falls_back_when_llm_name_call_fails(m
 
 def test_resolve_dashboard_create_identity_preserves_budget_exhaustion(monkeypatch):
     def _exhausted(goal, operator_user_id=None):
-        raise TakyonError("operator budget exhausted: need 1c, allowance 0c + topup 0c")
+        raise TakyonError("operator budget exhausted: need 1c, allowance 0c")
 
     monkeypatch.setattr("plugins.takyon.cli._derive_name_from_goal_with_llm", _exhausted)
 

@@ -5,7 +5,7 @@ GOAL_RULES.md §3, invariant 5:
    rejected; missing secret ⇒ 503, never trusted."
 
 This is the dedicated, independently-red-teamed assertion of that invariant across the
-WHOLE webhook surface (control-plane flow-A topups AND product flow-B payments). It assumes
+WHOLE webhook surface (control-plane flow-A operator billing AND product flow-B payments). It assumes
 every caller is EVIL and is trying to forge, replay, or strip the signature to move money for
 free, and proves the real code refuses.
 
@@ -24,8 +24,8 @@ Grounded real symbols (all confirmed by opening the file):
   plugins/takyon/stripe_util.py:build_signature_header    (synthetic Stripe-Signature, no network)
   plugins/takyon/safebox.py:verify_stripe_billing_webhook (flow-A authority verify)
   plugins/takyon/safebox.py:StripeBillingWebhookUnconfigured / StripeBillingWebhookInvalidSignature
-  plugins/takyon/control_api.py:/billing/webhook          (503 on unconfigured, 400 on bad sig, idempotent topup)
-  plugins/takyon/billing.py:topup                         (idempotent on idempotency_key == event id)
+  plugins/takyon/control_api.py:/billing/webhook          (503 on unconfigured, 400 on bad sig, idempotent crediting)
+  plugins/takyon/safebox.py:grant_credits                 (creative-credit pack grant; idempotent on event id)
   plugins/takyon/app_payments.py:record_webhook_and_process (dedup on webhook_events ... for update)
   plugins/takyon/core.py:handle_business_record_stripe_webhook (flow-B; refuses missing STRIPE_WEBHOOK_SECRET)
 """
@@ -182,21 +182,22 @@ def test_control_billing_webhook_route_maps_unconfigured_to_503():
     assert "status_code=503" in src
     assert "StripeBillingWebhookInvalidSignature" in src
     assert "status_code=400" in src
-    # Verification must precede crediting: the verify call appears before billing.topup.
-    assert src.index("verify_stripe_billing_webhook") < src.index("billing.topup")
+    # Verification must precede crediting: the verify call appears before any grant.
+    assert src.index("verify_stripe_billing_webhook") < src.index("grant_credits")
     # Crediting is keyed on the Stripe event id (idempotency token).
     assert "idempotency_key=event_id" in src
 
 
-def test_billing_topup_is_idempotent_on_event_id_by_source():
-    """billing.topup dedups on idempotency_key (the Stripe event id): a replay of the same
-    event id returns the prior balance and writes NO second ledger row. Asserted on the real
-    source; the live-DB proof is in the PG-gated test below."""
-    src = inspect.getsource(billing.topup)
+def test_billing_grant_allowance_is_idempotent_on_key_by_source():
+    """The flow-A operator credit is the subscription ALLOWANCE grant (the à-la-carte topup it
+    replaced was removed 2026-06-18). billing.grant_allowance dedups on idempotency_key: a replay
+    returns the prior included amount and writes NO second ledger row. Asserted on the real source;
+    the live-DB idempotency proof is the creative-credit-pack route test below."""
+    src = inspect.getsource(billing.grant_allowance)
     # Looks up a prior ledger entry by idempotency_key and returns early if present.
     assert "idempotency_key" in src
-    assert "balance_after_cents" in src and "where idempotency_key" in src
-    assert "return int(prior[0])" in src, "replay must return prior balance, not re-credit"
+    assert "_entry_exists" in src
+    assert "return int(acct[0])" in src, "replay must return prior amount, not re-grant"
 
 
 def test_app_payments_dedups_on_webhook_events_row_lock_by_source():
@@ -252,7 +253,10 @@ def client(pg_conn):
     return TestClient(app, raise_server_exceptions=True)
 
 
-def _topup_event(user_id: str, *, amount: int = 2000, event_id: str | None = None) -> str:
+def _billing_event(*, event_id: str | None = None) -> str:
+    """A minimal Stripe-shaped checkout.session.completed body. Purpose-agnostic — used by the
+    fail-closed / forged-signature tests, which reject at the verify step BEFORE any purpose
+    handling, so the body contents past the signature are irrelevant."""
     import json
     import uuid
 
@@ -263,10 +267,37 @@ def _topup_event(user_id: str, *, amount: int = 2000, event_id: str | None = Non
             "data": {
                 "object": {
                     "id": f"cs_{uuid.uuid4().hex}",
-                    "client_reference_id": user_id,
                     "payment_status": "paid",
-                    "amount_total": amount,
-                    "metadata": {"purpose": "takyon_topup", "user_id": user_id},
+                    "metadata": {"purpose": "operator_subscription"},
+                }
+            },
+        }
+    )
+
+
+def _credit_pack_event(business_slug: str, *, credits: int = 5, event_id: str | None = None) -> str:
+    """A creative-credit-pack checkout.session.completed — the flow-A crediting webhook that
+    REPLACED topup as INV5's live idempotency vehicle. Credits the business's creative credits
+    once, idempotent on the Stripe event id."""
+    import json
+    import uuid
+
+    return json.dumps(
+        {
+            "id": event_id or f"evt_{uuid.uuid4().hex}",
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": f"cs_{uuid.uuid4().hex}",
+                    "client_reference_id": business_slug,
+                    "payment_status": "paid",
+                    "amount_total": credits * 100,
+                    "metadata": {
+                        "purpose": "creative_credit_pack",
+                        "business_slug": business_slug,
+                        "credits": credits,
+                        "price_cents_per_credit": 100,
+                    },
                 }
             },
         }
@@ -279,7 +310,7 @@ def test_live_route_503_when_billing_secret_absent(client, monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
     monkeypatch.delenv("STRIPE_BILLING_WEBHOOK_SECRET", raising=False)
-    body = _topup_event("u-irrelevant")
+    body = _billing_event()
     resp = client.post(
         "/v1/billing/webhook",
         content=body,
@@ -295,7 +326,7 @@ def test_live_route_400_on_forged_signature(client, monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
     monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", _WHSEC)
-    body = _topup_event("u-irrelevant")
+    body = _billing_event()
     forged = build_signature_header(body, "whsec_wrong")
     resp = client.post(
         "/v1/billing/webhook",
@@ -308,26 +339,33 @@ def test_live_route_400_on_forged_signature(client, monkeypatch):
 
 @pytest.mark.usefixtures("pg_conn")
 def test_live_route_credits_once_then_replay_is_noop(client, pg_conn, monkeypatch):
-    """Live route, full invariant: a valid topup credits exactly once; replaying the SAME
-    Stripe event id credits again 0 (idempotent on event id)."""
+    """Live route, full invariant: a valid creative-credit-pack checkout credits the business
+    EXACTLY once; replaying the SAME Stripe event id credits again 0 (idempotent on event id).
+    This is the flow-A crediting webhook that replaced the removed topup path (the operator
+    subscription branch can't be the vehicle — it refreshes against live Stripe)."""
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
     monkeypatch.setenv("STRIPE_BILLING_WEBHOOK_SECRET", _WHSEC)
 
-    # JIT-provision a real operator user (returns (user_id, created, raw_key)).
+    # JIT-provision a real operator and a business they own (creative credits FK to businesses).
     uid, _created, _raw = provision_user_on_first_login(
         pg_conn, "auth0|inv5-webhook", email="inv5-webhook@example.com"
     )
+    slug = "inv5-credit-co"
+    pg_conn.execute(
+        "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
+        (slug, "INV5 Credit Co", uid),
+    )
 
-    body = _topup_event(uid, amount=2000)
+    body = _credit_pack_event(slug, credits=5)
     sig = build_signature_header(body, _WHSEC)
 
     first = client.post("/v1/billing/webhook", content=body, headers={"stripe-signature": sig})
     assert first.status_code == 200, first.text
-    assert first.json()["topup_balance_cents"] == 2000
-    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+    assert first.json()["credited_credits"] == 5
+    assert first.json()["balance_credits"] == 5
 
     # Replay the IDENTICAL event id -> credited once, balance unchanged.
     replay = client.post("/v1/billing/webhook", content=body, headers={"stripe-signature": sig})
     assert replay.status_code == 200, replay.text
-    assert billing.get_billing_balances(pg_conn, uid).topup_balance_cents == 2000
+    assert replay.json()["balance_credits"] == 5

@@ -149,8 +149,8 @@ class BusinessBudgetSpendMeter:
                 # sequential reserves each saw the full balance (120%+ of authority could be held at
                 # once). The fix: take a REAL hold on the operator billing rail (``billing.py``,
                 # Takyon-user → platform), denominated in cents. ``billing.reserve`` locks the single
-                # billing_accounts row FOR UPDATE, draws allowance-first-then-topup, and raises
-                # InsufficientBalance when the two buckets can no longer cover the estimate — so a
+                # billing_accounts row FOR UPDATE, draws the operator's allowance, and raises
+                # InsufficientBalance when the allowance can no longer cover the estimate — so a
                 # second reserve sees the DECREMENTED remaining and fails closed. THIS is the money
                 # gate; the ``app_usage`` reserve below stays as the per-business audit row and the
                 # carrier of any explicit operator pool cap. Both holds share the SAME reservation
@@ -176,7 +176,7 @@ class BusinessBudgetSpendMeter:
                             job_id=f"web_egress:{op}",
                         )
                     except billing.NoBillingAccount:
-                        # Every real operator is funded by the starter allowance or a topup; no
+                        # Every real operator is funded by the subscription/starter allowance; no
                         # account means "no money authority", which must fail closed (not "free").
                         raise web_spend_meter.SpendBlocked(
                             f"operator {owner_user_id} has no billing account; "
@@ -188,8 +188,7 @@ class BusinessBudgetSpendMeter:
                         raise web_spend_meter.SpendBlocked(
                             f"operator budget authority exhausted for business {business!r}: "
                             f"{op} via {provider} needs {estimate_cents} cents, operator has "
-                            f"allowance {exc.allowance_available_cents} + topup "
-                            f"{exc.topup_available_cents} cents"
+                            f"allowance {exc.allowance_available_cents} cents"
                         )
                     billing_reserved_cents = int(resv.total_cents)
                 try:

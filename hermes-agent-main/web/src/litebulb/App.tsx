@@ -68,7 +68,6 @@ function Router() {
     chatProgress,
     submitting,
     billingBusy,
-    topupBusy,
     subscribeBusy,
     resetBuildState,
     openBusiness,
@@ -79,7 +78,6 @@ function Router() {
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,
-    startTopup,
     subscribeToPlan,
     setTractionRange,
   } = useTakyonLitebulb();
@@ -150,8 +148,8 @@ function Router() {
     // not yet loaded) must NOT silently create; bounce to billing instead of spending.
     if (walletBalance === null) return;
     if (walletBalance <= 0) {
-      setBillingNudge("Add credits to create a company.");
-      setSettings("billing");
+      setBillingNudge("Subscribe to a plan to create a company.");
+      setSettings("plans");
       nav("/");
       return;
     }
@@ -180,9 +178,9 @@ function Router() {
       return;
     }
     // GOAL_RULES §3 gap #2 (frontend half): never enter /building (which auto-calls createBusiness)
-    // for an operator who cannot pay. walletBalance is spendable_cents (allowance remaining + topup).
+    // for an operator who cannot pay. walletBalance is spendable_cents (subscription allowance remaining).
     //   * null  → account not loaded yet: defer (do NOT create); the user can retry once it loads.
-    //   * <= 0  → no funds: open billing instead of /building and show an add-credits nudge.
+    //   * <= 0  → no funds: open Plans instead of /building and show a subscribe nudge.
     // The backend preflight (takyon.dashboard.create → _operator_create_balance_preflight) is the
     // authoritative gate; this is the UX guard so no /building screen is shown for a zero balance.
     if (walletBalance === null) {
@@ -191,8 +189,8 @@ function Router() {
       return;
     }
     if (walletBalance <= 0) {
-      setBillingNudge("Add credits to create a company.");
-      setSettings("billing");
+      setBillingNudge("Subscribe to a plan to create a company.");
+      setSettings("plans");
       return;
     }
     nav("/building");
@@ -276,12 +274,10 @@ function Router() {
           account={account}
           businesses={businesses}
           portalBusy={billingBusy}
-          topupBusy={topupBusy}
           nudge={billingNudge}
           subscribeBusy={subscribeBusy}
           onTheme={setTheme}
           onOpenPortal={openBillingPortal}
-          onTopup={startTopup}
           onSubscribe={subscribeToPlan}
           onBuyCreditPack={startCreativeCreditPackCheckout}
           onClose={closeSettings}

@@ -83,6 +83,17 @@ Creative-credit payment rules:
 - Normal app AI runtime pricing should resolve exact model pricing from `hermes-agent-main/agent/usage_pricing.py`, not heuristic family matching.
 - **No ungated paid capability — gate it behind usage or credits before it ships.** Never introduce a tool, skill, action, or runtime call that spends real money (provider/API, model inference, search/extract such as Tavily, media, or infra) without first metering it through a money gate. Route consumption-priced spend — model inference and per-request runtime tool calls — through the usage rail (`hermes-agent-main/plugins/takyon/app_usage.py`, reserve→settle→release, priced in `hermes-agent-main/agent/usage_pricing.py`; use `request_cost` for per-request providers); route fixed operator-priced creative/ad actions through the creative-credit rail (`hermes-agent-main/plugins/takyon/business_credits.py`). Spendful paths must fail closed: resolve exact cost from `hermes-agent-main/agent/usage_pricing.py` (unpriced = refused), reserve before the provider call, settle on success, release on failure. Do not paper over an ungated call with a downstream cost report or label — gate the call itself. If it cannot be gated yet, ship only the guarded/disabled path and record the missing gate; never expose the ungated paid path.
 
+Paid-provider secret keys live behind TK (the safebox) — never read them from `os.environ` in a business tool or skill. Every secret that lets a business tool call a paid provider — model/image/video APIs (Gemini, FAL, OpenAI `gpt-image`), search/extract (Tavily), social/ads (Composio) — is held by the safebox (private secret-authority host `67.205.158.170`), not in the business runtime. On the VPS the key is not in the process env: `os.environ.get("GEMINI_API_KEY")` is empty there, so a tool that reads its key from `os.environ` both breaks the secret boundary and fails closed at runtime (observed: a logo rewrite that read `os.environ` raised `GEMINI_API_KEY required` on prod and never worked).
+
+Canonical pattern (`GOAL_RULES` §7) — see `hermes-agent-main/plugins/takyon/creative_gateway.py::_resolve_gemini_image_key`:
+
+- Resolve the key only in an authority route via `safebox.first_env_backed_value(*ALIASES)` (e.g. aliases `TAKYON_GEMINI_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY`). The business runtime never reads the raw key.
+- Pass it as an explicit argument to the provider client (`genai.Client(api_key=...)`), never via `os.environ`.
+- Fail closed: if the key is absent, return a clear `*_unconfigured` error / `503` before any credit reserve or provider call — never proceed or fabricate.
+- Register the alias in `hermes-agent-main/plugins/takyon/core.py` (`_API_ENV_ALIASES`) and declare `requires_api=[...]` on the tool; gate the spend (creative-credit or usage rail) in the same authority route.
+
+Any new paid-provider skill/tool resolves its key this way — same as logo (`business_generate_logo`), UGC, static-ad, and web-search. Reading a provider key from `os.environ` in a business tool is a bug: it breaks the secret boundary and fails on the VPS.
+
 ## Operating Model
 
 Takyon should be a skill-based Hermes CEO system, not a fixed workflow cockpit.

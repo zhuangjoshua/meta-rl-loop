@@ -1287,7 +1287,10 @@ def _has_valid_session_token(request: Request) -> bool:
     ):
         return True
 
-    if request.url.path.startswith("/api/takyon/site-preview/"):
+    _qpath = request.url.path
+    if _qpath.startswith("/api/takyon/site-preview/") or (
+        _qpath.startswith("/api/takyon/businesses/") and _qpath.endswith("/asset")
+    ):
         query_token = request.query_params.get("token", "")
         if query_token and hmac.compare_digest(query_token.encode(), _SESSION_TOKEN.encode()):
             return True
@@ -1659,6 +1662,13 @@ def _resolve_dashboard_request_principal(request: Request) -> Any | None:
     )
     if principal is not None:
         return principal
+    # A valid dashboard session token (incl. ?token= for media/site-preview that an
+    # <img>/<video>/iframe cannot header-authenticate) authenticates as the local
+    # dashboard operator even when Auth0 is otherwise required for the host.
+    if _has_valid_session_token(request):
+        local = _resolve_local_dashboard_principal(runtime_database_url=runtime_database_url)
+        if local is not None:
+            return local
     if _auth0_required_for_host(request.headers):
         return None
     return _resolve_local_dashboard_principal(runtime_database_url=runtime_database_url)
@@ -3541,7 +3551,6 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
         allowance_included = max(0, int(balances.allowance_included_cents))
         allowance_used = max(0, int(balances.allowance_used_cents))
         allowance_remaining = max(0, int(balances.allowance_remaining_cents))
-        topup_balance = max(0, int(balances.topup_balance_cents))
         reserved = max(0, int(reconciled.get("reserved_cents", balances.reserved_cents)))
         allowance_percent_remaining = (
             round((allowance_remaining / allowance_included) * 100, 1)
@@ -3576,10 +3585,8 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
             "owned_business_count": len(principal.business_slugs),
             "reserved_cents": reserved,
             "reserved_allowance_cents": int(reconciled.get("reserved_allowance_cents", 0) or 0),
-            "reserved_topup_cents": int(reconciled.get("reserved_topup_cents", 0) or 0),
-            "spendable_cents": allowance_remaining + topup_balance,
+            "spendable_cents": allowance_remaining,
             "status": principal.status,
-            "topup_balance_cents": topup_balance,
             "operator_subscription_status": subscription_state.subscription_status,
             "owed_balance_cents": int(payout_state.owed_balance_cents),
             "paid_out_cents": int(payout_state.paid_out_cents),
@@ -4290,66 +4297,6 @@ async def get_takyon_operator_home(request: Request) -> dict[str, Any]:
         "account": account,
         "owned_business_count": businesses.get("owned_business_count", len(principal.business_slugs)),
         "user_id": str(principal.user_id),
-    }
-
-
-@app.post("/api/takyon/operator/topup/checkout")
-async def create_takyon_operator_topup_checkout(request: Request) -> dict[str, Any]:
-    principal = _resolve_dashboard_request_principal(request)
-    if principal is None:
-        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    try:
-        amount_cents = int(body.get("amount_cents") or 0)
-    except (TypeError, ValueError):
-        amount_cents = 0
-    if amount_cents <= 0:
-        raise HTTPException(status_code=400, detail="amount_cents must be > 0")
-    return_path = _same_origin_path(str(body.get("return_path") or "/"))
-    customer_id = None
-    try:
-        from plugins.takyon.control_api import (
-            create_topup_checkout_session,
-            ensure_operator_billing_customer,
-        )
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
-
-        try:
-            url = _request_runtime_database_url(request)
-            if not url:
-                raise RuntimeNotConfigured("database_unconfigured")
-            import psycopg
-
-            conn = psycopg.connect(url, autocommit=True)
-            try:
-                customer = ensure_operator_billing_customer(conn, str(principal.user_id))
-                customer_id = str(customer.get("id") or "").strip() or None
-            finally:
-                conn.close()
-        except RuntimeNotConfigured:
-            customer_id = None
-        except Exception:
-            customer_id = None
-
-        session = create_topup_checkout_session(
-            str(principal.user_id),
-            amount_cents=amount_cents,
-            success_url=_dashboard_absolute_url(request, return_path),
-            cancel_url=_dashboard_absolute_url(request, return_path),
-            customer_id=customer_id,
-        )
-    except Exception as exc:  # noqa: BLE001 - surface an honest UI error
-        message = str(exc)
-        if "STRIPE_SECRET_KEY" in message:
-            raise HTTPException(status_code=503, detail="topup_unconfigured") from exc
-        raise HTTPException(status_code=502, detail=message) from exc
-    return {
-        "checkout_url": session.get("url"),
-        "session_id": session.get("id"),
-        "amount_cents": amount_cents,
     }
 
 
