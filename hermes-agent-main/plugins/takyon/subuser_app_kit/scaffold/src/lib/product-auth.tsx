@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -10,6 +11,12 @@ import { createClient, type Provider, type SupabaseClient } from "@supabase/supa
 import { useLocation, useNavigate } from "react-router-dom";
 import { surfaceContext } from "@takyon/surface-context.js";
 import { client } from "./takyon";
+import {
+  LOADING_VIEWER_ACCESS,
+  resolveViewerAccessSnapshot,
+  type ViewerAccessResult,
+  type ViewerAccessSnapshot,
+} from "./hooks";
 
 interface SurfaceAuthConfig {
   provider?: string;
@@ -31,6 +38,9 @@ interface ProductAuthContextValue {
 }
 
 const ProductAuthContext = createContext<ProductAuthContextValue | null>(null);
+/** The single shared viewer-access store. Hoisted out of useViewerAccess so all four screens read
+ *  one source of truth and flip together on every auth transition (sign-in AND sign-out). */
+const ViewerAccessContext = createContext<ViewerAccessResult | null>(null);
 let browserSupabaseClient: SupabaseClient | null | undefined;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -88,6 +98,53 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const handledCallbackRef = useRef("");
+
+  // Single shared viewer-access store. This is the ONE place the session+account are fetched and
+  // derived; every screen reads it through context, so they all flip together on login/logout and
+  // the duplicate /session + /account calls (one per island) collapse into one fetch per auth
+  // change. `authenticated` here is also what gates a second sign-in below.
+  const [viewer, setViewer] = useState<ViewerAccessSnapshot>(LOADING_VIEWER_ACCESS);
+  const aliveRef = useRef(true);
+  // Coalesce overlapping refreshes (StrictMode double-invoke, focus + login racing) so only the
+  // freshest result wins and we don't thrash the store.
+  const refreshSeqRef = useRef(0);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    const seq = ++refreshSeqRef.current;
+    setViewer((prev) => (prev.loading ? prev : { ...prev, loading: true }));
+    const snapshot = await resolveViewerAccessSnapshot();
+    // Drop stale results: only the most recent refresh may commit.
+    if (!aliveRef.current || seq !== refreshSeqRef.current) return;
+    setViewer(snapshot);
+  }, []);
+
+  // First read on mount, and a re-read whenever the tab regains focus / visibility — that catches a
+  // login or logout that happened in another tab or a cookie that expired, which no in-app event
+  // can observe.
+  useEffect(() => {
+    void refresh();
+    if (typeof window === "undefined") return;
+    const onFocus = () => {
+      void refresh();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [refresh]);
+
   const available = runtimeHasAuthRail();
   const config = readSurfaceAuthConfig();
   const configured =
@@ -131,6 +188,11 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         await client.loginWithSupabase(accessToken);
         if (cancelled) return;
         setError(null);
+        // The app_session cookie is now set server-side. Re-read the shared viewer store BEFORE
+        // navigating so the gated shell sees `authenticated === true` on the first sign-in and never
+        // falls back to a second "Continue with Google".
+        await refresh();
+        if (cancelled) return;
         const nextPath = location.pathname === "/" ? "/app" : location.pathname;
         navigate(`${nextPath}${stripOauthParams(location.search)}${location.hash}`, {
           replace: true,
@@ -150,9 +212,16 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [config, configured, location.hash, location.pathname, location.search, navigate]);
+  }, [config, configured, location.hash, location.pathname, location.search, navigate, refresh]);
 
   async function signInWithGoogle() {
+    // Already signed in: never start a second OAuth round-trip / redundant loginWithSupabase. Just
+    // route to the post-login destination. The shared viewer store makes `authenticated` reliable
+    // here, so this guard (plus the button gating in the screens) makes a double login impossible.
+    if (viewer.authenticated) {
+      navigate(normalizeRedirectPath(config.redirectPath), { replace: true });
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -189,6 +258,9 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         const { error: signOutError } = await supabase.auth.signOut({ scope: "local" });
         if (signOutError) throw signOutError;
       }
+      // Re-read the shared viewer store so the gated shell drops back to anonymous in place after
+      // sign-out — every screen flips together because they all read this one store.
+      await refresh();
       navigate("/", { replace: true });
     } catch (err) {
       setError(displayError(err));
@@ -196,6 +268,8 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
       setBusy(false);
     }
   }
+
+  const viewerValue: ViewerAccessResult = { ...viewer, refresh };
 
   return (
     <ProductAuthContext.Provider
@@ -209,7 +283,7 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         clearError: () => setError(null),
       }}
     >
-      {children}
+      <ViewerAccessContext.Provider value={viewerValue}>{children}</ViewerAccessContext.Provider>
     </ProductAuthContext.Provider>
   );
 }
@@ -220,4 +294,22 @@ export function useProductAuth(): ProductAuthContextValue {
     throw new Error("useProductAuth must be used inside ProductAuthProvider");
   }
   return value;
+}
+
+/** Non-throwing accessor for consumers that must still work if rendered outside
+ *  ProductAuthProvider. */
+export function useOptionalProductAuth(): ProductAuthContextValue | null {
+  return useContext(ProductAuthContext);
+}
+
+/** Reads the single shared viewer-access store owned by ProductAuthProvider. useViewerAccess wraps
+ *  this. Falls back to a stable loading snapshot if rendered outside the provider so screens never
+ *  crash on a missing context. */
+export function useViewerAccessContext(): ViewerAccessResult {
+  const value = useContext(ViewerAccessContext);
+  if (value) return value;
+  return {
+    ...LOADING_VIEWER_ACCESS,
+    refresh: async () => {},
+  };
 }

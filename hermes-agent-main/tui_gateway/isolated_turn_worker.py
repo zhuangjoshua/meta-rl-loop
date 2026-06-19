@@ -306,6 +306,12 @@ def _build_agent(payload: dict[str, Any], workspace_root: str):
         duration_s = time.time() - started_at if started_at else None
         if duration_s is not None:
             payload["duration_s"] = duration_s
+        # Per-tool timing for the durable build-phase ladder. The parent relay
+        # (tui_gateway/server.py, event == "tool.complete") persists these onto
+        # the runtime trace so the workspace mirror can surface elapsed/duration
+        # per bootstrap phase. started_at is ms. Mirrors _on_tool_complete.
+        if started_at:
+            payload["started_at"] = int(started_at * 1000)
         summary = _tool_summary(name, result, duration_s)
         if summary:
             payload["summary"] = summary

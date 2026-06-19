@@ -21,7 +21,7 @@ const faqItems = [
   {
     question: "What happens if my subscription is past due or canceled?",
     answer:
-      "Your access may pause until billing is updated. The account page is the canonical place to check entitlement state, renew access, or manage cancellation.",
+      "Your access may pause until billing is updated. Use the account page to check your subscription status, renew access, or manage cancellation.",
   },
   {
     question: "What data does the app store about me?",
@@ -39,22 +39,22 @@ const privacySections = [
   {
     title: "Information the product may collect",
     body:
-      "A Takyon-powered app can collect account identity, subscription state, profile details you submit, product records you create, and usage receipts needed to operate the service.",
+      "This app can collect account identity, subscription state, profile details you submit, product records you create, and usage receipts needed to operate the service.",
   },
   {
     title: "How that information is used",
     body:
-      "The shared runtime uses account and session data to authenticate you, enforce entitlements, process checkout events, meter usage where applicable, and deliver the product features you requested.",
+      "We use account and session data to sign you in, manage your subscription and access, process checkout events, measure usage where applicable, and deliver the product features you requested.",
   },
   {
     title: "Payments and processors",
     body:
-      "Subscription billing and payment events may be handled by external payment processors. Businesses should publish their exact processor list, support email, and refund policy before shipping live traffic.",
+      "Subscription billing and payment events may be handled by external payment processors. Please see this page for the current processor list, support email, and refund policy before shipping live traffic.",
   },
   {
     title: "Retention and deletion",
     body:
-      "Operational logs and receipts may be retained for reliability, billing, and abuse prevention. Each business should replace this starter copy with exact retention windows and deletion instructions.",
+      "Operational logs and receipts may be retained for reliability, billing, and abuse prevention. Contact support for the exact retention windows and deletion instructions.",
   },
 ];
 
@@ -70,9 +70,9 @@ const termsSections = [
       "Some features require an active account or paid entitlement. Subscription status, trial access, renewal, and cancellation are governed by the business's published plan policy and checkout terms.",
   },
   {
-    title: "Business-specific rules",
+    title: "Product-specific rules",
     body:
-      "This is starter legal copy. The business should replace it with product-specific terms covering warranties, liability limits, governing law, and any regulated-use restrictions before public launch.",
+      "Additional product-specific terms may apply, covering warranties, liability limits, governing law, and any regulated-use restrictions. Please review this page for the latest terms.",
   },
 ];
 
@@ -93,7 +93,6 @@ function SupportLayout({
         <header className="flex flex-col gap-6">
           <div className="flex flex-wrap items-center gap-3">
             <Badge variant="outline">{eyebrow}</Badge>
-            <span className="text-sm text-muted-foreground">Starter public support page</span>
           </div>
           <div className="flex flex-col gap-4">
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
@@ -126,7 +125,7 @@ export function FaqScreen() {
     <SupportLayout
       eyebrow="FAQ"
       title="Frequently asked questions"
-      description="This starter page answers the most common account, billing, and access questions. Replace or extend the answers with business-specific support details before launch."
+      description="Answers to the most common account, billing, and access questions."
     >
       <section className="grid gap-4">
         {faqItems.map((item) => (
@@ -149,7 +148,7 @@ export function PrivacyScreen() {
     <SupportLayout
       eyebrow="Privacy"
       title="Privacy policy"
-      description="This shared starter explains the kinds of data a subscription app commonly needs to run. Businesses should customize the final live policy with exact data handling and contact details."
+      description="How we handle the data needed to run your account and subscription."
     >
       <section className="grid gap-4">
         {privacySections.map((section) => (
@@ -172,7 +171,7 @@ export function TermsScreen() {
     <SupportLayout
       eyebrow="Terms"
       title="Terms of service"
-      description="This seeded terms page keeps the route truthful and non-empty during bootstrap. It should be replaced with business-specific legal terms before a live launch."
+      description="The terms that govern your use of this product."
     >
       <section className="grid gap-4">
         {termsSections.map((section) => (
@@ -195,7 +194,7 @@ export function ArticlesScreen() {
     <SupportLayout
       eyebrow="Articles"
       title="Guides and updates"
-      description="This route is ready for product education, changelog posts, and support articles. It now renders a real starter state instead of a blank page."
+      description="Product guides, changelog posts, and support articles."
     >
       <Card>
         <CardHeader>

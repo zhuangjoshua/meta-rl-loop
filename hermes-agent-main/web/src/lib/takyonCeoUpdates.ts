@@ -355,7 +355,7 @@ export function deriveLiveWorkstreamCard({
       current?.summary
       || (isFirstBootstrap
         ? "I'm moving this through the next business workstream now."
-        : "I'm on this — picking up where the last workstream left off."),
+        : "Picking this back up now — more in a moment."),
     items: pastBootstrap && !currentKey && completed.length === 0 ? [] : items,
     current: current?.label,
     next: pastBootstrap && !currentKey && completed.length === 0 ? undefined : next,
@@ -553,6 +553,27 @@ const CUSTOMER_PLUMBING_PATTERNS: RegExp[] = [
   new RegExp(`\\b[\\w.-]+\\.(?:${TEXT_EXTENSIONS})\\b`, "i"),
   /\b(executing|running)\s+[`'"]?[a-z]/i,
   /\bI'?ll (?:load|invoke|call|delegate|run the)\b/i,
+  // Planner / deliberation lead-ins ("Let me think…", "Considering X or Y",
+  // "Should I…", "I'll wire…", "Now I'll…"): a line that STARTS this way is the
+  // model's chain-of-thought, not a customer update. Mirrors the backend ban-list
+  // in tui_gateway/server.py (_TAKYON_CHAT_PLUMBING_PATTERNS).
+  /^(?:let me|considering|deciding whether|should i|i(?:'?ll| will| need to| am going to|'?m going to)|now i(?:'?ll| will))\b/i,
+  // Sequencing words are chain-of-thought ONLY as a planner header ("Next:",
+  // "First:") — narrative "First, your homepage is live." is warm prose, kept.
+  /^(?:next|first|then)\s*:/i,
+  // Affirmation / realization META-OPENERS ("Good — I get what's going on now.",
+  // "Got it, building.", "Okay, so…", "Makes sense — done."): a line that STARTS
+  // with the model acknowledging its own understanding is internal thinking-stream
+  // filler, not a customer update. Two tiers so warm prose survives: the strong
+  // realization phrases (got it / i get what's / makes sense …) drop on any clause,
+  // while the short ambiguous words (good / okay / so / right …) drop ONLY when an
+  // immediate delimiter or "now" follows — so "Good news, your homepage is live."
+  // and "So you can now invite teammates." are KEPT. Byte-identical with the
+  // backend ban-list in tui_gateway/server.py (_TAKYON_CHAT_PLUMBING_PATTERNS).
+  /^(?:(?:got it|i get (?:what is|what'?s)|i see (?:what is|what'?s)|i understand|makes sense|let'?s see|let us see)\b|(?:good|okay|ok|alright|right|so)\s*(?:[,:–—-]|\bnow\b))/i,
+  // Internal jargon nouns ceo.md bans — anchored to the plumbing phrasing so the
+  // everyday verb "surface" ("we surface your best insights") is preserved.
+  /\b(?:workstream|(?:product|app|business)\s+surface|surface contract|research files|wedge)\b/i,
 ];
 
 /**
@@ -578,6 +599,348 @@ export function sanitizeCustomerReply(content: string): string {
     kept.push(line);
   }
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// One curated, customer-safe assistant message from the backend chat stream.
+// Shape mirrors the gateway contract emitted by `_takyon_ceo_chat_stream`
+// (tui_gateway/server.py): the text is already sanitized server-side; we
+// re-run sanitizeCustomerReply as belt-and-suspenders so a slip can never
+// surface raw planner/reasoning prose in the visible bubble.
+export type ChatStreamItem = {
+  id: string;
+  role: "assistant";
+  text: string;
+  headline: string;
+  summary: string;
+  postedAt: string;
+};
+
+// A curated CEO chat message ready to render as an agent bubble: customer-safe
+// text plus an optional wall-clock ms (parsed from the ISO posted_at) so it can
+// be merged in order against the user's send-stamped messages.
+export type ChatStreamMessage = {
+  id: string;
+  text: string;
+  ts?: number;
+};
+
+type WorkspaceLike = {
+  overview?: Record<string, unknown> | null;
+  live_state?: Record<string, unknown> | null;
+} | null | undefined;
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function rawChatStreamArray(workspace: WorkspaceLike): unknown[] {
+  if (!workspace) return [];
+  const overview = asRecord(workspace.overview);
+  const fromOverview = overview.chat_stream;
+  if (Array.isArray(fromOverview)) return fromOverview;
+  const liveState = asRecord(workspace.live_state);
+  const fromLiveState = liveState.chat_stream;
+  if (Array.isArray(fromLiveState)) return fromLiveState;
+  return [];
+}
+
+/**
+ * Parse the backend's curated `overview.chat_stream` (fallback
+ * `live_state.chat_stream`) into normalized, customer-safe items. Each item's
+ * text is re-sanitized; an item whose entire text is plumbing is dropped. This
+ * is the ONLY source the litebulb chat reads for AGENT bubbles — raw
+ * chain-of-thought history/delta messages are never rendered as conversation.
+ */
+export function parseChatStream(workspace: WorkspaceLike): ChatStreamItem[] {
+  const items: ChatStreamItem[] = [];
+  rawChatStreamArray(workspace).forEach((entry, index) => {
+    const record = asRecord(entry);
+    const safe = sanitizeCustomerReply(String(record.text ?? ""));
+    if (!safe) return;
+    const postedAt = String(record.posted_at ?? "").trim();
+    const id = String(record.id ?? "").trim() || `chat-stream-${postedAt || index}`;
+    items.push({
+      id,
+      role: "assistant",
+      text: safe,
+      headline: sanitizeCustomerReply(String(record.headline ?? "")),
+      summary: sanitizeCustomerReply(String(record.summary ?? "")),
+      postedAt,
+    });
+  });
+  return items;
+}
+
+/**
+ * The curated agent bubbles for the transcript: each chat_stream item as an
+ * agent ChatStreamMessage with an optional wall-clock ms parsed from posted_at.
+ * Ordered oldest→newest, matching the backend ordering.
+ */
+export function chatStreamAgentMessages(workspace: WorkspaceLike): ChatStreamMessage[] {
+  return parseChatStream(workspace).map((item) => {
+    const parsed = item.postedAt ? Date.parse(item.postedAt) : NaN;
+    return {
+      id: item.id,
+      text: item.text,
+      ts: Number.isFinite(parsed) ? parsed : undefined,
+    };
+  });
+}
+
+// One in-flight worker step for the build screen's live "Working on…" list. The
+// backend already ships per-step worker progress in the boot payload
+// (workspace.live_state.tasks, fallback overview.tasks, plus each milestone's
+// nested runtime children). `detail` is re-sanitized at the render site so no
+// tool/path/build noun reaches the customer-facing column.
+export type LiveWorkerTask = {
+  id: string;
+  label: string;
+  detail: string;
+  status: string;
+};
+
+function asTaskArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    .map((entry) => entry as Record<string, unknown>);
+}
+
+function taskFields(record: Record<string, unknown>): LiveWorkerTask {
+  const label = String(record.label ?? record.title ?? record.name ?? "").trim();
+  const detail = String(record.detail ?? record.summary ?? record.context ?? "").trim();
+  const status = String(record.status ?? "").trim().toLowerCase();
+  const id = String(record.id ?? record.key ?? "").trim() || `${label || "step"}-${detail}`;
+  return { id, label, detail, status };
+}
+
+/**
+ * The live worker steps to surface on the build screen, flattened from the
+ * canonical workspace mirror (`live_state.tasks`, fallback `overview.tasks`).
+ * Returns the running/queued milestones plus — for the running milestone — its
+ * nested runtime children (source 'runtime'/'task'), so the long worker phase is
+ * legible step-by-step. Newest-relevant order is preserved; the caller caps and
+ * sanitizes detail. Presentation-only — derived from the boot payload, never the
+ * agent's raw turn context.
+ */
+export function liveWorkerTasks(workspace: WorkspaceLike): LiveWorkerTask[] {
+  if (!workspace) return [];
+  const liveState = asRecord(workspace.live_state);
+  const overview = asRecord(workspace.overview);
+  const rawTasks = asTaskArray(liveState.tasks).length
+    ? asTaskArray(liveState.tasks)
+    : asTaskArray(overview.tasks);
+  const result: LiveWorkerTask[] = [];
+  for (const record of rawTasks) {
+    const status = String(record.status ?? "").trim().toLowerCase();
+    if (status !== "running" && status !== "queued") continue;
+    result.push(taskFields(record));
+    if (status === "running") {
+      // The running milestone carries the live per-step worker progress as
+      // nested runtime/task children — surface those so the worker phase is not
+      // a single blank line.
+      for (const child of asTaskArray(record.children)) {
+        const source = String(child.source ?? "").trim().toLowerCase();
+        if (source !== "runtime" && source !== "task") continue;
+        const childStatus = String(child.status ?? "").trim().toLowerCase();
+        if (childStatus && childStatus !== "running" && childStatus !== "queued") continue;
+        result.push(taskFields(child));
+      }
+    }
+  }
+  return result;
+}
+
+// --- Build-phase ladder ----------------------------------------------------
+//
+// The bootstrap turn runs a FIXED, ordered phase sequence
+// (plugins/takyon/cli.py::_business_bootstrap_instruction): a fast landing
+// build, then the logo, Search Console registration, the sign-in/subscription
+// access shell, and the launch post. Today the build screen only shows opaque
+// "Working on…" rows, so the customer can't tell that the landing is fast while
+// the logo + Search Console are the long tail, or where sign-in/subscription
+// get wired. This selector turns the durable per-tool runtime traces
+// (overview.trace, fallback live_state.trace — each carrying tool_name, status,
+// updated_at and the persisted per-tool duration_s) into a deterministic,
+// timed 6-phase ladder. It is PRESENTATIONAL ONLY — phase status is derived
+// strictly from real tool events (queued until the keying tool started, running
+// while in flight, complete on its completed trace), never fabricated and never
+// a deterministic business router. It fails toward queued/running, never a fake
+// "complete".
+
+export type LivePhaseStatus = "queued" | "running" | "complete";
+
+export type LivePhase = {
+  id: string;
+  // Warm, customer-safe label — never a tool name or runtime jargon.
+  label: string;
+  status: LivePhaseStatus;
+  // Seconds elapsed: the persisted tool duration once complete, otherwise the
+  // live elapsed time since the keying tool started (when running). Undefined
+  // when the phase has not started.
+  durationS?: number;
+};
+
+// One trace row, narrowed to the timing-relevant fields the ladder reads.
+type PhaseTrace = {
+  toolName: string;
+  status: string;
+  durationS?: number;
+  startedAtMs?: number;
+};
+
+function numberOrUndefined(value: unknown): number | undefined {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function phaseTraceArray(workspace: WorkspaceLike): PhaseTrace[] {
+  if (!workspace) return [];
+  const overview = asRecord(workspace.overview);
+  const raw = Array.isArray(overview.trace)
+    ? overview.trace
+    : Array.isArray(asRecord(workspace.live_state).trace)
+      ? (asRecord(workspace.live_state).trace as unknown[])
+      : [];
+  const out: PhaseTrace[] = [];
+  for (const entry of raw) {
+    const record = asRecord(entry);
+    const toolName = String(record.tool_name ?? "").trim().toLowerCase();
+    if (!toolName) continue;
+    out.push({
+      toolName,
+      status: String(record.status ?? "").trim().toLowerCase(),
+      durationS: numberOrUndefined(record.duration_s),
+      startedAtMs: numberOrUndefined(record.started_at),
+    });
+  }
+  return out;
+}
+
+// The 6 canonical bootstrap phases, in order, each keyed to the tool whose
+// completion marks the phase done. Sign-on AND Subscription/account are both
+// wired by the SECOND business_claude_agent_task pass (the /app access shell +
+// /app/profile account page), so they share that pass's second occurrence.
+const PHASE_LABELS: { id: string; label: string }[] = [
+  { id: "landing", label: "Building your landing page" },
+  { id: "logo", label: "Adding your logo" },
+  { id: "search_console", label: "Getting found on Google" },
+  { id: "sign_on", label: "Wiring sign-in" },
+  { id: "subscription", label: "Turning on subscriptions" },
+  { id: "launch", label: "Putting your launch post out" },
+];
+
+/**
+ * The deterministic, timed build-phase ladder for the Building screen, derived
+ * from the durable per-tool runtime traces. Returns all 6 canonical phases in
+ * order with a truthful status (queued/running/complete) and per-phase timing.
+ * Presentation-only — driven by real tool events + persisted durations, not by
+ * model prose and not a workflow router.
+ */
+export function livePhases(workspace: WorkspaceLike): LivePhase[] {
+  const traces = phaseTraceArray(workspace);
+
+  // Index the bootstrap tool events in chronological order. The two
+  // business_claude_agent_task passes are distinguished by occurrence: the
+  // first is the landing build (2a), the second is the app-shell pass (2b).
+  const claudeTasks = traces.filter((t) => t.toolName === "business_claude_agent_task");
+  const logo = traces.find((t) => t.toolName === "business_generate_logo");
+  const searchConsole = traces.find((t) => t.toolName === "business_register_search_console");
+  const landingTask = claudeTasks[0];
+  const appShellTask = claudeTasks[1];
+
+  const isComplete = (t?: PhaseTrace) =>
+    Boolean(t) && (t!.status === "completed" || t!.status === "complete");
+  // A keying tool with a trace row but not yet completed is in flight.
+  const isRunning = (t?: PhaseTrace) => Boolean(t) && !isComplete(t);
+
+  // Elapsed seconds: the persisted duration once complete, else the live
+  // elapsed since the tool started (when we have a started_at), else undefined.
+  const elapsed = (t?: PhaseTrace): number | undefined => {
+    if (!t) return undefined;
+    if (typeof t.durationS === "number") return Math.max(0, t.durationS);
+    if (typeof t.startedAtMs === "number") {
+      return Math.max(0, Math.round((Date.now() - t.startedAtMs) / 1000));
+    }
+    return undefined;
+  };
+
+  const phaseTrace: Record<string, PhaseTrace | undefined> = {
+    landing: landingTask,
+    logo,
+    search_console: searchConsole,
+    // Sign-on and Subscription/account are the same 2b pass; both light up
+    // together with the second claude_agent_task.
+    sign_on: appShellTask,
+    subscription: appShellTask,
+    // The launch post phase has no single durable tool trace keyed here yet
+    // (the X publish records a job, not a tool.complete trace), so it stays
+    // queued/running off the upstream phases rather than fabricating a time.
+    launch: undefined,
+  };
+
+  return PHASE_LABELS.map(({ id, label }) => {
+    const trace = phaseTrace[id];
+    let status: LivePhaseStatus;
+    if (id === "launch") {
+      // Launch is the final phase: it shows complete only once everything
+      // before it is complete (the X post runs after the app shell). It never
+      // fabricates its own completion from a tool it has no trace for, so it
+      // settles to complete only when the app-shell pass is done, else queued.
+      status = isComplete(appShellTask) ? "complete" : "queued";
+    } else if (isComplete(trace)) {
+      status = "complete";
+    } else if (isRunning(trace)) {
+      status = "running";
+    } else {
+      status = "queued";
+    }
+    const durationS = id === "launch" ? undefined : elapsed(trace);
+    return durationS === undefined
+      ? { id, label, status }
+      : { id, label, status, durationS };
+  });
+}
+
+/**
+ * Format a phase elapsed/duration as a compact M:SS clock ("0:42", "1:18").
+ * Empty when undefined.
+ */
+export function formatPhaseDuration(durationS?: number): string {
+  if (typeof durationS !== "number" || !Number.isFinite(durationS) || durationS < 0) {
+    return "";
+  }
+  const total = Math.round(durationS);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * The durable end-of-turn summary the backend mirrors at
+ * `overview.chat_summary` (fallback `live_state.chat_summary`), re-sanitized.
+ * Empty when absent.
+ */
+export function workspaceChatSummary(workspace: WorkspaceLike): string {
+  if (!workspace) return "";
+  const overview = asRecord(workspace.overview);
+  const fromOverview = String(overview.chat_summary ?? "").trim();
+  if (fromOverview) return sanitizeCustomerReply(fromOverview);
+  const liveState = asRecord(workspace.live_state);
+  const fromLiveState = String(liveState.chat_summary ?? "").trim();
+  return fromLiveState ? sanitizeCustomerReply(fromLiveState) : "";
+}
+
+/**
+ * The backend's authoritative running flag for the chat, mirrored on
+ * `live_state.chat_running` (true while the CEO turn is running). Used to drive
+ * the standalone thinking indicator on a reload, falling back to the client's
+ * own in-flight signal at the call site.
+ */
+export function workspaceChatRunning(workspace: WorkspaceLike): boolean {
+  if (!workspace) return false;
+  const liveState = asRecord(workspace.live_state);
+  return liveState.chat_running === true;
 }
 
 export function deriveAssistantReceipt({

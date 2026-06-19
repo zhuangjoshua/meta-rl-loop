@@ -17,11 +17,33 @@ function accountEmail(access: ReturnType<typeof useViewerAccess>): string {
   return String(access.user?.email || access.session?.email || access.account?.email || "").trim();
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function dollars(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(2)}` : null;
+}
+
+/** "$X of $Y used this week" line from the account's weekly usage allowance. Returns null when no
+ *  allowance is present so the line simply hides instead of faking a quota. */
+function weeklyAllocationLine(access: ReturnType<typeof useViewerAccess>): string | null {
+  const allocation = isRecord(access.account?.usage_allocation)
+    ? (access.account?.usage_allocation as Record<string, unknown>)
+    : null;
+  if (!allocation) return null;
+  const used = dollars(allocation.committed_usd);
+  if (used === null) return null;
+  const limit = dollars(allocation.hard_limit_usd);
+  return limit ? `${used} of ${limit} used this week` : `${used} used this week`;
+}
+
 export function AppHomeScreen() {
   const access = useViewerAccess();
   const auth = useProductAuth();
   const cta = resolveViewerCta(access);
   const productName = businessDisplayName();
+  const weeklyAllocation = weeklyAllocationLine(access);
 
   if (access.loading) {
     return (
@@ -34,40 +56,27 @@ export function AppHomeScreen() {
   }
 
   if (!access.authenticated) {
+    const signInBlocked = !auth.available || !auth.configured;
     return (
       <section className="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(18rem,0.9fr)]">
         <Card>
           <CardHeader>
-            <CardTitle>Sign in to enter the app</CardTitle>
-            <CardDescription>
-              The private app shell reads the shared Takyon session cookie. Use Google OAuth to mint
-              that session through Supabase Auth.
-            </CardDescription>
+            <CardTitle>Sign in to {productName}</CardTitle>
+            <CardDescription>Sign in to continue.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
             <Button
               size="lg"
               onClick={() => void auth.signInWithGoogle()}
-              disabled={!auth.available || !auth.configured || auth.busy}
+              disabled={signInBlocked || auth.busy}
             >
-              {auth.busy ? "Finishing sign-in…" : "Continue with Google"}
+              {auth.busy ? "Signing you in…" : "Continue with Google"}
             </Button>
-            <p className="text-sm text-muted-foreground">
-              If this app should allow access but the button is disabled, the public Supabase config
-              has not been materialized into `_takyon/surface-context.js` yet.
-            </p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Why this route exists</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3 text-sm text-muted-foreground">
-            <p>The scaffold keeps a real `/app` surface instead of a blank placeholder shell.</p>
-            <p>
-              Once authenticated, the same route can load account state, usage-led features, records,
-              checkout, and any future runtime rails without changing the auth boundary.
-            </p>
+            {signInBlocked ? (
+              <p className="text-sm text-muted-foreground">
+                Sign-in is temporarily unavailable. Please try again shortly.
+              </p>
+            ) : null}
           </CardContent>
         </Card>
       </section>
@@ -75,18 +84,15 @@ export function AppHomeScreen() {
   }
 
   return (
-    <section className="grid gap-6 xl:grid-cols-[minmax(0,1.2fr)_minmax(18rem,0.8fr)]">
+    <section className="grid gap-6">
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center gap-3">
             <Badge>{access.subscriptionState || "signed_in"}</Badge>
             <span className="text-sm text-muted-foreground">{productName}</span>
           </div>
-          <CardTitle>App session is active</CardTitle>
-          <CardDescription>
-            This product session was minted by the Takyon runtime after Supabase verified the browser
-            login. The app can now rely on the normal account and entitlement rails.
-          </CardDescription>
+          <CardTitle>You're signed in.</CardTitle>
+          <CardDescription>Welcome back to {productName}.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
           <div className="rounded border border-border bg-background p-4">
@@ -95,12 +101,12 @@ export function AppHomeScreen() {
               {accountEmail(access) || "No email surfaced yet"}
             </p>
           </div>
-          <div className="rounded border border-border bg-background p-4">
-            <p className="text-sm font-medium text-foreground">Recommended next step</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {cta.primaryLabel} through the canonical `{cta.primaryHref}` route.
-            </p>
-          </div>
+          {weeklyAllocation ? (
+            <div className="rounded border border-border bg-background p-4">
+              <p className="text-sm font-medium text-foreground">Weekly AI allowance</p>
+              <p className="mt-1 text-sm text-muted-foreground">{weeklyAllocation}</p>
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-3">
             <Link
               to={cta.primaryHref}
@@ -115,18 +121,6 @@ export function AppHomeScreen() {
               Open account
             </Link>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Access state</CardTitle>
-        </CardHeader>
-        <CardContent className="grid gap-3 text-sm text-muted-foreground">
-          <p>Viewer state: {access.state}</p>
-          <p>Subscription state: {access.subscriptionState || "none"}</p>
-          <p>Entitled: {access.entitled ? "yes" : "no"}</p>
-          <p>Authenticated: yes</p>
         </CardContent>
       </Card>
     </section>

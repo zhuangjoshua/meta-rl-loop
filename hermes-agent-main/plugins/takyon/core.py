@@ -10152,21 +10152,35 @@ def _ensure_warm_node_modules_prebake() -> Path | None:
         )
         if proc.returncode != 0 or not _warm_node_modules_ready(staging):
             return None
-        # Publish atomically. If a concurrent build already published a COMPLETE tree under this exact
-        # arch+lockhash key, keep theirs. Otherwise clear any incomplete/marker-stranded leftover (the
-        # pre-fix failure mode) and swap our finished tree in with a single rename.
-        if _warm_node_modules_ready(prebake):
-            return prebake
-        if prebake.exists():
-            shutil.rmtree(prebake, ignore_errors=True)
+        # Publish. Try the atomic rename FIRST. Into an ABSENT spot this is fully race-free
+        # (first-writer-wins): if a concurrent build already created the spot, our os.replace fails and
+        # we reuse theirs below — we never delete a freshly-published copy, and there is no rmtree
+        # window. Only a genuine NON-ready leftover (a pre-fix stranded marker / half-tree) can block
+        # us; clear THAT by moving it aside with an atomic rename rather than an in-place rmtree, so the
+        # spot is occupied at every instant except a single rename's width, then land ours.
         try:
             os.replace(str(staging), str(prebake))
             staging = None  # consumed by the rename
             return prebake
         except OSError:
-            # A racing build re-populated the spot between our clear and our rename: accept a ready
-            # spot, else fail soft to a cold install.
+            pass
+        if _warm_node_modules_ready(prebake):
+            return prebake  # a concurrent build published a complete tree — reuse it, never delete it
+        aside = prebake.parent / f".{prebake.name}.partial-stale-{os.getpid()}"
+        try:
+            os.replace(str(prebake), str(aside))  # atomic move-aside of the non-ready leftover
+        except OSError:
+            aside = None  # another build already cleared/replaced the spot in the meantime
+        try:
+            os.replace(str(staging), str(prebake))
+            staging = None
+            return prebake
+        except OSError:
+            # Lost a publish race after clearing: accept a ready spot, else fail soft to a cold install.
             return prebake if _warm_node_modules_ready(prebake) else None
+        finally:
+            if aside is not None:
+                shutil.rmtree(aside, ignore_errors=True)
     except Exception:
         return None
     finally:
@@ -18451,26 +18465,26 @@ def _openmeter_access_projection_failsoft(
     back to a (now fail-soft) retry job, and SWALLOWS every exception — a valid credential must mint a
     session even when OpenMeter is 404/down. Returns a best-effort sync summary for the response payload,
     or a ``{configured, ok:false, error}`` shape; it NEVER raises."""
+    # Defer the access-projection refresh to a background job rather than running it inline. The inline
+    # `_pg_sync_openmeter_access_projection` fired up to 4 sequential OpenMeter HTTP calls (20s timeout,
+    # no circuit breaker) on the session-mint request path, adding ~2s to every sign-in. The projection
+    # is a downstream usage MIRROR, never a login/session gate (access truth is the Stripe-webhook-backed
+    # app_entitlements projection), so landing it out-of-band keeps sign-in fast while staying eventually
+    # consistent. Fail-soft: a valid credential mints its session regardless of the queue outcome.
     try:
-        return _pg_sync_openmeter_access_projection(store, business, app_user_id)
-    except Exception as exc:
-        summary: dict[str, Any] = {"configured": True, "ok": False, "error": str(exc)}
-        try:
-            queued = _queue_openmeter_sync_job(
-                store,
-                business,
-                scope="access",
-                app_user_id=app_user_id,
-            )
-            if queued is not None:
-                summary["retry_job"] = queued
-        except Exception:  # pragma: no cover - fail-soft: queue errors must not break auth
-            pass
+        queued = _queue_openmeter_sync_job(
+            store,
+            business,
+            scope="access",
+            app_user_id=app_user_id,
+        )
+        return {"configured": True, "ok": True, "deferred": True, "retry_job": queued}
+    except Exception as exc:  # pragma: no cover - fail-soft: queue errors must not break auth
         try:
             import logging
 
             logging.getLogger("takyon.openmeter").warning(
-                "openmeter access projection sync failed (business=%s app_user_id=%s); "
+                "openmeter access projection enqueue failed (business=%s app_user_id=%s); "
                 "session minting continues without it: %s",
                 business,
                 app_user_id,
@@ -18478,7 +18492,7 @@ def _openmeter_access_projection_failsoft(
             )
         except Exception:
             pass
-        return summary
+        return {"configured": True, "ok": False, "error": str(exc)}
 
 
 def _run_openmeter_sync_job(
@@ -20665,19 +20679,21 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                 raise TakyonError("app account not found")
             _maybe_reconcile_pg_completed_checkout(store, conn, business, user)
             if isinstance(conn, _PGConn) and _openmeter_enabled():
+                # Refresh the OpenMeter access projection ASYNCHRONOUSLY. A synchronous refresh here
+                # fired up to 4 sequential OpenMeter HTTP calls (20s timeout, no circuit breaker) on the
+                # request path, adding ~2s to EVERY /account read and stalling the customer's app shell
+                # on load (measured: /account TTFB ~2.3s on an already-built site). The entitlement read
+                # below already returns the canonical app_entitlements projection, so enqueue the refresh
+                # to land out-of-band (eventually consistent) instead of blocking the render.
                 try:
-                    _pg_sync_openmeter_access_projection(
-                        store,
-                        business,
-                        str(user["id"]),
-                    )
-                except Exception:
                     _queue_openmeter_sync_job(
                         store,
                         business,
                         scope="access",
                         app_user_id=str(user["id"]),
                     )
+                except Exception:
+                    pass
             with (
                 store._pg_app_scope(conn, business, app_user_id=str(user["id"]))
                 if isinstance(conn, _PGConn)

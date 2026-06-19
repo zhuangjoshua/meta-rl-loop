@@ -34,19 +34,16 @@ export function ProfileScreen() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Account unavailable</CardTitle>
-          <CardDescription>
-            A product account page only becomes meaningful after the runtime can read your app
-            session. Sign in first, then this page will show the real user and entitlement state.
-          </CardDescription>
+          <CardTitle>Your account</CardTitle>
+          <CardDescription>Sign in to view your account.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-3">
           <Button
             size="lg"
             onClick={() => void auth.signInWithGoogle()}
-            disabled={!auth.available || !auth.configured || auth.busy}
+            disabled={!auth.available || !auth.configured || auth.busy || access.authenticated}
           >
-            {auth.busy ? "Finishing sign-in…" : "Continue with Google"}
+            {auth.busy ? "Signing you in…" : "Continue with Google"}
           </Button>
           <Link
             to="/"
@@ -64,22 +61,13 @@ export function ProfileScreen() {
       <Card>
         <CardHeader>
           <CardTitle>Account overview</CardTitle>
-          <CardDescription>
-            These fields come from the canonical session/account rails, not a browser-only auth
-            cache.
-          </CardDescription>
+          <CardDescription>Your account details.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
           <div className="rounded border border-border bg-background p-4">
             <p className="text-sm font-medium text-foreground">Email</p>
             <p className="mt-1 text-sm text-muted-foreground">
               {displayField(access.user?.email, "Unavailable")}
-            </p>
-          </div>
-          <div className="rounded border border-border bg-background p-4">
-            <p className="text-sm font-medium text-foreground">App user ID</p>
-            <p className="mt-1 break-all text-sm text-muted-foreground">
-              {displayField(access.user?.id, "Unavailable")}
             </p>
           </div>
           <div className="rounded border border-border bg-background p-4">
