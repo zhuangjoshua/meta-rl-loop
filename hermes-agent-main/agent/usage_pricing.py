@@ -116,6 +116,33 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # in this table (e.g. ("tavily", "search") below) — there is no synthetic flat ("agent", *) price.
     # A paid provider whose `(namespace, op)` is absent here is REFUSED (fail closed), not run
     # unpriced.
+    # ── DataForSEO Keywords Data → Google Ads (per-request, NOT per-token) ──
+    # The SEO/GEO operator's keyword research (business_seo_query_data, modes
+    # keyword-historical / keyword-ideas) meters through the SAME operator web-spend
+    # seam as Tavily: priced per request via `request_cost`, billed against the active
+    # business budget. The Google Ads Keywords Data "live" endpoints are a flat
+    # $0.075 per request regardless of how many keywords the array holds (1–1000),
+    # so units=1 per call. Without an entry here the metered keyword broker fails
+    # closed (refuses the call), so a new endpoint can never spend budget unpriced.
+    # Source: https://dataforseo.com/pricing/keywords-data/google-ads (live mode).
+    ("dataforseo", "search_volume"): PricingEntry(
+        request_cost=Decimal("0.075"),
+        source="official_docs_snapshot",
+        source_url="https://dataforseo.com/pricing/keywords-data/google-ads",
+        pricing_version="dataforseo-2026-06",
+    ),
+    ("dataforseo", "keywords_for_keywords"): PricingEntry(
+        request_cost=Decimal("0.075"),
+        source="official_docs_snapshot",
+        source_url="https://dataforseo.com/pricing/keywords-data/google-ads",
+        pricing_version="dataforseo-2026-06",
+    ),
+    ("dataforseo", "keywords_for_site"): PricingEntry(
+        request_cost=Decimal("0.075"),
+        source="official_docs_snapshot",
+        source_url="https://dataforseo.com/pricing/keywords-data/google-ads",
+        pricing_version="dataforseo-2026-06",
+    ),
     # ── Anthropic Fable 5 ────────────────────────────────────────────────
     # New top tier above Opus. $10/$50; cache read 0.1x input, write 1.25x.
     # Source: https://platform.claude.com/docs/en/about-claude/pricing

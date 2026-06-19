@@ -5753,38 +5753,42 @@ def test_handle_business_seo_query_data_gsc_query_requires_site_url_and_dates():
     assert "start_date" in out["error"].lower() or "end_date" in out["error"].lower()
 
 
-def test_handle_business_seo_query_data_keyword_modes_validate_inputs():
+def test_handle_business_seo_query_data_keyword_modes_validate_inputs(monkeypatch):
+    # DataForSEO backend: a business scope (so the paid-spend scope guard passes) but
+    # forced "no creds" so the paid path fails closed deterministically (the keyword modes
+    # replaced the old free Google Ads Keyword Planner backend).
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "testco")
+    monkeypatch.setattr(takyon_core, "_seo_resolve_sensitive_env", lambda name: "")
+
+    # keyword-historical validates the keyword list before any paid call
     out = json.loads(
         takyon_core.handle_business_seo_query_data({"mode": "keyword-historical"})
     )
     assert out["success"] is False
-    assert "customer_id" in out["error"].lower()
-
-    out = json.loads(
-        takyon_core.handle_business_seo_query_data(
-            {"mode": "keyword-historical", "customer_id": "123-456-7890"}
-        )
-    )
-    assert out["success"] is False
     assert "keywords" in out["error"].lower()
 
-    out = json.loads(takyon_core.handle_business_seo_query_data({"mode": "keyword-ideas"}))
-    assert out["success"] is False
-    assert "customer_id" in out["error"].lower()
-
+    # with keywords but no DataForSEO creds → fails closed (no spend, no fabrication)
     out = json.loads(
         takyon_core.handle_business_seo_query_data(
-            {"mode": "keyword-ideas", "customer_id": "123-456-7890"}
+            {"mode": "keyword-historical", "keywords": ["running shoes"]}
         )
     )
+    assert out["success"] is False
+    assert "dataforseo_unconfigured" in out["error"]
+
+    # keyword-ideas requires a keyword or page_url seed
+    out = json.loads(takyon_core.handle_business_seo_query_data({"mode": "keyword-ideas"}))
     assert out["success"] is False
     assert "keywords" in out["error"].lower() or "page_url" in out["error"].lower()
 
-
-def test_strip_customer_id_normalizes_dashes_and_spaces():
-    assert takyon_core._strip_customer_id("123-456-7890") == "1234567890"
-    assert takyon_core._strip_customer_id(" 123 456 7890 ") == "1234567890"
-    assert takyon_core._strip_customer_id(None) == ""
+    # with a seed but no creds → fails closed
+    out = json.loads(
+        takyon_core.handle_business_seo_query_data(
+            {"mode": "keyword-ideas", "keywords": ["running shoes"]}
+        )
+    )
+    assert out["success"] is False
+    assert "dataforseo_unconfigured" in out["error"]
 
 
 def test_seo_resolve_sensitive_env_is_strict_safebox_gated(monkeypatch):
@@ -5817,15 +5821,6 @@ def test_seo_resolve_sensitive_env_empty_when_safebox_unavailable(monkeypatch):
 
     monkeypatch.setattr(takyon_safebox, "read_env_backed_value", _unavailable)
     assert takyon_core._seo_resolve_sensitive_env("GOOGLE_ADS_REFRESH_TOKEN") == ""
-
-
-def test_seo_require_sensitive_env_raises_when_unresolved(monkeypatch):
-    from plugins.takyon import safebox as takyon_safebox
-
-    monkeypatch.setattr(takyon_safebox, "read_env_backed_value", lambda k: "")
-    with pytest.raises(TakyonError) as exc:
-        takyon_core._seo_require_sensitive_env("GOOGLE_ADS_DEVELOPER_TOKEN")
-    assert "safebox" in str(exc.value).lower()
 
 
 def test_google_ads_client_id_is_safebox_sensitive():

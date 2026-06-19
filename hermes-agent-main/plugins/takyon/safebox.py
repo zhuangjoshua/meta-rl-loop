@@ -57,6 +57,11 @@ _EXACT_SENSITIVE_ENV_KEYS = frozenset(
         "AUTH0_CLIENT_SECRET",
         "AUTH0_SECRET",
         "DATABASE_URL",
+        # DataForSEO authenticates with a login/password pair. The password matches
+        # the _PASSWORD suffix, but the login does not end in a sensitive suffix, so
+        # we keep it behind the Safebox gate explicitly (no os.getenv side door) the
+        # same way the Google Ads client id below is kept.
+        "DATAFORSEO_LOGIN",
         # Google OAuth client ids don't end in a sensitive suffix, but we keep the
         # full Google Ads credential set behind the Safebox gate (no os.getenv side door).
         "GOOGLE_ADS_CLIENT_ID",
