@@ -792,6 +792,193 @@ class SupabaseS3StorageBackend:
         return out
 
 
+class R2StorageBackend:
+    """Cloudflare R2 via its S3-compatible API (lazy ``boto3``) — the PUBLIC product-site mirror.
+
+    This is a SEPARATE bucket from the Supabase workspace store. It holds ONLY finished static
+    builds, served read-only at the edge so the VPS leaves the static path. NOTHING private is ever
+    written here: only ``<slug>/<build_id>/<rel>`` build files and the ``<slug>/current`` pointer.
+
+    Config resolves through the same env-backed / safebox-backed seam as the Supabase backend
+    (``_env_backed_config_value`` for non-secret, ``_sensitive_config_value`` for the keys), so the
+    R2 write token is no more exposed than the existing ``SUPABASE_S3_*`` creds — never read from a
+    business tool's ``os.environ`` at runtime. If any of ``R2_S3_ENDPOINT`` /
+    ``R2_S3_ACCESS_KEY_ID`` / ``R2_S3_SECRET_ACCESS_KEY`` / ``R2_BUCKET`` or ``boto3`` is missing it
+    raises :class:`StorageUnconfigured` — never a silent fallback. ``R2_S3_REGION`` defaults to
+    ``"auto"`` (R2's convention). sha256 is stored in object metadata at ``put`` so reads/listing
+    share the one digest space.
+
+    The mirror is best-effort: callers no-op via :func:`r2_configured` when R2 isn't provisioned, so
+    existing Supabase publish behavior is unchanged until the operator sets the ``R2_*`` values.
+    """
+
+    name = "r2"
+    _META_DIGEST = "sha256"
+
+    def __init__(self) -> None:
+        endpoint = _env_backed_config_value("R2_S3_ENDPOINT")
+        region = _env_backed_config_value("R2_S3_REGION") or "auto"
+        access_key = _sensitive_config_value("R2_S3_ACCESS_KEY_ID")
+        secret_key = _sensitive_config_value("R2_S3_SECRET_ACCESS_KEY")
+        bucket = _env_backed_config_value("R2_BUCKET")
+        missing = [
+            name
+            for name, val in (
+                ("R2_S3_ENDPOINT", endpoint),
+                ("R2_S3_ACCESS_KEY_ID", access_key),
+                ("R2_S3_SECRET_ACCESS_KEY", secret_key),
+                ("R2_BUCKET", bucket),
+            )
+            if not val
+        ]
+        if missing:
+            raise StorageUnconfigured(
+                "r2 storage backend selected but missing: " + ", ".join(missing)
+            )
+        try:
+            import boto3  # noqa: PLC0415 — lazy: the credential-free path never imports this
+        except ImportError as exc:  # pragma: no cover - depends on optional dep
+            raise StorageUnconfigured(
+                "r2 storage backend selected but boto3 is not installed"
+            ) from exc
+        self.bucket = bucket
+        self._client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+        )
+
+    def put(self, key: str, data: bytes, *, digest: str) -> None:  # pragma: no cover - live only
+        if len(data) > MAX_OBJECT_BYTES:
+            raise StorageError(f"object too large to put ({len(data)} bytes): {key}")
+        self._client.put_object(
+            Bucket=self.bucket,
+            Key=_safe_rel(key, field="object key"),
+            Body=data,
+            Metadata={self._META_DIGEST: digest},
+        )
+
+    def get(self, key: str) -> bytes:  # pragma: no cover - live only
+        try:
+            resp = self._client.get_object(
+                Bucket=self.bucket, Key=_safe_rel(key, field="object key")
+            )
+        except self._client.exceptions.NoSuchKey as exc:
+            raise ObjectNotFound(key) from exc
+        return resp["Body"].read()
+
+    def delete(self, key: str) -> None:  # pragma: no cover - live only
+        self._client.delete_object(Bucket=self.bucket, Key=_safe_rel(key, field="object key"))
+
+    def list_digests(self, prefix: str) -> dict[str, str]:  # pragma: no cover - live only
+        out: dict[str, str] = {}
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []) or []:
+                key = obj["Key"]
+                try:
+                    head = self._client.head_object(Bucket=self.bucket, Key=key)
+                except Exception as exc:
+                    if _storage_client_missing_object(exc):
+                        logger.warning("r2 list skipped vanished object: %s", key)
+                        continue
+                    raise
+                dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
+                if not dg:
+                    try:
+                        dg = digest_bytes(self.get(key))
+                    except ObjectNotFound:
+                        logger.warning("r2 list skipped vanished object during get: %s", key)
+                        continue
+                out[key] = dg
+        return out
+
+    def list_object_sizes(self, prefix: str) -> dict[str, int]:  # pragma: no cover - live only
+        out: dict[str, int] = {}
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", []) or []:
+                out[obj["Key"]] = int(obj.get("Size") or 0)
+        return out
+
+
+def r2_configured() -> bool:
+    """True iff the public R2 product-site mirror is fully provisioned.
+
+    Lets every caller of :func:`write_public_site_to_r2` no-op cleanly when ``R2_*`` is unset, so the
+    Supabase publish path is unchanged until the operator turns the edge mirror on. ``R2_S3_REGION``
+    is intentionally NOT required (defaults to ``"auto"``)."""
+    return bool(
+        _env_backed_config_value("R2_S3_ENDPOINT")
+        and _env_backed_config_value("R2_BUCKET")
+        and _sensitive_config_value("R2_S3_ACCESS_KEY_ID")
+        and _sensitive_config_value("R2_S3_SECRET_ACCESS_KEY")
+    )
+
+
+def public_site_object_key(slug: str, build_id: str, rel: str) -> str:
+    """Key a single built-site file in the PUBLIC R2 bucket: ``<slug>/<build_id>/<rel>``.
+
+    Deliberately flat and public-namespaced — no ``__takyon/`` private prefix — because this bucket
+    only ever holds servable static output. ``build_id`` reuses the same 16–64 hex-char validation as
+    :func:`build_object_prefix` so a pointer can never escape the slug namespace."""
+    safe_slug = _safe_slug(slug)
+    safe_build_id = str(build_id or "").strip().lower()
+    if not safe_build_id or not re.fullmatch(r"[0-9a-f]{16,64}", safe_build_id):
+        raise UnsafePath(f"unsafe build id: {build_id!r}")
+    return f"{safe_slug}/{safe_build_id}/" + _safe_rel(rel, field="public site path")
+
+
+def public_site_pointer_key(slug: str) -> str:
+    """Key the per-business live-build pointer in the PUBLIC R2 bucket: ``<slug>/current``.
+
+    The edge reader resolves ``<slug>/current`` -> ``build_id`` and then serves
+    ``<slug>/<build_id>/<rel>``. Written LAST so a half-uploaded build is never pointed at."""
+    return f"{_safe_slug(slug)}/current"
+
+
+def write_public_site_to_r2(
+    slug: str,
+    build_id: str,
+    build_root: str | os.PathLike[str],
+    *,
+    backend: "StorageBackend | None" = None,
+) -> dict[str, object]:
+    """Mirror one finished static build into the PUBLIC R2 bucket for edge serving.
+
+    Uploads every file under ``build_root`` to ``<slug>/<build_id>/<rel>`` (digest-tagged), THEN
+    writes the ``<slug>/current`` pointer to ``build_id`` so the pointer flips only after the whole
+    build is present (no torn read at the edge). Public-only: callers must never hand this a private
+    workspace tree — ``build_root`` is the same dist that :func:`write_build_artifact` publishes.
+
+    ``backend`` is injectable for tests; in production it defaults to a fresh :class:`R2StorageBackend`
+    (raising :class:`StorageUnconfigured` if ``R2_*`` is absent). Returns the uploaded
+    ``{slug, build_id, files, pointer_key}`` for the caller's receipt."""
+    safe_slug = _safe_slug(slug)
+    r2 = backend if backend is not None else R2StorageBackend()
+    root = Path(build_root).expanduser().resolve()
+    digests = workspace_file_digests(root)
+    uploaded: dict[str, str] = {}
+    for rel, digest in sorted(digests.items()):
+        r2.put(
+            public_site_object_key(safe_slug, build_id, rel),
+            _read_file_bytes(root / rel),
+            digest=digest,
+        )
+        uploaded[rel] = digest
+    pointer_key = public_site_pointer_key(safe_slug)
+    pointer_body = str(build_id or "").strip().lower().encode("utf-8")
+    r2.put(pointer_key, pointer_body, digest=digest_bytes(pointer_body))
+    return {
+        "slug": safe_slug,
+        "build_id": str(build_id or "").strip().lower(),
+        "files": uploaded,
+        "pointer_key": pointer_key,
+    }
+
+
 def get_storage_backend(*, root: str | os.PathLike[str] | None = None) -> StorageBackend:
     """Select the configured backend (the provider-selector seam).
 

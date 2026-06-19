@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import mimetypes
 import os
 import platform
@@ -133,6 +134,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_ugc_ad_generate",
         "business_static_ad_generate",
         "business_generate_logo",
+        "business_register_search_console",
         "business_meta_ad_launch",
         "business_meta_ad_bind_manual_launch",
         "business_meta_ad_control",
@@ -789,6 +791,31 @@ _COMMENTARY_BUSINESS_PATHS = {
     "summary.md",
 }
 
+# Bounded optimistic-concurrency retry for the canonical workspace commit (build-worker sync). A
+# concurrent committer can advance head between our base read and our revision INSERT, surfacing a
+# rare RECOVERABLE conflict (the business_revisions PK unique violation, or a serialization/deadlock
+# failure). We re-hydrate the base pointer from the DB and retry rather than failing the build. No
+# lock is taken — the prior per-business flock deadlocked the worker (see _business_mirror_lock).
+_WORKSPACE_COMMIT_MAX_ATTEMPTS = 5
+
+
+def _is_recoverable_commit_conflict(exc: BaseException) -> bool:
+    """True only for transient, retryable DB concurrency errors on the workspace-revision commit:
+    Postgres unique_violation (23505 — two committers raced for the same next revision),
+    serialization_failure (40001), deadlock_detected (40P01); and the SQLite IntegrityError /
+    "database is locked" equivalents. A SUBSTANTIVE stale-base ``TakyonError`` (a real concurrent
+    source edit) is NOT recoverable here and must propagate — retrying would only re-conflict."""
+    sqlstate = getattr(exc, "sqlstate", None) or getattr(getattr(exc, "diag", None), "sqlstate", None)
+    if sqlstate in {"23505", "40001", "40P01"}:
+        return True
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
+        return True
+    message = str(exc).lower()
+    # Driver-wrapped revision-PK collision, without a structured sqlstate.
+    return "business_revisions" in message and ("unique" in message or "duplicate" in message)
+
 
 def _workspace_truth_surface_name(*, session_scoped: bool) -> str:
     return "working" if session_scoped else "canonical"
@@ -1023,13 +1050,14 @@ def _business_file_truth_metadata(path: str, *, session_scoped: bool, revision: 
 # Guardrail aliases only. Agents can always pass explicit env names through
 # requires_env when an API is not listed here.
 _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     "composio": ("COMPOSIO_API_KEY",),
     "database": ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
     "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    "llm": ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
+    "google_search_console": ("TAKYON_GSC_SERVICE_ACCOUNT_KEY",),
+    "llm": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"),
     "meta": ("COMPOSIO_API_KEY",),
     "metaads": ("COMPOSIO_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
@@ -6089,16 +6117,58 @@ def _seed_brand_mark_assets(workspace_root: Path, *, slug: str) -> None:
 
 
 _FAVICON_LINK_MARKER = 'rel="icon"'
-_FAVICON_LINK_BLOCK = (
-    '    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />\n'
-    '    <link rel="apple-touch-icon" href="/favicon.svg" />\n'
+# No-logo fallback favicon (the scaffold monogram SVG).
+_SEED_FAVICON_HREF = "/favicon.svg"
+_SEED_FAVICON_TYPE = "image/svg+xml"
+_FAVICON_LINK_RE = re.compile(
+    r'[ \t]*<link\b[^>]*\brel=["\'](?:icon|apple-touch-icon)["\'][^>]*>[ \t]*\n?',
+    re.IGNORECASE,
 )
 
 
+def _set_index_favicon_links(workspace_root: Path, *, href: str, icon_type: str | None = None) -> None:
+    """Make ``href`` the ONLY favicon + apple-touch-icon in index.html.
+
+    Strips every existing rel="icon"/"apple-touch-icon" link first, then declares this one.
+    This is the load-bearing fix for the browser TAB favicon: a browser that supports SVG
+    PREFERS a type="image/svg+xml" icon, so merely APPENDING a PNG link after the seeded SVG
+    monogram never wins. Removing the SVG link and pointing both icon + apple-touch-icon at the
+    brand mark makes the tab actually show the real logo. Idempotent (re-running normalizes to
+    exactly these links)."""
+    index_path = workspace_root / "index.html"
+    try:
+        if not index_path.is_file():
+            return
+        text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "</head>" not in text:
+        return
+    cleaned = _FAVICON_LINK_RE.sub("", text)
+    type_attr = f' type="{icon_type}"' if icon_type else ""
+    block = (
+        f'    <link rel="icon"{type_attr} href="{href}" />\n'
+        f'    <link rel="apple-touch-icon" href="{href}" />\n'
+    )
+    updated = cleaned.replace("</head>", block + "  </head>", 1)
+    if updated != text:
+        try:
+            index_path.write_text(updated, encoding="utf-8")
+        except OSError:
+            pass
+
+
 def _inject_favicon_links(workspace_root: Path) -> None:
-    """Ensure the seeded index.html links the favicon. Idempotent: skips if already present.
-    The scaffold's index.html ships the links, but a business that seeded an older scaffold
-    (pre-favicon) gets them backfilled here on rebuild."""
+    """Ensure index.html's tab favicon is correct. If a published brand logo exists
+    (public/brand-logo.png), point the tab favicon AT it; otherwise seed the scaffold
+    monogram SVG. Runs on materialize + every rebuild, so a business that already paid for
+    a logo gets its tab favicon corrected on the next build without re-running the logo tool,
+    and a pre-favicon scaffold gets the seed backfilled."""
+    if (workspace_root / "public" / _PUBLISHED_BRAND_LOGO_FILENAME).is_file():
+        _set_index_favicon_links(
+            workspace_root, href=_PUBLISHED_BRAND_LOGO_URL, icon_type="image/png"
+        )
+        return
     index_path = workspace_root / "index.html"
     try:
         if not index_path.is_file():
@@ -6108,16 +6178,7 @@ def _inject_favicon_links(workspace_root: Path) -> None:
         return
     if _FAVICON_LINK_MARKER in text or "favicon.svg" in text:
         return
-    if "</head>" not in text:
-        return
-    updated = text.replace("</head>", _FAVICON_LINK_BLOCK + "  </head>", 1)
-    try:
-        index_path.write_text(updated, encoding="utf-8")
-    except OSError:
-        pass
-
-
-_PNG_FAVICON_LINK = '    <link rel="icon" type="image/png" href="/brand-logo.png" />\n'
+    _set_index_favicon_links(workspace_root, href=_SEED_FAVICON_HREF, icon_type=_SEED_FAVICON_TYPE)
 
 
 def _publish_brand_logo_to_site(workspace_root: Path, *, png_bytes: bytes) -> bool:
@@ -6125,9 +6186,10 @@ def _publish_brand_logo_to_site(workspace_root: Path, *, png_bytes: bytes) -> bo
 
     Writes ``public/brand-logo.png`` (served at ``/brand-logo.png`` after vite copies public/ into
     dist/). The surface-context's ``brandLogoUrl`` then makes the header/landing brand mark prefer it,
-    and a PNG favicon ``<link>`` is injected ahead of the SVG monogram so the browser TAB shows the
-    real logo too (a PNG icon link declared after the SVG one wins in browsers that prefer raster).
-    Returns True when the PNG was published. Best-effort: a write error leaves the monogram in place."""
+    and the browser TAB favicon is repointed at the same PNG: the seeded SVG monogram icon link is
+    STRIPPED (SVG-capable browsers prefer a type="image/svg+xml" icon, so an appended PNG link loses)
+    and icon + apple-touch-icon are pointed at the brand mark. Returns True when the PNG was published.
+    Best-effort: a write error leaves the monogram in place."""
     if not png_bytes:
         return False
     public_dir = workspace_root / "public"
@@ -6136,18 +6198,7 @@ def _publish_brand_logo_to_site(workspace_root: Path, *, png_bytes: bytes) -> bo
         _atomic_write_bytes(public_dir / _PUBLISHED_BRAND_LOGO_FILENAME, png_bytes)
     except OSError:
         return False
-    # Make the browser tab favicon use the real logo: inject a PNG icon link (idempotent). Browsers
-    # that support both pick the last/most-specific icon, so the PNG mark wins over the SVG monogram.
-    index_path = workspace_root / "index.html"
-    try:
-        if index_path.is_file():
-            text = index_path.read_text(encoding="utf-8")
-            if "/brand-logo.png" not in text and "</head>" in text:
-                index_path.write_text(
-                    text.replace("</head>", _PNG_FAVICON_LINK + "  </head>", 1), encoding="utf-8"
-                )
-    except OSError:
-        pass
+    _set_index_favicon_links(workspace_root, href=_PUBLISHED_BRAND_LOGO_URL, icon_type="image/png")
     return True
 
 
@@ -6194,6 +6245,14 @@ def _materialize_subuser_app_scaffold(
     # so the published slug host serves /favicon.svg instead of 404ing.
     _seed_brand_mark_assets(workspace_root, slug=slug)
     _inject_favicon_links(workspace_root)
+    # Warm start: the scaffold copy above just wrote the pinned package-lock.json into the workspace,
+    # so the workspace lock now matches the scaffold lock exactly. Drop in the prebaked node_modules
+    # (hardlinked from the arch+lockhash-keyed prebake) so the very next build skips the cold install.
+    # Best-effort + gated on an exact lock match; node_modules is excluded from canonical storage and
+    # the durability read-back hash set, so this seed stays local and never ships to the mirror. This
+    # materialized workspace can be consumed by the Linux docker worker (it bind-mounts this dir), so
+    # require host/container arch compatibility before seeding a host-built tree the worker would run.
+    _seed_warm_node_modules(workspace_root, for_docker_consumer=True)
 
 
 # The AppKit-owned rail wrappers + shared app shell. Unlike the worker-owned screens (app-home,
@@ -6432,6 +6491,71 @@ def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
 
 
 _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
+
+# Worker-progress sink: a ContextVar progress callback the Claude-agent-task worker run emits the
+# worker's current step/activity into, so the long (otherwise-blank) Claude-worker phase surfaces as
+# live job/task progress in the tui_gateway. The dispatcher binds a callback via
+# _bound_claude_worker_progress(...); _run_claude_agent_task_process pushes concise human progress
+# lines (no raw tool calls) into it as the worker streams SDK events. Unbound = no-op everywhere.
+_CLAUDE_WORKER_PROGRESS_SINK: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "takyon_claude_worker_progress_sink", default=None
+)
+
+
+@contextmanager
+def _bound_claude_worker_progress(sink: Any):
+    """Bind a worker-progress callback for the duration of a Claude-agent-task run.
+
+    ``sink`` is a callable taking one concise human progress line (str). A falsy sink is a no-op
+    binding so callers can pass through an optional callback without branching."""
+    if not callable(sink):
+        yield
+        return
+    token = _CLAUDE_WORKER_PROGRESS_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _CLAUDE_WORKER_PROGRESS_SINK.reset(token)
+
+
+def _emit_claude_worker_progress(line: str) -> None:
+    """Push one concise human progress line into the bound worker-progress sink, if any.
+
+    Best-effort and never raises into the worker stream-reader: a sink that errors must not break the
+    worker run or its stderr draining."""
+    text = str(line or "").strip()
+    if not text:
+        return
+    sink = _CLAUDE_WORKER_PROGRESS_SINK.get()
+    if not callable(sink):
+        return
+    try:
+        sink(_truncate_text(text, 240))
+    except Exception:
+        pass
+
+
+def _claude_worker_progress_line_from_event(event: Mapping[str, Any] | None) -> str:
+    """Map a worker SDK event to ONE concise human progress line, or "" to skip.
+
+    Surfaces the worker's current step/activity (task-level progress and worker-authored summaries)
+    and deliberately DROPS raw tool-call chatter (per-tool running ticks) so the operator sees the
+    business work, not the plumbing."""
+    if not isinstance(event, Mapping):
+        return ""
+    trace = event.get("trace") if isinstance(event.get("trace"), Mapping) else {}
+    trace_kind = str(trace.get("kind") or "").strip().lower()
+    # Raw per-tool progress ticks ("X running · 5s") are plumbing — drop them from the human lane.
+    if trace_kind == "tool":
+        return ""
+    detail = str(event.get("detail") or event.get("line") or "").strip()
+    if not detail:
+        return ""
+    label = str(trace.get("label") or "").strip()
+    # Prefer the worker's step label + detail when the label adds context beyond the detail itself.
+    if label and label.lower() not in detail.lower():
+        return f"{label}: {detail}"
+    return detail
 _ACTIVE_OPERATOR_TASK_RUN_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "takyon_active_operator_task_run_id", default=""
 )
@@ -6588,10 +6712,17 @@ def _run_claude_agent_task_process(
                     if clean:
                         stderr_lines.append(clean)
                     continue
+                mapping_event = event if isinstance(event, Mapping) else None
                 _record_claude_agent_sdk_progress(
                     business=business,
                     workspace_rel=workspace_rel,
-                    event=event if isinstance(event, Mapping) else None,
+                    event=mapping_event,
+                )
+                # Surface the worker's current step/activity as live job/task progress so the long
+                # Claude-worker phase is no longer blank in the tui_gateway. Concise human lines only;
+                # raw per-tool ticks are filtered out by the mapper.
+                _emit_claude_worker_progress(
+                    _claude_worker_progress_line_from_event(mapping_event)
                 )
                 continue
             clean = _truncate_text(line, 800).strip()
@@ -6755,6 +6886,7 @@ def _run_claude_agent_task_in_docker(
         "root": "/workspace",
     }
     runtime_env = _runtime_env({
+        **_anthropic_runtime_env(),
         "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
     })
     env_keys = [
@@ -6790,6 +6922,31 @@ def _run_claude_agent_task_in_docker(
     # docker CLI environment.
     env_args.extend(["-e", "HOME=/tmp"])
 
+    # Shared npm tarball cache: the container is --read-only with HOME on ephemeral tmpfs, so the
+    # worker's `npm install`/`npm run build` would otherwise download the full pinned dependency
+    # closure cold on EVERY run. Bind the host's arch-keyed shared npm cache in writable and point
+    # npm at it so the second build onward installs from a warm cache. The workspace bind mount at
+    # /workspace already carries the seed-once warm node_modules (materialize prebake), so a
+    # lock-matching workspace needs little or no network at all. Both reuse the same host cache as the
+    # host-side read-back rebuild, so neither installs cold.
+    npm_cache_mount_args: list[str] = []
+    try:
+        shared_npm_cache = _shared_npm_cache_dir()
+        npm_cache_mount_args = [
+            "--mount",
+            f"type=bind,src={shared_npm_cache},dst=/opt/takyon-npm-cache",
+        ]
+        env_args.extend(["-e", "NPM_CONFIG_CACHE=/opt/takyon-npm-cache"])
+        env_args.extend(["-e", "npm_config_cache=/opt/takyon-npm-cache"])
+    except Exception:
+        npm_cache_mount_args = []
+
+    # CPU/memory isolation for the build sandbox. The coding-worker build (npm install + vite/
+    # esbuild + the agent's own tool calls) runs on the SAME host as the operator dashboard, the
+    # product AI runtime, and every business's LIVE site. Uncapped, a build saturates all cores and
+    # starves serving — observed: during two concurrent builds a 2-vCPU host stopped answering SSH
+    # and live product sites timed out (HTTP 000). A hard --cpus quota leaves headroom for serving;
+    # --memory keeps a runaway build from OOMing the host. Env-overridable for larger hosts.
     run_cmd = [
         docker,
         "run",
@@ -6797,6 +6954,7 @@ def _run_claude_agent_task_in_docker(
         "--init",
         "-i",
         "--read-only",
+        *_build_sandbox_resource_args(),
         *security_args,
         "--tmpfs",
         "/root:rw,exec,size=512m",
@@ -6804,6 +6962,7 @@ def _run_claude_agent_task_in_docker(
         "/home:rw,exec,size=512m",
         *sdk_mount_args,
         *identity_mount_args,
+        *npm_cache_mount_args,
         "--mount",
         f"type=bind,src={workspace_path},dst=/workspace",
         "--mount",
@@ -6817,6 +6976,40 @@ def _run_claude_agent_task_in_docker(
         "/repo/scripts/takyon-claude-agent-task.mjs",
     ]
     return run_cmd, payload, str(repo_root), runtime_env
+
+
+def _build_sandbox_resource_args() -> list[str]:
+    """Docker CPU/memory caps for the coding-worker build sandbox.
+
+    The build shares one small host with the operator dashboard, the product AI runtime, and every
+    business's LIVE site. Without a cap a single build (npm install + vite/esbuild + the agent's
+    tool calls) pegs all cores and starves serving; two concurrent builds took a 2-vCPU host fully
+    unresponsive (SSH refused, live sites HTTP 000). A hard ``--cpus`` quota guarantees serving keeps
+    a slice of CPU; ``--memory`` stops a runaway build OOM-ing the host. Both are env-overridable for
+    larger hosts via ``TAKYON_BUILD_DOCKER_CPUS`` / ``TAKYON_BUILD_DOCKER_MEMORY``; a value of
+    ``0`` / ``off`` / ``none`` disables that limit. Defaults are tuned for a 2-vCPU / 4 GB host so a
+    couple of concurrent builds still leave the asyncio server enough CPU to answer."""
+
+    def _disabled(raw: str | None) -> bool:
+        return bool(raw) and str(raw).strip().lower() in ("0", "off", "none")
+
+    args: list[str] = []
+    cpus_raw = os.environ.get("TAKYON_BUILD_DOCKER_CPUS")
+    if _disabled(cpus_raw):
+        cpus = 0.0
+    else:
+        try:
+            cpus = float(cpus_raw) if cpus_raw and cpus_raw.strip() else 0.85
+        except (TypeError, ValueError):
+            cpus = 0.85
+    if cpus > 0:
+        args += ["--cpus", ("%g" % cpus)]
+
+    mem_raw = os.environ.get("TAKYON_BUILD_DOCKER_MEMORY")
+    mem = "1536m" if mem_raw is None or not mem_raw.strip() else mem_raw.strip()
+    if not _disabled(mem):
+        args += ["--memory", mem]
+    return args
 
 
 def _find_guidance_skill_file(identifier: str) -> Path | None:
@@ -7424,6 +7617,46 @@ def _runtime_path_prefixes() -> list[Path]:
         _repo_root() / "node_modules" / ".bin",
         Path(sys.executable).resolve().parent,
     ]
+
+
+def _runtime_sensitive_env_value(*names: str) -> str:
+    resolved_names = [str(name or "").strip() for name in names if str(name or "").strip()]
+    for name in resolved_names:
+        direct = str(os.getenv(name) or "").strip()
+        if direct:
+            return direct
+    if not resolved_names:
+        return ""
+    try:
+        mirrored = str(safebox.first_env_backed_value(*resolved_names) or "").strip()
+    except Exception:
+        mirrored = ""
+    if mirrored:
+        return mirrored
+    for name in resolved_names:
+        try:
+            mirrored = str(safebox.read_env_backed_value(name) or "").strip()
+        except Exception:
+            mirrored = ""
+        if mirrored:
+            return mirrored
+    return ""
+
+
+def _anthropic_runtime_env() -> dict[str, str]:
+    """Anthropic auth env for isolated/local Claude workers.
+
+    This lets operator/subuser runtimes fetch the active credential from Safebox at launch time
+    instead of requiring a long-lived raw provider secret in the host EnvironmentFile.
+    """
+    resolved: dict[str, str] = {}
+    api_key = _runtime_sensitive_env_value("ANTHROPIC_API_KEY")
+    token = _runtime_sensitive_env_value("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+    if api_key:
+        resolved["ANTHROPIC_API_KEY"] = api_key
+    if token:
+        resolved["ANTHROPIC_TOKEN"] = token
+    return resolved
 
 
 def _runtime_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -8500,6 +8733,17 @@ def _scan_for_forbidden_product_backend_code(root: Path, *, limit: int = 25) -> 
             continue
         suffix = path.suffix.lower()
         rel = str(path.relative_to(root))
+        # node_modules holds installed DEPENDENCIES (vite, express, hono, koa, …) whose own
+        # internal code legitimately matches the server-entrypoint patterns, and it is NEVER
+        # part of the published artifact (the pinned Vite scaffold ships only dist/). The
+        # entrypoint pass below runs even inside skip dirs to catch a backend smuggled into
+        # BUILT/COPIED output (dist/, _takyon/, references/) — but node_modules is neither built
+        # nor shipped, so scanning it is pure false-positive: it flagged Vite's own
+        # node_modules/vite/dist/node/ dev-server code as a "forbidden server entrypoint",
+        # forcing the CEO to hand-add a .takyonignore on every build. Exclude it from every pass
+        # (it was never provider-scanned anyway — scan_provider requires ``not skipped``).
+        if "node_modules" in path.parts:
+            continue
         skipped = _product_source_is_skipped(path)
 
         # Server entrypoints are scanned even inside skip dirs (dist/, _takyon/,
@@ -8612,14 +8856,30 @@ def _scan_for_forbidden_product_backend_code(root: Path, *, limit: int = 25) -> 
 
 
 _SCAFFOLD_PLACEHOLDER_TOKENS_PATH = Path(__file__).resolve().parent / "subuser_app_kit" / "scaffold" / "src" / "tokens.css"
-# Customer-visible screens whose scaffold ships as a BLANK aria-hidden placeholder and so
-# must be rewritten before publish. support.tsx is deliberately seeded as real, shippable
-# FAQ/privacy/terms/articles content (scaffold/src/screens/support.tsx), not a blank shell,
-# so an untouched-but-real support page is acceptable to ship and must NOT be gated here.
+# Customer-visible screens that must never ship as a blank/stubbed shell. A screen that still
+# carries the blank-shell SENTINEL (``data-takyon-scaffold``) is always gated here, on every
+# screen below, because the sentinel means a worker stubbed the route back to a blank placeholder.
+#
+# The BYTE-IDENTICAL-to-seed arm is narrower: it gates only the public landing route ``/``. The
+# bundled scaffold seeds ``app-home.tsx`` and ``profile.tsx`` as REAL, functional, shippable
+# app-kit screens wired through the shared runtime hooks (gated behind sign-in), exactly like
+# ``support.tsx`` (real seeded FAQ/privacy/terms/articles content). So an untouched-but-real seed
+# of the gated ``/app`` shell is acceptable to ship — gating it byte-identically would block the
+# landing-first publish pass (2a customizes only ``/`` and serves it immediately while the seeded
+# real ``/app`` shell ships behind the access gate; 2b then refines ``/app`` + ``/app/profile``).
+# Only ``/`` is the public, must-be-rewritten-before-publish route, so only its byte-identical seed
+# blocks publish.
 _SCAFFOLD_VISIBLE_SCREEN_PATHS: tuple[str, ...] = (
     "src/screens/landing.tsx",
     "src/screens/app-home.tsx",
     "src/screens/profile.tsx",
+)
+# Subset of the visible screens whose untouched byte-identical seed must STILL block publish. The
+# bundled seed for these is not a shippable customer-facing surface (the public landing must be
+# rewritten); the seeds for app-home/profile are real and shippable so they are gated only by the
+# blank-shell sentinel above, never by byte identity to their seed.
+_SCAFFOLD_BYTE_IDENTICAL_GATED_SCREEN_PATHS: frozenset[str] = frozenset(
+    {"src/screens/landing.tsx"}
 )
 _SCAFFOLD_VISIBLE_SCREEN_SENTINEL = "data-takyon-scaffold"
 
@@ -8657,7 +8917,10 @@ def _scaffold_visible_shell_markers(root: Path) -> list[dict[str, Any]]:
         snippet = ""
         if _SCAFFOLD_VISIBLE_SCREEN_SENTINEL in product_text:
             snippet = "screen still carries the scaffold sentinel marker and renders the blank shell"
-        else:
+        elif rel in _SCAFFOLD_BYTE_IDENTICAL_GATED_SCREEN_PATHS:
+            # Only the public landing route blocks on an untouched byte-identical seed. The seeded
+            # /app shell screens are real and shippable behind the access gate, so an untouched seed
+            # of them must not block the landing-first publish pass (it is refined later in 2b).
             try:
                 if scaffold_path.is_file() and product_text == scaffold_path.read_text(encoding="utf-8"):
                     snippet = "screen is byte-identical to the bundled blank scaffold"
@@ -9719,10 +9982,45 @@ def _javascript_package_manager_command(name: str) -> dict[str, Any]:
     return {"available": False, "name": manager, "command": [], "source": "missing"}
 
 
-def _javascript_install_command(manager: dict[str, Any]) -> list[str]:
+def _scaffold_lockfile_hash() -> str:
+    """sha256 of the bundled scaffold package-lock.json (the pinned dependency closure).
+
+    Returns "" when the scaffold lock is missing so callers fall back to a normal install instead of
+    keying a warm cache off an absent lock."""
+    try:
+        lock = _subuser_app_scaffold_source_dir() / "package-lock.json"
+        return hashlib.sha256(lock.read_bytes()).hexdigest() if lock.is_file() else ""
+    except OSError:
+        return ""
+
+
+def _workspace_lockfile_matches_scaffold(root: Path) -> bool:
+    """True when the workspace package-lock.json is byte-identical to the pinned scaffold lock.
+
+    Only an exact match makes `npm ci` (and the warm node_modules prebake) deterministic and safe; on
+    any drift the caller degrades to a normal `npm install` so a worker-modified dependency set still
+    resolves correctly."""
+    scaffold_hash = _scaffold_lockfile_hash()
+    if not scaffold_hash:
+        return False
+    workspace_lock = root / "package-lock.json"
+    try:
+        if not workspace_lock.is_file():
+            return False
+        return hashlib.sha256(workspace_lock.read_bytes()).hexdigest() == scaffold_hash
+    except OSError:
+        return False
+
+
+def _javascript_install_command(manager: dict[str, Any], *, root: Path | None = None) -> list[str]:
     base = list(manager.get("command") or [])
     name = str(manager.get("name") or "npm")
     if name == "npm":
+        # Deterministic, cache-friendly install when the copied lockfile is the pinned scaffold lock:
+        # `npm ci` installs exactly the lock closure from the (now shared) tarball cache. Degrade to
+        # `npm install` on lockfile drift (a worker changed deps) so the new closure still resolves.
+        if root is not None and _workspace_lockfile_matches_scaffold(root):
+            return [*base, "ci", "--prefer-offline", "--no-audit", "--no-fund", "--ignore-scripts"]
         return [*base, "install", "--ignore-scripts"]
     if name == "pnpm":
         return [*base, "install", "--ignore-scripts"]
@@ -9733,6 +10031,162 @@ def _javascript_install_command(manager: dict[str, Any]) -> list[str]:
     return [*base, "install"]
 
 
+def _shared_npm_cache_dir() -> Path:
+    """Process-arch-keyed npm tarball cache shared across ALL businesses.
+
+    The npm cache holds content-addressed package tarballs + their integrity hashes; it is safe to
+    share across businesses and never carries business state. Keying it per-business source-root
+    digest (the old behaviour) guaranteed a COLD cache for every new business, so every bootstrap
+    re-downloaded the same pinned scaffold deps from the registry. Key by runtime/arch only so the
+    SECOND business onward installs from a warm on-disk cache. Kept under TAKYON_HOME so each profile
+    still gets its own copy."""
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    arch_key = f"{platform.system()}-{platform.machine()}".lower().replace("/", "-")
+    shared = takyon_home / "tmp" / "surface-js-cache" / arch_key / "npm-cache"
+    shared.mkdir(parents=True, exist_ok=True)
+    return shared
+
+
+def _warm_node_modules_prebake_dir() -> Path | None:
+    """Arch + scaffold-lockfile-hash keyed prebaked node_modules shared across businesses.
+
+    A lockfile-hash key guarantees the prebake matches the exact pinned dependency closure; an arch
+    key keeps native binaries (esbuild, etc.) correct for the running host. Returns None when the
+    scaffold lock is missing (nothing safe to key on)."""
+    lock_hash = _scaffold_lockfile_hash()
+    if not lock_hash:
+        return None
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    arch_key = f"{platform.system()}-{platform.machine()}".lower().replace("/", "-")
+    return takyon_home / "tmp" / "surface-js-cache" / arch_key / "node-modules" / lock_hash[:16]
+
+
+def _warm_node_modules_ready(prebake: Path) -> bool:
+    """A prebake is usable only when node_modules exists AND carries the build binaries we need."""
+    nm = prebake / "node_modules"
+    if not (nm.exists() and any(nm.iterdir())):
+        return False
+    return (nm / ".bin" / "vite").exists() and (nm / ".bin" / "tsc").exists()
+
+
+def _ensure_warm_node_modules_prebake() -> Path | None:
+    """Build (once per arch+lockhash) a prebaked node_modules from the pinned scaffold lock.
+
+    Deterministic `npm ci` from the scaffold's package-lock.json into an arch+lockhash-keyed dir,
+    using the shared tarball cache so the FIRST build warms the cache and every later business copies
+    from this tree instead of resolving+downloading again. Returns the prebake dir on success, else
+    None (callers degrade to a normal install). The build is guarded behind a coarse file lock so two
+    concurrent bootstraps don't both `npm ci` into the same target."""
+    prebake = _warm_node_modules_prebake_dir()
+    if prebake is None:
+        return None
+    if _warm_node_modules_ready(prebake):
+        return prebake
+    scaffold = _subuser_app_scaffold_source_dir()
+    scaffold_lock = scaffold / "package-lock.json"
+    scaffold_pkg = scaffold / "package.json"
+    if not (scaffold_lock.is_file() and scaffold_pkg.is_file()):
+        return None
+    npm = _resolve_runtime_executable("npm")
+    if not npm:
+        return None
+    prebake.mkdir(parents=True, exist_ok=True)
+    try:
+        # Coarse, non-blocking guard: an atomic mkdir marker. If another process holds it, it is
+        # already building this exact arch+lockhash prebake; skip rather than double-`npm ci` into the
+        # same target. mkdir is atomic across POSIX + Windows.
+        build_marker = prebake / ".building"
+        try:
+            build_marker.mkdir()
+        except FileExistsError:
+            return prebake if _warm_node_modules_ready(prebake) else None
+        try:
+            # Seed package.json + lock into the prebake dir, then `npm ci` the exact closure. The
+            # shared (arch-keyed) npm tarball cache from _javascript_install_env keeps this offline-
+            # fast after the registry has been hit once. --ignore-scripts matches the scaffold install
+            # path (esbuild 0.21 ships platform binaries as optionalDependencies, no postinstall).
+            shutil.copy2(scaffold_pkg, prebake / "package.json")
+            shutil.copy2(scaffold_lock, prebake / "package-lock.json")
+            env = _javascript_install_env(prebake)
+            proc = subprocess.run(
+                [npm, "ci", "--prefer-offline", "--no-audit", "--no-fund", "--ignore-scripts"],
+                cwd=str(prebake),
+                text=True,
+                capture_output=True,
+                timeout=600,
+                env=env,
+            )
+            if proc.returncode != 0 or not _warm_node_modules_ready(prebake):
+                return None
+            return prebake
+        finally:
+            try:
+                build_marker.rmdir()
+            except OSError:
+                pass
+    except Exception:
+        return None
+
+
+def _copy_node_modules_tree(src: Path, dst: Path) -> bool:
+    """Copy a prebaked node_modules tree into a workspace, preferring hardlinks for speed/space.
+
+    Hardlinks make the per-business seed near-instant and share inodes with the prebake; falls back
+    to a full copy when the destination is on a different filesystem (cross-device link error)."""
+    try:
+        if dst.exists():
+            return True
+        try:
+            shutil.copytree(src, dst, copy_function=os.link, dirs_exist_ok=False)
+            return True
+        except (OSError, shutil.Error):
+            # Cross-device or partial-hardlink failure: clean up and do a plain copy.
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(src, dst, dirs_exist_ok=False)
+            return True
+    except Exception:
+        if dst.exists():
+            shutil.rmtree(dst, ignore_errors=True)
+        return False
+
+
+def _warm_node_modules_safe_for_docker_consumer() -> bool:
+    """True only when a host-built node_modules is binary-compatible with the docker worker container.
+
+    The prebake is built with the HOST's npm, so node_modules carries host-arch native binaries
+    (esbuild, etc.). The docker worker runs a Linux container; seeding a foreign-arch tree into the
+    bind-mounted workspace would hard-fail the container's vite build. On a Linux host (the production
+    VPS) host==container arch, so the seed is safe and the worker reuses it directly. On non-Linux
+    hosts (dev), skip the workspace seed and let the container do its own warm `npm ci` against the
+    shared (arch-neutral) npm tarball cache instead."""
+    return platform.system().lower() == "linux"
+
+
+def _seed_warm_node_modules(workspace_root: Path, *, for_docker_consumer: bool = False) -> bool:
+    """Drop a prebaked node_modules into a fresh workspace when its lock is the pinned scaffold lock.
+
+    Gated on an EXACT scaffold-lockfile-hash match so we never seed a mismatched dependency set; on
+    any drift the caller's normal install runs instead. When ``for_docker_consumer`` is set, also
+    require host/container arch compatibility so we never hand the Linux worker a foreign-arch tree.
+    node_modules is excluded from canonical storage + the durability read-back hash set
+    (storage._SYNC_EXCLUDED_SEGMENTS, _WORKSPACE_DURABILITY_EXCLUDED_PARTS), so this seed stays purely
+    local and never ships to the remote mirror. Returns True when node_modules is present afterwards."""
+    try:
+        if _node_modules_present(workspace_root):
+            return True
+        if for_docker_consumer and not _warm_node_modules_safe_for_docker_consumer():
+            return False
+        if not _workspace_lockfile_matches_scaffold(workspace_root):
+            return False
+        prebake = _ensure_warm_node_modules_prebake()
+        if prebake is None:
+            return False
+        return _copy_node_modules_tree(prebake / "node_modules", workspace_root / "node_modules")
+    except Exception:
+        return False
+
+
 def _javascript_surface_runtime_env(root: Path) -> dict[str, str]:
     source_root = root.resolve()
     takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
@@ -9741,9 +10195,12 @@ def _javascript_surface_runtime_env(root: Path) -> dict[str, str]:
     runtime_root = takyon_home / "tmp" / "surface-js" / digest
     home_dir = runtime_root / "home"
     cache_dir = runtime_root / "cache"
-    npm_cache_dir = runtime_root / "npm-cache"
+    # npm tarball cache is shared across businesses (arch-keyed), NOT per-business: a per-business
+    # cache is always cold on a fresh create. HOME / XDG_CACHE_HOME / COREPACK_HOME stay per-business
+    # because they hold transient/runtime state, not the reusable content-addressed package cache.
+    npm_cache_dir = _shared_npm_cache_dir()
     corepack_home = runtime_root / "corepack"
-    for path in (home_dir, cache_dir, npm_cache_dir, corepack_home):
+    for path in (home_dir, cache_dir, corepack_home):
         path.mkdir(parents=True, exist_ok=True)
     return _runtime_env(
         {
@@ -9985,9 +10442,29 @@ def _refresh_product_surface_path(
     # install=False — otherwise the build false-fails later with a misleading "vite: not found".
     # (The package-manager-unavailable + node_modules-absent case is already fail-closed above.)
     if install or not _node_modules_present(root):
-        if package_manager.get("available"):
+        # Warm start: when the workspace lock is the pinned scaffold lock, drop in the prebaked
+        # node_modules (hardlinked from the arch+lockhash-keyed prebake). If the seed lands a complete,
+        # lock-matching tree we can SKIP the install entirely — the prebake was already `npm ci`'d from
+        # this exact lock and verified to carry vite+tsc, so it IS the lock closure. This is the big
+        # win: the dominant cost (cold resolve+download+extract) disappears for every business after
+        # the first. node_modules never enters canonical storage (storage._SYNC_EXCLUDED_SEGMENTS) so
+        # this stays purely local. NB: a warm seed must be dropped BEFORE choosing the install command,
+        # because `npm ci` would otherwise wipe node_modules and reinstall, defeating the warm start.
+        warm_seeded = False
+        if not _node_modules_present(root):
+            warm_seeded = _seed_warm_node_modules(root)
+        warm_complete = (
+            warm_seeded
+            and _node_modules_present(root)
+            and _workspace_lockfile_matches_scaffold(root)
+        )
+        if warm_complete:
+            result["warnings"].append(
+                "dependency install skipped: prebaked node_modules matches the pinned scaffold lock"
+            )
+        elif package_manager.get("available"):
             install_check = _run_surface_command(
-                _javascript_install_command(package_manager),
+                _javascript_install_command(package_manager, root=root),
                 cwd=root,
                 timeout_seconds=timeout_seconds,
                 env=_javascript_install_env(root),
@@ -11249,6 +11726,65 @@ def _canonicalize_business_product_links(body: str, *, business: str, canonical_
     return pattern.sub(replace, body), replacements
 
 
+def _ensure_product_edge_route(slug: str) -> None:
+    """Ensure ``<slug>.fourmanifold.com`` is routed to the Cloudflare R2 edge worker.
+
+    So a freshly-published business is served from R2 at the edge instead of the VPS. Idempotent
+    (skips if the route already exists) and fail-soft: it needs ``CLOUDFLARE_API_TOKEN`` resolvable
+    from the safebox; on any error it logs and returns so the publish is never affected. The VPS
+    static path keeps serving as the fallback if the route is missing."""
+    import json as _json
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    log = logging.getLogger("takyon.r2")
+    try:
+        from plugins.takyon import safebox
+
+        token = safebox.first_env_backed_value("CLOUDFLARE_API_TOKEN")
+        if not token:
+            return
+        zone = (os.environ.get("CLOUDFLARE_ZONE_NAME") or "fourmanifold.com").strip()
+        worker = (os.environ.get("TAKYON_PRODUCT_EDGE_WORKER") or "takyon-product-worker").strip()
+        pattern = f"{_slugify(slug)}.{zone}/*"
+
+        def _cf(method: str, path: str, body=None):
+            req = _ur.Request(
+                "https://api.cloudflare.com/client/v4" + path,
+                data=(_json.dumps(body).encode() if body is not None else None),
+                method=method,
+                headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+            )
+            try:
+                return _json.load(_ur.urlopen(req, timeout=20))
+            except _ue.HTTPError as exc:
+                try:
+                    return _json.load(exc)
+                except Exception:
+                    return {"success": False}
+
+        zones = _cf("GET", f"/zones?name={zone}").get("result") or []
+        zid = zones[0].get("id") if zones else None
+        if not zid:
+            return
+        existing = {
+            rt.get("pattern") for rt in (_cf("GET", f"/zones/{zid}/workers/routes").get("result") or [])
+        }
+        if pattern in existing:
+            return
+        created = _cf("POST", f"/zones/{zid}/workers/routes", {"pattern": pattern, "script": worker})
+        if created.get("success"):
+            log.info("created product edge route %s -> %s", pattern, worker)
+        else:
+            log.warning(
+                "product edge route create failed for %s: %s",
+                pattern,
+                [e.get("message") for e in (created.get("errors") or [])],
+            )
+    except Exception as exc:  # pragma: no cover - best-effort edge routing
+        log.warning("ensure product edge route failed (publish unaffected): slug=%s err=%s", slug, exc)
+
+
 def _publish_product_surface_path(
     *,
     business_root: Path,
@@ -11291,6 +11827,32 @@ def _publish_product_surface_path(
     ).hexdigest()[:32]
     artifact_prefix = storage.build_object_prefix(slug, build_id)
     storage.write_build_artifact(backend, slug, build_id, publish_source)
+
+    # Best-effort mirror of the finished static build into the PUBLIC Cloudflare R2 bucket so the
+    # edge can serve <slug>.fourmanifold.com without the VPS. This is non-blocking and fail-soft: if
+    # R2 is unconfigured we no-op, and any mirror error is logged but never fails the publish (the
+    # Supabase artifact above remains the source of truth and the VPS static fallback still serves).
+    if storage.r2_configured():
+        try:
+            mirror = storage.write_public_site_to_r2(slug, build_id, publish_source)
+            logging.getLogger("takyon.r2").info(
+                "mirrored product site to R2: slug=%s build_id=%s files=%d",
+                _slugify(slug),
+                build_id,
+                len(mirror.get("files") or {}),
+            )
+        except Exception as exc:  # pragma: no cover - best-effort edge mirror
+            logging.getLogger("takyon.r2").warning(
+                "R2 product-site mirror failed (publish still succeeded via Supabase): "
+                "slug=%s build_id=%s err=%s",
+                _slugify(slug),
+                build_id,
+                exc,
+            )
+        # Ensure <slug>.fourmanifold.com is routed to the R2 edge worker, so a freshly
+        # published business is served from R2 at the edge (not the VPS). Idempotent +
+        # fail-soft: needs CLOUDFLARE_API_TOKEN in the safebox; never fails the publish.
+        _ensure_product_edge_route(slug)
 
     build_root = _product_live_build_root(slug, build_id)
     current_root = _product_live_current_root(slug)
@@ -12643,6 +13205,41 @@ class TakyonStore:
             self._workspace_sync_cache.add(normalized)
             self._workspace_revision_cache[normalized] = head_revision
 
+    def _clear_stale_supabase_business_cache(self, slug: str, root: Path) -> bool:
+        """Clear a leftover business workspace root when no businesses row owns it.
+
+        This is only ever called from the create path AFTER confirming the business row is
+        absent (``existing is None``). In that state a non-empty workspace root is stale
+        residue from a previously wiped business, not a live business, and must not block
+        recreating the slug. It applies to BOTH the supabase_s3 cache root and the local
+        workspace root (``/opt/takyon/.takyon/.../businesses/<slug>``) — the only invariant
+        that protects a live business is that the businesses row is gone, which the caller
+        has already established. A session-mounted workspace override is never touched.
+        """
+        normalized = _slugify(slug)
+        if self._workspace_root_override is not None:
+            return False
+        if self._workspace_storage_backend_kind() not in {"supabase_s3", "local"}:
+            return False
+        with _business_mirror_lock(root):
+            if not root.exists():
+                return False
+            try:
+                root_has_contents = any(root.iterdir())
+            except OSError:
+                root_has_contents = True
+            if not root_has_contents:
+                return False
+            # The business row is gone (caller established ``existing is None``), so any
+            # leftover files here are stale residue and must not block recreating the slug.
+            if root.is_dir() and not root.is_symlink():
+                shutil.rmtree(root)
+            else:
+                root.unlink()
+        self._workspace_sync_cache.discard(normalized)
+        self._workspace_revision_cache.pop(normalized, None)
+        return True
+
     def _workspace_storage_backend(self) -> Any:
         from . import storage
 
@@ -12749,12 +13346,30 @@ class TakyonStore:
             if candidate_files.get(rel) != head_files.get(rel)
         )
         if conflicts:
-            preview = ", ".join(conflicts[:5])
-            suffix = " ..." if len(conflicts) > 5 else ""
-            raise TakyonError(
-                f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
-                f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
-            )
+            # Commentary/summary files (product/surface.md, distribution/surface.md, metrics/*.md,
+            # summary.md) are GENERATED, non-authoritative renders — proof_level "commentary" in
+            # _document_proof_metadata. The real publish pointer lives in the app_surface_contracts DB
+            # row (live_build_id), never in these files. During bootstrap several tools
+            # (business_upsert_app_surface_contract, business_refresh_product_surface, and the
+            # build-worker canonical sync via _sync_business_workspace_remote) legitimately re-render the
+            # SAME commentary file against slightly different bases. That used to hard-fail the commit
+            # ("stale workspace base: ... product/surface.md") and make the CEO thrash on re-publish even
+            # though no real state was at stake. Resolve a commentary-only conflict by letting the
+            # committed upstream (head) render win: it carries nothing we can lose, and the next surface
+            # refresh regenerates it from canonical state. Only a conflict on a SUBSTANTIVE file (real
+            # product source, receipts, etc.) is a true concurrent-edit hazard worth blocking on.
+            substantive_conflicts = [rel for rel in conflicts if rel not in _COMMENTARY_BUSINESS_PATHS]
+            if substantive_conflicts:
+                preview = ", ".join(substantive_conflicts[:5])
+                suffix = " ..." if len(substantive_conflicts) > 5 else ""
+                raise TakyonError(
+                    f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
+                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
+                )
+            # Drop the local (stale) render of each commentary conflict so head's committed version
+            # stands after re-materialize below; do NOT snapshot/re-apply it as a local override.
+            for rel in conflicts:
+                local_changed.discard(rel)
 
         local_overrides: dict[str, bytes | None] = {}
         for rel in sorted(local_changed):
@@ -12904,7 +13519,16 @@ class TakyonStore:
         return next_revision
 
     def _sync_business_workspace_remote(self, slug: str) -> str:
-        """Commit the current local business workspace into canonical durable storage."""
+        """Commit the current local business workspace into canonical durable storage.
+
+        Optimistic-concurrency: another committer (a concurrent durable write, or a second build-worker
+        sync) can advance head between our base read and our revision INSERT. Content conflicts on
+        generated commentary files (product/surface.md, …) are auto-resolved to head inside
+        _rebase_business_workspace_to_head; the remaining race is a rare RECOVERABLE DB conflict (the
+        revision-PK unique violation / a serialization failure). Re-hydrate the base pointer from the DB
+        and retry a bounded number of times instead of failing the build. A SUBSTANTIVE stale-base
+        TakyonError (a real concurrent source edit) is not recoverable and propagates on the first try.
+        """
         normalized = _slugify(slug)
         backend = self._workspace_storage_backend()
         backend_name = str(getattr(backend, "name", "") or "").strip().lower()
@@ -12912,15 +13536,28 @@ class TakyonStore:
             return "skipped_no_backend"
         if not _remote_workspace_sync_allowed(backend_name):
             return "skipped_disallowed"
-        with self._connect() as conn:
-            with conn:
-                self._commit_business_workspace_revision(
-                    conn,
-                    normalized,
-                    actor=self._operator_user_id or "system",
-                    reason="canonical workspace commit",
-                    expected_base_revision=self._canonical_workspace_revision(normalized),
-                )
+        last_exc: BaseException | None = None
+        for _attempt in range(_WORKSPACE_COMMIT_MAX_ATTEMPTS):
+            try:
+                with self._connect() as conn:
+                    with conn:
+                        self._commit_business_workspace_revision(
+                            conn,
+                            normalized,
+                            actor=self._operator_user_id or "system",
+                            reason="canonical workspace commit",
+                            expected_base_revision=self._canonical_workspace_revision(normalized),
+                        )
+                return "synced"
+            except Exception as exc:  # noqa: BLE001 — re-raised below unless a recoverable race
+                if not _is_recoverable_commit_conflict(exc):
+                    raise
+                last_exc = exc
+                # Re-hydrate: drop the cached base revision so the next attempt re-reads the true head.
+                self._workspace_revision_cache.pop(normalized, None)
+        # Exhausted retries on a genuinely persistent conflict — surface it truthfully.
+        if last_exc is not None:
+            raise last_exc
         return "synced"
 
     def _delete_business_workspace_remote(self, slug: str) -> None:
@@ -15205,6 +15842,8 @@ class TakyonStore:
                         root_has_contents = any(root.iterdir())
                     except OSError:
                         root_has_contents = True
+                    if root_has_contents and self._clear_stale_supabase_business_cache(slug, root):
+                        root_has_contents = False
                     if root_has_contents:
                         raise TakyonError(
                             f"cannot create fresh business:{slug}: workspace root already exists and is non-empty ({root})"
@@ -19903,6 +20542,49 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _app_usage_allocation_summary(store, conn, business: str, budget: dict[str, Any]) -> dict[str, Any]:
+    """Weekly $-allocation the customer's product surface shows ("$X of $Y used this week").
+
+    Postgres (live runtime): read the canonical app_usage rail so the microUSD→USD projection and
+    the period unit are derived once. SQLite/local: project the same shape from the already-loaded
+    budget dict (hard_limit_microusd, current_period_start) plus the business-level committed sum
+    for the current period — matching app_usage._committed_microusd's reserved-estimate +
+    completed-actual aggregation. Either way the returned figures are display-only dollars
+    (period_unit='week'); micro-USD and raw provider cost never reach the customer."""
+    try:
+        from . import app_usage as _app_usage
+    except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+        from plugins.takyon import app_usage as _app_usage
+    if isinstance(conn, _PGConn):
+        summary = _app_usage.get_usage_summary(conn, business)
+        return {
+            "period_unit": summary.get("period_unit", "week"),
+            "hard_limit_usd": summary.get("hard_limit_usd"),
+            "committed_usd": summary.get("committed_usd"),
+            "remaining_usd": summary.get("remaining_usd"),
+        }
+    # SQLite/local projection — same money math as app_usage, $-denominated for the UI.
+    hard_limit_microusd = budget.get("hard_limit_microusd")
+    committed_row = conn.execute(
+        "SELECT COALESCE(SUM(CASE "
+        " WHEN status = 'reserved' THEN estimated_cost_microusd "
+        " WHEN status = 'completed' THEN actual_cost_microusd "
+        " ELSE 0 END), 0) AS committed "
+        "FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
+        (business, budget["current_period_start"]),
+    ).fetchone()
+    committed_microusd = int(committed_row["committed"] or 0)
+    remaining_microusd = (
+        None if hard_limit_microusd is None else max(0, int(hard_limit_microusd) - committed_microusd)
+    )
+    return {
+        "period_unit": "week",
+        "hard_limit_usd": _app_usage._microusd_to_usd(hard_limit_microusd),
+        "committed_usd": _app_usage._microusd_to_usd(committed_microusd),
+        "remaining_usd": _app_usage._microusd_to_usd(remaining_microusd),
+    }
+
+
 def handle_business_read_app_account(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -19962,6 +20644,20 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
                     (business, user["id"], budget["current_period_start"]),
                 ).fetchone()
+                # Weekly $-allocation summary the customer's app surface renders ("$X of $Y used this
+                # week"). On Postgres (the live runtime) read it from the canonical app_usage rail so
+                # the conversion + period unit are derived once; the microUSD figures stay
+                # authoritative and these are display-only $ projections (never micro-USD or raw
+                # provider cost). app_usage.get_usage_summary is a psycopg leaf, so the SQLite/local
+                # path projects the same shape from the budget dict + the per-period business sum.
+                # Fail-soft: the $ allocation is a display-only projection. If the
+                # app_usage read raises, degrade to an empty shape so the rest of
+                # /account (user, entitlements, usage_this_period, revenue) still
+                # returns — a cosmetic projection must never hard-fail the account.
+                try:
+                    usage_allocation = _app_usage_allocation_summary(store, conn, business, budget)
+                except Exception:
+                    usage_allocation = {"period_unit": "week", "hard_limit_usd": None, "committed_usd": None, "remaining_usd": None}
                 revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
             for entitlement in entitlements:
                 metadata = entitlement.get("metadata") if isinstance(entitlement.get("metadata"), dict) else {}
@@ -19969,7 +20665,7 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     entitlement["cancel_at_period_end"] = bool(metadata.get("cancel_at_period_end"))
                 if "stripe_subscription_status" not in entitlement and "stripe_subscription_status" in metadata:
                     entitlement["stripe_subscription_status"] = metadata.get("stripe_subscription_status")
-        return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
+        return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "usage_allocation": usage_allocation, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -21233,6 +21929,129 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _grant_test_checkout_entitlement(
+    store: "TakyonStore",
+    conn: Any,
+    *,
+    business: str,
+    intent_id: str,
+    plan: dict[str, Any],
+    app_user_id: str | None,
+    customer_email: str | None,
+) -> dict[str, Any]:
+    """Flip the customer to entitled for a TEST checkout through the canonical app_entitlements rail.
+
+    A test checkout never fires a Stripe webhook, so without this the customer is recorded as having
+    "paid" in test mode but is never actually entitled. This grants the plan's tier through the SAME
+    canonical entitlement writer the live webhook uses (PG: ``app_entitlements.grant_entitlement``;
+    SQLite: the canonical app_entitlements INSERT + ``_sync_user_tier``), tied to the real recorded
+    test checkout intent as evidence (``stripe_checkout_session_id = test:<intent_id>``) with
+    ``source = "test"`` so it is truthful and distinguishable — not fabricated billing. Returns
+    ``{granted, app_user_id, tier}``; returns ``granted=False`` when there is no customer to grant to
+    (no app_user_id and no email), exactly as the live path skips an anonymous checkout."""
+    tier_value = str(plan.get("tier") or "").strip()
+    if not tier_value:
+        # The canonical rail refuses an empty tier; a plan with no tier cannot entitle anyone.
+        return {"granted": False, "reason": "plan_tier_missing"}
+    email = _normalize_email(str(customer_email)) if customer_email else None
+    resolved_user_id = str(app_user_id or "").strip() or None
+    if not resolved_user_id and not email:
+        return {"granted": False, "reason": "no_checkout_customer"}
+    # Real recorded evidence: the test checkout intent row in app_checkout_intents (status
+    # test_local). Prefixed so it is never confused with a live Stripe session id.
+    test_session_evidence = f"test:{intent_id}"
+    grant_metadata = {
+        "source": "test_checkout",
+        "checkout_intent_id": intent_id,
+        "business_mode": "test",
+        "plan_key": str(plan.get("plan_key") or ""),
+    }
+    if isinstance(conn, _PGConn):
+        leaves = store._app_leaves()
+        try:
+            with store._leaf_conn(conn) as raw:
+                ent, tier = leaves["entitlements"].grant_entitlement(
+                    raw,
+                    business,
+                    app_user_id=resolved_user_id,
+                    email=email,
+                    tier=tier_value,
+                    status="active",
+                    source="test",
+                    stripe_checkout_session_id=test_session_evidence,
+                    plan_key=str(plan.get("plan_key") or "") or None,
+                    metadata=grant_metadata,
+                )
+        except (leaves["entitlements"].EntitlementError, leaves["identity"].AppIdentityError) as exc:
+            raise TakyonError(str(exc)) from exc
+        store._rewrite_app_files(conn, business)
+        store._record_event(
+            conn,
+            scope=f"business:{business}/app",
+            business_slug=business,
+            event_type="app.entitlement.upsert",
+            payload={"app_user_id": ent.app_user_id, "tier": tier, "source": "test"},
+        )
+        return {"granted": True, "app_user_id": ent.app_user_id, "tier": tier}
+    # SQLite trunk: resolve/provision the user, then run the canonical entitlement INSERT + tier sync.
+    user = None
+    if resolved_user_id:
+        user = store._row_to_dict(
+            conn.execute(
+                "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
+                (business, resolved_user_id),
+            ).fetchone()
+        )
+    if not user and email:
+        conn.execute(
+            "INSERT INTO app_users (id, business_slug, email, status, tier, metadata_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'active', ?, ?, ?, ?) "
+            "ON CONFLICT(business_slug, email) DO UPDATE SET tier = excluded.tier, updated_at = excluded.updated_at",
+            (uuid.uuid4().hex, business, email, tier_value, _json_dumps({"source": "test_checkout"}), _now(), _now()),
+        )
+        user = store._row_to_dict(
+            conn.execute(
+                "SELECT * FROM app_users WHERE business_slug = ? AND email = ?",
+                (business, email),
+            ).fetchone()
+        )
+    if not user:
+        return {"granted": False, "reason": "missing_checkout_user"}
+    resolved_user_id = str(user["id"])
+    _ensure_sqlite_app_profile(conn, business, resolved_user_id, display_name=user.get("name"))
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO app_entitlements (
+          id, business_slug, app_user_id, tier, status, source,
+          stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id,
+          plan_key, current_period_end, metadata_json, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'active', 'test', NULL, NULL, ?, ?, NULL, ?, ?, ?)
+        """,
+        (
+            uuid.uuid4().hex,
+            business,
+            resolved_user_id,
+            tier_value,
+            test_session_evidence,
+            str(plan.get("plan_key") or "") or None,
+            _json_dumps(grant_metadata),
+            now,
+            now,
+        ),
+    )
+    tier = store._sync_user_tier(conn, business, resolved_user_id)
+    store._record_event(
+        conn,
+        scope=f"business:{business}/app",
+        business_slug=business,
+        event_type="app.entitlement.upsert",
+        payload={"app_user_id": resolved_user_id, "tier": tier, "source": "test"},
+    )
+    return {"granted": True, "app_user_id": resolved_user_id, "tier": tier}
+
+
 def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -21353,9 +22172,27 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     intent_id=intent_id,
                     origin=args.get("origin"),
                 )
+                # A test checkout never fires a Stripe webhook, so the customer would otherwise be
+                # left UN-entitled even after "paying". Flip them to entitled now through the SAME
+                # canonical app_entitlements rail the live webhook uses, tied to this real test
+                # checkout intent as evidence (source="test"). The grant runs inside this connection
+                # so it commits atomically with the intent completion below.
+                entitlement_grant = _grant_test_checkout_entitlement(
+                    store,
+                    conn,
+                    business=business,
+                    intent_id=intent_id,
+                    plan=plan,
+                    app_user_id=str(args.get("app_user_id") or "").strip() or None,
+                    customer_email=customer_email,
+                )
+                granted = bool(entitlement_grant.get("granted"))
+                # When the entitlement was actually granted, the test "payment" is complete — mark the
+                # intent completed (mirrors the live completed status) rather than leaving it pending.
+                intent_status = "completed" if granted else "test_local"
                 conn.execute(
-                    "UPDATE app_checkout_intents SET status = 'test_local', checkout_url = ?, updated_at = ? WHERE id = ?",
-                    (checkout_url, _now(), intent_id),
+                    "UPDATE app_checkout_intents SET status = ?, checkout_url = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+                    (intent_status, checkout_url, _now() if granted else None, _now(), intent_id),
                 )
                 receipt_rel = f"metrics/receipts/app-checkout/{intent_id}.json"
                 _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
@@ -21370,9 +22207,11 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     "success_url": success_url,
                     "cancel_url": cancel_url,
                     "client_reference_id": client_reference_id,
+                    "entitlement_granted": granted,
+                    "entitlement": entitlement_grant,
                     "created_at": now,
                 }) + "\n")
-                store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "external_side_effects": "suppressed", "receipt": receipt_rel})
+                store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "external_side_effects": "suppressed", "entitlement_granted": granted, "receipt": receipt_rel})
                 store._rewrite_app_files(conn, business)
                 return tool_result({
                     "success": True,
@@ -21385,6 +22224,8 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     "url": checkout_url,
                     "client_reference_id": client_reference_id,
                     "external_side_effects": "suppressed",
+                    "entitlement_granted": granted,
+                    "entitlement": entitlement_grant,
                     "openmeter_sync": openmeter_sync,
                 })
             session = _stripe_request("checkout/sessions", params)
@@ -24408,25 +25249,25 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 }
             )
 
-        # Publish the generated PNG into the site so it REPLACES the bootstrap monogram on the live
-        # business site (header + landing via brandLogoUrl, and the browser tab via a PNG favicon).
-        # The generated asset already lives at product/brand/logos/<slug>/logo.png; copy it into the
-        # product site's public/ dir. The next surface refresh/build serves /brand-logo.png.
-        published_to_site = False
+        # The gateway logo-render route ALREADY published the PNG into the live product site in its
+        # own process, while the freshly written bytes were guaranteed present in the local cache
+        # mirror (see creative_gateway.logo_render). Read the publish outcome straight from the
+        # gateway response — do NOT re-read/re-publish here. The previous cross-process re-read
+        # resolved the business file again, which re-materialized the cache mirror with
+        # delete_local=True and returned EMPTY bytes, so the publish silently no-op'd and the receipt
+        # recorded published_to_site=False (monogram persisted, /brand-logo.png 404) even though 2
+        # credits were charged.
         published_asset_rel = gateway_result.get("asset_path") or asset_rel
-        try:
-            generated_abs = store._resolve_business_file(business, published_asset_rel)
-            png_bytes = generated_abs.read_bytes() if generated_abs.is_file() else b""
-            if png_bytes:
-                source_path = _canonical_product_surface_source_path(
-                    str((args.get("source_path") or "product/site"))
-                )
-                site_root = store._resolve_business_file(business, source_path)
-                published_to_site = _publish_brand_logo_to_site(site_root, png_bytes=png_bytes)
-        except Exception:
-            # Best-effort publish: a copy failure never fails the (already-charged) generation; the
-            # asset is still recorded at product/brand/logos/<slug>/logo.png for a later rebuild.
-            published_to_site = False
+        published_to_site = bool(gateway_result.get("published_to_site"))
+        site_logo_url = str(gateway_result.get("site_logo_url") or "").strip()
+        if published_to_site and not site_logo_url:
+            site_logo_url = _PUBLISHED_BRAND_LOGO_URL
+        # Harden: a successful generation that did NOT reach the live site must record an explicit
+        # reason on the receipt so we never silently charge credits for an unserved logo. Prefer the
+        # gateway's exact publish_skipped_reason; fall back to a generic marker.
+        publish_skipped_reason = str(gateway_result.get("publish_skipped_reason") or "").strip()
+        if not published_to_site and not publish_skipped_reason:
+            publish_skipped_reason = "publish_not_reported_by_gateway"
 
         receipt = {
             **base_receipt,
@@ -24439,7 +25280,8 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
             "balance_credits": gateway_result.get("balance_credits"),
             "reserved_credits": gateway_result.get("reserved_credits"),
             "published_to_site": published_to_site,
-            "site_logo_url": _PUBLISHED_BRAND_LOGO_URL if published_to_site else "",
+            "site_logo_url": site_logo_url if published_to_site else "",
+            "publish_skipped_reason": "" if published_to_site else publish_skipped_reason,
         }
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         store.commit(
@@ -24473,6 +25315,310 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 "reserved_credits": receipt.get("reserved_credits"),
                 "published_to_site": receipt.get("published_to_site"),
                 "site_logo_url": receipt.get("site_logo_url"),
+                "publish_skipped_reason": receipt.get("publish_skipped_reason") or "",
+                "value": receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+# Google Search Console verification: aliases live in core._API_ENV_ALIASES under
+# "google_search_console" -> TAKYON_GSC_SERVICE_ACCOUNT_KEY. The service-account JSON is held by the
+# safebox (private secret-authority host) and resolved ONLY through the authority route below; the
+# business runtime never reads it from os.environ. Verification uses the URL-prefix property
+# mechanism with a google-site-verification META tag injected on the published landing page.
+_GSC_KEY_ALIASES = ("TAKYON_GSC_SERVICE_ACCOUNT_KEY",)
+_GSC_OAUTH_SCOPES = (
+    "https://www.googleapis.com/auth/siteverification",
+    "https://www.googleapis.com/auth/webmasters",
+)
+_GSC_META_MARKER = "google-site-verification"
+
+
+def _resolve_gsc_service_account_json() -> str:
+    """Resolve the Google Search Console service-account JSON from safebox-backed aliases.
+
+    Authority-route ONLY (GOAL_RULES §7): the business runtime never reads the raw key from
+    os.environ. Returns "" when no alias is provisioned so the caller fails closed with
+    blocked_search_console_unconfigured before any provider work."""
+    try:
+        value = safebox.first_env_backed_value(*_GSC_KEY_ALIASES)
+    except Exception:
+        value = ""
+    return str(value or "").strip()
+
+
+def _inject_search_console_meta_tag(site_root: Path, verification_token: str) -> bool:
+    """Inject the google-site-verification META tag into the published landing page (index.html).
+
+    Idempotent: skips if a verification tag for this token is already present. Returns True when the
+    tag is present after the call. Mirrors the favicon/brand-logo injection pattern: the URL-prefix
+    property is verified by Google fetching this tag from the live landing page."""
+    token = str(verification_token or "").strip()
+    if not token:
+        return False
+    index_path = site_root / "index.html"
+    try:
+        if not index_path.is_file():
+            return False
+        text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    meta = f'    <meta name="google-site-verification" content="{token}" />\n'
+    if f'content="{token}"' in text:
+        return True
+    if "</head>" not in text:
+        return False
+    try:
+        index_path.write_text(text.replace("</head>", meta + "  </head>", 1), encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def handle_business_register_search_console(args: dict, **_: Any) -> str:
+    """Register the published landing page as a Google Search Console URL-prefix property.
+
+    Mechanism: URL-prefix property verified via a google-site-verification META tag injected on the
+    live landing page. Key-behind-TK: the service-account JSON is resolved ONLY through the safebox
+    authority route (never os.environ). Fails closed with ``blocked_search_console_unconfigured`` when
+    the key (or the google client libraries) is unavailable, recording a receipt at
+    ``product/seo/search-console/<slug>/receipt.json`` and never fabricating a verification."""
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+
+        slug = _file_slug(str(args.get("slug") or business or "site"), "site")
+        publication_rel = f"product/seo/search-console/{slug}"
+        receipt_rel = f"{publication_rel}/receipt.json"
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None:
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_register_search_console",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "receipt": receipt_rel,
+                    "value": prior,
+                }
+            )
+
+        business_mode = _business_mode(store, business)
+        if business_mode == "test":
+            raise TakyonError(
+                "business_register_search_console requires a live business; Search Console "
+                "verification touches a live external Google property and is not stubbed in test mode"
+            )
+
+        source_path = _canonical_product_surface_source_path(
+            str((args.get("source_path") or "product/site"))
+        )
+        # The public site URL is the URL-prefix property to register. Prefer an explicit override,
+        # else the published surface public_url recorded on the business.
+        site_url = str(args.get("site_url") or "").strip()
+        if not site_url:
+            try:
+                summary = store.read(scope=f"business:{business}", query="summary")
+                surface = (summary.get("business") or {}).get("app_surface") if isinstance(summary, dict) else None
+                if isinstance(surface, Mapping):
+                    site_url = str(surface.get("public_url") or surface.get("publish_url") or "").strip()
+            except Exception:
+                site_url = ""
+
+        base_receipt = {
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "publication_dir": publication_rel,
+            "business_mode": business_mode,
+            "mechanism": "url_prefix_meta_tag",
+            "site_url": site_url,
+            "source_path": source_path,
+            "created_at": _now(),
+        }
+
+        def _blocked(status: str, error: str, **extra: Any) -> str:
+            receipt = {**base_receipt, "success": False, "status": status, "error": error, **extra}
+            _atomic_write_text(
+                receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+            )
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_register_search_console",
+                    "business": business,
+                    "slug": slug,
+                    "status": status,
+                    "receipt": receipt_rel,
+                    "error": error,
+                    "value": receipt,
+                }
+            )
+
+        if not site_url:
+            return _blocked(
+                "blocked_search_console_no_site_url",
+                "no published site URL is available to register; publish the landing page first or "
+                "pass site_url explicitly",
+            )
+
+        # Authority route ONLY: resolve the service-account JSON via the safebox. Fail closed before
+        # any provider work when the key is not provisioned.
+        sa_json = _resolve_gsc_service_account_json()
+        if not sa_json:
+            return _blocked(
+                "blocked_search_console_unconfigured",
+                "Google Search Console service-account key is not provisioned in the safebox "
+                "(alias TAKYON_GSC_SERVICE_ACCOUNT_KEY)",
+            )
+
+        try:
+            sa_info = json.loads(sa_json)
+        except Exception as exc:
+            return _blocked(
+                "blocked_search_console_unconfigured",
+                f"Search Console service-account key is not valid JSON: {exc}",
+            )
+
+        # Lazy provider-client imports: the google client libraries are an optional dependency. If
+        # they are not installed in this runtime, fail closed (guarded/disabled path) rather than
+        # fabricating a verification.
+        try:
+            from google.oauth2 import service_account as _gsc_service_account  # type: ignore
+            from googleapiclient import discovery as _gsc_discovery  # type: ignore
+        except Exception as exc:
+            return _blocked(
+                "blocked_search_console_unconfigured",
+                "Google API client libraries (google-auth, google-api-python-client) are not "
+                f"available in this runtime: {exc}",
+            )
+
+        try:
+            credentials = _gsc_service_account.Credentials.from_service_account_info(
+                sa_info, scopes=list(_GSC_OAUTH_SCOPES)
+            )
+            # Pass credentials explicitly to each discovery client (never via os.environ / ADC).
+            site_verification = _gsc_discovery.build(
+                "siteVerification", "v1", credentials=credentials, cache_discovery=False
+            )
+            search_console = _gsc_discovery.build(
+                "searchconsole", "v1", credentials=credentials, cache_discovery=False
+            )
+
+            # 1) Obtain the META-tag verification token for the URL-prefix property.
+            token_resp = (
+                site_verification.webResource()
+                .getToken(
+                    body={
+                        "verificationMethod": "META",
+                        "site": {"type": "SITE", "identifier": site_url},
+                    }
+                )
+                .execute()
+            )
+            verification_token = str((token_resp or {}).get("token") or "").strip()
+            if not verification_token:
+                return _blocked(
+                    "blocked_search_console_unconfigured",
+                    "Search Console did not return a META verification token",
+                )
+
+            # 2) Inject the token META tag so Google can fetch it from the LIVE landing page.
+            #    Inject into BOTH the SOURCE index.html (the vite entry template — so a later
+            #    rebuild/republish, e.g. bootstrap's 2b appkit pass, carries the tag forward into the
+            #    next dist instead of dropping it) AND the currently-published LIVE dist index.html
+            #    (so Google's verify fetch below sees the tag immediately, without waiting for the next
+            #    publish). This makes the call idempotent and ordering-independent: it works whether it
+            #    runs right after the landing publish (2a) or after the final appkit publish (2b).
+            site_root = store._resolve_business_file(business, source_path)
+            source_injected = _inject_search_console_meta_tag(site_root, verification_token)
+            live_root = _product_live_current_root(business)
+            live_injected = _inject_search_console_meta_tag(live_root, verification_token)
+            meta_injected = bool(source_injected and live_injected)
+            if not meta_injected:
+                # The verify fetch needs the tag on the LIVE page; the source injection alone is not
+                # enough. Surface exactly which side failed so the operator/CEO knows whether to
+                # republish (live missing) vs investigate the source template (source missing).
+                return _blocked(
+                    "blocked_search_console_meta_inject_failed",
+                    "could not inject the google-site-verification META tag onto the live landing page "
+                    "(index.html); publish the landing page first, then retry"
+                    + (
+                        " (the live published dist/index.html was not found — the site must be "
+                        "published before Search Console can verify it)"
+                        if not live_injected
+                        else ""
+                    ),
+                    verification_token=verification_token,
+                    source_injected=bool(source_injected),
+                    live_injected=bool(live_injected),
+                )
+
+            # 3) Verify the URL-prefix property (Google fetches the META tag from the live page),
+            #    then register/add the property to Search Console.
+            verify_resp = (
+                site_verification.webResource()
+                .insert(
+                    verificationMethod="META",
+                    body={"site": {"type": "SITE", "identifier": site_url}},
+                )
+                .execute()
+            )
+            search_console.sites().add(siteUrl=site_url).execute()
+        except Exception as exc:
+            # Provider rejected the call (token mismatch, fetch not yet live, permission). Record the
+            # exact blocker and continue — never fabricate a verified property.
+            return _blocked(
+                "blocked_search_console_verification_failed",
+                f"Search Console verification/registration failed: {exc}",
+                verification_token=locals().get("verification_token", ""),
+                meta_injected=bool(locals().get("meta_injected", False)),
+            )
+
+        receipt = {
+            **base_receipt,
+            "success": True,
+            "status": "registered",
+            "property_type": "URL_PREFIX",
+            "verification_method": "META",
+            "verification_token": verification_token,
+            "meta_injected": True,
+            "verified_resource": (verify_resp or {}).get("id") if isinstance(verify_resp, Mapping) else None,
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/product:search-console/{slug}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "search_console.register",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:receipt",
+            reason=args.get("reason") or "register search console property",
+            actor=args.get("actor") or "agent",
+        )
+        store._sync_business_workspace_remote(business)
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_register_search_console",
+                "business": business,
+                "slug": slug,
+                "status": "registered",
+                "site_url": site_url,
+                "publication_dir": publication_rel,
+                "receipt": receipt_rel,
                 "value": receipt,
             }
         )
@@ -29351,6 +30497,31 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             requested_publish_policy = str(surface.get("publish_policy") or _DEFAULT_PRODUCT_PUBLISH_POLICY).strip() or _DEFAULT_PRODUCT_PUBLISH_POLICY
             publish_policy = "publish_after_refresh" if _is_shared_renderer_publish_policy(requested_publish_policy) else requested_publish_policy
             active_worker_instruction = worker_instruction
+
+            # Default worker-progress sink: forward each concise worker step/activity line as a live
+            # job/task-progress runtime event (kind="task") bound to the active worker-plane run id, so
+            # the long Claude-worker phase surfaces a current step in the tui_gateway instead of going
+            # blank. A richer caller may override this sink via _bound_claude_worker_progress(...).
+            def _default_worker_progress_sink(progress_line: str) -> None:
+                text = str(progress_line or "").strip()
+                if not text:
+                    return
+                _record_claude_agent_runtime_event(
+                    business=business,
+                    workspace_rel=workspace_rel,
+                    kind="task",
+                    status="running",
+                    detail=text,
+                    line=text,
+                    trace={"kind": "task", "detail": text, "status": "running"},
+                )
+
+            worker_progress_binding = (
+                nullcontext()
+                if _CLAUDE_WORKER_PROGRESS_SINK.get() is not None
+                else _bound_claude_worker_progress(_default_worker_progress_sink)
+            )
+            scoped_workspaces.enter_context(worker_progress_binding)
             while True:
                 worker_attempts += 1
                 attempt_payload = {
@@ -29391,7 +30562,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         payload=attempt_payload,
                         cwd=str(_repo_root()),
                         timeout_ms=timeout_ms,
-                        env=_runtime_env({"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"}),
+                        env=_runtime_env({
+                            **_anthropic_runtime_env(),
+                            "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+                        }),
                         business=business,
                         workspace_rel=workspace_rel,
                     )
@@ -30600,6 +31774,32 @@ TAKYON_TOOL_DEFINITIONS = [
                     "type": "object",
                     "description": "Brand context read from business state to steer the icon: {name, category|industry|vertical, tone|brand_tone|voice}. Read business_read_business / product state first; do not invent brand voice.",
                 },
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_register_search_console",
+        "description": (
+            "Register the published landing page as a Google Search Console URL-prefix property so "
+            "it can be indexed. Live-only; key-behind-TK (service-account JSON resolved only through "
+            "the safebox, never os.environ). Mechanism: a google-site-verification META tag injected "
+            "on the landing page. Fails closed (blocked_search_console_unconfigured) until the key is "
+            "provisioned; a receipt lands at product/seo/search-console/<slug>/receipt.json."
+        ),
+        "handler": handle_business_register_search_console,
+        "requires_api": ["google_search_console"],
+        "schema": _schema(
+            "business_register_search_console",
+            "Register the published landing page as a Google Search Console URL-prefix property.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {"type": "string", "description": "Optional publication slug under product/seo/search-console/<slug>/; defaults to the business slug."},
+                "site_url": {"type": "string", "description": "Optional explicit URL-prefix property to register (the live site origin). Defaults to the published surface public_url."},
+                "source_path": {"type": "string", "description": "Business-relative site source whose index.html receives the verification META tag. Defaults to product/site."},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
