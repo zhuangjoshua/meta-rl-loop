@@ -150,9 +150,14 @@ clarity) sit on top.
   missing, treat that as a bootstrap gap to report, not something to fix here. (2) Or an
   `mcp-gsc` / `google-search-console-mcp` server. Unlocks striking-distance (positions
   11-20), position-aware CTR gaps, opportunity scoring, cannibalization, and decline alerts.
-- **Google Keyword Planner** (Google Ads API or pasted exports). Use it for demand
-  validation, close-variant discovery, geo/language fit, and rough competition/bid
-  signals when GSC does not expose enough query variety.
+- **Google Keyword Planner data via DataForSEO.** The built-in `business_seo_query_data`
+  tool (modes `keyword-historical`, `keyword-ideas`) reads Google Ads Keyword Planner
+  metrics (search volume, competition, CPC) through DataForSEO — no Google Ads account,
+  customer ID, or OAuth needed, just the DataForSEO login/password held in the safebox.
+  Use it for demand validation, geo/language fit, and rough competition/bid signals when
+  GSC does not expose enough query variety. These modes are **paid** (~$0.075/request,
+  metered against the business budget); they fail closed (no spend, no fabrication) when
+  DataForSEO creds or budget are missing, so the run degrades to inferred strategy.
 - **OpenSEO / DataForSEO / SERP MCP** for keyword/SERP/competitor validation.
 - **Discover optional tools, do not assume them:** run a `ToolSearch` for keywords
   like `search console`, `gsc`, `openseo`, `dataforseo`, `serp`, `keyword`. If a
@@ -328,18 +333,20 @@ If GSC is available, use these fields:
 - `country`, `device`, and `searchAppearance` when they materially affect the query
   mix or SERP shape.
 
-If Keyword Planner is available, use these fields:
+If keyword data (DataForSEO) is available, use these result fields:
 
 - `avg_monthly_searches` to gauge demand bands.
 - `competition` and `competition_index` to estimate market pressure.
-- `low_top_of_page_bid_micros` and `high_top_of_page_bid_micros` as commercial-value
-  proxies, not as rankings.
+- `low_top_of_page_bid_micros` and `high_top_of_page_bid_micros` (and `cpc`) as
+  commercial-value proxies, not as rankings.
 - `monthly_search_volumes` to spot seasonality.
-- `close_variants` to find wording options that stay on intent.
+- `close_variants` is returned empty by the DataForSEO backend (no equivalent field);
+  get wording options from the separate rows that `keyword-ideas` returns instead.
 
-Use `keyword-ideas` when you want Google Ads to expand a seed topic or page URL into
-adjacent keywords. Use `keyword-historical` when you already have a narrowed list and
-want to validate demand, competition, and seasonality for those exact terms.
+Use `keyword-ideas` to expand a seed keyword set or page URL into adjacent keywords
+(DataForSEO Google Ads keywords_for_keywords / keywords_for_site). Use
+`keyword-historical` when you already have a narrowed list and want to validate demand,
+competition, and seasonality for those exact terms (DataForSEO Google Ads search_volume).
 
 Recommended sequence:
 

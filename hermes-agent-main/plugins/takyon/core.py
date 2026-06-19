@@ -1054,6 +1054,7 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     "composio": ("COMPOSIO_API_KEY",),
     "database": ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"),
+    "dataforseo": ("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
     "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -31192,27 +31193,37 @@ def handle_business_seo_add_property(args: dict, **_: Any) -> str:
 
 
 # ===========================================================================
-# business_seo_query_data — read-only Search Console + Google Keyword Planner
-# evidence for SEO/GEO decisions. One business-scoped tool, four modes:
+# business_seo_query_data — Search Console + DataForSEO keyword evidence for
+# SEO/GEO decisions. One business-scoped tool, four modes:
 #   gsc-sites          → list accessible Search Console properties
 #   gsc-query          → page/query metrics (clicks/impressions/ctr/position)
-#   keyword-historical → Keyword Planner demand/competition for a known list
-#   keyword-ideas      → Keyword Planner expansion of a seed topic/page URL
+#   keyword-historical → DataForSEO Google Ads Search Volume for a known list
+#   keyword-ideas      → DataForSEO Google Ads expansion of a seed topic/page URL
 #
-# Both APIs are optional and read-only (no ad spend, no cost): each mode raises
-# a clear TakyonError when its creds/packages are missing, so the skill degrades
-# to repo-inferred strategy rather than failing. GSC auth reuses the shared
-# Safebox service-account resolver (_seo_build_credentials, above) with the
-# readonly scope; Keyword Planner reads its separate Google Ads credentials
-# through the same Safebox gate (no os.getenv side door, no on-disk key file).
+# GSC is read-only and free; it raises a clear TakyonError when creds are missing
+# so the skill degrades to repo-inferred strategy. The keyword modes are PAID:
+# they replace the old (free) Google Ads Keyword Planner backend with DataForSEO,
+# which bills per request, so they are gated through the operator web-spend seam
+# (agent/web_spend_meter.py — same rail as the CEO's web_search) and priced in
+# agent/usage_pricing.py under the "dataforseo" namespace. They fail closed:
+# missing safebox creds → dataforseo_unconfigured; over budget / unpriced / no
+# meter in a business session → SpendBlocked — nothing spends and the skill
+# degrades to inferred strategy. GSC auth reuses the shared Safebox service-account
+# resolver (_seo_build_credentials, above); the DataForSEO login/password pair
+# resolves through the same Safebox gate (no os.getenv side door, no key file).
 # ===========================================================================
-_DEFAULT_GEO_TARGET_ID = "2840"   # United States
-_DEFAULT_LANGUAGE_ID = "1000"     # English
-
-
-def _strip_customer_id(customer_id: str) -> str:
-    """Normalise a Google Ads customer id to bare digits (strip dashes/space)."""
-    return str(customer_id or "").replace("-", "").replace(" ", "").strip()
+_DEFAULT_GEO_TARGET_ID = "2840"   # United States (Google criteria id; DataForSEO location_code uses the same ids)
+_DATAFORSEO_BASE_URL = "https://api.dataforseo.com"
+# DataForSEO Keywords Data → Google Ads result rows carry `monthly_searches[].month` as an
+# integer 1-12. The previous Google Ads backend emitted the protobuf enum name ("JANUARY"…),
+# so we map back to that exact shape to keep the tool result contract stable for the skill.
+_SEO_MONTH_NAMES = (
+    "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+    "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
+)
+# Back-compat: callers that still pass the legacy Google Ads language constant id get mapped to
+# a DataForSEO language_code. New callers should pass `language_code` directly.
+_SEO_LEGACY_LANGUAGE_ID_TO_CODE = {"1000": "en"}
 
 
 def _seo_resolve_sensitive_env(name: str) -> str:
@@ -31231,16 +31242,6 @@ def _seo_resolve_sensitive_env(name: str) -> str:
         return str(safebox.read_env_backed_value(name) or "").strip()
     except Exception:
         return ""
-
-
-def _seo_require_sensitive_env(name: str) -> str:
-    """Resolve a required sensitive credential or raise a clear TakyonError."""
-    value = _seo_resolve_sensitive_env(name)
-    if not value:
-        raise TakyonError(
-            f"{name} is required but could not be resolved from the Takyon safebox"
-        )
-    return value
 
 
 def _seo_build_search_console_service():
@@ -31287,153 +31288,280 @@ def _seo_query_search_console(
     return service.searchanalytics().query(siteUrl=site_url, body=body).execute()
 
 
-def _seo_build_google_ads_client(
-    customer_id: str | None = None,
-    login_customer_id: str | None = None,
-):
-    try:
-        from google.ads.googleads.client import GoogleAdsClient
-    except Exception as exc:  # pragma: no cover - import guard
-        raise TakyonError("Google Keyword Planner support requires the google-ads package") from exc
+def _seo_resolve_dataforseo_auth() -> tuple[str, str]:
+    """Resolve the DataForSEO login/password pair strictly through the Safebox gate.
 
-    # Every Google Ads secret resolves through the same Safebox gate (tk key) as
-    # the GSC service account — no bare os.getenv side door and no on-disk
-    # credential file. The customer-id fields below are account identifiers, not
-    # secrets, so they stay on plain env (the safebox refuses non-sensitive keys).
-    config: dict[str, Any] = {
-        "developer_token": _seo_require_sensitive_env("GOOGLE_ADS_DEVELOPER_TOKEN"),
-        "client_id": _seo_require_sensitive_env("GOOGLE_ADS_CLIENT_ID"),
-        "client_secret": _seo_require_sensitive_env("GOOGLE_ADS_CLIENT_SECRET"),
-        "refresh_token": _seo_require_sensitive_env("GOOGLE_ADS_REFRESH_TOKEN"),
-        "use_proto_plus": True,
-    }
-
-    resolved_login_customer_id = login_customer_id or os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
-    if resolved_login_customer_id:
-        config["login_customer_id"] = _strip_customer_id(resolved_login_customer_id)
-
-    linked_customer_id = os.getenv("GOOGLE_ADS_LINKED_CUSTOMER_ID")
-    if linked_customer_id:
-        config["linked_customer_id"] = _strip_customer_id(linked_customer_id)
-
-    return GoogleAdsClient.load_from_dict(config)
+    Same boundary as every other paid-provider key: the values come from the Safebox
+    authority (no bare ``os.getenv`` side door, no on-disk credential file). Fails closed
+    with a clear ``dataforseo_unconfigured`` error when either half is absent, so the SEO
+    skill degrades to repo-inferred strategy rather than spending or fabricating.
+    """
+    login = _seo_resolve_sensitive_env("DATAFORSEO_LOGIN")
+    password = _seo_resolve_sensitive_env("DATAFORSEO_PASSWORD")
+    if not login or not password:
+        raise TakyonError(
+            "dataforseo_unconfigured: DATAFORSEO_LOGIN and DATAFORSEO_PASSWORD must be "
+            "resolvable from the Takyon safebox before keyword data can be fetched"
+        )
+    return login, password
 
 
-def _seo_generate_keyword_historical_metrics(
-    client,
-    *,
-    customer_id: str,
-    keywords: list[str],
-    language_id: str = _DEFAULT_LANGUAGE_ID,
-    geo_target_ids: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    if not keywords:
-        raise TakyonError("keywords must not be empty")
-
-    googleads_service = client.get_service("GoogleAdsService")
-    keyword_plan_idea_service = client.get_service("KeywordPlanIdeaService")
-    request = client.get_type("GenerateKeywordHistoricalMetricsRequest")
-
-    request.customer_id = _strip_customer_id(customer_id)
-    request.keywords.extend(keywords)
-
-    for geo_target_id in (geo_target_ids or [_DEFAULT_GEO_TARGET_ID]):
-        request.geo_target_constants.append(
-            googleads_service.geo_target_constant_path(str(geo_target_id))
+def _seo_require_metered_business_scope() -> None:
+    """The paid DataForSEO keyword modes must run inside a business scope so the spend is
+    metered against that business's budget. In global/non-business scope the operator
+    web-spend meter takes no hold (it returns None by design), which would let the paid call
+    run ungated — so refuse here instead (fail closed), matching the no-ungated-paid rule.
+    The free GSC modes are unaffected."""
+    if not _session_business_slug():
+        raise TakyonError(
+            "keyword modes require a business scope: paid DataForSEO calls are metered "
+            "against a business budget and are refused outside a business session"
         )
 
-    request.keyword_plan_network = client.enums.KeywordPlanNetworkEnum.GOOGLE_SEARCH
-    request.language = googleads_service.language_constant_path(str(language_id))
 
-    response = keyword_plan_idea_service.generate_keyword_historical_metrics(request=request)
+def _seo_dataforseo_location_code(args: dict) -> int:
+    """Resolve a DataForSEO ``location_code`` (Google criteria id). Prefer an explicit
+    ``location_code``; fall back to the first legacy ``geo_target_ids`` entry; default US."""
+    direct = str(args.get("location_code") or "").strip()
+    if direct:
+        try:
+            return int(direct)
+        except ValueError:
+            pass
+    for item in _as_list(args.get("geo_target_ids")):
+        token = str(item).strip()
+        if not token:
+            continue
+        try:
+            return int(token)
+        except ValueError:
+            continue
+    return int(_DEFAULT_GEO_TARGET_ID)
 
-    rows: list[dict[str, Any]] = []
-    for result in response.results:
-        metrics = result.keyword_metrics
-        rows.append(
+
+def _seo_dataforseo_language_code(args: dict) -> str:
+    """Resolve a DataForSEO ``language_code`` ("en"). Prefer an explicit ``language_code``;
+    fall back to a legacy Google Ads ``language_id``; default English."""
+    direct = str(args.get("language_code") or "").strip()
+    if direct:
+        return direct
+    legacy = str(args.get("language_id") or "").strip()
+    return _SEO_LEGACY_LANGUAGE_ID_TO_CODE.get(legacy, "en")
+
+
+def _seo_call_dataforseo(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    login: str,
+    password: str,
+    timeout: int = 60,
+) -> list[dict[str, Any]]:
+    """POST one task to a DataForSEO ``/live`` endpoint with Basic Auth and return its result
+    rows. Raises ``TakyonError`` on any HTTP/parse/status failure so the metered wrapper releases
+    the reservation and nothing is recorded as spent on a failed read."""
+    import base64
+
+    url = f"{_DATAFORSEO_BASE_URL}{path}"
+    body = json.dumps([payload]).encode("utf-8")  # DataForSEO expects an array of task objects
+    token = base64.b64encode(f"{login}:{password}".encode("utf-8")).decode("ascii")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Authorization": f"Basic {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8")[:500]
+        except Exception:
+            detail = ""
+        raise TakyonError(f"DataForSEO HTTP {exc.code} for {path}: {detail or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise TakyonError(f"DataForSEO request failed for {path}: {exc.reason}") from exc
+
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise TakyonError(f"DataForSEO returned non-JSON for {path}") from exc
+
+    if parsed.get("status_code") != 20000:
+        raise TakyonError(
+            f"DataForSEO error {parsed.get('status_code')}: {parsed.get('status_message') or 'unknown'}"
+        )
+    tasks = parsed.get("tasks") or []
+    if not tasks:
+        return []
+    task0 = tasks[0] or {}
+    if task0.get("status_code") != 20000:
+        raise TakyonError(
+            f"DataForSEO task error {task0.get('status_code')}: {task0.get('status_message') or 'unknown'}"
+        )
+    return [item for item in (task0.get("result") or []) if isinstance(item, dict)]
+
+
+def _seo_metered_dataforseo(
+    op: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    login: str,
+    password: str,
+) -> list[dict[str, Any]]:
+    """Reserve → call → settle one paid DataForSEO request through the operator web-spend seam
+    (same rail as the CEO's web_search), priced off ``("dataforseo", op)`` in usage_pricing.
+
+    Fails closed: a ``SpendBlocked`` (over budget, unpriced, or no meter registered in a business
+    session) raised by ``reserve_paid_call`` propagates before any provider call, so nothing is
+    spent; any HTTP/parse error releases the reservation in ``finally``. The flat $0.075/request
+    price is independent of keyword count, so ``units`` is always 1."""
+    from agent.web_spend_meter import (
+        release_paid_call,
+        reserve_paid_call,
+        settle_paid_call,
+    )
+
+    handle = reserve_paid_call(
+        pricing_key=("dataforseo", op),
+        provider="dataforseo",
+        op=op,
+        units=1,
+        purpose="seo_keyword_research",
+    )
+    settled = False
+    try:
+        rows = _seo_call_dataforseo(path, payload, login=login, password=password)
+        settle_paid_call(handle, units=1)
+        settled = True
+        return rows
+    finally:
+        if handle is not None and not settled:
+            release_paid_call(handle, error="dataforseo_call_failed")
+
+
+def _seo_normalize_dataforseo_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Map one DataForSEO Google Ads keyword row into the stable tool result shape the SEO skill
+    already reads. DataForSEO bids are floats in USD; the previous Google Ads backend emitted
+    integer micros, so we convert (×1e6) to keep ``*_micros`` field semantics. ``cpc`` is surfaced
+    as an additive real field. ``close_variants`` has no DataForSEO equivalent, so it stays an empty
+    list rather than being fabricated (keyword-ideas already returns variants as their own rows)."""
+
+    def _bid_to_micros(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        try:
+            return int(round(float(value) * 1_000_000))
+        except (TypeError, ValueError):
+            return None
+
+    monthly: list[dict[str, Any]] = []
+    for month in (item.get("monthly_searches") or []):
+        if not isinstance(month, dict):
+            continue
+        raw_month = month.get("month")
+        try:
+            month_int = int(raw_month)
+        except (TypeError, ValueError):
+            month_int = 0
+        # Guard the 1..12 range explicitly: Python negative indexing means month 0
+        # would silently resolve to _SEO_MONTH_NAMES[-1] ("DECEMBER") without raising.
+        month_name = _SEO_MONTH_NAMES[month_int - 1] if 1 <= month_int <= 12 else str(raw_month or "")
+        monthly.append(
             {
-                "keyword": result.text,
-                "close_variants": list(result.close_variants),
-                "avg_monthly_searches": metrics.avg_monthly_searches,
-                "competition": str(metrics.competition),
-                "competition_index": metrics.competition_index,
-                "low_top_of_page_bid_micros": metrics.low_top_of_page_bid_micros,
-                "high_top_of_page_bid_micros": metrics.high_top_of_page_bid_micros,
-                "monthly_search_volumes": [
-                    {
-                        "year": month.year,
-                        "month": month.month.name,
-                        "monthly_searches": month.monthly_searches,
-                    }
-                    for month in metrics.monthly_search_volumes
-                ],
+                "year": month.get("year"),
+                "month": month_name,
+                "monthly_searches": month.get("search_volume"),
             }
         )
-    return rows
+
+    return {
+        "keyword": item.get("keyword") or "",
+        "avg_monthly_searches": item.get("search_volume"),
+        "competition": str(item.get("competition") or ""),
+        "competition_index": item.get("competition_index"),
+        "low_top_of_page_bid_micros": _bid_to_micros(item.get("low_top_of_page_bid")),
+        "high_top_of_page_bid_micros": _bid_to_micros(item.get("high_top_of_page_bid")),
+        "cpc": item.get("cpc"),
+        "monthly_search_volumes": monthly,
+        "close_variants": [],
+    }
 
 
-def _seo_generate_keyword_ideas(
-    client,
+def _seo_dataforseo_keyword_metrics(
     *,
-    customer_id: str,
+    keywords: list[str],
+    location_code: int,
+    language_code: str,
+    login: str,
+    password: str,
+) -> list[dict[str, Any]]:
+    """keyword-historical: demand/competition for a known keyword list via DataForSEO Keywords
+    Data → Google Ads Search Volume (live). One request covers up to 1000 keywords."""
+    if not keywords:
+        raise TakyonError("keywords must not be empty")
+    payload = {
+        "keywords": keywords[:1000],
+        "location_code": location_code,
+        "language_code": language_code,
+    }
+    rows = _seo_metered_dataforseo(
+        "search_volume",
+        "/v3/keywords_data/google_ads/search_volume/live",
+        payload,
+        login=login,
+        password=password,
+    )
+    return [_seo_normalize_dataforseo_item(item) for item in rows]
+
+
+def _seo_dataforseo_keyword_ideas(
+    *,
     keywords: list[str] | None = None,
     page_url: str | None = None,
-    language_id: str = _DEFAULT_LANGUAGE_ID,
-    geo_target_ids: list[str] | None = None,
+    location_code: int,
+    language_code: str,
     include_adult_keywords: bool = False,
     limit: int = 100,
+    login: str,
+    password: str,
 ) -> list[dict[str, Any]]:
-    googleads_service = client.get_service("GoogleAdsService")
-    keyword_plan_idea_service = client.get_service("KeywordPlanIdeaService")
-    request = client.get_type("GenerateKeywordIdeasRequest")
-
-    request.customer_id = _strip_customer_id(customer_id)
-    request.language = googleads_service.language_constant_path(str(language_id))
-    request.keyword_plan_network = client.enums.KeywordPlanNetworkEnum.GOOGLE_SEARCH
-    request.include_adult_keywords = bool(include_adult_keywords)
-
-    for geo_target_id in (geo_target_ids or [_DEFAULT_GEO_TARGET_ID]):
-        request.geo_target_constants.append(
-            googleads_service.geo_target_constant_path(str(geo_target_id))
-        )
-
-    keyword_seed_terms = [str(item).strip() for item in (keywords or []) if str(item).strip()]
+    """keyword-ideas: expand a seed via DataForSEO Keywords Data → Google Ads. A keyword seed uses
+    keywords_for_keywords (capped at 20 seeds by the endpoint); a pure page/URL seed uses
+    keywords_for_site. Both preserve Keyword Planner semantics (volume/competition/CPC)."""
+    seed_terms = [str(item).strip() for item in (keywords or []) if str(item).strip()]
     normalized_page_url = str(page_url or "").strip()
-    if keyword_seed_terms and normalized_page_url and hasattr(request, "keyword_and_url_seed"):
-        request.keyword_and_url_seed.keywords.extend(keyword_seed_terms)
-        request.keyword_and_url_seed.url = normalized_page_url
-    elif keyword_seed_terms:
-        request.keyword_seed.keywords.extend(keyword_seed_terms)
+
+    if seed_terms:
+        op = "keywords_for_keywords"
+        path = "/v3/keywords_data/google_ads/keywords_for_keywords/live"
+        # keywords_for_keywords/live has no `target`/URL-seed parameter (only
+        # keywords_for_site does), so a page_url passed alongside keywords is ignored
+        # here rather than sent as an unsupported field that the API would reject.
+        payload: dict[str, Any] = {
+            "keywords": seed_terms[:20],
+            "location_code": location_code,
+            "language_code": language_code,
+            "include_adult_keywords": bool(include_adult_keywords),
+        }
     elif normalized_page_url:
-        request.url_seed.url = normalized_page_url
+        op = "keywords_for_site"
+        path = "/v3/keywords_data/google_ads/keywords_for_site/live"
+        payload = {
+            "target": normalized_page_url,
+            "location_code": location_code,
+            "language_code": language_code,
+            "include_adult_keywords": bool(include_adult_keywords),
+        }
     else:
         raise TakyonError("keyword-ideas requires keywords and/or page_url")
 
-    response = keyword_plan_idea_service.generate_keyword_ideas(request=request)
-
-    rows: list[dict[str, Any]] = []
-    for result in response:
-        metrics = getattr(result, "keyword_idea_metrics", None)
-        rows.append(
-            {
-                "keyword": getattr(result, "text", ""),
-                "avg_monthly_searches": getattr(metrics, "avg_monthly_searches", None),
-                "competition": str(getattr(metrics, "competition", "")),
-                "competition_index": getattr(metrics, "competition_index", None),
-                "low_top_of_page_bid_micros": getattr(metrics, "low_top_of_page_bid_micros", None),
-                "high_top_of_page_bid_micros": getattr(metrics, "high_top_of_page_bid_micros", None),
-                "monthly_search_volumes": [
-                    {
-                        "year": month.year,
-                        "month": month.month.name,
-                        "monthly_searches": month.monthly_searches,
-                    }
-                    for month in getattr(metrics, "monthly_search_volumes", [])
-                ],
-                "close_variants": list(getattr(result, "close_variants", []) or []),
-            }
-        )
-    return rows[: max(1, int(limit))]
+    rows = _seo_metered_dataforseo(op, path, payload, login=login, password=password)
+    normalized = [_seo_normalize_dataforseo_item(item) for item in rows]
+    return normalized[: max(1, int(limit))]
 
 
 def handle_business_seo_query_data(args: dict, **_: Any) -> str:
@@ -31496,34 +31624,29 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
             )
 
         if mode == "keyword-historical":
-            customer_id = str(args.get("customer_id") or "").strip()
-            if not customer_id:
-                raise TakyonError("customer_id is required for keyword-historical")
             raw_keywords = [
                 str(item).strip() for item in _as_list(args.get("keywords")) if str(item).strip()
             ]
             if not raw_keywords:
                 raise TakyonError("keywords are required for keyword-historical")
-            client = _seo_build_google_ads_client(
-                customer_id=customer_id,
-                login_customer_id=str(args.get("login_customer_id") or "").strip() or None,
-            )
-            rows = _seo_generate_keyword_historical_metrics(
-                client,
-                customer_id=customer_id,
+            _seo_require_metered_business_scope()
+            login, password = _seo_resolve_dataforseo_auth()
+            location_code = _seo_dataforseo_location_code(args)
+            language_code = _seo_dataforseo_language_code(args)
+            rows = _seo_dataforseo_keyword_metrics(
                 keywords=raw_keywords,
-                language_id=str(args.get("language_id") or _DEFAULT_LANGUAGE_ID).strip() or _DEFAULT_LANGUAGE_ID,
-                geo_target_ids=[
-                    str(item).strip()
-                    for item in _as_list(args.get("geo_target_ids") or [_DEFAULT_GEO_TARGET_ID])
-                    if str(item).strip()
-                ],
+                location_code=location_code,
+                language_code=language_code,
+                login=login,
+                password=password,
             )
             return tool_result(
                 {
                     "success": True,
                     "mode": mode,
-                    "customer_id": customer_id,
+                    "provider": "dataforseo",
+                    "location_code": location_code,
+                    "language_code": language_code,
                     "keywords": raw_keywords,
                     "row_count": len(rows),
                     "rows": rows,
@@ -31531,38 +31654,33 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
             )
 
         if mode == "keyword-ideas":
-            customer_id = str(args.get("customer_id") or "").strip()
-            if not customer_id:
-                raise TakyonError("customer_id is required for keyword-ideas")
             raw_keywords = [
                 str(item).strip() for item in _as_list(args.get("keywords")) if str(item).strip()
             ]
             page_url = str(args.get("page_url") or args.get("url_seed") or "").strip()
             if not raw_keywords and not page_url:
                 raise TakyonError("keyword-ideas requires keywords and/or page_url")
-            client = _seo_build_google_ads_client(
-                customer_id=customer_id,
-                login_customer_id=str(args.get("login_customer_id") or "").strip() or None,
-            )
-            rows = _seo_generate_keyword_ideas(
-                client,
-                customer_id=customer_id,
+            _seo_require_metered_business_scope()
+            login, password = _seo_resolve_dataforseo_auth()
+            location_code = _seo_dataforseo_location_code(args)
+            language_code = _seo_dataforseo_language_code(args)
+            rows = _seo_dataforseo_keyword_ideas(
                 keywords=raw_keywords,
                 page_url=page_url or None,
-                language_id=str(args.get("language_id") or _DEFAULT_LANGUAGE_ID).strip() or _DEFAULT_LANGUAGE_ID,
-                geo_target_ids=[
-                    str(item).strip()
-                    for item in _as_list(args.get("geo_target_ids") or [_DEFAULT_GEO_TARGET_ID])
-                    if str(item).strip()
-                ],
+                location_code=location_code,
+                language_code=language_code,
                 include_adult_keywords=_boolish(args.get("include_adult_keywords"), default=False),
                 limit=int(args.get("limit") or 100),
+                login=login,
+                password=password,
             )
             return tool_result(
                 {
                     "success": True,
                     "mode": mode,
-                    "customer_id": customer_id,
+                    "provider": "dataforseo",
+                    "location_code": location_code,
+                    "language_code": language_code,
                     "keywords": raw_keywords,
                     "page_url": page_url,
                     "row_count": len(rows),
@@ -32943,16 +33061,16 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_seo_query_data",
-        "description": "Read Search Console and Google Keyword Planner query evidence for SEO/GEO decisions (read-only, no ad spend). Modes degrade gracefully when creds are missing.",
+        "description": "Read Search Console (free) and DataForSEO keyword data (Google Ads Keyword Planner volume/competition/CPC) for SEO/GEO decisions. The keyword modes are metered per request against the business budget and fail closed when creds/budget are missing; GSC and the keyword modes degrade gracefully so the skill can fall back to inferred strategy.",
         "handler": handle_business_seo_query_data,
         "schema": _schema(
             "business_seo_query_data",
-            "Read Search Console and Google Keyword Planner data for SEO/GEO prioritization. All modes are read-only; each raises a clear error (not a failure) when its credentials are absent.",
+            "Read Search Console and DataForSEO Google Ads keyword data for SEO/GEO prioritization. GSC modes are free and read-only; keyword modes are PAID per request (metered against the business budget) and fail closed — not silently — when DataForSEO creds or budget are missing.",
             {
                 "mode": {
                     "type": "string",
                     "enum": ["gsc-sites", "gsc-query", "keyword-historical", "keyword-ideas"],
-                    "description": "gsc-sites = list accessible Search Console properties; gsc-query = pull page/query metrics for a date range; keyword-historical = fetch demand/competition for a narrowed keyword list; keyword-ideas = expand a seed page/topic into adjacent keywords.",
+                    "description": "gsc-sites = list accessible Search Console properties (free); gsc-query = pull page/query metrics for a date range (free); keyword-historical = DataForSEO Google Ads Search Volume for a known keyword list (paid, ~$0.075/request); keyword-ideas = DataForSEO Google Ads expansion of a seed keyword set or page URL into adjacent keywords (paid, ~$0.075/request).",
                 },
                 "site_url": {"type": "string", "description": "Search Console property identifier like sc-domain:example.com or a URL property (gsc-query)."},
                 "start_date": {"type": "string", "description": "YYYY-MM-DD for gsc-query."},
@@ -32962,13 +33080,13 @@ TAKYON_TOOL_DEFINITIONS = [
                 "row_limit": {"type": "integer", "description": "Maximum rows for gsc-query; default 1000."},
                 "start_row": {"type": "integer", "description": "Search Console paging start row; default 0."},
                 "search_type": {"type": "string", "description": "Search Console type, default web."},
-                "customer_id": {"type": "string", "description": "Google Ads customer ID for keyword-historical and keyword-ideas."},
-                "login_customer_id": {"type": "string", "description": "Google Ads manager (MCC) account ID if required for routing."},
-                "keywords": {"type": "array", "items": {"type": "string"}, "description": "Seed keywords for Keyword Planner historical metrics or idea expansion."},
-                "page_url": {"type": "string", "description": "Optional page URL for keyword-ideas URL seeding."},
-                "language_id": {"type": "string", "description": "Google Ads language constant ID; default 1000 (English)."},
-                "geo_target_ids": {"type": "array", "items": {"type": "string"}, "description": "Repeatable Google Ads geo target IDs; default 2840 (United States)."},
-                "include_adult_keywords": {"type": "boolean", "description": "Whether Keyword Planner should include adult keywords for keyword-ideas. Default false."},
+                "keywords": {"type": "array", "items": {"type": "string"}, "description": "Seed keywords for DataForSEO keyword-historical (up to 1000) or keyword-ideas (up to 20 seeds)."},
+                "page_url": {"type": "string", "description": "Optional page/site URL seed for keyword-ideas (uses DataForSEO keywords_for_site when no keywords are given)."},
+                "location_code": {"type": "integer", "description": "DataForSEO/Google location code for keyword modes; default 2840 (United States)."},
+                "language_code": {"type": "string", "description": "DataForSEO language code for keyword modes, e.g. \"en\"; default \"en\"."},
+                "language_id": {"type": "string", "description": "Legacy Google Ads language constant ID (mapped to language_code when language_code is absent); default 1000 (English)."},
+                "geo_target_ids": {"type": "array", "items": {"type": "string"}, "description": "Legacy Google geo target IDs (first entry maps to location_code when location_code is absent); default 2840 (United States)."},
+                "include_adult_keywords": {"type": "boolean", "description": "Whether DataForSEO should include adult keywords for keyword-ideas. Default false."},
                 "limit": {"type": "integer", "description": "Maximum returned rows for keyword-ideas; default 100."},
             },
             ["mode"],
