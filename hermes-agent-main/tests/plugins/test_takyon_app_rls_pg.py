@@ -176,3 +176,37 @@ def test_app_plane_rls_limits_connections_to_rows_touching_the_actor(pg_conn):
     assert [(row[0], row[1]) for row in rows] == sorted(
         [(alice.id, bob.id), (bob.id, alice.id)]
     )
+
+
+def test_session_revoke_runs_privileged_not_under_app_customer_scope(pg_conn):
+    """Product sign-out (session revoke = UPDATE app_sessions) must run on the PRIVILEGED
+    operator/runtime path, never the restricted ``takyon_app`` app-customer scope.
+
+    Migration 0030 grants ``takyon_app`` SELECT-only on app_sessions ("identity/session mutation
+    stays on the privileged operator/runtime path"). So the session READ that resolves the
+    customer (validate_session) works under the scope, but the session MUTATION that revokes it
+    does NOT. Until this was fixed, handle_business_delete_app_session wrapped revoke_session in
+    ``_pg_app_scope`` and every product sign-out failed with "permission denied for table
+    app_sessions" — the customer could not sign out AND the session stayed live server-side. This
+    test locks the invariant so a future re-scope of the revoke regresses loudly."""
+    owner = _owner(pg_conn)
+    slug = _business(pg_conn, owner)
+    _user, token = _user_and_session(pg_conn, slug, "alice@example.com")
+
+    # Under the app-customer scope (the restricted, non-bypassing takyon_app role), the session
+    # READ is permitted (SELECT grant) but the revoke UPDATE is refused — exactly why revoke must
+    # not run here.
+    with _customer_scope(pg_conn, business_slug=slug, session_token=token):
+        assert app_identity.validate_session(pg_conn, slug, token) is not None
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app_identity.revoke_session(pg_conn, slug, token)
+
+    # The refused revoke never applied: the session is still live (proves the production symptom —
+    # a sign-out that "succeeds" in the UI while the server session lingers would be a real leak).
+    assert app_identity.validate_session(pg_conn, slug, token) is not None
+
+    # On the privileged path (the production fix), the revoke succeeds and the session is gone.
+    assert app_identity.revoke_session(pg_conn, slug, token) is True
+    assert app_identity.validate_session(pg_conn, slug, token) is None
+    # Idempotent: revoking an already-revoked/absent session returns False, never raises.
+    assert app_identity.revoke_session(pg_conn, slug, token) is False
