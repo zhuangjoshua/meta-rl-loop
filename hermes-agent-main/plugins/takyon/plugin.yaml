@@ -57,3 +57,5 @@ provides_tools:
   - business_schedule_ceo_wakeup
   - business_gc
   - business_upgrade_businesses
+  - business_seo_add_property
+  - business_seo_query_data

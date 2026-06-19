@@ -57,6 +57,9 @@ _EXACT_SENSITIVE_ENV_KEYS = frozenset(
         "AUTH0_CLIENT_SECRET",
         "AUTH0_SECRET",
         "DATABASE_URL",
+        # Google OAuth client ids don't end in a sensitive suffix, but we keep the
+        # full Google Ads credential set behind the Safebox gate (no os.getenv side door).
+        "GOOGLE_ADS_CLIENT_ID",
         "POSTGRES_PRISMA_URL",
         "POSTGRES_URL",
     }
