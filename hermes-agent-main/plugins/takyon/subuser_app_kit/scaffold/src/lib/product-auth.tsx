@@ -132,9 +132,11 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         setError(null);
         const nextPath = location.pathname === "/" ? "/app" : location.pathname;
-        navigate(`${nextPath}${stripOauthParams(location.search)}${location.hash}`, {
-          replace: true,
-        });
+        // Full reload (not a client-side navigate) so the gated shell remounts and re-reads the freshly
+        // minted session — every screen flips to signed-in. A client-side navigate leaves the already
+        // mounted viewer-access state showing the stale anonymous view (the OAuth params are stripped
+        // first, so the callback effect does not re-run on the reload).
+        window.location.replace(`${nextPath}${stripOauthParams(location.search)}${location.hash}`);
       } catch (err) {
         if (cancelled) return;
         setError(displayError(err));
@@ -189,7 +191,9 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         const { error: signOutError } = await supabase.auth.signOut({ scope: "local" });
         if (signOutError) throw signOutError;
       }
-      navigate("/", { replace: true });
+      // Full reload so the gated shell remounts and re-reads the now-anonymous session — every screen
+      // flips back to signed-out in place.
+      window.location.replace("/");
     } catch (err) {
       setError(displayError(err));
     } finally {
