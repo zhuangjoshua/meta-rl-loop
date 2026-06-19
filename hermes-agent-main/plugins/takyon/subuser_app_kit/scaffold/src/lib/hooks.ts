@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { client, defaultSubscribePlanKey, type TakyonActionError } from "./takyon";
-import { useViewerAccessContext } from "./product-auth";
 
 export interface SessionUser {
   [key: string]: unknown;
@@ -271,93 +270,117 @@ export function useSession(): UseSessionResult {
   return { user, loading, error };
 }
 
-/** Resolved viewer state minus the refresh handle — the provider owns the single store and
- *  derives this snapshot once per auth change, then exposes it through context. */
-export type ViewerAccessSnapshot = Omit<ViewerAccessResult, "refresh">;
-
-/** Loading placeholder before the first session read completes. */
-export const LOADING_VIEWER_ACCESS: ViewerAccessSnapshot = {
-  state: "anonymous",
-  authenticated: false,
-  entitled: false,
-  user: null,
-  session: null,
-  account: null,
-  subscriptionState: "none",
-  loading: true,
-  error: null,
-};
-
-/** Reads the product session, then (when authenticated) the account, and derives the CTA-safe
- *  access snapshot in ONE place. The provider calls this once per auth transition so every screen
- *  flips together off a single source of truth. Pure aside from the two client GETs — no React. */
-export async function resolveViewerAccessSnapshot(): Promise<ViewerAccessSnapshot> {
-  const base: ViewerAccessSnapshot = {
-    ...LOADING_VIEWER_ACCESS,
-    loading: false,
-  };
-  try {
-    const sessionPayload = await client.session();
-    const nextSession = isObject(sessionPayload) ? (sessionPayload as SessionPayload) : null;
-    const nextSessionUser = sessionUser(nextSession);
-    const hasSession =
-      (nextSession && nextSession.authenticated === true) ||
-      nextSessionUser !== null ||
-      Boolean(String(nextSession?.email ?? "").trim());
-
-    if (!hasSession) {
-      return { ...base, session: nextSession, state: "anonymous" };
-    }
-
-    try {
-      const accountPayload = await client.account();
-      const nextAccount =
-        isObject(accountPayload) && accountPayload.authenticated === false
-          ? null
-          : isObject(accountPayload)
-            ? (accountPayload as AccountPayload)
-            : null;
-      const nextEntitled = isAccountEntitled(nextAccount);
-      const nextSubscriptionState = subscriptionStateFromAccount(nextAccount);
-      return {
-        ...base,
-        authenticated: true,
-        entitled: nextEntitled,
-        user: accountUser(nextAccount) ?? nextSessionUser,
-        session: nextSession,
-        account: nextAccount,
-        subscriptionState: nextSubscriptionState,
-        state: nextEntitled
-          ? "ready"
-          : nextSubscriptionState === "past_due" || nextSubscriptionState === "canceled"
-            ? "past_due"
-            : "subscription_required",
-      };
-    } catch (err) {
-      return {
-        ...base,
-        authenticated: true,
-        user: nextSessionUser,
-        session: nextSession,
-        state: "account_unavailable",
-        error: err instanceof Error ? err : new Error(String(err)),
-      };
-    }
-  } catch (err) {
-    return {
-      ...base,
-      state: "anonymous",
-      error: err instanceof Error ? err : new Error(String(err)),
-    };
-  }
-}
-
-/** Reads the single shared viewer-access store from ProductAuthProvider. Every screen calls this so
- *  they all flip together on sign-in AND sign-out — no per-component useState, no per-mount refetch,
- *  no state islands. The provider owns the fetch/derivation (resolveViewerAccessSnapshot) and the
- *  refetch on every auth transition. */
+/** Loads session first, then account, and keeps CTA-safe access state in one place. */
 export function useViewerAccess(): ViewerAccessResult {
-  return useViewerAccessContext();
+  const [state, setState] = useState<ViewerAccessState>("anonymous");
+  const [authenticated, setAuthenticated] = useState(false);
+  const [entitled, setEntitled] = useState(false);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [session, setSession] = useState<SessionPayload | null>(null);
+  const [account, setAccount] = useState<AccountPayload | null>(null);
+  const [subscriptionState, setSubscriptionState] = useState("none");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const aliveRef = useRef(true);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const sessionPayload = await client.session();
+      if (!aliveRef.current) return;
+      const nextSession = isObject(sessionPayload) ? (sessionPayload as SessionPayload) : null;
+      const nextSessionUser = sessionUser(nextSession);
+      const hasSession =
+        (nextSession && nextSession.authenticated === true) ||
+        nextSessionUser !== null ||
+        Boolean(String(nextSession?.email ?? "").trim());
+
+      setSession(nextSession);
+
+      if (!hasSession) {
+        setState("anonymous");
+        setAuthenticated(false);
+        setEntitled(false);
+        setUser(null);
+        setAccount(null);
+        setSubscriptionState("none");
+        setError(null);
+        return;
+      }
+
+      setAuthenticated(true);
+      setUser(nextSessionUser);
+
+      try {
+        const accountPayload = await client.account();
+        if (!aliveRef.current) return;
+        const nextAccount =
+          isObject(accountPayload) && accountPayload.authenticated === false
+            ? null
+            : isObject(accountPayload)
+              ? (accountPayload as AccountPayload)
+              : null;
+        const nextEntitled = isAccountEntitled(nextAccount);
+        const nextSubscriptionState = subscriptionStateFromAccount(nextAccount);
+
+        setAccount(nextAccount);
+        setUser(accountUser(nextAccount) ?? nextSessionUser);
+        setEntitled(nextEntitled);
+        setSubscriptionState(nextSubscriptionState);
+        setState(
+          nextEntitled
+            ? "ready"
+            : nextSubscriptionState === "past_due" || nextSubscriptionState === "canceled"
+              ? "past_due"
+              : "subscription_required",
+        );
+        setError(null);
+      } catch (err) {
+        if (!aliveRef.current) return;
+        setAccount(null);
+        setEntitled(false);
+        setSubscriptionState("none");
+        setState("account_unavailable");
+        setError(err instanceof Error ? err : new Error(String(err)));
+      }
+    } catch (err) {
+      if (!aliveRef.current) return;
+      setState("anonymous");
+      setAuthenticated(false);
+      setEntitled(false);
+      setUser(null);
+      setSession(null);
+      setAccount(null);
+      setSubscriptionState("none");
+      setError(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      if (aliveRef.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return {
+    state,
+    authenticated,
+    entitled,
+    user,
+    session,
+    account,
+    subscriptionState,
+    loading,
+    error,
+    refresh,
+  };
 }
 
 export interface RecordItem {
