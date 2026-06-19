@@ -1791,8 +1791,12 @@ def _takyon_trace_tool_shape(
         detail = f"Updated {count} task{'s' if count != 1 else ''}." if count else "Updated task list."
         return "tool", "Todo", detail, ""
     if tool_name == "business_claude_agent_task":
+        # General, customer-safe label — never the internal "Delegated worker" /
+        # "Claude agent task" identifier. The card shows business-language work,
+        # not the tool/worker that performed it (TASK 10, fail-closed below via
+        # _takyon_task_intent_title token stripping).
         workspace = str(tool_args.get("workspace") or tool_args.get("source_path") or preview).strip()
-        return "tool", "Delegated worker", workspace or "Delegated workspace task.", ""
+        return "tool", "Working on the product", workspace or "Working on the product.", ""
     return "tool", _takyon_trace_label(tool_name), preview, ""
 
 
@@ -1946,6 +1950,12 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
                 "preview": context,
                 "summary": str(payload.get("summary") or "").strip(),
                 "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+                # Per-tool timing for the durable build-phase ladder (the transient
+                # tool.complete event already carries duration_s; persist it here so
+                # the workspace mirror — rebuilt from these dashboard.run.% events —
+                # can surface elapsed/duration per bootstrap phase). started_at is ms.
+                "duration_s": duration_s,
+                "started_at": int(started_at * 1000) if started_at else None,
             },
         )
     if _tool_progress_enabled(sid) or payload.get("inline_diff"):
@@ -2255,6 +2265,11 @@ def _forward_isolated_turn_event(
                 "tool_name": name,
                 "summary": str(payload.get("summary") or "").strip(),
                 "turn_key": str(session.get("takyon_active_turn_key") or "").strip(),
+                # Per-tool timing forwarded from the isolated worker payload so the
+                # durable build-phase ladder can surface elapsed/duration. Mirrors
+                # the in-process _on_tool_complete trace fields.
+                "duration_s": payload.get("duration_s"),
+                "started_at": payload.get("started_at"),
             },
         )
         _emit("tool.complete", sid, payload)
@@ -6389,6 +6404,10 @@ def _takyon_business_home_snapshot(
                     "tool_name": as_text(trace_payload.get("tool_name")),
                     "skill_name": as_text(trace_payload.get("skill_name")),
                     "summary": as_text(trace_payload.get("summary")),
+                    # Per-tool timing for the build-phase ladder (may be None on
+                    # legacy traces recorded before durations were persisted).
+                    "duration_s": trace_payload.get("duration_s"),
+                    "started_at": trace_payload.get("started_at"),
                 }
                 trace_key = as_text(trace_entry.get("entry_key") or trace_entry.get("id"))
                 if trace_key and trace_key not in seen_trace_keys:
@@ -6452,6 +6471,41 @@ def _takyon_business_home_snapshot(
         summary = as_dict(store.read(scope=f"business:{business_slug}", query="summary", limit=12))
     except Exception:
         summary = {}
+    # Curated CEO conversational updates (business_post_operator_update). The fast
+    # boot/reload path rebuilds the same customer-safe chat transcript the full
+    # overview does, so a reload immediately shows the prior conversation (ordered
+    # oldest→newest) plus a durable last summary — never a "What changed" card and
+    # never the raw reasoning stream. Milestone ladder stays Tasks-panel only.
+    boot_operator_update_events: list[dict[str, Any]] = []
+    boot_operator_update: dict[str, Any] = {}
+    for event in as_list(summary.get("events")):
+        event_dict = as_dict(event)
+        if as_text(event_dict.get("event_type")) != "business.operator_update":
+            continue
+        payload = event_dict.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        payload_dict = as_dict(payload)
+        payload_dict["updated_at"] = as_text(
+            event_dict.get("created_at") or event_dict.get("updated_at")
+        )
+        if not payload_dict.get("posted_at"):
+            payload_dict["posted_at"] = payload_dict["updated_at"]
+        boot_operator_update_events.append(payload_dict)
+        if not boot_operator_update:
+            boot_operator_update = payload_dict
+    boot_chat_stream = _takyon_ceo_chat_stream(list(reversed(boot_operator_update_events)))
+    boot_chat_summary = (
+        _takyon_sanitize_chat_text(as_text(boot_operator_update.get("summary")))
+        or as_text(boot_operator_update.get("summary"))
+    )
+    boot_operator_headline = (
+        _takyon_sanitize_chat_text(as_text(boot_operator_update.get("headline")))
+        or as_text(boot_operator_update.get("headline"))
+    )
     conversations = as_dict(summary.get("conversations"))
     unresolved_by_thread: dict[str, int] = {}
     for message in as_list(conversations.get("unresolved")):
@@ -6613,17 +6667,25 @@ def _takyon_business_home_snapshot(
             }
         )
     for job in latest_jobs[:6]:
-        task_cards.append(
-            {
-                "id": f"{as_text(job.get('source') or 'job')}:{as_text(job.get('id'))}",
-                "source": as_text(job.get("source") or "job"),
-                "label": job_label(as_text(job.get("kind"))),
-                "status": trace_status(as_text(job.get("status"))),
-                "detail": latest_job_detail if job is latest_job else (as_text(job.get("detail")) or headline(as_text(job.get("kind")), as_text(job.get("status")))),
-                "tone": tone(as_text(job.get("status"))),
-                "updated_at": as_text(job.get("updated_at") or job.get("created_at")),
-            }
+        job_payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        job_task_card = {
+            "id": f"{as_text(job.get('source') or 'job')}:{as_text(job.get('id'))}",
+            "source": as_text(job.get("source") or "job"),
+            "label": job_label(as_text(job.get("kind"))),
+            "status": trace_status(as_text(job.get("status"))),
+            "detail": latest_job_detail if job is latest_job else (as_text(job.get("detail")) or headline(as_text(job.get("kind")), as_text(job.get("status")))),
+            "tone": tone(as_text(job.get("status"))),
+            "updated_at": as_text(job.get("updated_at") or job.get("created_at")),
+        }
+        # TASK 19: carry the live tweet URL (persisted as post_url on the X work
+        # request payload) onto the boot task card so canonical_task surfaces a
+        # clickable open_url on reload too. One canonical field name: open_url.
+        job_open_url = _takyon_openable_url(
+            job_payload.get("post_url") or job_payload.get("open_url") or job_payload.get("url")
         )
+        if job_open_url:
+            job_task_card["open_url"] = job_open_url
+        task_cards.append(job_task_card)
     if product_blocker:
         # The stored publish blocker is usually a raw build/deploy error (npm/vite
         # output, absolute paths, stack frames). The founder must never see that —
@@ -6769,12 +6831,19 @@ def _takyon_business_home_snapshot(
                 },
             ],
             "current_action": current_action,
+            # Prefer the CEO's latest curated headline/summary for the loop copy on
+            # reload (the customer-facing conversational voice); fall back to the
+            # generic current-action labels only when no update has been posted yet.
             "ceo_loop": {
                 "status": current_action["status"],
-                "headline": current_action["label"],
-                "detail": current_action["detail"],
-                "next_action": current_action["detail"] or current_action["label"],
+                "headline": boot_operator_headline or current_action["label"],
+                "detail": boot_chat_summary or current_action["detail"],
+                "next_action": boot_chat_summary
+                or current_action["detail"]
+                or current_action["label"],
             },
+            "chat_stream": boot_chat_stream,
+            "chat_summary": boot_chat_summary,
             "wake_health": {},
             "research": {
                 "status": "visible" if local_research_outputs else "needed",
@@ -7086,6 +7155,12 @@ def _takyon_business_overview_payload(
             value = brief_text(entry.get(field)) if field not in {"id"} else entry.get(field)
             if value not in (None, "", [], {}):
                 merged[field] = value
+        # Per-tool timing is numeric — carry it through verbatim (never brief_text)
+        # so a later completed trace can refresh the build-phase ladder duration.
+        for num_field in ("duration_s", "started_at"):
+            num_value = entry.get(num_field)
+            if num_value is not None:
+                merged[num_field] = num_value
         entries_by_key[key] = merged
 
     def legacy_trace_entry(
@@ -7120,7 +7195,11 @@ def _takyon_business_overview_payload(
             preview = brief_text(tool_started.group(2)).strip()
             return {
                 "id": event_id,
-                "entry_key": f"legacy-tool:{tool_name}:{preview}",
+                # Stable key (no preview suffix) so the later "tool completed"
+                # row merges over this started row and flips running->completed;
+                # otherwise the started row stays 'running' forever and pins
+                # live_state.status='running' -> chat_running true.
+                "entry_key": f"legacy-tool:{tool_name}",
                 "source": "runtime",
                 "kind": "tool",
                 "label": human_kind(tool_name),
@@ -7235,12 +7314,18 @@ def _takyon_business_overview_payload(
     product_inventory = as_dict(app.get("product_inventory"))
     source_path = brief_text(surface.get("source_path"))
 
-    # Curated CEO update (business_post_operator_update). This is the ONLY
-    # customer-facing channel: the latest business.operator_update event carries a
-    # warm headline + 1-2 sentence summary and a milestone plan. The raw assistant
-    # message stream (chain-of-thought / planning) is NEVER surfaced to the
-    # customer; the UI renders only this curated card + the milestone rollup.
+    # Curated CEO updates (business_post_operator_update). This is the customer-
+    # facing conversational channel: each business.operator_update event carries a
+    # warm headline + 1-2 sentence summary (the CEO's DELIBERATE narration) plus a
+    # milestone plan. The raw assistant message stream (chain-of-thought / planning)
+    # is NEVER surfaced to the customer. The litebulb chat renders these curated
+    # messages as an ordered assistant-message transcript (chat_stream below); the
+    # milestone/phase ladder is scoped to the Tasks panel only. `operator_update`
+    # is the LATEST event (drives the ceo_loop one-liner + Tasks milestone cards).
+    # `operator_update_events` is the full window (newest→oldest as stored) used to
+    # build the ordered conversational stream.
     operator_update: dict[str, Any] = {}
+    operator_update_events: list[dict[str, Any]] = []
     for event in as_list(summary.get("events")):
         event_dict = as_dict(event)
         if brief_text(event_dict.get("event_type")) != "business.operator_update":
@@ -7251,14 +7336,22 @@ def _takyon_business_overview_payload(
                 payload = json.loads(payload)
             except Exception:
                 payload = {}
-        operator_update = as_dict(payload)
-        operator_update["updated_at"] = brief_text(
+        payload_dict = as_dict(payload)
+        payload_dict["updated_at"] = brief_text(
             event_dict.get("created_at") or event_dict.get("updated_at")
         )
-        break
+        if not payload_dict.get("posted_at"):
+            payload_dict["posted_at"] = payload_dict["updated_at"]
+        operator_update_events.append(payload_dict)
+        if not operator_update:
+            operator_update = payload_dict
     operator_update_milestones = [
         m for m in as_list(operator_update.get("milestones")) if isinstance(m, dict)
     ]
+    # Ordered (oldest→newest) customer-safe CEO conversational messages. Events are
+    # stored newest-first; reverse so the chat reads top-to-bottom in time. Milestone
+    # ladder data is intentionally excluded (Tasks-panel only).
+    ceo_chat_stream = _takyon_ceo_chat_stream(list(reversed(operator_update_events)))
 
     try:
         pulse = as_dict(store.calculate_pulse(slug, limit=5))
@@ -7387,6 +7480,13 @@ def _takyon_business_overview_payload(
                 "description": brief_text(payload.get("description") or payload.get("why_now")),
                 "category": brief_text(payload.get("category")),
                 "work_request_id": brief_text(payload.get("work_request_id")),
+                # TASK 19: the X-post worker persists the live tweet URL on the work
+                # request payload as post_url (plugins/takyon/worker.py). Derive a
+                # single canonical openable field so the X task/card links straight
+                # to the live tweet. Mirrors the ad-campaign open_url pattern.
+                "open_url": openable_url(
+                    payload.get("post_url") or payload.get("open_url") or payload.get("url")
+                ),
             }
         )
 
@@ -7443,7 +7543,11 @@ def _takyon_business_overview_payload(
                     {
                         "id": brief_text(run.get("id")),
                         "tool_name": worker_tool,
-                        "name": "Delegated worker" if worker_tool == "business_claude_agent_task" else "Agent run",
+                        # General, customer-safe name — never the internal
+                        # "Delegated worker" / "Agent run" identifier (TASK 10).
+                        # The raw tool_name stays available for the expanded
+                        # "raw:" detail only.
+                        "name": "Working on the product" if worker_tool == "business_claude_agent_task" else "Working on the company",
                         "purpose": purpose or summary_text or brief_text(run.get("prompt"))[:120],
                         "status": brief_text(run.get("status")) or "recorded",
                         "updated_at": brief_text(run.get("updated_at") or run.get("created_at")),
@@ -7484,6 +7588,10 @@ def _takyon_business_overview_payload(
                     "tool_name": brief_text(trace_payload.get("tool_name")),
                     "skill_name": brief_text(trace_payload.get("skill_name")),
                     "summary": brief_text(trace_payload.get("summary")),
+                    # Per-tool timing for the build-phase ladder (may be None on
+                    # legacy traces recorded before durations were persisted).
+                    "duration_s": trace_payload.get("duration_s"),
+                    "started_at": trace_payload.get("started_at"),
                 }
                 upsert_trace_entry(trace_by_key, trace_order, trace_entry)
             else:
@@ -8024,6 +8132,11 @@ def _takyon_business_overview_payload(
             job_card["title"] = job.get("title")
         if job.get("description"):
             job_card["description"] = job.get("description")
+        # TASK 19: carry the live tweet (or other openable) URL onto the task card so
+        # canonical_task can return it and the UI can link the X-post task/card to the
+        # real post. One canonical field name end to end: open_url.
+        if job.get("open_url"):
+            job_card["open_url"] = job.get("open_url")
         task_cards.append(job_card)
     for run in agent_runs[:4]:
         run_card = {
@@ -8214,6 +8327,15 @@ def _takyon_business_overview_payload(
         "tasks": task_cards[:16],
         "status_cards": status_cards,
         "ceo_loop": ceo_loop,
+        # Customer-facing conversational chat. `chat_stream` is the ordered
+        # (oldest→newest) list of the CEO's deliberate, customer-safe messages that
+        # the litebulb transcript renders as assistant bubbles. `chat_summary` is the
+        # latest curated summary — a durable last-known one-liner for reload, shown
+        # as a single plain bubble (NOT a "What changed" card). The milestone/phase
+        # ladder stays under `tasks` only and never enters the chat.
+        "chat_stream": ceo_chat_stream,
+        "chat_summary": _takyon_sanitize_chat_text(operator_update_summary)
+        or operator_update_summary,
         "wake_health": wake_health,
         "research": {
             "status": "visible" if research_visible else "needed",
@@ -9004,6 +9126,147 @@ def _takyon_clean_runtime_line(line: str) -> str:
     return text[:360]
 
 
+def _takyon_openable_url(value: Any) -> str:
+    """Return value only when it is a clickable http(s)/data URL or bare domain.
+
+    Module-level twin of the local `openable_url` helpers in the overview/boot
+    builders, so canonical_task (in _takyon_live_state_payload) can resolve the same
+    openable URL without duplicating the regex. Used for the X-post open_url.
+    """
+    text = str(value or "").strip() if isinstance(value, (str, int, float, bool)) else ""
+    if not text:
+        return ""
+    if re.match(r"^(https?://|data:)", text, re.I):
+        return text
+    if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?:/.*)?$", text, re.I):
+        return text
+    return ""
+
+
+# Customer-safe chat sanitizer. The litebulb chat now renders the CEO's curated
+# conversational messages (business_post_operator_update headline + summary) as a
+# real assistant-message transcript — NOT the raw message.delta stream (which is
+# chain-of-thought/planning) and NOT the milestone/phase ladder (Tasks-panel only).
+# The CEO prompt already bans internal jargon from these fields, but this gate
+# FAILS SAFE if the model slips: any line that names a tool/skill/worker, a file
+# path, or a build/deploy mechanic is dropped before it reaches the customer.
+# Mirrors the frontend ban-list in web/src/lib/takyonCeoUpdates.ts
+# (CUSTOMER_PLUMBING_PATTERNS) and the CEO-prompt ban-list in
+# plugins/takyon/prompts/ceo.md, so the same plumbing/PII contract is enforced on
+# both ends of the channel.
+_TAKYON_CHAT_TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql"
+_TAKYON_CHAT_PLUMBING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(business_[a-z_]+|takyon[-_][a-z-]+|claude[ _-]?agent|claude_agent_task)\b", re.I),
+    re.compile(r"\b(skill|worker lane|site worker|surface contract|app account|app shell|subuser|toolset|work request|work-request)\b", re.I),
+    re.compile(r"\b(bootstrap|scaffold|provision|upsert|runtime rail|workspace|delegate|delegated)\b", re.I),
+    re.compile(r"\b(npm|pnpm|yarn|tsc|typecheck|vite|vercel|deploy(?:ed|ing|ment)?|webpack|eslint|pytest|py_compile)\b", re.I),
+    re.compile(r"\b(actions/|screens/|src/|product/site/|metrics/|distribution/|research/)", re.I),
+    re.compile(rf"\b[\w.-]+\.(?:{_TAKYON_CHAT_TEXT_EXTENSIONS})\b", re.I),
+    re.compile(r"\b(executing|running)\s+[`'\"]?[a-z]", re.I),
+    re.compile(r"\bI'?ll (?:load|invoke|call|delegate|run the)\b", re.I),
+    # Planner/deliberation lead-ins the CEO prompt bans from customer voice:
+    # "Next: I'll …", "Let me think …", "Considering whether to target X or Y",
+    # "Deciding whether …", "Should I …". Matches a line that STARTS with the
+    # planner deliberation so customer-safe prose that merely contains the word
+    # mid-sentence is preserved.
+    re.compile(
+        r"^(let me|considering|deciding whether|should i|"
+        r"i(?:'?ll| will| need to| am going to|'?m going to)|now i(?:'?ll| will))\b",
+        re.I,
+    ),
+    # Sequencing words (Next/First/Then) are chain-of-thought ONLY as a planner
+    # HEADER ("Next:", "First:"). Narrative "First, your homepage is live." /
+    # "Then you can invite teammates." is warm customer prose and must be kept —
+    # so anchor on a trailing colon, not a bare word boundary.
+    re.compile(r"^(next|first|then)\s*:", re.I),
+    # Affirmation / realization META-OPENERS ("Good — I get what's going on now.",
+    # "Got it, building.", "Okay, so…", "Makes sense — done."): a line that STARTS
+    # with the model acknowledging its own understanding is internal thinking-stream
+    # filler, not a customer update. Two tiers so warm prose survives: the strong
+    # realization phrases (got it / i get what's / makes sense …) drop on any clause,
+    # while the short ambiguous words (good / okay / so / right …) drop ONLY when an
+    # immediate delimiter or "now" follows — so "Good news, your homepage is live."
+    # and "So you can now invite teammates." are KEPT. Byte-identical with the
+    # frontend ban-list in web/src/lib/takyonCeoUpdates.ts (CUSTOMER_PLUMBING_PATTERNS).
+    re.compile(
+        r"^(?:(?:got it|i get (?:what is|what'?s)|i see (?:what is|what'?s)|i understand|makes sense|let'?s see|let us see)\b|(?:good|okay|ok|alright|right|so)\s*(?:[,:–—-]|\bnow\b))",
+        re.I,
+    ),
+    # Internal jargon nouns ceo.md bans from customer voice — anchored to the
+    # plumbing phrasing ("product/app/business surface", "surface contract") so the
+    # everyday verb "surface" ("we surface your best insights") is preserved.
+    re.compile(r"\b(workstream|(?:product|app|business)\s+surface|surface contract|research files|wedge)\b", re.I),
+)
+
+
+def _takyon_sanitize_chat_text(text: str) -> str:
+    """Strip internal plumbing from a CEO conversational message line-by-line.
+
+    Returns "" when nothing customer-safe remains (the caller then drops that
+    message entirely). Presentation-only — never alters the agent's turn context.
+    """
+    normalized = _takyon_clean_runtime_line(text) if "\n" not in str(text or "") else str(text or "")
+    normalized = str(normalized or "").strip()
+    if not normalized:
+        return ""
+    kept: list[str] = []
+    for raw_line in normalized.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        if any(pattern.search(line) for pattern in _TAKYON_CHAT_PLUMBING_PATTERNS):
+            continue
+        kept.append(line)
+    out = "\n".join(kept)
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out[:600]
+
+
+def _takyon_ceo_chat_stream(
+    operator_update_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ordered (oldest→newest) customer-safe CEO chat messages.
+
+    Each business.operator_update event is the CEO's DELIBERATE, curated
+    conversational message for one stretch of work: a warm headline plus a 1-2
+    sentence summary. We surface them as an ordered assistant-message stream so the
+    litebulb chat reads like a real OpenAI/Claude conversation (a living stream of
+    progress messages, not a single static "What changed" card). The milestone /
+    phase ladder carried on the same event is intentionally NOT included here — it
+    is scoped to the Tasks panel only. Every message is run through the
+    customer-safe sanitizer; a message whose entire text is plumbing is dropped.
+    """
+    messages: list[dict[str, Any]] = []
+    for event in operator_update_events:
+        if not isinstance(event, dict):
+            continue
+        headline = str(event.get("headline") or "").strip()
+        summary = str(event.get("summary") or "").strip()
+        # The conversational bubble text leads with the warm headline, then the
+        # 1-2 sentence summary on its own line when it adds detail.
+        parts = [headline]
+        if summary and summary != headline:
+            parts.append(summary)
+        raw_text = "\n".join(part for part in parts if part).strip()
+        safe_text = _takyon_sanitize_chat_text(raw_text)
+        if not safe_text:
+            continue
+        posted_at = str(event.get("posted_at") or event.get("updated_at") or "").strip()
+        messages.append(
+            {
+                "id": f"ceo-update:{posted_at or len(messages)}",
+                "role": "assistant",
+                "text": safe_text,
+                "headline": _takyon_sanitize_chat_text(headline) or headline[:200],
+                "summary": _takyon_sanitize_chat_text(summary),
+                "posted_at": posted_at,
+            }
+        )
+    return messages
+
+
 def _takyon_set_background_run(business: str, run: dict[str, Any]) -> None:
     slug = str(business or "").strip()
     if not slug:
@@ -9210,16 +9473,58 @@ def _takyon_task_category(label: str, detail: str, source: str) -> str:
 _TAKYON_TASK_TITLE_MAX_WORDS = 8
 
 
+# Internal worker/tool identifiers that must NEVER reach a customer-facing card
+# title. A label that IS (or starts with) one of these is plumbing — it is mapped
+# to a general, business-language title instead. This is the fail-closed gate for
+# TASK 10: even if some upstream path emits a raw worker label, the card title is
+# normalized here rather than leaking "Delegated worker" / "Claude agent task" /
+# "Agent run" / a bare "build" kind to the customer. The raw label stays available
+# only in the expanded "raw:" detail row.
+_TAKYON_INTERNAL_WORKER_TITLE = "Working on the product"
+_TAKYON_INTERNAL_WORKER_TOKENS = (
+    "delegated worker",
+    "delegate worker",
+    "delegated workspace task",
+    "claude agent task",
+    "claude-agent-task",
+    "claude agent sdk",
+    "agent run",
+    "business claude agent task",
+    "business_claude_agent_task",
+    "worker lane",
+    "site worker",
+)
+# Bare raw job kinds that are not descriptive on their own. "build" / "deploy"
+# alone read as plumbing, so they get a general product-work title; the richer
+# job_label mappings ("Product build", "Build product surface") are kept as-is.
+_TAKYON_BARE_KIND_TITLES = {
+    "build": "Working on the product",
+    "deploy": "Publishing the product",
+    "work request": "Working on the company",
+    "background run": "Working on the company",
+}
+
+
 def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
     """Verb-led, outcome-first title — never a raw tool-call string (<=8 words).
 
     Operator-approved style: outcome-first, capped at 8 words. Strips obvious
     tool/identifier noise so a card never shows e.g. "business_write_file" or
-    "takyon:tool:foo"; does not invent specific business copy.
+    "takyon:tool:foo"; does not invent specific business copy. Fail-closed: any
+    known internal worker/tool identifier is replaced with a general business
+    title (TASK 10) so "Delegated worker" / "Claude agent task" / a bare "build"
+    can never leak to the customer card.
     """
     text = str(label or "").strip()
     if not text:
         text = "Recorded work"
+    # Fail-closed worker-token gate: a label that is (or leads with) a known
+    # internal worker identifier becomes a general business-language title.
+    lowered = text.lower()
+    if any(token in lowered for token in _TAKYON_INTERNAL_WORKER_TOKENS):
+        return _TAKYON_INTERNAL_WORKER_TITLE
+    if lowered in _TAKYON_BARE_KIND_TITLES:
+        return _TAKYON_BARE_KIND_TITLES[lowered]
     # Strip raw tool/skill identifier shapes so a card never shows e.g.
     # "business_write_file" or "takyon:tool:foo".
     if re.search(r"[a-z]+_[a-z]+|^takyon:|^tool:|::", text):
@@ -9228,6 +9533,18 @@ def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
         cleaned = re.sub(r"[._:-]+", " ", cleaned).strip()
         if cleaned:
             text = " ".join(part.capitalize() for part in cleaned.split())
+        # Re-check after de-identifiering in case the cleaned form is a worker token.
+        if any(token in text.lower() for token in _TAKYON_INTERNAL_WORKER_TOKENS):
+            return _TAKYON_INTERNAL_WORKER_TITLE
+    # The internal platform name "Takyon" is never customer-facing (customers see
+    # "Coscale"). Strip it when the CEO leaks it into a prose title as the brand
+    # adjective, e.g. "Generate and Finalize Takyon Brand Logo" -> "Generate and
+    # Finalize Brand Logo" (TASK 10). Runs AFTER the identifier-shape strip above so
+    # a "takyon:tool" form is already normalized; here we only clean prose words.
+    if "takyon" in text.lower():
+        text = re.sub(r"\bTakyon\b\s*", "", text, flags=re.IGNORECASE).strip()
+        if not text:
+            text = "Recorded work"
     # Outcome-first style caps the title at 8 words; the full label remains
     # available in the expanded "raw:" detail row.
     words = text.split()
@@ -9256,18 +9573,133 @@ def _takyon_task_description(label: str, detail: str, category: str) -> str:
     return f"{lane}: {title}."[:240]
 
 
+# Generic placeholder details that carry no real progress signal. A worker
+# progress line equal to one of these is NOT surfaced onto the running card —
+# we keep the existing label instead (fail-open).
+_TAKYON_GENERIC_PROGRESS_DETAILS = frozenset(
+    {
+        "working on the product",
+        "working on the product.",
+        "working on the company",
+        "working on the company.",
+        "runtime event recorded.",
+        "run recorded in audit trail.",
+        "tracked in the workspace overview.",
+        "recorded work",
+        "ceo live trace",
+        "claude task is running.",
+        "claude task started.",
+    }
+)
+
+
+def _takyon_clean_worker_progress_detail(detail: str) -> str:
+    """Customer-clean a worker progress line for the running card's detail.
+
+    Fail-closed: strips ANSI / arrow noise via _takyon_clean_runtime_line, then
+    drops the line entirely (returns "") if it carries a raw internal
+    worker/tool identifier ("Claude agent task", "Delegated worker",
+    "business_claude_agent_task", …) or is a bare generic placeholder. The
+    caller keeps the existing label when this returns "" (TASK 17 fail-open).
+    """
+    text = _takyon_clean_runtime_line(detail)
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in _TAKYON_GENERIC_PROGRESS_DETAILS:
+        return ""
+    if any(token in lowered for token in _TAKYON_INTERNAL_WORKER_TOKENS):
+        return ""
+    # A raw tool/skill identifier shape (business_write_file, takyon:tool:foo,
+    # foo::bar) is plumbing — never surface it on the customer-facing card.
+    if re.search(r"\b[a-z]+_[a-z_]+\b|takyon:|(?:^|\s)tool:|::", lowered):
+        return ""
+    return text[:240]
+
+
+def _takyon_running_worker_progress_detail(
+    live_tasks: list[dict[str, Any]],
+    current_task_id: str,
+) -> str:
+    """Latest worker/runtime progress line nested under the running anchor.
+
+    TASK 17: while business_claude_agent_task runs, the gateway records the
+    worker's current step as nested runtime/trace child rows (Agent A's progress
+    sink in core.py). Those rows only show when the card is expanded; the
+    collapsed RUNNING card otherwise sits on a static "Working on the product"
+    detail for the whole long worker phase. Here we pick the freshest such child
+    so the caller can surface it as the running card's live detail.
+
+    Fail-open: returns "" when there is no anchor, no running child, or no
+    customer-clean progress line — the caller then keeps the existing label.
+    """
+    anchor_id = str(current_task_id or "").strip()
+    if not anchor_id:
+        return ""
+    best_detail = ""
+    best_updated = ""
+    for task in live_tasks:
+        if not isinstance(task, dict):
+            continue
+        task_id = str(task.get("id") or "").strip()
+        parent = str(task.get("task_id") or "").strip()
+        # Only rows nested UNDER the running anchor (not the anchor itself).
+        if parent != anchor_id or task_id == anchor_id:
+            continue
+        if str(task.get("status") or "").strip() != "running":
+            continue
+        # Worker/runtime progress lives on the low-level event rows.
+        if str(task.get("source") or "").strip() not in {"runtime", "trace", "agent"}:
+            continue
+        cleaned = _takyon_clean_worker_progress_detail(str(task.get("detail") or ""))
+        if not cleaned:
+            continue
+        updated = str(task.get("updated_at") or "").strip()
+        # Prefer the most recently updated child; lexical compare is safe for the
+        # ISO-8601 created_at timestamps the gateway records.
+        if best_detail and updated <= best_updated:
+            continue
+        best_detail = cleaned
+        best_updated = updated
+    return best_detail
+
+
 def _takyon_attach_operator_update_copy(
     live_state: Any, overview: dict[str, Any] | None
 ) -> None:
-    """Surface the CEO's curated headline/summary on the live_state.
+    """Surface the CEO's curated chat copy + running flag on the live_state.
 
-    business_post_operator_update mirrors its warm headline + 1-2 sentence
-    summary onto overview.ceo_loop. We copy that onto the live_state so the chat
-    "CEO update" card shows the curated operator copy — never the raw assistant
-    reasoning stream. Presentation-only; does not touch the agent's turn context.
+    business_post_operator_update mirrors its warm headline + 1-2 sentence summary
+    onto overview.ceo_loop, and the overview builder also assembles the ordered
+    customer-safe chat stream (overview.chat_stream) and last summary
+    (overview.chat_summary). We copy those onto the live_state so:
+
+    - `live_state.headline` / `live_state.summary` stay a DURABLE last-known
+      one-liner the litebulb chat can render as ONE plain bubble on reload (never a
+      "What changed" card, never the raw assistant reasoning stream).
+    - `live_state.chat_stream` carries the ordered conversational messages and
+      `live_state.chat_summary` the clean end-of-turn summary, so a reload rebuilds
+      the transcript without waiting on a live turn.
+    - `live_state.chat_running` is the running flag the chat reads to show the
+      thinking/stop affordance, derived from the live_state run status.
+
+    Presentation-only; does not touch the agent's turn context. The milestone/phase
+    ladder is intentionally NOT mirrored here — it stays on overview.tasks /
+    live_state.tasks for the Tasks panel only.
     """
     if not isinstance(live_state, dict) or not isinstance(overview, dict):
         return
+    # Running flag: the chat shows the thinking/stop affordance only while a turn
+    # is actively in flight. live_state.status is the canonical run state. A
+    # queued/gated follow-up job is NOT an active conversational turn, so it must
+    # not spin the customer's thinking dots — only 'running' counts.
+    live_state["chat_running"] = str(live_state.get("status") or "").strip() == "running"
+    chat_stream = overview.get("chat_stream")
+    if isinstance(chat_stream, list):
+        live_state["chat_stream"] = chat_stream
+    chat_summary = str(overview.get("chat_summary") or "").strip()
+    if chat_summary:
+        live_state["chat_summary"] = chat_summary
     ceo_loop = overview.get("ceo_loop")
     if not isinstance(ceo_loop, dict):
         return
@@ -9362,7 +9794,13 @@ def _takyon_live_state_payload(
         parent_task_id = as_text(task.get("task_id") or task.get("parent_task_id"))
         steps = [step for step in as_list(task.get("steps")) if isinstance(step, dict)]
         outputs = [out for out in as_list(task.get("outputs")) if out not in (None, "")]
-        return {
+        # TASK 19: a clickable open_url (e.g. the live tweet for an X-post task)
+        # carried in from the job card. One canonical field name end to end; resolve
+        # through the openable-URL guard so only real clickable URLs survive.
+        open_url = _takyon_openable_url(
+            task.get("open_url") or task.get("post_url") or task.get("url")
+        )
+        canonical = {
             "id": task_id,
             "task_id": parent_task_id or task_id,
             "source": source,
@@ -9377,6 +9815,9 @@ def _takyon_live_state_payload(
             "outputs": outputs,
             "updated_at": updated_at,
         }
+        if open_url:
+            canonical["open_url"] = open_url
+        return canonical
 
     overview_dict = as_dict(overview)
     current_action = as_dict(overview_dict.get("current_action"))
@@ -9523,6 +9964,21 @@ def _takyon_live_state_payload(
                 task.get("task_id")
             ) == as_text(task.get("id")):
                 task["task_id"] = current_task_id
+
+    # TASK 17: surface the Claude-agent worker's live step onto the RUNNING
+    # anchor card. While business_claude_agent_task runs, its progress is recorded
+    # as nested runtime/trace child rows; the collapsed running card would
+    # otherwise sit on a static label for the whole worker phase. Lift the
+    # freshest customer-clean child progress line onto the anchor's detail so the
+    # Tasks UI reflects the current step. Fail-open: keep the existing detail when
+    # there is no worker progress.
+    if current_task_id:
+        worker_step = _takyon_running_worker_progress_detail(live_tasks, current_task_id)
+        if worker_step:
+            for task in live_tasks:
+                if task.get("id") == current_task_id and task.get("status") == "running":
+                    task["detail"] = worker_step
+                    break
 
     def first_task(status: str) -> dict[str, Any] | None:
         return next((task for task in live_tasks if task.get("status") == status), None)

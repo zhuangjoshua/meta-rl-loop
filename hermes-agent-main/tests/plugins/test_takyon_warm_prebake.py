@@ -117,6 +117,29 @@ def test_ready_real_spot_is_reused_without_rebuilding(tmp_path, monkeypatch):
     assert calls["n"] == 0  # short-circuited — no npm ci against a ready prebake
 
 
+def test_publish_reuses_a_complete_concurrent_winner(tmp_path, monkeypatch):
+    """Rename-first publish: if the real spot already holds a COMPLETE tree by publish time (a
+    concurrent build won the race), our finished staging is discarded and the winner's tree is REUSED
+    — never deleted+replaced. Closes the redundant-delete TOCTOU the in-place rmtree had."""
+    prebake = _wire(monkeypatch, tmp_path, npm_run=_npm_success)
+    real_ready = core._warm_node_modules_ready
+    state = {"n": 0}
+
+    def staged_ready(p):
+        state["n"] += 1
+        return False if state["n"] == 1 else real_ready(p)  # top guard misses -> we build a staging
+
+    win = prebake / "node_modules" / ".bin"
+    win.mkdir(parents=True)
+    (win / "vite").write_text("WINNER")
+    (win / "tsc").write_text("WINNER")
+    monkeypatch.setattr(core, "_warm_node_modules_ready", staged_ready)
+    out = core._ensure_warm_node_modules_prebake()
+    assert out == prebake
+    assert (prebake / "node_modules" / ".bin" / "vite").read_text() == "WINNER"  # winner survived
+    assert [p for p in prebake.parent.iterdir() if ".partial-" in p.name] == []  # no staging/aside junk
+
+
 def test_sweep_removes_old_partials_keeps_fresh_and_real(tmp_path):
     parent = tmp_path / "node-modules"
     parent.mkdir()

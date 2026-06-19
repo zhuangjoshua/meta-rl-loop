@@ -16,12 +16,18 @@ export function AppLayout() {
   // so a client-side link click (not just a full reload) triggers checkout.
   useSubscribeIntent(access, searchParams.get("intent"));
 
+  const refreshAccess = access.refresh;
   useEffect(() => {
     if (checkout !== "success" && checkout !== "cancel") return;
+    // After returning from checkout (Stripe live OR the Takyon test-checkout page), re-read the
+    // account so the UI flips to entitled without a manual reload once the entitlement is granted.
+    if (checkout === "success") {
+      void refreshAccess();
+    }
     const next = new URLSearchParams(searchParams);
     next.delete("checkout");
     setSearchParams(next, { replace: true });
-  }, [checkout, searchParams, setSearchParams]);
+  }, [checkout, refreshAccess, searchParams, setSearchParams]);
 
   return (
     <div className="min-h-screen bg-background" data-takyon-scaffold="app-layout">
@@ -88,7 +94,7 @@ export function AppLayout() {
       {auth.busy ? (
         <div className="border-b border-border bg-muted/60">
           <div className="mx-auto w-full max-w-6xl px-6 py-3 text-sm text-muted-foreground">
-            Finishing secure sign-in…
+            Signing you in…
           </div>
         </div>
       ) : null}
