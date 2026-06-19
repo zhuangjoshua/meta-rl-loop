@@ -10070,14 +10070,46 @@ def _warm_node_modules_ready(prebake: Path) -> bool:
     return (nm / ".bin" / "vite").exists() and (nm / ".bin" / "tsc").exists()
 
 
+def _sweep_warm_prebake_partials(parent: Path, *, keep: str, max_age_seconds: float = 1800.0) -> None:
+    """Remove orphaned ``.<name>.partial-*`` staging dirs left behind by force-killed prebake builds.
+
+    Staging dirs are private scratch — never seeded into a business, never read by a consumer; only
+    the atomically-published real spot is. A force-killed ``npm ci`` can therefore leave a partial
+    tree here with zero correctness impact (its junk is simply ignored), but sweeping reclaims the
+    disk. Guarded by age so an in-flight concurrent build's own staging is never deleted out from
+    under it."""
+    try:
+        now = time.time()
+        for child in parent.iterdir():
+            name = child.name
+            if name == keep or not name.startswith(".") or ".partial-" not in name:
+                continue
+            try:
+                if now - child.stat().st_mtime < max_age_seconds:
+                    continue
+            except OSError:
+                continue
+            shutil.rmtree(child, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _ensure_warm_node_modules_prebake() -> Path | None:
     """Build (once per arch+lockhash) a prebaked node_modules from the pinned scaffold lock.
 
     Deterministic `npm ci` from the scaffold's package-lock.json into an arch+lockhash-keyed dir,
     using the shared tarball cache so the FIRST build warms the cache and every later business copies
     from this tree instead of resolving+downloading again. Returns the prebake dir on success, else
-    None (callers degrade to a normal install). The build is guarded behind a coarse file lock so two
-    concurrent bootstraps don't both `npm ci` into the same target."""
+    None (callers degrade to a normal install).
+
+    Crash-safe by construction — no lock, no marker. `npm ci` runs into a private temp sibling on the
+    same filesystem, and only a fully-installed, verified tree is published into the real arch+lockhash
+    spot with a single atomic ``os.replace``. The real spot is therefore ALWAYS absent-or-complete: a
+    force-killed worker (the ``stop-sigterm timed out. Killing.`` case) can only ever leave an orphan
+    ``.partial-*`` sibling — ignored, and swept on the next run — never a stranded "reserved" marker
+    that would permanently revert every later build to a cold install, and never a half-installed tree
+    that could be mistaken for complete and seeded into a business. A killed build leaves the real spot
+    untouched, so the next build simply retries."""
     prebake = _warm_node_modules_prebake_dir()
     if prebake is None:
         return None
@@ -10091,42 +10123,55 @@ def _ensure_warm_node_modules_prebake() -> Path | None:
     npm = _resolve_runtime_executable("npm")
     if not npm:
         return None
-    prebake.mkdir(parents=True, exist_ok=True)
+    parent = prebake.parent
     try:
-        # Coarse, non-blocking guard: an atomic mkdir marker. If another process holds it, it is
-        # already building this exact arch+lockhash prebake; skip rather than double-`npm ci` into the
-        # same target. mkdir is atomic across POSIX + Windows.
-        build_marker = prebake / ".building"
-        try:
-            build_marker.mkdir()
-        except FileExistsError:
-            return prebake if _warm_node_modules_ready(prebake) else None
-        try:
-            # Seed package.json + lock into the prebake dir, then `npm ci` the exact closure. The
-            # shared (arch-keyed) npm tarball cache from _javascript_install_env keeps this offline-
-            # fast after the registry has been hit once. --ignore-scripts matches the scaffold install
-            # path (esbuild 0.21 ships platform binaries as optionalDependencies, no postinstall).
-            shutil.copy2(scaffold_pkg, prebake / "package.json")
-            shutil.copy2(scaffold_lock, prebake / "package-lock.json")
-            env = _javascript_install_env(prebake)
-            proc = subprocess.run(
-                [npm, "ci", "--prefer-offline", "--no-audit", "--no-fund", "--ignore-scripts"],
-                cwd=str(prebake),
-                text=True,
-                capture_output=True,
-                timeout=600,
-                env=env,
-            )
-            if proc.returncode != 0 or not _warm_node_modules_ready(prebake):
-                return None
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    _sweep_warm_prebake_partials(parent, keep=prebake.name)
+    staging: Path | None = None
+    try:
+        # Private staging sibling on the SAME filesystem as the real spot, so the publish below is a
+        # true atomic rename (not a cross-device copy). mkdtemp's unique name means concurrent builds
+        # never collide and a crashed build can't poison a shared path.
+        staging = Path(tempfile.mkdtemp(prefix=f".{prebake.name}.partial-", dir=str(parent)))
+        # Seed package.json + lock into the staging dir, then `npm ci` the exact closure. The shared
+        # (arch-keyed) npm tarball cache from _javascript_install_env keeps this offline-fast after the
+        # registry has been hit once. --ignore-scripts matches the scaffold install path (esbuild 0.21
+        # ships platform binaries as optionalDependencies, no postinstall).
+        shutil.copy2(scaffold_pkg, staging / "package.json")
+        shutil.copy2(scaffold_lock, staging / "package-lock.json")
+        env = _javascript_install_env(staging)
+        proc = subprocess.run(
+            [npm, "ci", "--prefer-offline", "--no-audit", "--no-fund", "--ignore-scripts"],
+            cwd=str(staging),
+            text=True,
+            capture_output=True,
+            timeout=600,
+            env=env,
+        )
+        if proc.returncode != 0 or not _warm_node_modules_ready(staging):
+            return None
+        # Publish atomically. If a concurrent build already published a COMPLETE tree under this exact
+        # arch+lockhash key, keep theirs. Otherwise clear any incomplete/marker-stranded leftover (the
+        # pre-fix failure mode) and swap our finished tree in with a single rename.
+        if _warm_node_modules_ready(prebake):
             return prebake
-        finally:
-            try:
-                build_marker.rmdir()
-            except OSError:
-                pass
+        if prebake.exists():
+            shutil.rmtree(prebake, ignore_errors=True)
+        try:
+            os.replace(str(staging), str(prebake))
+            staging = None  # consumed by the rename
+            return prebake
+        except OSError:
+            # A racing build re-populated the spot between our clear and our rename: accept a ready
+            # spot, else fail soft to a cold install.
+            return prebake if _warm_node_modules_ready(prebake) else None
     except Exception:
         return None
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _copy_node_modules_tree(src: Path, dst: Path) -> bool:
