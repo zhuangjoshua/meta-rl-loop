@@ -11277,8 +11277,6 @@ def _(rid, params: dict) -> dict:
         TakyonStore = takyon_cli.TakyonStore
         resolve_dashboard_create_identity = takyon_cli._resolve_dashboard_create_identity
         run_takyon_command = takyon_cli.run_takyon_command
-        read_model_config = getattr(takyon_cli, "_read_model_config", lambda _store: {})
-        build_bootstrap_turn = getattr(takyon_cli, "_ceo_bootstrap_turn_config", None)
         operator_user_id = _takyon_operator_user_id(session) or None
         # GOAL_RULES §3 gap #2: zero-balance company-creation preflight. Bootstrapping a company
         # spends real operator money, so refuse BEFORE any business row, identity resolution, or
@@ -11299,7 +11297,14 @@ def _(rid, params: dict) -> dict:
         )
 
         command_argv = ["create", "--live"]
-        if can_stream_bootstrap or not bootstrap_enabled:
+        # BUG-004 fix: only suppress the durable bootstrap on the skill-lab/headless path
+        # (bootstrap=false). For every real "Start building" click we now KEEP auto_start on, so
+        # `create --live` enqueues the durable ceo_bootstrap worker job (the same path the CLI uses)
+        # instead of running the CEO turn in-process in the gateway. The in-process turn was not
+        # durable (a dashboard restart killed it) and ran in the live chat session's agent rather than
+        # the worker's fresh, isolated agent — which is why the instant first-paint reliably fired on
+        # the CLI worker path but the dashboard thrashed into a slow 2-pass build.
+        if not bootstrap_enabled:
             command_argv.append("--no-auto")
         if resolved_name:
             command_argv.extend(["--name", resolved_name])
@@ -11322,8 +11327,8 @@ def _(rid, params: dict) -> dict:
             command_result=command_result,
         )
         active_mode = "live"
-        config = read_model_config(store)
-        schedule = str(config.get("default_ceo_schedule") or "every 6h").strip() or "every 6h"
+        # The post-bootstrap CEO wake schedule is now owned by the durable worker job
+        # (worker.ceo_bootstrap_handler → cron.ensure_ceo_wakeup), not this in-process handler.
         _takyon_invalidate_businesses_cache(session)
         session["takyon_current_business"] = slug
         # Mark this session's create as a LIVE bootstrap BEFORE building the boot
@@ -11376,160 +11381,36 @@ def _(rid, params: dict) -> dict:
                 },
             )
 
-        # The live-bootstrap signal was already set before the boot workspace was
-        # built above (so the create response carries the seeded ladder/scaffold);
-        # it stays set on the bootstrap-enabled path through the streaming turn.
-
-        if not can_stream_bootstrap:
-            bootstrap_job = (
-                command_result.get("bootstrap_job") or {}
-                if isinstance(command_result, dict)
-                else {}
-            )
-            if bootstrap_job:
-                session["takyon_background_run"] = {
-                    "kind": "create",
-                    "business": slug,
-                    "status": str(bootstrap_job.get("status") or "queued"),
-                    "started_at": time.time(),
-                    "detail": "Queued CEO bootstrap job.",
-                    "job_id": str(bootstrap_job.get("job_id") or ""),
-                }
-                _takyon_set_background_run(slug, session["takyon_background_run"])
-            return _ok(
-                rid,
-                {
-                    "business_slug": slug,
-                    "business_name": resolved_name,
-                    "goal": requested_goal,
-                    "mode": active_mode,
-                    "job_id": str(bootstrap_job.get("job_id") or ""),
-                    "job_kind": str(bootstrap_job.get("kind") or "ceo_bootstrap"),
-                    "job_status": str(bootstrap_job.get("status") or "queued"),
-                    "lifecycle_state": "queued" if bootstrap_job else "ready",
-                    "scope": f"business:{slug}",
-                    "current": current,
-                    "overview": workspace.get("overview") or {},
-                    "outputs": workspace.get("outputs") or [],
-                    "deliverables": workspace.get("deliverables") or [],
-                    "background_run": workspace.get("background_run") or session.get("takyon_background_run"),
-                    "live_state": workspace.get("live_state") or {},
-                    "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
-                },
-            )
-
-        session.pop("takyon_background_run", None)
-        if callable(build_bootstrap_turn):
-            bootstrap_turn = build_bootstrap_turn(
-                slug,
-                requested_goal,
-                active_mode,
-                business_name=resolved_name,
-            )
-        else:
-            bootstrap_turn = {
-                "user_prompt": requested_goal or f"Bootstrap business:{slug} now.",
-                "ephemeral_system_prompt": "",
-                "enabled_toolsets": ["takyon", "web", "skills"],
-                "disabled_toolsets": [],
-                "load_soul_identity": False,
-                "skip_memory": True,
-                "skip_context_files": True,
-                "max_turns": 20,
-            }
-        bootstrap_user_prompt = str(bootstrap_turn.get("user_prompt") or "")
-        bootstrap_agent_config = {
-            "enabled_toolsets": list(bootstrap_turn.get("enabled_toolsets") or []),
-            "disabled_toolsets": list(bootstrap_turn.get("disabled_toolsets") or []),
-            "ephemeral_system_prompt": str(
-                bootstrap_turn.get("ephemeral_system_prompt") or ""
-            )
-            or None,
-            "load_soul_identity": bool(bootstrap_turn.get("load_soul_identity")),
-            "skip_memory": bool(bootstrap_turn.get("skip_memory")),
-            "skip_context_files": bool(bootstrap_turn.get("skip_context_files")),
-        }
-        try:
-            bootstrap_max_turns = int(bootstrap_turn.get("max_turns") or 20)
-        except (TypeError, ValueError):
-            bootstrap_max_turns = 20
-
-        def _finalize_bootstrap() -> str | None:
-            from plugins.takyon.worker import _refresh_business_surface_after_bootstrap
-
-            warning_parts: list[str] = []
-            try:
-                try:
-                    _takyon_require_durable_business(
-                        store,
-                        slug,
-                        context="bootstrap finalization",
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "bootstrap finalization skipped for business:%s: %s",
-                        slug,
-                        exc,
-                    )
-                    return str(exc)
-                surface_refresh = _refresh_business_surface_after_bootstrap(
-                    slug,
-                    job_id=f"session:{session.get('session_key') or sid or slug}",
-                    operator_user_id=operator_user_id,
-                )
-                if isinstance(surface_refresh, dict):
-                    publish = (
-                        surface_refresh.get("publish")
-                        if isinstance(surface_refresh.get("publish"), dict)
-                        else {}
-                    )
-                    publish_status = str(
-                        publish.get("status") or surface_refresh.get("status") or ""
-                    ).strip()
-                    publish_blocker = str(
-                        publish.get("blocker")
-                        or surface_refresh.get("blocker")
-                        or surface_refresh.get("error")
-                        or ""
-                    ).strip()
-                    if publish_status and publish_status != "published" and publish_blocker:
-                        warning_parts.append(
-                            f"Product surface: {publish_status} - {publish_blocker}"
-                        )
-                if schedule:
-                    store.commit(
-                        scope=f"business:{slug}",
-                        operations=[
-                            {
-                                "action": "cron.ensure_ceo_wakeup",
-                                "business": slug,
-                                "schedule": schedule,
-                                "defer_first_run": True,
-                            }
-                        ],
-                        idempotency_key=(
-                            f"session-bootstrap-wake:{session.get('session_key') or sid or slug}:"
-                            f"{slug}:{schedule}"
-                        ),
-                        reason="bootstrap completed and enabled CEO wake loop",
-                        actor="worker",
-                    )
-                return "\n".join(part for part in warning_parts if part)
-            finally:
-                _reset_session_history_for_post_bootstrap_chat(sid, session)
-
-        _start_streaming_session_turn(
-            rid,
-            sid,
-            session,
-            bootstrap_user_prompt,
-            record_user_history=False,
-            max_iterations_override=max(1, bootstrap_max_turns),
-            agent_config_overrides=bootstrap_agent_config,
-            post_complete_callback=_finalize_bootstrap,
-            start_delay_ms=125,
+        # Bootstrap-enabled create: the `create --live` subprocess (no `--no-auto`) ran the auto_start
+        # path and enqueued the durable ceo_bootstrap worker job. Surface that job and let the build
+        # run IN THE WORKER — durable across a dashboard restart (BUG-004) and observed by the dashboard
+        # through the polled workspace mirror (background_run / live_state reconciled from overview.jobs),
+        # instead of running the CEO turn in-process here. The worker also runs the post-bootstrap
+        # surface refresh + cron wake (worker.ceo_bootstrap_handler), so nothing is lost by dropping the
+        # in-process _finalize_bootstrap. The live-bootstrap session signal set above keeps the first
+        # response's seeded ladder/scaffold live until the worker's first job-status write lands.
+        bootstrap_job = (
+            command_result.get("bootstrap_job") or {}
+            if isinstance(command_result, dict)
+            else {}
         )
-        started_stream = True
+        if bootstrap_job:
+            session["takyon_background_run"] = {
+                "kind": "create",
+                "business": slug,
+                "status": str(bootstrap_job.get("status") or "queued"),
+                "started_at": time.time(),
+                "detail": "Queued CEO bootstrap job.",
+                "job_id": str(bootstrap_job.get("job_id") or ""),
+            }
+            _takyon_set_background_run(slug, session["takyon_background_run"])
+        else:
+            session.pop("takyon_background_run", None)
+        # Release the busy guard taken above for can_stream_bootstrap: there is no longer a streaming
+        # turn whose lifecycle would clear it, so clear it here or the chat session stays wedged busy.
+        if can_stream_bootstrap and history_lock is not None:
+            with history_lock:
+                session["running"] = False
         return _ok(
             rid,
             {
@@ -11537,18 +11418,16 @@ def _(rid, params: dict) -> dict:
                 "business_name": resolved_name,
                 "goal": requested_goal,
                 "mode": active_mode,
-                "job_id": "",
-                "job_kind": "ceo_bootstrap",
-                "job_status": "streaming",
-                "lifecycle_state": "streaming",
-                "streaming": True,
-                "output": f"Create started for business:{slug}",
+                "job_id": str(bootstrap_job.get("job_id") or ""),
+                "job_kind": str(bootstrap_job.get("kind") or "ceo_bootstrap"),
+                "job_status": str(bootstrap_job.get("status") or "queued"),
+                "lifecycle_state": "queued" if bootstrap_job else "ready",
                 "scope": f"business:{slug}",
                 "current": current,
                 "overview": workspace.get("overview") or {},
                 "outputs": workspace.get("outputs") or [],
                 "deliverables": workspace.get("deliverables") or [],
-                "background_run": workspace.get("background_run"),
+                "background_run": workspace.get("background_run") or session.get("takyon_background_run"),
                 "live_state": workspace.get("live_state") or {},
                 "businesses": _takyon_businesses_for_session(session, store=_takyon_store(session)),
             },

@@ -10542,6 +10542,54 @@ def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path)
         return False
 
 
+def _ensure_instant_first_paint_brief(
+    *, business_root: Path, build_root: Path, surface: dict[str, Any] | None
+) -> bool:
+    """Deterministic floor for the instant branded first-paint. If the bootstrap/CEO did NOT pin an
+    instant-landing brief AND the just-materialized landing is still the byte-identical seeded scaffold,
+    synthesize a minimal TRUTHFUL brief from canonical state (humanized business name + the surface
+    notes/tagline) and write it to ``build_root/instant_landing.json`` so ``_apply_instant_first_paint_landing``
+    can ship a real branded page (themed tokens.css, not the gray scaffold placeholder) on the FIRST
+    publish — independent of whether the CEO emitted ``business_write_instant_landing`` in the right order.
+
+    This is the UPSTREAM fix for the slow 2-pass thrash: step 2.0 was prompt-driven, so a CEO that
+    skipped or mis-ordered the brief left ``src/tokens.css`` byte-identical to the scaffold placeholder,
+    tripping ``_scaffold_theme_unfinished_blocker`` and forcing the slow design pass before the first
+    publish. The CEO's richer brief still wins when present (this only writes when no brief is pinned).
+    Returns True when a brief was synthesized. Best-effort; never raises."""
+    try:
+        brief_path = (build_root / "instant_landing.json").resolve()
+        if brief_path.exists():
+            # A richer brief is already pinned (CEO/bootstrap, or a prior refresh) — respect it.
+            return False
+        landing_path = build_root / "src" / "screens" / "landing.tsx"
+        scaffold_landing = _subuser_app_scaffold_source_dir() / "src" / "screens" / "landing.tsx"
+        if not (landing_path.is_file() and scaffold_landing.is_file()):
+            return False
+        # Only synthesize over the still-seeded scaffold landing; never invent a brief for a business
+        # whose landing the design pass already customized (the apply step is self-gated the same way).
+        if landing_path.read_text(encoding="utf-8") != scaffold_landing.read_text(encoding="utf-8"):
+            return False
+        slug = business_root.name
+        strings = _subuser_app_starter_strings(surface, slug=slug)
+        headline = str(strings.get("title") or _humanize_business_slug(slug)).strip()
+        subhead = str(strings.get("description") or "").strip()
+        brief = {
+            "eyebrow": "",
+            "headline": headline,
+            "subhead": subhead,
+            "primary_cta": "Continue with Google",
+            "features": [],
+            "accent": "",
+        }
+        brief_path.write_text(
+            json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _refresh_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -10697,6 +10745,13 @@ def _refresh_product_surface_path(
         except Exception as exc:
             result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
             return result
+    # Deterministic instant-landing floor (UPSTREAM fix for the slow 2-pass thrash): if no brief was
+    # pinned, synthesize a minimal truthful one from canonical state so the FIRST publish ships a real
+    # branded page instead of the scaffold placeholder theme. Runs AFTER the materialize (so a
+    # CEO-pinned brief that materialized into the workspace is detected and respected) and BEFORE the
+    # apply below, which consumes it. This makes the fast first-paint independent of whether the CEO
+    # emitted business_write_instant_landing in the right order — on the dashboard worker path too.
+    _ensure_instant_first_paint_brief(business_root=business_root, build_root=root, surface=surface)
     # Instant branded first-paint: apply the deterministic landing the bootstrap pinned (if any),
     # AFTER the materialize re-seeds the scaffold and BEFORE the build, so this first publish ships a
     # REAL branded page (passing the scaffold-visible-shell + placeholder-theme gates) instead of

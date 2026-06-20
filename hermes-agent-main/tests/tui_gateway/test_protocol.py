@@ -780,15 +780,18 @@ def test_takyon_dashboard_create_requires_durable_business_before_streaming(serv
     assert server._sessions[sid]["running"] is False
 
 
-def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(server, monkeypatch):
+def test_takyon_dashboard_create_with_agent_enqueues_durable_job(server, monkeypatch):
+    # BUG-004: even on a streaming-capable session (a live agent), the dashboard create must enqueue the
+    # DURABLE ceo_bootstrap worker job and surface it as queued — NOT run the CEO turn in-process via
+    # _start_streaming_session_turn (which a dashboard restart would kill, and which ran in the chat
+    # session's agent rather than the worker's fresh isolated agent). It must also release the busy
+    # guard it took, so the chat session is not left wedged "busy".
     sid = "takyon-session"
     server._sessions[sid] = {
         "takyon_current_business": "",
         "takyon_operator_user_id": "user-1",
         "agent_ready": threading.Event(),
         "history_lock": threading.Lock(),
-        "history": [{"role": "assistant", "content": "bootstrap transcript"}],
-        "history_version": 7,
         "session_key": "sess-1",
     }
     captured: dict[str, object] = {}
@@ -809,19 +812,13 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
         assert operator_user_id == "user-1"
         return "Latexflow", "latexflow"
 
-    def fake_run_takyon_command(*_args, **_kwargs):
-        return {"success": True, "business": "latexflow", "mode": "live"}
-
-    def fake_bootstrap_turn(*_args, **_kwargs):
+    def fake_run_takyon_command(argv, *_args, **_kwargs):
+        captured["argv"] = list(argv)
         return {
-            "user_prompt": "Bootstrap business:latexflow now.",
-            "ephemeral_system_prompt": "",
-            "enabled_toolsets": ["takyon", "web", "skills"],
-            "disabled_toolsets": [],
-            "load_soul_identity": False,
-            "skip_memory": True,
-            "skip_context_files": True,
-            "max_turns": 20,
+            "success": True,
+            "business": "latexflow",
+            "mode": "live",
+            "bootstrap_job": {"job_id": "job-777", "kind": "ceo_bootstrap", "status": "queued"},
         }
 
     fake_cli.TakyonStore = FakeStore
@@ -830,7 +827,6 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
     # §3 gap #2 preflight: default the fake to a funded operator (no-op) so existing create-path
     # tests exercise the happy path; the dedicated balance-block test overrides this to raise.
     fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
-    fake_cli._ceo_bootstrap_turn_config = fake_bootstrap_turn
     monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
     monkeypatch.setattr(server, "_takyon_unique_business_slug", lambda *_args, **_kwargs: "latexflow")
     monkeypatch.setattr(
@@ -847,7 +843,7 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
             "overview": {"goal": "Overleaf competitor"},
             "outputs": [],
             "deliverables": [],
-            "background_run": None,
+            "background_run": {"kind": "create", "status": "queued"},
             "live_state": {},
         },
     )
@@ -856,28 +852,17 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
         "_takyon_businesses_for_session",
         lambda *_args, **_kwargs: [{"slug": "latexflow", "name": "Latexflow"}],
     )
-    fake_worker = types.ModuleType("plugins.takyon.worker")
-    fake_worker._refresh_business_surface_after_bootstrap = lambda *_args, **_kwargs: {
-        "publish": {"status": "published"}
-    }
-    monkeypatch.setitem(sys.modules, "plugins.takyon.worker", fake_worker)
-
-    class FakeDb:
-        def replace_messages(self, session_id, messages):
-            captured["session_id"] = session_id
-            captured["messages"] = list(messages)
-
-    monkeypatch.setattr(server, "_get_db", lambda: FakeDb())
+    # The bootstrap turn must NOT run in-process on the dashboard gateway anymore — it runs in the worker.
     monkeypatch.setattr(
         server,
         "_start_streaming_session_turn",
-        lambda *_args, **kwargs: captured.__setitem__(
-            "post_complete_callback", kwargs.get("post_complete_callback")
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dashboard bootstrap must enqueue the durable worker job, not stream in-process")
         ),
     )
 
     response = server._methods["takyon.dashboard.create"](
-        "dashboard-create-stream-reset-1",
+        "dashboard-create-durable-1",
         {
             "session_id": sid,
             "business": "latexflow",
@@ -887,17 +872,17 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
         },
     )
 
-    assert response["result"]["streaming"] is True
-    callback = captured["post_complete_callback"]
-    assert callable(callback)
-
-    warning = callback()
-
-    assert warning == ""
-    assert server._sessions[sid]["history"] == []
-    assert server._sessions[sid]["history_version"] == 8
-    assert captured["session_id"] == "sess-1"
-    assert captured["messages"] == []
+    result = response["result"]
+    # The durable ceo_bootstrap job is surfaced as queued (not an in-process stream).
+    assert result["job_id"] == "job-777"
+    assert result["job_kind"] == "ceo_bootstrap"
+    assert result["job_status"] == "queued"
+    assert result["lifecycle_state"] == "queued"
+    assert "streaming" not in result
+    # The create subprocess must NOT suppress the durable enqueue on a real "Start building" click.
+    assert "--no-auto" not in captured["argv"]
+    # The busy guard taken for the streaming-capable session is released (chat not left wedged).
+    assert server._sessions[sid]["running"] is False
 
 
 def test_takyon_dashboard_workspace_uses_explicit_business_slug(server, monkeypatch):

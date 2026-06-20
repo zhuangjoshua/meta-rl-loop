@@ -48,6 +48,14 @@ def test_create_enqueues_bootstrap_after_business_persists(monkeypatch):
     monkeypatch.setattr(takyon_cli, "TakyonStore", FakeStore)
     monkeypatch.setattr(takyon_cli, "_read_model_config", lambda store: {})
     monkeypatch.setattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", fake_enqueue)
+    # This test exercises the enqueue contract, not slug-collision handling. The FakeStore reports the
+    # business on read, which the create chokepoint's pre-create _business_exists probe would treat as an
+    # existing slug and auto-increment to `latexflow-2`; stub it so the slug under test stays `latexflow`.
+    monkeypatch.setattr(takyon_cli, "_business_exists", lambda *_a, **_k: False)
+    # The chokepoint also runs the operator balance preflight + seeds free credits against the real
+    # control-plane DB (each covered by its own PG-gated suite); stub them so this enqueue unit is hermetic.
+    monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", lambda *_a, **_k: None)
+    monkeypatch.setattr(takyon_cli, "_seed_business_free_credits", lambda *_a, **_k: None)
 
     result = takyon_cli.run_takyon_command(
         ["create", "--live", "--schedule", "every 6h", "latexflow", "overleaf competitor"],
@@ -105,11 +113,22 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
     monkeypatch.setattr(takyon_cli, "TakyonStore", FakeStore)
     monkeypatch.setattr(takyon_cli, "_read_model_config", lambda store: {})
     monkeypatch.setattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", fake_enqueue)
+    # This test exercises the enqueue contract, not slug-collision handling. The FakeStore reports the
+    # business on read, which the create chokepoint's pre-create _business_exists probe would treat as an
+    # existing slug and auto-increment to `latexflow-2`; stub it so the slug under test stays `latexflow`.
+    monkeypatch.setattr(takyon_cli, "_business_exists", lambda *_a, **_k: False)
+    # The chokepoint also runs the operator balance preflight + seeds free credits against the real
+    # control-plane DB (each covered by its own PG-gated suite); stub them so this enqueue unit is hermetic.
+    monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", lambda *_a, **_k: None)
+    monkeypatch.setattr(takyon_cli, "_seed_business_free_credits", lambda *_a, **_k: None)
 
+    # Request a turn budget well ABOVE the cap so this asserts the capping relationship, not a literal:
+    # the enqueued budget must be clamped down to _DEFAULT_BOOTSTRAP_MAX_TURNS (a change-detector pinned
+    # to the old literal 20 would silently break every time that cap is retuned).
     takyon_cli.run_takyon_command(
         ["create", "--live", "latexflow", "overleaf competitor"],
         model="",
-        max_turns=30,
+        max_turns=takyon_cli._DEFAULT_BOOTSTRAP_MAX_TURNS + 50,
     )
 
     assert observed["enqueued"] == {
@@ -117,7 +136,7 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
         "goal": "overleaf competitor",
         "mode": "live",
         "schedule": "every 6h",
-        "max_turns": 20,
+        "max_turns": takyon_cli._DEFAULT_BOOTSTRAP_MAX_TURNS,
     }
 
 
