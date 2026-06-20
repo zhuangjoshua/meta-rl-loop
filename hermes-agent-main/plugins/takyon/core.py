@@ -10523,6 +10523,30 @@ def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path)
         css = instant_landing.render_instant_tokens_css(accent=str(brief.get("accent") or ""))
         landing_path.write_text(tsx, encoding="utf-8")
         (build_root / "src" / "tokens.css").write_text(css, encoding="utf-8")
+        # Brand the index.html <head> too — a real <title> + meta description from the brief, and drop
+        # the scaffold-placeholder comment — so the browser TAB is on-message at first paint instead of
+        # staying the bare site name (+ generic meta + a shipped scaffold comment) until the slow design
+        # pass rewrites index.html minutes later. Favicon→logo is deliberately NOT touched here: the
+        # logo isn't generated yet at first paint, so pointing at it would 404 — that repoint stays a
+        # later step. Best-effort: never fail the instant landing on a head-branding hiccup.
+        try:
+            index_path = (build_root / "index.html").resolve()
+            if index_path.is_file():
+                existing_index = index_path.read_text(encoding="utf-8")
+                title_match = re.search(r"<title>(.*?)</title>", existing_index, re.DOTALL)
+                current_name = (title_match.group(1).strip() if title_match else "")
+                if not current_name or "__" in current_name:  # token not materialized → derive from slug
+                    current_name = business_root.name.replace("-", " ").title()
+                eyebrow = str(brief.get("eyebrow") or "").strip()
+                branded_title = f"{current_name} — {eyebrow}" if (current_name and eyebrow) else (current_name or eyebrow)
+                description = str(brief.get("subhead") or brief.get("headline") or "").strip()
+                branded_index = instant_landing.render_instant_index_html(
+                    existing_index, title=branded_title, description=description
+                )
+                if branded_index != existing_index:
+                    index_path.write_text(branded_index, encoding="utf-8")
+        except Exception:
+            pass
         # One-shot: drop the brief from the build so it never ships in dist and never re-applies over
         # the design pass on a later refresh.
         try:

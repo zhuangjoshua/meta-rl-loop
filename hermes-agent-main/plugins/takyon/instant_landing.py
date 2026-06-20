@@ -16,6 +16,7 @@ product-auth) so it compiles against the pinned scaffold with no new deps.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 
@@ -225,3 +226,30 @@ def render_instant_landing_tsx(
 
 def render_instant_tokens_css(*, accent: str | None) -> str:
     return _TOKENS_TEMPLATE.replace("__ACCENT__", _normalize_accent(accent))
+
+
+def render_instant_index_html(existing_html: str, *, title: str, description: str) -> str:
+    """Brand the scaffold ``index.html`` <head> at first paint: a real <title> + meta description
+    from the idea brief, and strip the scaffold-placeholder instruction comment.
+
+    The instant landing already rewrites ``landing.tsx`` + ``tokens.css`` (the visible page), but NOT
+    ``index.html`` — so without this the browser TAB stays the bare site name + a generic description,
+    and the ``SCAFFOLD-PLACEHOLDER`` comment ships to production, until the slow design pass rewrites
+    the head minutes later. Best-effort string surgery: any field whose pattern is not found is left
+    untouched, so the result is always valid HTML (a malformed index.html would fail the vite build
+    and block the very first paint this exists to deliver)."""
+    out = existing_html
+    safe_title = html.escape((title or "").strip())
+    safe_desc = html.escape((description or "").strip(), quote=True)
+    if safe_title:
+        out = re.sub(r"<title>.*?</title>", f"<title>{safe_title}</title>", out, count=1, flags=re.DOTALL)
+    if safe_desc:
+        out = re.sub(
+            r'<meta\s+name="description"\s+content="[^"]*"\s*/?>',
+            f'<meta name="description" content="{safe_desc}" />',
+            out,
+            count=1,
+        )
+    # Drop the scaffold instruction comment so it never reaches a customer's page source.
+    out = re.sub(r"[ \t]*<!--\s*SCAFFOLD-PLACEHOLDER:.*?-->\n?", "", out, flags=re.DOTALL)
+    return out
