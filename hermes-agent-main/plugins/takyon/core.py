@@ -6627,6 +6627,26 @@ def _worker_tool_phase_line(tool_name: str) -> str:
     return "Working on the product"
 
 
+_SHELL_CMD_MARKERS = (
+    "/usr/bin/env", "/bin/bash", "bash -lc", "sh -c", " -lc ", "npm run",
+    "npm ci", "npm install", "npx ", "node ", "yarn ", "pnpm ",
+)
+
+
+def _looks_like_shell_command(text: str) -> bool:
+    """A progress line that is (or wraps) a raw shell command — build checks etc."""
+    low = str(text or "").lower()
+    return any(marker in low for marker in _SHELL_CMD_MARKERS)
+
+
+def _worker_command_phase_line(text: str) -> str:
+    """De-identified build phase for a raw shell-command progress line (BUG #17)."""
+    low = str(text or "").lower()
+    if any(m in low for m in ("build", "typecheck", "tsc", "vite", "compile", "npm ci", "npm install", "test", "lint")):
+        return "Building and testing the product"
+    return "Working on the product"
+
+
 def _claude_worker_progress_line_from_event(event: Mapping[str, Any] | None) -> str:
     """Map a worker SDK event to ONE concise human progress line, or "" to skip.
 
@@ -6652,6 +6672,11 @@ def _claude_worker_progress_line_from_event(event: Mapping[str, Any] | None) -> 
         folded = _worker_tool_phase_line(detail)
         if folded != "Working on the product":
             return folded
+    # Raw shell-command progress (e.g. the build checks' env-wrapped `bash -lc "npm run build"`)
+    # must never surface verbatim in the operator's "Working on…" list — fold it into a
+    # de-identified build phase. The full command stays in the collapsed build-details disclosure.
+    if _looks_like_shell_command(detail) or _looks_like_shell_command(str(trace.get("label") or "")):
+        return _worker_command_phase_line(detail)
     label = str(trace.get("label") or "").strip()
     # Prefer the worker's step label + detail when the label adds context beyond the detail itself.
     if label and label.lower() not in detail.lower():
