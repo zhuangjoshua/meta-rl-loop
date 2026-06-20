@@ -58,7 +58,14 @@ def _insufficient_operator_balance_cls() -> type:
     return _INSUFFICIENT_OPERATOR_BALANCE_CLS
 
 
-_TAKYON_AGENT_TOOLSETS = ["takyon", "web", "skills", "todo"]
+# The interactive dashboard CEO turn IS a CEO turn (a business-scoped operator agent), so it must
+# carry the quarantined `takyon-authority` toolset exactly like the bootstrap (cli.py) and cron
+# (core._ceo_cron_toolsets) CEO turns — otherwise the three product skills (build/iterate/workflow),
+# which require_toolsets:[takyon,takyon-authority], are HIDDEN from the Hermes skills index and the
+# CEO cannot route to product build/iterate/pricing/publish from the dashboard chat (the clickthrough
+# was dead). The authority tools are fail-closed money gates and the worker-only ops self-guard
+# against session-bound calls, so carrying the toolset does not bypass any gate.
+_TAKYON_AGENT_TOOLSETS = ["takyon", "takyon-authority", "web", "skills", "todo"]
 _TAKYON_DISABLED_TOOLSETS = [
     "browser",
     "code_execution",
@@ -67,7 +74,6 @@ _TAKYON_DISABLED_TOOLSETS = [
     "memory",
     "messaging",
     "session_search",
-    "takyon-authority",
     "terminal",
 ]
 
@@ -2272,6 +2278,15 @@ def _forward_isolated_turn_event(
                 "started_at": payload.get("started_at"),
             },
         )
+        # Mirror the in-process _on_tool_complete appender: the isolated worker populates
+        # payload["file_activity"], but the operator dashboard agent ALWAYS runs isolated, so without
+        # this the session's turn file-activity stayed empty and the deterministic post-turn
+        # republish-to-R2 backstop (_finalize_product_surface_after_turn) early-returned on every
+        # operator turn — a CEO edit to product/site that skipped the explicit refresh would land in
+        # source but never republish, while the operator was told it succeeded.
+        acts = payload.get("file_activity")
+        if isinstance(acts, list) and acts:
+            _append_turn_file_activity(session, acts)
         _emit("tool.complete", sid, payload)
         return
     if event == "tool.progress":

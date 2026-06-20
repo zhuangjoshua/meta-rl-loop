@@ -158,11 +158,30 @@ def _tsx_string(value: str) -> str:
     return json.dumps(str(value or "").strip())
 
 
+def _relative_luminance(r: int, g: int, b: int) -> float:
+    """WCAG relative luminance of an sRGB color (0=black, 1=white)."""
+    def _lin(c: float) -> float:
+        c = c / 255.0
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+
+
 def _normalize_accent(accent: str | None) -> str:
+    """Validated brand accent, darkened if needed so the theme's hard-coded WHITE foreground stays
+    readable on it. The accent fills primary buttons / the eyebrow / CTA links (all white text) and
+    sits on a white page, so a light model-supplied accent (e.g. #ffd700) would be unreadable both
+    ways. Darken until white text clears WCAG AA (contrast >= 4.5:1 vs #fff, i.e. luminance <= ~0.18)
+    while keeping the hue, so this stays a one-knob theme with no per-color foreground branching."""
     raw = str(accent or "").strip()
-    if _HEX_RE.match(raw):
-        return raw.lower()
-    return "#2563eb"  # clean default blue
+    if not _HEX_RE.match(raw):
+        return "#2563eb"  # clean default blue
+    raw = raw.lower()
+    r, g, b = int(raw[1:3], 16), int(raw[3:5], 16), int(raw[5:7], 16)
+    for _ in range(12):
+        if _relative_luminance(r, g, b) <= 0.18:
+            break
+        r, g, b = int(r * 0.85), int(g * 0.85), int(b * 0.85)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def render_instant_landing_tsx(
