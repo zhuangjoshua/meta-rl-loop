@@ -9504,6 +9504,37 @@ _TAKYON_BARE_KIND_TITLES = {
     "background run": "Working on the company",
 }
 
+# General business-language title for any residual tool/identifier-shaped label
+# that survives de-identification. The card must never be titled with a raw tool
+# name (BUG-005).
+_TAKYON_GENERAL_BUSINESS_TITLE = "Working on the company"
+
+
+def _takyon_label_is_tool_shaped(text: str) -> bool:
+    """True when `text` still reads like a raw tool / runtime identifier.
+
+    Catches (BUG-005): snake_case tool names (`web_extract`, `skill_view`,
+    `business_upsert_business`), their de-identified Title Case forms
+    ("Web Extract", "Skill View", "Business Upsert Business"), and the bare
+    "CEO turn" / "ceo turn" loop label that carries no underscore. These must
+    never title an operator-facing task card.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if low in {"ceo turn"}:
+        return True
+    # snake_case tool identifier, e.g. web_extract / business_upsert_business.
+    if re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", low):
+        return True
+    # De-identified Title Case form whose first word is an internal namespace
+    # prefix: "Business Upsert Business", "Skill View", "Web Extract".
+    first_word = low.split()[0] if low.split() else ""
+    if first_word in {"business", "skill", "web"} and len(low.split()) >= 2:
+        return True
+    return False
+
 
 def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
     """Verb-led, outcome-first title — never a raw tool-call string (<=8 words).
@@ -9518,6 +9549,12 @@ def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
     text = str(label or "").strip()
     if not text:
         text = "Recorded work"
+    # BUG-005 fail-closed gate (raw form): a label that is itself a tool-shaped
+    # identifier ("web_extract", "business_upsert_business") or the bare "CEO turn"
+    # loop label becomes a general business-language title before any cleanup, so
+    # a raw tool name can never title a card.
+    if _takyon_label_is_tool_shaped(text):
+        return _TAKYON_GENERAL_BUSINESS_TITLE
     # Fail-closed worker-token gate: a label that is (or leads with) a known
     # internal worker identifier becomes a general business-language title.
     lowered = text.lower()
@@ -9545,6 +9582,12 @@ def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
         text = re.sub(r"\bTakyon\b\s*", "", text, flags=re.IGNORECASE).strip()
         if not text:
             text = "Recorded work"
+    # BUG-005 fail-closed gate (cleaned form, defense-in-depth): if the
+    # de-identified title still reads as a tool/namespace identifier — e.g.
+    # "Web Extract", "Skill View", "Business Upsert Business" — replace it with a
+    # general business-language title so no raw tool name can title a card.
+    if _takyon_label_is_tool_shaped(text):
+        return _TAKYON_GENERAL_BUSINESS_TITLE
     # Outcome-first style caps the title at 8 words; the full label remains
     # available in the expanded "raw:" detail row.
     words = text.split()
@@ -9711,9 +9754,45 @@ def _takyon_attach_operator_update_copy(
         live_state["summary"] = detail
 
 
+# Window (seconds) during which a session's pending dashboard-create signal still
+# counts as a LIVE bootstrap. Matches the pending-create auto-enter window in
+# `_takyon_maybe_auto_enter_created_business` so the live-state scaffold and the
+# auto-enter logic expire together.
+_TAKYON_PENDING_CREATE_LIVE_WINDOW_SECONDS = 900
+
+
+def _takyon_session_bootstrap_is_live(session: dict | None, business: str) -> bool:
+    """True when this session has a live (streaming/pending) create for `business`.
+
+    The dashboard create RPC takes the in-process STREAMING path, which never
+    writes a `ceo_bootstrap` job row, so `_takyon_reconcile_background_run` has
+    nothing to synthesize a `background_run` from. Without a background_run the
+    live-state scaffold (BUG-004) would never seed the named workstreams. Use the
+    pending-create session signal (`takyon_pending_business_create` + its
+    timestamp, scoped to the current business slug) as the live-bootstrap trigger
+    so the Tasks panel shows the seeded milestones immediately, before the CEO
+    posts its first operator_update.
+    """
+    if not isinstance(session, dict):
+        return False
+    slug = str(business or "").strip()
+    if not slug:
+        return False
+    if not session.get("takyon_pending_business_create"):
+        return False
+    if str(session.get("takyon_current_business") or "").strip() != slug:
+        return False
+    pending_at = float(session.get("takyon_pending_business_create_at") or 0)
+    if not pending_at:
+        return False
+    return (time.time() - pending_at) <= _TAKYON_PENDING_CREATE_LIVE_WINDOW_SECONDS
+
+
 def _takyon_live_state_payload(
     overview: dict[str, Any] | None,
     background_run: dict[str, Any] | None,
+    *,
+    bootstrap_is_live: bool = False,
 ) -> dict[str, Any]:
     def as_dict(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
@@ -9827,6 +9906,16 @@ def _takyon_live_state_payload(
     run = as_dict(background_run)
     run_status = canonical_task_status(run.get("status"))
     run_label_text = run_label(as_text(run.get("kind")))
+    # BUG-004: the dashboard create RPC streams the bootstrap turn in-process, so
+    # no `ceo_bootstrap` job row exists and `background_run` is None here. When the
+    # caller flags this slug as a live streaming create, synthesize a running
+    # "CEO bootstrap" run so the milestone scaffold below seeds the named
+    # workstreams immediately and the raw runtime events nest under a live anchor.
+    # Never downgrade a real job-backed run: only fill in when there is no
+    # background_run-derived status yet.
+    if bootstrap_is_live and run_status == "idle":
+        run_status = "running"
+        run_label_text = "CEO bootstrap"
     run_detail = as_text(run.get("detail")) or (
         "Setting up the business and starting the first workstream." if run_status == "queued" and run_label_text == "CEO bootstrap"
         else "Working through the business workstreams now." if run_status == "running" and run_label_text == "CEO bootstrap"
@@ -9876,7 +9965,10 @@ def _takyon_live_state_payload(
         "Work request",
         "Background run",
     }
-    bootstrap_is_live = bool(
+    # The scaffold fires either on a job-backed bootstrap/background run that is
+    # live, OR on the caller-supplied streaming pending-create signal (BUG-004),
+    # which has no job row to drive `run_task` directly.
+    bootstrap_scaffold_live = bool(bootstrap_is_live) or bool(
         run_task and run_status in {"running", "queued"} and run_label_text == "CEO bootstrap"
     )
     has_real_intent = any(
@@ -9887,7 +9979,7 @@ def _takyon_live_state_payload(
         )
         for task in raw_tasks
     )
-    if bootstrap_is_live and not has_real_intent:
+    if bootstrap_scaffold_live and not has_real_intent:
         scaffold = _takyon_bootstrap_milestone_scaffold(run_status, run_updated_at)
         # Prepend the scaffold so the named workstreams lead; the raw bootstrap
         # run row stays so its low-level events nest under the running card.
@@ -9964,6 +10056,31 @@ def _takyon_live_state_payload(
                 task.get("task_id")
             ) == as_text(task.get("id")):
                 task["task_id"] = current_task_id
+
+    # BUG-005 (b) — structural: a raw runtime/trace row must never render as a
+    # TOP-LEVEL card. The frontend treats any row whose task_id == id as a
+    # top-level intent card (CompanyTab.Tasks); a runtime/trace event that found
+    # no intent/milestone anchor above still has task_id == id and would float up
+    # as a flat "Web Extract" / "CEO turn" card. Parent any such orphan onto the
+    # current intent anchor when one exists (so it shows only inside the expanded
+    # activity log); when there is NO anchor at all, drop it from the top-level
+    # task list entirely rather than promote a tool-name card. The raw event
+    # remains available via the runtime event feed, not the Tasks rollup.
+    _RUNTIME_LOG_SOURCES = {"runtime", "trace"}
+
+    def _is_orphan_runtime_row(task: dict[str, Any]) -> bool:
+        return as_text(task.get("source")) in _RUNTIME_LOG_SOURCES and as_text(
+            task.get("task_id")
+        ) == as_text(task.get("id"))
+
+    if current_task_id:
+        for task in live_tasks:
+            if task.get("id") == current_task_id:
+                continue
+            if _is_orphan_runtime_row(task):
+                task["task_id"] = current_task_id
+    else:
+        live_tasks = [task for task in live_tasks if not _is_orphan_runtime_row(task)]
 
     # TASK 17: surface the Claude-agent worker's live step onto the RUNNING
     # anchor card. While business_claude_agent_task runs, its progress is recorded
@@ -10248,6 +10365,7 @@ def _takyon_workspace_boot_payload(
     live_state = _takyon_live_state_payload(
         overview if isinstance(overview, dict) else {},
         background_run,
+        bootstrap_is_live=_takyon_session_bootstrap_is_live(session, slug),
     )
     _takyon_attach_operator_update_copy(
         live_state, overview if isinstance(overview, dict) else {}
@@ -10324,6 +10442,7 @@ def _takyon_workspace_payload(
     live_state = _takyon_live_state_payload(
         overview if isinstance(overview, dict) else {},
         background_run,
+        bootstrap_is_live=_takyon_session_bootstrap_is_live(session, slug),
     )
     _takyon_attach_operator_update_copy(
         live_state, overview if isinstance(overview, dict) else {}
@@ -10998,14 +11117,19 @@ def _(rid, params: dict) -> dict:
         # bootstrap work when the operator has no spendable balance. Raises
         # InsufficientOperatorBalance (mapped to 4030 below); fail-open only for identity-less/dev.
         takyon_cli._operator_create_balance_preflight(operator_user_id)
+        store = TakyonStore(operator_user_id=operator_user_id)
+        # BUG-006: resolve the FREE public slug here (passing `store`) so the slug
+        # the dashboard uses for the durable-business check, session focus, and
+        # workspace payload is the SAME slug the `create` subprocess persists after
+        # its collision auto-increment — no stranding or wrong-business attach.
         resolved_name, slug = resolve_dashboard_create_identity(
             requested_name,
             requested_goal,
             str(params.get("slug") or params.get("business") or "").strip(),
             operator_user_id=operator_user_id,
+            store=store,
         )
 
-        store = TakyonStore(operator_user_id=operator_user_id)
         command_argv = ["create", "--live"]
         if can_stream_bootstrap or not bootstrap_enabled:
             command_argv.append("--no-auto")

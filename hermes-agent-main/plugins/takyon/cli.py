@@ -919,10 +919,23 @@ def _resolve_dashboard_create_identity(
     slug_hint: str = "",
     *,
     operator_user_id: str | None = None,
+    store: "TakyonStore | None" = None,
 ) -> tuple[str, str]:
+    # BUG-006: the dashboard caller must receive the SAME slug the `create`
+    # command will actually persist. `create` auto-increments past a slug
+    # collision to the next free slug (`...-2`), so resolving only the preferred
+    # slug here strands the dashboard (its strict durable-business check looks up
+    # the pre-collision slug) or silently attaches to a pre-existing wrong
+    # business. When a store is supplied, resolve the FREE public slug so both
+    # the dashboard and the create subprocess agree on the final slug.
+    def _final_slug(seed_slug: str) -> str:
+        if store is not None:
+            return _resolve_free_public_business_slug(store, seed_slug)
+        return _preferred_public_business_slug(seed_slug)
+
     explicit_name = _collapse_whitespace(name)
     if explicit_name:
-        return explicit_name, _preferred_public_business_slug(explicit_name)
+        return explicit_name, _final_slug(explicit_name)
     goal_text = _collapse_whitespace(goal)
     if goal_text:
         try:
@@ -938,9 +951,11 @@ def _resolve_dashboard_create_identity(
         else:
             resolved_name = _collapse_whitespace(resolved_name)
             if resolved_name:
-                return resolved_name, _preferred_public_business_slug(resolved_name)
-        return _resolve_create_identity("", goal_text, slug_hint)
-    return _resolve_create_identity("", "", slug_hint)
+                return resolved_name, _final_slug(resolved_name)
+        fallback_name, fallback_slug = _resolve_create_identity("", goal_text, slug_hint)
+        return fallback_name, _final_slug(fallback_slug)
+    fallback_name, fallback_slug = _resolve_create_identity("", "", slug_hint)
+    return fallback_name, _final_slug(fallback_slug)
 
 
 @contextlib.contextmanager
@@ -1520,6 +1535,7 @@ def _business_bootstrap_instruction(
         "This 2a pass with `refresh_surface: true` PUBLISHES AND SERVES the landing immediately on its own: the worker's `surface_refresh.publish.status` should come back `published` and the live site at the customer host serves the new landing right away, with the still-seeded real `/app` access shell shipping behind sign-in until 2b refines it. The landing does NOT wait for 2b to be served — confirm `surface_refresh.publish.status == \"published\"` and a real `public_url` in this pass's structured result before continuing.",
         "",
         "Inspect the structured result from this first business_claude_agent_task. Trust only its exact success/blocker and surface_refresh publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, the rest of the app kit, or X.",
+        "A `detached: true` result (status `queued` or `running`, with a re-attach note) is NOT a blocker and NOT a failure — the build is simply still running on the worker plane. Do NOT record it as a blocker and do NOT stop the bootstrap. Re-call business_claude_agent_task with the SAME workspace, instruction, and idempotency_key to re-attach and collect the published result; repeat until it returns either `surface_refresh.publish.status == \"published\"` (continue) or a real blocker (then stop). Only an explicit blocker/error stops the landing.",
         "",
         "#### 2a.1. Register Search Console (immediately after the landing publishes)",
         "As soon as 2a reports `surface_refresh.publish.status == \"published\"` for the landing, register the live site with Google Search Console — do this BEFORE 2b so the single fast idempotent call is front-loaded onto the already-live landing instead of being pushed past the budget by the heavier 2b pass.",

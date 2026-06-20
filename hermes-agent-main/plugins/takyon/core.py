@@ -29839,7 +29839,16 @@ def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
 
 _WORK_REQUEST_TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
 _WORKER_DEFERRAL_POLL_SECONDS = 3.0
-_WORKER_PICKUP_TIMEOUT_SECONDS = 30.0
+# How long the caller waits for the worker to PICK UP (start) a deferred job before it stops
+# blocking. This is NOT "the worker is dead" — under the single-concurrency worker, a new build job
+# legitimately queues behind an in-flight build (~150-250s) plus light jobs (openmeter/ceo_wake), so a
+# 30s pickup window made the CEO wrongly treat a perfectly-queued landing build as a hard blocker and
+# ABORT the whole bootstrap (observed: fridge-to-fork landing never published — "did not start before
+# the pickup deadline" ×3 while the build sat queued behind another build). Give a queued build time to
+# start behind one in-flight build; and when the window still expires, the not-picked-up branch now
+# returns a DETACHED/re-attachable result (not a hard error) so the bootstrap keeps going and the CEO
+# re-attaches to the running job rather than declaring the landing failed.
+_WORKER_PICKUP_TIMEOUT_SECONDS = 240.0
 
 
 def _format_process_exit_detail(returncode: Any, *, process_label: str = "process") -> str:
@@ -30007,14 +30016,26 @@ def _run_operator_task_on_worker(
             return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
         now = time.monotonic()
         if not picked_up and now >= pickup_deadline:
-            return tool_error(
-                f"{tool_name} did not start on the worker plane before the pickup deadline",
-                success=False,
-                status=normalized_status or "queued",
-                run_id=run_id,
-                worker_job=worker_job_id,
-                business=business,
-                kind=kind,
+            # The worker has not STARTED this job yet — it is queued behind an in-flight build on the
+            # single-concurrency worker. That is NOT a failure, so return a DETACHED/re-attachable
+            # result (not a hard tool_error): a bootstrap landing build merely waiting its turn must
+            # not be recorded as a blocker that aborts the whole bootstrap. The caller re-calls with
+            # the same idempotency_key to re-attach and collect the published result.
+            return tool_result(
+                {
+                    "success": False,
+                    "status": normalized_status or "queued",
+                    "detached": True,
+                    "run_id": run_id,
+                    "worker_job": worker_job_id,
+                    "business": business,
+                    "kind": kind,
+                    "note": (
+                        f"{tool_name} is queued on the worker plane (waiting behind an in-flight "
+                        "build) and survives this session. Re-call the tool with the SAME arguments "
+                        f"and idempotency_key to re-attach and collect the result for run {run_id}."
+                    ),
+                }
             )
         if now >= deadline:
             return tool_result(

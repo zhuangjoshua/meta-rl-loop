@@ -76,8 +76,13 @@ def test_canonical_task_title_is_intent_first_not_raw_tool_name():
         ],
     }
     task = _tasks_for(overview)[0]
-    assert task["title"] == "Business Write File"
+    # BUG-005 fail-closed: a raw tool-shaped label ("business_write_file") never
+    # reaches the card as a de-identified tool name ("Business Write File"); it is
+    # replaced with a general business-language title so no raw tool identifier can
+    # title an operator-facing card.
+    assert task["title"] == "Working on the company"
     assert "business_write_file" not in task["title"]
+    assert "Write File" not in task["title"]
     # The raw label is preserved (so the detail panel can show it) but is not the title.
     assert task["label"] == "business_write_file"
 
@@ -363,7 +368,9 @@ def test_workspace_payload_e2e_ties_task_ui_group_together(monkeypatch):
     # ── Card 1: task rollup enrichment + grouping ──
     tasks = {t["id"]: t for t in payload["live_state"]["tasks"]}
     intent = tasks["intent-1"]
-    assert intent["title"] == "Business Write File"  # intent-first, not raw tool name
+    # BUG-005 fail-closed: a raw "business_*" tool label is replaced with a general
+    # business-language title, never the de-identified tool name.
+    assert intent["title"] == "Working on the company"  # general title, not raw tool name
     assert intent["description"]                       # non-empty one-sentence
     assert intent["category"] in {"RESEARCH", "PRODUCT", "LAUNCH", "GROWTH", "OPS"}
     assert intent["status"] == "running"

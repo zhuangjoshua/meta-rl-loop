@@ -1,12 +1,10 @@
-import { useEffect } from "react";
 import { Link, NavLink, Outlet, useSearchParams } from "react-router-dom";
 import { brandMarkDataUri, businessDisplayName } from "../lib/branding";
 import { useProductAuth } from "../lib/product-auth";
-import { useSubscribeIntent, useViewerAccess } from "../lib/hooks";
+import { useCheckoutReturnRefresh, useSubscribeIntent, useViewerAccess } from "../lib/hooks";
 
 export function AppLayout() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const checkout = searchParams.get("checkout");
+  const [searchParams] = useSearchParams();
   const access = useViewerAccess();
   const auth = useProductAuth();
   const productName = businessDisplayName();
@@ -15,19 +13,11 @@ export function AppLayout() {
   // the subscribe button (the button is just a link to the intent route). Pass the reactive `intent`
   // so a client-side link click (not just a full reload) triggers checkout.
   useSubscribeIntent(access, searchParams.get("intent"));
-
-  const refreshAccess = access.refresh;
-  useEffect(() => {
-    if (checkout !== "success" && checkout !== "cancel") return;
-    // After returning from checkout (Stripe live OR the Takyon test-checkout page), re-read the
-    // account so the UI flips to entitled without a manual reload once the entitlement is granted.
-    if (checkout === "success") {
-      void refreshAccess();
-    }
-    const next = new URLSearchParams(searchParams);
-    next.delete("checkout");
-    setSearchParams(next, { replace: true });
-  }, [checkout, refreshAccess, searchParams, setSearchParams]);
+  // After returning from Stripe checkout (live OR the Takyon test-checkout page), re-read the account
+  // so the badge/CTA flip to entitled without a manual reload — with a bounded poll to absorb webhook
+  // lag, plus a tab-focus re-read for the pay-in-another-tab case. Handles the return signal whether it
+  // lands in the query or the hash query, and strips it so a later reload does not re-trigger.
+  useCheckoutReturnRefresh(access);
 
   return (
     <div className="min-h-screen bg-background" data-takyon-scaffold="app-layout">

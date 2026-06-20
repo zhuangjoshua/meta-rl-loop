@@ -236,6 +236,126 @@ export function useSubscribeIntent(
   }, [intent, access.authenticated, access.entitled, access.loading]);
 }
 
+/** Read the query string from BOTH the real query and any hash query. Stripe's `success_url` lands
+ *  back in the SPA, and depending on how the public site routes, the return params can sit either on
+ *  `window.location.search` (`/app?checkout=success`) or inside the hash query of a hash-style URL
+ *  (`/app#/?checkout=success`). Checking both means the return-from-checkout refresh fires regardless
+ *  of which form Stripe redirected to. */
+function checkoutReturnParams(): URLSearchParams {
+  const merged = new URLSearchParams();
+  if (typeof window === "undefined") return merged;
+  const absorb = (raw: string) => {
+    const trimmed = raw.replace(/^[?#]/, "");
+    if (!trimmed) return;
+    for (const [key, value] of new URLSearchParams(trimmed)) {
+      if (!merged.has(key)) merged.set(key, value);
+    }
+  };
+  absorb(window.location.search);
+  const hash = window.location.hash;
+  const queryIndex = hash.indexOf("?");
+  if (queryIndex >= 0) absorb(hash.slice(queryIndex));
+  return merged;
+}
+
+function hasCheckoutReturnSignal(params: URLSearchParams): boolean {
+  return params.get("checkout") === "success" || Boolean(String(params.get("session_id") ?? "").trim());
+}
+
+/** Strip the one-shot checkout return params from the URL (both the real query and any hash query) so
+ *  a later reload does not re-trigger the refresh poll. Uses history.replaceState directly so it works
+ *  even when the params live in the hash, which react-router's setSearchParams would not touch. */
+function stripCheckoutReturnParams(): void {
+  if (typeof window === "undefined") return;
+  const drop = (raw: string): string => {
+    const hadPrefix = raw.startsWith("?") || raw.startsWith("#");
+    const prefix = raw.startsWith("#") ? "#" : "?";
+    const params = new URLSearchParams(raw.replace(/^[?#]/, ""));
+    params.delete("checkout");
+    params.delete("session_id");
+    const next = params.toString();
+    if (!next) return "";
+    return (hadPrefix ? prefix : "") + next;
+  };
+  const search = drop(window.location.search);
+  let hash = window.location.hash;
+  const queryIndex = hash.indexOf("?");
+  if (queryIndex >= 0) {
+    hash = hash.slice(0, queryIndex) + drop(hash.slice(queryIndex));
+  }
+  window.history.replaceState(null, "", window.location.pathname + search + hash);
+}
+
+/** Re-read entitlement after the customer returns from Stripe checkout, without a manual reload.
+ *  Two triggers, both guarded so they cannot loop:
+ *
+ *  1. On mount, if the URL carries the Stripe return signal (`?checkout=success` and/or `session_id`,
+ *     in the query OR the hash query), poll `refresh()` a few times over ~8s to absorb webhook lag,
+ *     stopping as soon as `entitled` flips true, then strip the params so a later reload is inert.
+ *  2. On `visibilitychange`/window `focus`, re-read once (debounced) so returning to the tab after
+ *     paying elsewhere updates the badge/CTA.
+ *
+ *  `entitled` is intentionally NOT a dep of the mount effect — the poll reads the latest value through
+ *  a ref, so the effect runs once per page load and the interval is the only thing that re-checks. */
+export function useCheckoutReturnRefresh(
+  access: Pick<ViewerAccessResult, "entitled" | "refresh">,
+): void {
+  const refresh = access.refresh;
+  const entitledRef = useRef(access.entitled);
+  entitledRef.current = access.entitled;
+  const handledReturnRef = useRef(false);
+
+  // 1. Return-from-checkout poll (runs at most once per page load).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (handledReturnRef.current) return;
+    const params = checkoutReturnParams();
+    if (!hasCheckoutReturnSignal(params)) return;
+    handledReturnRef.current = true;
+    stripCheckoutReturnParams();
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    const maxAttempts = 5; // initial + retries, ~0/2/4/6/8s
+    const poll = () => {
+      void (async () => {
+        await refresh();
+        if (cancelled) return;
+        attempts += 1;
+        if (entitledRef.current || attempts >= maxAttempts) return;
+        timer = setTimeout(poll, 2000);
+      })();
+    };
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [refresh]);
+
+  // 2. Re-read on tab focus / visibility, debounced so quick focus flaps don't hammer the API.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (document.visibilityState === "hidden") return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        void refresh();
+      }, 400);
+    };
+    window.addEventListener("focus", schedule);
+    document.addEventListener("visibilitychange", schedule);
+    return () => {
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("focus", schedule);
+      document.removeEventListener("visibilitychange", schedule);
+    };
+  }, [refresh]);
+}
+
 /** Loads the current product session once on mount via client.session(). */
 export function useSession(): UseSessionResult {
   const [user, setUser] = useState<SessionUser | null>(null);

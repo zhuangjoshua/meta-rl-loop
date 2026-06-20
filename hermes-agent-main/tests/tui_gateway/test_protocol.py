@@ -259,7 +259,7 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         assert name == "Latexflow"
         assert goal == "Overleaf competitor"
         assert slug_hint == "latexflow"
@@ -370,7 +370,7 @@ def test_takyon_dashboard_create_bootstrap_false_creates_ready_dev_business(serv
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         assert name == "Dev Lab"
         assert goal == "test goal"
         assert slug_hint == "dev-lab"
@@ -463,7 +463,7 @@ def test_takyon_dashboard_create_rejects_existing_normalized_slug(server, monkey
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         assert name == "Cat App"
         assert goal == "cat app"
         assert slug_hint == "cat-app"
@@ -571,7 +571,7 @@ def test_takyon_dashboard_create_derives_name_from_goal_once(server, monkeypatch
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         captured["resolve"] = (name, goal, slug_hint, operator_user_id)
         return "Longer", "longer"
 
@@ -653,7 +653,7 @@ def test_takyon_dashboard_create_seeds_current_name_on_first_response(server, mo
         def __init__(self, *args, **kwargs):
             self._operator_user_id = kwargs.get("operator_user_id")
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         assert operator_user_id == "user-1"
         return "Longer", "longer"
 
@@ -739,7 +739,7 @@ def test_takyon_dashboard_create_requires_durable_business_before_streaming(serv
                 return {"success": True, "business": {}}
             return {"success": True}
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         assert name == "Ghost"
         assert goal == "ghost goal"
         assert slug_hint == "ghost"
@@ -802,7 +802,7 @@ def test_takyon_dashboard_create_stream_finalizer_clears_bootstrap_history(serve
         def commit(self, *args, **kwargs):
             return None
 
-    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None):
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
         assert name == "Latexflow"
         assert goal == "Overleaf competitor"
         assert slug_hint == "latexflow"
