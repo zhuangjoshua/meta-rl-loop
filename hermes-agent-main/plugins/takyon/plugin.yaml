@@ -16,6 +16,7 @@ provides_tools:
   - business_set_work_focus
   - business_create_workspace
   - business_write_file
+  - business_write_instant_landing
   - business_patch_file
   - business_record_memory
   - business_upsert_app_surface_contract

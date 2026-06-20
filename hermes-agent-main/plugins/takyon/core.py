@@ -19355,6 +19355,60 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
     )
 
 
+def handle_business_write_instant_landing(args: dict, **_: Any) -> str:
+    """Deterministically render + write a real branded `landing.tsx` + themed `tokens.css` from the
+    launch brief, so the landing can be PUBLISHED for an instant first-paint (~2min) before the slow
+    design pass. Writing real, scaffold-different files is what lets the publish gate pass; data-only
+    branding (hero.json) cannot, because the gate checks the FILES for scaffold byte-identity."""
+    try:
+        from . import instant_landing
+    except Exception:  # pragma: no cover - alternate load path
+        from plugins.takyon import instant_landing
+
+    business = _resolved_business_slug(args, required=True)
+    source_path = str(args.get("source_path") or "product/site").strip() or "product/site"
+    features = args.get("features") if isinstance(args.get("features"), list) else []
+    tsx = instant_landing.render_instant_landing_tsx(
+        eyebrow=str(args.get("eyebrow") or ""),
+        headline=str(args.get("headline") or ""),
+        subhead=str(args.get("subhead") or ""),
+        primary_cta=str(args.get("primary_cta") or "Continue with Google"),
+        features=features,
+    )
+    css = instant_landing.render_instant_tokens_css(accent=str(args.get("accent") or ""))
+    idem = str(args.get("idempotency_key") or "").strip() or f"instant-landing-{_slugify(business)}"
+    written = []
+    for rel, content, tag in (
+        (f"{source_path}/src/screens/landing.tsx", tsx, "landing"),
+        (f"{source_path}/src/tokens.css", css, "tokens"),
+    ):
+        res = handle_business_write_file(
+            {
+                "business": args.get("business") or business,
+                "path": rel,
+                "content": content,
+                "mode": "replace",
+                "idempotency_key": f"{idem}-{tag}",
+                "reason": "instant branded first-paint landing",
+                "actor": args.get("actor") or "agent",
+            }
+        )
+        try:
+            ok = bool(json.loads(res).get("success", True))
+        except Exception:
+            ok = True
+        written.append({"path": rel, "ok": ok})
+    return json.dumps(
+        {
+            "success": all(w["ok"] for w in written),
+            "action": "business_write_instant_landing",
+            "business": business,
+            "written": written,
+            "next": "call business_refresh_product_surface (source_path %s) to build + publish the instant landing" % source_path,
+        }
+    )
+
+
 def handle_business_patch_file(args: dict, **_: Any) -> str:
     business = _resolved_business_slug(args, required=True)
     store = _store()
@@ -31965,6 +32019,29 @@ TAKYON_TOOL_DEFINITIONS = [
             "Write a business-scoped file.",
             {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "path", "content", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_write_instant_landing",
+        "description": "Deterministically write a real branded landing.tsx + themed tokens.css from the launch brief, so the landing can be published for an instant first-paint before the full design pass.",
+        "handler": handle_business_write_instant_landing,
+        "schema": _schema(
+            "business_write_instant_landing",
+            "Write a deterministic branded instant-landing (landing.tsx + tokens.css) from the brief.",
+            {
+                "business": _BUSINESS_PROP,
+                "source_path": {"type": "string", "description": "product surface source path (default product/site)"},
+                "eyebrow": {"type": "string", "description": "2-4 word kicker, e.g. the product category"},
+                "headline": {"type": "string", "description": "the punchy one-line tagline/headline"},
+                "subhead": {"type": "string", "description": "one truthful sentence on the core value proposition"},
+                "primary_cta": {"type": "string", "description": "primary button label (default 'Continue with Google')"},
+                "features": {"type": "array", "description": "2-4 {title, body} feature points from the brief", "items": {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}}},
+                "accent": {"type": "string", "description": "brand accent hex like #0e7c66 (clean blue default)"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "headline", "subhead", "idempotency_key"],
         ),
     },
     {
