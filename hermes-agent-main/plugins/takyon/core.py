@@ -10411,6 +10411,10 @@ def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path)
         # The brief lives INSIDE the product source (build_root) so it materializes with the source
         # into the sandbox build; product/instant_landing.json (outside source_path) never reaches it.
         brief_path = (build_root / "instant_landing.json").resolve()
+        logging.getLogger("takyon.instant_landing").info(
+            "instant-landing inject: brief=%s exists=%s build_root=%s",
+            brief_path, brief_path.is_file(), build_root,
+        )
         if not brief_path.is_file():
             return False
         landing_path = build_root / "src" / "screens" / "landing.tsx"
