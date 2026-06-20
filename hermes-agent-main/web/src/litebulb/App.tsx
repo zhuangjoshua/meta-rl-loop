@@ -154,7 +154,11 @@ function Router() {
       return;
     }
     void createBusiness(pendingIdea);
-  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState, walletBalance]);
+    // Clear the auto-create trigger the instant we initiate, so a RELOAD of /building (which resets
+    // the in-memory buildState to "idle") cannot re-fire createBusiness and mint+bill a SECOND
+    // company. The build screen reads its idea from buildState.goal (set by createBusiness) below.
+    setPendingIdea("");
+  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState, setPendingIdea, walletBalance]);
 
   useEffect(() => {
     if (path !== "/building") return;
@@ -263,7 +267,7 @@ function Router() {
   } else if (path === "/building") {
     view = (
       <Building
-        idea={pendingIdea}
+        idea={buildState.goal || pendingIdea}
         state={buildState}
         workspace={workspace}
         onDone={() => buildState.businessSlug && nav(`/app/c/${buildState.businessSlug}`)}

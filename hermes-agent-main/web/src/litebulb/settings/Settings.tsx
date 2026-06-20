@@ -120,8 +120,15 @@ export function Settings(props: {
   const buyPack = async (packId: string) => {
     if (!onBuyCreditPack || !creditBusinessSlug || !packId) return;
     setBuyingPackId(packId);
+    setCreditPacksError("");
     try {
       await onBuyCreditPack(creditBusinessSlug, packId);
+    } catch (err) {
+      // Surface the failure instead of swallowing it (a 503/502 from a misconfigured Stripe used to
+      // just clear the spinner with no feedback, so the operator thought nothing happened).
+      setCreditPacksError(
+        err instanceof Error && err.message ? err.message : "Could not start the purchase. Please try again.",
+      );
     } finally {
       setBuyingPackId("");
     }

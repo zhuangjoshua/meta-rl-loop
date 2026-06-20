@@ -1766,8 +1766,13 @@ def _enqueue_pg_ceo_bootstrap(
                 "ceo_bootstrap",
                 idempotency_key=_idempotency_key("operator-bootstrap", slug, uuid.uuid4().hex),
                 payload=payload,
-                # Bootstrap is the create-time critical path; keep the normal queue retry cushion.
-                max_attempts=5,
+                # Bootstrap is the create-time critical path, but a full from-scratch re-run is NOT
+                # idempotent across attempts (the CEO mints fresh uuid4 keys, so a retry re-tweets the
+                # X launch and re-reserves the logo credit). Until the sub-step keys are derived
+                # deterministically from the job id (resume-not-restart — tracked separately), bound
+                # the blast radius to one retry so a transient failure can still recover without a
+                # 5× re-tweet / re-charge / model-spend cascade.
+                max_attempts=2,
             )
     return {
         "action": "ceo_bootstrap.enqueue",
