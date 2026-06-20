@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from textwrap import dedent
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 try:
     from dotenv import load_dotenv
@@ -806,6 +806,8 @@ def _is_recoverable_commit_conflict(exc: BaseException) -> bool:
     serialization_failure (40001), deadlock_detected (40P01); and the SQLite IntegrityError /
     "database is locked" equivalents. A SUBSTANTIVE stale-base ``TakyonError`` (a real concurrent
     source edit) is NOT recoverable here and must propagate — retrying would only re-conflict."""
+    if _is_transient_mirror_wipe(exc):
+        return True
     sqlstate = getattr(exc, "sqlstate", None) or getattr(getattr(exc, "diag", None), "sqlstate", None)
     if sqlstate in {"23505", "40001", "40P01"}:
         return True
@@ -816,6 +818,23 @@ def _is_recoverable_commit_conflict(exc: BaseException) -> bool:
     message = str(exc).lower()
     # Driver-wrapped revision-PK collision, without a structured sqlstate.
     return "business_revisions" in message and ("unique" in message or "duplicate" in message)
+
+
+def _is_transient_mirror_wipe(exc: BaseException) -> bool:
+    """True for a FileNotFoundError raised because a local cache-mirror file vanished mid-commit.
+
+    The canonical commit (``storage.write_workspace_revision``) reads each source file TWICE:
+    once to digest it (``workspace_source_digests``, which swallows OSError and simply omits a
+    racy-deleted file) and again, UNGUARDED, to upload its bytes to CAS. A concurrent
+    ``_business_root(sync=True)`` from another store re-materializes the SAME local mirror with
+    ``delete_local=True`` and ``unlink``s any file that is not yet in the committed manifest —
+    e.g. a freshly published ``product/site/public/brand-logo.png`` — between those two reads.
+    The second read then raises ``FileNotFoundError`` and aborts the commit. That is a transient
+    local-scratch race (the durable backend is untouched), not a real failure: re-asserting the
+    file into the re-materialized mirror and retrying the commit succeeds. This was the prod
+    bootstrap-logo bug — the 502 ``No such file or directory: .../public/brand-logo.png`` that
+    left every fresh business on the monogram favicon with no published logo."""
+    return isinstance(exc, FileNotFoundError)
 
 
 def _workspace_truth_surface_name(*, session_scoped: bool) -> str:
@@ -13585,7 +13604,12 @@ class TakyonStore:
         self._track_workspace_revision(normalized, next_revision)
         return next_revision
 
-    def _sync_business_workspace_remote(self, slug: str) -> str:
+    def _sync_business_workspace_remote(
+        self,
+        slug: str,
+        *,
+        before_attempt: Callable[[Path], None] | None = None,
+    ) -> str:
         """Commit the current local business workspace into canonical durable storage.
 
         Optimistic-concurrency: another committer (a concurrent durable write, or a second build-worker
@@ -13595,6 +13619,14 @@ class TakyonStore:
         revision-PK unique violation / a serialization failure). Re-hydrate the base pointer from the DB
         and retry a bounded number of times instead of failing the build. A SUBSTANTIVE stale-base
         TakyonError (a real concurrent source edit) is not recoverable and propagates on the first try.
+
+        ``before_attempt`` is called with the resolved local workspace root BEFORE each commit attempt.
+        It lets a caller that has just written NEW, not-yet-committed files into the local mirror (e.g.
+        the logo-render publish of ``product/site/public/brand-logo.png``) re-assert those files after a
+        concurrent ``_business_root(sync=True)`` from another store re-materialized the mirror with
+        ``delete_local=True`` and unlinked them mid-commit. The commit reads each source file twice
+        (digest, then an UNGUARDED CAS upload), so that mirror wipe surfaces as a transient
+        ``FileNotFoundError`` (``_is_transient_mirror_wipe``) — recoverable here: re-assert and retry.
         """
         normalized = _slugify(slug)
         backend = self._workspace_storage_backend()
@@ -13606,6 +13638,11 @@ class TakyonStore:
         last_exc: BaseException | None = None
         for _attempt in range(_WORKSPACE_COMMIT_MAX_ATTEMPTS):
             try:
+                if before_attempt is not None:
+                    # Re-assert caller-owned new files into the (possibly re-materialized) mirror.
+                    # sync=False: do NOT trigger our own re-materialize here — that would wipe the very
+                    # files the callback is about to (re)write.
+                    before_attempt(self._business_root(normalized, sync=False))
                 with self._connect() as conn:
                     with conn:
                         self._commit_business_workspace_revision(
@@ -13622,6 +13659,11 @@ class TakyonStore:
                 last_exc = exc
                 # Re-hydrate: drop the cached base revision so the next attempt re-reads the true head.
                 self._workspace_revision_cache.pop(normalized, None)
+                if _is_transient_mirror_wipe(exc):
+                    # A concurrent re-materialize wiped our uncommitted local files. Drop the
+                    # sync-cache marker so the next ``before_attempt`` re-resolves a fresh mirror and
+                    # re-asserts the files before we retry the CAS upload.
+                    self._workspace_sync_cache.discard(normalized)
         # Exhausted retries on a genuinely persistent conflict — surface it truthfully.
         if last_exc is not None:
             raise last_exc

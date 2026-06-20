@@ -120,3 +120,104 @@ def test_set_favicon_links_safe_without_head(tmp_path):
     (root / "index.html").write_text(raw, encoding="utf-8")
     core._set_index_favicon_links(root, href="/brand-logo.png", icon_type="image/png")
     assert (root / "index.html").read_text() == raw
+
+
+# ── transient mirror-wipe recovery (the bootstrap-logo 502 root cause) ────────────────────────────
+#
+# The prod bug: logo-render published public/brand-logo.png into the LOCAL cache mirror, then the
+# canonical commit re-read each source file UNGUARDED for CAS upload. A concurrent
+# _business_root(sync=True) from another store re-materialized the mirror with delete_local=True and
+# unlinked the not-yet-committed brand-logo.png mid-commit -> FileNotFoundError -> 502
+# "No such file or directory: .../public/brand-logo.png" -> blocked_authority_runtime_unavailable;
+# the logo never published and the tab favicon stayed the monogram on every fresh business.
+
+
+def test_transient_mirror_wipe_is_recoverable_commit_conflict():
+    # The exact prod exception (FileNotFoundError on the published brand logo) must be classified
+    # recoverable so the commit retries; a real concurrent source edit (stale-base TakyonError) must
+    # NOT be, so it still propagates.
+    fnf = FileNotFoundError(
+        2, "No such file or directory", "/x/product/site/public/brand-logo.png"
+    )
+    assert core._is_transient_mirror_wipe(fnf) is True
+    assert core._is_recoverable_commit_conflict(fnf) is True
+    assert (
+        core._is_recoverable_commit_conflict(core.TakyonError("stale workspace base: ...")) is False
+    )
+
+
+def test_sync_remote_reasserts_files_and_retries_through_mirror_wipe(tmp_path, monkeypatch):
+    """End-to-end shape of the fix: the before_attempt callback re-asserts the published files into
+    the (re-materialized) mirror before EACH commit attempt, and a transient FileNotFoundError from a
+    mid-commit mirror wipe is retried instead of escaping as a 502."""
+
+    class _FakeStore(core.TakyonStore):
+        def __init__(self, root):
+            self.root = root
+            self._workspace_sync_cache = set()
+            self._workspace_revision_cache = {}
+            self._operator_user_id = "op"
+            self._attempts = 0
+
+        # Backend gate: pretend the local backend is configured and allowed.
+        def _workspace_storage_backend(self):
+            return type("B", (), {"name": "local"})()
+
+        def _business_root(self, slug, *, sync=True):
+            r = self.root / core._slugify(slug)
+            r.mkdir(parents=True, exist_ok=True)
+            return r
+
+        def _connect(self):
+            import contextlib
+
+            class _Conn:
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            @contextlib.contextmanager
+            def _outer():
+                yield _Conn()
+
+            return _outer()
+
+        def _canonical_workspace_revision(self, slug):
+            return 0
+
+        def _commit_business_workspace_revision(self, conn, slug, **_):
+            # Simulate the unguarded CAS re-read: first attempt finds the file MISSING (a concurrent
+            # delete_local wipe between before_attempt and here), and raises exactly like
+            # storage.write_workspace_revision's _read_file_bytes. Second attempt sees it present.
+            self._attempts += 1
+            root = self._business_root(slug, sync=False)
+            target = root / "product" / "site" / "public" / core._PUBLISHED_BRAND_LOGO_FILENAME
+            if self._attempts == 1:
+                target.unlink(missing_ok=True)  # the wipe race
+                raise FileNotFoundError(2, "No such file or directory", str(target))
+            assert target.is_file(), "before_attempt must re-publish the logo before the retry"
+            return 1
+
+    monkeypatch.setattr(core, "_remote_workspace_sync_allowed", lambda *_a, **_k: True)
+
+    store = _FakeStore(tmp_path)
+    site_root = store._business_root("acme", sync=False) / "product" / "site"
+    site_root.mkdir(parents=True, exist_ok=True)
+    (site_root / "index.html").write_text(SCAFFOLD_INDEX, encoding="utf-8")
+
+    calls = {"n": 0}
+
+    def _reassert(workspace_root):
+        calls["n"] += 1
+        core._publish_brand_logo_to_site(workspace_root / "product" / "site", png_bytes=PNG)
+
+    result = store._sync_business_workspace_remote("acme", before_attempt=_reassert)
+
+    assert result == "synced"
+    assert store._attempts == 2  # failed once on the wipe, succeeded on retry
+    assert calls["n"] == 2  # re-asserted before BOTH attempts
+    published = site_root / "public" / core._PUBLISHED_BRAND_LOGO_FILENAME
+    assert published.read_bytes() == PNG  # durable after recovery
+    assert not _svg_icon_link((site_root / "index.html").read_text())

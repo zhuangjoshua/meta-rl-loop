@@ -298,7 +298,11 @@ def build_creative_gateway_router() -> APIRouter:
         slug = core._file_slug(str(body.get("slug") or business or "logo"), "logo")
         publication_rel = f"product/brand/logos/{slug}"
         asset_rel = f"{publication_rel}/logo.png"
-        asset_abs = store._resolve_business_file(business, asset_rel)
+        # Resolve once with the default sync=True to materialize the local cache mirror up front and
+        # warm the store's workspace-sync cache, so the publish/commit path below (which resolves with
+        # sync=False) operates on a materialized tree. The brand asset itself is (re)written into the
+        # mirror by the commit's before_attempt callback, not from this path.
+        store._resolve_business_file(business, asset_rel)
         prompt = _gemini_logo_prompt(business_context)
 
         # Brand-level creative: no channel bucket (budget_bucket="").
@@ -338,40 +342,59 @@ def build_creative_gateway_router() -> APIRouter:
             png_bytes = _gemini_generate_logo_png(api_key=api_key, prompt=prompt)
             if not png_bytes:
                 raise RuntimeError("Gemini image generation returned empty image")
-            core._atomic_write_bytes(asset_abs, png_bytes)
-            # Publish the PNG into the live product site IN THIS PROCESS, while the freshly written
-            # bytes are guaranteed present in the local cache mirror. ``asset_abs`` was resolved with
-            # the default ``sync=True`` above, so the mirror is materialized; resolve the site root
-            # with ``sync=False`` so we do NOT re-materialize (that would re-run the mirror with
-            # ``delete_local=True`` and wipe the just-written logo — the exact hazard static_render
-            # documents for its render output). This writes product/site/public/brand-logo.png plus
-            # the injected PNG-favicon <link>, so the single ``_sync_business_workspace_remote`` below
-            # commits BOTH the brand asset AND the published site files in one revision. The core.py
-            # handler reads ``published_to_site`` / ``site_logo_url`` from this response instead of
-            # re-publishing off a stale mirror.
-            try:
-                source_path = core._canonical_product_surface_source_path("product/site")
-                site_root = store._resolve_business_file(business, source_path, sync=False)
-                published_to_site = bool(
-                    core._publish_brand_logo_to_site(site_root, png_bytes=png_bytes)
+
+            source_path = core._canonical_product_surface_source_path("product/site")
+            asset_rel_for_root = asset_rel
+            # Re-assert the rendered asset AND the published site files into the local cache mirror
+            # right before EACH canonical-commit attempt. This runs once normally, and again on a
+            # retry after a concurrent ``_business_root(sync=True)`` from another store re-materialized
+            # the mirror with ``delete_local=True`` and unlinked our not-yet-committed files between
+            # the commit's digest read and its (unguarded) CAS-upload read — the prod bootstrap-logo
+            # race that surfaced as ``502 No such file or directory: .../public/brand-logo.png`` and
+            # left every fresh business on the monogram favicon. Writing here, then committing in the
+            # same retry-protected call, makes the brand asset AND the published site files (public/
+            # brand-logo.png + the repointed favicon <link>) durable in one revision. ``workspace_root``
+            # is resolved by the caller with ``sync=False`` so this callback never triggers a wipe of
+            # the very files it is (re)writing.
+            publish_state: dict[str, Any] = {
+                "published_to_site": False,
+                "site_logo_url": "",
+                "publish_skipped_reason": "",
+            }
+
+            def _reassert_logo_files(workspace_root: Path) -> None:
+                # The asset lives under product/brand/logos/<slug>/logo.png — re-resolve against the
+                # (possibly re-materialized) root so the path is always valid for this attempt.
+                core._atomic_write_bytes(workspace_root / asset_rel_for_root, png_bytes)
+                site_root = workspace_root / source_path
+                try:
+                    published = bool(
+                        core._publish_brand_logo_to_site(site_root, png_bytes=png_bytes)
+                    )
+                except Exception as publish_exc:
+                    # Best-effort publish: never crash the already-rendered (about-to-be-charged) logo.
+                    publish_state["published_to_site"] = False
+                    publish_state["site_logo_url"] = ""
+                    publish_state["publish_skipped_reason"] = f"publish_failed: {publish_exc}"
+                    return
+                publish_state["published_to_site"] = published
+                publish_state["site_logo_url"] = "/brand-logo.png" if published else ""
+                publish_state["publish_skipped_reason"] = (
+                    "" if published else "publish_returned_false"
                 )
-                if published_to_site:
-                    site_logo_url = "/brand-logo.png"
-                else:
-                    publish_skipped_reason = "publish_returned_false"
-            except Exception as publish_exc:
-                # Best-effort publish: never crash the already-rendered (about-to-be-charged) logo.
-                published_to_site = False
-                publish_skipped_reason = f"publish_failed: {publish_exc}"
-            # Persist the rendered logo to canonical remote storage IMMEDIATELY, before committing
-            # the credit. The render wrote the PNG only into the LOCAL cache mirror; a concurrent
-            # ``_business_root(sync=True)`` re-materializes that mirror with ``delete_local=True`` and
-            # would wipe the logo before any later sync — charging credits for an asset that then
-            # vanishes (observed: success+2 credits, but logo.png gone on the next sync). Pushing here,
-            # while both the asset AND the published site files exist, makes them durable at the point
-            # of creation. Same immediate-remote-push pattern static_render already uses for ad
-            # creatives.
-            store._sync_business_workspace_remote(business)
+
+            # Persist the rendered logo + published site files to canonical remote storage IMMEDIATELY,
+            # before committing the credit. The render wrote the PNG only into the LOCAL cache mirror; a
+            # concurrent ``_business_root(sync=True)`` re-materializes that mirror with
+            # ``delete_local=True`` and would wipe the logo before any later sync — charging credits for
+            # an asset that then vanishes (observed: success+2 credits, but logo.png gone on the next
+            # sync). The before_attempt callback re-asserts the files into the mirror immediately before
+            # each commit attempt and the commit retries the transient mirror-wipe, so the asset AND the
+            # published site files are durable at the point of creation.
+            store._sync_business_workspace_remote(business, before_attempt=_reassert_logo_files)
+            published_to_site = bool(publish_state["published_to_site"])
+            site_logo_url = str(publish_state["site_logo_url"] or "")
+            publish_skipped_reason = str(publish_state["publish_skipped_reason"] or "")
             balances = core._commit_creative_credits(
                 reservation_key,
                 action="logo_generate",

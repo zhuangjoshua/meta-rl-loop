@@ -9788,6 +9788,106 @@ def _takyon_session_bootstrap_is_live(session: dict | None, business: str) -> bo
     return (time.time() - pending_at) <= _TAKYON_PENDING_CREATE_LIVE_WINDOW_SECONDS
 
 
+# The keying tool names the Building screen's phase ladder (livePhases in
+# web/src/lib/takyonCeoUpdates.ts) reads from `overview.trace` to light each
+# bootstrap phase (landing -> logo -> Search Console -> sign-on/subscription).
+# A trace row whose `tool_name` is one of these means the build has reached a
+# real keying step, so the server-side seed below must stand down and let the
+# real per-tool traces drive the ladder.
+_TAKYON_BOOTSTRAP_PHASE_KEYING_TOOLS = frozenset(
+    {
+        "business_claude_agent_task",
+        "business_generate_logo",
+        "business_register_search_console",
+    }
+)
+# The first phase (landing) is keyed to the first `business_claude_agent_task`
+# pass. The seed uses this tool so the landing phase renders RUNNING the moment
+# the bootstrap is live, before any real keying-tool trace has been recorded.
+_TAKYON_BOOTSTRAP_PHASE_SEED_TOOL = "business_claude_agent_task"
+
+
+def _takyon_bootstrap_phase_trace_seed(
+    session: dict | None,
+    business: str,
+    overview: dict[str, Any] | None,
+) -> list[dict[str, Any]] | None:
+    """Truthful single keying-tool trace row to surface the build-phase ladder.
+
+    The Building screen's phase ladder (web/src/litebulb/product/Building.tsx ->
+    livePhases) is driven by `overview.trace` rows whose `tool_name` matches a
+    bootstrap keying tool, and the screen hides the whole ladder while every
+    phase is still queued (`showPhases`). On a fresh streaming bootstrap, the CEO
+    spends its opening steps researching / posting operator updates before the
+    first keying tool (`business_claude_agent_task`) fires, so `overview.trace`
+    carries no keying-tool row yet and the named landing -> logo -> Search
+    Console -> sign-on -> subscription ladder never appears during the build.
+
+    When this session has a LIVE bootstrap for `slug` and the real trace has no
+    keying-tool row yet, return a single `business_claude_agent_task` row marked
+    RUNNING (the landing build is the bootstrap's first build target), timed from
+    the pending-create start so the elapsed clock is truthful. This is dropped
+    the instant a real keying-tool trace is recorded — the frontend reads
+    `overview.trace` first, so as soon as the real landing/logo/etc. trace lands
+    it supersedes the seed and the ladder advances on real events. Returns None
+    when the bootstrap is not live or a real keying trace already exists.
+    """
+    if not _takyon_session_bootstrap_is_live(session, business):
+        return None
+    trace_rows = []
+    if isinstance(overview, dict):
+        raw = overview.get("trace")
+        if isinstance(raw, list):
+            trace_rows = raw
+    for entry in trace_rows:
+        if not isinstance(entry, dict):
+            continue
+        tool_name = str(entry.get("tool_name") or "").strip().lower()
+        if tool_name in _TAKYON_BOOTSTRAP_PHASE_KEYING_TOOLS:
+            # A real keying-tool trace already drives the ladder — stand down.
+            return None
+    pending_at = float((session or {}).get("takyon_pending_business_create_at") or 0)
+    started_at_ms = int(pending_at * 1000) if pending_at else None
+    seed_row = {
+        "id": "bootstrap-phase-seed:landing",
+        "entry_key": "bootstrap-phase-seed:landing",
+        "source": "runtime",
+        "kind": "tool",
+        "label": "Building your landing page",
+        "detail": "Starting the first build pass.",
+        "status": "running",
+        "tone": "running",
+        "updated_at": "",
+        "tool_name": _TAKYON_BOOTSTRAP_PHASE_SEED_TOOL,
+        "skill_name": "",
+        "summary": "",
+        "duration_s": None,
+        "started_at": started_at_ms,
+    }
+    return [seed_row]
+
+
+def _takyon_apply_bootstrap_phase_trace_seed(
+    overview_payload: dict[str, Any],
+    session: dict | None,
+    business: str,
+) -> None:
+    """Inject the bootstrap phase-trace seed into `overview_payload['trace']`.
+
+    Mutates `overview_payload` in place. No-op unless `_takyon_bootstrap_phase_
+    trace_seed` returns a seed (i.e. a live bootstrap with no real keying-tool
+    trace yet). The seed leads so the landing phase is the freshest row.
+    """
+    if not isinstance(overview_payload, dict):
+        return
+    seed = _takyon_bootstrap_phase_trace_seed(session, business, overview_payload)
+    if not seed:
+        return
+    existing = overview_payload.get("trace")
+    existing_rows = existing if isinstance(existing, list) else []
+    overview_payload["trace"] = [*seed, *existing_rows]
+
+
 def _takyon_live_state_payload(
     overview: dict[str, Any] | None,
     background_run: dict[str, Any] | None,
@@ -10379,6 +10479,11 @@ def _takyon_workspace_boot_payload(
         )
     )
     overview_payload["product"] = product_payload
+    # Surface the build-phase ladder on the Building screen during a live
+    # bootstrap: seed a single truthful keying-tool trace so livePhases lights
+    # the landing phase before the first real keying tool fires (superseded by
+    # real traces as soon as they land).
+    _takyon_apply_bootstrap_phase_trace_seed(overview_payload, session, slug)
     media = _takyon_workspace_media_payload(overview_payload, [])
     return {
         "business_slug": slug,
@@ -10456,6 +10561,11 @@ def _takyon_workspace_payload(
         )
     )
     overview_payload["product"] = product_payload
+    # Surface the build-phase ladder on the Building screen during a live
+    # bootstrap (see _takyon_apply_bootstrap_phase_trace_seed): seed a single
+    # truthful keying-tool trace so livePhases lights the landing phase before
+    # the first real keying tool fires, superseded by real traces once recorded.
+    _takyon_apply_bootstrap_phase_trace_seed(overview_payload, session, slug)
     media = _takyon_workspace_media_payload(
         overview_payload,
         outputs if isinstance(outputs, list) else [],
@@ -11158,6 +11268,13 @@ def _(rid, params: dict) -> dict:
         schedule = str(config.get("default_ceo_schedule") or "every 6h").strip() or "every 6h"
         _takyon_invalidate_businesses_cache(session)
         session["takyon_current_business"] = slug
+        # Mark this session's create as a LIVE bootstrap BEFORE building the boot
+        # workspace, so the very first create response already carries the seeded
+        # build-phase ladder (Building screen) and the live-state milestone
+        # scaffold (Tasks panel). The `not bootstrap_enabled` branch below pops
+        # these again when there is no bootstrap turn to run.
+        session["takyon_pending_business_create"] = True
+        session["takyon_pending_business_create_at"] = time.time()
         workspace = _takyon_workspace_payload(
             session,
             slug,
@@ -11201,8 +11318,9 @@ def _(rid, params: dict) -> dict:
                 },
             )
 
-        session["takyon_pending_business_create"] = True
-        session["takyon_pending_business_create_at"] = time.time()
+        # The live-bootstrap signal was already set before the boot workspace was
+        # built above (so the create response carries the seeded ladder/scaffold);
+        # it stays set on the bootstrap-enabled path through the streaming turn.
 
         if not can_stream_bootstrap:
             bootstrap_job = (
