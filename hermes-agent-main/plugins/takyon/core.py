@@ -19405,55 +19405,49 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
 
 
 def handle_business_write_instant_landing(args: dict, **_: Any) -> str:
-    """Deterministically render + write a real branded `landing.tsx` + themed `tokens.css` from the
-    launch brief, so the landing can be PUBLISHED for an instant first-paint (~2min) before the slow
-    design pass. Writing real, scaffold-different files is what lets the publish gate pass; data-only
-    branding (hero.json) cannot, because the gate checks the FILES for scaffold byte-identity."""
-    try:
-        from . import instant_landing
-    except Exception:  # pragma: no cover - alternate load path
-        from plugins.takyon import instant_landing
-
+    """Pin the instant-landing brief to `product/instant_landing.json`. The NEXT
+    business_refresh_product_surface reads it and (when the landing is still the seeded scaffold)
+    renders a real branded landing.tsx + themed tokens.css INSIDE the build, after the re-materialize
+    — which is what lets the publish gate accept it and ship a branded first-paint in ~2-3 minutes.
+    Writing the brief (not the files) is deliberate: the refresh re-materializes the scaffold and
+    would clobber any pre-written landing, so the render must happen inside the refresh."""
     business = _resolved_business_slug(args, required=True)
-    source_path = str(args.get("source_path") or "product/site").strip() or "product/site"
     features = args.get("features") if isinstance(args.get("features"), list) else []
-    tsx = instant_landing.render_instant_landing_tsx(
-        eyebrow=str(args.get("eyebrow") or ""),
-        headline=str(args.get("headline") or ""),
-        subhead=str(args.get("subhead") or ""),
-        primary_cta=str(args.get("primary_cta") or "Continue with Google"),
-        features=features,
-    )
-    css = instant_landing.render_instant_tokens_css(accent=str(args.get("accent") or ""))
+    norm_features = []
+    for f in features[:4]:
+        if isinstance(f, dict) and str(f.get("title") or "").strip() and str(f.get("body") or "").strip():
+            norm_features.append({"title": str(f["title"]).strip(), "body": str(f["body"]).strip()})
+    brief = {
+        "eyebrow": str(args.get("eyebrow") or "").strip(),
+        "headline": str(args.get("headline") or "").strip(),
+        "subhead": str(args.get("subhead") or "").strip(),
+        "primary_cta": str(args.get("primary_cta") or "Continue with Google").strip(),
+        "features": norm_features,
+        "accent": str(args.get("accent") or "").strip(),
+    }
     idem = str(args.get("idempotency_key") or "").strip() or f"instant-landing-{_slugify(business)}"
-    written = []
-    for rel, content, tag in (
-        (f"{source_path}/src/screens/landing.tsx", tsx, "landing"),
-        (f"{source_path}/src/tokens.css", css, "tokens"),
-    ):
-        res = handle_business_write_file(
-            {
-                "business": args.get("business") or business,
-                "path": rel,
-                "content": content,
-                "mode": "replace",
-                "idempotency_key": f"{idem}-{tag}",
-                "reason": "instant branded first-paint landing",
-                "actor": args.get("actor") or "agent",
-            }
-        )
-        try:
-            ok = bool(json.loads(res).get("success", True))
-        except Exception:
-            ok = True
-        written.append({"path": rel, "ok": ok})
+    res = handle_business_write_file(
+        {
+            "business": args.get("business") or business,
+            "path": "product/instant_landing.json",
+            "content": json.dumps(brief, ensure_ascii=False, indent=2),
+            "mode": "replace",
+            "idempotency_key": f"{idem}-brief",
+            "reason": "instant branded first-paint brief",
+            "actor": args.get("actor") or "agent",
+        }
+    )
+    try:
+        ok = bool(json.loads(res).get("success", True))
+    except Exception:
+        ok = True
     return json.dumps(
         {
-            "success": all(w["ok"] for w in written),
+            "success": ok,
             "action": "business_write_instant_landing",
             "business": business,
-            "written": written,
-            "next": "call business_refresh_product_surface (source_path %s) to build + publish the instant landing" % source_path,
+            "brief_pinned": "product/instant_landing.json",
+            "next": "call business_refresh_product_surface (source_path product/site) to build + publish the instant branded landing now",
         }
     )
 
