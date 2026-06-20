@@ -9239,6 +9239,17 @@ def _takyon_sanitize_chat_text(text: str) -> str:
     return out[:600]
 
 
+# Clean, generic, honest customer-facing line used ONLY when every curated field
+# of an operator_update sanitizes to empty. Per the reactive-chat spec §38/§32 the
+# litebulb chat is append-only — a posted bubble must never vanish on a later
+# rebuild — but a §32-bounded sanitizer must also never leak plumbing. So when the
+# warm headline/summary over-redacts to nothing we emit this non-empty, plumbing-
+# free line instead of dropping the bubble. It deliberately contains no banned
+# token (verified against _TAKYON_CHAT_PLUMBING_PATTERNS and the frontend mirror
+# CUSTOMER_PLUMBING_PATTERNS), so it survives both ends of the channel unchanged.
+_TAKYON_CHAT_SAFE_FALLBACK = "Working on your business."
+
+
 def _takyon_ceo_chat_stream(
     operator_update_events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -9250,8 +9261,17 @@ def _takyon_ceo_chat_stream(
     litebulb chat reads like a real OpenAI/Claude conversation (a living stream of
     progress messages, not a single static "What changed" card). The milestone /
     phase ladder carried on the same event is intentionally NOT included here — it
-    is scoped to the Tasks panel only. Every message is run through the
-    customer-safe sanitizer; a message whose entire text is plumbing is dropped.
+    is scoped to the Tasks panel only.
+
+    Durability rule (reactive-chat spec §38/§32/§31): the litebulb chat is an
+    append-only assistant-message stream — once posted, a message is NEVER removed,
+    replaced, or collapsed, and a turn that did work NEVER renders blank. So every
+    event renders exactly ONE non-empty, customer-safe bubble. Each curated field
+    is run through the customer-safe sanitizer; if the sanitizer empties the
+    combined text (a §32 over-redaction would otherwise DROP an already-shown
+    bubble on the next rebuild), we fall back — full text → headline → summary →
+    a clean generic line — so the bubble is always non-empty WITHOUT ever leaking
+    internal nouns/paths/tool names. We never fall back to the raw plumbing text.
     """
     messages: list[dict[str, Any]] = []
     for event in operator_update_events:
@@ -9265,16 +9285,27 @@ def _takyon_ceo_chat_stream(
         if summary and summary != headline:
             parts.append(summary)
         raw_text = "\n".join(part for part in parts if part).strip()
-        safe_text = _takyon_sanitize_chat_text(raw_text)
-        if not safe_text:
-            continue
+        # Never drop a real CEO turn to nothing: prefer the full curated text, then
+        # the headline alone, then the summary alone, and only when EVERY curated
+        # field sanitizes to empty fall back to a clean generic line. The fallback
+        # is itself customer-safe (no plumbing) — we never surface the raw text.
+        safe_text = (
+            _takyon_sanitize_chat_text(raw_text)
+            or _takyon_sanitize_chat_text(headline)
+            or _takyon_sanitize_chat_text(summary)
+            or _TAKYON_CHAT_SAFE_FALLBACK
+        )
         posted_at = str(event.get("posted_at") or event.get("updated_at") or "").strip()
         messages.append(
             {
                 "id": f"ceo-update:{posted_at or len(messages)}",
                 "role": "assistant",
+                # `text` is the load-bearing bubble and is guaranteed non-empty by
+                # the fallback chain above. The `headline`/`summary` companion
+                # fields stay strictly sanitized — never a raw-plumbing fallback —
+                # so no consumer can read an internal noun/path/tool name from them.
                 "text": safe_text,
-                "headline": _takyon_sanitize_chat_text(headline) or headline[:200],
+                "headline": _takyon_sanitize_chat_text(headline),
                 "summary": _takyon_sanitize_chat_text(summary),
                 "posted_at": posted_at,
             }
