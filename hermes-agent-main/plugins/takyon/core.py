@@ -10408,7 +10408,9 @@ def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path)
     still-seeded landing only, so it NEVER clobbers a customized design-pass landing. Best-effort:
     any error leaves the materialized state untouched (the design pass still publishes later)."""
     try:
-        brief_path = (business_root / "product" / "instant_landing.json").resolve()
+        # The brief lives INSIDE the product source (build_root) so it materializes with the source
+        # into the sandbox build; product/instant_landing.json (outside source_path) never reaches it.
+        brief_path = (build_root / "instant_landing.json").resolve()
         if not brief_path.is_file():
             return False
         landing_path = build_root / "src" / "screens" / "landing.tsx"
@@ -10435,6 +10437,12 @@ def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path)
         css = instant_landing.render_instant_tokens_css(accent=str(brief.get("accent") or ""))
         landing_path.write_text(tsx, encoding="utf-8")
         (build_root / "src" / "tokens.css").write_text(css, encoding="utf-8")
+        # One-shot: drop the brief from the build so it never ships in dist and never re-applies over
+        # the design pass on a later refresh.
+        try:
+            brief_path.unlink()
+        except OSError:
+            pass
         return True
     except Exception:
         return False
@@ -19429,7 +19437,7 @@ def handle_business_write_instant_landing(args: dict, **_: Any) -> str:
     res = handle_business_write_file(
         {
             "business": args.get("business") or business,
-            "path": "product/instant_landing.json",
+            "path": "product/site/instant_landing.json",
             "content": json.dumps(brief, ensure_ascii=False, indent=2),
             "mode": "replace",
             "idempotency_key": f"{idem}-brief",
