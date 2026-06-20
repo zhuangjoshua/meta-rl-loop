@@ -12,7 +12,7 @@ import {
   type TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
 import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
-import { sanitizeTaskErrorText } from "@/lib/takyonCeoUpdates";
+import { sanitizeCustomerReply, sanitizeTaskErrorText } from "@/lib/takyonCeoUpdates";
 import "./companytab.css";
 
 const S = (d: string, w = 15) => (
@@ -509,10 +509,14 @@ function TaskDetail({
               // title/label/detail; sanitize both the headline and the detail
               // line so the log never shows a provider dict / repr (BUG-002).
               const label =
-                sanitizeTaskErrorText(
-                  asText(activity.title) || asText(activity.label) || asText(activity.detail),
+                sanitizeCustomerReply(
+                  sanitizeTaskErrorText(
+                    asText(activity.title) || asText(activity.label) || asText(activity.detail),
+                  ),
                 ) || `Activity ${i + 1}`;
-              const detail = sanitizeTaskErrorText(asText(activity.description) || asText(activity.detail));
+              const detail = sanitizeCustomerReply(
+                sanitizeTaskErrorText(asText(activity.description) || asText(activity.detail)),
+              );
               const when = activityTime(asText(activity.updated_at));
               const statusLabel = asText(activity.status_label) || TASK_STATUS_LABELS[state] || state;
               return (
@@ -599,7 +603,7 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
           // route the card line through the "fail better" sanitizer (BUG-002) so
           // it never renders a provider dict / `Error code:` repr to the user.
           const description =
-            sanitizeTaskErrorText(asText(task.description) || asText(task.detail))
+            sanitizeCustomerReply(sanitizeTaskErrorText(asText(task.description) || asText(task.detail)))
             || "Tracked in the workspace overview.";
           // Canonical link captured on the task (e.g. the live X post URL the X
           // tool persists, spec #19). When present the row shows a clickable
@@ -613,7 +617,7 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
           // operator sees real movement instead of a blank wait. Falls back to the
           // task's own running detail when no child activity has landed yet.
           const liveProgress = state === "running"
-            ? sanitizeTaskErrorText(latestRunningActivity(childActivities) || asText(task.detail) || description)
+            ? sanitizeCustomerReply(sanitizeTaskErrorText(latestRunningActivity(childActivities) || asText(task.detail) || description))
             : "";
           return (
             <div key={id} className={`lb-act__task lb-task is-${state} ${isOpen ? "is-open" : ""}`}>

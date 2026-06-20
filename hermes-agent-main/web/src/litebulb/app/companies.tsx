@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./companies.css";
 import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
-import { buildTakyonBusinessAssetUrl, buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
+import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 
 // Canonical product domain. Product sub-apps are served at
 // `<slug>.fourmanifold.com` (see product/Product.tsx canonicalProductHost and
@@ -132,7 +132,14 @@ export function LandingThumb({
    exists, otherwise a monogram chip so the row never breaks. */
 function CompanyLogo({ slug, name, logoPath }: { slug: string; name: string; logoPath: string }) {
   const [broken, setBroken] = useState(false);
-  const src = logoPath ? buildTakyonBusinessAssetUrl(slug, logoPath) : "";
+  // Use the PUBLIC product URL for the logo (same source the live landing favicon
+  // uses — served 200 from R2 with no auth), not the token-gated workspace asset
+  // endpoint, so the card reliably shows the REAL logo. logoPath is the workspace
+  // path (e.g. "product/site/public/brand-logo.png"); its basename is the public
+  // root path. onError still falls back to the monogram, so a missing/broken logo
+  // never renders blank.
+  const host = canonicalProductHost(slug);
+  const src = logoPath && host ? `https://${host}/${logoPath.split("/").pop()}` : "";
   const monogram = (name.trim()[0] || "C").toUpperCase();
   if (!src || broken) {
     return <span className="lb-coCard__logo lb-coCard__logo--mono" aria-hidden="true">{monogram}</span>;

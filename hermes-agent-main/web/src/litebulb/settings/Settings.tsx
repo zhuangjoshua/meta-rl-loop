@@ -152,6 +152,13 @@ export function Settings(props: {
         </nav>
 
         <div className="lb-setm__body lb-set__body">
+          {/* Nudge banner renders for ALL sections (not just billing): the out-of-credits /
+              slug-collision 4030 handler routes the user to the Plans tab with a billingNudge,
+              so the explanation must be visible there too — otherwise the Plans tab is a
+              no-explanation dead-end on a single-tier account. */}
+          {nudge ? (
+            <div className="lb-set__nudge" role="status">{nudge}</div>
+          ) : null}
           {sec === "profile" && (
             <Card variant="outline" className="lb-set__card">
               <div className="lb-set__card-h">Profile</div>
@@ -223,9 +230,6 @@ export function Settings(props: {
 
           {sec === "billing" && (
             <>
-              {nudge ? (
-                <div className="lb-set__nudge" role="status">{nudge}</div>
-              ) : null}
               <Card variant="outline" className="lb-set__card">
                 <div className="lb-set__card-h">Operator wallet</div>
                 <div className="lb-set__planrow">
