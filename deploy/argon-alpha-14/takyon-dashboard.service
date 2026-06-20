@@ -54,6 +54,10 @@ Environment=TAKYON_REQUIRE_OPERATOR_IDENTITY=enforce
 Environment=TAKYON_HOST_ROLE=operator
 Environment=TAKYON_NODE_NAME=argon-alpha-14
 Environment=TAKYON_PRODUCT_ACTIVATION_NODE=argon-alpha-14
+# Product subdomains publish to coscale.app: this operator runtime mints <slug>.coscale.app publish
+# URLs and gates on-demand TLS; CLOUDFLARE_ZONE_NAME targets the coscale zone for per-publish edge routes.
+Environment=PUBLIC_COMPANY_BASE_DOMAIN=coscale.app
+Environment=CLOUDFLARE_ZONE_NAME=coscale.app
 Environment=TAKYON_STORAGE_BACKEND=supabase_s3
 Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000

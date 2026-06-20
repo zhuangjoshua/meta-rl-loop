@@ -43,6 +43,9 @@ ORIGIN_HOST = "origin.fourmanifold.com"
 # off the Worker route (and grey-clouded) so it can serve as the loop-free origin.
 routes = [
   { pattern = "*.fourmanifold.com/*", zone_name = "fourmanifold.com" },
+  # coscale.app product plane — same worker + R2 (keys are slug-scoped, not domain-scoped). Bind via
+  # `wrangler deploy`; not required for origin-path serving, only to move static to the edge.
+  { pattern = "*.coscale.app/*", zone_name = "coscale.app" },
 ]
 # Reserved-host exclusions (added at deploy via the CF API / dashboard, NOT here —
 # wrangler.toml routes only ADD routes for THIS worker; "(none)" carve-outs are

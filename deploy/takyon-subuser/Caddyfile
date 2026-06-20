@@ -77,7 +77,7 @@
 	import fourmanifold_edge_only
 
 	@product {
-		host *.fourmanifold.com
+		host *.fourmanifold.com *.coscale.app
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {
