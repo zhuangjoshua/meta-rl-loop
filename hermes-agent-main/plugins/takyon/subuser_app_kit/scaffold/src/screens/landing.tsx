@@ -1,6 +1,12 @@
 import { Link } from "react-router-dom";
 import { Button } from "../components/ui/button";
-import { brandMarkDataUri, businessDisplayName } from "../lib/branding";
+import {
+  brandHeroEyebrow,
+  brandHeroHeadline,
+  brandHeroSubhead,
+  brandMarkDataUri,
+  businessDisplayName,
+} from "../lib/branding";
 import { resolveViewerCta, useViewerAccess } from "../lib/hooks";
 import { useProductAuth } from "../lib/product-auth";
 
@@ -9,6 +15,12 @@ export function LandingScreen() {
   const auth = useProductAuth();
   const productName = businessDisplayName();
   const cta = resolveViewerCta(access);
+  // Idea-branded hero copy from the bootstrap brief (injected via surface-context) so the very first
+  // published landing is already on-message; falls back to the generic welcome when unset.
+  const heroEyebrow = brandHeroEyebrow() || "Get started";
+  const heroHeadline = brandHeroHeadline() || `Welcome to ${productName}.`;
+  const heroSubhead =
+    brandHeroSubhead() || "Sign in with Google to access your account and get started.";
 
   return (
     <main className="min-h-screen bg-background">
@@ -51,13 +63,13 @@ export function LandingScreen() {
           <div className="flex flex-col gap-6">
             <div className="flex flex-col gap-4">
               <p className="text-sm font-medium uppercase tracking-[0.2em] text-muted-foreground">
-                Get started
+                {heroEyebrow}
               </p>
               <h1 className="font-heading text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
-                Welcome to {productName}.
+                {heroHeadline}
               </h1>
               <p className="max-w-3xl text-base leading-7 text-muted-foreground sm:text-lg">
-                Sign in with Google to access your account and get started.
+                {heroSubhead}
               </p>
             </div>
 

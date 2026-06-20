@@ -2214,17 +2214,45 @@ def _published_brand_logo_url(workspace_root: Path) -> str:
     return ""
 
 
+def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
+    """Idea-branded hero copy the bootstrap writes to ``product/hero.json`` from the step-1 brief,
+    so the FIRST published landing is on-message before the slower full design pass. Best-effort and
+    fail-soft: any read/parse problem returns {} and the landing falls back to the generic welcome."""
+    if workspace_root is None:
+        return {}
+    try:
+        hero_path = Path(workspace_root) / "product" / "hero.json"
+        if not hero_path.is_file():
+            return {}
+        data = json.loads(hero_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in ("eyebrow", "headline", "subhead"):
+        value = str(data.get(key) or "").strip()
+        if value:
+            out[key] = value[:240]
+    return out
+
+
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
     slug: str,
     plans: list[dict[str, Any]] | None = None,
     brand_logo_url: str = "",
+    workspace_root: "Path | None" = None,
 ) -> dict[str, Any]:
     shape = _surface_subuser_app_shape(surface)
     routes = _surface_routes(surface)
     effective_runtime_features = _surface_effective_runtime_features(surface)
+    hero = _read_bootstrap_hero_copy(workspace_root)
     return {
+        "heroEyebrow": hero.get("eyebrow", ""),
+        "heroHeadline": hero.get("headline", ""),
+        "heroSubhead": hero.get("subhead", ""),
         "business": slug,
         "frontendApiMode": SUBUSER_FRONTEND_API_MODE,
         "kitPath": shape.get("kit_path") or SUBUSER_KIT_DIRNAME,
@@ -2403,6 +2431,7 @@ def _materialize_subuser_app_kit(
         slug=slug,
         plans=plans,
         brand_logo_url=_published_brand_logo_url(workspace_root),
+        workspace_root=workspace_root,
     )
     (target_root / "surface-context.js").write_text(
         "export const surfaceContext = "

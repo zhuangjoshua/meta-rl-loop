@@ -32,3 +32,18 @@ export function brandMarkDataUri(): string {
   if (!svg) return "/favicon.svg";
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
+
+// Idea-derived hero copy, injected by the surface-context payload from the bootstrap brief so the
+// FIRST published landing (before the slower full design pass) is already branded to the business,
+// not a generic "Welcome to X". Each returns "" when unset, so the landing falls back cleanly.
+export function brandHeroEyebrow(): string {
+  return String((surfaceContext as Record<string, unknown>).heroEyebrow || "").trim();
+}
+
+export function brandHeroHeadline(): string {
+  return String((surfaceContext as Record<string, unknown>).heroHeadline || "").trim();
+}
+
+export function brandHeroSubhead(): string {
+  return String((surfaceContext as Record<string, unknown>).heroSubhead || "").trim();
+}
