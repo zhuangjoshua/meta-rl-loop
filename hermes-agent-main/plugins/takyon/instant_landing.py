@@ -146,6 +146,7 @@ _TOKENS_TEMPLATE = ''':root {
   --tk-radius: 0.625rem;
   --tk-font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --tk-font-heading: var(--tk-font-sans);
+  --tk-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 '''
 

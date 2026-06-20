@@ -19627,6 +19627,17 @@ def _finalize_product_surface_refresh(
             "effective_publish_policy": publish_policy,
             "warnings": warnings,
         }
+    logging.getLogger("takyon.instant_landing").info(
+        "refresh result for %s: status=%s error=%s checks=%s",
+        business,
+        refresh.get("status"),
+        str(refresh.get("error"))[:500],
+        [
+            (str(ch.get("name") or ch.get("command") or "")[:40], ch.get("status"))
+            for ch in (refresh.get("checks") or [])
+            if isinstance(ch, dict)
+        ][:8],
+    )
     if refresh.get("status") == "passed":
         publish = _publish_product_surface_path(
             business_root=store._business_root(business),
