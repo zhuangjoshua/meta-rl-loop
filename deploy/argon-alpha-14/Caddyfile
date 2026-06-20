@@ -73,7 +73,28 @@ app.fourmanifold.com {
 		}
 	}
 
-	reverse_proxy 127.0.0.1:9119
+	# The product/app Stripe webhook (/api/webhooks/stripe) is an app-plane path the operator
+	# dashboard (TAKYON_HOST_ROLE=operator) deliberately refuses with 404 — product-subscription
+	# reconciliation belongs to the subuser/product plane (10.116.0.3:80, role=subuser), which owns
+	# app_payments + the STRIPE_WEBHOOK_SECRET it verifies against. Route ONLY that path there so
+	# app.fourmanifold.com/api/webhooks/stripe stays the one stable Stripe delivery URL. The
+	# control-plane /v1/billing/webhook (STRIPE_BILLING_WEBHOOK_SECRET) stays on the operator dashboard.
+	#
+	# The subuser Caddy is Host-gated: its @product matcher forwards any *.fourmanifold.com EXCEPT the
+	# reserved operator hostnames (app/skills/www/admin/dashboard/research-composer). Passing the real
+	# Host (app.fourmanifold.com) is therefore rejected as "not found", so we rewrite Host to a stable
+	# synthetic product host. The webhook handler dispatches purely on event metadata (business_slug),
+	# not the Host, and role=subuser allows /api/webhooks/stripe for any host — so this host is just an
+	# internal routing token (no DNS/TLS needed; the operator->subuser hop is plain HTTP on :80).
+	handle /api/webhooks/stripe {
+		reverse_proxy 10.116.0.3:80 {
+			header_up Host stripe-webhooks.fourmanifold.com
+			header_up X-Forwarded-Proto https
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:9119
+	}
 }
 
 # Operator keeps ONLY app.fourmanifold.com (the Coscale workspace). Every other

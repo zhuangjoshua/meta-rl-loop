@@ -152,8 +152,22 @@ ssh "${ssh_opts[@]}" "$TARGET_HOST" \
   "env REMOTE_CERT='$TAKYON_REMOTE_CLOUDFLARE_ORIGIN_CERT' REMOTE_KEY='$TAKYON_REMOTE_CLOUDFLARE_ORIGIN_KEY' TMP_CERT='$remote_tmp_cert' TMP_KEY='$remote_tmp_key' bash -s" <<'EOF'
 set -euo pipefail
 
+# Caddy runs as an unprivileged user (`caddy`). It must be able to TRAVERSE the key directory and
+# READ the key, or every `caddy reload`/restart fails with "permission denied: <key>" while the old
+# in-memory config silently keeps serving — i.e. config changes stop taking effect with no obvious
+# error (observed in prod: a root:root 0600 key wedged Caddy reloads for ~2 days). Grant the minimum:
+# the `caddy` group can traverse the key dir (0710, no listing) and read THIS key (0640). Any other
+# private key in that dir keeps its own (typically root:root 0600) perms, so it stays caddy-unreadable.
+key_group=root
+key_dir_mode=0700
+key_file_mode=0600
+if getent group caddy >/dev/null 2>&1; then
+  key_group=caddy
+  key_dir_mode=0710
+  key_file_mode=0640
+fi
 install -d -m 0755 "$(dirname "$REMOTE_CERT")"
-install -d -m 0700 "$(dirname "$REMOTE_KEY")"
+install -d -m "$key_dir_mode" -o root -g "$key_group" "$(dirname "$REMOTE_KEY")"
 if [ -f "$REMOTE_CERT" ]; then
   cp "$REMOTE_CERT" "$REMOTE_CERT.bak-$(date +%Y%m%d%H%M%S)"
 fi
@@ -161,7 +175,7 @@ if [ -f "$REMOTE_KEY" ]; then
   cp "$REMOTE_KEY" "$REMOTE_KEY.bak-$(date +%Y%m%d%H%M%S)"
 fi
 install -o root -g root -m 0644 "$TMP_CERT" "$REMOTE_CERT"
-install -o root -g root -m 0600 "$TMP_KEY" "$REMOTE_KEY"
+install -o root -g "$key_group" -m "$key_file_mode" "$TMP_KEY" "$REMOTE_KEY"
 rm -f "$TMP_CERT" "$TMP_KEY"
 openssl x509 -in "$REMOTE_CERT" -noout >/dev/null
 cert_md5="$(openssl x509 -noout -modulus -in "$REMOTE_CERT" | openssl md5)"
