@@ -877,15 +877,15 @@ def _require_active_entitlement(entitlement) -> None:
 def _plan_derived_user_limit_microusd(plan) -> int:
     """CENTRALIZED per-user-limit resolution (GOAL_RULES §3 gap #4: "centralize per-user-limit
     resolution ... unify to plan-derived-or-0"). Delegates to THE canonical resolver
-    ``ai_gateway._user_monthly_budget_microusd`` so the action reserve path and the gateway path
-    share ONE rule: a paid plan grants exactly its ``included_ai_budget_microusd`` (the ``y``
-    term); a free / unentitled / absent plan grants 0. NEVER returns None (an uncapped per-user
-    limit would defeat the only gate)."""
+    ``ai_gateway._user_weekly_budget_microusd`` so the action reserve path and the gateway path
+    share ONE rule: a paid plan grants its ``included_ai_budget_microusd`` pro-rated to the weekly
+    usage window (× 7/30); a free / unentitled / absent plan grants 0. NEVER returns None (an
+    uncapped per-user limit would defeat the only gate)."""
     try:
-        from .ai_gateway import _user_monthly_budget_microusd
+        from .ai_gateway import _user_weekly_budget_microusd
     except Exception:
-        from plugins.takyon.ai_gateway import _user_monthly_budget_microusd
-    return _user_monthly_budget_microusd(plan)
+        from plugins.takyon.ai_gateway import _user_weekly_budget_microusd
+    return _user_weekly_budget_microusd(plan)
 
 
 def _resolve_pg_action_usage_limit(

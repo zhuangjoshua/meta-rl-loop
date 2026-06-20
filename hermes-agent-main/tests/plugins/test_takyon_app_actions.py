@@ -486,7 +486,10 @@ def test_reserve_usage_pg_uses_leaf_conn_and_plan_limit(monkeypatch):
 
     assert captured["conn"] is raw_conn
     assert captured["business_slug"] == "mathflow"
-    assert captured["user_monthly_limit_microusd"] == 5_000_000
+    # The per-user limit is the monthly plan allowance pro-rated to the weekly usage window (×7/30,
+    # operator decision 2026-06-20). Asserted via the canonical conversion constants, not a literal.
+    from plugins.takyon import ai_gateway as _g
+    assert captured["user_monthly_limit_microusd"] == 5_000_000 * _g._USAGE_WINDOW_DAYS // _g._PLAN_FUNDING_PERIOD_DAYS
     assert captured["app_user_tier"] == "paid"
 
 
