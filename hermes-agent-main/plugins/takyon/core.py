@@ -16116,6 +16116,11 @@ class TakyonStore:
             "job.enqueue",
             "maintenance.gc",
             "memory.write",
+            # The CEO's customer-facing narration channel (business_post_operator_update). The
+            # apply-handler exists in _apply_operation, but this validation whitelist never listed
+            # it — so EVERY narration post failed "unsupported operation.action: operator_update.post"
+            # and the bootstrap/work chat went nearly silent. It must be allowed for the CEO to speak.
+            "operator_update.post",
             "outreach.local_publish",
             "workspace.upsert",
         }
