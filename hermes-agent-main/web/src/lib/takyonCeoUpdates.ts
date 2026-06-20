@@ -831,12 +831,15 @@ export function liveWorkerTasks(workspace: WorkspaceLike): LiveWorkerTask[] {
     if (status !== "running" && status !== "queued") continue;
     result.push(taskFields(record));
     if (status === "running") {
-      // The running milestone carries the live per-step worker progress as
-      // nested runtime/task children — surface those so the worker phase is not
-      // a single blank line.
+      // The running milestone carries the live per-step worker progress as nested children. Only the
+      // DE-IDENTIFIED phase children (source="task", e.g. "Building and testing the product") belong
+      // in the customer "Working on…" list. The raw source="runtime" children are unsanitized claude-
+      // agent log lines — env-wrapped shell commands (`/usr/bin/env … npm run build`) and internal
+      // labels like "CEO live trace" — which leak plumbing onto the build screen; they stay in the
+      // collapsed "View build details" disclosure, not the customer-facing list.
       for (const child of asTaskArray(record.children)) {
         const source = String(child.source ?? "").trim().toLowerCase();
-        if (source !== "runtime" && source !== "task") continue;
+        if (source !== "task") continue;
         const childStatus = String(child.status ?? "").trim().toLowerCase();
         if (childStatus && childStatus !== "running" && childStatus !== "queued") continue;
         result.push(taskFields(child));
