@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -22,6 +24,40 @@ from croniter import croniter
 
 _ACTION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _OUTBOUND_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$")
+_INTERNAL_HOST_SUFFIXES = (".localhost", ".internal", ".local", ".cluster.local")
+
+
+def _is_internal_host(hostname: str) -> bool:
+    """True if the hostname is loopback / link-local / private / otherwise internal — so it must
+    never be added to the deno sandbox's --allow-net allowlist (SSRF guard for both the customer
+    outbound_hosts allowlist AND the rails origin). Blocks IP literals directly and resolves bare
+    names so a public name pointing at an internal address (169.254.169.254 metadata, loopback,
+    RFC1918/RFC4193) is rejected too."""
+    h = str(hostname or "").strip().lower().rstrip(".")
+    if not h or h in {"localhost", "0.0.0.0"} or h.endswith(_INTERNAL_HOST_SUFFIXES):
+        return True
+
+    def _blocked(addr: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        return bool(
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified or ip.is_multicast
+        )
+
+    # bracketed/raw IP literal
+    if _blocked(h.strip("[]")):
+        return True
+    # bare hostname -> resolve every A/AAAA and reject if ANY is internal (DNS-rebinding defense)
+    try:
+        for info in socket.getaddrinfo(h, None):
+            if _blocked(str(info[4][0])):
+                return True
+    except (socket.gaierror, UnicodeError, OSError):
+        return False  # transient/invalid DNS is not itself an internal host; literal checks above hold
+    return False
 _SERVICE_EMAIL_SUFFIX = ".takyon.invalid"
 _ACTION_REQUEST_BODY_LIMIT = 64 * 1024
 _ACTION_STDOUT_LIMIT = 256 * 1024
@@ -374,9 +410,7 @@ def validate_action_contract(
             or "://" in value
             or "/" in value
             or "*" in value
-            or value in {"localhost", "0.0.0.0"}
-            or value.startswith("127.")
-            or value.startswith("169.254.")
+            or _is_internal_host(value.rsplit(":", 1)[0])
         ):
             raise ActionContractError(
                 f"product_workflow.outbound_hosts entries must be bare public hostnames (host or host:port), got: {value}"
@@ -765,6 +799,11 @@ def _parse_rails_base(value: str, *, key_name: str = "plugins.takyon.app_actions
         raise ActionConfigError(f"{key_name} must be an origin like scheme://host[:port]")
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ActionConfigError(f"{key_name} must be an origin only (scheme://host[:port])")
+    # SSRF guard: the rails origin's host is added to the deno sandbox --allow-net allowlist, so a
+    # request-derived/attacker-controlled bound_origin must never be an internal host (cloud metadata,
+    # loopback, RFC1918/RFC4193) — same denylist the customer outbound_hosts allowlist enforces.
+    if _is_internal_host(parsed.hostname):
+        raise ActionConfigError(f"{key_name} must be a public origin, not an internal/loopback host")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     hostport = f"{parsed.hostname}:{port}"
     origin = f"{parsed.scheme}://{parsed.hostname}"
