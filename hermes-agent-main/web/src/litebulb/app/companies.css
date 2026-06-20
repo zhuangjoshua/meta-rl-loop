@@ -18,7 +18,7 @@
 .lb-coCard:hover .lb-coCard__thumb { transform: translateY(-4px); box-shadow: var(--cds-shadow-lg); }
 /* Brand row: small logo + company name, left-aligned under the tile. */
 .lb-coCard__brand { display: flex; align-items: center; gap: 9px; margin-top: 14px; min-width: 0; }
-.lb-coCard__logo { flex: none; width: 22px; height: 22px; border-radius: 6px; object-fit: cover; background: var(--cds-color-surface-sunken); border: 1px solid var(--cds-color-border-default); }
+.lb-coCard__logo { flex: none; width: 22px; height: 22px; border-radius: 6px; object-fit: contain; padding: 2px; background: var(--cds-color-surface-sunken); border: 1px solid var(--cds-color-border-default); }
 .lb-coCard__logo--mono { display: grid; place-items: center; font-size: 12px; font-weight: var(--cds-weight-semibold); line-height: 1; color: var(--cds-color-text-soft); }
 .lb-coCard__name { font-weight: var(--cds-weight-semibold); font-size: var(--cds-text-lg); letter-spacing: -0.01em; color: var(--cds-color-text-default); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lb-coCard__meta { margin-top: 2px; font-size: var(--cds-text-sm); color: var(--cds-color-text-soft); }
