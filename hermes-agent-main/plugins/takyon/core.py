@@ -10612,7 +10612,12 @@ def _refresh_product_surface_path(
     # REAL branded page (passing the scaffold-visible-shell + placeholder-theme gates) instead of
     # waiting the full design pass. Self-gated to the still-seeded scaffold landing, so it never
     # clobbers a customized design-pass landing. Best-effort.
-    _apply_instant_first_paint_landing(business_root=business_root, build_root=root)
+    if _apply_instant_first_paint_landing(business_root=business_root, build_root=root):
+        # The inventory (with the scaffold risk-markers the publish gates read) was snapshotted at the
+        # top of this function, BEFORE the materialize + this inject — so it still describes the bare
+        # scaffold. Recompute it now that landing.tsx + tokens.css are the real branded files, or the
+        # gates would wrongly block the instant landing on a stale snapshot.
+        result["inventory"] = _product_inventory(business_root, source_rel, surface=surface)
     # A freshly-materialized readback/cache workspace is deps-free by design (node_modules is
     # never synced into canonical storage), so install MUST run there even when a caller passes
     # install=False — otherwise the build false-fails later with a misleading "vite: not found".
