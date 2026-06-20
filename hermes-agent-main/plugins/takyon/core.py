@@ -6556,6 +6556,12 @@ _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
 _CLAUDE_WORKER_PROGRESS_SINK: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "takyon_claude_worker_progress_sink", default=None
 )
+# Last progress line emitted in the current (per-reader-thread) context, so consecutive duplicate
+# phase lines — e.g. many "Editing the product site" tool ticks in a row — record only once until the
+# phase actually changes (BUG #17 de-dup; the line set is small + de-identified).
+_LAST_CLAUDE_WORKER_PROGRESS_LINE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "takyon_claude_worker_progress_last_line", default=""
+)
 
 
 @contextmanager
@@ -6582,31 +6588,70 @@ def _emit_claude_worker_progress(line: str) -> None:
     text = str(line or "").strip()
     if not text:
         return
+    if text == _LAST_CLAUDE_WORKER_PROGRESS_LINE.get():
+        return
     sink = _CLAUDE_WORKER_PROGRESS_SINK.get()
     if not callable(sink):
         return
     try:
         sink(_truncate_text(text, 240))
+        _LAST_CLAUDE_WORKER_PROGRESS_LINE.set(text)
     except Exception:
         pass
+
+
+# Ordered most-specific first: a tool name is matched by substring, and broad needles like "write"
+# would otherwise swallow "TodoWrite"/"WebSearch", so todo + web tools are checked before edit/read.
+_WORKER_TOOL_PHASES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("todo",), "Planning the work"),
+    (("webfetch", "websearch", "webextract", "browse", "fetch"), "Researching references"),
+    (("edit", "write", "multiedit", "notebookedit", "strreplace", "applypatch", "createfile", "patch"), "Editing the product site"),
+    (("bash", "shell", "execute", "command", "terminal", "npm", "vite", "compile"), "Building and testing the product"),
+    (("read", "grep", "glob", "ls", "listdir", "view", "cat", "find"), "Reviewing the code"),
+)
+
+
+def _worker_tool_phase_line(tool_name: str) -> str:
+    """A warm, de-identified business-language phase for a sandbox tool event (BUG #17).
+
+    The worker's raw per-tool ticks ("Edit running · 5s") are plumbing AND leak tool names, but
+    dropping every tool event left the long build phase blank on the operator's /building screen.
+    Map the tool to a customer-safe phase line (never a raw tool name); _emit_claude_worker_progress
+    collapses consecutive duplicates so a phase records once until it changes."""
+    key = re.sub(r"[^a-z0-9]+", "", str(tool_name or "").lower())
+    if not key:
+        return "Working on the product"
+    for needles, phase in _WORKER_TOOL_PHASES:
+        if any(n in key for n in needles):
+            return phase
+    return "Working on the product"
 
 
 def _claude_worker_progress_line_from_event(event: Mapping[str, Any] | None) -> str:
     """Map a worker SDK event to ONE concise human progress line, or "" to skip.
 
-    Surfaces the worker's current step/activity (task-level progress and worker-authored summaries)
-    and deliberately DROPS raw tool-call chatter (per-tool running ticks) so the operator sees the
-    business work, not the plumbing."""
+    Surfaces the worker's current step/activity (task-level progress and worker-authored summaries).
+    Raw per-tool ticks are never shown verbatim (they leak tool names); instead each tool event is
+    folded into a de-identified business-language phase line so the long build phase is legible
+    rather than blank (BUG #17)."""
     if not isinstance(event, Mapping):
         return ""
     trace = event.get("trace") if isinstance(event.get("trace"), Mapping) else {}
     trace_kind = str(trace.get("kind") or "").strip().lower()
-    # Raw per-tool progress ticks ("X running · 5s") are plumbing — drop them from the human lane.
+    # Per-tool ticks ("X running · 5s") are plumbing and leak the raw tool name — fold them into a
+    # warm, de-identified phase line instead of dropping them, so the human lane is never blank.
     if trace_kind == "tool":
-        return ""
+        return _worker_tool_phase_line(trace.get("tool_name") or trace.get("label") or "")
     detail = str(event.get("detail") or event.get("line") or "").strip()
     if not detail:
         return ""
+    # A task-progress event whose summary collapsed to a bare tool name (the worker's last_tool_name
+    # fallback) carries trace.kind="task" but a single raw token like "Bash"/"Read" — fold that into a
+    # de-identified phase so it can't surface verbatim. Multi-word human summaries are left untouched.
+    if " " not in detail:
+        folded = _worker_tool_phase_line(detail)
+        if folded != "Working on the product":
+            return folded
     label = str(trace.get("label") or "").strip()
     # Prefer the worker's step label + detail when the label adds context beyond the detail itself.
     if label and label.lower() not in detail.lower():
@@ -6792,8 +6837,20 @@ def _run_claude_agent_task_process(
                 line=clean,
             )
 
-    stdout_thread = threading.Thread(target=_read_stdout, name="takyon-claude-stdout", daemon=True)
-    stderr_thread = threading.Thread(target=_read_stderr, name="takyon-claude-stderr", daemon=True)
+    # Run the reader threads inside a COPY of the current (handler-thread) context so the bound
+    # worker-progress sink (_CLAUDE_WORKER_PROGRESS_SINK) and the active worker-plane run id are
+    # visible inside them. contextvars do NOT propagate to bare threads, so without this the
+    # progress sink was unreachable from the stderr reader and zero kind="task" progress events were
+    # ever recorded — the true root cause of the blank build phase (BUG #17). One independent copy
+    # per thread (a Context cannot be entered concurrently from two threads).
+    _reader_ctx_out = contextvars.copy_context()
+    _reader_ctx_err = contextvars.copy_context()
+    stdout_thread = threading.Thread(
+        target=lambda: _reader_ctx_out.run(_read_stdout), name="takyon-claude-stdout", daemon=True
+    )
+    stderr_thread = threading.Thread(
+        target=lambda: _reader_ctx_err.run(_read_stderr), name="takyon-claude-stderr", daemon=True
+    )
     stdout_thread.start()
     stderr_thread.start()
     try:
@@ -14075,11 +14132,15 @@ class TakyonStore:
         now = _now()
         row = conn.execute("SELECT * FROM app_budgets WHERE business_slug = ?", (slug,)).fetchone()
         if not row:
-            start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            if start.month == 12:
-                end = start.replace(year=start.year + 1, month=1)
-            else:
-                end = start.replace(month=start.month + 1)
+            # Open on the canonical WEEKLY window (this week's Monday 00:00 UTC), matching both the
+            # app_budgets column defaults (date_trunc('week', now()) — Postgres weeks start Monday)
+            # and the canonical weekly usage rail (app_usage.ensure_app_budget / _ensure_budget_locked).
+            # A calendar-MONTH window here would OVERRIDE the weekly column defaults on the live
+            # Postgres store and break the weekly allowance reset the /account UI promises (the prior
+            # code opened a 30-day window, so committed usage accumulated for a month, never weekly).
+            start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            start = start - timedelta(days=start.weekday())
+            end = start + timedelta(days=7)
             # Invariant 9: open with NO per-business pool cap (hard_limit_microusd = NULL). Budget
             # derives from the active paid subscription's per-subuser included_ai_budget_microusd.
             conn.execute(

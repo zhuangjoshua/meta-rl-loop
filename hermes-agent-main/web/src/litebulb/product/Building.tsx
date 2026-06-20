@@ -202,7 +202,7 @@ export function Building({
                 <ul className="lb-bld__work-list">
                   {workerTasks.map((task) => {
                     const detail = sanitizeCustomerReply(task.detail);
-                    const label = task.label || detail || "Working";
+                    const label = sanitizeCustomerReply(task.label ?? "") || detail || "Working";
                     return (
                       <li key={task.id} className="lb-bld__work-row">
                         <span className="lb-bld__work-dot" aria-hidden="true" />

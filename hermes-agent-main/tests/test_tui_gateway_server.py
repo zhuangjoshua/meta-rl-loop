@@ -6293,7 +6293,11 @@ def test_live_state_payload_marks_failed_when_only_stale_running_tasks_remain():
     )
 
     assert payload["status"] == "failed"
-    assert payload["label"] == "CEO turn"
+    # BUG #10: the surfaced card label is de-identified through the same fail-closed gate as the
+    # title, so the internal loop name "CEO turn" never reaches the operator card — it reads as the
+    # general business-language title instead. (The raw status/detail are unaffected.)
+    assert payload["label"] == "Working on the company"
+    assert "CEO turn" not in payload["label"]
     assert payload["detail"] == "isolated turn exited with code -15"
     assert all(task["status"] != "running" for task in payload["tasks"])
 

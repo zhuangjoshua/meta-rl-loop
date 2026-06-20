@@ -538,10 +538,15 @@ function TaskDetail({
           </ul>
         </div>
       )}
-      {/* Raw tool-call name only shown here, in the expanded detail (spec #4). */}
-      {asText(task.label) && asText(task.label) !== asText(task.title) && (
-        <div className="lb-task__raw">raw: {asText(task.label)}</div>
-      )}
+      {/* Raw underlying label, shown in the expanded detail (spec #4). Sanitized so an internal
+          tool/worker/Takyon name can never leak via this row, and suppressed when it collapses to
+          empty or to the title (BUG #10 belt-and-suspenders; the backend already de-identifies it). */}
+      {(() => {
+        const rawLabel = sanitizeCustomerReply(asText(task.label));
+        return rawLabel && rawLabel !== asText(task.title) ? (
+          <div className="lb-task__raw">raw: {rawLabel}</div>
+        ) : null;
+      })()}
     </div>
   );
 }

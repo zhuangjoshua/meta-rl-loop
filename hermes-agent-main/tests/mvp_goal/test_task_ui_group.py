@@ -83,8 +83,11 @@ def test_canonical_task_title_is_intent_first_not_raw_tool_name():
     assert task["title"] == "Working on the company"
     assert "business_write_file" not in task["title"]
     assert "Write File" not in task["title"]
-    # The raw label is preserved (so the detail panel can show it) but is not the title.
-    assert task["label"] == "business_write_file"
+    # BUG #10: the SURFACED label is de-identified through the same gate too — the frontend renders a
+    # "raw: <label>" row whenever label != title, so a raw tool name must never reach the card via the
+    # label either. Neither title nor surfaced label carries "business_write_file".
+    assert "business_write_file" not in task["label"]
+    assert "Write File" not in task["label"]
 
 
 def test_raw_runtime_events_group_under_current_task_id():

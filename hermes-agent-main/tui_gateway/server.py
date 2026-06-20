@@ -9966,7 +9966,19 @@ def _takyon_live_state_payload(
             if explicit_category in _TAKYON_TASK_CATEGORIES
             else _takyon_task_category(label, detail, source)
         )
-        title = as_text(task.get("title")) or _takyon_task_intent_title(label, detail, source)
+        # Route the explicit CEO/LLM-authored milestone title through the SAME fail-closed
+        # de-identifier gate as the fallback (BUG #10): an explicit title previously bypassed
+        # _takyon_task_intent_title, so an internal name ("Claude agent task", "...Takyon...")
+        # set as title could leak to the customer card. The gate preserves clean prose titles
+        # ("Build and Deploy Product Site") and only strips tool/worker/Takyon identifiers.
+        raw_title = as_text(task.get("title"))
+        title = _takyon_task_intent_title(raw_title or label, detail, source)
+        # Emit a de-identified DISPLAY label too (BUG #10): the raw `label` still feeds the
+        # title/category/description heuristics above, but the card's surfaced label must never carry
+        # an internal tool/worker/Takyon name — the frontend renders a "raw: <label>" row whenever
+        # label != title, so an un-gated label re-leaks exactly what the title gate strips. Route it
+        # through the same fail-closed gate so neither title NOR the surfaced label can leak.
+        display_label = _takyon_task_intent_title(label, detail, source)
         description = as_text(task.get("description")) or _takyon_task_description(label, detail, category)
         # Spec criterion #6: raw low-level events carry a parent task_id so the
         # frontend can nest them under an intent-level task instead of flat rows.
@@ -9983,7 +9995,7 @@ def _takyon_live_state_payload(
             "id": task_id,
             "task_id": parent_task_id or task_id,
             "source": source,
-            "label": label,
+            "label": display_label,
             "title": title,
             "description": description,
             "category": category,
