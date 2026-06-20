@@ -10,6 +10,7 @@ import type {
 import {
   chatStreamAgentMessages,
   sanitizeCustomerReply,
+  sanitizeTaskErrorText,
   workspaceChatRunning,
   workspaceChatSummary,
   type ChatStreamMessage,
@@ -98,7 +99,12 @@ function liveStateOneLiner(
   const headline = sanitizeCustomerReply(String(payload.headline || ""));
   if (headline) return headline;
   const status = String(payload.status || "").trim().toLowerCase();
-  const detail = sanitizeCustomerReply(String(payload.detail || ""));
+  // The live_state detail can carry a failed task's raw provider error
+  // (`Error code: 400 - {'type': 'error', ...}`), which sanitizeCustomerReply
+  // does NOT catch (it targets plumbing nouns, not provider dicts). Run the
+  // "fail better" error sanitizer first so a raw provider dict becomes a calm
+  // user line, then strip any remaining plumbing (BUG-002).
+  const detail = sanitizeCustomerReply(sanitizeTaskErrorText(String(payload.detail || "")));
   if (detail) return detail;
   if (["queued", "scheduled", "pending"].includes(status)) {
     return `Getting ${businessName} set up now — I'll update you here in a moment.`;

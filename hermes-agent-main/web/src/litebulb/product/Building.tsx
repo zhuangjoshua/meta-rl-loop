@@ -7,6 +7,7 @@ import {
   livePhases,
   liveWorkerTasks,
   sanitizeCustomerReply,
+  sanitizeTaskErrorText,
   workspaceChatSummary,
 } from "@/lib/takyonCeoUpdates";
 import { BulbMark } from "../shared/icons";
@@ -148,7 +149,7 @@ export function Building({
             })()}
             {errored && (
               <p className="lb-bld__line lb-bld__line--error">
-                {state.error || "The build needs attention before it can continue."}
+                {sanitizeTaskErrorText(state.error) || "The build needs attention before it can continue."}
               </p>
             )}
             <div ref={endRef} />
@@ -229,7 +230,7 @@ export function Building({
                   {narration.map((line, index) => (
                     <li key={`${index}-${line}`}>{line}</li>
                   ))}
-                  {errored && state.error && <li>{state.error}</li>}
+                  {errored && state.error && <li>{sanitizeTaskErrorText(state.error)}</li>}
                 </ul>
               </div>
             </details>

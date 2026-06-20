@@ -174,8 +174,13 @@ function fallbackToolLabel(tool: ProgressToolSignal): string {
 }
 
 function describeTool(tool: ProgressToolSignal): string {
+  // tool.error is the one field that can carry a raw provider/runtime error
+  // (`Error code: 400 - {'type': 'error', ...}`). Route it through the
+  // "fail better" sanitizer so the live card's blocked detail is a calm,
+  // user-facing line, never a Python dict / provider repr (BUG-002).
+  const safeError = tool.error ? sanitizeTaskErrorText(tool.error) : "";
   return cleanText(
-    [tool.label || fallbackToolLabel(tool), tool.context, tool.preview, tool.summary, tool.error]
+    [tool.label || fallbackToolLabel(tool), tool.context, tool.preview, tool.summary, safeError]
       .filter(Boolean)
       .join(" · "),
   ).trim();
@@ -599,6 +604,96 @@ export function sanitizeCustomerReply(content: string): string {
     kept.push(line);
   }
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// --- Raw provider-error "fail better" (BUG-002) ----------------------------
+//
+// A failed bootstrap/CEO task can carry the raw upstream provider error string
+// in its detail/status/description fields. Rendered verbatim on a task card it
+// reads like `Error: Error code: 400 - {'type': 'error', 'error': {'type':
+// 'invalid_request_error', 'message': 'You have reached your specified
+// workspace API usage limits...'}}` — a Python dict / provider repr that strands
+// the customer with internal guts (violates card #4 "no thinking/log copy" and
+// #11 "fail better"). This pure helper detects such raw errors and maps them to
+// one calm, general, user-facing line. It is deliberately NOT keyed to a single
+// message: it classifies by error SHAPE so any future quota / rate-limit / 4xx
+// / 5xx / dict-blob error gets a clean line. Already-clean human text is left
+// untouched (only rewritten when it clearly looks like a raw error).
+
+// Calm, general customer-facing copy. Never a provider message, code, or field.
+const TASK_ERROR_USAGE_LIMIT_COPY =
+  "This step is briefly paused — we're at capacity and will pick it back up shortly.";
+const TASK_ERROR_RATE_LIMIT_COPY =
+  "Working through a busy moment — this will retry automatically.";
+const TASK_ERROR_GENERIC_COPY = "That step hit a snag and will retry.";
+
+// Markers that prove a string is a raw provider/runtime error rather than warm
+// human copy. Matching ANY of these flips the string into "rewrite" mode.
+const RAW_PROVIDER_ERROR_MARKERS: RegExp[] = [
+  /invalid_request_error/i,
+  /workspace api usage limit/i,
+  /usage limit/i,
+  /insufficient[_\s-]?(?:quota|credit)/i,
+  /\bError code:\s*\d/i,
+  /\brate[_\s-]?limit/i,
+  /\{'type'\s*:\s*'error'/i,
+  /"type"\s*:\s*"error"/i,
+  // A JSON object / Python dict blob (balanced-ish braces with a quoted key):
+  // `{'error': {...}}`, `{"message": "..."}`. Distinguishes a serialized error
+  // payload from prose that merely contains a stray brace.
+  /\{\s*['"][\w-]+['"]\s*:/,
+  // Bare provider/runtime error preface ("Error: ...", "Exception: ...").
+  /^\s*(?:error|exception|traceback)\b\s*[:(-]/i,
+  // An HTTP status surfaced inline ("HTTP 429", "status 503").
+  /\b(?:http\s*)?(?:status\s*)?\b[45]\d{2}\b\s*(?:-|—|:|error|too many|service)/i,
+];
+
+function looksLikeRawProviderError(text: string): boolean {
+  return RAW_PROVIDER_ERROR_MARKERS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * Map a task's error/status text to clean, calm, user-facing copy when (and only
+ * when) it looks like a raw provider/runtime error. Returns the input unchanged
+ * for already-clean human messages. Pure — no I/O, no side effects.
+ *
+ * Examples:
+ *   sanitizeTaskErrorText(
+ *     "Error: Error code: 400 - {'type': 'error', 'error': {'type': " +
+ *     "'invalid_request_error', 'message': 'You have reached your specified " +
+ *     "workspace API usage limits...'}}"
+ *   ) === "This step is briefly paused — we're at capacity and will pick it back up shortly."
+ *
+ *   sanitizeTaskErrorText("Error code: 429 - rate_limit_error")
+ *     === "Working through a busy moment — this will retry automatically."
+ *
+ *   sanitizeTaskErrorText("Error code: 503 - {'type': 'error'}")
+ *     === "That step hit a snag and will retry."
+ *
+ *   sanitizeTaskErrorText("Researching the market") === "Researching the market"  // untouched
+ */
+export function sanitizeTaskErrorText(text: string): string {
+  const raw = cleanText(String(text ?? "")).trim();
+  if (!raw) return "";
+  // Already-clean human copy: leave it exactly as written.
+  if (!looksLikeRawProviderError(raw)) return raw;
+  const lower = raw.toLowerCase();
+  // Usage limit / quota / "workspace API usage" → capacity-paused copy.
+  if (
+    /workspace api usage limit/.test(lower)
+    || /usage limit/.test(lower)
+    || /\bquota\b/.test(lower)
+    || /\bbilling\b/.test(lower)
+    || /insufficient[_\s-]?(?:quota|credit)/.test(lower)
+  ) {
+    return TASK_ERROR_USAGE_LIMIT_COPY;
+  }
+  // Rate limit / 429 → busy-moment retry copy.
+  if (/rate[_\s-]?limit/.test(lower) || /\b429\b/.test(lower) || /too many requests/.test(lower)) {
+    return TASK_ERROR_RATE_LIMIT_COPY;
+  }
+  // Any other 4xx/5xx / provider dict / generic raw error → generic retry copy.
+  return TASK_ERROR_GENERIC_COPY;
 }
 
 // One curated, customer-safe assistant message from the backend chat stream.

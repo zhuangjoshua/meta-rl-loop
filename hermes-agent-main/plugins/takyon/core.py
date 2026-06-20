@@ -2396,6 +2396,15 @@ def _materialize_subuser_app_kit(
     # auth/checkout/entitlement plumbing fixes reach existing businesses on rebuild, not just new
     # ones. Worker-owned screens are untouched.
     _rematerialize_appkit_owned_src(workspace_root, slug=slug, surface=materialized_surface)
+    # Tab favicon = the business logo on EVERY rebuild, not just first materialize. The scaffold-only
+    # path (_materialize_subuser_app_scaffold) seeds + repoints the favicon, but it short-circuits for
+    # any already-built business (the seed-once starter returns early once product source exists). So
+    # without this, a business that publishes a real logo (public/brand-logo.png) AFTER bootstrap keeps
+    # the seeded monogram in its browser tab forever. Re-run the deterministic favicon injector here so
+    # a published logo becomes the tab favicon on the next normal build — no paid re-generation needed.
+    # Idempotent: a no-op when the favicon already points at the right asset.
+    _seed_brand_mark_assets(workspace_root, slug=slug)
+    _inject_favicon_links(workspace_root)
 
 
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
@@ -6171,15 +6180,12 @@ def _inject_favicon_links(workspace_root: Path) -> None:
             workspace_root, href=_PUBLISHED_BRAND_LOGO_URL, icon_type="image/png"
         )
         return
-    index_path = workspace_root / "index.html"
-    try:
-        if not index_path.is_file():
-            return
-        text = index_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    if _FAVICON_LINK_MARKER in text or "favicon.svg" in text:
-        return
+    # No published logo: normalize to EXACTLY the seeded monogram link. Always route through
+    # _set_index_favicon_links (it strips every existing icon/apple-touch link first), so a stale
+    # duplicate — a leftover /brand-logo.png link from a logo that was later removed, or the historical
+    # SVG+appended-PNG double-link — can never leave the tab showing a wrong/broken icon. It is
+    # idempotent (writes only on change) and does its own index.html is_file guard, so this is safe on
+    # every rebuild and replaces the old early-return that let stale links survive untouched.
     _set_index_favicon_links(workspace_root, href=_SEED_FAVICON_HREF, icon_type=_SEED_FAVICON_TYPE)
 
 

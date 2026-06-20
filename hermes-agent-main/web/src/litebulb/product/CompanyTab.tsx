@@ -12,6 +12,7 @@ import {
   type TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
 import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
+import { sanitizeTaskErrorText } from "@/lib/takyonCeoUpdates";
 import "./companytab.css";
 
 const S = (d: string, w = 15) => (
@@ -437,8 +438,13 @@ function TaskDetail({
   // Rendered as the task LOG so the hierarchy reads company -> task -> activity.
   activities?: Array<Record<string, unknown>>;
 }) {
-  const description = asText(task.description) || asText(task.detail);
-  const outputs = (Array.isArray(task.outputs) ? task.outputs : []).map((o) => asText(o)).filter(Boolean);
+  // Expanded detail can also carry a failed task's raw provider error — route
+  // the goal line and any string outputs through the "fail better" sanitizer
+  // (BUG-002) so the expanded card never shows a provider dict / repr.
+  const description = sanitizeTaskErrorText(asText(task.description) || asText(task.detail));
+  const outputs = (Array.isArray(task.outputs) ? task.outputs : [])
+    .map((o) => sanitizeTaskErrorText(asText(o)))
+    .filter(Boolean);
   const steps = asList(task.steps);
   // Canonical link captured on the task (e.g. the live X post URL, spec #19).
   const openUrl = asText(task.open_url);
@@ -499,9 +505,14 @@ function TaskDetail({
           <ul className="lb-task__loglist">
             {orderedActivities.map((activity, i) => {
               const state = normalizeTaskStatus(asText(activity.status));
+              // A failed activity step can carry a raw provider error in its
+              // title/label/detail; sanitize both the headline and the detail
+              // line so the log never shows a provider dict / repr (BUG-002).
               const label =
-                asText(activity.title) || asText(activity.label) || asText(activity.detail) || `Activity ${i + 1}`;
-              const detail = asText(activity.description) || asText(activity.detail);
+                sanitizeTaskErrorText(
+                  asText(activity.title) || asText(activity.label) || asText(activity.detail),
+                ) || `Activity ${i + 1}`;
+              const detail = sanitizeTaskErrorText(asText(activity.description) || asText(activity.detail));
               const when = activityTime(asText(activity.updated_at));
               const statusLabel = asText(activity.status_label) || TASK_STATUS_LABELS[state] || state;
               return (
@@ -584,7 +595,12 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
           const category = taskCategory(asText(task.category));
           const statusLabel = asText(task.status_label) || TASK_STATUS_LABELS[state] || state;
           const title = titleWithoutLeadingCategory(asText(task.title) || asText(task.label) || "Recorded work", category);
-          const description = asText(task.description) || asText(task.detail) || "Tracked in the workspace overview.";
+          // A failed task can carry a raw provider error in detail/description;
+          // route the card line through the "fail better" sanitizer (BUG-002) so
+          // it never renders a provider dict / `Error code:` repr to the user.
+          const description =
+            sanitizeTaskErrorText(asText(task.description) || asText(task.detail))
+            || "Tracked in the workspace overview.";
           // Canonical link captured on the task (e.g. the live X post URL the X
           // tool persists, spec #19). When present the row shows a clickable
           // "View post" anchor; stopPropagation keeps a click from toggling the card.
@@ -597,7 +613,7 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
           // operator sees real movement instead of a blank wait. Falls back to the
           // task's own running detail when no child activity has landed yet.
           const liveProgress = state === "running"
-            ? (latestRunningActivity(childActivities) || asText(task.detail) || description)
+            ? sanitizeTaskErrorText(latestRunningActivity(childActivities) || asText(task.detail) || description)
             : "";
           return (
             <div key={id} className={`lb-act__task lb-task is-${state} ${isOpen ? "is-open" : ""}`}>
