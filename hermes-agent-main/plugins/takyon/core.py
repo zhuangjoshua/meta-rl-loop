@@ -15345,13 +15345,44 @@ class TakyonStore:
             "previous_totals": previous_totals,
         }
 
-    def _sync_business_ceo_cron_control(self, slug: str, state: str, reason: str) -> dict[str, Any]:
+    def _sync_business_ceo_cron_control(self, conn: "_PGConn", slug: str, state: str, reason: str) -> dict[str, Any]:
         from cron.jobs import list_jobs, pause_job, resume_job
+
+        # Mirror the control state onto the canonical Postgres wake schedule. ``control.set`` is the
+        # pause/resume/kill rail, but until now it only touched the legacy file-cron and left
+        # ``wake_schedules`` enabled — so a "paused" business kept getting dispatched by
+        # ``dispatch_due_wakes()`` (which selects ``where enabled and next_run_at <= now()``). Flipping
+        # ``wake_schedules.enabled`` here is the real gate: active -> enabled, paused/killed -> disabled.
+        # Fail-soft + idempotent: a wakes flip failure must not break the control.set, and re-pausing an
+        # already-paused schedule is a no-op (set_enabled is an idempotent UPDATE). Mirrors
+        # ``_ensure_ceo_cron``'s ``_leaf_conn`` pattern.
+        wake_enabled = state == "active"
+        wakes_synced = False
+        try:
+            from . import wakes
+        except ImportError:  # pragma: no cover - alternate load path as a top-level package
+            from plugins.takyon import wakes
+        try:
+            with self._leaf_conn(conn) as raw:
+                wakes.set_enabled(raw, slug, wake_enabled)
+            wakes_synced = True
+        except Exception as exc:  # noqa: BLE001 - a wakes flip failure must not break the control set
+            logging.getLogger("takyon.wakes").warning(
+                "control.set could not flip wake_schedules.enabled for %r (state=%s): %s",
+                slug,
+                state,
+                exc,
+            )
 
         name = f"takyon-ceo:{_slugify(slug)}"
         existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
         if not existing:
-            return {"cron_job": None, "changed": False}
+            return {
+                "cron_job": None,
+                "changed": False,
+                "wakes_enabled": wake_enabled,
+                "wakes_synced": wakes_synced,
+            }
         if state == "active":
             updated = resume_job(existing["id"])
         else:
@@ -15361,6 +15392,8 @@ class TakyonStore:
             "changed": bool(updated),
             "enabled": bool(updated.get("enabled", False)) if updated else bool(existing.get("enabled", False)),
             "state": updated.get("state") if updated else existing.get("state"),
+            "wakes_enabled": wake_enabled,
+            "wakes_synced": wakes_synced,
         }
 
     def _filesystem_summary(self, root: Path) -> dict[str, Any]:
@@ -16247,6 +16280,7 @@ class TakyonStore:
             business = control_parts.get("business")
             cron = (
                 self._sync_business_ceo_cron_control(
+                    conn,
                     business,
                     state,
                     str(op.get("reason") or reason or ""),

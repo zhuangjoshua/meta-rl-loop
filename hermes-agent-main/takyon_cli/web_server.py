@@ -3607,6 +3607,36 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
         }
 
 
+def _business_wakes_paused(store: Any, conn: Any, slug: str) -> bool:
+    """True when the business's autonomous CEO wake loop is paused.
+
+    The canonical gate is ``wake_schedules.enabled`` — the exact filter in the in-DB
+    ``dispatch_due_wakes()`` (``where enabled and next_run_at <= now()``) — so a disabled (or
+    missing) schedule means no wakes fire. We also treat a ``control_states`` row at
+    ``business:<slug>`` in (paused, killed) as paused, since that is the operator-facing pause rail.
+    Fail-soft: any read failure returns False so the businesses list never blanks on one bad row.
+    """
+    try:
+        with store._leaf_conn(conn) as raw:
+            sched = raw.execute(
+                "select enabled from wake_schedules where business_slug = %s",
+                (slug,),
+            ).fetchone()
+            if sched is not None:
+                # A schedule exists: its enabled flag is the truth.
+                return not bool(sched[0])
+            # No schedule row yet — fall back to the control state.
+            ctrl = raw.execute(
+                "select state from control_states where scope = %s",
+                (f"business:{slug}",),
+            ).fetchone()
+            if ctrl is not None:
+                return str(ctrl[0] or "").strip().lower() in {"paused", "killed"}
+    except Exception as exc:  # noqa: BLE001 - degrade honestly, never blank the list
+        _log.warning("dashboard wakes_paused read failed for %r: %s", slug, exc)
+    return False
+
+
 def _takyon_operator_businesses_payload(principal: Any) -> dict[str, Any]:
     try:
         from plugins.takyon.core import TakyonStore
@@ -3635,6 +3665,11 @@ def _takyon_operator_businesses_payload(principal: Any) -> dict[str, Any]:
                     logo_rel = "product/site/public/brand-logo.png"
                     logo_abs = store._resolve_business_file(slug, logo_rel, sync=False)
                     item["logo_url"] = logo_rel if logo_abs.is_file() else ""
+                    # Whether the autonomous CEO wake loop is paused. Read the canonical gate
+                    # (wake_schedules.enabled — the actual filter in dispatch_due_wakes()) and fall
+                    # back to the control_states row. Fail-soft: any read failure defaults to false
+                    # so one unreadable schedule never blanks the list.
+                    item["wakes_paused"] = _business_wakes_paused(store, conn, slug)
                 except Exception as item_exc:  # noqa: BLE001 - one bad business must not blank the list
                     _log.warning("dashboard business card enrich failed for %r: %s", item.get("slug"), item_exc)
         return {
@@ -5000,6 +5035,64 @@ async def set_takyon_business_creative_credit_budgets(request: Request, slug: st
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
         _log.warning("dashboard business creative credit budgets update failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/takyon/businesses/{slug}/wake-state")
+async def set_takyon_business_wake_state(request: Request, slug: str) -> dict[str, Any]:
+    """Operator pause/resume of a business's autonomous CEO wake loop.
+
+    Reuses the canonical ``control.set`` rail (active <-> paused), which now also flips
+    ``wake_schedules.enabled`` so a paused business is excluded from ``dispatch_due_wakes()``.
+    """
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    paused = bool(body.get("paused"))
+    try:
+        from uuid import uuid4
+
+        from plugins.takyon.core import TakyonStore, _db_backend
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
+        store.commit(
+            scope=f"business:{slug}",
+            operations=[
+                {
+                    "action": "control.set",
+                    "scope": f"business:{slug}",
+                    "state": ("paused" if paused else "active"),
+                }
+            ],
+            # Per-request key so the operator can freely toggle pause<->resume; a stable
+            # f"wake-state:{slug}:{paused}" key would make commit() replay the cached result and
+            # block the second toggle to the same state. Mirrors the creative-credits route's uuid key.
+            idempotency_key=f"wake-state:{slug}:{paused}:{uuid4().hex}",
+            reason="operator pause/resume wakes from dashboard",
+            actor="dashboard",
+        )
+        return {"success": True, "slug": slug, "wakes_paused": paused}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business wake-state update failed for %s: %s", slug, exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

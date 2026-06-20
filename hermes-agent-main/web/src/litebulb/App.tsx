@@ -75,6 +75,7 @@ function Router() {
     stopPrompt,
     createBusiness,
     saveChannelCreditBudgets,
+    setBusinessWakeState,
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,
@@ -295,6 +296,7 @@ function Router() {
         onSendPrompt={sendPrompt}
         onStopPrompt={stopPrompt}
         onSaveChannelCreditBudgets={saveChannelCreditBudgets}
+        onSetWakeState={setBusinessWakeState}
         onBuyCreativeCredits={startCreativeCreditCheckout}
         onTractionRangeChange={setTractionRange}
       />

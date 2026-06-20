@@ -200,6 +200,7 @@ function TopBar({
   onNav,
   onLogout,
   onOpenSettings,
+  onSetWakeState,
 }: {
   business: LitebulbBusiness;
   theme: Theme;
@@ -207,12 +208,24 @@ function TopBar({
   onNav: (hash: string) => void;
   onLogout: () => void;
   onOpenSettings: (s: SettingsSection) => void;
+  onSetWakeState: (slug: string, paused: boolean) => Promise<void>;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [wakeBusy, setWakeBusy] = useState(false);
+  const wakesPaused = Boolean(business.wakesPaused);
   const onSelect = (label: string) => {
     if (label === "Log out") onLogout();
     else if (MENU_SETTINGS[label]) onOpenSettings(MENU_SETTINGS[label]);
     else if (MENU_ROUTES[label]) onNav(MENU_ROUTES[label]);
+  };
+  const onToggleWakes = async () => {
+    if (wakeBusy) return;
+    setWakeBusy(true);
+    try {
+      await onSetWakeState(business.slug, !wakesPaused);
+    } finally {
+      setWakeBusy(false);
+    }
   };
   return (
     <header className="lb-topbar">
@@ -225,6 +238,17 @@ function TopBar({
       <div className="lb-topbar__group">
         <span className="lb-wstat__name">{business.name}</span>
         <span className={`lb-badge ${business.mode === "live" ? "is-live" : ""}`}>{business.mode || "live"}</span>
+        {wakesPaused && <span className="lb-badge lb-badge--paused">wakes paused</span>}
+        <button
+          type="button"
+          className={`lb-badge lb-wakebtn${wakesPaused ? " is-paused" : ""}`}
+          onClick={onToggleWakes}
+          disabled={wakeBusy}
+          aria-pressed={wakesPaused}
+          title={wakesPaused ? "Resume the autonomous CEO wake loop" : "Pause the autonomous CEO wake loop"}
+        >
+          {wakeBusy ? "…" : wakesPaused ? "Resume wakes" : "Pause wakes"}
+        </button>
       </div>
 
       <div className="lb-topbar__group lb-topbar__group--end">
@@ -614,6 +638,7 @@ export function Product({
   onSendPrompt,
   onStopPrompt,
   onSaveChannelCreditBudgets,
+  onSetWakeState,
   onBuyCreativeCredits,
   onTractionRangeChange,
 }: {
@@ -636,6 +661,7 @@ export function Product({
     slug: string,
     allocations: Record<"x" | "meta" | "reddit", number>,
   ) => Promise<TakyonBusinessCreativeCreditsResponse | null>;
+  onSetWakeState: (slug: string, paused: boolean) => Promise<void>;
   onBuyCreativeCredits: (slug: string, credits: number) => Promise<void>;
   onTractionRangeChange: (range: "D" | "W" | "M" | "Y") => void;
 }) {
@@ -674,6 +700,7 @@ export function Product({
         onNav={onNav}
         onLogout={onLogout}
         onOpenSettings={onOpenSettings}
+        onSetWakeState={onSetWakeState}
       />
 
       <div className="lb-workspace">

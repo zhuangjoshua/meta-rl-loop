@@ -33,6 +33,11 @@
 .lb-topbar__group--end { margin-left: auto; gap: clamp(8px, 0.9vw, 12px); }
 .lb-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; border: 1px solid var(--cds-color-border-default); background: var(--cds-color-surface-sunken); color: var(--cds-color-text-soft); font-size: var(--cds-text-xs); font-weight: var(--cds-weight-semibold); text-transform: capitalize; }
 .lb-badge.is-live { color: var(--cds-color-success); border-color: rgba(49, 128, 90, 0.24); background: var(--cds-color-success-bg); }
+.lb-badge--paused { color: var(--cds-color-warning); border-color: rgba(255, 187, 56, 0.32); background: var(--cds-color-warning-bg); }
+.lb-wakebtn { cursor: pointer; text-transform: none; }
+.lb-wakebtn:hover:not(:disabled) { color: var(--cds-color-text-default); border-color: var(--cds-color-text-soft); }
+.lb-wakebtn:disabled { opacity: 0.55; cursor: default; }
+.lb-wakebtn.is-paused { color: var(--cds-color-warning); border-color: rgba(255, 187, 56, 0.32); background: var(--cds-color-warning-bg); }
 .lb-nav-sep { width: 1px; height: 22px; background: var(--cds-color-border-default); }
 .lb-brand { display: inline-flex; align-items: center; gap: 8px; border: 0; background: none; padding: 0; cursor: pointer; color: var(--cds-color-text-default); }
 .lb-brand:hover { opacity: 0.72; }

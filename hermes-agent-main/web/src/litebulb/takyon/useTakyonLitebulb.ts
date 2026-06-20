@@ -69,6 +69,9 @@ export type LitebulbBusiness = {
   // when a paid logo has been generated for the business. Empty until then —
   // the card falls back to a monogram chip.
   logoPath: string;
+  // True when the business's autonomous CEO wake loop is paused. Derived from the
+  // canonical wake gate (wake_schedules.enabled) via the operator businesses payload.
+  wakesPaused?: boolean;
 };
 
 type HistoryPayload = {
@@ -182,6 +185,7 @@ function mapBusiness(item: TakyonOperatorBusinessSummary): LitebulbBusiness {
     meta: businessMeta(item),
     productUrl,
     logoPath,
+    wakesPaused: Boolean(item.wakes_paused),
   };
 }
 
@@ -731,6 +735,23 @@ export function useTakyonLitebulb() {
     setCreativeCredits(payload);
     return payload;
   }, [isVisibleBusiness]);
+
+  // Pause/resume the business's autonomous CEO wake loop through the canonical
+  // control.set rail (which also flips wake_schedules.enabled server-side).
+  // Optimistically reflect the new state in the active business + card list, then
+  // refresh from the canonical operator payload.
+  const setBusinessWakeState = useCallback(async (slug: string, paused: boolean) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
+    setActiveBusiness((current) =>
+      current && current.slug === businessSlug ? { ...current, wakesPaused: paused } : current,
+    );
+    setBusinesses((current) =>
+      current.map((b) => (b.slug === businessSlug ? { ...b, wakesPaused: paused } : b)),
+    );
+    await api.setTakyonBusinessWakeState(businessSlug, paused);
+    await loadHome();
+  }, [loadHome]);
 
   const startCreativeCreditCheckout = useCallback(async (slug: string, credits: number) => {
     const businessSlug = trimText(slug).toLowerCase();
@@ -1722,6 +1743,7 @@ export function useTakyonLitebulb() {
     stopPrompt,
     createBusiness,
     saveChannelCreditBudgets,
+    setBusinessWakeState,
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,

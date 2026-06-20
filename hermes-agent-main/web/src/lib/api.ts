@@ -213,6 +213,15 @@ export const api = {
         body: JSON.stringify({ allocations }),
       },
     ),
+  setTakyonBusinessWakeState: (slug: string, paused: boolean) =>
+    fetchJSON<{ success: boolean; slug: string; wakes_paused: boolean }>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}/wake-state`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused }),
+      },
+    ),
   getTakyonBusinessCreativeCreditPacks: (slug: string) =>
     fetchJSON<TakyonBusinessCreativeCreditPacksResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/packs`,
@@ -719,6 +728,9 @@ export interface TakyonOperatorBusinessSummary {
   // host (and a same-origin site-preview embed) so these may be absent.
   product_url?: string;
   logo_url?: string;
+  // True when the business's autonomous CEO wake loop is paused (canonical source:
+  // wake_schedules.enabled is false, or its control_states row is paused/killed).
+  wakes_paused?: boolean;
 }
 
 export interface TakyonOperatorBusinessesResponse {
