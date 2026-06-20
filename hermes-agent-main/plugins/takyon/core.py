@@ -11401,6 +11401,26 @@ def _publish_public_asset_to_live_build_artifact(
         digest = hashlib.sha256(data).hexdigest()
         backend.put(storage.build_object_key(_slugify(business), build_id, rel), data, digest=digest)
         result.update({"published": True, "build_id": build_id, "object_rel": rel, "sha256": digest})
+        # Also mirror the staged asset into the PUBLIC R2 bucket when R2 is provisioned. The edge
+        # worker (deploy/cloudflare/product-worker/worker.js) serves strictly
+        # <slug>/<build_id>/<rel> from R2 with NO origin fallback, so for an R2-routed business the
+        # workspace-artifact write above is invisible at the edge and the asset 404s — which made a
+        # live Reddit/ad launch hard-fail in _stage_business_public_asset's reachability probe. Write
+        # the SAME bytes to the SAME live build_id the edge currently serves, reusing the canonical
+        # key scheme (storage.public_site_object_key) and R2StorageBackend.put — do not invent a new
+        # key. Best-effort: if R2 is unconfigured we no-op, and any R2 error is recorded without
+        # failing the workspace-artifact publish above (reachability is still verified by the caller).
+        if storage.r2_configured():
+            try:
+                storage.R2StorageBackend().put(
+                    storage.public_site_object_key(_slugify(business), build_id, rel),
+                    data,
+                    digest=digest,
+                )
+                result["r2_mirrored"] = True
+            except Exception as exc:  # pragma: no cover - best-effort edge mirror
+                result["r2_mirrored"] = False
+                result["r2_reason"] = str(exc)
         return result
     except Exception as exc:
         result["reason"] = str(exc)
@@ -18816,6 +18836,73 @@ def _pg_sync_openmeter_customer(
     }
 
 
+def _pg_sync_openmeter_plan_failsoft(
+    store: "TakyonStore", business: str, plan_key: str
+) -> dict[str, Any] | None:
+    """Fail-soft OpenMeter plan-sync for the pre-checkout path.
+
+    OpenMeter is a downstream usage-PROJECTION mirror, never a payment authority, so a plan
+    CREATE/PUBLISH failure must NEVER block a Stripe checkout (a fresh business's FIRST subscription
+    checkout previously hard-failed on a non-2xx here even with a healthy Stripe rail). Mirrors the
+    canonical `_openmeter_access_projection_failsoft` shape: attempt the sync, enqueue a retry job on a
+    soft failure, and SWALLOW every exception. Returns a best-effort sync summary, or a
+    ``{configured, ok:false, error}`` shape; it NEVER raises."""
+    try:
+        result = _pg_sync_openmeter_plan(store, business, plan_key)
+    except Exception as exc:  # pragma: no cover - fail-soft: sync errors must not block checkout
+        result = {"configured": True, "ok": False, "error": str(exc)}
+    if isinstance(result, dict) and result.get("configured") and not result.get("ok"):
+        try:
+            queued = _queue_openmeter_sync_job(store, business, scope="plan", plan_key=plan_key)
+            if queued is not None:
+                result["retry_job"] = queued
+        except Exception:  # pragma: no cover - retry enqueue is best-effort
+            pass
+        try:
+            import logging
+
+            logging.getLogger("takyon.openmeter").warning(
+                "openmeter plan sync failed (business=%s plan_key=%s); checkout continues without it: %s",
+                business,
+                plan_key,
+                result.get("error"),
+            )
+        except Exception:
+            pass
+    return result
+
+
+def _pg_sync_openmeter_customer_failsoft(
+    store: "TakyonStore", business: str, app_user_id: str
+) -> dict[str, Any] | None:
+    """Fail-soft OpenMeter customer-sync for the pre-checkout path. Same rationale and shape as
+    :func:`_pg_sync_openmeter_plan_failsoft`: it never blocks checkout, enqueues a retry on soft
+    failure, swallows every exception, and never raises."""
+    try:
+        result = _pg_sync_openmeter_customer(store, business, app_user_id)
+    except Exception as exc:  # pragma: no cover - fail-soft: sync errors must not block checkout
+        result = {"configured": True, "ok": False, "error": str(exc)}
+    if isinstance(result, dict) and result.get("configured") and not result.get("ok"):
+        try:
+            queued = _queue_openmeter_sync_job(store, business, scope="customer", app_user_id=app_user_id)
+            if queued is not None:
+                result["retry_job"] = queued
+        except Exception:  # pragma: no cover - retry enqueue is best-effort
+            pass
+        try:
+            import logging
+
+            logging.getLogger("takyon.openmeter").warning(
+                "openmeter customer sync failed (business=%s app_user_id=%s); checkout continues without it: %s",
+                business,
+                app_user_id,
+                result.get("error"),
+            )
+        except Exception:
+            pass
+    return result
+
+
 def _pg_sync_openmeter_access_projection(
     store: "TakyonStore",
     business: str,
@@ -20992,6 +21079,31 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     )
                 except Exception:
                     pass
+            # The app_budgets reads/writes below run on the PRIVILEGED default login role, OUTSIDE
+            # the per-customer `_pg_app_scope` (which drops to `takyon_app`). `takyon_app` (migration
+            # 0030) holds DML grants only on the 9 customer tables + SELECT on app_users/app_sessions;
+            # it has NO grant on app_budgets, so _ensure_app_budget's SELECT+INSERT (and
+            # _app_usage_allocation_summary -> get_usage_summary -> get_app_budget) raised
+            # "permission denied for table app_budgets" under that role and hard-failed the whole
+            # /account read on a fresh business (no budget row yet). Budget access is a server/runtime
+            # concern, not a customer-scoped one — the canonical usage reserve/settle rail always
+            # touches app_budgets under store._leaf_conn (privileged, no role switch). Compute budget
+            # first because the in-scope usage query below windows on budget["current_period_start"].
+            budget = store._ensure_app_budget(conn, business)
+            # Weekly $-allocation summary the customer's app surface renders ("$X of $Y used this
+            # week"). On Postgres (the live runtime) read it from the canonical app_usage rail so
+            # the conversion + period unit are derived once; the microUSD figures stay
+            # authoritative and these are display-only $ projections (never micro-USD or raw
+            # provider cost). app_usage.get_usage_summary is a psycopg leaf, so the SQLite/local
+            # path projects the same shape from the budget dict + the per-period business sum.
+            # Fail-soft: the $ allocation is a display-only projection. If the
+            # app_usage read raises, degrade to an empty shape so the rest of
+            # /account (user, entitlements, usage_this_period, revenue) still
+            # returns — a cosmetic projection must never hard-fail the account.
+            try:
+                usage_allocation = _app_usage_allocation_summary(store, conn, business, budget)
+            except Exception:
+                usage_allocation = {"period_unit": "week", "hard_limit_usd": None, "committed_usd": None, "remaining_usd": None}
             with (
                 store._pg_app_scope(conn, business, app_user_id=str(user["id"]))
                 if isinstance(conn, _PGConn)
@@ -20999,25 +21111,10 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             ):
                 user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
                 entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
-                budget = store._ensure_app_budget(conn, business)
                 usage = conn.execute(
                     "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
                     (business, user["id"], budget["current_period_start"]),
                 ).fetchone()
-                # Weekly $-allocation summary the customer's app surface renders ("$X of $Y used this
-                # week"). On Postgres (the live runtime) read it from the canonical app_usage rail so
-                # the conversion + period unit are derived once; the microUSD figures stay
-                # authoritative and these are display-only $ projections (never micro-USD or raw
-                # provider cost). app_usage.get_usage_summary is a psycopg leaf, so the SQLite/local
-                # path projects the same shape from the budget dict + the per-period business sum.
-                # Fail-soft: the $ allocation is a display-only projection. If the
-                # app_usage read raises, degrade to an empty shape so the rest of
-                # /account (user, entitlements, usage_this_period, revenue) still
-                # returns — a cosmetic projection must never hard-fail the account.
-                try:
-                    usage_allocation = _app_usage_allocation_summary(store, conn, business, budget)
-                except Exception:
-                    usage_allocation = {"period_unit": "week", "hard_limit_usd": None, "committed_usd": None, "remaining_usd": None}
                 revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
             for entitlement in entitlements:
                 metadata = entitlement.get("metadata") if isinstance(entitlement.get("metadata"), dict) else {}
@@ -22453,34 +22550,17 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                 and _openmeter_enabled()
                 and str(plan.get("billing_interval") or "").strip().lower() != "one_time"
             ):
-                openmeter_sync = _pg_sync_openmeter_plan(store, business, plan_key)
-                if isinstance(openmeter_sync, dict) and openmeter_sync.get("configured") and not openmeter_sync.get("ok"):
-                    queued = _queue_openmeter_sync_job(
-                        store,
-                        business,
-                        scope="plan",
-                        plan_key=plan_key,
-                    )
-                    if queued is not None:
-                        openmeter_sync["retry_job"] = queued
-                    raise TakyonError(
-                        f"OpenMeter plan sync failed before checkout: {openmeter_sync.get('error') or 'unknown error'}"
-                    )
+                # OpenMeter is a downstream usage-PROJECTION mirror, never a payment authority — it must
+                # NEVER block checkout. A non-2xx from the Kong-fronted OpenMeter API (e.g. a fresh
+                # business's first plan CREATE/PUBLISH) raises OpenMeterAPIError; previously that
+                # hard-failed the FIRST subscription checkout even though the Stripe rail was healthy.
+                # Fail-soft exactly like the sibling session/access projection paths
+                # (`_openmeter_access_projection_failsoft`): attempt the sync, enqueue a retry job, and
+                # SWALLOW every exception so a healthy Stripe rail still returns a checkout URL.
+                openmeter_sync = _pg_sync_openmeter_plan_failsoft(store, business, plan_key)
                 app_user_id = str(args.get("app_user_id") or "").strip()
                 if app_user_id:
-                    customer_sync = _pg_sync_openmeter_customer(store, business, app_user_id)
-                    if isinstance(customer_sync, dict) and customer_sync.get("configured") and not customer_sync.get("ok"):
-                        queued = _queue_openmeter_sync_job(
-                            store,
-                            business,
-                            scope="customer",
-                            app_user_id=app_user_id,
-                        )
-                        if queued is not None:
-                            customer_sync["retry_job"] = queued
-                        raise TakyonError(
-                            f"OpenMeter customer sync failed before checkout: {customer_sync.get('error') or 'unknown error'}"
-                        )
+                    customer_sync = _pg_sync_openmeter_customer_failsoft(store, business, app_user_id)
                     if isinstance(openmeter_sync, dict) and isinstance(customer_sync, dict):
                         openmeter_sync = {
                             **openmeter_sync,
