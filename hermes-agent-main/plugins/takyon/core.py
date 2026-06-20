@@ -10397,6 +10397,49 @@ def _blocked_message(text: Any) -> str:
     return f"BLOCKED: {message}"
 
 
+def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path) -> bool:
+    """Render the deterministic instant branded landing into the build root, if the bootstrap pinned
+    a brief at ``product/instant_landing.json`` AND the just-materialized landing is still the
+    byte-identical seeded scaffold. Returns True when applied.
+
+    This is what makes a sub-4-minute first paint possible: a real, designed ``landing.tsx`` +
+    themed ``tokens.css`` (different from the scaffold, no sentinel) pass the publish gate, so the
+    refresh can publish immediately instead of waiting the full design pass. Self-gated to the
+    still-seeded landing only, so it NEVER clobbers a customized design-pass landing. Best-effort:
+    any error leaves the materialized state untouched (the design pass still publishes later)."""
+    try:
+        brief_path = (business_root / "product" / "instant_landing.json").resolve()
+        if not brief_path.is_file():
+            return False
+        landing_path = build_root / "src" / "screens" / "landing.tsx"
+        scaffold_landing = _subuser_app_scaffold_source_dir() / "src" / "screens" / "landing.tsx"
+        if not (landing_path.is_file() and scaffold_landing.is_file()):
+            return False
+        # Only apply over the still-seeded scaffold landing; never overwrite a real design.
+        if landing_path.read_text(encoding="utf-8") != scaffold_landing.read_text(encoding="utf-8"):
+            return False
+        brief = json.loads(brief_path.read_text(encoding="utf-8") or "{}")
+        if not isinstance(brief, dict):
+            return False
+        try:
+            from . import instant_landing
+        except Exception:  # pragma: no cover - alternate load path
+            from plugins.takyon import instant_landing
+        tsx = instant_landing.render_instant_landing_tsx(
+            eyebrow=str(brief.get("eyebrow") or ""),
+            headline=str(brief.get("headline") or ""),
+            subhead=str(brief.get("subhead") or ""),
+            primary_cta=str(brief.get("primary_cta") or "Continue with Google"),
+            features=brief.get("features") if isinstance(brief.get("features"), list) else [],
+        )
+        css = instant_landing.render_instant_tokens_css(accent=str(brief.get("accent") or ""))
+        landing_path.write_text(tsx, encoding="utf-8")
+        (build_root / "src" / "tokens.css").write_text(css, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def _refresh_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -10552,6 +10595,12 @@ def _refresh_product_surface_path(
         except Exception as exc:
             result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
             return result
+    # Instant branded first-paint: apply the deterministic landing the bootstrap pinned (if any),
+    # AFTER the materialize re-seeds the scaffold and BEFORE the build, so this first publish ships a
+    # REAL branded page (passing the scaffold-visible-shell + placeholder-theme gates) instead of
+    # waiting the full design pass. Self-gated to the still-seeded scaffold landing, so it never
+    # clobbers a customized design-pass landing. Best-effort.
+    _apply_instant_first_paint_landing(business_root=business_root, build_root=root)
     # A freshly-materialized readback/cache workspace is deps-free by design (node_modules is
     # never synced into canonical storage), so install MUST run there even when a caller passes
     # install=False — otherwise the build false-fails later with a misleading "vite: not found".
