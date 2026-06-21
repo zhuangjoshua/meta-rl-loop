@@ -13,7 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
-from takyon_cli.main import _web_ui_build_needed, _build_web_ui, _run_npm_install_deterministic
+from takyon_cli.main import (
+    _build_web_ui,
+    _run_npm_install_deterministic,
+    _web_ui_build_needed,
+    _web_ui_dist_sentinel,
+)
 
 
 def _touch(path: Path, offset: float = 0.0) -> None:
@@ -55,6 +60,13 @@ class TestWebUIBuildNeeded:
         web_dir, dist_dir = _make_web_dir(tmp_path)
         _touch(web_dir / "src" / "main.ts", offset=-10)
         _touch(dist_dir / "index.html")
+        assert _web_ui_build_needed(web_dir) is False
+
+    def test_falls_back_to_litebulb_html_when_root_index_missing(self, tmp_path):
+        web_dir, dist_dir = _make_web_dir(tmp_path)
+        _touch(web_dir / "src" / "main.ts", offset=-10)
+        _touch(dist_dir / "litebulb" / "litebulb.html")
+        assert _web_ui_dist_sentinel(dist_dir) == dist_dir / "litebulb" / "litebulb.html"
         assert _web_ui_build_needed(web_dir) is False
 
     def test_web_dist_dir_not_web_dist_subdir(self, tmp_path):

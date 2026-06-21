@@ -6157,19 +6157,33 @@ def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0)
     return default
 
 
+def _web_ui_dist_sentinel(dist_dir: Path) -> Path | None:
+    """Return a known web UI build sentinel if the dist exists."""
+    for rel in (
+        ".vite/manifest.json",
+        "index.html",
+        "litebulb/litebulb.html",
+        "litebulb/index.html",
+    ):
+        candidate = dist_dir / rel
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _web_ui_build_needed(web_dir: Path) -> bool:
     """Return True if the web UI dist is missing or stale.
 
     The Vite build outputs to ``takyon_cli/web_dist/`` (per vite.config.ts
     outDir: "../takyon_cli/web_dist"), NOT to ``web/dist/``.  Uses the Vite
-    manifest as the sentinel because it is written last and therefore has the
-    newest mtime of any build output.
+    manifest as the preferred sentinel because it is written last and
+    therefore has the newest mtime of any build output. The Coscale/Litebulb
+    bundle emits ``litebulb/litebulb.html`` instead of a root ``index.html``,
+    so keep that as a valid fallback sentinel.
     """
     dist_dir = web_dir.parent / "takyon_cli" / "web_dist"
-    sentinel = dist_dir / ".vite" / "manifest.json"
-    if not sentinel.exists():
-        sentinel = dist_dir / "index.html"
-    if not sentinel.exists():
+    sentinel = _web_ui_dist_sentinel(dist_dir)
+    if sentinel is None:
         return True
     dist_mtime = sentinel.stat().st_mtime
     skip = frozenset({"node_modules", "dist"})
@@ -10326,12 +10340,14 @@ def cmd_dashboard(args):
             if "TAKYON_WEB_DIST" in os.environ
             else PROJECT_ROOT / "takyon_cli" / "web_dist"
         )
-        if not (_dist_root / "index.html").exists():
+        dist_sentinel = _web_ui_dist_sentinel(_dist_root)
+        if dist_sentinel is None:
             print(f"✗ --skip-build was passed but no web dist found at: {_dist_root}")
             print("  Pre-build first:  cd web && npm install && npm run build")
             print("  Or drop --skip-build to build automatically.")
             sys.exit(1)
-        print(f"→ Skipping web UI build (--skip-build); using dist at {_dist_root}")
+        rel_sentinel = dist_sentinel.relative_to(_dist_root)
+        print(f"→ Skipping web UI build (--skip-build); using dist at {_dist_root} ({rel_sentinel})")
 
     from takyon_cli.web_server import start_server
 
