@@ -652,14 +652,16 @@ def project_openmeter_access(
 ) -> tuple[Entitlement | None, str]:
     """Project OpenMeter access into the local entitlement rail.
 
-    OpenMeter becomes the billing/access authority, but Takyon keeps the runtime gate. This helper
-    translates one vendor access snapshot into the local `app_entitlements` rows that the existing
-    login/session/AI gateway paths already trust:
+    OpenMeter is a downstream usage MIRROR, NOT the access authority — Stripe (via the webhook-backed
+    `app_entitlements`) governs access (CLAUDE.md). This helper translates one vendor access snapshot
+    into a parallel `source='openmeter'` mirror row, without ever voiding Stripe's authoritative rows:
 
-    * all prior billing-sourced rows (`stripe`, prior `openmeter`) stop conferring access
-    * an active vendor snapshot becomes one fresh `source='openmeter'` entitlement row
-    * an inactive vendor snapshot leaves NO active billing entitlement row
-    * `app_users.tier` is resynced atomically in the same transaction
+    * only prior `source='openmeter'` rows stop conferring access; `source='stripe'` rows are left
+      intact (a broken/degraded OpenMeter can never cancel a paid Stripe subscription)
+    * an active vendor snapshot adds one fresh `source='openmeter'` entitlement row
+    * an inactive/degraded vendor snapshot leaves any Stripe entitlement untouched
+    * `app_users.tier` is resynced atomically in the same transaction (an active Stripe row still
+      confers the paid tier even when OpenMeter reports no access)
 
     Manual/operator-only grants are intentionally left alone; this replaces the recurring billing
     path, not every possible non-billing override.
@@ -678,12 +680,18 @@ def project_openmeter_access(
         ).fetchone()
         if exists is None:
             raise AppUserNotFound(str(app_user_id))
+        # OpenMeter is a downstream usage MIRROR, never the payment/access authority (CLAUDE.md).
+        # A degraded OpenMeter (observed: OPENMETER_URL pointed at a Kong gateway that 404s, so the
+        # access snapshot reports has_access=false for EVERY paid customer) must NEVER cancel a paid
+        # Stripe entitlement. Only retire prior OpenMeter-sourced rows here; Stripe-sourced rows stay
+        # authoritative and are governed solely by the Stripe webhook (grant_entitlement +
+        # customer.subscription.* events). This stops a broken OpenMeter from voiding real subscriptions.
         conn.execute(
             "update app_entitlements set status = 'cancelled', "
             "current_period_end = coalesce(%s, current_period_end), "
             "metadata = metadata || %s::jsonb, updated_at = now() "
             "where business_slug = %s and app_user_id = %s "
-            "and source in ('stripe', 'openmeter') "
+            "and source = 'openmeter' "
             "and lower(status) not in ('cancelled', 'canceled')",
             (
                 current_period_end,
