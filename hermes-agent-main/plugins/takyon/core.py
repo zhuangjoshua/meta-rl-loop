@@ -31710,30 +31710,31 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
 # Google Search Console under the operator's service account.
 #
 # Credential source: the full service-account JSON key (which embeds the
-# private key) lives in the Takyon Safebox under the sensitive secret
-# GSC_SERVICE_ACCOUNT_KEY and is read through the Safebox authority — never a
-# key file on disk and never browser OAuth. The same service account backs both
-# the read-write (this tool) and read-only (business_seo_query_data) Search
-# Console services; only the requested scope differs.
+# private key) lives in the Takyon Safebox under the canonical
+# TAKYON_GSC_SERVICE_ACCOUNT_KEY alias and is read through the Safebox
+# authority — never a key file on disk and never browser OAuth. The same
+# service account backs both the read-write (this tool) and read-only
+# (business_seo_query_data) Search Console services; only the requested scope
+# differs.
 #
 # The parent domain (e.g. sc-domain:coscale.app) is assumed already
 # verified and owned by this service account; this tool only registers
 # subdomains under that owner-verified parent. The API has no endpoint to grant
 # ownership, so the one-time parent verification/grant is done in the GSC UI.
 # ===========================================================================
-_GSC_SERVICE_ACCOUNT_ENV = "GSC_SERVICE_ACCOUNT_KEY"  # Safebox secret: service-account JSON content
+_GSC_SERVICE_ACCOUNT_ENV = _GSC_KEY_ALIASES[0]  # Safebox secret: service-account JSON content
 
 
 def _seo_build_credentials(scopes: list[str]) -> Any:
     """Build Google service-account credentials from the Safebox-held key.
 
     The service-account JSON (client_email + private_key + token_uri) is stored
-    as a sensitive Safebox secret under GSC_SERVICE_ACCOUNT_KEY and read via the
-    Takyon Safebox authority — no key file on disk, no OAuth browser flow. The
-    one service account serves both the readonly and read-write scopes; callers
-    pass the scope they need.
+    as a sensitive Safebox secret under TAKYON_GSC_SERVICE_ACCOUNT_KEY and read
+    via the Takyon Safebox authority — no key file on disk, no OAuth browser
+    flow. The one service account serves both the readonly and read-write scopes;
+    callers pass the scope they need.
     """
-    raw = str(safebox.read_env_backed_value(_GSC_SERVICE_ACCOUNT_ENV) or "").strip()
+    raw = _resolve_gsc_service_account_json()
     if not raw:
         raise TakyonError(
             "Google Search Console access needs the service-account credential in Safebox "

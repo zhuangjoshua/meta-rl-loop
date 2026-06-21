@@ -5701,20 +5701,22 @@ def test_handle_business_seo_add_property_requires_site_url():
 
 
 def test_seo_build_credentials_reads_service_account_from_safebox(monkeypatch):
-    # The credential source is the Safebox secret GSC_SERVICE_ACCOUNT_KEY, not a
-    # key file on disk. With no secret configured it fails closed before any
-    # Google client import — so this holds regardless of google-auth presence.
-    seen: list[str] = []
+    # The credential source is the same canonical Safebox alias used by
+    # business_register_search_console, not the retired GSC_SERVICE_ACCOUNT_KEY
+    # alias and not a key file on disk. With no secret configured it fails
+    # closed before any Google client import, so this holds regardless of
+    # google-auth presence.
+    seen: list[tuple[str, ...]] = []
 
-    def _fake_read(key: str) -> str:
-        seen.append(key)
+    def _fake_first(*keys: str) -> str:
+        seen.append(tuple(keys))
         return ""
 
-    monkeypatch.setattr(takyon_core.safebox, "read_env_backed_value", _fake_read)
+    monkeypatch.setattr(takyon_core.safebox, "first_env_backed_value", _fake_first)
     with pytest.raises(TakyonError) as excinfo:
         takyon_core._seo_build_credentials(["https://www.googleapis.com/auth/webmasters"])
-    assert seen == ["GSC_SERVICE_ACCOUNT_KEY"]
-    assert "GSC_SERVICE_ACCOUNT_KEY" in str(excinfo.value)
+    assert seen == [("TAKYON_GSC_SERVICE_ACCOUNT_KEY",)]
+    assert "TAKYON_GSC_SERVICE_ACCOUNT_KEY" in str(excinfo.value)
 
 
 def test_business_seo_query_data_registered_in_plain_takyon_toolset():
