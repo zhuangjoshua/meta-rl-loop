@@ -343,14 +343,15 @@ function AgentChat({
   //   • USER bubbles — taken only from `messages` (who === 'user'). The raw
   //     history/delta AGENT messages are deliberately DROPPED here: they are the
   //     CEO's chain-of-thought and must never reach the customer.
-  //   • AGENT bubbles — the curated, customer-safe chat_stream (`agentStream`).
+  //   • AGENT bubbles — the per-turn chat_stream (`agentStream`): one bubble per
+  //     completed CEO turn (the turn's own reply), NOT the raw history/delta stream.
   // Ordering: every item with a wall-clock ts (user send time, or the stream
   // item's posted_at) sorts by ts; items without a ts keep their relative
   // insertion order (stable). A bootstrap (no user messages) reads as just the
   // chat_stream in order; a follow-up reads as the user message then the CEO's
-  // narration. Each agent bubble is re-sanitized (belt-and-suspenders); a
-  // message with nothing safe left is omitted. There is NO card, NO phase
-  // ladder, and NO "What changed" panel.
+  // reply. Each agent bubble is lightly cleaned for display (no ban-list); only a
+  // genuinely-empty bubble is omitted. There is NO card, NO phase ladder, and NO
+  // "What changed" panel.
   type TranscriptEntry = {
     id: string;
     who: "agent" | "user";

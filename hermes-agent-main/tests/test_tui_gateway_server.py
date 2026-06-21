@@ -6763,6 +6763,42 @@ def test_ceo_chat_stream_collapses_consecutive_duplicate_reposts():
     assert msgs[0]["posted_at"] == "2026-06-21T00:00:02"  # advanced to the latest re-post
 
 
+def test_ceo_chat_stream_renders_each_turn_reply_lightly_cleaned():
+    """The chat IS the turn: each business.ceo_turn event renders ONE bubble from its
+    `text` (that turn's final_response), lightly cleaned for display — ANSI stripped,
+    blank runs collapsed — while the agent's actual words are PRESERVED. There is no
+    ban-list and the bubble is never dropped to empty (reactive-chat spec §31/§32)."""
+    events = [
+        {
+            "text": "\x1b[32m→\x1b[0m Landing page is up.\n\n\n"
+            "Scaffolded the site in product/site/ and published to coscale.app.",
+            "posted_at": "2026-06-21T00:00:01",
+        },
+    ]
+    msgs = server._takyon_ceo_chat_stream(events)
+    assert len(msgs) == 1
+    text = msgs[0]["text"]
+    assert "\x1b[" not in text  # ANSI stripped
+    assert "\n\n\n" not in text  # blank runs collapsed
+    # The agent's real words survive — the old ban-list would have deleted these.
+    assert "product/site/" in text
+    assert "coscale.app" in text
+    assert msgs[0]["id"].startswith("ceo-turn:")
+
+
+def test_clean_chat_text_never_empties_what_the_ban_list_would_have_deleted():
+    """A reply whose every line names a tool/file/build word — which the removed
+    plumbing ban-list would have stripped to nothing, then replaced with the generic
+    'Working on your business.' placeholder — must now survive intact. The light
+    cleaner never returns '' for non-empty input (abstraction by generation, not
+    subtraction)."""
+    plumbing = "Ran business_claude_agent_task, vite build, vercel deploy of product/site/app.tsx."
+    cleaned = server._takyon_clean_chat_text(plumbing)
+    assert cleaned  # not emptied
+    assert "vercel" in cleaned and "business_claude_agent_task" in cleaned
+    assert "Working on your business" not in cleaned
+
+
 def test_chat_running_only_true_when_background_run_genuinely_live():
     """A child task stuck at status=='running' (its terminal event never merged) must NOT pin the
     thinking dots once the background run has settled — otherwise the '...' spins forever."""

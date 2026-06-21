@@ -1848,6 +1848,39 @@ def _takyon_record_session_runtime_event(
         logger.debug("failed to record gateway runtime event for %s: %s", slug, exc)
 
 
+def _takyon_record_ceo_turn_chat(session: dict | None, text: str) -> None:
+    """Record one completed CEO turn's own reply as a business.ceo_turn chat event.
+
+    This is the customer/operator chat: the turn's final_response IS the bubble, shown
+    lightly cleaned for display (the read-side `_takyon_ceo_chat_stream`). It is a
+    pure read of `final_response` (an immutable derived string) — it NEVER mutates the
+    agent's persisted context (session history / messages / session DB keep the raw
+    assistant message), so the display edit cannot affect a future Hermes turn. Stored
+    on the business scope (not the /runtime scope) so the overview/boot builders pick
+    it up alongside operator_update milestone events. Best-effort: a failure here must
+    never break the turn."""
+    if not isinstance(session, dict):
+        return
+    slug = str(session.get("takyon_current_business") or "").strip()
+    if not slug:
+        return
+    body = _takyon_clean_chat_text(text)
+    if not body:
+        return
+    try:
+        store = _takyon_store(session)
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}",
+                business_slug=slug,
+                event_type="business.ceo_turn",
+                payload={"text": body},
+            )
+    except Exception as exc:
+        logger.debug("failed to record CEO turn chat event for %s: %s", slug, exc)
+
+
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
     if session is not None:
@@ -4870,6 +4903,10 @@ def _run_prompt_submit(
                         "status": trace_status_value,
                     },
                 )
+                # The chat IS the turn: record this turn's own reply as one chat
+                # bubble (business.ceo_turn). Display-only — reads the final_response
+                # copy, never the persisted context.
+                _takyon_record_ceo_turn_chat(session, raw)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -6486,11 +6523,14 @@ def _takyon_business_home_snapshot(
         summary = as_dict(store.read(scope=f"business:{business_slug}", query="summary", limit=12))
     except Exception:
         summary = {}
-    # Curated CEO conversational updates (business_post_operator_update). The fast
-    # boot/reload path rebuilds the same customer-safe chat transcript the full
-    # overview does, so a reload immediately shows the prior conversation (ordered
-    # oldest→newest) plus a durable last summary — never a "What changed" card and
-    # never the raw reasoning stream. Milestone ladder stays Tasks-panel only.
+    # The chat IS the turn. The fast boot/reload path rebuilds the same transcript the
+    # full overview does: one bubble per completed CEO turn (business.ceo_turn = that
+    # turn's own reply, a DISPLAY-ONLY mirror of final_response), so a reload shows the
+    # prior conversation (ordered oldest→newest) plus a durable last line. ceo_turn is
+    # read via the dedicated dashboard fetch (read_ceo_turn_events) so it never enters
+    # a CEO-facing read. Legacy business.operator_update events (pre-ceo_turn
+    # businesses) are a migration fallback for the stream, and still carry the
+    # milestone ladder for the Tasks panel only.
     boot_operator_update_events: list[dict[str, Any]] = []
     boot_operator_update: dict[str, Any] = {}
     for event in as_list(summary.get("events")):
@@ -6512,13 +6552,36 @@ def _takyon_business_home_snapshot(
         boot_operator_update_events.append(payload_dict)
         if not boot_operator_update:
             boot_operator_update = payload_dict
-    boot_chat_stream = _takyon_ceo_chat_stream(list(reversed(boot_operator_update_events)))
+    boot_ceo_turn_events: list[dict[str, Any]] = []
+    try:
+        for event in as_list(store.read_ceo_turn_events(business_slug, limit=50)):
+            event_dict = as_dict(event)
+            payload = event_dict.get("payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            payload_dict = as_dict(payload)
+            payload_dict["updated_at"] = as_text(
+                event_dict.get("created_at") or event_dict.get("updated_at")
+            )
+            if not payload_dict.get("posted_at"):
+                payload_dict["posted_at"] = payload_dict["updated_at"]
+            boot_ceo_turn_events.append(payload_dict)
+    except Exception:
+        boot_ceo_turn_events = []
+    boot_chat_stream = _takyon_ceo_chat_stream(
+        list(reversed(boot_ceo_turn_events or boot_operator_update_events))
+    )
+    # Durable last line for reload = the newest turn bubble (fall back to the legacy
+    # operator_update summary for pre-ceo_turn businesses).
     boot_chat_summary = (
-        _takyon_sanitize_chat_text(as_text(boot_operator_update.get("summary")))
+        (boot_chat_stream[-1].get("text") if boot_chat_stream else "")
         or as_text(boot_operator_update.get("summary"))
     )
     boot_operator_headline = (
-        _takyon_sanitize_chat_text(as_text(boot_operator_update.get("headline")))
+        _takyon_clean_chat_text(as_text(boot_operator_update.get("headline")))
         or as_text(boot_operator_update.get("headline"))
     )
     conversations = as_dict(summary.get("conversations"))
@@ -7329,16 +7392,13 @@ def _takyon_business_overview_payload(
     product_inventory = as_dict(app.get("product_inventory"))
     source_path = brief_text(surface.get("source_path"))
 
-    # Curated CEO updates (business_post_operator_update). This is the customer-
-    # facing conversational channel: each business.operator_update event carries a
-    # warm headline + 1-2 sentence summary (the CEO's DELIBERATE narration) plus a
-    # milestone plan. The raw assistant message stream (chain-of-thought / planning)
-    # is NEVER surfaced to the customer. The litebulb chat renders these curated
-    # messages as an ordered assistant-message transcript (chat_stream below); the
-    # milestone/phase ladder is scoped to the Tasks panel only. `operator_update`
-    # is the LATEST event (drives the ceo_loop one-liner + Tasks milestone cards).
-    # `operator_update_events` is the full window (newest→oldest as stored) used to
-    # build the ordered conversational stream.
+    # The chat IS the turn. Each completed CEO turn records its own reply as a
+    # business.ceo_turn event (the turn's final_response); the litebulb chat renders
+    # one bubble per turn (chat_stream below), shown lightly cleaned — never run
+    # through a deletion filter (reactive-chat spec §32). `business_post_operator_update`
+    # is now demoted to the milestone plan only: its events drive the ceo_loop
+    # one-liner + the Tasks-panel cards, and serve as a migration fallback for the
+    # chat stream on businesses created before the ceo_turn channel existed.
     operator_update: dict[str, Any] = {}
     operator_update_events: list[dict[str, Any]] = []
     for event in as_list(summary.get("events")):
@@ -7363,10 +7423,35 @@ def _takyon_business_overview_payload(
     operator_update_milestones = [
         m for m in as_list(operator_update.get("milestones")) if isinstance(m, dict)
     ]
-    # Ordered (oldest→newest) customer-safe CEO conversational messages. Events are
-    # stored newest-first; reverse so the chat reads top-to-bottom in time. Milestone
-    # ladder data is intentionally excluded (Tasks-panel only).
-    ceo_chat_stream = _takyon_ceo_chat_stream(list(reversed(operator_update_events)))
+    # Per-turn chat feed (business.ceo_turn) via the dedicated dashboard fetch — kept
+    # OUT of the generic event read so it never enters a CEO-facing read / the agent's
+    # context. Decode the same way as operator_update (stamp posted_at/updated_at).
+    ceo_turn_events: list[dict[str, Any]] = []
+    try:
+        for event in as_list(store.read_ceo_turn_events(slug, limit=50)):
+            event_dict = as_dict(event)
+            payload = event_dict.get("payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            payload_dict = as_dict(payload)
+            payload_dict["updated_at"] = brief_text(
+                event_dict.get("created_at") or event_dict.get("updated_at")
+            )
+            if not payload_dict.get("posted_at"):
+                payload_dict["posted_at"] = payload_dict["updated_at"]
+            ceo_turn_events.append(payload_dict)
+    except Exception:
+        ceo_turn_events = []
+    # Ordered (oldest→newest) chat bubbles — one per turn. Events are stored
+    # newest-first; reverse so the chat reads top-to-bottom in time. Prefer the
+    # per-turn ceo_turn stream; fall back to legacy operator_update events for
+    # pre-ceo_turn businesses so their history still renders.
+    ceo_chat_stream = _takyon_ceo_chat_stream(
+        list(reversed(ceo_turn_events or operator_update_events))
+    )
 
     try:
         pulse = as_dict(store.calculate_pulse(slug, limit=5))
@@ -8342,14 +8427,13 @@ def _takyon_business_overview_payload(
         "tasks": task_cards[:16],
         "status_cards": status_cards,
         "ceo_loop": ceo_loop,
-        # Customer-facing conversational chat. `chat_stream` is the ordered
-        # (oldest→newest) list of the CEO's deliberate, customer-safe messages that
-        # the litebulb transcript renders as assistant bubbles. `chat_summary` is the
-        # latest curated summary — a durable last-known one-liner for reload, shown
-        # as a single plain bubble (NOT a "What changed" card). The milestone/phase
-        # ladder stays under `tasks` only and never enters the chat.
+        # The chat IS the turn. `chat_stream` is the ordered (oldest→newest) list of
+        # per-turn CEO replies the litebulb transcript renders as assistant bubbles.
+        # `chat_summary` is a durable last-known one-liner for reload — the newest
+        # turn bubble (falling back to the legacy operator_update summary for
+        # pre-ceo_turn businesses). The milestone/phase ladder stays under `tasks`.
         "chat_stream": ceo_chat_stream,
-        "chat_summary": _takyon_sanitize_chat_text(operator_update_summary)
+        "chat_summary": (ceo_chat_stream[-1]["text"] if ceo_chat_stream else "")
         or operator_update_summary,
         "wake_health": wake_health,
         "research": {
@@ -9141,6 +9225,30 @@ def _takyon_clean_runtime_line(line: str) -> str:
     return text[:360]
 
 
+def _takyon_clean_chat_text(text: str) -> str:
+    """Light, display-only clean of a CEO turn's own reply.
+
+    Strips ANSI/control escapes and collapses blank-line runs while PRESERVING the
+    agent's actual words and paragraph structure. It NEVER deletes content lines and
+    NEVER empties non-empty input — the reactive-chat contract (spec §31/§32) is that
+    the chat is the turn's reply produced clean by GENERATION, not a plumbing ban-list
+    that can blank a message. Presentation-only; never touches the agent's turn
+    context (it runs on a read-only copy of final_response)."""
+    raw = str(text or "")
+    cleaned = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    kept: list[str] = []
+    for line in cleaned.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            if kept and kept[-1] != "":
+                kept.append("")
+            continue
+        kept.append(stripped)
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return out[:2000]
+
+
 def _takyon_openable_url(value: Any) -> str:
     """Return value only when it is a clickable http(s)/data URL or bare domain.
 
@@ -9158,174 +9266,70 @@ def _takyon_openable_url(value: Any) -> str:
     return ""
 
 
-# Customer-safe chat sanitizer. The litebulb chat now renders the CEO's curated
-# conversational messages (business_post_operator_update headline + summary) as a
-# real assistant-message transcript — NOT the raw message.delta stream (which is
-# chain-of-thought/planning) and NOT the milestone/phase ladder (Tasks-panel only).
-# The CEO prompt already bans internal jargon from these fields, but this gate
-# FAILS SAFE if the model slips: any line that names a tool/skill/worker, a file
-# path, or a build/deploy mechanic is dropped before it reaches the customer.
-# Mirrors the frontend ban-list in web/src/lib/takyonCeoUpdates.ts
-# (CUSTOMER_PLUMBING_PATTERNS) and the CEO-prompt ban-list in
-# plugins/takyon/prompts/ceo.md, so the same plumbing/PII contract is enforced on
-# both ends of the channel.
-_TAKYON_CHAT_TEXT_EXTENSIONS = "ts|tsx|js|jsx|py|md|json|css|html|yml|yaml|toml|txt|sql"
-_TAKYON_CHAT_PLUMBING_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(business_[a-z_]+|takyon[-_][a-z-]+|claude[ _-]?agent|claude_agent_task)\b", re.I),
-    re.compile(r"\b(skill|worker lane|site worker|surface contract|app account|app shell|subuser|toolset|work request|work-request)\b", re.I),
-    re.compile(r"\b(bootstrap|scaffold|provision|upsert|runtime rail|workspace|delegate|delegated)\b", re.I),
-    re.compile(r"\b(npm|pnpm|yarn|tsc|typecheck|vite|vercel|deploy(?:ed|ing|ment)?|webpack|eslint|pytest|py_compile)\b", re.I),
-    re.compile(r"\b(actions/|screens/|src/|product/site/|metrics/|distribution/|research/)", re.I),
-    re.compile(rf"\b[\w.-]+\.(?:{_TAKYON_CHAT_TEXT_EXTENSIONS})\b", re.I),
-    re.compile(r"\b(executing|running)\s+[`'\"]?[a-z]", re.I),
-    re.compile(r"\bI'?ll (?:load|invoke|call|delegate|run the)\b", re.I),
-    # Planner/deliberation lead-ins the CEO prompt bans from customer voice:
-    # "Next: I'll …", "Let me think …", "Considering whether to target X or Y",
-    # "Deciding whether …", "Should I …". Matches a line that STARTS with the
-    # planner deliberation so customer-safe prose that merely contains the word
-    # mid-sentence is preserved.
-    re.compile(
-        r"^(let me|considering|deciding whether|should i|"
-        r"i(?:'?ll| will| need to| am going to|'?m going to)|now i(?:'?ll| will))\b",
-        re.I,
-    ),
-    # Sequencing words (Next/First/Then) are chain-of-thought ONLY as a planner
-    # HEADER ("Next:", "First:"). Narrative "First, your homepage is live." /
-    # "Then you can invite teammates." is warm customer prose and must be kept —
-    # so anchor on a trailing colon, not a bare word boundary.
-    re.compile(r"^(next|first|then)\s*:", re.I),
-    # Affirmation / realization META-OPENERS ("Good — I get what's going on now.",
-    # "Got it, building.", "Okay, so…", "Makes sense — done."): a line that STARTS
-    # with the model acknowledging its own understanding is internal thinking-stream
-    # filler, not a customer update. Two tiers so warm prose survives: the strong
-    # realization phrases (got it / i get what's / makes sense …) drop on any clause,
-    # while the short ambiguous words (good / okay / so / right …) drop ONLY when an
-    # immediate delimiter or "now" follows — so "Good news, your homepage is live."
-    # and "So you can now invite teammates." are KEPT. Byte-identical with the
-    # frontend ban-list in web/src/lib/takyonCeoUpdates.ts (CUSTOMER_PLUMBING_PATTERNS).
-    re.compile(
-        r"^(?:(?:got it|i get (?:what is|what'?s)|i see (?:what is|what'?s)|i understand|makes sense|let'?s see|let us see)\b|(?:good|okay|ok|alright|right|so)\s*(?:[,:–—-]|\bnow\b))",
-        re.I,
-    ),
-    # Internal jargon nouns ceo.md bans from customer voice — anchored to the
-    # plumbing phrasing ("product/app/business surface", "surface contract") so the
-    # everyday verb "surface" ("we surface your best insights") is preserved.
-    re.compile(r"\b(workstream|(?:product|app|business)\s+surface|surface contract|research files|wedge)\b", re.I),
-)
-
-
 def _takyon_sanitize_chat_text(text: str) -> str:
-    """Strip internal plumbing from a CEO conversational message line-by-line.
+    """Light display-only clean of a CEO chat line (back-compat alias).
 
-    Returns "" when nothing customer-safe remains (the caller then drops that
-    message entirely). Presentation-only — never alters the agent's turn context.
+    The legacy line-by-line plumbing ban-list — which could delete every line and
+    empty a whole message, then fall back to a generic placeholder — has been
+    REMOVED. Abstraction is now by generation (the CEO writes a clean plain-language
+    progress reply), not by deletion (reactive-chat spec §32). This simply runs the
+    light cleaner: it never drops content and never empties non-empty input.
+    Presentation-only — never alters the agent's turn context.
     """
-    normalized = _takyon_clean_runtime_line(text) if "\n" not in str(text or "") else str(text or "")
-    normalized = str(normalized or "").strip()
-    if not normalized:
-        return ""
-    kept: list[str] = []
-    for raw_line in normalized.split("\n"):
-        line = raw_line.strip()
-        if not line:
-            if kept and kept[-1] != "":
-                kept.append("")
-            continue
-        if any(pattern.search(line) for pattern in _TAKYON_CHAT_PLUMBING_PATTERNS):
-            continue
-        kept.append(line)
-    out = "\n".join(kept)
-    out = re.sub(r"\n{3,}", "\n\n", out).strip()
-    return out[:600]
-
-
-# Clean, generic, honest customer-facing line used ONLY when every curated field
-# of an operator_update sanitizes to empty. Per the reactive-chat spec §38/§32 the
-# litebulb chat is append-only — a posted bubble must never vanish on a later
-# rebuild — but a §32-bounded sanitizer must also never leak plumbing. So when the
-# warm headline/summary over-redacts to nothing we emit this non-empty, plumbing-
-# free line instead of dropping the bubble. It deliberately contains no banned
-# token (verified against _TAKYON_CHAT_PLUMBING_PATTERNS and the frontend mirror
-# CUSTOMER_PLUMBING_PATTERNS), so it survives both ends of the channel unchanged.
-_TAKYON_CHAT_SAFE_FALLBACK = "Working on your business."
+    return _takyon_clean_chat_text(text)
 
 
 def _takyon_ceo_chat_stream(
-    operator_update_events: list[dict[str, Any]],
+    chat_events: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Ordered (oldest→newest) customer-safe CEO chat messages.
+    """Ordered (oldest→newest) CEO chat bubbles — one per completed turn.
 
-    Each business.operator_update event is the CEO's DELIBERATE, curated
-    conversational message for one stretch of work: a warm headline plus a 1-2
-    sentence summary. We surface them as an ordered assistant-message stream so the
-    litebulb chat reads like a real OpenAI/Claude conversation (a living stream of
-    progress messages, not a single static "What changed" card). The milestone /
-    phase ladder carried on the same event is intentionally NOT included here — it
-    is scoped to the Tasks panel only.
+    The chat IS the agent's turn. Each event is the CEO's own end-of-turn reply
+    (a business.ceo_turn event carrying `text` = the turn's final_response). As a
+    migration fallback for businesses created before this channel existed, a legacy
+    business.operator_update event (headline + summary) is also accepted and rendered
+    from those fields.
 
-    Durability rule (reactive-chat spec §38/§32/§31): the litebulb chat is an
-    append-only assistant-message stream — once posted, a message is NEVER removed,
-    replaced, or collapsed, and a turn that did work NEVER renders blank. So every
-    event renders exactly ONE non-empty, customer-safe bubble. Each curated field
-    is run through the customer-safe sanitizer; if the sanitizer empties the
-    combined text (a §32 over-redaction would otherwise DROP an already-shown
-    bubble on the next rebuild), we fall back — full text → headline → summary →
-    a clean generic line — so the bubble is always non-empty WITHOUT ever leaking
-    internal nouns/paths/tool names. We never fall back to the raw plumbing text.
+    The reply is shown LIGHTLY CLEANED for display only (ANSI/whitespace) — it is
+    never run through a deletion/ban-list filter and is never dropped to empty
+    (reactive-chat spec §31/§32: abstraction by generation, not by subtraction; a
+    turn that did work never renders blank). Consecutive byte-identical bubbles are
+    collapsed (append-safe). Presentation-only — never alters the agent's turn
+    context (the durable transcript keeps the raw assistant message; this renders a
+    read-only copy of final_response).
     """
     messages: list[dict[str, Any]] = []
-    for event in operator_update_events:
+    for event in chat_events:
         if not isinstance(event, dict):
             continue
-        headline = str(event.get("headline") or "").strip()
-        summary = str(event.get("summary") or "").strip()
-        # The conversational bubble text leads with the warm headline, then the
-        # 1-2 sentence summary on its own line when it adds detail.
-        parts = [headline]
-        if summary and summary != headline:
-            parts.append(summary)
-        raw_text = "\n".join(part for part in parts if part).strip()
-        # Never drop a real CEO turn to nothing: prefer the full curated text, then
-        # the headline alone, then the summary alone, and only when EVERY curated
-        # field sanitizes to empty fall back to a clean generic line. The fallback
-        # is itself customer-safe (no plumbing) — we never surface the raw text.
-        safe_text = (
-            _takyon_sanitize_chat_text(raw_text)
-            or _takyon_sanitize_chat_text(headline)
-            or _takyon_sanitize_chat_text(summary)
-            or _TAKYON_CHAT_SAFE_FALLBACK
-        )
-        # Consecutive-duplicate guard (append-only safe). The CEO prompt tells the
-        # CEO to RE-POST the operator_update as each milestone flips status (see
-        # plugins/takyon/cli.py::_business_bootstrap_instruction). The milestone
-        # ladder is Tasks-panel only and is NOT part of the chat bubble text, so a
-        # re-post that only flips a milestone's status carries the SAME headline +
-        # summary — a fresh business.operator_update event with a new `posted_at`
-        # but byte-identical customer-safe `text`. Each such event would otherwise
-        # render as its own bubble, producing the same CEO message twice (or more)
-        # back-to-back. Collapse a bubble whose customer-safe text equals the
-        # immediately preceding bubble's text into that prior bubble (advancing its
-        # posted_at to the latest re-post). This is durability-safe per the
-        # reactive-chat append-only rule: it never removes a DISTINCT prior message
-        # and never empties a turn — it only de-dupes an exact consecutive repeat,
-        # the noise the re-post creates.
+        text = str(event.get("text") or "").strip()
+        if not text:
+            # Legacy business.operator_update fallback: lead with the headline, then
+            # the 1-2 sentence summary on its own line when it adds detail.
+            headline = str(event.get("headline") or "").strip()
+            summary = str(event.get("summary") or "").strip()
+            parts = [headline]
+            if summary and summary != headline:
+                parts.append(summary)
+            text = "\n".join(part for part in parts if part).strip()
+        safe_text = _takyon_clean_chat_text(text)
+        if not safe_text:
+            continue
         posted_at = str(event.get("posted_at") or event.get("updated_at") or "").strip()
+        # Consecutive-duplicate guard (append-only safe): collapse a bubble whose
+        # text equals the immediately preceding one into that prior bubble. With one
+        # event per turn this is rare, but it keeps a re-emitted/identical turn from
+        # double-rendering. Never removes a DISTINCT prior message.
         if messages and messages[-1].get("text") == safe_text:
             if posted_at:
                 messages[-1]["posted_at"] = posted_at
-                messages[-1]["id"] = f"ceo-update:{posted_at}"
+                messages[-1]["id"] = f"ceo-turn:{posted_at}"
             continue
         messages.append(
             {
-                "id": f"ceo-update:{posted_at or len(messages)}",
+                "id": f"ceo-turn:{posted_at or len(messages)}",
                 "role": "assistant",
-                # `text` is the load-bearing bubble and is guaranteed non-empty by
-                # the fallback chain above. The `headline`/`summary` companion
-                # fields stay strictly sanitized — never a raw-plumbing fallback —
-                # so no consumer can read an internal noun/path/tool name from them.
                 "text": safe_text,
-                "headline": _takyon_sanitize_chat_text(headline),
-                "summary": _takyon_sanitize_chat_text(summary),
                 "posted_at": posted_at,
             }
         )

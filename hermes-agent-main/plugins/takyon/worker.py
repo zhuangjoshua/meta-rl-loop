@@ -556,6 +556,34 @@ def _record_runtime_event(
         _log.debug("failed to record worker runtime event for %s: %s", slug, exc)
 
 
+def _record_ceo_turn_chat(slug: str, text: str) -> None:
+    """Record one completed CEO turn's reply as a business.ceo_turn chat event.
+
+    The chat IS the turn: this turn's final_response becomes one chat bubble (shown
+    lightly cleaned by the read-side ``_takyon_ceo_chat_stream``). This is a pure read
+    of ``final_response`` — it never mutates the agent's persisted context, so the
+    bubble can't affect a future Hermes turn. Stored on the business scope (not
+    /runtime) so the overview/boot builders pick it up. Best-effort: a failure here
+    must NOT fail the turn (the caller is on the billing/settlement path)."""
+    from .core import TakyonStore
+
+    body = str(text or "").strip()
+    if not body:
+        return
+    try:
+        store = TakyonStore()
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}",
+                business_slug=slug,
+                event_type="business.ceo_turn",
+                payload={"text": body[:4000]},
+            )
+    except Exception as exc:  # pragma: no cover - best-effort chat mirror only
+        _log.debug("failed to record CEO turn chat event for %s: %s", slug, exc)
+
+
 def _refresh_business_surface_after_bootstrap(
     slug: str,
     *,
@@ -965,6 +993,10 @@ def _run_ceo_turn(
         )
 
     final_response = str(result.get("final_response") or "")
+    # The chat IS the turn: record this wake/bootstrap turn's own reply as one chat
+    # bubble (business.ceo_turn). Display-only mirror of final_response — never feeds
+    # back into the agent's context.
+    _record_ceo_turn_chat(slug, final_response)
     cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
     cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
     return final_response, cost_usd, cost_status

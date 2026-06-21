@@ -15174,6 +15174,7 @@ class TakyonStore:
                 SELECT event_type, COUNT(*) AS count
                 FROM events
                 WHERE business_slug = ? AND created_at >= ?
+                  AND event_type != 'business.ceo_turn'
                 GROUP BY event_type
                 ORDER BY count DESC, event_type ASC
                 LIMIT ?
@@ -15863,6 +15864,24 @@ class TakyonStore:
         )
         return result
 
+    def read_ceo_turn_events(self, slug: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Display-only chat feed: the per-turn business.ceo_turn events (each a mirror
+        of one CEO turn's final_response), newest-first. Read ONLY by the dashboard
+        chat builders — deliberately separate from the generic event feed (read()
+        excludes business.ceo_turn) so this presentation mirror never reaches a
+        CEO-facing read or the agent's compute context."""
+        slug = _slugify(slug)
+        capped = max(1, min(int(limit or 50), 200))
+        with self._connect() as conn:
+            return [
+                self._row_to_dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM events WHERE business_slug = ? "
+                    "AND event_type = 'business.ceo_turn' ORDER BY created_at DESC LIMIT ?",
+                    (slug, capped),
+                ).fetchall()
+            ]
+
     def read(
         self,
         *,
@@ -15989,7 +16008,13 @@ class TakyonStore:
             events = [
                 self._row_to_dict(row)
                 for row in conn.execute(
-                    "SELECT * FROM events WHERE business_slug = ? ORDER BY created_at DESC LIMIT ?",
+                    # business.ceo_turn is a DISPLAY-ONLY chat mirror of each turn's
+                    # final_response. It is deliberately excluded from this generic
+                    # event feed so it never enters a CEO-facing read (business_read_business
+                    # / pulse) and therefore never changes the agent's compute context.
+                    # The dashboard reads it via read_ceo_turn_events() instead.
+                    "SELECT * FROM events WHERE business_slug = ? "
+                    "AND event_type != 'business.ceo_turn' ORDER BY created_at DESC LIMIT ?",
                     (slug, limit),
                 ).fetchall()
             ]

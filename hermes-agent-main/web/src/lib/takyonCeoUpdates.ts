@@ -544,50 +544,15 @@ function looksTechnicalAssistantReceipt(text: string): boolean {
   );
 }
 
-// Internal runtime jargon that must never reach customer-visible chat. A line
-// that mentions any of these is plumbing (tool/skill/worker/build mechanics) and
-// is dropped from the default conversational reply — it lives only under the
-// opt-in "View raw assistant log". Mirrors the CEO-prompt ban list in
-// plugins/takyon/prompts/ceo.md so the UI fails safe even if the model slips.
-const CUSTOMER_PLUMBING_PATTERNS: RegExp[] = [
-  /\b(business_[a-z_]+|takyon[-_][a-z-]+|claude[ _-]?agent|claude_agent_task)\b/i,
-  /\b(skill|worker lane|site worker|surface contract|app account|app shell|subuser|toolset|work request|work-request)\b/i,
-  /\b(bootstrap|scaffold|provision|upsert|runtime rail|workspace|delegate|delegated)\b/i,
-  /\b(npm|pnpm|yarn|tsc|typecheck|vite|vercel|deploy(?:ed|ing|ment)?|webpack|eslint|pytest|py_compile)\b/i,
-  /\b(actions\/|screens\/|src\/|product\/site\/|metrics\/|distribution\/|research\/)/i,
-  new RegExp(`\\b[\\w.-]+\\.(?:${TEXT_EXTENSIONS})\\b`, "i"),
-  /\b(executing|running)\s+[`'"]?[a-z]/i,
-  /\bI'?ll (?:load|invoke|call|delegate|run the)\b/i,
-  // Planner / deliberation lead-ins ("Let me think…", "Considering X or Y",
-  // "Should I…", "I'll wire…", "Now I'll…"): a line that STARTS this way is the
-  // model's chain-of-thought, not a customer update. Mirrors the backend ban-list
-  // in tui_gateway/server.py (_TAKYON_CHAT_PLUMBING_PATTERNS).
-  /^(?:let me|considering|deciding whether|should i|i(?:'?ll| will| need to| am going to|'?m going to)|now i(?:'?ll| will))\b/i,
-  // Sequencing words are chain-of-thought ONLY as a planner header ("Next:",
-  // "First:") — narrative "First, your homepage is live." is warm prose, kept.
-  /^(?:next|first|then)\s*:/i,
-  // Affirmation / realization META-OPENERS ("Good — I get what's going on now.",
-  // "Got it, building.", "Okay, so…", "Makes sense — done."): a line that STARTS
-  // with the model acknowledging its own understanding is internal thinking-stream
-  // filler, not a customer update. Two tiers so warm prose survives: the strong
-  // realization phrases (got it / i get what's / makes sense …) drop on any clause,
-  // while the short ambiguous words (good / okay / so / right …) drop ONLY when an
-  // immediate delimiter or "now" follows — so "Good news, your homepage is live."
-  // and "So you can now invite teammates." are KEPT. Byte-identical with the
-  // backend ban-list in tui_gateway/server.py (_TAKYON_CHAT_PLUMBING_PATTERNS).
-  /^(?:(?:got it|i get (?:what is|what'?s)|i see (?:what is|what'?s)|i understand|makes sense|let'?s see|let us see)\b|(?:good|okay|ok|alright|right|so)\s*(?:[,:–—-]|\bnow\b))/i,
-  // Internal jargon nouns ceo.md bans — anchored to the plumbing phrasing so the
-  // everyday verb "surface" ("we surface your best insights") is preserved.
-  /\b(?:workstream|(?:product|app|business)\s+surface|surface contract|research files|wedge)\b/i,
-];
-
 /**
- * Strip internal plumbing from a plain (non-receipt) CEO reply so it can render
- * directly in the default customer chat. Drops any line that names a tool,
- * skill, worker, file path, or build/deploy step, keeping only warm
- * business-outcome prose. Returns "" when nothing customer-safe remains (the
- * caller then suppresses the bubble and leaves the content only under the opt-in
- * raw log). Presentation-only — it never alters the agent's actual reply.
+ * Light, display-only clean of a CEO turn reply (mirrors the backend
+ * `_takyon_clean_chat_text`). The chat IS the agent's turn: its reply is shown
+ * lightly cleaned — control codes stripped, blank-line runs collapsed — while the
+ * agent's actual words are PRESERVED. The legacy line-by-line plumbing ban-list
+ * (which could delete every line and empty the bubble, then fall back to a generic
+ * placeholder) has been REMOVED: abstraction is by generation, not by subtraction
+ * (reactive-chat spec §32). This never drops content and never empties non-empty
+ * input. Presentation-only — it never alters the agent's actual reply.
  */
 export function sanitizeCustomerReply(content: string): string {
   const normalized = cleanText(content).trim();
@@ -600,7 +565,6 @@ export function sanitizeCustomerReply(content: string): string {
       if (kept.length && kept[kept.length - 1] !== "") kept.push("");
       continue;
     }
-    if (CUSTOMER_PLUMBING_PATTERNS.some((pattern) => pattern.test(line))) continue;
     kept.push(line);
   }
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -740,11 +704,11 @@ function rawChatStreamArray(workspace: WorkspaceLike): unknown[] {
 }
 
 /**
- * Parse the backend's curated `overview.chat_stream` (fallback
- * `live_state.chat_stream`) into normalized, customer-safe items. Each item's
- * text is re-sanitized; an item whose entire text is plumbing is dropped. This
- * is the ONLY source the litebulb chat reads for AGENT bubbles — raw
- * chain-of-thought history/delta messages are never rendered as conversation.
+ * Parse the backend's `overview.chat_stream` (fallback `live_state.chat_stream`)
+ * into normalized items — one bubble per completed CEO turn (the turn's own reply).
+ * Each item's text is lightly cleaned for display (no ban-list, never emptied);
+ * only a genuinely-empty record is skipped. This is the ONLY source the litebulb
+ * chat reads for AGENT bubbles.
  */
 export function parseChatStream(workspace: WorkspaceLike): ChatStreamItem[] {
   const items: ChatStreamItem[] = [];
