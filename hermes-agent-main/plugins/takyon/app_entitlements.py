@@ -645,6 +645,7 @@ def project_openmeter_access(
     app_user_id: str,
     *,
     active: bool,
+    degraded: bool = False,
     tier: str | None = None,
     plan_key: str | None = None,
     current_period_end: object = None,
@@ -665,7 +666,22 @@ def project_openmeter_access(
 
     Manual/operator-only grants are intentionally left alone; this replaces the recurring billing
     path, not every possible non-billing override.
+
+    Fail-OPEN grace: when `degraded` is True the vendor access could NOT be authoritatively read
+    (OpenMeter unreachable / 404, not a definitive "no access"). In that case NOTHING is mutated —
+    no row is retired, none inserted — so a transient OpenMeter outage can never lapse a paying
+    customer's local access. The effective tier is just recomputed from the rows already on file.
     """
+    if degraded:
+        with conn.transaction():
+            exists = conn.execute(
+                "select 1 from app_users where business_slug = %s and id = %s",
+                (business_slug, app_user_id),
+            ).fetchone()
+            if exists is None:
+                raise AppUserNotFound(str(app_user_id))
+            effective = _sync_user_tier(conn, business_slug, app_user_id)
+        return None, effective
     meta = dict(metadata or {})
     patch = _json_dumps(
         {

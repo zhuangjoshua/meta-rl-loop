@@ -18745,6 +18745,22 @@ def _openmeter_enabled() -> bool:
     return bool(_openmeter_backend_module().enabled())
 
 
+def _business_openmeter_authoritative(business_row: Mapping[str, Any] | None) -> bool:
+    """Per-business OpenMeter-authority flag (`metadata.openmeter_authority`). Default OFF: absent /
+    falsey metadata keeps the business on the proven Stripe-authoritative rail (coscale, wandr, and
+    every existing business — no migration, no backfill). When ON, the OpenMeter billing anchor
+    (binding the OpenMeter customer to the real Stripe customer + correlating the subscription) is
+    wired for that business so OpenMeter subscriptions activate against the actual charge. The
+    request-time access gate stays local and source-agnostic either way — this flag never moves a
+    live OpenMeter call onto the reserve path."""
+    if not isinstance(business_row, Mapping):
+        return False
+    metadata = business_row.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    return bool(metadata.get("openmeter_authority"))
+
+
 def _queue_openmeter_sync_job(
     store: "TakyonStore",
     business: str,
@@ -19057,6 +19073,23 @@ def _pg_sync_openmeter_access_projection(
                 None,
             )
             policy = _pg_plan_for_runtime_user(leaves, raw, business, user, entitlement)
+        business_row = store._business(conn, business)
+    openmeter_authoritative = _business_openmeter_authoritative(business_row)
+    # Stripe ids are already durably on the granted entitlement (grant_entitlement carries them);
+    # no extra DB read is needed. They are only used when this business is OpenMeter-authoritative.
+    stripe_customer_id = ""
+    stripe_subscription_id = ""
+    if openmeter_authoritative:
+        stripe_customer_id = str(
+            getattr(entitlement, "stripe_customer_id", None)
+            or getattr(latest_billing, "stripe_customer_id", None)
+            or ""
+        ).strip()
+        stripe_subscription_id = str(
+            getattr(entitlement, "stripe_subscription_id", None)
+            or getattr(latest_billing, "stripe_subscription_id", None)
+            or ""
+        ).strip()
     if policy is not None and str(policy.billing_interval or "").strip().lower() == "one_time":
         return {
             "configured": True,
@@ -19071,6 +19104,24 @@ def _pg_sync_openmeter_access_projection(
         email=user.email,
         name=user.name,
     )
+    if openmeter_authoritative and stripe_customer_id:
+        # THE previously-unwired billing anchor: bind the OpenMeter customer to the real Stripe
+        # customer so the subscription invoices against the actual charge. Fail-soft — a Kong /
+        # OpenMeter 4xx/5xx here must never abort the projection (the enclosing caller already
+        # swallows + enqueues a retry); sync_customer above guarantees the customer exists.
+        try:
+            backend.upsert_customer_stripe_data(
+                business_slug=business,
+                app_user_id=user.id,
+                stripe_customer_id=stripe_customer_id,
+            )
+        except Exception:
+            logger.warning(
+                "openmeter stripe billing-anchor upsert failed for %s/%s",
+                business,
+                user.id,
+                exc_info=True,
+            )
     current_subscription = backend.current_subscription(
         business_slug=business,
         app_user_id=user.id,
@@ -19102,6 +19153,7 @@ def _pg_sync_openmeter_access_projection(
                     business_slug=business,
                     app_user_id=user.id,
                     plan=desired,
+                    stripe_subscription_id=stripe_subscription_id or None,
                 )
             backend.cancel_subscription(
                 business_slug=business,
@@ -19115,6 +19167,7 @@ def _pg_sync_openmeter_access_projection(
                     business_slug=business,
                     app_user_id=user.id,
                     plan=desired,
+                    stripe_subscription_id=stripe_subscription_id or None,
                 )
     elif entitlement is not None and policy is not None:
         desired = backend.sync_access_plan(policy)
@@ -19122,6 +19175,7 @@ def _pg_sync_openmeter_access_projection(
             business_slug=business,
             app_user_id=user.id,
             plan=desired,
+            stripe_subscription_id=stripe_subscription_id or None,
         )
         if cancel_at_period_end:
             backend.cancel_subscription(
@@ -19140,6 +19194,7 @@ def _pg_sync_openmeter_access_projection(
                 business,
                 user.id,
                 active=bool(snapshot.has_access),
+                degraded=bool(getattr(snapshot, "degraded", False)),
                 tier=snapshot.tier or (policy.tier if policy is not None else None),
                 plan_key=snapshot.takyon_plan_key or (policy.plan_key if policy is not None else None),
                 current_period_end=snapshot.current_period_end,
@@ -19161,6 +19216,9 @@ def _pg_sync_openmeter_access_projection(
         "openmeter_plan_key": snapshot.openmeter_plan_key,
         "openmeter_plan_version": snapshot.plan_version,
         "projected_entitlement_id": getattr(projected, "id", None),
+        "openmeter_authoritative": openmeter_authoritative,
+        "stripe_anchor_bound": bool(openmeter_authoritative and stripe_customer_id),
+        "degraded": bool(getattr(snapshot, "degraded", False)),
     }
 
 

@@ -585,3 +585,37 @@ def test_project_openmeter_access_inactive_only_retires_openmeter_rows(pg_conn):
     assert statuses
     assert ("stripe", "active") in statuses
     assert ("openmeter", "cancelled") in statuses
+
+
+def test_project_openmeter_access_degraded_preserves_last_known_good(pg_conn):
+    """Fail-OPEN grace: an OpenMeter-ONLY paid customer (no Stripe backstop) must NOT lose access
+    when OpenMeter is unreachable. A degraded read (active=False, degraded=True) preserves the
+    last-known-good openmeter row, whereas an AUTHORITATIVE inactive read retires it."""
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    # An active OpenMeter-sourced grant (no Stripe row at all).
+    app_entitlements.project_openmeter_access(
+        pg_conn, slug, user_id, active=True, tier="paid", plan_key="pro",
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    active = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
+    assert active is not None and active.source == "openmeter"
+
+    # OpenMeter unreachable / 404 (degraded) — MUST NOT retire the row.
+    projected, effective = app_entitlements.project_openmeter_access(
+        pg_conn, slug, user_id, active=False, degraded=True,
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    assert projected is None
+    assert effective == "paid"
+    still = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
+    assert still is not None and still.source == "openmeter" and still.status == "active"
+
+    # By contrast, an AUTHORITATIVE inactive read (not degraded) DOES retire it.
+    _, effective_after = app_entitlements.project_openmeter_access(
+        pg_conn, slug, user_id, active=False, degraded=False,
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    assert effective_after == app_identity.UNENTITLED_TIER
+    assert app_entitlements.get_active_entitlement(pg_conn, slug, user_id) is None

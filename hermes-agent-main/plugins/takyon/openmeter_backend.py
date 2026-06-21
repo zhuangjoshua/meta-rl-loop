@@ -74,6 +74,12 @@ class OpenMeterAccessSnapshot:
     metadata: dict[str, Any]
     raw_access: dict[str, Any]
     raw_subscription: dict[str, Any] | None
+    # True when access could NOT be authoritatively read (the entitlement-access endpoint 404'd /
+    # gave no definitive answer AND there was no active subscription to confirm from). A degraded
+    # snapshot must NEVER retire a customer's local access — it is the fail-OPEN-grace signal that
+    # distinguishes "OpenMeter says no access" (authoritative, may retire) from "OpenMeter could
+    # not tell us" (unreachable/404, preserve last-known-good).
+    degraded: bool = False
 
 
 def enabled() -> bool:
@@ -355,6 +361,7 @@ def ensure_subscription(
     business_slug: str,
     app_user_id: str,
     plan: OpenMeterPlanSnapshot,
+    stripe_subscription_id: str | None = None,
 ) -> dict[str, Any]:
     _require_enabled()
     customer_key = customer_key_for(business_slug, app_user_id)
@@ -363,18 +370,24 @@ def ensure_subscription(
         current_plan = current.get("plan") if isinstance(current.get("plan"), dict) else {}
         current_plan_key = str(current_plan.get("key") or "").strip()
         if current_plan_key == plan.key:
+            # Same plan already active: idempotent no-op. The plan key/version is the ONLY churn
+            # driver — carrying stripe_subscription_id in metadata never makes a same-plan sub look
+            # "different", so a webhook/subscription.updated storm can't cause cancel/recreate.
             return current
         cancel_subscription(
             business_slug=business_slug,
             app_user_id=app_user_id,
             timing="immediate",
         )
+    metadata = {"takyon_customer_key": customer_key}
+    if stripe_subscription_id:
+        metadata["takyon_stripe_subscription_id"] = str(stripe_subscription_id).strip()
     create = {
         "customer": {"key": customer_key},
         "plan": {"key": plan.key, "version": int(plan.version)},
         "timing": "immediate",
         "name": f"{business_slug} {plan.key}",
-        "metadata": {"takyon_customer_key": customer_key},
+        "metadata": metadata,
     }
     created = _request_json(
         "POST",
@@ -428,6 +441,17 @@ def project_customer_access(
     )
     current = current_subscription(business_slug=business_slug, app_user_id=app_user_id)
     entitlement = _entitlement_payload(raw_access, feature_key)
+    # Fail-OPEN-grace inputs. An active OpenMeter subscription confers access even if the
+    # entitlement-access read came back empty. `raw_access is None` means the entitlement-access
+    # endpoint 404'd (urllib soft-miss via allow_status), which is NOT an authoritative negative.
+    subscription_active = bool(
+        isinstance(current, dict)
+        and str(current.get("status") or "").strip().lower() in _SUBSCRIPTION_STATUSES
+    )
+    has_access = _entitlement_has_access(entitlement) or subscription_active
+    # Degraded == access could not be authoritatively read (404/empty) AND no active subscription
+    # confirms it. The projection must preserve last-known-good rather than retire on this.
+    degraded = (raw_access is None) and not subscription_active
     plan_ref = current.get("plan") if isinstance(current, dict) and isinstance(current.get("plan"), dict) else {}
     plan_payload = None
     plan_id = str(plan_ref.get("id") or "").strip()
@@ -446,7 +470,8 @@ def project_customer_access(
     return OpenMeterAccessSnapshot(
         customer_key=customer_key,
         feature_key=feature_key,
-        has_access=_entitlement_has_access(entitlement),
+        has_access=has_access,
+        degraded=degraded,
         tier=(
             str(plan_metadata.get("takyon_tier") or "").strip() or None
         ),

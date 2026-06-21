@@ -154,3 +154,109 @@ def test_project_customer_access_reads_plan_metadata(monkeypatch):
     assert snapshot.tier == "paid"
     assert snapshot.subscription_id == "sub_123"
     assert snapshot.plan_version == 3
+    assert snapshot.degraded is False
+
+
+# --- OpenMeter-first migration: billing anchor + subscription correlation + fail-open grace ---
+
+
+def test_upsert_customer_stripe_data_puts_billing_anchor(monkeypatch):
+    """The previously-unwired billing anchor: PUT /customers/{id}/billing binds the OpenMeter
+    customer to the real Stripe customer so subscriptions invoice against the actual charge."""
+    customer_key = openmeter_backend.customer_key_for("acme", "user-123")
+    calls: list[tuple[str, str, object]] = []
+
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_9", "key": key})
+
+    def _fake_request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get("payload")))
+        return {"id": "cust_9", "type": "stripe"}
+
+    monkeypatch.setattr(openmeter_backend, "_request_json", _fake_request)
+
+    openmeter_backend.upsert_customer_stripe_data(
+        business_slug="acme",
+        app_user_id="user-123",
+        stripe_customer_id="cus_live_42",
+        stripe_default_payment_method_id="pm_7",
+    )
+
+    assert calls == [
+        (
+            "PUT",
+            "/openmeter/customers/cust_9/billing",
+            {"type": "stripe", "stripe_customer_id": "cus_live_42", "stripe_default_payment_method_id": "pm_7"},
+        )
+    ]
+
+
+def test_upsert_customer_stripe_data_raises_when_customer_missing(monkeypatch):
+    """Fail-closed: binding a Stripe customer to a non-existent OpenMeter customer must raise, not
+    silently no-op (the caller wraps it fail-soft, but the adapter itself stays honest)."""
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: None)
+    monkeypatch.setattr(
+        openmeter_backend, "_request_json",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not PUT when customer missing")),
+    )
+    with pytest.raises(openmeter_backend.OpenMeterAPIError, match="customer not found"):
+        openmeter_backend.upsert_customer_stripe_data(
+            business_slug="acme", app_user_id="ghost", stripe_customer_id="cus_x",
+        )
+
+
+def test_ensure_subscription_carries_stripe_subscription_id(monkeypatch):
+    """The OpenMeter sub correlates to the real Stripe sub via metadata, so the mirror is auditable."""
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)
+    captured: dict[str, object] = {}
+
+    def _fake_request(method, path, **kwargs):
+        if method == "POST" and path == "/openmeter/subscriptions":
+            captured["payload"] = kwargs.get("payload")
+            return {"id": "sub_new"}
+        raise AssertionError(f"unexpected OpenMeter call: {method} {path}")
+
+    monkeypatch.setattr(openmeter_backend, "_request_json", _fake_request)
+    plan = openmeter_backend.OpenMeterPlanSnapshot(id="p1", key="tk_acme_plan_pro", version=2, status="active", metadata={})
+
+    openmeter_backend.ensure_subscription(
+        business_slug="acme", app_user_id="user-123", plan=plan, stripe_subscription_id="sub_1Stripe",
+    )
+    md = captured["payload"]["metadata"]
+    assert md["takyon_stripe_subscription_id"] == "sub_1Stripe"
+    # absent when not supplied → no spurious metadata churn
+    captured.clear()
+    openmeter_backend.ensure_subscription(business_slug="acme", app_user_id="user-123", plan=plan)
+    assert "takyon_stripe_subscription_id" not in captured["payload"]["metadata"]
+
+
+def test_project_customer_access_degraded_when_unreadable_and_no_subscription(monkeypatch):
+    """Fail-OPEN grace: a 404 on entitlement-access with NO active subscription is NOT an
+    authoritative 'no access' — it is degraded, so the projection must preserve last-known-good."""
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
+    monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)
+    # entitlement-access 404 -> _request_json returns None for the allow_status soft-miss.
+    monkeypatch.setattr(openmeter_backend, "_request_json", lambda *a, **k: None)
+
+    snapshot = openmeter_backend.project_customer_access(business_slug="acme", app_user_id="user-123")
+    assert snapshot.degraded is True
+    assert snapshot.has_access is False
+
+
+def test_project_customer_access_active_subscription_is_authoritative_access(monkeypatch):
+    """An active subscription confers access even if entitlement-access 404s — and that is an
+    authoritative positive, NOT degraded."""
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
+    monkeypatch.setattr(
+        openmeter_backend, "current_subscription",
+        lambda **kw: {"id": "sub_a", "status": "active", "plan": {}},
+    )
+    monkeypatch.setattr(openmeter_backend, "_request_json", lambda *a, **k: None)
+
+    snapshot = openmeter_backend.project_customer_access(business_slug="acme", app_user_id="user-123")
+    assert snapshot.has_access is True
+    assert snapshot.degraded is False

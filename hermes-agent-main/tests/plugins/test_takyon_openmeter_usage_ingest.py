@@ -47,7 +47,8 @@ def test_ingest_usage_event_builds_cloudevent_when_enabled(monkeypatch):
     )
     assert ok is True
     assert captured["method"] == "POST"
-    assert captured["path"] == "/api/v1/events"
+    # Kong-fronted OpenMeter ingest path (matches ingest_usage_event + the live gateway, probed 200).
+    assert captured["path"] == "/openmeter/events"
     ev = captured["payload"]
     assert ev["type"] == "tk_ai_usage"
     assert ev["subject"] == om.usage_event_subject_for("acme")
@@ -68,3 +69,18 @@ def test_ingest_usage_event_idempotent_id_is_stable(monkeypatch):
     for _ in range(2):
         om.ingest_usage_event(business_slug="acme", reservation_key="rk-9", actual_cost_microusd=1)
     assert ids[0] == ids[1]
+
+
+def test_business_openmeter_authoritative_flag_defaults_off():
+    """The per-business OpenMeter-authority flag is OFF unless metadata.openmeter_authority is truthy,
+    so every existing business (coscale, wandr, ...) stays on the Stripe-authoritative rail with no
+    migration and no backfill."""
+    from plugins.takyon import core
+
+    assert core._business_openmeter_authoritative(None) is False
+    assert core._business_openmeter_authoritative({}) is False
+    assert core._business_openmeter_authoritative({"metadata": None}) is False
+    assert core._business_openmeter_authoritative({"metadata": {}}) is False
+    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": False}}) is False
+    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": True}}) is True
+    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": 1}}) is True
