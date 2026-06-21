@@ -9,6 +9,28 @@
     <!-- SCAFFOLD-PLACEHOLDER: replace title + meta from the design brief -->
     <title>__STARTER_SITE_NAME__</title>
     <meta name="description" content="__STARTER_SITE_DESCRIPTION__" />
+    <!-- Technical SEO floor shipped on every build (canonical, Open Graph, Twitter, JSON-LD). -->
+    <link rel="canonical" href="__STARTER_PUBLIC_ORIGIN__" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="__STARTER_SITE_NAME__" />
+    <meta property="og:title" content="__STARTER_SITE_NAME__" />
+    <meta property="og:description" content="__STARTER_SITE_DESCRIPTION__" />
+    <meta property="og:url" content="__STARTER_PUBLIC_ORIGIN__" />
+    <meta property="og:image" content="__STARTER_PUBLIC_ORIGIN__brand-logo.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="__STARTER_SITE_NAME__" />
+    <meta name="twitter:description" content="__STARTER_SITE_DESCRIPTION__" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "__STARTER_SITE_NAME__",
+        "description": "__STARTER_SITE_DESCRIPTION__",
+        "url": "__STARTER_PUBLIC_ORIGIN__",
+        "applicationCategory": "WebApplication",
+        "operatingSystem": "Web"
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,13 @@
+# __STARTER_SITE_NAME__
+
+> __STARTER_SITE_DESCRIPTION__
+
+## Overview
+
+__STARTER_SITE_NAME__ is a web application. The public landing page describes the product;
+the app itself is available to signed-in customers.
+
+## Links
+
+- [Home](__STARTER_PUBLIC_ORIGIN__)
+- [Sitemap](__STARTER_PUBLIC_ORIGIN__sitemap.xml)

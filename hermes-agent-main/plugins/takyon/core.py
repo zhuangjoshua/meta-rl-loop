@@ -6073,7 +6073,7 @@ def _subuser_app_starter_pages_js() -> str:
 
 
 _SCAFFOLD_SEED_SKIP_PARTS = frozenset({"_takyon", "node_modules", "dist", ".git"})
-_SCAFFOLD_SEED_TOKEN_SUFFIXES = frozenset({".html", ".ts", ".tsx", ".css", ".md", ".json", ".txt"})
+_SCAFFOLD_SEED_TOKEN_SUFFIXES = frozenset({".html", ".ts", ".tsx", ".css", ".md", ".json", ".txt", ".xml"})
 
 
 def _subuser_app_scaffold_source_dir() -> Path:
@@ -6282,6 +6282,10 @@ def _materialize_subuser_app_scaffold(
     replacements = {
         "__STARTER_SITE_NAME__": _seed_safe(copy.get("title")) or _humanize_business_slug(slug),
         "__STARTER_SITE_DESCRIPTION__": _seed_safe(copy.get("description")),
+        # Public origin for technical-SEO artifacts (sitemap.xml, llms.txt, canonical, OG) seeded
+        # into the build. Resolved from the slug + the current company base domain so a fresh
+        # business ships a valid sitemap/canonical on coscale.app (never the legacy domain).
+        "__STARTER_PUBLIC_ORIGIN__": f"https://{slug}.{_company_base_domain()}/",
     }
     for path in sorted(source.rglob("*")):
         if not path.is_file():
@@ -25980,6 +25984,38 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
         store._sync_business_workspace_remote(business)
+        # The render above wrote product/site/public/brand-logo.png and repointed the WORKSPACE
+        # index.html, but the LIVE site serves the built dist/, where the favicon <link> and the
+        # header brandLogoUrl are baked at BUILD time — so without a rebuild+republish the live site
+        # keeps the seeded "ST" monogram favicon/header even though the real logo was generated.
+        # Chain the canonical refresh->publish (it self-defers to the worker, same as
+        # business_refresh_product_surface) so the next build regenerates surface-context.js
+        # (brandLogoUrl=/brand-logo.png) and re-runs _inject_favicon_links (favicon -> /brand-logo.png),
+        # wiring the generated logo into BOTH the favicon and the header. Fail-soft: a publish blocker
+        # must never reverse the already-charged, already-rendered logo.
+        logo_republish: dict[str, Any] = {"status": "skipped", "detail": "logo not published to site"}
+        if receipt.get("published_to_site"):
+            try:
+                _refresh_raw = handle_business_refresh_product_surface(
+                    {
+                        "business": business,
+                        "idempotency_key": f"{idempotency_key}:logo-republish",
+                        "reason": "republish product site with generated logo",
+                        "actor": args.get("actor") or "agent",
+                    }
+                )
+                _refresh_out = json.loads(_refresh_raw) if isinstance(_refresh_raw, str) else (_refresh_raw or {})
+                logo_republish = {
+                    "status": "published" if _refresh_out.get("success") else "failed",
+                    "detail": str(
+                        _refresh_out.get("error")
+                        or _refresh_out.get("publish_blocker")
+                        or _refresh_out.get("status")
+                        or ""
+                    )[:300],
+                }
+            except Exception as _republish_exc:  # noqa: BLE001 - fail-soft, never reverse the logo
+                logo_republish = {"status": "failed", "detail": str(_republish_exc)[:300]}
         return tool_result(
             {
                 "success": True,
@@ -25997,6 +26033,7 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 "published_to_site": receipt.get("published_to_site"),
                 "site_logo_url": receipt.get("site_logo_url"),
                 "publish_skipped_reason": receipt.get("publish_skipped_reason") or "",
+                "logo_republish": logo_republish,
                 "value": receipt,
             }
         )

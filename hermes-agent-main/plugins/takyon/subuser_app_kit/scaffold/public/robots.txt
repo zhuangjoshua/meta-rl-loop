@@ -1,2 +1,4 @@
 User-agent: *
 Allow: /
+
+Sitemap: __STARTER_PUBLIC_ORIGIN__sitemap.xml
