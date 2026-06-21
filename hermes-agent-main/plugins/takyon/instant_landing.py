@@ -155,8 +155,17 @@ _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def _tsx_string(value: str) -> str:
-    """JSON-encode a value as a safe TSX string literal (handles quotes/newlines/unicode)."""
-    return json.dumps(str(value or "").strip())
+    """JSON-encode a value as a safe TSX string literal (handles quotes/newlines/unicode).
+
+    ``ensure_ascii=False`` keeps real Unicode (em-dashes, smart quotes, accents) LITERAL in the
+    emitted ``.tsx`` source instead of ``\\uXXXX`` escapes. JSON still escapes the structural
+    characters that would break a JS string literal (``"``, ``\\``, control chars / newlines), so the
+    literal stays valid TS while the copy round-trips byte-faithfully. With the default
+    ``ensure_ascii=True`` an em-dash became the six literal characters ``\\u2014`` in the source; that
+    compiles to ``—`` on the product page, but any surface that reads the copy back as PLAIN TEXT
+    (e.g. the CEO chat narrating what it built) then showed the raw ``\\u2014`` escape. .tsx files are
+    UTF-8, so a literal ``—`` is correct and eliminates the escape at the boundary that created it."""
+    return json.dumps(str(value or "").strip(), ensure_ascii=False)
 
 
 def _relative_luminance(r: int, g: int, b: int) -> float:

@@ -6743,3 +6743,39 @@ def test_business_home_snapshot_surfaces_nested_worker_failure_detail(tmp_path):
     assert snapshot["overview"]["current_action"]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
     assert snapshot["overview"]["jobs"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
     assert snapshot["overview"]["tasks"][0]["detail"] == "Claude worker was interrupted by SIGTERM before completion"
+
+
+# --- Dashboard CEO-chat rendering fixes (dedup re-posts, truthful thinking dots) ---
+
+
+def test_ceo_chat_stream_collapses_consecutive_duplicate_reposts():
+    """The CEO re-posts the SAME operator_update as milestones flip status; the chat must not
+    render the identical bubble twice back-to-back. Consecutive exact-duplicate text collapses."""
+    events = [
+        {"headline": "Live!", "summary": "Your reading tracker is live.", "posted_at": "2026-06-21T00:00:01"},
+        {"headline": "Live!", "summary": "Your reading tracker is live.", "posted_at": "2026-06-21T00:00:02"},
+        {"headline": "Next up", "summary": "Now building outreach.", "posted_at": "2026-06-21T00:00:03"},
+    ]
+    msgs = server._takyon_ceo_chat_stream(events)
+    assert len(msgs) == 2  # the identical re-post collapsed
+    assert msgs[0]["text"].startswith("Live!")
+    assert msgs[1]["text"].startswith("Next up")
+    assert msgs[0]["posted_at"] == "2026-06-21T00:00:02"  # advanced to the latest re-post
+
+
+def test_chat_running_only_true_when_background_run_genuinely_live():
+    """A child task stuck at status=='running' (its terminal event never merged) must NOT pin the
+    thinking dots once the background run has settled — otherwise the '...' spins forever."""
+    overview = {}
+    # stuck task pins status='running' but the reconciled run has finished -> dots clear
+    live = {"status": "running"}
+    server._takyon_attach_operator_update_copy(live, overview, {"status": "completed", "finished_at": "2026-06-21T00:00:05"})
+    assert live["chat_running"] is False
+    # genuinely-live background run -> dots show
+    live2 = {"status": "running"}
+    server._takyon_attach_operator_update_copy(live2, overview, {"status": "running"})
+    assert live2["chat_running"] is True
+    # no background run (interactive turns use the frontend `running` flag) -> no dots
+    live3 = {"status": "running"}
+    server._takyon_attach_operator_update_copy(live3, overview, None)
+    assert live3["chat_running"] is False

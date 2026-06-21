@@ -91,3 +91,15 @@ def test_does_not_synthesize_over_a_customized_landing(tmp_path):
 
     assert wrote is False
     assert not (build_root / "instant_landing.json").exists()
+
+
+def test_tsx_string_keeps_unicode_literal_not_escaped():
+    """_tsx_string must emit real Unicode (em-dash) into the .tsx literal, NOT a \\u2014 escape — the
+    escape leaks as literal text wherever the copy is read back as plain text (the CEO chat)."""
+    from plugins.takyon import instant_landing
+
+    out = instant_landing._tsx_string("Track yearly stats — all persisted")
+    assert "\\u2014" not in out      # no escaped form that would leak into plain-text surfaces
+    assert "—" in out                # the real em-dash is preserved
+    # structural escaping is still intact (quotes/backslashes)
+    assert instant_landing._tsx_string('He said "hi"') == '"He said \\"hi\\""'

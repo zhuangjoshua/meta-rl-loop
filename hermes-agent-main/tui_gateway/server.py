@@ -9295,7 +9295,26 @@ def _takyon_ceo_chat_stream(
             or _takyon_sanitize_chat_text(summary)
             or _TAKYON_CHAT_SAFE_FALLBACK
         )
+        # Consecutive-duplicate guard (append-only safe). The CEO prompt tells the
+        # CEO to RE-POST the operator_update as each milestone flips status (see
+        # plugins/takyon/cli.py::_business_bootstrap_instruction). The milestone
+        # ladder is Tasks-panel only and is NOT part of the chat bubble text, so a
+        # re-post that only flips a milestone's status carries the SAME headline +
+        # summary — a fresh business.operator_update event with a new `posted_at`
+        # but byte-identical customer-safe `text`. Each such event would otherwise
+        # render as its own bubble, producing the same CEO message twice (or more)
+        # back-to-back. Collapse a bubble whose customer-safe text equals the
+        # immediately preceding bubble's text into that prior bubble (advancing its
+        # posted_at to the latest re-post). This is durability-safe per the
+        # reactive-chat append-only rule: it never removes a DISTINCT prior message
+        # and never empties a turn — it only de-dupes an exact consecutive repeat,
+        # the noise the re-post creates.
         posted_at = str(event.get("posted_at") or event.get("updated_at") or "").strip()
+        if messages and messages[-1].get("text") == safe_text:
+            if posted_at:
+                messages[-1]["posted_at"] = posted_at
+                messages[-1]["id"] = f"ceo-update:{posted_at}"
+            continue
         messages.append(
             {
                 "id": f"ceo-update:{posted_at or len(messages)}",
@@ -9754,7 +9773,7 @@ def _takyon_running_worker_progress_detail(
 
 
 def _takyon_attach_operator_update_copy(
-    live_state: Any, overview: dict[str, Any] | None
+    live_state: Any, overview: dict[str, Any] | None, background_run: dict[str, Any] | None = None
 ) -> None:
     """Surface the CEO's curated chat copy + running flag on the live_state.
 
@@ -9778,11 +9797,21 @@ def _takyon_attach_operator_update_copy(
     """
     if not isinstance(live_state, dict) or not isinstance(overview, dict):
         return
-    # Running flag: the chat shows the thinking/stop affordance only while a turn
-    # is actively in flight. live_state.status is the canonical run state. A
-    # queued/gated follow-up job is NOT an active conversational turn, so it must
-    # not spin the customer's thinking dots — only 'running' counts.
-    live_state["chat_running"] = str(live_state.get("status") or "").strip() == "running"
+    # Running flag: the chat shows the thinking/stop affordance only while a turn is GENUINELY in
+    # flight. live_state.status alone is NOT enough — a child runtime task whose terminal event
+    # never merged stays status=='running' forever (the tool-started-without-tool-completed pin),
+    # which used to spin the customer's thinking dots even after the run settled (e.g. once the
+    # product-ready copy shows: "There's a working version of your product..."). So ALSO gate on the
+    # reconciled background_run being genuinely live (status 'running' and not finished). Interactive
+    # turns spin the dots via the frontend's own `running` state, not this flag, so a missing /
+    # settled background_run correctly clears the dots.
+    run = background_run if isinstance(background_run, dict) else {}
+    run_genuinely_live = (
+        str(run.get("status") or "").strip().lower() == "running" and not run.get("finished_at")
+    )
+    live_state["chat_running"] = bool(
+        str(live_state.get("status") or "").strip() == "running" and run_genuinely_live
+    )
     chat_stream = overview.get("chat_stream")
     if isinstance(chat_stream, list):
         live_state["chat_stream"] = chat_stream
@@ -10526,7 +10555,7 @@ def _takyon_workspace_boot_payload(
         bootstrap_is_live=_takyon_session_bootstrap_is_live(session, slug),
     )
     _takyon_attach_operator_update_copy(
-        live_state, overview if isinstance(overview, dict) else {}
+        live_state, overview if isinstance(overview, dict) else {}, background_run
     )
     overview_payload = dict(overview) if isinstance(overview, dict) else {}
     product_payload = dict(overview_payload.get("product") or {})
@@ -10608,7 +10637,7 @@ def _takyon_workspace_payload(
         bootstrap_is_live=_takyon_session_bootstrap_is_live(session, slug),
     )
     _takyon_attach_operator_update_copy(
-        live_state, overview if isinstance(overview, dict) else {}
+        live_state, overview if isinstance(overview, dict) else {}, background_run
     )
     overview_payload = dict(overview) if isinstance(overview, dict) else {}
     product_payload = dict(overview_payload.get("product") or {})
