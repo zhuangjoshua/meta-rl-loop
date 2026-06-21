@@ -416,10 +416,15 @@ function AgentChat({
   // `running` only, so it can never show with nothing to stop.
   const turnInFlight = running || (chatRunning && !showSummary && !summaryText);
   const showThinking = turnInFlight && !tailIsAgentText;
-  // On a cold reload with no chat_stream yet, surface the durable live_state
-  // one-liner as a single plain assistant bubble so the chat is never blank —
-  // but only when there is no curated agent bubble and no summary to show.
-  const showLiveStateLine = !hasAgentBubble && !showSummary && Boolean(liveStateLine);
+  // On a cold reload of a SETTLED business with no chat_stream yet, surface the
+  // durable live_state one-liner as a single plain assistant bubble so the chat is
+  // never blank. NEVER while a turn is in flight: the live_state one-liner is a
+  // deterministic status-ladder line (e.g. "There's a working version of your
+  // product…") and must not impersonate the agent's voice mid-build — during an
+  // active turn the streamed per-response bubbles (and the thinking row) are the
+  // agent. So gate on !turnInFlight too.
+  const showLiveStateLine =
+    !hasAgentBubble && !showSummary && !turnInFlight && Boolean(liveStateLine);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });

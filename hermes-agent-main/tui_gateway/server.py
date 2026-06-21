@@ -1849,16 +1849,17 @@ def _takyon_record_session_runtime_event(
 
 
 def _takyon_record_ceo_turn_chat(session: dict | None, text: str) -> None:
-    """Record one completed CEO turn's own reply as a business.ceo_turn chat event.
+    """Record ONE model response (assistant message) as a business.ceo_turn chat bubble.
 
-    This is the customer/operator chat: the turn's final_response IS the bubble, shown
-    lightly cleaned for display (the read-side `_takyon_ceo_chat_stream`). It is a
-    pure read of `final_response` (an immutable derived string) — it NEVER mutates the
-    agent's persisted context (session history / messages / session DB keep the raw
-    assistant message), so the display edit cannot affect a future Hermes turn. Stored
-    on the business scope (not the /runtime scope) so the overview/boot builders pick
-    it up alongside operator_update milestone events. Best-effort: a failure here must
-    never break the turn."""
+    This is the customer/operator chat, streamed: called once per model response — each
+    mid-loop assistant message via the interim tap as it completes, plus the final
+    response at turn end — so a multi-step turn reads like a live agent conversation,
+    not one end-of-turn summary. It is a pure read of text the agent ALREADY produced
+    and appended to its own messages — it NEVER mutates the agent's persisted context
+    (session history / messages / session DB keep the raw assistant message), so a
+    bubble cannot affect a future Hermes turn. Stored on the business scope (not the
+    /runtime scope) so the overview/boot builders pick it up alongside operator_update
+    milestone events. Best-effort: a failure here must never break the turn."""
     if not isinstance(session, dict):
         return
     slug = str(session.get("takyon_current_business") or "").strip()
@@ -1869,6 +1870,20 @@ def _takyon_record_ceo_turn_chat(session: dict | None, text: str) -> None:
         return
     try:
         store = _takyon_store(session)
+        # Dedup: the per-message interim tap and the post-turn final call can both
+        # present the same last text — skip a write equal to the most recent bubble.
+        try:
+            recent = store.read_ceo_turn_events(slug, limit=1)
+            if recent:
+                last_payload = recent[0].get("payload")
+                if isinstance(last_payload, str):
+                    last_payload = json.loads(last_payload)
+                if isinstance(last_payload, dict) and _takyon_clean_chat_text(
+                    str(last_payload.get("text") or "")
+                ) == body:
+                    return
+        except Exception:
+            pass
         with store._connect() as conn:
             store._record_event(
                 conn,
@@ -4733,6 +4748,19 @@ def _run_prompt_submit(
                             workspace_root=str(workspace_home or ""),
                             business_slug=current_business,
                         )
+                        # Stream each model response (mid-loop assistant message) of a
+                        # business turn to the chat as its own bubble, so a multi-step
+                        # interactive turn reads like a live agent conversation — same
+                        # rail as the bootstrap/wake worker path. Display-only: the
+                        # interim hook only forwards text the loop already appended to
+                        # messages (never mutates context). Gated on current_business
+                        # and cleared in finally so it never leaks to a later turn.
+                        if current_business:
+                            agent.interim_assistant_callback = (
+                                lambda text, already_streamed=False: _takyon_record_ceo_turn_chat(
+                                    session, text
+                                )
+                            )
                         run_kwargs = {
                             "conversation_history": list(history),
                             "stream_callback": _stream,
@@ -4746,6 +4774,9 @@ def _run_prompt_submit(
                             and original_agent_max_iterations is not None
                         ):
                             agent.max_iterations = original_agent_max_iterations
+                        # Don't let the per-turn interim chat tap persist on the reused
+                        # session agent into a later (possibly non-business) turn.
+                        agent.interim_assistant_callback = None
 
             last_reasoning = None
             status_note = None

@@ -557,28 +557,46 @@ def _record_runtime_event(
 
 
 def _record_ceo_turn_chat(slug: str, text: str) -> None:
-    """Record one completed CEO turn's reply as a business.ceo_turn chat event.
+    """Record ONE model response (assistant message) as a business.ceo_turn chat bubble.
 
-    The chat IS the turn: this turn's final_response becomes one chat bubble (shown
-    lightly cleaned by the read-side ``_takyon_ceo_chat_stream``). This is a pure read
-    of ``final_response`` — it never mutates the agent's persisted context, so the
-    bubble can't affect a future Hermes turn. Stored on the business scope (not
-    /runtime) so the overview/boot builders pick it up. Best-effort: a failure here
-    must NOT fail the turn (the caller is on the billing/settlement path)."""
+    The chat IS the turn, streamed: this is called once per model response — each
+    mid-loop assistant message via the interim tap as it completes, plus the final
+    response at turn end — so a long bootstrap reads like a live agent conversation
+    (a message per step), not one end-of-turn summary.
+
+    Pure read of text the agent ALREADY produced and appended to its own messages —
+    it never mutates the agent's persisted context, so a bubble can never affect a
+    future Hermes turn. Stored on the business scope (not /runtime) so the
+    overview/boot builders pick it up; the read-side ``_takyon_ceo_chat_stream``
+    lightly cleans it. Best-effort: a failure here must NOT fail the turn (the caller
+    is on the billing/settlement path)."""
     from .core import TakyonStore
 
-    body = str(text or "").strip()
+    body = str(text or "").strip()[:4000]
     if not body:
         return
     try:
         store = TakyonStore()
+        # Dedup: the per-message interim tap and the post-turn final call can both
+        # present the same last text. Skip a write whose text equals the most recent
+        # turn bubble so an identical final response isn't double-posted.
+        try:
+            recent = store.read_ceo_turn_events(slug, limit=1)
+            if recent:
+                last_payload = recent[0].get("payload")
+                if isinstance(last_payload, str):
+                    last_payload = json.loads(last_payload)
+                if isinstance(last_payload, dict) and str(last_payload.get("text") or "").strip() == body:
+                    return
+        except Exception:
+            pass
         with store._connect() as conn:
             store._record_event(
                 conn,
                 scope=f"business:{slug}",
                 business_slug=slug,
                 event_type="business.ceo_turn",
-                payload={"text": body[:4000]},
+                payload={"text": body},
             )
     except Exception as exc:  # pragma: no cover - best-effort chat mirror only
         _log.debug("failed to record CEO turn chat event for %s: %s", slug, exc)
@@ -943,6 +961,16 @@ def _run_ceo_turn(
     agent._skill_nudge_interval = 0
     agent.suppress_status_output = True
     agent.activity_callback = progress.activity if progress is not None else None
+    # Stream each model response (mid-loop assistant message) to the business chat as
+    # its own bubble, the instant it completes — so a long bootstrap/wake reads like a
+    # live agent conversation (a message per step), not a single end-of-turn summary.
+    # Display-only by construction: _emit_interim_assistant_message (run_agent.py) only
+    # forwards text the loop ALREADY appended to messages; it never mutates the agent's
+    # context, so this cannot affect a future Hermes turn. The final no-tool-call
+    # response is still recorded once more after the turn returns (deduped).
+    agent.interim_assistant_callback = (
+        lambda text, already_streamed=False: _record_ceo_turn_chat(slug, text)
+    )
 
     # Run on a worker thread and watch the agent's own activity tracker, so a hung turn is caught
     # without killing a healthy long-running one. (Mirrors cron/scheduler.py's inactivity guard.)
