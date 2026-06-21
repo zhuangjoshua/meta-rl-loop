@@ -340,14 +340,15 @@ def upsert_customer_stripe_data(
     customer_id = str(customer.get("id") or "").strip()
     if not customer_id:
         raise OpenMeterAPIError(f"OpenMeter customer lookup for key={key} returned no id")
-    payload = {
-        "type": "stripe",
-        "stripe_customer_id": str(stripe_customer_id or "").strip(),
-    }
+    # PUT /customers/{id}/billing expects the Stripe binding under app_data.stripe with snake_case
+    # `customer_id` (verified against the live Kong-fronted OpenMeter: the older
+    # {type, stripe_customer_id} shape 400s with "app_data.stripe required"; this shape advances
+    # to the real Stripe-customer validation). OpenMeter validates the customer exists in the
+    # connected Stripe account, so the id must be a real Stripe customer (from the product checkout).
+    stripe_data: dict[str, Any] = {"customer_id": str(stripe_customer_id or "").strip()}
     if stripe_default_payment_method_id:
-        payload["stripe_default_payment_method_id"] = str(
-            stripe_default_payment_method_id
-        ).strip()
+        stripe_data["default_payment_method_id"] = str(stripe_default_payment_method_id).strip()
+    payload = {"app_data": {"stripe": stripe_data}}
     updated = _request_json(
         "PUT",
         f"/openmeter/customers/{urllib.parse.quote(customer_id, safe='')}/billing",

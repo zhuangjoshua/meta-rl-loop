@@ -182,11 +182,13 @@ def test_upsert_customer_stripe_data_puts_billing_anchor(monkeypatch):
         stripe_default_payment_method_id="pm_7",
     )
 
+    # Verified against live OpenMeter: the binding goes under app_data.stripe with snake_case
+    # customer_id / default_payment_method_id (the old {type, stripe_customer_id} shape 400s).
     assert calls == [
         (
             "PUT",
             "/openmeter/customers/cust_9/billing",
-            {"type": "stripe", "stripe_customer_id": "cus_live_42", "stripe_default_payment_method_id": "pm_7"},
+            {"app_data": {"stripe": {"customer_id": "cus_live_42", "default_payment_method_id": "pm_7"}}},
         )
     ]
 
