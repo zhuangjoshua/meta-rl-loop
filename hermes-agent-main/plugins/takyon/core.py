@@ -554,6 +554,18 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
 # appended to the worker contract for every product instead.
 ALWAYS_ON_RUNTIME_RAILS: tuple[str, ...] = ("analytics",)
 
+# Rails whose declaration is DERIVED from the built product source — the app self-declares
+# the rails it actually calls — rather than relying on the bootstrap seed listing them.
+# `actions` is derived from on-disk action files (site_http_action_names); the data / media /
+# AI / social rails are derived from runtime-client usage in the app source
+# (referenced_runtime_rails_in_source). Deriving the whole set is what keeps declared >= used
+# by construction for every business, curing rail_unavailable:<rail>:undeclared at the root.
+# Always-seeded shell rails (auth/account/profile/checkout) are intentionally NOT here — they
+# are declared regardless of source scanning.
+_BUILD_DERIVED_RAILS: frozenset[str] = frozenset(
+    {"actions", "records", "directory", "media", "connections", "generate", "search"}
+)
+
 # Product chat tone presets — the operator-selectable VOICE for the customer-facing
 # product chat/assistant (the Litebulb-built product app's AI surface), NOT the operator
 # CEO shell. This is a per-business choice recorded on the surface contract
@@ -1354,11 +1366,24 @@ def _normalize_runtime_features(raw: Any, *, strict: bool = False) -> list[str]:
 def _surface_declared_runtime_features(surface: dict[str, Any] | None) -> list[str]:
     if not isinstance(surface, dict):
         return []
-    direct = [rail for rail in _normalize_runtime_features(surface.get("runtime_features")) if rail != "actions"]
+    # `actions` is the one rail that MUST be file-backed — declaring it without on-disk action
+    # files would expose an uncallable rail — so it is stripped from the directly-declared set
+    # and only re-admitted from `_workspace_file_rails` below. Every other rail may be declared
+    # directly AND/OR derived from the build (purely additive), so directly-declared rails are
+    # never lost.
+    direct = [
+        rail
+        for rail in _normalize_runtime_features(surface.get("runtime_features"))
+        if rail != "actions"
+    ]
+    # `_workspace_file_rails` carries the rails DERIVED from the built source (actions from
+    # on-disk files, plus records/media/directory/connections/generate/search from runtime-
+    # client usage). Admit the whole build-derived set, not just actions, so a product that
+    # calls a rail self-declares it even when the stored contract omitted it.
     file_backed = [
         rail
         for rail in _normalize_runtime_features(surface.get("_workspace_file_rails"))
-        if rail == "actions"
+        if rail in _BUILD_DERIVED_RAILS
     ]
     if direct or file_backed:
         return _normalize_runtime_features([*direct, *file_backed])
@@ -1800,28 +1825,6 @@ def _merge_product_workflow_metadata(
     else:
         merged.pop("product_workflow", None)
     return merged
-
-def _runtime_features_implied_by_product_workflow(product_workflow: dict[str, Any] | None) -> list[str]:
-    if not isinstance(product_workflow, dict):
-        return []
-    implied: list[str] = []
-
-    def include(raw_rail: Any) -> None:
-        rail = _normalize_runtime_rail_name(raw_rail)
-        if not rail or rail in _RUNTIME_FEATURE_LEGACY_ALIASES:
-            return
-        if rail not in PRODUCT_RUNTIME_RAILS or rail == "billing" or rail in implied:
-            return
-        implied.append(rail)
-
-    persistence_rules = (
-        product_workflow.get("persistence_rules")
-        if isinstance(product_workflow.get("persistence_rules"), dict)
-        else {}
-    )
-    include(persistence_rules.get("persistence_rail"))
-    return _canonical_runtime_features_for_surface_shape(implied)
-
 
 def _product_workflow_screen_claims(customer_experience: dict[str, Any] | None) -> list[str]:
     if not isinstance(customer_experience, dict):
@@ -2394,10 +2397,16 @@ def _materialized_surface_for_workspace(
         **surface,
         "product_workflow": _surface_product_workflow_shape(surface),
     }
-    file_rails = []
+    file_rails: list[str] = []
     runtime_features = _surface_runtime_features(surface)
     if takyon_app_actions.site_http_action_names(workspace_root, surface_with_workflow):
         file_rails.append("actions")
+    # Self-declare every build-derived rail the app's source actually calls (records, media,
+    # directory, connections, generate, search) — symmetric with how `actions` is derived from
+    # on-disk action files above — so the declared contract stays honest to the build.
+    for rail in takyon_app_actions.referenced_runtime_rails_in_source(workspace_root):
+        if rail in _BUILD_DERIVED_RAILS and rail not in file_rails:
+            file_rails.append(rail)
     return {
         **surface_with_workflow,
         "runtime_features": runtime_features,

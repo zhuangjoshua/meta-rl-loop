@@ -545,6 +545,64 @@ def _referenced_action_names_in_source(site_root: Path, *, limit: int = 300) -> 
     return referenced
 
 
+# Distinctive runtime-client rail methods an app calls in its own source. Mirrors how action
+# names are scanned (_referenced_action_names_in_source) so a built product self-declares the
+# data / media / AI / social rails it actually uses — the root cure for
+# rail_unavailable:<rail>:undeclared. auth/account/profile/checkout are always-seeded shell
+# rails and are intentionally omitted here; `actions` is derived separately from on-disk
+# action files. The kit (`_takyon`) — which DEFINES these methods — is skipped by
+# _ACTION_SCAN_SKIP_DIRS, so only real call sites in app source match.
+_RUNTIME_RAIL_USAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("records", re.compile(r"\b(?:listRecords|getRecord|saveRecord|deleteRecord)\s*\(")),
+    (
+        "directory",
+        re.compile(
+            r"\b(?:listDirectory|getDirectoryMe|getDirectoryEntry|updateDirectoryMe|disableDirectoryMe)\s*\("
+        ),
+    ),
+    ("media", re.compile(r"\b(?:uploadMedia|deleteMedia)\s*\(")),
+    ("connections", re.compile(r"\b(?:listConnections|actOnConnection)\s*\(")),
+    ("generate", re.compile(r"\b(?:ctx|client|runtime|rt)\.generate\s*\(")),
+    ("search", re.compile(r"\b(?:ctx|client|runtime|rt)\.search\s*\(")),
+)
+
+
+def referenced_runtime_rails_in_source(site_root: Path, *, limit: int = 400) -> set[str]:
+    """Runtime rails a product's own source actually calls through the shared runtime client.
+
+    Scans the app-authored source (skipping the kit, build output, and vendored deps) for the
+    distinctive runtime-client rail methods, so the surface contract's declared
+    runtime_features can be DERIVED from real usage — declared >= used by construction,
+    symmetric with how `actions` is derived from on-disk action files. Returns a subset of the
+    data / media / AI / social rails; never the always-seeded shell rails.
+    """
+    used: set[str] = set()
+    if not site_root.exists():
+        return used
+    pending = list(_RUNTIME_RAIL_USAGE_PATTERNS)
+    scanned = 0
+    for path in sorted(site_root.rglob("*")):
+        if scanned >= limit or not pending:
+            break
+        if not path.is_file() or path.suffix.lower() not in _ACTION_SCAN_SOURCE_SUFFIXES:
+            continue
+        if _ACTION_SCAN_SKIP_DIRS & set(path.relative_to(site_root).parts):
+            continue
+        scanned += 1
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        still_pending: list[tuple[str, re.Pattern[str]]] = []
+        for rail, pattern in pending:
+            if pattern.search(text):
+                used.add(rail)
+            else:
+                still_pending.append((rail, pattern))
+        pending = still_pending
+    return used
+
+
 def _file_backed_action_names(site_root: Path, *, limit: int = 300) -> set[str]:
     """Action files physically present under product/site/actions."""
     names: set[str] = set()
