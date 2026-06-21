@@ -610,7 +610,9 @@ def _plan_create_body(
     body = {
         "key": plan_key_for(str(getattr(policy, "business_slug", "") or ""), str(getattr(policy, "plan_key", "") or "")),
         "name": name or "Plan",
-        "description": str(getattr(policy, "notes", "") or "") or None,
+        # Live OpenMeter rejects a null description ("description [nullable]: Value is not nullable"),
+        # so never send None — fall back to a non-empty default.
+        "description": str(getattr(policy, "notes", "") or "").strip() or f"{name or 'Plan'} app access",
         "currency": str(getattr(policy, "currency", "usd") or "usd").upper(),
         "billing_cadence": cadence,
         "metadata": metadata,
