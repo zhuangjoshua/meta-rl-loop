@@ -450,9 +450,14 @@ def project_customer_access(
         and str(current.get("status") or "").strip().lower() in _SUBSCRIPTION_STATUSES
     )
     has_access = _entitlement_has_access(entitlement) or subscription_active
-    # Degraded == access could not be authoritatively read (404/empty) AND no active subscription
-    # confirms it. The projection must preserve last-known-good rather than retire on this.
-    degraded = (raw_access is None) and not subscription_active
+    # A read is AUTHORITATIVE only when it carries an EXPLICIT access decision (the resolved
+    # entitlement payload actually contains has_access/hasAccess/access) OR an active subscription
+    # confirms access. Everything else -- a 404 (raw_access None), a 200 empty/non-dict body ({}),
+    # or a 200 envelope that lacks THIS feature's entitlement (the live Kong-misroute case) -- CANNOT
+    # prove no-access, so it is degraded and must preserve last-known-good rather than retire.
+    # (Keying degraded on `raw_access is None` alone missed every non-404 degraded 200.)
+    authoritative = subscription_active or _entitlement_access_is_authoritative(entitlement)
+    degraded = not authoritative
     plan_ref = current.get("plan") if isinstance(current, dict) and isinstance(current.get("plan"), dict) else {}
     plan_payload = None
     plan_id = str(plan_ref.get("id") or "").strip()
@@ -595,7 +600,12 @@ def _plan_create_body(
     cadence: str,
     metadata: dict[str, str],
 ) -> dict[str, Any]:
-    amount = max(0, int(getattr(policy, "price_cents", 0) or 0))
+    # OpenMeter is a downstream ACCESS/USAGE MIRROR, never a second charger. The product's own Stripe
+    # Checkout is the sole money rail; if the OpenMeter rate card carried the real price, OpenMeter's
+    # Stripe billing app would issue a SECOND recurring invoice to the same customer (double-billing).
+    # So the rate card is $0 — it confers the boolean access entitlement only. The real Takyon price
+    # is still recorded in the plan metadata (takyon_price_cents) for reference.
+    amount = 0
     name = str(getattr(policy, "plan_key", "plan") or "plan").replace("-", " ").strip().title()
     body = {
         "key": plan_key_for(str(getattr(policy, "business_slug", "") or ""), str(getattr(policy, "plan_key", "") or "")),
@@ -771,6 +781,15 @@ def _entitlement_has_access(payload: dict[str, Any]) -> bool:
         if value is not None:
             return bool(value)
     return False
+
+
+def _entitlement_access_is_authoritative(payload: dict[str, Any]) -> bool:
+    """True iff the entitlement payload carries an EXPLICIT access decision (one of
+    has_access/hasAccess/access is present, regardless of value). An empty / feature-missing payload
+    cannot prove no-access, so it is NOT authoritative — the fail-open grace must preserve on it."""
+    if not isinstance(payload, dict):
+        return False
+    return any(payload.get(name) is not None for name in ("has_access", "hasAccess", "access"))
 
 
 def _entitlement_payload(raw_access: dict[str, Any] | list[Any] | None, feature_key: str) -> dict[str, Any]:

@@ -646,6 +646,7 @@ def project_openmeter_access(
     *,
     active: bool,
     degraded: bool = False,
+    authoritative: bool = False,
     tier: str | None = None,
     plan_key: str | None = None,
     current_period_end: object = None,
@@ -667,12 +668,16 @@ def project_openmeter_access(
     Manual/operator-only grants are intentionally left alone; this replaces the recurring billing
     path, not every possible non-billing override.
 
-    Fail-OPEN grace: when `degraded` is True the vendor access could NOT be authoritatively read
-    (OpenMeter unreachable / 404, not a definitive "no access"). In that case NOTHING is mutated —
-    no row is retired, none inserted — so a transient OpenMeter outage can never lapse a paying
-    customer's local access. The effective tier is just recomputed from the rows already on file.
+    Fail-OPEN grace (OpenMeter-AUTHORITATIVE businesses only): when `degraded` is True the vendor
+    access could NOT be authoritatively read (OpenMeter unreachable / 404 / a 200 with no explicit
+    access decision) AND `authoritative` is True (this business runs on OpenMeter as the access
+    authority, so the source='openmeter' row may be the customer's ONLY conferring row), NOTHING is
+    mutated — no row retired, none inserted — so a transient outage can never lapse a paying customer.
+    For Stripe-authoritative (flag-OFF) businesses the source='openmeter' row is a mere MIRROR and the
+    Stripe row governs, so a degraded read falls through to the normal path (the mirror is retired per
+    `active`) and correctly follows a Stripe cancel rather than stranding stale access.
     """
-    if degraded:
+    if degraded and authoritative:
         with conn.transaction():
             exists = conn.execute(
                 "select 1 from app_users where business_slug = %s and id = %s",

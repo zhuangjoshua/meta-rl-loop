@@ -19122,10 +19122,8 @@ def _pg_sync_openmeter_access_projection(
                 user.id,
                 exc_info=True,
             )
-    current_subscription = backend.current_subscription(
-        business_slug=business,
-        app_user_id=user.id,
-    )
+    # Derived from the LOCAL billing row (no OpenMeter call) — compute before the OpenMeter
+    # interaction so it survives a degraded-outage fall-through.
     cancel_at_period_end = bool(
         (
             (getattr(latest_billing, "metadata", {}) or {})
@@ -19133,60 +19131,86 @@ def _pg_sync_openmeter_access_projection(
             else {}
         ).get("cancel_at_period_end")
     )
-    if current_subscription is not None:
-        current_plan = (
-            current_subscription.get("plan")
-            if isinstance(current_subscription.get("plan"), dict)
-            else {}
-        )
-        current_plan_key = str(current_plan.get("key") or "").strip()
-        if entitlement is None or policy is None:
-            backend.cancel_subscription(
-                business_slug=business,
-                app_user_id=user.id,
-                timing="immediate",
-            )
-        elif cancel_at_period_end:
-            desired = backend.sync_access_plan(policy)
-            if current_plan_key != desired.key:
-                backend.ensure_subscription(
-                    business_slug=business,
-                    app_user_id=user.id,
-                    plan=desired,
-                    stripe_subscription_id=stripe_subscription_id or None,
-                )
-            backend.cancel_subscription(
-                business_slug=business,
-                app_user_id=user.id,
-                timing="next_billing_cycle",
-            )
-        elif allow_provision and policy is not None:
-            desired = backend.sync_access_plan(policy)
-            if current_plan_key and current_plan_key != desired.key:
-                backend.ensure_subscription(
-                    business_slug=business,
-                    app_user_id=user.id,
-                    plan=desired,
-                    stripe_subscription_id=stripe_subscription_id or None,
-                )
-    elif entitlement is not None and policy is not None:
-        desired = backend.sync_access_plan(policy)
-        backend.ensure_subscription(
+    try:
+        current_subscription = backend.current_subscription(
             business_slug=business,
             app_user_id=user.id,
-            plan=desired,
-            stripe_subscription_id=stripe_subscription_id or None,
         )
-        if cancel_at_period_end:
-            backend.cancel_subscription(
+        if current_subscription is not None:
+            current_plan = (
+                current_subscription.get("plan")
+                if isinstance(current_subscription.get("plan"), dict)
+                else {}
+            )
+            current_plan_key = str(current_plan.get("key") or "").strip()
+            if entitlement is None or policy is None:
+                backend.cancel_subscription(
+                    business_slug=business,
+                    app_user_id=user.id,
+                    timing="immediate",
+                )
+            elif cancel_at_period_end:
+                desired = backend.sync_access_plan(policy)
+                if current_plan_key != desired.key:
+                    backend.ensure_subscription(
+                        business_slug=business,
+                        app_user_id=user.id,
+                        plan=desired,
+                        stripe_subscription_id=stripe_subscription_id or None,
+                    )
+                backend.cancel_subscription(
+                    business_slug=business,
+                    app_user_id=user.id,
+                    timing="next_billing_cycle",
+                )
+            elif allow_provision and policy is not None:
+                desired = backend.sync_access_plan(policy)
+                if current_plan_key and current_plan_key != desired.key:
+                    backend.ensure_subscription(
+                        business_slug=business,
+                        app_user_id=user.id,
+                        plan=desired,
+                        stripe_subscription_id=stripe_subscription_id or None,
+                    )
+        elif entitlement is not None and policy is not None:
+            desired = backend.sync_access_plan(policy)
+            backend.ensure_subscription(
                 business_slug=business,
                 app_user_id=user.id,
-                timing="next_billing_cycle",
+                plan=desired,
+                stripe_subscription_id=stripe_subscription_id or None,
             )
-    snapshot = backend.project_customer_access(
-        business_slug=business,
-        app_user_id=user.id,
-    )
+            if cancel_at_period_end:
+                backend.cancel_subscription(
+                    business_slug=business,
+                    app_user_id=user.id,
+                    timing="next_billing_cycle",
+                )
+        snapshot = backend.project_customer_access(
+            business_slug=business,
+            app_user_id=user.id,
+        )
+    except backend.OpenMeterError as exc:
+        # A partial OpenMeter outage mid-projection (a subscription-management call or the access
+        # read 4xx/5xx) must NOT abort the whole turn. Treat it as a DEGRADED snapshot so the
+        # fail-open grace runs IN-TURN (preserve last-known-good for an authoritative business)
+        # instead of only on the queued retry. The outer caller still enqueues a retry to converge.
+        logger.warning("openmeter projection degraded for %s/%s: %s", business, user.id, exc)
+        snapshot = backend.OpenMeterAccessSnapshot(
+            customer_key=backend.customer_key_for(business, user.id),
+            feature_key=backend.access_feature_key_for(business),
+            has_access=False,
+            tier=None,
+            takyon_plan_key=None,
+            openmeter_plan_key=None,
+            plan_version=None,
+            subscription_id=None,
+            current_period_end=None,
+            metadata={"authority": "openmeter", "openmeter_degraded": "true"},
+            raw_access={},
+            raw_subscription=None,
+            degraded=True,
+        )
     with store._connect() as conn:
         with store._leaf_conn(conn) as raw:
             projected, tier = leaves["entitlements"].project_openmeter_access(
@@ -19195,6 +19219,7 @@ def _pg_sync_openmeter_access_projection(
                 user.id,
                 active=bool(snapshot.has_access),
                 degraded=bool(getattr(snapshot, "degraded", False)),
+                authoritative=openmeter_authoritative,
                 tier=snapshot.tier or (policy.tier if policy is not None else None),
                 plan_key=snapshot.takyon_plan_key or (policy.plan_key if policy is not None else None),
                 current_period_end=snapshot.current_period_end,

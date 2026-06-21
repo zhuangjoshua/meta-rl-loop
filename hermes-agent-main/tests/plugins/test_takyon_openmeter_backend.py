@@ -262,3 +262,44 @@ def test_project_customer_access_active_subscription_is_authoritative_access(mon
     snapshot = openmeter_backend.project_customer_access(business_slug="acme", app_user_id="user-123")
     assert snapshot.has_access is True
     assert snapshot.degraded is False
+
+
+def test_project_customer_access_degraded_on_200_without_explicit_access(monkeypatch):
+    """Fail-OPEN grace covers more than 404: a 200 that does NOT carry an explicit access decision
+    for this feature (empty body, or an envelope missing the feature — the live Kong-misroute case)
+    is NON-authoritative => degraded=True, preserve last-known-good. (raw_access is {} here, not None.)"""
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
+    monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)
+    monkeypatch.setattr(openmeter_backend, "_request_json", lambda *a, **k: {})  # 200 empty/feature-missing
+    snap = openmeter_backend.project_customer_access(business_slug="acme", app_user_id="u")
+    assert snap.degraded is True
+    assert snap.has_access is False
+
+
+def test_project_customer_access_explicit_no_access_is_authoritative(monkeypatch):
+    """A 200 that explicitly says has_access=false IS authoritative (degraded=False) — safe to retire."""
+    monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
+    monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
+    monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)
+    feature = openmeter_backend.access_feature_key_for("acme")
+
+    def _req(method, path, **kw):
+        if "entitlement-access" in path:
+            return {"entitlements": {feature: {"has_access": False}}}
+        return None
+
+    monkeypatch.setattr(openmeter_backend, "_request_json", _req)
+    snap = openmeter_backend.project_customer_access(business_slug="acme", app_user_id="u")
+    assert snap.degraded is False
+    assert snap.has_access is False
+
+
+def test_access_plan_rate_card_is_zero_priced_to_avoid_double_billing():
+    """OpenMeter is an access/usage MIRROR, not a second charger: the plan rate card must be $0 so
+    OpenMeter never issues a Stripe invoice on top of the product's own Checkout (double-billing)."""
+    policy = _policy(price_cents=2000)
+    feature_key = openmeter_backend.access_feature_key_for(policy.business_slug)
+    body = openmeter_backend._plan_create_body(policy, feature_key, "P1M", {})
+    rate_card = body["phases"][0]["rate_cards"][0]
+    assert rate_card["price"]["amount"] == "0"

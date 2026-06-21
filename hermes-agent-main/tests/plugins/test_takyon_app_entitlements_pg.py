@@ -587,24 +587,25 @@ def test_project_openmeter_access_inactive_only_retires_openmeter_rows(pg_conn):
     assert ("openmeter", "cancelled") in statuses
 
 
-def test_project_openmeter_access_degraded_preserves_last_known_good(pg_conn):
-    """Fail-OPEN grace: an OpenMeter-ONLY paid customer (no Stripe backstop) must NOT lose access
-    when OpenMeter is unreachable. A degraded read (active=False, degraded=True) preserves the
-    last-known-good openmeter row, whereas an AUTHORITATIVE inactive read retires it."""
+def test_project_openmeter_access_degraded_preserves_when_authoritative(pg_conn):
+    """Fail-OPEN grace (OpenMeter-AUTHORITATIVE business): an OpenMeter-ONLY paid customer (no Stripe
+    backstop) must NOT lose access when OpenMeter is unreachable. A degraded read with
+    authoritative=True preserves the last-known-good openmeter row; an AUTHORITATIVE inactive read
+    (degraded=False) retires it."""
     slug = _business(pg_conn, _owner(pg_conn))
     user_id = _user(pg_conn, slug)
     app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
-    # An active OpenMeter-sourced grant (no Stripe row at all).
     app_entitlements.project_openmeter_access(
-        pg_conn, slug, user_id, active=True, tier="paid", plan_key="pro",
+        pg_conn, slug, user_id, active=True, authoritative=True, tier="paid", plan_key="pro",
         metadata={"openmeter_customer_key": "om_customer"},
     )
     active = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
     assert active is not None and active.source == "openmeter"
 
-    # OpenMeter unreachable / 404 (degraded) — MUST NOT retire the row.
+    # Degraded (OpenMeter unreachable, OR a 200 that can't prove no-access) on an AUTHORITATIVE
+    # business MUST NOT retire the sole conferring row.
     projected, effective = app_entitlements.project_openmeter_access(
-        pg_conn, slug, user_id, active=False, degraded=True,
+        pg_conn, slug, user_id, active=False, degraded=True, authoritative=True,
         metadata={"openmeter_customer_key": "om_customer"},
     )
     assert projected is None
@@ -612,10 +613,48 @@ def test_project_openmeter_access_degraded_preserves_last_known_good(pg_conn):
     still = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
     assert still is not None and still.source == "openmeter" and still.status == "active"
 
-    # By contrast, an AUTHORITATIVE inactive read (not degraded) DOES retire it.
+    # An AUTHORITATIVE inactive read (not degraded) DOES retire it.
     _, effective_after = app_entitlements.project_openmeter_access(
-        pg_conn, slug, user_id, active=False, degraded=False,
+        pg_conn, slug, user_id, active=False, degraded=False, authoritative=True,
         metadata={"openmeter_customer_key": "om_customer"},
     )
     assert effective_after == app_identity.UNENTITLED_TIER
+    assert app_entitlements.get_active_entitlement(pg_conn, slug, user_id) is None
+
+
+def test_project_openmeter_access_degraded_retires_mirror_when_not_authoritative(pg_conn):
+    """Stripe-authoritative (flag-OFF) business: the source='openmeter' row is a MIRROR, so a degraded
+    read must NOT keep stranding it — it falls through and is retired per `active`. This prevents the
+    revenue-leak where a Stripe cancel + a momentarily-down OpenMeter leaves a stale mirror conferring
+    paid access. The authoritative Stripe row (added here) is never touched by OpenMeter regardless."""
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
+    # Stripe row (authoritative) + an openmeter MIRROR row both active.
+    app_entitlements.grant_entitlement(
+        pg_conn, slug, app_user_id=user_id, tier="paid", source="stripe",
+        stripe_customer_id="cus_x", stripe_subscription_id="sub_x", stripe_checkout_session_id="cs_x",
+        plan_key="pro",
+    )
+    app_entitlements.project_openmeter_access(
+        pg_conn, slug, user_id, active=True, authoritative=False, tier="paid", plan_key="pro",
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    # Now Stripe cancels (authoritative) → the stripe row flips cancelled.
+    app_entitlements.set_subscription_status(pg_conn, "sub_x", status="cancelled")
+    # OpenMeter momentarily degraded during the cancel projection — for a flag-OFF business this
+    # must retire the mirror (not preserve it), so no stale access lingers.
+    app_entitlements.project_openmeter_access(
+        pg_conn, slug, user_id, active=False, degraded=True, authoritative=False,
+        metadata={"openmeter_customer_key": "om_customer"},
+    )
+    rows = {
+        (r[0], r[1])
+        for r in pg_conn.execute(
+            "select source, status from app_entitlements where business_slug = %s and app_user_id = %s",
+            (slug, user_id),
+        ).fetchall()
+    }
+    assert ("stripe", "cancelled") in rows
+    assert ("openmeter", "cancelled") in rows
     assert app_entitlements.get_active_entitlement(pg_conn, slug, user_id) is None
