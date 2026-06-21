@@ -26253,24 +26253,58 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
             source_injected = _inject_search_console_meta_tag(site_root, verification_token)
             live_root = _product_live_current_root(business)
             live_injected = _inject_search_console_meta_tag(live_root, verification_token)
-            meta_injected = bool(source_injected and live_injected)
+            # The live landing is served from the Cloudflare R2 edge (keyed by live_build_id), not
+            # the VPS `current` dist. Injecting the META tag into the VPS dist alone never reaches
+            # the edge, so Google's verify fetch below 400s ("verification token could not be
+            # found"). Re-mirror the meta-injected live dist to R2 under its current build_id so the
+            # edge serves the token BEFORE we ask Google to verify. When R2 is unconfigured the VPS
+            # dist IS the live surface, so the plain injection already suffices (edge_synced stays
+            # True). Fail-closed: a failed edge sync blocks with a clear reason rather than asking
+            # Google to verify a token the live page does not serve.
+            edge_synced = True
+            if live_injected:
+                try:
+                    from . import storage as _takyon_storage
+                except Exception:
+                    from plugins.takyon import storage as _takyon_storage
+                if _takyon_storage.r2_configured():
+                    edge_synced = False
+                    try:
+                        live_build_id = live_build_pointer(business)
+                        if live_build_id:
+                            _takyon_storage.write_public_site_to_r2(slug, live_build_id, live_root)
+                            edge_synced = True
+                    except Exception as exc:
+                        logging.getLogger("takyon.r2").warning(
+                            "GSC meta re-mirror to R2 failed (verify would not see the token): "
+                            "slug=%s err=%s",
+                            slug,
+                            exc,
+                        )
+            meta_injected = bool(source_injected and live_injected and edge_synced)
             if not meta_injected:
                 # The verify fetch needs the tag on the LIVE page; the source injection alone is not
                 # enough. Surface exactly which side failed so the operator/CEO knows whether to
                 # republish (live missing) vs investigate the source template (source missing).
                 return _blocked(
                     "blocked_search_console_meta_inject_failed",
-                    "could not inject the google-site-verification META tag onto the live landing page "
-                    "(index.html); publish the landing page first, then retry"
+                    "could not place the google-site-verification META tag on the LIVE landing page "
+                    "before verification; publish the landing page first, then retry"
                     + (
                         " (the live published dist/index.html was not found — the site must be "
                         "published before Search Console can verify it)"
                         if not live_injected
-                        else ""
+                        else (
+                            " (the META tag was injected but the R2 edge mirror failed, so the live "
+                            "<slug>.coscale.app page does not serve the token yet)"
+                            if not edge_synced
+                            else ""
+                        )
                     ),
                     verification_token=verification_token,
                     source_injected=bool(source_injected),
                     live_injected=bool(live_injected),
+                    edge_synced=bool(edge_synced),
                 )
 
             # 3) Verify the URL-prefix property (Google fetches the META tag from the live page),
