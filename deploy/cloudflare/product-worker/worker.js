@@ -1,7 +1,7 @@
 /**
  * Takyon product-site edge worker.
  *
- * Serves the BUILT product static (`<slug>.fourmanifold.com`) from the R2 bucket
+ * Serves the BUILT product static (`<slug>.coscale.app`) from the R2 bucket
  * `product-sites` at the Cloudflare edge, and forwards EVERYTHING else — every
  * `/api/*` request and every reserved operator host — to the real origin
  * (operator Caddy at 137.184.75.57) byte-for-byte unchanged.
@@ -28,7 +28,17 @@ const RESERVED_HOSTS = new Set([
   "admin.fourmanifold.com",
   "dashboard.fourmanifold.com",
   "research-composer.fourmanifold.com",
+  "app.coscale.app",
+  "skills.coscale.app",
+  "www.coscale.app",
+  "admin.coscale.app",
+  "dashboard.coscale.app",
+  "research-composer.coscale.app",
 ]);
+
+const PRODUCT_BASE_DOMAIN = "coscale.app";
+const PRODUCT_HOST_SUFFIX = `.${PRODUCT_BASE_DOMAIN}`;
+const ORIGIN_HOSTS = new Set(["origin.coscale.app"]);
 
 // Product slug grammar — mirrors `_safe_product_slug` in
 // hermes-agent-main/takyon_cli/web_server.py:8414 (single char, or
@@ -81,6 +91,13 @@ export default {
     const url = new URL(request.url);
     const host = url.hostname.toLowerCase();
 
+    // This Worker is now the coscale product rail only. If a legacy
+    // fourmanifold.com route is still bound during migration, fail closed instead
+    // of serving stale R2 content from the old product hostname.
+    if (ORIGIN_HOSTS.has(host) || !host.endsWith(PRODUCT_HOST_SUFFIX)) {
+      return notFound("", "unsupported product host");
+    }
+
     // ── Passthrough rail ────────────────────────────────────────────────
     // Reserved operator hosts, OR any /api/* path on any host, go to the real
     // origin unchanged. This is the security boundary: auth, sessions, actions,
@@ -98,11 +115,9 @@ export default {
       return forwardToOrigin(request, env);
     }
 
-    const slug = host.split(".")[0];
+    const slug = host.slice(0, -PRODUCT_HOST_SUFFIX.length);
     if (!SLUG_RE.test(slug)) {
-      // Not a valid product slug (and not reserved) — let the origin answer,
-      // exactly as Caddy's wildcard block would have.
-      return forwardToOrigin(request, env);
+      return notFound("", "invalid product host");
     }
 
     return serveStatic(slug, url, request, env);
@@ -112,26 +127,26 @@ export default {
 /**
  * Forward a request to the real origin (operator Caddy) unchanged.
  *
- * The Worker route covers `*.fourmanifold.com/*`, so `fetch(request)` against the
+ * The Worker route covers product hosts such as `wandr.coscale.app/*`, so `fetch(request)` against the
  * same hostname would re-enter this Worker (infinite loop). We pin the subrequest
- * to a grey-clouded origin hostname (`env.ORIGIN_HOST`, e.g. origin.fourmanifold.com
+ * to a grey-clouded origin hostname (`env.ORIGIN_HOST`, e.g. origin.coscale.app
  * -> 137.184.75.57, DNS-only / not proxied, NOT on the Worker route) via
  * `cf.resolveOverride`, while keeping the ORIGINAL Host header so Caddy still
  * matches the per-business site block and serves the right cert/SNI.
  *
  * Because the subrequest still egresses from Cloudflare's network, it arrives at
  * Caddy from a Cloudflare IP and passes `fourmanifold_edge_only`. Direct clients
- * hitting origin.fourmanifold.com are NOT on the CF IP allowlist and still get 403.
+ * hitting origin.coscale.app are NOT on the CF IP allowlist and still get 403.
  */
 function forwardToOrigin(request, env) {
-  const originHost = env.ORIGIN_HOST; // e.g. "origin.fourmanifold.com"
+  const originHost = env.ORIGIN_HOST; // e.g. "origin.coscale.app"
   if (!originHost) {
     // Misconfiguration: never silently bypass auth by serving anything else.
     return new Response("origin not configured", { status: 503 });
   }
 
   // Preserve method, headers and body verbatim. We do NOT touch the Host header:
-  // Caddy keys its product site block + origin cert on Host=<slug>.fourmanifold.com.
+  // Caddy keys its product site block + origin cert on Host=<slug>.coscale.app.
   const subreq = new Request(request, {
     cf: {
       // Send the connection to the grey-clouded origin record instead of looping
@@ -218,7 +233,7 @@ function sanitizeRel(pathname) {
     return null; // malformed %-encoding
   }
   // Reject NUL and control chars.
-  if (/[ -]/.test(decoded)) {
+  if (/[\u0000-\u001f]/.test(decoded)) {
     return null;
   }
   const trailingSlash = decoded.endsWith("/") && decoded !== "/";

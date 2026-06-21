@@ -104,12 +104,12 @@
       "priorityBand": "p0_control",
       "palette": "advanced",
       "usage": "/delete [--confirm] [--no-files] [--no-cron] [--no-domains] [--domain <subdomain>]",
-      "summary": "Dry-run by default; with `--confirm` deletes the business database rows, its durable object-store workspace, the local business cache/files, Takyon CEO cron jobs, and the business subdomain on fourmanifold.com via Vercel.",
+      "summary": "Dry-run by default; with `--confirm` deletes the business database rows, public product surfaces, Cloudflare R2 edge artifacts, Takyon CEO cron jobs, and the business subdomain. By default it also deletes the durable workspace and local cache/files.",
       "flags": [
         {"name": "--confirm", "description": "permanently delete after showing the same candidates in preview"},
-        {"name": "--no-files", "description": "leave the business filesystem tree in place"},
+        {"name": "--no-files", "description": "preserve private workspace/cache files only; public product surfaces are still removed"},
         {"name": "--no-cron", "description": "leave matching Takyon cron jobs in place"},
-        {"name": "--no-domains", "description": "skip Vercel/fourmanifold.com subdomain cleanup"},
+        {"name": "--no-domains", "description": "skip Vercel/coscale.app subdomain cleanup"},
         {"name": "--domain", "description": "also remove an explicit business-owned subdomain under the base domain"}
       ]
     },

@@ -27,7 +27,7 @@ Takyon now has three VPS classes in production `NYC1 / default-nyc1`:
 
 Use the local Codex deploy key at `~/.ssh/takyon_argon_alpha14` for root SSH when deployment work needs direct VPS access. That key is the current tracked default for operator, Safebox, and sub-user deploy scripts unless the operator explicitly swaps to host-specific keys. Do not assume the same unit files, open ports, or public role on the Safebox or sub-user hosts.
 
-The public operator hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code. Product hosts such as `slug.fourmanifold.com` are the sub-user plane; today the tracked operator edge terminates those shared hosts and proxies eligible traffic over the private VPC to the sub-user VPS, so do not paper over product-host issues with ad hoc per-business Caddy blocks or direct app-host hacks.
+The public operator hostname is `app.fourmanifold.com`. DNS is managed outside this repo and should currently resolve to `137.184.75.57`; if it does not, treat that as DNS drift and fix the record outside this repo rather than papering over it in code. Product hosts such as `slug.coscale.app` are the sub-user plane; today the tracked operator edge terminates those shared hosts and proxies eligible traffic over the private VPC to the sub-user VPS, so do not paper over product-host issues with ad hoc per-business Caddy blocks or direct app-host hacks.
 
 Production Postgres is a VPS-only rail. Do not run local Mac dashboard/worker/runtime processes against the production Takyon control-plane DSN, and do not leave a production `DATABASE_URL` wired into a local Takyon process "just for convenience". The tracked VPS services must set an explicit `TAKYON_HOST_ROLE`, and the dashboard embedded worker is opt-in only; the canonical production queue drain is the VPS `takyon-worker.service`, not a local dashboard thread. If an intentional non-VPS Postgres session is truly required for testing or one-off maintenance, make that override explicit and temporary rather than the default developer posture.
 
@@ -66,7 +66,7 @@ When the operator asks to push or deploy Takyon, keep the rails distinct:
 
 Default deployment rule: if the change is code, tracked config, routing, UI, service units, or any other repo-owned artifact, push it through the outer git repo and the tracked deploy workflow first. Do not treat direct VPS edits, ad hoc `rsync`, hand-written host files, or any other untracked-on-host mutation as the normal deployment path. The narrow exceptions are secrets/env/provider-console state that intentionally lives outside git, plus explicit emergency rollback/hotfix requests from the operator; even then, backport the tracked change into the repo immediately and describe the out-of-band step plainly.
 
-When the operator explicitly asks for the production workflow, a live Hermes/UI-agent path, or an end-to-end browser proof on `app.fourmanifold.com` / `slug.fourmanifold.com`, do not substitute localhost demos, lab homes, manual scaffolds, or local-only publish loops as the main path. Use the tracked production/business workflow first: the real Takyon worker path, the real business refresh/publish rails, the real VPS deploy path for the touched planes, and the visible in-app browser against the live host. If a production rail is blocked, say so plainly before using any fallback, and do not present a local proof as if it satisfied the requested production workflow.
+When the operator explicitly asks for the production workflow, a live Hermes/UI-agent path, or an end-to-end browser proof on `app.fourmanifold.com` / `slug.coscale.app`, do not substitute localhost demos, lab homes, manual scaffolds, or local-only publish loops as the main path. Use the tracked production/business workflow first: the real Takyon worker path, the real business refresh/publish rails, the real VPS deploy path for the touched planes, and the visible in-app browser against the live host. If a production rail is blocked, say so plainly before using any fallback, and do not present a local proof as if it satisfied the requested production workflow.
 
 The deployment workflow is tracked at `.github/workflows/deploy.yml` and is now multi-host aware when the corresponding GitHub secrets are configured. It should:
 
@@ -88,7 +88,7 @@ Current deploy reality under the tightened firewall:
 - Do not weaken the firewall just to preserve the old GitHub-hosted SSH pattern unless the operator explicitly asks for that tradeoff.
 - The dedicated Safebox service app now runs live on `10.116.0.2:8000`, and the tracked operator/sub-user systemd units point at it with `TAKYON_SAFEBOX_URL=http://10.116.0.2:8000`.
 - The sub-user VPS now runs the tracked shared product-host Caddyfile and serves product hosts through `takyon-subuser.service`; if a product host falls back to the default Caddy page, treat that as a sub-user Caddy drift or missing `product-sites` sync, not as a frontend build issue.
-- During `app.fourmanifold.com` / in-app-browser E2E waits, do not sit idle. Keep polling both the visible browser state and the live VPS/backend/job/workspace state so you can tell the difference between a slow bootstrap, a stale preview, and a real production failure.
+- During `app.fourmanifold.com` / `slug.coscale.app` / in-app-browser E2E waits, do not sit idle. Keep polling both the visible browser state and the live VPS/backend/job/workspace state so you can tell the difference between a slow bootstrap, a stale preview, and a real production failure.
 
 Fast path for ordinary code/docs/UI changes:
 
@@ -108,7 +108,7 @@ Mirror the production shape as closely as practical on that local rail:
 
 - keep a separate local operator runtime home and local Safebox authority instead of collapsing secrets back into random shell exports
 - use the normal `./takyon` shell/CEO/business-tool path for operator work
-- allow local-only exceptions only for public DNS/auth surfaces the operator already called out, such as `slug.fourmanifold.com` and production Auth0 login
+- allow local-only exceptions only for public DNS/auth surfaces the operator already called out, such as `slug.coscale.app` and production Auth0 login
 
 Local dev state under that outside-repo root is operator-local and must never be staged, committed, pushed, deployed, rsynced to a VPS, or described as repo-owned state, even under broad requests such as "push everything locally", "commit all changes", or "sync the whole workspace". Treat that rule as stronger than generic bulk-stage/push instructions unless the operator explicitly names a specific local file and says to promote it into tracked repo state.
 
@@ -293,7 +293,7 @@ When the operator wants live monitoring, run the shell in a terminal visible to 
 
 ### Browser E2E is the final acceptance gate — on a brand-new business, every time
 
-For the dashboard/product experience (`app.fourmanifold.com` and the live `<slug>.fourmanifold.com` product site), the **final** acceptance check for ANY change set is a **brand-new business created end-to-end through the browser UI**, exercised as a real user across every change. Poking at an existing business — signing in, re-running a tool, reloading a page — is **debugging/exploration only**; it is NOT the acceptance gate, because existing businesses were built under older code and skip the current bootstrap path. The loop is: batch fixes → deploy to BOTH hosts (operator + subuser) → create ONE fresh business in the browser → verify all changes on it as a user → fix what failed → create ANOTHER fresh business → repeat until clean. Never declare a change done on existing-business checks alone.
+For the dashboard/product experience (`app.fourmanifold.com` and the live `<slug>.coscale.app` product site), the **final** acceptance check for ANY change set is a **brand-new business created end-to-end through the browser UI**, exercised as a real user across every change. Poking at an existing business — signing in, re-running a tool, reloading a page — is **debugging/exploration only**; it is NOT the acceptance gate, because existing businesses were built under older code and skip the current bootstrap path. The loop is: batch fixes → deploy to BOTH hosts (operator + subuser) → create ONE fresh business in the browser → verify all changes on it as a user → fix what failed → create ANOTHER fresh business → repeat until clean. Never declare a change done on existing-business checks alone.
 
 ### Parallel build agents run on Opus 4.8
 

@@ -1,6 +1,6 @@
 # R2 Edge-Static Migration — Threat Model
 
-**Goal.** Serve product static (`<slug>.fourmanifold.com`, the built Vite SPA) from a
+**Goal.** Serve product static (`<slug>.coscale.app`, the built Vite SPA) from a
 Cloudflare R2 bucket at the edge, removing the VPS from the static path. `/api/*` for
 the same hostname MUST keep reaching the existing subuser runtime (`:9119`,
 `takyon_cli/web_server.py`) **untouched** — auth, magic-link sessions, paywall,
@@ -57,7 +57,7 @@ that bucket would be one crafted key away from serving a competitor's source tre
 
 ---
 
-## 1. Cross-tenant / private-data reads from `<slug>.fourmanifold.com`
+## 1. Cross-tenant / private-data reads from `<slug>.coscale.app`
 
 > Attacker goal: from a product hostname, read **another business's** built site, or
 > **this** business's **private** workspace source (CAS blobs, manifests, server-side
@@ -80,12 +80,12 @@ that bucket would be one crafted key away from serving a competitor's source tre
 
 ### 1.2 Slug spoofing via the `Host` header / key prefix
 
-* **Attack.** Send `Host: ../victim.fourmanifold.com`, `Host: victim.fourmanifold.com.attacker.com`,
-  `Host: VICTIM.fourmanifold.com`, `Host: victim..fourmanifold.com`, or a Host with an
+* **Attack.** Send `Host: ../victim.coscale.app`, `Host: victim.coscale.app.attacker.com`,
+  `Host: VICTIM.coscale.app`, `Host: victim..coscale.app`, or a Host with an
   embedded `/` or `%2e%2e`, hoping the Worker derives the R2 key prefix from raw Host and
   lands on `victim/...` or escapes its own prefix.
 * **Guard.** The Worker derives the slug with the **same discipline as the runtime**:
-  strip the configured base domain (`fourmanifold.com`), lowercase, then validate against
+  strip the configured base domain (`coscale.app`), lowercase, then validate against
   the exact runtime regex
   `^[a-z0-9][a-z0-9-]{0,78}[a-z0-9]$` OR `^[a-z0-9]$`
   (mirror of `_safe_product_slug`, web_server.py:8414). Anything that fails → **404**, no
@@ -188,13 +188,9 @@ that bucket would be one crafted key away from serving a competitor's source tre
 * **Attack.** The Worker matches too broadly (`*`) and serves `/api/...` from R2 (404s, or
   worse, serves a **cached** prior API response), so auth/usage never runs — free
   inference, or a stale authenticated payload served to an anonymous client.
-* **Guard.** The Worker route is **scoped to static only**. Cloudflare route binding must
-  **exclude** `/api/*` — bind the Worker to the product host but configure the route so any
-  request whose path starts with `/api/` is **passed to origin** (either a separate route
-  `*.fourmanifold.com/api/*` mapped to origin/no-worker that is **more specific** and
-  therefore wins, or an explicit first-line check in the Worker: `if
-  url.pathname.startsWith('/api/') → fetch(origin)` / `return env.ORIGIN.fetch(request)`
-  with **no caching**). Defense in depth: the Worker **never** caches or serves anything
+* **Guard.** The Worker route is **scoped to product hosts only** and the Worker itself
+  first-lines `/api/*` to the origin with **no caching**. Defense in depth: the Worker
+  **never** caches or serves anything
   under `/api/`, `/auth/`, `/billing/`, `/api/webhooks/`, or `/api/pty` (WebSocket). A
   regression test / smoke check (RUNBOOK) asserts `/api/takyon/apps/<slug>/auth/...` from
   the edge returns the **runtime's** response headers, not a Worker/R2 response.
@@ -211,7 +207,7 @@ that bucket would be one crafted key away from serving a competitor's source tre
   "cache everything" page rule). The runtime already returns `no-store`/`no-cache` on
   dynamic/API responses (`_product_site_unavailable_response`,
   `_product_site_file_response`). No Cloudflare "Cache Everything" page rule may be applied
-  to `*.fourmanifold.com`.
+  to `*.coscale.app`.
 
 ### 2.3 `/api/*` not reaching the runtime (availability = soft bypass / outage)
 
@@ -229,23 +225,22 @@ that bucket would be one crafted key away from serving a competitor's source tre
 
 ### 2.4 Host / reserved-host confusion routing API to the wrong plane
 
-* **Attack.** Use `app.fourmanifold.com`, `skills.…`, `admin.…`, or a crafted Host to make
+* **Attack.** Use a reserved label (`app`, `skills`, `admin`, `origin`) or a crafted Host to make
   the Worker treat an **operator/control-plane** host as a product host (and serve its
   static from R2, or worse proxy its `/api` oddly), reaching the operator dashboard or
   control plane through the product edge.
-* **Guard.** The Worker route binds **only** to product hosts. Reserved hosts
-  (`app`/`skills`/`www`/`admin`/`dashboard`/`research-composer`.fourmanifold.com) are
-  **excluded** from the Worker route exactly as the Caddyfiles exclude them from the
-  `@product` matcher. `app.fourmanifold.com` continues to go **operator Caddy → :9119
-  dashboard** with **no Worker** in front of its `/api/*`. The Worker also re-validates the
-  slug (§1.2) and treats a reserved/invalid slug as 404, so even a mis-scoped route fails
-  closed rather than serving control-plane bytes.
+* **Guard.** The default route set is per-business (`<slug>.coscale.app/*`), so reserved
+  labels are not bound to the Worker at all. The operator frontdoor remains
+  `app.fourmanifold.com` with **no Worker** in front of its `/api/*`. The Worker also
+  re-validates the host (§1.2) and treats unsupported/reserved/invalid hosts as 404 or
+  origin-owned, so even a mis-scoped route fails closed rather than serving control-plane
+  bytes.
 
 ### 2.5 CORS / cookie / Host changes that weaken the session protocol
 
 * **Attack.** The edge rewrites `Host`, drops `CF-Connecting-IP`/`X-Forwarded-For`, changes
   the apparent `Origin`, or alters cookie scope, so that (a) magic-link/session cookies set
-  by the runtime for `<slug>.fourmanifold.com` no longer bind correctly, (b) the runtime's
+  by the runtime for `<slug>.coscale.app` no longer bind correctly, (b) the runtime's
   per-IP rate limits (subuser Caddy `product_auth`/`product_actions` zones keyed on
   `{client_ip}`) all collapse to one IP and stop limiting, or (c) a permissive CORS
   response lets a third-party origin replay credentialed API calls.
@@ -267,12 +262,12 @@ that bucket would be one crafted key away from serving a competitor's source tre
   origin that itself proxies back through Cloudflare, creates an infinite request loop
   (Worker fetches origin which is the same CF zone which re-invokes the Worker), causing
   522/loop errors and a self-DoS — and during the confusion, a fail-open window.
-* **Guard.** The Worker's origin fetch for `/api/*` targets the **origin** explicitly — use
-  a dedicated origin hostname / route that is **not** matched by the Worker (e.g. a
-  separate `*.fourmanifold.com/api/*` route to origin that the Worker does not own), or
-  fetch the origin IP/origin-hostname directly with `resolveOverride`/a service binding so
-  the subrequest does not re-enter the Worker route. The origin (operator + subuser Caddy)
-  must **not** wrap its upstream back through Cloudflare. Verify post-cutover that an
+* **Guard.** The Worker's origin fetch for `/api/*` targets the **origin** explicitly with
+  `resolveOverride=origin.coscale.app`, and that origin hostname must not be matched by
+  this Worker. The default per-business route set satisfies that automatically; if a
+  wildcard `*.coscale.app/*` route is used, add a more-specific `origin.coscale.app/*`
+  route mapped to no Worker first. The origin (operator + subuser Caddy) must **not** wrap
+  its upstream back through Cloudflare. Verify post-cutover that an
   `/api` request makes exactly **one** origin hop (check `Server`/`Via` headers and that
   there's no 522/loop). Static requests never fetch origin, so the loop can only arise on
   the `/api` passthrough — keep that passthrough a single, explicit, non-recursive route.
@@ -365,27 +360,25 @@ that bucket would be one crafted key away from serving a competitor's source tre
   headers. Origin TLS is the Cloudflare origin cert.
 * **Guard.** This migration **does not touch** the edge-only snippet or the CF IP list.
   After adding any DNS record for the migration, re-verify that a **direct** request to the
-  VPS IP (`curl --resolve <slug>.fourmanifold.com:443:137.184.75.57 ...` from a non-CF IP)
+  VPS IP (`curl --resolve <slug>.coscale.app:443:137.184.75.57 ...` from a non-CF IP)
   still returns `403 forbidden`, for **both** static and `/api` paths. The lockdown is the
   reason an attacker cannot skip the edge and hit `:9119` directly.
 
 ### 4.2 The grey-cloud origin record hazard
 
 * **Attack.** To give the Worker an origin to fetch for `/api`, someone adds a **grey-cloud
-  (DNS-only)** A record (e.g. `origin.fourmanifold.com` → `137.184.75.57`) that is **not**
+  (DNS-only)** A record (e.g. `origin.coscale.app` → `137.184.75.57`) that is **not**
   proxied by Cloudflare. An attacker who discovers that hostname now reaches the VPS
   **directly**, bypassing the CF edge entirely — and because it's DNS-only, the
   `(fourmanifold_edge_only)` allowlist is the **only** thing standing between them and the
   runtime.
-* **Guard.** Prefer **no** new grey record: route the Worker's `/api` passthrough to the
-  **existing proxied** product host / a Cloudflare **service binding** so the origin fetch
-  still rides the orange-cloud edge (and stays inside the CF IP allowlist). **If** an
-  origin-pull hostname is unavoidable, it must (a) resolve to the VPS only, (b) be covered
-  by the **same** `(fourmanifold_edge_only)` 403 allowlist in Caddy (so a direct hit from a
-  non-CF IP is still `403`), and (c) carry the Cloudflare origin TLS cert. Verify: from a
-  non-CF IP, the grey hostname returns `403`. The allowlist already includes the CF ranges,
-  loopback, and `10.116.0.0/20`; a grey record does **not** widen it — direct non-CF
-  clients stay blocked. Never add an IP to the allowlist to "make the grey record work."
+* **Guard.** The origin-pull hostname must (a) resolve to the operator VPS only, (b) be
+  covered by the **same** `(fourmanifold_edge_only)` 403 allowlist in Caddy (so a direct
+  hit from a non-CF IP is still `403`), (c) carry the Cloudflare origin TLS cert, and (d)
+  stay off this Worker's route table. Verify: from a non-CF IP, the grey hostname returns
+  `403`. The allowlist already includes the CF ranges, loopback, and `10.116.0.0/20`; a
+  grey record does **not** widen it — direct non-CF clients stay blocked. Never add an IP
+  to the allowlist to "make the grey record work."
 
 ### 4.3 The Worker→origin subrequest must remain inside the trust boundary
 
@@ -413,18 +406,19 @@ that bucket would be one crafted key away from serving a competitor's source tre
   So at every intermediate step, rollback = "do nothing / unbind the Worker," and the VPS
   still serves.
 
-### 5.2 One test business first, then `*`
+### 5.2 One test business first, then per-business rollout
 
 * The Worker route is bound to **one test business's host** first
-  (`<test-slug>.fourmanifold.com`), verified end to end (static-from-R2 **and**
-  `/api`-still-works **and** sign-in **and** a test checkout intent), **before** the
-  wildcard `*.fourmanifold.com` route is bound. A failure on the test host affects **one**
-  business and is reverted by unbinding that one route.
+  (`<test-slug>.coscale.app`), verified end to end (static-from-R2 **and**
+  `/api`-still-works **and** sign-in **and** a test checkout intent), **before** more
+  per-business coscale routes are bound. A failure on the test host affects **one**
+  business and is reverted by unbinding that one route. A wildcard route is optional only
+  after the `origin.coscale.app/*` no-worker exclusion exists.
 
 ### 5.3 Instant rollback = unbind the route
 
 * **Static breakage rollback.** Disable/unbind the Worker route on the affected host(s) in
-  Cloudflare. With the Worker gone, `*.fourmanifold.com` static falls straight back to the
+  Cloudflare. With the Worker gone, `<slug>.coscale.app` static falls straight back to the
   **unchanged** origin path (operator Caddy → subuser :9119 → `_serve_product_site_file`).
   No rebuild, no republish, no DNS change, no VPS change. This is a **single dashboard/API
   action** and propagates in seconds.

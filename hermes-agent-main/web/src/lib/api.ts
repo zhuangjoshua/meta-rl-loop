@@ -89,7 +89,7 @@ async function getSessionToken(): Promise<string> {
 }
 
 // The product preview embeds the business's PUBLIC published landing directly
-// (https://<slug>.fourmanifold.com/). That page is public, so the preview needs NO
+// (https://<slug>.coscale.app/). That page is public, so the preview needs NO
 // operator auth / sign-in. The previous same-origin /api/takyon/site-preview operator
 // endpoint returned {"detail":"Auth0 login required"} inside the iframe — the Auth0
 // session cookie does not ride a cross-origin sub-resource request, and the ?token=
@@ -100,7 +100,7 @@ async function getSessionToken(): Promise<string> {
 export function buildTakyonBusinessSitePreviewFrameUrl(slug: string): string {
   const businessSlug = String(slug || "").trim().toLowerCase();
   if (!businessSlug) return "";
-  return `https://${businessSlug}.fourmanifold.com/`;
+  return `https://${businessSlug}.coscale.app/`;
 }
 
 // Authenticated URL for a generated business asset (image/video/logo). Browsers can't
@@ -724,7 +724,7 @@ export interface TakyonOperatorBusinessSummary {
   reason?: string;
   // Optional enrichment from the operator-home payload. When the backend records
   // a published public URL / brand logo for the business it surfaces them here;
-  // the frontend always falls back to the canonical `<slug>.fourmanifold.com`
+  // the frontend always falls back to the canonical `<slug>.coscale.app`
   // host (and a same-origin site-preview embed) so these may be absent.
   product_url?: string;
   logo_url?: string;

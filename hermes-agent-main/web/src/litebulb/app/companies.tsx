@@ -8,10 +8,10 @@ import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import { buildTakyonBusinessSitePreviewFrameUrl } from "@/lib/api";
 
 // Canonical product domain. Product sub-apps are served at
-// `<slug>.fourmanifold.com` (see product/Product.tsx canonicalProductHost and
+// `<slug>.coscale.app` (see product/Product.tsx canonicalProductHost and
 // core._product_publish_target). The card address bar must show this real host —
 // never a fabricated `.app` placeholder.
-const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+const PRODUCT_BASE_DOMAIN = "coscale.app";
 
 function canonicalProductHost(slug: string) {
   const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");

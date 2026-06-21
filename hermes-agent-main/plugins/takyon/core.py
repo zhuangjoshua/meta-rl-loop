@@ -763,7 +763,7 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CONTROL_STATES = {"active", "paused", "killed"}
 _BUSINESS_MODES = {"live"}
 _BUSINESS_WORK_FOCUS_MODES = {"all", "marketing", "product"}
-_DEFAULT_COMPANY_BASE_DOMAIN = "fourmanifold.com"
+_DEFAULT_COMPANY_BASE_DOMAIN = "coscale.app"
 _RESERVED_PUBLIC_SUBDOMAINS = frozenset(
     {
         "app",
@@ -6080,7 +6080,7 @@ def _subuser_app_scaffold_source_dir() -> Path:
 # Free bootstrap brand mark (favicon + monogram).
 #
 # Every freshly bootstrapped product site shipped with NO favicon, so the browser
-# tab and slug.fourmanifold.com served a 404 for /favicon.svg. The fix is a FREE,
+# tab and slug.coscale.app served a 404 for /favicon.svg. The fix is a FREE,
 # deterministic SVG monogram seeded once into the scaffold's public/ dir (vite copies
 # public/ verbatim into dist/), plus matching surface-context brand keys the worker UI
 # can render. This spends NO money and makes NO provider call at bootstrap — the paid
@@ -11289,6 +11289,25 @@ def _delete_subuser_product_site(slug: str) -> dict[str, Any]:
     }
 
 
+def _public_edge_product_site_summary(slug: str) -> dict[str, Any]:
+    from . import storage
+
+    return {
+        "provider": "cloudflare_r2",
+        "prefix": storage.public_site_object_prefix(_slugify(slug)),
+    }
+
+
+def _delete_public_edge_product_site(slug: str) -> dict[str, Any]:
+    from . import storage
+
+    result = storage.delete_public_site_from_r2(_slugify(slug))
+    return {
+        "provider": "cloudflare_r2",
+        **result,
+    }
+
+
 def _product_public_asset_publish_roots(store: "TakyonStore", business: str) -> list[Path]:
     slug = _slugify(business)
     roots: list[Path] = []
@@ -12073,7 +12092,7 @@ def _canonicalize_business_product_links(body: str, *, business: str, canonical_
 
 
 def _ensure_product_edge_route(slug: str) -> None:
-    """Ensure ``<slug>.fourmanifold.com`` is routed to the Cloudflare R2 edge worker.
+    """Ensure ``<slug>.coscale.app`` is routed to the Cloudflare R2 edge worker.
 
     So a freshly-published business is served from R2 at the edge instead of the VPS. Idempotent
     (skips if the route already exists) and fail-soft: it needs ``CLOUDFLARE_API_TOKEN`` resolvable
@@ -12090,7 +12109,7 @@ def _ensure_product_edge_route(slug: str) -> None:
         token = safebox.first_env_backed_value("CLOUDFLARE_API_TOKEN")
         if not token:
             return
-        zone = (os.environ.get("CLOUDFLARE_ZONE_NAME") or "fourmanifold.com").strip()
+        zone = (os.environ.get("CLOUDFLARE_ZONE_NAME") or _DEFAULT_COMPANY_BASE_DOMAIN).strip()
         worker = (os.environ.get("TAKYON_PRODUCT_EDGE_WORKER") or "takyon-product-worker").strip()
         pattern = f"{_slugify(slug)}.{zone}/*"
 
@@ -12175,7 +12194,7 @@ def _publish_product_surface_path(
     storage.write_build_artifact(backend, slug, build_id, publish_source)
 
     # Best-effort mirror of the finished static build into the PUBLIC Cloudflare R2 bucket so the
-    # edge can serve <slug>.fourmanifold.com without the VPS. This is non-blocking and fail-soft: if
+    # edge can serve <slug>.coscale.app without the VPS. This is non-blocking and fail-soft: if
     # R2 is unconfigured we no-op, and any mirror error is logged but never fails the publish (the
     # Supabase artifact above remains the source of truth and the VPS static fallback still serves).
     if storage.r2_configured():
@@ -12195,7 +12214,7 @@ def _publish_product_surface_path(
                 build_id,
                 exc,
             )
-        # Ensure <slug>.fourmanifold.com is routed to the R2 edge worker, so a freshly
+        # Ensure <slug>.coscale.app is routed to the R2 edge worker, so a freshly
         # published business is served from R2 at the edge (not the VPS). Idempotent +
         # fail-soft: needs CLOUDFLARE_API_TOKEN in the safebox; never fails the publish.
         _ensure_product_edge_route(slug)
@@ -15704,6 +15723,7 @@ class TakyonStore:
         cron_preview = self._delete_business_crons(slug, confirm=False) if delete_cron else {"matched": [], "removed": []}
         db_counts = self._business_delete_db_counts(conn, slug)
         subuser_product_site = _subuser_product_site_summary(slug)
+        public_edge_site = _public_edge_product_site_summary(slug)
 
         result: dict[str, Any] = {
             "action": "business.delete",
@@ -15713,6 +15733,7 @@ class TakyonStore:
             "filesystem": filesystem,
             "published_site": published_site_summary,
             "subuser_product_site": subuser_product_site,
+            "public_edge_site": public_edge_site,
             "product_service": {
                 "service_root": product_service_summary,
                 "service_file": product_service_file,
@@ -15730,6 +15751,7 @@ class TakyonStore:
             result["domains"] = self._delete_business_domains(domains, confirm=True)
         if delete_cron:
             result["cron"] = self._delete_business_crons(slug, confirm=True)
+        result["public_edge_site"] = _delete_public_edge_product_site(slug)
         if delete_files and root.exists():
             shutil.rmtree(root)
             result["filesystem"] = {**filesystem, "removed": True}
@@ -15737,48 +15759,40 @@ class TakyonStore:
             result["filesystem"] = {**filesystem, "removed": False}
         else:
             result["filesystem"] = {**filesystem, "removed": False, "skipped": True}
-        if delete_files and published_site is not None and published_site.exists():
+        if published_site is not None and published_site.exists():
             shutil.rmtree(published_site)
             result["published_site"] = {**published_site_summary, "removed": True}
-        elif delete_files and published_site is not None:
+        elif published_site is not None:
             result["published_site"] = {**published_site_summary, "removed": False}
         else:
-            result["published_site"] = {**published_site_summary, "removed": False, "skipped": True}
-        if delete_files:
-            result["subuser_product_site"] = _delete_subuser_product_site(slug)
-        else:
-            result["subuser_product_site"] = {**subuser_product_site, "removed": False, "skipped": True}
+            result["published_site"] = {**published_site_summary, "removed": False}
+        result["subuser_product_site"] = _delete_subuser_product_site(slug)
         product_service_result = {
             "service_root": {**product_service_summary, "removed": False},
             "service_file": {**product_service_file, "removed": False},
             "caddy_route": {**product_service_route, "removed": False},
         }
-        if delete_files:
-            removed_service_file, service_blocker, service_file_removed = _remove_product_service_file(slug=slug)
-            product_service_result["service_file"] = {
-                **product_service_file,
-                "path": str(removed_service_file or service_file),
-                "removed": bool(service_file_removed),
-            }
-            if service_blocker:
-                product_service_result["service_file"]["blocker"] = service_blocker
-            if product_service_root.exists() and not service_blocker:
-                shutil.rmtree(product_service_root)
-                product_service_result["service_root"] = {**product_service_summary, "removed": True}
-            else:
-                product_service_result["service_root"] = {**product_service_summary, "removed": False}
-            removed_caddyfile, caddy_blocker, caddy_removed = _remove_product_caddy_route(publish_target=publish_target)
-            product_service_result["caddy_route"] = {
-                **product_service_route,
-                "path": str(removed_caddyfile or caddyfile),
-                "removed": bool(caddy_removed),
-            }
-            if caddy_blocker:
-                product_service_result["caddy_route"]["blocker"] = caddy_blocker
+        removed_service_file, service_blocker, service_file_removed = _remove_product_service_file(slug=slug)
+        product_service_result["service_file"] = {
+            **product_service_file,
+            "path": str(removed_service_file or service_file),
+            "removed": bool(service_file_removed),
+        }
+        if service_blocker:
+            product_service_result["service_file"]["blocker"] = service_blocker
+        if product_service_root.exists() and not service_blocker:
+            shutil.rmtree(product_service_root)
+            product_service_result["service_root"] = {**product_service_summary, "removed": True}
         else:
-            product_service_result["service_root"]["skipped"] = True
-            product_service_result["service_file"]["skipped"] = True
-            product_service_result["caddy_route"]["skipped"] = True
+            product_service_result["service_root"] = {**product_service_summary, "removed": False}
+        removed_caddyfile, caddy_blocker, caddy_removed = _remove_product_caddy_route(publish_target=publish_target)
+        product_service_result["caddy_route"] = {
+            **product_service_route,
+            "path": str(removed_caddyfile or caddyfile),
+            "removed": bool(caddy_removed),
+        }
+        if caddy_blocker:
+            product_service_result["caddy_route"]["blocker"] = caddy_blocker
         result["product_service"] = product_service_result
         if delete_files:
             self._delete_business_workspace_remote(slug)
@@ -15798,6 +15812,7 @@ class TakyonStore:
                 "cron": result["cron"],
                 "domains": result["domains"],
                 "subuser_product_site": result["subuser_product_site"],
+                "public_edge_site": result["public_edge_site"],
                 "database": result["database"],
             },
         )
@@ -31556,7 +31571,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
 # the read-write (this tool) and read-only (business_seo_query_data) Search
 # Console services; only the requested scope differs.
 #
-# The parent domain (e.g. sc-domain:fourmanifold.com) is assumed already
+# The parent domain (e.g. sc-domain:coscale.app) is assumed already
 # verified and owned by this service account; this tool only registers
 # subdomains under that owner-verified parent. The API has no endpoint to grant
 # ownership, so the one-time parent verification/grant is done in the GSC UI.
@@ -32290,7 +32305,7 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_delete_business",
-        "description": "Dry-run or permanently delete one business, including its durable workspace, local cache/files, CEO cron jobs, and its fourmanifold.com/Vercel subdomain.",
+        "description": "Dry-run or permanently delete one business, including public product surfaces, R2 edge artifacts, CEO cron jobs, domain cleanup, and optionally its private workspace/cache files.",
         "handler": handle_business_delete_business,
         "schema": _schema(
             "business_delete_business",
@@ -32298,10 +32313,10 @@ TAKYON_TOOL_DEFINITIONS = [
             {
                 "business": _BUSINESS_PROP,
                 "confirm": {"type": "boolean", "description": "Required true for permanent deletion; false previews only"},
-                "delete_files": {"type": "boolean", "description": "Delete the business's durable object-store workspace plus any local cache/files; default true"},
+                "delete_files": {"type": "boolean", "description": "Delete the business's private durable object-store workspace plus local cache/files; default true. Public product surfaces are removed even when false."},
                 "delete_cron": {"type": "boolean", "description": "Delete Takyon CEO cron jobs for this business; default true"},
                 "delete_domains": {"type": "boolean", "description": "Remove the business subdomain from the Vercel project; default true"},
-                "base_domain": {"type": "string", "description": "Base domain for business subdomains; defaults to PUBLIC_COMPANY_BASE_DOMAIN or fourmanifold.com"},
+                "base_domain": {"type": "string", "description": "Base domain for business subdomains; defaults to PUBLIC_COMPANY_BASE_DOMAIN or coscale.app"},
                 "subdomains": {"type": "array", "items": {"type": "string"}, "description": "Additional explicit business-owned subdomains under the base domain"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
@@ -32410,7 +32425,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
                 "tone": {"type": "string", "enum": ["default", "poke"], "description": "Voice preset for the customer-facing product chat/assistant (the generate rail), NOT the operator CEO shell. 'default' is neutral; 'poke' is short, warm, lightly playful, no corporate hedging, always ends on a proactive next step. Recorded on the surface contract and injected into the product-build worker so the generated product assistant speaks in this voice. Omit to keep the current selection (defaults to 'default')."},
                 "routes": {"type": "array", "items": {"type": "object"}},
-                "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.fourmanifold.com/"},
+                "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.coscale.app/"},
                 "notes": {"type": "string"},
                 "metadata": {"type": "object"},
                 "idempotency_key": _IDEMPOTENCY_PROP,
@@ -32430,7 +32445,7 @@ TAKYON_TOOL_DEFINITIONS = [
             {
                 "business": _BUSINESS_PROP,
                 "source_path": {"type": "string", "description": "Business-relative source path. OMIT to use the business's anchored app-surface-contract source_path (recommended — this is almost always correct). The source_path is anchored on first publish and CANNOT be switched afterward: passing a different value (e.g. 'product' when the surface is anchored to 'product/site') is refused with an exact anchor error. Only set it to establish the anchor on a brand-new surface that has none."},
-                "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.fourmanifold.com/"},
+                "publish_target": {"type": "string", "description": "Public URL target; defaults to the app surface contract or https://<business>.coscale.app/"},
                 "publish_policy": {"type": "string", "description": "Defaults to publish_after_refresh. Legacy shared_renderer aliases are ignored; Takyon still requires real source/build output and will not publish fallback pages."},
                 "install": {"type": "boolean", "description": "Run package install before build when package.json exists; default true"},
                 "timeout_seconds": {"type": "integer", "description": "Per command timeout for explicit source builds; default 300"},
@@ -33566,9 +33581,9 @@ TAKYON_TOOL_DEFINITIONS = [
         "handler": handle_business_seo_add_property,
         "schema": _schema(
             "business_seo_add_property",
-            "Register a URL-prefix property in Google Search Console. The URL must be a subdomain of an already owner-verified property in the account (e.g. sc-domain:fourmanifold.com).",
+            "Register a URL-prefix property in Google Search Console. The URL must be a subdomain of an already owner-verified property in the account (e.g. sc-domain:coscale.app).",
             {
-                "site_url": {"type": "string", "description": "The subdomain URL to register, e.g. https://acme.fourmanifold.com"},
+                "site_url": {"type": "string", "description": "The subdomain URL to register, e.g. https://acme.coscale.app"},
             },
             ["site_url"],
         ),

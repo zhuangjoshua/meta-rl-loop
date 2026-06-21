@@ -133,10 +133,10 @@ def test_dashboard_session_token_env_override_wins(tmp_path, monkeypatch):
 def test_live_site_preview_wrapper_html_embeds_public_url():
     import takyon_cli.web_server as web_server
 
-    result = web_server._takyon_live_site_preview_wrapper_html("https://coolman.fourmanifold.com/")
+    result = web_server._takyon_live_site_preview_wrapper_html("https://coolman.coscale.app/")
 
     assert "<title>Takyon Product Preview</title>" in result
-    assert '<iframe src="https://coolman.fourmanifold.com/"' in result
+    assert '<iframe src="https://coolman.coscale.app/"' in result
     assert "referrerpolicy=\"strict-origin-when-cross-origin\"" in result
 
 
@@ -1880,8 +1880,8 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
                 "action": "app.surface.publish_result",
                 "business": "latexflow",
                 "publish_status": "published",
-                "publish_target": "https://latexflow.fourmanifold.com/",
-                "public_url": "https://latexflow.fourmanifold.com/",
+                "publish_target": "https://latexflow.coscale.app/",
+                "public_url": "https://latexflow.coscale.app/",
                 "published_at": "2026-06-14T06:00:00+00:00",
                 "live_build_id": "build123",
                 "live_probe_status": "ok",
@@ -1895,9 +1895,9 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        response = client.get("/", headers={"Host": "latexflow.coscale.app"})
         local_response = client.get("/site/latexflow/", headers={"Host": "localhost:9119"})
-        missing_response = client.get("/", headers={"Host": "missing.fourmanifold.com"})
+        missing_response = client.get("/", headers={"Host": "missing.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -1949,8 +1949,8 @@ def test_product_subdomain_spa_routes_fall_back_to_index_html(tmp_path, monkeypa
                 "action": "app.surface.publish_result",
                 "business": "latexflow",
                 "publish_status": "published",
-                "publish_target": "https://latexflow.fourmanifold.com/",
-                "public_url": "https://latexflow.fourmanifold.com/",
+                "publish_target": "https://latexflow.coscale.app/",
+                "public_url": "https://latexflow.coscale.app/",
                 "published_at": "2026-06-14T06:00:00+00:00",
                 "live_build_id": "build123",
                 "live_probe_status": "ok",
@@ -1964,7 +1964,7 @@ def test_product_subdomain_spa_routes_fall_back_to_index_html(tmp_path, monkeypa
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        response = client.get("/app", headers={"Host": "latexflow.fourmanifold.com"})
+        response = client.get("/app", headers={"Host": "latexflow.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -2003,7 +2003,7 @@ def test_product_subdomain_materializes_published_site_from_storage(tmp_path, mo
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        response = client.get("/", headers={"Host": "latexflow.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -2029,7 +2029,7 @@ def test_product_subdomain_without_live_build_pointer_returns_404(tmp_path, monk
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        blocked = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        blocked = client.get("/", headers={"Host": "latexflow.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -2067,7 +2067,7 @@ def test_product_subdomain_serves_existing_current_pointer_without_materialize(t
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        response = client.get("/", headers={"Host": "latexflow.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -2106,7 +2106,7 @@ def test_product_subdomain_rehydrates_current_build_from_storage(tmp_path, monke
     web_server.app.state.bound_host = "127.0.0.1"
     try:
         client = TestClient(web_server.app)
-        response = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        response = client.get("/", headers={"Host": "latexflow.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -2138,7 +2138,7 @@ def test_product_subdomain_pointer_timeout_returns_503(tmp_path, monkeypatch):
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             started = time.perf_counter()
-            response = await client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+            response = await client.get("/", headers={"Host": "latexflow.coscale.app"})
             elapsed = time.perf_counter() - started
             return response, elapsed
 
@@ -2176,7 +2176,7 @@ def test_product_subdomain_materialize_timeout_returns_503(tmp_path, monkeypatch
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             started = time.perf_counter()
-            response = await client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+            response = await client.get("/", headers={"Host": "latexflow.coscale.app"})
             elapsed = time.perf_counter() - started
             return response, elapsed
 
@@ -2196,7 +2196,7 @@ def test_reserved_public_host_does_not_resolve_as_product_business():
 
     assert web_server._business_slug_from_product_host("skills.fourmanifold.com") == ""
     assert web_server._business_slug_from_product_host("app.fourmanifold.com") == ""
-    assert web_server._business_slug_from_product_host("mathflow.fourmanifold.com") == "mathflow"
+    assert web_server._business_slug_from_product_host("mathflow.coscale.app") == "mathflow"
 
 
 def test_auth0_required_for_skill_lab_host_when_public_dashboard_auth_is_enabled(monkeypatch):
@@ -2209,7 +2209,7 @@ def test_auth0_required_for_skill_lab_host_when_public_dashboard_auth_is_enabled
 
     assert web_server._auth0_required_for_host({"host": "app.fourmanifold.com"}) is True
     assert web_server._auth0_required_for_host({"host": "skills.fourmanifold.com"}) is True
-    assert web_server._auth0_required_for_host({"host": "mathflow.fourmanifold.com"}) is False
+    assert web_server._auth0_required_for_host({"host": "mathflow.coscale.app"}) is False
 
 
 def test_auth0_login_uses_request_host_for_skill_lab_callback(monkeypatch):
@@ -2305,16 +2305,16 @@ def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeyp
         canonical = client.post(
             "/api/takyon/apps/mathflow/auth/request",
             json={"email": "a@b.com"},
-            headers={"Host": "mathflow.fourmanifold.com"},
+            headers={"Host": "mathflow.coscale.app"},
         )
         wrong_slug = client.get(
             "/api/takyon/apps/someoneelse/account",
-            headers={"Host": "mathflow.fourmanifold.com"},
+            headers={"Host": "mathflow.coscale.app"},
         )
         bare = client.post(
             "/auth/request",
             json={"prompt": "hi"},
-            headers={"Host": "mathflow.fourmanifold.com"},
+            headers={"Host": "mathflow.coscale.app"},
         )
         dash = client.post(
             "/auth/request",
@@ -2361,7 +2361,7 @@ def test_app_checkout_get_renders_test_receipt_page(tmp_path, monkeypatch):
         client = TestClient(web_server.app)
         response = client.get(
             "/api/takyon/apps/mathflow/checkout?checkout_intent_id=abc123",
-            headers={"Host": "mathflow.fourmanifold.com"},
+            headers={"Host": "mathflow.coscale.app"},
         )
     finally:
         if hasattr(web_server.app.state, "bound_host"):
@@ -2404,7 +2404,7 @@ def test_app_session_get_dispatches_session_handler_without_account_lookup(monke
         response = client.get(
             "/api/takyon/apps/mathflow/session",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2444,7 +2444,7 @@ def test_app_auth_session_post_sets_app_cookie(monkeypatch):
         response = client.post(
             "/api/takyon/apps/mathflow/auth/session",
             json={"access_token": "supabase_access_token"},
-            headers={"Host": "mathflow.fourmanifold.com"},
+            headers={"Host": "mathflow.coscale.app"},
         )
     finally:
         if hasattr(web_server.app.state, "bound_host"):
@@ -2471,7 +2471,7 @@ def test_app_session_get_returns_unauthenticated_when_cookie_is_stale(monkeypatc
         response = client.get(
             "/api/takyon/apps/mathflow/session",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=stale_cookie",
             },
         )
@@ -2503,7 +2503,7 @@ def test_app_session_delete_revokes_and_clears_cookie(monkeypatch):
         response = client.delete(
             "/api/takyon/apps/mathflow/session",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2543,7 +2543,7 @@ def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):
             "/api/takyon/apps/mathflow/account",
             json={"action": "cancel_subscription"},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2594,14 +2594,14 @@ def test_app_records_routes_dispatch_session_scoped_handlers(monkeypatch):
         list_response = client.get(
             "/api/takyon/apps/mathflow/records?type=draft&limit=10",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
         read_response = client.get(
             "/api/takyon/apps/mathflow/records/draft/abc123",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2609,14 +2609,14 @@ def test_app_records_routes_dispatch_session_scoped_handlers(monkeypatch):
             "/api/takyon/apps/mathflow/records/draft/abc123",
             json={"title": "Investor update", "data": {"body": "Saved"}},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
         delete_response = client.delete(
             "/api/takyon/apps/mathflow/records/draft/abc123",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2704,21 +2704,21 @@ def test_app_directory_and_connections_routes_dispatch_session_scoped_handlers(m
         directory_list_response = client.get(
             "/api/takyon/apps/mathflow/directory?limit=5",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
         directory_me_response = client.get(
             "/api/takyon/apps/mathflow/directory/me",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
         directory_entry_response = client.get(
             "/api/takyon/apps/mathflow/directory/u_123",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2726,21 +2726,21 @@ def test_app_directory_and_connections_routes_dispatch_session_scoped_handlers(m
             "/api/takyon/apps/mathflow/directory/me",
             json={"display_name": "Avery", "headline": "Open to meetups"},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
         directory_delete_response = client.delete(
             "/api/takyon/apps/mathflow/directory/me",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
         connections_list_response = client.get(
             "/api/takyon/apps/mathflow/connections?state=matches&limit=8",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2748,7 +2748,7 @@ def test_app_directory_and_connections_routes_dispatch_session_scoped_handlers(m
             "/api/takyon/apps/mathflow/connections",
             json={"target_app_user_id": "u_123", "action": "like"},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2819,7 +2819,7 @@ def test_product_host_rejects_owner_token_on_app_plane(tmp_path, monkeypatch):
         resp = client.get(
             "/api/takyon/apps/mathflow/account",
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Authorization": "Bearer tk_attacksurface1234567890123456789012345678901234",
             },
         )
@@ -2859,7 +2859,7 @@ def test_app_connections_post_limits_directory_style_actions_and_hides_missing_t
             "/api/takyon/apps/mathflow/connections",
             json={"target_app_user_id": "u_hidden", "action": "like"},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2867,7 +2867,7 @@ def test_app_connections_post_limits_directory_style_actions_and_hides_missing_t
             "/api/takyon/apps/mathflow/connections",
             json={"target_app_user_id": "u_hidden", "action": "block"},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2903,7 +2903,7 @@ def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
             "/api/takyon/apps/mathflow/actions/send-email",
             json={"payload": {"subject": "Hello"}, "idempotencyKey": "idem_123"},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2919,7 +2919,7 @@ def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
         "session_token": "session_123",
         "payload": {"subject": "Hello"},
         "idempotency_key": "idem_123",
-        "bound_origin": "http://mathflow.fourmanifold.com",
+        "bound_origin": "http://mathflow.coscale.app",
     }]
 
 
@@ -2942,7 +2942,7 @@ def test_app_actions_route_maps_missing_rail_and_budget_errors(monkeypatch):
             "/api/takyon/apps/mathflow/actions/hidden",
             json={"payload": {}},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2950,7 +2950,7 @@ def test_app_actions_route_maps_missing_rail_and_budget_errors(monkeypatch):
             "/api/takyon/apps/mathflow/actions/budgeted",
             json={"payload": {}},
             headers={
-                "Host": "mathflow.fourmanifold.com",
+                "Host": "mathflow.coscale.app",
                 "Cookie": "takyon_app_session=session_123",
             },
         )
@@ -2969,7 +2969,7 @@ def test_http_path_allowed_for_host_roles():
 
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_SUBUSER,
-        host="latexflow.fourmanifold.com",
+        host="latexflow.coscale.app",
         path="/",
     ) is True
     assert web_server._http_path_allowed_for_host_role(
@@ -2984,7 +2984,7 @@ def test_http_path_allowed_for_host_roles():
     ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_SUBUSER,
-        host="latexflow.fourmanifold.com",
+        host="latexflow.coscale.app",
         path="/api/status",
     ) is False
     assert web_server._http_path_allowed_for_host_role(
@@ -3004,22 +3004,22 @@ def test_http_path_allowed_for_host_roles():
     ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
-        host="latexflow.fourmanifold.com",
+        host="latexflow.coscale.app",
         path="/api/checkout",
     ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
-        host="latexflow.fourmanifold.com",
+        host="latexflow.coscale.app",
         path="/api/takyon/apps/latexflow/account",
     ) is True
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
-        host="latexflow.fourmanifold.com",
+        host="latexflow.coscale.app",
         path="/checkout",
     ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
-        host="latexflow.fourmanifold.com",
+        host="latexflow.coscale.app",
         path="/",
     ) is False
 
@@ -3064,7 +3064,7 @@ def test_operator_role_blocks_public_app_plane(tmp_path, monkeypatch):
             "/api/takyon/apps/latexflow/account",
             headers={"Host": "localhost:9119"},
         )
-        blocked_product = client.get("/", headers={"Host": "latexflow.fourmanifold.com"})
+        blocked_product = client.get("/", headers={"Host": "latexflow.coscale.app"})
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -3096,8 +3096,8 @@ def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monke
 
     client = TestClient(web_server.app)
 
-    assert client.get("/api/product-tls/ask?domain=latexflow.fourmanifold.com").status_code == 200
-    assert client.get("/api/product-tls/ask?domain=missing.fourmanifold.com").status_code == 404
+    assert client.get("/api/product-tls/ask?domain=latexflow.coscale.app").status_code == 200
+    assert client.get("/api/product-tls/ask?domain=missing.coscale.app").status_code == 404
     assert client.get("/api/product-tls/ask?domain=app.fourmanifold.com").status_code == 404
     assert client.get("/api/product-tls/ask?domain=latexflow.evil.test").status_code == 404
 
@@ -3123,7 +3123,7 @@ def test_product_tls_ask_does_not_block_status_route(monkeypatch):
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             ask_task = asyncio.create_task(
-                client.get("/api/product-tls/ask?domain=missing.fourmanifold.com")
+                client.get("/api/product-tls/ask?domain=missing.coscale.app")
             )
             await asyncio.sleep(0.02)
             started = time.perf_counter()
@@ -3167,7 +3167,7 @@ def test_product_site_materialize_does_not_block_status_route(monkeypatch, tmp_p
         transport = httpx.ASGITransport(app=web_server.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             product_task = asyncio.create_task(
-                client.get("/", headers={"Host": "plannerly.fourmanifold.com"})
+                client.get("/", headers={"Host": "plannerly.coscale.app"})
             )
             await asyncio.sleep(0.02)
             started = time.perf_counter()
@@ -3204,7 +3204,7 @@ def test_product_host_assets_route_serves_published_product_assets(monkeypatch, 
     _clear_product_serving_caches(web_server)
 
     client = TestClient(web_server.app)
-    response = client.get("/assets/app.js", headers={"Host": "plannerly.fourmanifold.com"})
+    response = client.get("/assets/app.js", headers={"Host": "plannerly.coscale.app"})
 
     assert response.status_code == 200
     assert "plannerly" in response.text
@@ -5762,7 +5762,7 @@ def test_email_send_route_requires_session(monkeypatch):
     response = client.post(
         "/api/takyon/apps/mathflow/email/send",
         json={"app_user_id": "u1", "subject": "hi", "text": "body"},
-        headers={"Host": "mathflow.fourmanifold.com"},
+        headers={"Host": "mathflow.coscale.app"},
     )
     assert response.status_code == 401
     assert response.json() == {"success": False, "error": "missing app session"}
@@ -5795,7 +5795,7 @@ def test_email_send_route_dispatches_and_maps_statuses(monkeypatch):
         return client.post(
             "/api/takyon/apps/mathflow/email/send",
             json={"app_user_id": "u1", "subject": "hi", "text": "body", "purpose": "new_match_notice"},
-            headers={"Host": "mathflow.fourmanifold.com", "Cookie": "takyon_app_session=tok123"},
+            headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=tok123"},
         )
 
     ok = post()
@@ -5827,7 +5827,7 @@ def test_records_query_route_dispatches_filters(monkeypatch):
     resp = client.post(
         "/api/takyon/apps/mathflow/records/query",
         json={"filters": [{"field": "data.age", "op": "gte", "value": 25}], "sort": [{"field": "created_at", "dir": "desc"}], "limit": 10},
-        headers={"Host": "mathflow.fourmanifold.com", "Cookie": "takyon_app_session=tok"},
+        headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=tok"},
     )
     assert resp.status_code == 200
     assert captured["session_token"] == "tok"
@@ -5843,7 +5843,7 @@ def test_records_query_route_requires_session():
     resp = client.post(
         "/api/takyon/apps/mathflow/records/query",
         json={"filters": []},
-        headers={"Host": "mathflow.fourmanifold.com"},
+        headers={"Host": "mathflow.coscale.app"},
     )
     assert resp.status_code == 401
     assert resp.json() == {"success": False, "error": "missing app session"}
@@ -5865,7 +5865,7 @@ def test_media_upload_route_dispatches_multipart(monkeypatch):
     resp = client.post(
         "/api/takyon/apps/mathflow/media",
         files={"file": ("pic.png", b"abc", "image/png")},
-        headers={"Host": "mathflow.fourmanifold.com", "Cookie": "takyon_app_session=tok"},
+        headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=tok"},
     )
     assert resp.status_code == 200
     assert resp.json()["media_id"] == "m1"
@@ -5882,7 +5882,7 @@ def test_media_upload_route_requires_session():
     resp = client.post(
         "/api/takyon/apps/mathflow/media",
         files={"file": ("pic.png", b"abc", "image/png")},
-        headers={"Host": "mathflow.fourmanifold.com"},
+        headers={"Host": "mathflow.coscale.app"},
     )
     assert resp.status_code == 401
 

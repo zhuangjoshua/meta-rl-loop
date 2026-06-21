@@ -1,7 +1,7 @@
 # R2 Edge-Static Migration — RUNBOOK
 
 Ordered, **reversible** deploy steps to move product static
-(`<slug>.fourmanifold.com`) onto a Cloudflare R2 bucket served by a Cloudflare
+(`<slug>.coscale.app`) onto a Cloudflare R2 bucket served by a Cloudflare
 Worker, while `/api/*` stays on the **unchanged** VPS runtime path. Read
 `THREAT-MODEL.md` first — every step here exists to satisfy a guard there, and
 each step cites the guard it verifies.
@@ -31,13 +31,13 @@ each step cites the guard it verifies.
 
 ```bash
 # Baseline: static + /api both work today via the VPS path.
-curl -sS -o /dev/null -w '%{http_code}\n' https://<TEST_SLUG>.fourmanifold.com/
-curl -sS -D- -o /dev/null https://<TEST_SLUG>.fourmanifold.com/api/takyon/apps/<TEST_SLUG>/session \
+curl -sS -o /dev/null -w '%{http_code}\n' https://<TEST_SLUG>.coscale.app/
+curl -sS -D- -o /dev/null https://<TEST_SLUG>.coscale.app/api/takyon/apps/<TEST_SLUG>/session \
   | grep -i -E 'server:|via:|cache-control:'
 # Baseline: direct non-CF hit to origin is already blocked (from a non-CF host/IP).
 curl -sS -o /dev/null -w '%{http_code}\n' \
-  --resolve <TEST_SLUG>.fourmanifold.com:443:137.184.75.57 \
-  https://<TEST_SLUG>.fourmanifold.com/        # expect 403 (edge-only lockdown)
+  --resolve <TEST_SLUG>.coscale.app:443:137.184.75.57 \
+  https://<TEST_SLUG>.coscale.app/        # expect 403 (edge-only lockdown)
 # Note the current live build_id (rollback / backfill reference).
 ssh -i ~/.ssh/takyon_argon_alpha14 root@137.184.75.57 \
   "psql \"$DATABASE_URL\" -tAc \"select live_build_id from app_surface_contracts where business_slug='<TEST_SLUG>'\""
@@ -177,7 +177,7 @@ the bucket contents (`wrangler r2 object delete` per key) — VPS serving unaffe
 1. **First line:** if `url.pathname` starts with `/api/` (also `/auth/`,
    `/billing/`, `/api/webhooks/`, `/api/pty`) → **pass to origin**, no cache, no R2.
    (§2.1, §2.3.)
-2. Derive `<slug>` from `Host` by stripping `fourmanifold.com`; validate against
+2. Derive `<slug>` from `Host` by stripping `coscale.app`; validate against
    `^[a-z0-9][a-z0-9-]{0,78}[a-z0-9]$ | ^[a-z0-9]$`; reject reserved
    (`app`/`skills`/`www`/`admin`/`dashboard`/`research-composer`) and invalid → 404.
    (§1.2, §2.4.)
@@ -205,12 +205,12 @@ bucket_name = "product-sites"
 Deploy **without** a route (or to a `workers.dev` preview) first.
 
 ```bash
-npx wrangler deploy            # no *.fourmanifold.com route yet
+npx wrangler deploy            # no *.coscale.app route yet
 # Smoke the preview URL with a known slug (Host override):
-curl -sS -H 'Host: <TEST_SLUG>.fourmanifold.com' https://<worker>.workers.dev/ -o /dev/null -w '%{http_code}\n'  # 200
-curl -sS -H 'Host: <TEST_SLUG>.fourmanifold.com' "https://<worker>.workers.dev/../etc/passwd" -o /dev/null -w '%{http_code}\n'  # 404 (traversal rejected)
-curl -sS -H 'Host: app.fourmanifold.com' https://<worker>.workers.dev/ -o /dev/null -w '%{http_code}\n'  # 404 (reserved)
-curl -sS -H 'Host: <TEST_SLUG>.fourmanifold.com' "https://<worker>.workers.dev/api/takyon/apps/<TEST_SLUG>/session" -o /dev/null -w '%{http_code}\n'  # passes to origin, not 404-from-R2
+curl -sS -H 'Host: <TEST_SLUG>.coscale.app' https://<worker>.workers.dev/ -o /dev/null -w '%{http_code}\n'  # 200
+curl -sS -H 'Host: <TEST_SLUG>.coscale.app' "https://<worker>.workers.dev/../etc/passwd" -o /dev/null -w '%{http_code}\n'  # 404 (traversal rejected)
+curl -sS -H 'Host: app.coscale.app' https://<worker>.workers.dev/ -o /dev/null -w '%{http_code}\n'  # 404 (reserved)
+curl -sS -H 'Host: <TEST_SLUG>.coscale.app' "https://<worker>.workers.dev/api/takyon/apps/<TEST_SLUG>/session" -o /dev/null -w '%{http_code}\n'  # passes to origin, not 404-from-R2
 ```
 
 **Verify.** Valid static = `200` from R2; traversal/reserved/invalid-slug = `404`;
@@ -225,9 +225,9 @@ unaffected. (§5.1.)
 
 ## Step 6 — Bind the Worker to ONE test business host, verify end-to-end
 
-**Do.** Add a Cloudflare **route** for **only** `<TEST_SLUG>.fourmanifold.com/*`
+**Do.** Add a Cloudflare **route** for **only** `<TEST_SLUG>.coscale.app/*`
 to the Worker. Ensure `/api/*` still reaches origin: either (a) a **more-specific**
-route `<TEST_SLUG>.fourmanifold.com/api/*` → origin (no Worker), or (b) rely on the
+route `<TEST_SLUG>.coscale.app/api/*` → origin (no Worker), or (b) rely on the
 Worker's first-line `/api/` passthrough (Step 5.1). Confirm the origin fetch does
 **not** re-enter the Worker (use a service binding or an origin route the Worker
 doesn't own — avoid the §2.6 loop). Add **no** new grey/DNS-only origin record if
@@ -235,20 +235,20 @@ the proxied product host can serve as the `/api` origin (§4.2).
 
 **Verify — static from R2:**
 ```bash
-curl -sS -D- https://<TEST_SLUG>.fourmanifold.com/ -o /dev/null \
+curl -sS -D- https://<TEST_SLUG>.coscale.app/ -o /dev/null \
   | grep -i -E 'cf-ray:|server:|cache-control:'   # cf-ray present, HTML no-cache
-curl -sS https://<TEST_SLUG>.fourmanifold.com/assets/<hashed>.js -o /dev/null -w '%{http_code}\n'  # 200, immutable
+curl -sS https://<TEST_SLUG>.coscale.app/assets/<hashed>.js -o /dev/null -w '%{http_code}\n'  # 200, immutable
 ```
 **Verify — /api still works (unchanged runtime):**
 ```bash
-curl -sS -D- https://<TEST_SLUG>.fourmanifold.com/api/takyon/apps/<TEST_SLUG>/session -o /dev/null \
+curl -sS -D- https://<TEST_SLUG>.coscale.app/api/takyon/apps/<TEST_SLUG>/session -o /dev/null \
   | grep -i -E 'server:|cache-control:'           # runtime headers, no-store/no-cache, NOT a Worker/R2 response
 ```
 **Verify — sign-in (magic-link/session) round-trips:**
 ```bash
 # Request a magic link / verify a session through the normal app auth endpoints and
 # confirm Set-Cookie is set by the runtime and the session validates on a follow-up call.
-curl -sS -i -X POST https://<TEST_SLUG>.fourmanifold.com/api/takyon/apps/<TEST_SLUG>/auth/request ...
+curl -sS -i -X POST https://<TEST_SLUG>.coscale.app/api/takyon/apps/<TEST_SLUG>/auth/request ...
 ```
 **Verify — a test checkout intent:** create a checkout intent via
 `/api/takyon/apps/<TEST_SLUG>/checkout` (test mode) and confirm it reaches the
@@ -258,39 +258,40 @@ no `522`/loop.
 **Verify — origin lockdown intact:**
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' \
-  --resolve <TEST_SLUG>.fourmanifold.com:443:137.184.75.57 \
-  https://<TEST_SLUG>.fourmanifold.com/          # still 403 (direct non-CF)
+  --resolve <TEST_SLUG>.coscale.app:443:137.184.75.57 \
+  https://<TEST_SLUG>.coscale.app/          # still 403 (direct non-CF)
 ```
 
 **Rollback (single action, seconds).** **Unbind/disable the Worker route** for
-`<TEST_SLUG>.fourmanifold.com`. Static immediately falls back to the unchanged VPS
+`<TEST_SLUG>.coscale.app`. Static immediately falls back to the unchanged VPS
 path; `/api` was never moved. No rebuild/DNS/VPS change. (Guards: §2.1, §2.3, §2.5,
 §2.6, §4.1, §5.2, §5.3.)
 
 ---
 
-## Step 7 — Cut over `*.fourmanifold.com` to the Worker
+## Step 7 — Route coscale product hosts to the Worker
 
-**Do.** Once the test host passes **all** of Step 6, bind the wildcard route
-`*.fourmanifold.com/*` to the Worker (excluding reserved hosts, mirroring the
-Caddyfile `@product` exclusions, and keeping `/api/*` → origin per Step 6). Reserved
-hosts (`app`/`skills`/…) keep going to operator Caddy → :9119 with **no** Worker
-(§2.4).
+**Do.** Once the test host passes **all** of Step 6, use the Takyon publish path
+to create per-business routes such as `<slug>.coscale.app/*` for live product
+hosts. Do not route `origin.coscale.app` to this Worker. If you intentionally
+choose a wildcard `*.coscale.app/*` route, first add a more-specific
+`origin.coscale.app/*` route mapped to no Worker so `/api/*` passthrough cannot
+loop (§2.4).
 
 **Verify.** Spot-check several existing product hosts:
 ```bash
 for s in <slugA> <slugB> <slugC>; do
-  echo -n "$s static="; curl -sS -o /dev/null -w '%{http_code}' https://$s.fourmanifold.com/;
-  echo -n " api="; curl -sS -o /dev/null -w '%{http_code}' https://$s.fourmanifold.com/api/takyon/apps/$s/session; echo
+  echo -n "$s static="; curl -sS -o /dev/null -w '%{http_code}' https://$s.coscale.app/;
+  echo -n " api="; curl -sS -o /dev/null -w '%{http_code}' https://$s.coscale.app/api/takyon/apps/$s/session; echo
 done
-# Reserved host unaffected:
+# Operator frontdoor unaffected:
 curl -sS -D- https://app.fourmanifold.com/ -o /dev/null | grep -i cf-ray   # served as before (operator path)
 ```
 All static = `200` from edge; all `/api` = live runtime; `app.fourmanifold.com`
 unchanged.
 
-**Rollback.** Unbind the wildcard route (revert to the test-only route or remove
-entirely) → all product static falls back to the VPS path instantly; `/api`
+**Rollback.** Unbind the per-business route (or the optional wildcard route if
+you used one) → product static falls back to the VPS path instantly; `/api`
 unaffected. (Guards: §2.4, §5.3.)
 
 ---
@@ -301,7 +302,7 @@ unaffected. (Guards: §2.4, §5.3.)
 created end-to-end through the browser UI** — existing-business checks are
 exploration only. Create one fresh business via `app.fourmanifold.com`, let it
 publish its product, then exercise it **as a user** in the browser at
-`<fresh-slug>.fourmanifold.com`.
+`<fresh-slug>.coscale.app`.
 
 **Verify.**
 * Static loads from R2 (response has `cf-ray`, HTML `no-cache`, hashed assets
@@ -360,7 +361,7 @@ never deleted, so no data loss. (Guards: §5.1, §5.4, §5.5.)
 | 4 | Backfill builds into R2 | Delete R2 keys; VPS still serves |
 | 5 | Deploy Worker (no route) | `wrangler delete`; nothing routed |
 | 6 | Route ONE test host → Worker | **Unbind that route** (seconds) |
-| 7 | Route `*.fourmanifold.com` → Worker | **Unbind wildcard** → VPS fallback |
+| 7 | Route `<slug>.coscale.app` → Worker | **Unbind route** → VPS fallback |
 | 8 | Fresh-business E2E acceptance | Unbind route; fix bootstrap mirror |
 | 9 | Remove VPS materialization (disable→delete) | Re-enable flag / code revert; Supabase artifacts intact |
 

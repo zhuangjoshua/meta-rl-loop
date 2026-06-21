@@ -84,15 +84,15 @@ app.fourmanifold.com {
 	# app.fourmanifold.com/api/webhooks/stripe stays the one stable Stripe delivery URL. The
 	# control-plane /v1/billing/webhook (STRIPE_BILLING_WEBHOOK_SECRET) stays on the operator dashboard.
 	#
-	# The subuser Caddy is Host-gated: its @product matcher forwards any *.fourmanifold.com EXCEPT the
-	# reserved operator hostnames (app/skills/www/admin/dashboard/research-composer). Passing the real
+	# The subuser Caddy is Host-gated: its @product matcher forwards *.coscale.app product hosts.
+	# Passing the real
 	# Host (app.fourmanifold.com) is therefore rejected as "not found", so we rewrite Host to a stable
 	# synthetic product host. The webhook handler dispatches purely on event metadata (business_slug),
 	# not the Host, and role=subuser allows /api/webhooks/stripe for any host — so this host is just an
 	# internal routing token (no DNS/TLS needed; the operator->subuser hop is plain HTTP on :80).
 	handle /api/webhooks/stripe {
 		reverse_proxy 10.116.0.3:80 {
-			header_up Host stripe-webhooks.fourmanifold.com
+			header_up Host stripe-webhooks.coscale.app
 			header_up X-Forwarded-Proto https
 		}
 	}
@@ -118,27 +118,14 @@ research-composer.fourmanifold.com {
 	import fourmanifold_cloudflare_origin_tls
 	import fourmanifold_edge_only
 
-	# Compress business product sites (slug.fourmanifold.com) at the edge too.
-	encode zstd gzip
-
-	@product {
-		host *.fourmanifold.com
-		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-	}
-	handle @product {
-		reverse_proxy 10.116.0.3:80 {
-			header_up Host {host}
-			header_up X-Forwarded-Proto https
-		}
-	}
-
+	# Legacy product subdomains no longer serve product traffic. Current product
+	# hosts are <slug>.coscale.app through the shared product plane below.
 	respond "not found" 404
 }
 
-# Business product sites on the coscale.app domain. Same product plane (subuser 10.116.0.3:80) as
-# *.fourmanifold.com, but terminated with coscale.app's own Cloudflare Origin cert. coscale.app has
-# no reserved operator hosts, so every subdomain is a product host (the app runtime rejects any host
-# that isn't a real business).
+# Business product sites on the coscale.app domain, terminated with coscale.app's own Cloudflare
+# Origin cert and proxied to the sub-user product plane on 10.116.0.3:80. The app runtime rejects
+# any host that isn't a real business.
 *.coscale.app {
 	import coscale_cloudflare_origin_tls
 	import fourmanifold_edge_only
@@ -167,7 +154,7 @@ research-composer.fourmanifold.com {
 	}
 
 	@product {
-		host *.fourmanifold.com *.coscale.app
+		host *.coscale.app
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {

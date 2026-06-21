@@ -22,53 +22,12 @@
 	respond @origin_bypass "forbidden" 403
 }
 
-# Shared dynamic product subdomains.
+# Legacy fourmanifold product subdomains no longer serve product traffic.
 # The app runtime itself decides whether a hostname belongs to a real business;
-# Caddy only forwards eligible product hosts to the sub-user plane.
+# Caddy only forwards eligible coscale product hosts to the sub-user plane.
 *.fourmanifold.com {
 	import fourmanifold_cloudflare_origin_tls
 	import fourmanifold_edge_only
-
-	@product {
-		host *.fourmanifold.com
-		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-	}
-	handle @product {
-		# Tightest: product-app customer auth (magic-link verify) — credential brute-force surface.
-		@app_auth path /api/takyon/apps/*/auth/*
-		rate_limit @app_auth {
-			zone product_auth {
-				key {client_ip}
-				events 30
-				window 1m
-			}
-		}
-
-		# Paid/AI product actions (actions/generate/checkout) — each call is metered/spendful,
-		# so cap per-IP abuse at the edge before it reaches the money gates.
-		@app_actions path /api/takyon/apps/*/actions/* /api/takyon/apps/*/generate /api/takyon/apps/*/checkout
-		rate_limit @app_actions {
-			zone product_actions {
-				key {client_ip}
-				events 60
-				window 1m
-			}
-		}
-
-		# Global DDoS cap on all product traffic (static + dynamic) per client IP.
-		rate_limit {
-			zone product_all {
-				key {client_ip}
-				events 600
-				window 1m
-			}
-		}
-
-		reverse_proxy 127.0.0.1:9119 {
-			header_up Host {host}
-			header_up X-Forwarded-Proto https
-		}
-	}
 
 	respond "not found" 404
 }
@@ -77,7 +36,7 @@
 	import fourmanifold_edge_only
 
 	@product {
-		host *.fourmanifold.com *.coscale.app
+		host *.coscale.app
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {

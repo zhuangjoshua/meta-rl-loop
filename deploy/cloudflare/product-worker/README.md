@@ -1,22 +1,22 @@
 # Takyon product-site edge worker
 
-Serves built product static (`<slug>.fourmanifold.com`) from the Cloudflare R2
-bucket `product-sites` at the edge, and forwards everything else — all `/api/*`
-traffic and all reserved operator hosts — to the existing origin (operator Caddy
-at `137.184.75.57`) **unchanged**. This takes the VPS out of the static-serving
-path without touching the dynamic auth / paywall / usage / entitlements rail.
+Serves built product static (`<slug>.coscale.app`) from the Cloudflare R2
+bucket `product-sites` at the edge, and forwards `/api/*` traffic to the existing
+origin (operator Caddy at `137.184.75.57`) **unchanged**. This takes the VPS out
+of the static-serving path without touching the dynamic auth / paywall / usage /
+entitlements rail.
 
 ## What it does, per request
 
-For `*.fourmanifold.com/*` (the Worker route):
+For `<slug>.coscale.app/*` (the per-business Worker route):
 
 1. **Reserved host OR `/api/*`** → forward to the real origin **verbatim**
    (same method, headers, body) and return the origin's response **verbatim**,
-   never cached. Reserved hosts: `app`, `skills`, `www`, `admin`, `dashboard`,
-   `research-composer` (kept in sync with the `not host …` lists in both
-   Caddyfiles). Everything dynamic lives under `/api/*` — product app auth,
-   sessions, actions, `generate`, `checkout`, Stripe webhooks, `/api/pty`,
-   `/api/events` — so this single prefix is the whole security boundary.
+   never cached. Reserved labels (`app`, `skills`, `www`, `admin`, `dashboard`,
+   `research-composer`, `origin`) are defense-in-depth only; the normal route set
+   is per-business and should not include them. Everything dynamic lives under
+   `/api/*` — product app auth, sessions, actions, `generate`, `checkout`, Stripe
+   webhooks — so this single prefix is the whole security boundary.
 
    This is the part that **must not change behaviour**: auth, paywall, usage
    metering and entitlements stay byte-identical to today, and are never cached
@@ -51,7 +51,7 @@ Conditional requests (`If-None-Match`) and `Range` are honoured from R2
 
 ## API passthrough — the loop problem and how it's solved
 
-The Worker is bound to `*.fourmanifold.com/*`. A naïve `fetch(request)` for a
+The Worker is bound to product routes such as `wandr.coscale.app/*`. A naïve `fetch(request)` for a
 `/api/*` request would target the **same** hostname, match the same route, and
 **re-invoke this Worker** — an infinite loop (or, with the loop guard, a failure).
 
@@ -65,9 +65,9 @@ new Request(request, { cf: { resolveOverride: env.ORIGIN_HOST }, redirect: "manu
 `resolveOverride` only changes **where the TCP connection goes**; it does **not**
 rewrite the URL or the `Host` header. So:
 
-- The connection is sent to `origin.fourmanifold.com` (→ `137.184.75.57`) instead
-  of looping back through the `*.fourmanifold.com/*` Worker route.
-- Caddy still sees `Host: <slug>.fourmanifold.com`, so it matches the per-business
+- The connection is sent to `origin.coscale.app` (→ `137.184.75.57`) instead
+  of looping back through the `*.coscale.app/*` Worker route.
+- Caddy still sees `Host: <slug>.coscale.app`, so it matches the per-business
   product site block and presents the **Cloudflare origin cert** exactly as today.
 - The subrequest still **egresses from Cloudflare's network**, so it arrives at
   Caddy from a Cloudflare IP and passes the `fourmanifold_edge_only` snippet.
@@ -79,20 +79,20 @@ is **not** behind this Worker:
 
 | Type | Name                    | Value           | Proxy status      |
 |------|-------------------------|-----------------|-------------------|
-| A    | `origin.fourmanifold.com` | `137.184.75.57` | **DNS only (grey)** |
+| A    | `origin.coscale.app` | `137.184.75.57` | **DNS only (grey)** |
 
 - It must be **grey-clouded** so the subrequest hits the VPS directly rather than
   re-entering Cloudflare's proxy/Worker layer.
-- Do **not** add a Worker route for `origin.fourmanifold.com` (and the wildcard
-  route `*.fourmanifold.com/*` matches `slug` hosts but the Worker only calls out
-  to `origin.…` via `resolveOverride`, which bypasses route matching entirely).
+- Do **not** add a Worker route for `origin.coscale.app`. If you intentionally
+  bind a wildcard `*.coscale.app/*` route instead of per-business routes, first
+  add a more-specific `origin.coscale.app/*` route mapped to no Worker.
 
 ### This does NOT expose the origin to non-CF clients
 
-`origin.fourmanifold.com` resolving publicly to the VPS does **not** open a
+`origin.coscale.app` resolving publicly to the VPS does **not** open a
 bypass. Caddy's `fourmanifold_edge_only` snippet `respond 403` for any
 `remote_ip` not in the Cloudflare ranges (plus loopback / `10.116.0.0/20`). A
-direct client hitting `origin.fourmanifold.com` comes from its own IP — **not** a
+direct client hitting `origin.coscale.app` comes from its own IP — **not** a
 Cloudflare IP — and gets `403`. Only Worker subrequests (which egress from CF
 IPs) pass. The lockdown is unchanged; we only added a name pointing at the same
 already-locked host.
@@ -137,7 +137,7 @@ cd deploy/cloudflare/product-worker
 # one-time: create the bucket and the grey-clouded origin DNS record (above)
 wrangler r2 bucket create product-sites
 
-# deploy / update the worker (binds the route + R2 + ORIGIN_HOST var from wrangler.toml)
+# deploy / update the worker code + R2 binding + ORIGIN_HOST var from wrangler.toml
 wrangler deploy
 
 # watch live logs
@@ -146,32 +146,26 @@ wrangler tail takyon-product-worker
 
 ### Exact route binding
 
-`wrangler.toml` declares:
-
-```toml
-routes = [
-  { pattern = "*.fourmanifold.com/*", zone_name = "fourmanifold.com" },
-]
-```
-
-One wildcard route covers all product subdomains. Reserved operator hosts also
-match it and are handled in-code by forwarding to the origin, so there is no
-per-host route to maintain.
+Routes are managed by the Takyon publish path, not by `wrangler deploy`.
+`plugins/takyon/core.py::_ensure_product_edge_route` creates a per-business
+Cloudflare route such as `wandr.coscale.app/*` in the `coscale.app` zone. This
+keeps `origin.coscale.app` outside the Worker route table so `/api/*`
+passthrough can use `resolveOverride` without looping.
 
 ### Bindings summary
 
 | Binding        | Kind     | Value             | Notes                                  |
 |----------------|----------|-------------------|----------------------------------------|
 | `PRODUCT_SITES`| R2 bucket| `product-sites`   | read-only at runtime; public dist only |
-| `ORIGIN_HOST`  | var      | `origin.fourmanifold.com` | grey-cloud DNS-only → `137.184.75.57` |
+| `ORIGIN_HOST`  | var      | `origin.coscale.app` | grey-cloud DNS-only → `137.184.75.57` |
 
 ## Rollback
 
 Because the static rail is purely additive at the edge, rollback is a Cloudflare
 control-plane action with no VPS change:
 
-- **Disable the Worker route** (or `wrangler delete`) → all traffic falls back to
-  the existing Caddy path (`*.fourmanifold.com` → subuser `:9119`
+- **Disable the per-business Worker route** (or `wrangler delete`) → traffic falls back to
+  the existing Caddy path (`*.coscale.app` → subuser `:9119`
   `_serve_product_site_file`), which still serves static and `/api/*` exactly as
   before. The VPS static path was never removed; it's just bypassed while the
   Worker is live.

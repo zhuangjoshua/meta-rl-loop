@@ -3661,7 +3661,7 @@ def _takyon_operator_businesses_payload(principal: Any) -> dict[str, Any]:
                     try:
                         item["product_url"] = _canonical_product_url(store, conn, slug)
                     except Exception:  # noqa: BLE001 - URL is best-effort
-                        item["product_url"] = f"https://{slug}.fourmanifold.com"
+                        item["product_url"] = f"https://{slug}.coscale.app"
                     logo_rel = "product/site/public/brand-logo.png"
                     logo_abs = store._resolve_business_file(slug, logo_rel, sync=False)
                     item["logo_url"] = logo_rel if logo_abs.is_file() else ""
@@ -8194,7 +8194,7 @@ def _company_base_domain() -> str:
     return (
         os.getenv("PUBLIC_COMPANY_BASE_DOMAIN", "").strip().lower()
         or os.getenv("TAKYON_COMPANY_BASE_DOMAIN", "").strip().lower()
-        or "fourmanifold.com"
+        or "coscale.app"
     ).strip(".")
 
 

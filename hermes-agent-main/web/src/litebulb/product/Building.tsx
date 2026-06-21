@@ -21,10 +21,10 @@ const clock = (index: number) => {
   return [h, m, s].map((value) => String(value).padStart(2, "0")).join(":");
 };
 
-// Canonical product domain — product sub-apps are served at `<slug>.fourmanifold.com`
+// Canonical product domain — product sub-apps are served at `<slug>.coscale.app`
 // (same convention as product/Product.tsx). Show the REAL host as soon as the slug is
 // known; never a fabricated `.app` placeholder.
-const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+const PRODUCT_BASE_DOMAIN = "coscale.app";
 
 function canonicalProductHost(slug: string) {
   const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");

@@ -32,7 +32,7 @@ configure `TAKYON_PRODUCT_ACTIVATION_SSH_TARGET` plus an activation SSH key ther
 
 The sub-user host serves only:
 
-- shared `slug.fourmanifold.com` product subdomains
+- shared `slug.coscale.app` product subdomains
 - the narrow app-runtime rails behind those hosts
 - the product-host TLS ask gate
 

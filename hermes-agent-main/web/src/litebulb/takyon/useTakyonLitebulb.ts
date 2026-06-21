@@ -61,7 +61,7 @@ export type LitebulbBusiness = {
   status: string;
   tagline: string;
   meta: string;
-  // Real published product URL (https://<slug>.fourmanifold.com or a recorded
+  // Real published product URL (https://<slug>.coscale.app or a recorded
   // public_url). Always populated from the canonical host so the company card
   // never shows a fabricated `.app` placeholder.
   productUrl: string;
@@ -149,10 +149,10 @@ function isMissingSessionError(error: unknown) {
 }
 
 // Canonical product domain — product sub-apps are served at
-// `<slug>.fourmanifold.com` (mirrors product/Product.tsx canonicalProductHost and
+// `<slug>.coscale.app` (mirrors product/Product.tsx canonicalProductHost and
 // core._product_publish_target). Used to derive a REAL product URL for the
 // company card whenever the backend payload omits an explicit public_url.
-const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+const PRODUCT_BASE_DOMAIN = "coscale.app";
 
 function canonicalProductUrl(slug: string) {
   const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");

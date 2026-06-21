@@ -145,7 +145,7 @@ clarity) sit on top.
   `GSC_SERVICE_ACCOUNT_FILE` is set (browser-OAuth fallback via `GSC_CLIENT_SECRETS_FILE`
   otherwise). Assume the subdomain's URL-prefix property already exists — it is registered
   at bootstrap / website creation, not by this skill — so query it directly (e.g.
-  `https://<slug>.fourmanifold.com/`) for isolated metrics rather than the parent domain
+  `https://<slug>.coscale.app/`) for isolated metrics rather than the parent domain
   property, which mixes all subdomains together. If `gsc-sites` shows the property is
   missing, treat that as a bootstrap gap to report, not something to fix here. (2) Or an
   `mcp-gsc` / `google-search-console-mcp` server. Unlocks striking-distance (positions

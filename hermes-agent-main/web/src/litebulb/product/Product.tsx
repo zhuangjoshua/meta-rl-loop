@@ -45,10 +45,10 @@ const Icon = {
 };
 
 // Canonical product domain. Product sub-apps are served at
-// `<slug>.fourmanifold.com` (see takyon_cli/web_server._company_base_domain and
+// `<slug>.coscale.app` (see takyon_cli/web_server._company_base_domain and
 // core._product_publish_target). The address bar must show this real canonical
 // host — never a fabricated `.app` placeholder.
-const PRODUCT_BASE_DOMAIN = "fourmanifold.com";
+const PRODUCT_BASE_DOMAIN = "coscale.app";
 
 // Canonical expected product host derived from the business slug. Used only as a
 // last-resort fallback when neither the published public_url nor the backend
@@ -520,7 +520,7 @@ function ProductPreview({
   const product = (overview.product || {}) as Record<string, unknown>;
   // Authoritative URL resolution, best-to-fallback:
   //   1. publicUrl       — the published canonical URL when live.
-  //   2. publish_target  — the backend's canonical expected URL (slug.fourmanifold.com)
+  //   2. publish_target  — the backend's canonical expected URL (slug.coscale.app)
   //                        even before the product is published.
   //   3. canonical host derived client-side from the slug.
   // Never fabricate a `.app` placeholder.
@@ -537,7 +537,7 @@ function ProductPreview({
   const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
   const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
   const productStatus = typeof product.status === "string" ? product.status : "";
-  // Embed the PUBLIC published landing (slug.fourmanifold.com) directly — it is a
+  // Embed the PUBLIC published landing (slug.coscale.app) directly — it is a
   // public page, so the preview needs no operator auth / sign-in. Only embed once it
   // is actually published; otherwise fall through to the "building" / "no preview yet"
   // state below (an unpublished slug has no live landing to show).

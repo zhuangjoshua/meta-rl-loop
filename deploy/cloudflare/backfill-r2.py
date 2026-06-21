@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Backfill the public Cloudflare R2 product-site bucket from existing live builds.
 
-Run this ONCE on the VPS before cutting <slug>.fourmanifold.com over to the R2 edge, so every
+Run this ONCE on the VPS before cutting <slug>.coscale.app over to the R2 edge, so every
 already-published business is present in R2 ahead of the switch. After cutover the normal publish
 path (`core._publish_product_surface_path` -> `storage.write_public_site_to_r2`) keeps R2 current;
 this script is only the one-time catch-up for builds published before the mirror existed.

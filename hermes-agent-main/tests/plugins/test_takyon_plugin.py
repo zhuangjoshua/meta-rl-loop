@@ -385,7 +385,7 @@ def test_action_runtime_capability_check_requires_working_user_scope_on_operator
 
 
 def test_product_publish_target_defaults_to_business_subdomain():
-    assert _product_publish_target("latexflow") == "https://latexflow.fourmanifold.com/"
+    assert _product_publish_target("latexflow") == "https://latexflow.coscale.app/"
 
 
 def test_takyon_skills_index_command_is_removed():
@@ -748,7 +748,7 @@ def test_active_surface_requires_product_refresh_receipt(tmp_path, monkeypatch):
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert app["surface_contract"]["public_url"] == "https://latexflow.coscale.app/"
     assert app["product_inventory"]["routes"] == ["/"]
     assert app["product_surface"]["local_continuable_work"] == []
     assert (tmp_path / "published-sites" / "latexflow" / "index.html").exists()
@@ -887,7 +887,7 @@ def test_product_surface_projection_turns_stale_when_source_changes_after_publis
 def test_publish_result_preserves_existing_live_state_on_blocked_republish(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
-    publish_target = "https://latexflow.fourmanifold.com/"
+    publish_target = "https://latexflow.coscale.app/"
     _commit(
         store,
         "business:latexflow",
@@ -962,7 +962,7 @@ def test_product_surface_reads_live_pointer_over_stale_publish_status(tmp_path, 
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))
     store = TakyonStore(tmp_path)
-    publish_target = "https://latexflow.fourmanifold.com/"
+    publish_target = "https://latexflow.coscale.app/"
     _commit(
         store,
         "business:latexflow",
@@ -1176,13 +1176,13 @@ def test_app_like_surface_claiming_app_route_without_real_source_is_blocked(tmp_
 
     assert verification["status"] == "blocked"
     assert verification["publish"]["status"] == "published"
-    assert verification["publish"]["public_url"] == "https://briefpilot.fourmanifold.com/"
+    assert verification["publish"]["public_url"] == "https://briefpilot.coscale.app/"
     assert "generated source does not include a working app subroute" in verification["blocker"]
     assert (tmp_path / "published-sites" / "briefpilot" / "index.html").exists()
     app = store.read(scope="business:briefpilot", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["public_url"] == "https://briefpilot.fourmanifold.com/"
+    assert app["surface_contract"]["public_url"] == "https://briefpilot.coscale.app/"
     assert app["surface_contract"]["publish_blocker"]
 
 
@@ -1483,7 +1483,7 @@ def test_static_product_publish_writes_caddy_route_when_configured(tmp_path, mon
     caddyfile = (tmp_path / "Caddyfile").read_text(encoding="utf-8")
     assert verification["publish"]["status"] == "published"
     assert verification["publish"]["caddyfile"] == str(tmp_path / "Caddyfile")
-    assert "latexflow.fourmanifold.com" in caddyfile
+    assert "latexflow.coscale.app" in caddyfile
     assert "@takyon_app_runtime path /api/*" in caddyfile
     assert "reverse_proxy 127.0.0.1:9119" in caddyfile
     assert f"root * {tmp_path / 'published-sites' / 'latexflow'}" in caddyfile
@@ -1530,7 +1530,7 @@ def test_business_refresh_product_surface_uses_longer_default_timeout(monkeypatc
                 "app": {
                     "surface": {
                         "source_path": "product/site",
-                        "publish_target": "https://latexflow.fourmanifold.com/",
+                        "publish_target": "https://latexflow.coscale.app/",
                     }
                 }
             }
@@ -1544,7 +1544,7 @@ def test_business_refresh_product_surface_uses_longer_default_timeout(monkeypatc
             "status": "passed",
             "publish": {
                 "status": "published",
-                "public_url": "https://latexflow.fourmanifold.com/",
+                "public_url": "https://latexflow.coscale.app/",
                 "blocker": "",
             },
             "receipt_path": "metrics/receipts/product-surface/test.json",
@@ -1595,7 +1595,7 @@ def test_business_refresh_product_surface_treats_null_install_as_default_true(mo
                 "app": {
                     "surface": {
                         "source_path": "product/site",
-                        "publish_target": "https://latexflow.fourmanifold.com/",
+                        "publish_target": "https://latexflow.coscale.app/",
                     }
                 }
             }
@@ -1609,7 +1609,7 @@ def test_business_refresh_product_surface_treats_null_install_as_default_true(mo
             "status": "passed",
             "publish": {
                 "status": "published",
-                "public_url": "https://latexflow.fourmanifold.com/",
+                "public_url": "https://latexflow.coscale.app/",
                 "blocker": "",
             },
             "receipt_path": "metrics/receipts/product-surface/test.json",
@@ -1647,7 +1647,7 @@ def test_business_refresh_product_surface_rejects_source_path_drift(monkeypatch)
                 "app": {
                     "surface": {
                         "source_path": "product/site",
-                        "publish_target": "https://latexflow.fourmanifold.com/",
+                        "publish_target": "https://latexflow.coscale.app/",
                     }
                 }
             }
@@ -3105,7 +3105,7 @@ def test_claude_agent_task_publishes_verified_product_surface(tmp_path, monkeypa
     app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
     assert app["surface_contract"]["status"] == "active"
     assert app["surface_contract"]["publish_status"] == "published"
-    assert app["surface_contract"]["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert app["surface_contract"]["public_url"] == "https://latexflow.coscale.app/"
     receipt_path = tmp_path / "businesses" / "latexflow" / str(result["surface_refresh"]["receipt_path"])
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["guidance_skills"] == []
@@ -3134,7 +3134,7 @@ def test_claude_agent_task_treats_null_install_as_default_true_for_surface_refre
             "status": "passed",
             "publish": {
                 "status": "published",
-                "public_url": "https://latexflow.fourmanifold.com/",
+                "public_url": "https://latexflow.coscale.app/",
                 "blocker": "",
             },
             "receipt_path": "metrics/receipts/product-surface/test.json",
@@ -3212,7 +3212,7 @@ def test_claude_agent_task_prefixes_forbidden_surface_blockers_with_blocked(tmp_
             "publish": {
                 "status": "blocked",
                 "public_url": "",
-                "publish_target": "https://latexflow.fourmanifold.com/",
+                "publish_target": "https://latexflow.coscale.app/",
                 "publish_source_path": "product/site",
                 "blocker": blocker,
             },
@@ -3337,7 +3337,7 @@ def test_next_product_publish_is_blocked_without_vite_dist_output(tmp_path, monk
         business_root=business_root,
         slug="latexflow",
         source_path="product/site",
-        publish_target="https://latexflow.fourmanifold.com/",
+        publish_target="https://latexflow.coscale.app/",
     )
 
     assert result["status"] == "blocked"
@@ -3372,7 +3372,7 @@ def test_next_product_publish_does_not_handoff_to_activation_host(tmp_path, monk
         business_root=business_root,
         slug="latexflow",
         source_path="product/site",
-        publish_target="https://latexflow.fourmanifold.com/",
+        publish_target="https://latexflow.coscale.app/",
     )
 
     assert result["status"] == "blocked"
@@ -4705,7 +4705,7 @@ def test_delete_business_removes_product_service_runtime(tmp_path, monkeypatch):
 
     caddyfile = tmp_path / "Caddyfile"
     caddyfile.write_text(
-        "latexflow.fourmanifold.com {\n"
+        "latexflow.coscale.app {\n"
         "    handle {\n"
         "        reverse_proxy 127.0.0.1:4010\n"
         "    }\n"
@@ -4734,7 +4734,7 @@ def test_delete_business_removes_product_service_runtime(tmp_path, monkeypatch):
     assert deletion["subuser_product_site"]["removed"] is True
     assert not service_root.exists()
     assert not service_file.exists()
-    assert "latexflow.fourmanifold.com" not in caddyfile.read_text(encoding="utf-8")
+    assert "latexflow.coscale.app" not in caddyfile.read_text(encoding="utf-8")
 
 
 def test_delete_business_removes_remote_workspace_copy(tmp_path):
@@ -5033,7 +5033,7 @@ def test_business_session_allows_claude_agent_surface_refresh(tmp_path, monkeypa
             "status": "passed",
             "publish": {
                 "status": "published",
-                "public_url": "https://alpha.fourmanifold.com/",
+                "public_url": "https://alpha.coscale.app/",
                 "blocker": "",
             },
             "receipt_path": "metrics/receipts/product-surface/test.json",
@@ -5654,33 +5654,33 @@ class _FakeGscService:
 
 def test_seo_add_gsc_property_registers_subdomain_under_owner_parent():
     service = _FakeGscService(
-        [{"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"}]
+        [{"siteUrl": "sc-domain:coscale.app", "permissionLevel": "siteOwner"}]
     )
-    result = takyon_core._seo_add_gsc_property(service, "https://acme.fourmanifold.com")
+    result = takyon_core._seo_add_gsc_property(service, "https://acme.coscale.app")
     assert result == {
         "success": True,
-        "site_url": "https://acme.fourmanifold.com/",
-        "parent": "sc-domain:fourmanifold.com",
+        "site_url": "https://acme.coscale.app/",
+        "parent": "sc-domain:coscale.app",
         "already_existed": False,
     }
-    assert service.added == ["https://acme.fourmanifold.com/"]
+    assert service.added == ["https://acme.coscale.app/"]
 
 
 def test_seo_add_gsc_property_is_idempotent_when_already_present():
     service = _FakeGscService(
         [
-            {"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"},
-            {"siteUrl": "https://acme.fourmanifold.com/", "permissionLevel": "siteOwner"},
+            {"siteUrl": "sc-domain:coscale.app", "permissionLevel": "siteOwner"},
+            {"siteUrl": "https://acme.coscale.app/", "permissionLevel": "siteOwner"},
         ]
     )
-    result = takyon_core._seo_add_gsc_property(service, "https://acme.fourmanifold.com/")
+    result = takyon_core._seo_add_gsc_property(service, "https://acme.coscale.app/")
     assert result["already_existed"] is True
     assert service.added == []
 
 
 def test_seo_add_gsc_property_rejects_url_outside_owner_verified_parent():
     service = _FakeGscService(
-        [{"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"}]
+        [{"siteUrl": "sc-domain:coscale.app", "permissionLevel": "siteOwner"}]
     )
     with pytest.raises(TakyonError):
         takyon_core._seo_add_gsc_property(service, "https://acme.example.com/")
@@ -5688,10 +5688,10 @@ def test_seo_add_gsc_property_rejects_url_outside_owner_verified_parent():
 
 def test_seo_add_gsc_property_requires_http_scheme():
     service = _FakeGscService(
-        [{"siteUrl": "sc-domain:fourmanifold.com", "permissionLevel": "siteOwner"}]
+        [{"siteUrl": "sc-domain:coscale.app", "permissionLevel": "siteOwner"}]
     )
     with pytest.raises(TakyonError):
-        takyon_core._seo_add_gsc_property(service, "ftp://acme.fourmanifold.com/")
+        takyon_core._seo_add_gsc_property(service, "ftp://acme.coscale.app/")
 
 
 def test_handle_business_seo_add_property_requires_site_url():
@@ -5746,7 +5746,7 @@ def test_handle_business_seo_query_data_gsc_query_requires_site_url_and_dates():
 
     out = json.loads(
         takyon_core.handle_business_seo_query_data(
-            {"mode": "gsc-query", "site_url": "sc-domain:acme.fourmanifold.com"}
+            {"mode": "gsc-query", "site_url": "sc-domain:acme.coscale.app"}
         )
     )
     assert out["success"] is False
@@ -7174,13 +7174,13 @@ def test_business_reddit_ad_launch_defaults_destination_to_canonical_product_url
     assert result["success"] is True
     plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
     plan = json.loads(plan_abs.read_text(encoding="utf-8"))
-    assert plan["post"]["destination_url"] == "https://clipbook.fourmanifold.com/"
-    assert plan["ad"]["click_url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["post"]["destination_url"] == "https://clipbook.coscale.app/"
+    assert plan["ad"]["click_url"] == "https://clipbook.coscale.app/"
 
     receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
     receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
-    assert receipt["destination_url"] == "https://clipbook.fourmanifold.com/"
-    assert receipt["click_url"] == "https://clipbook.fourmanifold.com/"
+    assert receipt["destination_url"] == "https://clipbook.coscale.app/"
+    assert receipt["click_url"] == "https://clipbook.coscale.app/"
 
 
 def test_business_reddit_ad_launch_preserves_copy_fields_in_plan_and_receipt(tmp_path, monkeypatch):
@@ -7192,10 +7192,10 @@ def test_business_reddit_ad_launch_preserves_copy_fields_in_plan_and_receipt(tmp
             _reddit_launch_args(
                 post={
                     "headline": "Try Clipbook",
-                    "destination_url": "https://clipbook.fourmanifold.com/",
+                    "destination_url": "https://clipbook.coscale.app/",
                     "media_url": "https://cdn.example.com/clipbook.png",
                     "allow_comments": False,
-                    "display_url": "https://clipbook.fourmanifold.com/",
+                    "display_url": "https://clipbook.coscale.app/",
                     "call_to_action": "Learn More",
                     "supplementary_text": "No ticket queue. No templated sludge.",
                     "body": "Optional long-form copy for Reddit post flows.",
@@ -7208,14 +7208,14 @@ def test_business_reddit_ad_launch_preserves_copy_fields_in_plan_and_receipt(tmp
     assert result["success"] is True
     plan_abs = tmp_path / "businesses" / "clipbook" / result["plan_path"]
     plan = json.loads(plan_abs.read_text(encoding="utf-8"))
-    assert plan["post"]["display_url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["post"]["display_url"] == "https://clipbook.coscale.app/"
     assert plan["post"]["call_to_action"] == "Learn More"
     assert plan["post"]["supplementary_text"] == "No ticket queue. No templated sludge."
     assert plan["post"]["body"] == "Optional long-form copy for Reddit post flows."
 
     receipt_abs = tmp_path / "businesses" / "clipbook" / result["receipt"]
     receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
-    assert receipt["display_url"] == "https://clipbook.fourmanifold.com/"
+    assert receipt["display_url"] == "https://clipbook.coscale.app/"
     assert receipt["call_to_action"] == "Learn More"
     assert receipt["supplementary_text"] == "No ticket queue. No templated sludge."
     assert receipt["body"] == "Optional long-form copy for Reddit post flows."
@@ -7330,7 +7330,7 @@ def test_business_reddit_ad_launch_live_local_asset_failure_writes_blocked_publi
 
 def test_stage_business_public_asset_mirrors_into_static_publish_root_only(tmp_path, monkeypatch):
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
-    publish_target = "https://clipbook.fourmanifold.com/"
+    publish_target = "https://clipbook.coscale.app/"
     publish_receipt_rel = "metrics/receipts/product-surface/test.json"
     publish_root = tmp_path / "product-sites" / "clipbook"
     receipt_abs = tmp_path / "businesses" / "clipbook" / publish_receipt_rel
@@ -7656,10 +7656,10 @@ def test_reddit_launch_plan_passes_structured_post_payload(tmp_path, monkeypatch
 
     assert staged_assets == []
     plan = takyon_core._reddit_launch_plan(staged_args, {})
-    assert plan["structured_post_payload"]["data"]["creative"]["destination"]["url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["structured_post_payload"]["data"]["creative"]["destination"]["url"] == "https://clipbook.coscale.app/"
     assert plan["structured_post_payload"]["data"]["creative"]["destination"]["call_to_action"] == "Learn More"
     assert plan["structured_post_payload"]["data"]["creative"]["supplementary_text"] == "No ticket queue. No templated sludge."
-    assert plan["legacy_post_payload"]["data"]["content"][0]["destination_url"] == "https://clipbook.fourmanifold.com/"
+    assert plan["legacy_post_payload"]["data"]["content"][0]["destination_url"] == "https://clipbook.coscale.app/"
     assert plan["legacy_post_payload"]["data"]["content"][0]["call_to_action"] == "Learn More"
 
 
@@ -8185,7 +8185,7 @@ def test_business_publish_test_outreach_canonicalizes_product_url(tmp_path, monk
                 "business": "latexflow",
                 "status": "draft",
                 "source_path": "product/site",
-                "publish_target": "https://latexflow.fourmanifold.com/",
+                "publish_target": "https://latexflow.coscale.app/",
             },
         ],
         "surface-latexflow-outreach",
@@ -8194,10 +8194,10 @@ def test_business_publish_test_outreach_canonicalizes_product_url(tmp_path, monk
     preview, replacements = _canonicalize_business_product_links(
         "https://latexflow.io (coming soon)",
         business="latexflow",
-        canonical_url="https://latexflow.fourmanifold.com/",
+        canonical_url="https://latexflow.coscale.app/",
     )
-    assert preview == "https://latexflow.fourmanifold.com/ (coming soon)"
-    assert replacements == [{"from": "https://latexflow.io", "to": "https://latexflow.fourmanifold.com/"}]
+    assert preview == "https://latexflow.coscale.app/ (coming soon)"
+    assert replacements == [{"from": "https://latexflow.io", "to": "https://latexflow.coscale.app/"}]
 
     result = json.loads(
         handle_business_publish_test_outreach(
@@ -8216,10 +8216,10 @@ def test_business_publish_test_outreach_canonicalizes_product_url(tmp_path, monk
     publish = result["results"][0]
     artifact = tmp_path / "businesses" / "latexflow" / publish["artifact"]
     receipt = tmp_path / "businesses" / "latexflow" / publish["receipt"]
-    assert "https://latexflow.fourmanifold.com/ (coming soon)" in artifact.read_text(encoding="utf-8")
+    assert "https://latexflow.coscale.app/ (coming soon)" in artifact.read_text(encoding="utf-8")
     assert "latexflow.io" not in artifact.read_text(encoding="utf-8")
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
-    assert receipt_payload["metadata"]["canonical_product_url"] == "https://latexflow.fourmanifold.com/"
+    assert receipt_payload["metadata"]["canonical_product_url"] == "https://latexflow.coscale.app/"
     assert receipt_payload["metadata"]["canonicalized_product_links"]
 
 

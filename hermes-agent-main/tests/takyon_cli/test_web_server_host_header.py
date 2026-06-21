@@ -57,8 +57,8 @@ class TestHostHeaderValidator:
     def test_loopback_bind_accepts_product_subdomains(self):
         from takyon_cli.web_server import _is_accepted_host
 
-        assert _is_accepted_host("latexflow.fourmanifold.com", "127.0.0.1")
-        assert _is_accepted_host("latexflow.fourmanifold.com:9119", "localhost")
+        assert _is_accepted_host("latexflow.coscale.app", "127.0.0.1")
+        assert _is_accepted_host("latexflow.coscale.app:9119", "localhost")
 
     def test_zero_zero_bind_accepts_anything(self):
         """0.0.0.0 means operator explicitly opted into all-interfaces

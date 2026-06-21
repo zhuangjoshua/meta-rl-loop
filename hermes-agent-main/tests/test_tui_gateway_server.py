@@ -6559,7 +6559,7 @@ def test_business_home_snapshot_surfaces_runtime_progress_and_publish_blocker(tm
                 "publish_receipt_path": receipt_rel,
                 "publish_blocker": "Missing CSS asset manifest",
                 "public_url": "",
-                "publish_target": "https://demo.fourmanifold.com/",
+                "publish_target": "https://demo.coscale.app/",
                 "publish_policy": "publish_after_refresh",
             }
 

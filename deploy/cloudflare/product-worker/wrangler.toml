@@ -25,29 +25,13 @@ bucket_name = "product-sites"
 # preserved, so Caddy still matches the per-business product block and serves the
 # Cloudflare origin cert. See README.md "API passthrough" for the DNS record.
 [vars]
-ORIGIN_HOST = "origin.fourmanifold.com"
+ORIGIN_HOST = "origin.coscale.app"
 
 # ── Routes ──────────────────────────────────────────────────────────────────
-# Bind to every product subdomain via the wildcard. SECURITY (redteam must-fix #1):
-# the reserved operator hosts (app/skills/www/admin/dashboard/research-composer) must
-# NOT have this Worker in front — in particular app.fourmanifold.com's `/api/pty`
-# WebSocket-upgrade and `/api/events` SSE must reach operator Caddy directly, never
-# through the Worker's resolveOverride passthrough. At deploy, add a MORE-SPECIFIC
-# zone route per reserved host mapped to NO worker ("(none)") — a more-specific route
-# takes precedence over the wildcard, so the Worker is simply not invoked for them.
-# The in-code RESERVED_HOSTS forward-to-origin in worker.js is DEFENSE-IN-DEPTH ONLY,
-# not the primary guard. See RUNBOOK "reserved-host exclusion" step. Verify the
-# operator chat WebSocket (/api/pty) + /api/events SSE after binding the wildcard.
+# Routes are intentionally managed by the Takyon publish path, not by `wrangler deploy`:
+# `plugins/takyon/core.py::_ensure_product_edge_route` creates per-business routes such as
+# `wandr.coscale.app/*` in the coscale.app zone. Per-business routes keep `origin.coscale.app`
+# outside this Worker, which is required for `/api/*` passthrough via `resolveOverride`.
 #
-# NOTE: do NOT add a route for `origin.fourmanifold.com` — that record must stay
-# off the Worker route (and grey-clouded) so it can serve as the loop-free origin.
-routes = [
-  { pattern = "*.fourmanifold.com/*", zone_name = "fourmanifold.com" },
-  # coscale.app product plane — same worker + R2 (keys are slug-scoped, not domain-scoped). Bind via
-  # `wrangler deploy`; not required for origin-path serving, only to move static to the edge.
-  { pattern = "*.coscale.app/*", zone_name = "coscale.app" },
-]
-# Reserved-host exclusions (added at deploy via the CF API / dashboard, NOT here —
-# wrangler.toml routes only ADD routes for THIS worker; "(none)" carve-outs are
-# zone-level): app.fourmanifold.com/*, skills.fourmanifold.com/*, www.fourmanifold.com/*,
-# admin.fourmanifold.com/*, dashboard.fourmanifold.com/*, research-composer.fourmanifold.com/*
+# If you intentionally choose a wildcard route (`*.coscale.app/*`) in Cloudflare, first add a
+# more-specific `origin.coscale.app/*` route mapped to NO worker so passthrough cannot loop.

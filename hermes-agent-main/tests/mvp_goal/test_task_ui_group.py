@@ -288,14 +288,16 @@ def test_deliverables_payload_drops_internal_and_keeps_business_docs():
     assert ats == sorted(ats, reverse=True)
 
 
-# ── Show the actual url: publish_target derives slug.fourmanifold.com ───────
+# ── Show the actual url: publish_target derives slug.coscale.app ───────
 
-def test_product_publish_target_is_canonical_fourmanifold_host():
+def test_product_publish_target_is_canonical_coscale_host(monkeypatch):
     from plugins.takyon import core
 
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "coscale.app")
+    monkeypatch.delenv("TAKYON_COMPANY_BASE_DOMAIN", raising=False)
     target = core._product_publish_target("myco")
-    assert target == "https://myco.fourmanifold.com/"
-    assert ".app" not in target
+    assert target == "https://myco.coscale.app/"
+    assert target != "https://myco.app/"
 
 
 # ── GROUPED E2E: the real workspace payload ties all four cards together ─────
@@ -307,7 +309,7 @@ def test_workspace_payload_e2e_ties_task_ui_group_together(monkeypatch):
       1. Task rollup    -> live_state.tasks carry title/description/category/status_label + grouping
       2. Raw documents  -> deliverables exclude internal files (SKILL.md, package.json, lock, node_modules)
       3. Linear feed     -> deliverables are newest-first (chronological)
-      4. Actual url      -> overview.product.publish_target is slug.fourmanifold.com (no .app)
+      4. Actual url      -> overview.product.publish_target is slug.coscale.app (no .app)
     """
 
     class _FakeStore:
@@ -325,7 +327,7 @@ def test_workspace_payload_e2e_ties_task_ui_group_together(monkeypatch):
                 "publish_status": "draft",
                 "public_url": "",
                 # canonical expected URL even before publish (card "actual url"):
-                "publish_target": "https://testco.fourmanifold.com/",
+                "publish_target": "https://testco.coscale.app/",
             },
             "artifacts": {"website": {"status": "local_source", "path": "product/site/index.html"}},
             "research": {
@@ -394,5 +396,5 @@ def test_workspace_payload_e2e_ties_task_ui_group_together(monkeypatch):
 
     # ── Card 4: canonical product URL (no fabricated .app) ──
     publish_target = payload["overview"]["product"]["publish_target"]
-    assert publish_target == "https://testco.fourmanifold.com/"
+    assert publish_target == "https://testco.coscale.app/"
     assert ".app" not in publish_target

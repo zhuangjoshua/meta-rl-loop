@@ -213,7 +213,7 @@ try {
     const chatHtml = await page.$eval(".lb-bld__chat", (e) => e.innerHTML);
     check("curated conversation has no plumbing token", !chatHtml.includes(banned));
     const host = await page.$$eval(".lb-bld__url", (els) => els.map((e) => e.textContent.trim()));
-    check("real <slug>.fourmanifold.com header present", host.some((h) => h === "acme.fourmanifold.com"), JSON.stringify(host));
+    check("real <slug>.coscale.app header present", host.some((h) => h === "acme.coscale.app"), JSON.stringify(host));
     const disclosure = await page.$$eval("details.lb-bld__details summary", (els) =>
       els.map((e) => e.textContent.trim()),
     );

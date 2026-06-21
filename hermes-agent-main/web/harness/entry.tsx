@@ -19,7 +19,7 @@ const business: LitebulbBusiness = {
   status: "active",
   tagline: "Sell widgets",
   meta: "Live mode",
-  productUrl: "https://acme.fourmanifold.com",
+  productUrl: "https://acme.coscale.app",
   logoPath: "",
 };
 
