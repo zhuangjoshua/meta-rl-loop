@@ -6295,6 +6295,11 @@ def _materialize_subuser_app_scaffold(
         # into the build. Resolved from the slug + the current company base domain so a fresh
         # business ships a valid sitemap/canonical on coscale.app (never the legacy domain).
         "__STARTER_PUBLIC_ORIGIN__": f"https://{slug}.{_company_base_domain()}/",
+        # GSC ownership: the platform service-account's stable verification META tag, baked into
+        # index.html so EVERY build carries it from the first publish and the bootstrap verify
+        # always finds it on the live edge (no build-pointer/R2 race). Fail-soft "" when the SA is
+        # unavailable at seed time, in which case the GSC tool's own injection is the fallback.
+        "__STARTER_GSC_VERIFICATION__": _resolve_gsc_verification_meta_tag(),
     }
     for path in sorted(source.rglob("*")):
         if not path.is_file():
@@ -26134,6 +26139,53 @@ def _await_search_console_token_live(
         if attempt < attempts - 1:
             _time.sleep(delay_seconds)
     return False
+
+
+_GSC_VERIFICATION_META_CACHE: list[str] = []
+
+
+def _resolve_gsc_verification_meta_tag() -> str:
+    """The platform service-account's google-site-verification META tag, resolved via the GSC
+    authority route. The META token is service-account-scoped (identical for every coscale.app
+    site), so baking it into the scaffold index.html at seed time makes EVERY build carry it from
+    the first publish — the bootstrap verify then always finds it on the live R2 edge regardless
+    of which build is served, eliminating the build-pointer/propagation race. Cached for the
+    process (only a successful, non-empty resolve is cached, so a transient outage retries).
+    Fail-soft: returns "" when the GSC service account or the google client libraries are
+    unavailable, in which case the GSC tool's own live injection remains the fallback."""
+    if _GSC_VERIFICATION_META_CACHE:
+        return _GSC_VERIFICATION_META_CACHE[0]
+    tag = ""
+    try:
+        sa_json = _resolve_gsc_service_account_json()
+        if sa_json:
+            from google.oauth2 import service_account as _gsc_sa  # type: ignore
+            from googleapiclient import discovery as _gsc_disc  # type: ignore
+
+            creds = _gsc_sa.Credentials.from_service_account_info(
+                json.loads(sa_json), scopes=list(_GSC_OAUTH_SCOPES)
+            )
+            sv = _gsc_disc.build(
+                "siteVerification", "v1", credentials=creds, cache_discovery=False
+            )
+            site = f"https://{_company_base_domain()}/"
+            resp = (
+                sv.webResource()
+                .getToken(
+                    body={"verificationMethod": "META", "site": {"type": "SITE", "identifier": site}}
+                )
+                .execute()
+            )
+            raw = str((resp or {}).get("token") or "").strip()
+            match = re.search(r'content="([^"]+)"', raw)
+            value = (match.group(1) if match else raw).strip()
+            if value:
+                tag = f'<meta name="google-site-verification" content="{value}" />'
+    except Exception:
+        tag = ""
+    if tag:
+        _GSC_VERIFICATION_META_CACHE.append(tag)
+    return tag
 
 
 def handle_business_register_search_console(args: dict, **_: Any) -> str:

@@ -20,6 +20,11 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="__STARTER_SITE_NAME__" />
     <meta name="twitter:description" content="__STARTER_SITE_DESCRIPTION__" />
+    <!-- Google Search Console ownership: the platform service-account's verification META tag,
+         baked into every build at seed time so the bootstrap GSC verify always finds it on the
+         live edge regardless of which build is served (no R2/pointer race). Empty if the GSC SA
+         is unavailable at seed time, in which case the GSC tool's own injection is the fallback. -->
+    __STARTER_GSC_VERIFICATION__
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
