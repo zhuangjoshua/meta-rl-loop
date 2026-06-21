@@ -26,9 +26,9 @@ Three credential rails are covered:
 
   2. Sub-user Supabase JWTs
      - `plugins.takyon.app_supabase_auth.verify_supabase_jwt` — fail-closed:
-       requires `exp` + `sub`, audience must match (`"authenticated"`), bad
-       signature / expiry / wrong-aud / missing token are all refused. Exercised
-       on the ES256 / JWKS path with a self-generated keypair (mirrors
+       requires `exp` + `sub`, audience must match (`"authenticated"`), email
+       must be verified, and bad signature / expiry / wrong-aud / missing token
+       are all refused. Exercised on the ES256 / JWKS path with a self-generated keypair (mirrors
        tests/plugins/test_takyon_supabase_auth.py), so no live Supabase or secret
        is needed.
 
@@ -86,6 +86,7 @@ def _hs_token(secret: str = _HS_SECRET, **over) -> str:
     claims = {
         "sub": _SUB,
         "email": "User@Example.com",
+        "email_verified": True,
         "aud": "authenticated",
         "exp": int(time.time()) + 600,
     }
@@ -111,6 +112,7 @@ def _es256_token(private_key, **over) -> str:
     claims = {
         "sub": _SUB,
         "email": "ec@example.com",
+        "email_verified": True,
         "aud": "authenticated",
         "exp": int(time.time()) + 600,
     }
@@ -275,9 +277,11 @@ def test_mint_then_rotate_keeps_single_active_key_invariant_in_source():
 # =========================================================================== #
 
 
-def test_jwt_verifier_requires_exp_and_sub_in_decode_options():
+def test_jwt_verifier_requires_exp_sub_audience_and_verified_email():
     """Both decode paths must pass options={"require": ["exp", "sub"]} so a token
-    missing either claim is rejected by PyJWT itself, not trusted."""
+    missing either claim is rejected by PyJWT itself, not trusted. The public verifier
+    also defaults to Supabase's audience and checks verified email before returning an
+    app identity."""
     for fn in (sa._decode_hs_token, sa._decode_asymmetric_token):
         src = inspect.getsource(fn)
         assert '"require"' in src or "'require'" in src
@@ -286,6 +290,7 @@ def test_jwt_verifier_requires_exp_and_sub_in_decode_options():
     assert sa._DEFAULT_AUDIENCE == "authenticated"
     sig = inspect.signature(sa.verify_supabase_jwt)
     assert sig.parameters["audience"].default == "authenticated"
+    assert "_ensure_verified_email_claims" in inspect.getsource(sa.verify_supabase_jwt)
 
 
 def test_jwt_es256_valid_token_accepted_via_jwks(monkeypatch):
@@ -326,6 +331,16 @@ def test_jwt_wrong_audience_refused(monkeypatch):
 
     with pytest.raises(sa.SupabaseAuthError):
         sa.verify_supabase_jwt(wrong_aud, project_url="https://example.supabase.co")
+
+
+def test_jwt_unverified_email_refused(monkeypatch):
+    private_key, public_key = _es256_keypair()
+    _install_jwks(monkeypatch, public_key)
+    monkeypatch.setattr(sa, "_publishable_key", lambda: "")
+    unverified = _es256_token(private_key, email_verified=False)
+
+    with pytest.raises(sa.SupabaseAuthError):
+        sa.verify_supabase_jwt(unverified, project_url="https://example.supabase.co")
 
 
 def test_jwt_missing_exp_refused(monkeypatch):

@@ -18031,49 +18031,8 @@ class TakyonStore:
                     raise TakyonError(str(exc)) from exc
                 event_id = event.id
             else:
-                if app_user_id and not conn.execute("SELECT 1 FROM app_users WHERE business_slug = ? AND id = ?", (slug, app_user_id)).fetchone():
-                    raise TakyonError(f"app user not found: {app_user_id}")
-                budget = self._ensure_app_budget(conn, slug)
-                # Per-business pool gate: ONLY when an explicit cap is set (invariant 9 — NULL =
-                # no pool cap, the per-subuser subscription gate is then the sole budget gate).
-                pool_cap = budget["hard_limit_microusd"]
-                if pool_cap is not None:
-                    used = conn.execute(
-                        "SELECT COALESCE(SUM(actual_cost_microusd), 0) AS total FROM app_usage_events WHERE business_slug = ? AND created_at >= ?",
-                        (slug, budget["current_period_start"]),
-                    ).fetchone()["total"]
-                    if int(used or 0) + actual > int(pool_cap):
-                        raise TakyonError(f"app usage would exceed budget cap {pool_cap} microusd")
-                now = _now()
-                conn.execute(
-                    """
-                    INSERT INTO app_usage_events (
-                      id, business_slug, app_user_id, app_user_tier, purpose, route, status,
-                      estimated_cost_microusd, actual_cost_microusd, input_tokens, output_tokens,
-                      provider_request_id, provider, model, metadata_json, error, created_at, completed_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event_id,
-                        slug,
-                        app_user_id,
-                        op.get("app_user_tier"),
-                        str(op.get("purpose") or "product_usage"),
-                        str(op.get("route") or "app"),
-                        str(op.get("status") or "completed"),
-                        estimated,
-                        actual,
-                        op.get("input_tokens"),
-                        op.get("output_tokens"),
-                        op.get("provider_request_id"),
-                        op.get("provider"),
-                        op.get("model"),
-                        _json_dumps(op.get("metadata") or {}),
-                        op.get("error"),
-                        now,
-                        op.get("completed_at") or now,
-                    ),
+                raise TakyonError(
+                    "app usage record requires the Postgres runtime authority"
                 )
             self._rewrite_app_files(conn, slug)
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"usage_event": event_id, "actual_cost_microusd": actual})

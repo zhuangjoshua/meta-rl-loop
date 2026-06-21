@@ -1163,12 +1163,14 @@ _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
 _reveal_timestamps: List[float] = []
 _REVEAL_MAX_PER_WINDOW = 5
 _REVEAL_WINDOW_SECONDS = 30
-_directory_lookup_timestamps: Dict[str, List[float]] = {}
-_DIRECTORY_LOOKUP_MAX_PER_WINDOW = 60
-_DIRECTORY_LOOKUP_WINDOW_SECONDS = 60
-_action_invoke_timestamps: Dict[str, List[float]] = {}
-_ACTION_INVOKE_MAX_PER_WINDOW = 20
-_ACTION_INVOKE_WINDOW_SECONDS = 60
+_APP_DIRECTORY_RATE_LIMIT_ENV = "TAKYON_APP_DIRECTORY_RATE_LIMIT"
+_APP_DIRECTORY_RATE_WINDOW_SECONDS_ENV = "TAKYON_APP_DIRECTORY_RATE_WINDOW_SECONDS"
+_APP_ACTION_RATE_LIMIT_ENV = "TAKYON_APP_ACTION_RATE_LIMIT"
+_APP_ACTION_RATE_WINDOW_SECONDS_ENV = "TAKYON_APP_ACTION_RATE_WINDOW_SECONDS"
+_DEFAULT_APP_DIRECTORY_RATE_LIMIT = 60
+_DEFAULT_APP_DIRECTORY_RATE_WINDOW_SECONDS = 60
+_DEFAULT_APP_ACTION_RATE_LIMIT = 20
+_DEFAULT_APP_ACTION_RATE_WINDOW_SECONDS = 60
 
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
@@ -2081,30 +2083,122 @@ def _takyon_app_session_token(request: Request) -> str:
     return ""
 
 
+def _takyon_positive_int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _log.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return default
+    if value <= 0:
+        _log.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return default
+    return value
+
+
+def _takyon_app_check_sql_rate_limit_for_session(
+    *,
+    business: str,
+    session_token: str,
+    limit: int,
+    window_seconds: int,
+    detail: str,
+) -> None:
+    from plugins.takyon import app_identity as takyon_app_identity
+    from plugins.takyon import rate_limit as takyon_rate_limit
+    from plugins.takyon.core import _db_backend
+    from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+    if _db_backend() != "postgres":
+        raise HTTPException(
+            status_code=503,
+            detail="app rate limiting requires the Postgres runtime authority",
+        )
+    try:
+        resolved_url = _resolve_runtime_database_url()
+    except RuntimeNotConfigured as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="app rate limiting authority is not configured",
+        ) from exc
+    try:
+        import psycopg
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="app rate limiting authority requires psycopg",
+        ) from exc
+
+    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+    try:
+        app_user = takyon_app_identity.validate_session(conn, business, session_token)
+        if app_user is None:
+            raise HTTPException(status_code=401, detail="invalid app session")
+        result = takyon_rate_limit.check_rate_limit(
+            conn,
+            app_user.id,
+            limit=limit,
+            window_seconds=window_seconds,
+        )
+    finally:
+        conn.close()
+    if not result.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=detail,
+            headers={"Retry-After": str(max(1, result.retry_after_seconds))},
+        )
+
+
 def _takyon_app_rate_limit_directory_lookup(*, business: str, session_token: str) -> None:
     if not session_token:
         return
-    key = hashlib.sha256(f"{business}:{session_token}".encode("utf-8")).hexdigest()
-    now = time.time()
-    cutoff = now - _DIRECTORY_LOOKUP_WINDOW_SECONDS
-    timestamps = [stamp for stamp in _directory_lookup_timestamps.get(key, []) if stamp > cutoff]
-    if len(timestamps) >= _DIRECTORY_LOOKUP_MAX_PER_WINDOW:
-        raise HTTPException(status_code=429, detail="Too many directory requests. Try again shortly.")
-    timestamps.append(now)
-    _directory_lookup_timestamps[key] = timestamps
+    _takyon_app_check_sql_rate_limit_for_session(
+        business=business,
+        session_token=session_token,
+        limit=_takyon_positive_int_env(
+            _APP_DIRECTORY_RATE_LIMIT_ENV,
+            _DEFAULT_APP_DIRECTORY_RATE_LIMIT,
+        ),
+        window_seconds=_takyon_positive_int_env(
+            _APP_DIRECTORY_RATE_WINDOW_SECONDS_ENV,
+            _DEFAULT_APP_DIRECTORY_RATE_WINDOW_SECONDS,
+        ),
+        detail="Too many directory requests. Try again shortly.",
+    )
 
 
 def _takyon_app_rate_limit_action_invoke(*, business: str, session_token: str, action_name: str) -> None:
     if not session_token:
         return
-    key = hashlib.sha256(f"{business}:{action_name}:{session_token}".encode("utf-8")).hexdigest()
-    now = time.time()
-    cutoff = now - _ACTION_INVOKE_WINDOW_SECONDS
-    timestamps = [stamp for stamp in _action_invoke_timestamps.get(key, []) if stamp > cutoff]
-    if len(timestamps) >= _ACTION_INVOKE_MAX_PER_WINDOW:
-        raise HTTPException(status_code=429, detail="Too many action requests. Try again shortly.")
-    timestamps.append(now)
-    _action_invoke_timestamps[key] = timestamps
+    _takyon_app_check_sql_rate_limit_for_session(
+        business=business,
+        session_token=session_token,
+        limit=_takyon_positive_int_env(
+            _APP_ACTION_RATE_LIMIT_ENV,
+            _DEFAULT_APP_ACTION_RATE_LIMIT,
+        ),
+        window_seconds=_takyon_positive_int_env(
+            _APP_ACTION_RATE_WINDOW_SECONDS_ENV,
+            _DEFAULT_APP_ACTION_RATE_WINDOW_SECONDS,
+        ),
+        detail="Too many action requests. Try again shortly.",
+    )
+
+
+def _takyon_body_has_positive_microusd(body: dict[str, Any], *keys: str) -> bool:
+    for key in keys:
+        value = body.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            if int(float(value)) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _takyon_app_origin(request: Request, body: dict[str, Any] | None = None) -> str:
@@ -2852,6 +2946,20 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         if account_status != int(HTTPStatus.OK):
             return _takyon_app_json(account_status, account)
         user = account.get("user") or {}
+        if _takyon_body_has_positive_microusd(
+            body,
+            "estimated_cost_microusd",
+            "estimatedCostMicrousd",
+            "actual_cost_microusd",
+            "actualCostMicrousd",
+        ):
+            return _takyon_app_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "success": False,
+                    "error": "priced app usage must flow through metered server brokers",
+                },
+            )
         status, payload = _takyon_app_tool(handle_business_record_app_usage({
             "business": business,
             "app_user_id": user.get("id"),
@@ -2924,7 +3032,10 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
                 action_name=action_name,
             )
         except HTTPException as exc:
-            return _takyon_app_json(exc.status_code, {"success": False, "error": str(exc.detail)})
+            response = _takyon_app_json(exc.status_code, {"success": False, "error": str(exc.detail)})
+            for key, value in (exc.headers or {}).items():
+                response.headers[key] = value
+            return response
         payload_value = body.get("payload")
         if "payload" not in body:
             payload_value = {

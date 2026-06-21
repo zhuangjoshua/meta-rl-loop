@@ -26,6 +26,7 @@ reason) — it never calls keyless and never fabricates a completion.
 
 from __future__ import annotations
 
+import os
 from http.cookies import SimpleCookie
 import logging
 import uuid
@@ -48,7 +49,7 @@ from .ai_provider import (
     tavily_key,
     tavily_request_microusd,
 )
-from . import app_entitlements, app_identity
+from . import app_entitlements, app_identity, rate_limit
 from .app_gateway_keys import GatewayPrincipal, resolve_gateway_key
 from .app_runtime_constants import APP_SESSION_COOKIE
 from .app_usage import (
@@ -64,6 +65,10 @@ from .app_usage import (
 _BEARER_PREFIX = "Bearer "
 _UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
 _APP_SESSION_HEADER = "X-Takyon-App-Session"
+_APP_AI_RATE_LIMIT_ENV = "TAKYON_APP_AI_RATE_LIMIT"
+_APP_AI_RATE_WINDOW_SECONDS_ENV = "TAKYON_APP_AI_RATE_WINDOW_SECONDS"
+_DEFAULT_APP_AI_RATE_LIMIT = 30
+_DEFAULT_APP_AI_RATE_WINDOW_SECONDS = 60
 
 # A provider caller is a server-side closure that already holds the shared key. The endpoint only
 # ever sees this callable (or None when unconfigured) — never the key itself.
@@ -71,6 +76,46 @@ ProviderCaller = Callable[[dict], dict]
 _CALLER_UNSET = object()
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return default
+    if value <= 0:
+        logger.warning("Invalid %s=%r; using default %s", name, raw, default)
+        return default
+    return value
+
+
+def _check_app_ai_rate_limit(conn, app_user: app_identity.AppUser) -> None:
+    limit = _positive_int_env(_APP_AI_RATE_LIMIT_ENV, _DEFAULT_APP_AI_RATE_LIMIT)
+    window_seconds = _positive_int_env(
+        _APP_AI_RATE_WINDOW_SECONDS_ENV,
+        _DEFAULT_APP_AI_RATE_WINDOW_SECONDS,
+    )
+    result = rate_limit.check_rate_limit(
+        conn,
+        app_user.id,
+        limit=limit,
+        window_seconds=window_seconds,
+    )
+    if not result.allowed:
+        raise GatewayMessageError(
+            status_code=429,
+            detail={
+                "error": "rate_limited",
+                "limit": result.limit,
+                "window_seconds": result.window_seconds,
+                "retry_after_seconds": result.retry_after_seconds,
+            },
+            headers={"Retry-After": str(max(1, result.retry_after_seconds))},
+        )
 
 
 def _settle_or_hold(
@@ -370,6 +415,7 @@ def broker_message_for_business(
     requested_app_user_id = body.get("app_user_id") or body.get("appUserId") or None
     if requested_app_user_id and str(requested_app_user_id) != app_user.id:
         raise GatewayMessageError(status_code=403, detail="mismatched_app_user")
+    _check_app_ai_rate_limit(conn, app_user)
 
     # Invariant #8: no provider key configured -> block with a reason. Checked
     # after auth (so callers cannot probe config) and before reservation.
@@ -567,6 +613,7 @@ def broker_search_for_business(
     requested_app_user_id = body.get("app_user_id") or body.get("appUserId") or None
     if requested_app_user_id and str(requested_app_user_id) != app_user.id:
         raise GatewayMessageError(status_code=403, detail="mismatched_app_user")
+    _check_app_ai_rate_limit(conn, app_user)
 
     # Invariant #8 (search): no Tavily key configured -> block. Checked after auth (callers cannot
     # probe config) and before any reservation.

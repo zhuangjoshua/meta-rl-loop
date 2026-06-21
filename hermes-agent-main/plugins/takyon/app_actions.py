@@ -27,6 +27,21 @@ _OUTBOUND_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$"
 _INTERNAL_HOST_SUFFIXES = (".localhost", ".internal", ".local", ".cluster.local")
 
 
+def _is_blocked_ip_address(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+        or ip.is_multicast
+    )
+
+
 def _is_internal_host(hostname: str) -> bool:
     """True if the hostname is loopback / link-local / private / otherwise internal — so it must
     never be added to the deno sandbox's --allow-net allowlist (SSRF guard for both the customer
@@ -37,23 +52,13 @@ def _is_internal_host(hostname: str) -> bool:
     if not h or h in {"localhost", "0.0.0.0"} or h.endswith(_INTERNAL_HOST_SUFFIXES):
         return True
 
-    def _blocked(addr: str) -> bool:
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return False
-        return bool(
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_unspecified or ip.is_multicast
-        )
-
     # bracketed/raw IP literal
-    if _blocked(h.strip("[]")):
+    if _is_blocked_ip_address(h.strip("[]")):
         return True
     # bare hostname -> resolve every A/AAAA and reject if ANY is internal (DNS-rebinding defense)
     try:
         for info in socket.getaddrinfo(h, None):
-            if _blocked(str(info[4][0])):
+            if _is_blocked_ip_address(str(info[4][0])):
                 return True
     except (socket.gaierror, UnicodeError, OSError):
         return False  # transient/invalid DNS is not itself an internal host; literal checks above hold
@@ -261,7 +266,57 @@ def _normalized_host_role() -> str:
 
 
 def _operator_host_requires_action_sandbox() -> bool:
-    return _normalized_host_role() == "operator"
+    return _normalized_host_role() in {"operator", "subuser"}
+
+
+def _split_outbound_hostport(value: str) -> tuple[str, str | None]:
+    text = str(value or "").strip().lower()
+    if ":" not in text:
+        return text, None
+    host, port = text.rsplit(":", 1)
+    return host, port or None
+
+
+def _format_deno_allow_net_ip(addr: str, port: str | None) -> str:
+    if port:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return f"{addr}:{port}"
+        if ip.version == 6:
+            return f"[{addr}]:{port}"
+        return f"{addr}:{port}"
+    return addr
+
+
+def _resolved_public_allow_net_entries(value: str) -> list[str]:
+    host, port = _split_outbound_hostport(value)
+    if not host:
+        raise ActionConfigError("product action outbound host is empty")
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError, OSError) as exc:
+        raise ActionConfigError(
+            f"product action outbound host could not be resolved: {value}"
+        ) from exc
+
+    entries: list[str] = []
+    seen: set[str] = set()
+    for info in infos:
+        addr = str(info[4][0])
+        if _is_blocked_ip_address(addr):
+            raise ActionConfigError(
+                f"product action outbound host resolved to an internal address: {value}"
+            )
+        formatted = _format_deno_allow_net_ip(addr, port)
+        if formatted not in seen:
+            seen.add(formatted)
+            entries.append(formatted)
+    if not entries:
+        raise ActionConfigError(
+            f"product action outbound host could not be resolved: {value}"
+        )
+    return entries
 
 
 def _systemd_user_manager_env() -> dict[str, str]:
@@ -1621,7 +1676,9 @@ def _run_action_subprocess(
         if client_available:
             read_roots.append(str(client_path.parent))
         allow_read = ",".join(read_roots)
-        allow_net_hosts = [base.hostport, *outbound_hosts]
+        allow_net_hosts = [base.hostport]
+        for host in outbound_hosts:
+            allow_net_hosts.extend(_resolved_public_allow_net_entries(host))
         deno_command = [
             deno,
             "run",
@@ -1661,7 +1718,9 @@ def _run_action_subprocess(
                 *deno_command,
             ]
         elif sandbox_required:
-            raise ActionConfigError("operator host requires product actions to run inside a user-scoped systemd sandbox")
+            raise ActionConfigError(
+                "managed host requires product actions to run inside a user-scoped systemd sandbox"
+            )
         else:
             fallback_reason = "user-scoped systemd sandbox unavailable on this host"
             _LOGGER.warning("App action sandbox unavailable; falling back to plain subprocess: %s", fallback_reason)
@@ -1679,7 +1738,9 @@ def _run_action_subprocess(
         ):
             detail = stderr_text.strip() or stdout.decode("utf-8", errors="replace").strip() or "failed to create user-scoped systemd sandbox"
             if sandbox_required:
-                raise ActionConfigError(f"operator host requires the user-scoped systemd sandbox for product actions: {detail[:_ACTION_STDERR_LIMIT]}")
+                raise ActionConfigError(
+                    f"managed host requires the user-scoped systemd sandbox for product actions: {detail[:_ACTION_STDERR_LIMIT]}"
+                )
             fallback_reason = detail[:_ACTION_STDERR_LIMIT]
             _LOGGER.warning("App action sandbox unavailable; falling back to plain subprocess: %s", fallback_reason)
             isolation = "subprocess-fallback"

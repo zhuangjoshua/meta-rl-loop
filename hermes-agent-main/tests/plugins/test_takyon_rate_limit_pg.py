@@ -14,15 +14,25 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
+from plugins.takyon import app_identity  # noqa: E402
 from plugins.takyon.rate_limit import check_rate_limit, prune_rate_limits  # noqa: E402
 
 
 def _user(conn) -> str:
-    """Insert a bare users row (rate_limit FKs to users.id) and return its id."""
+    """Insert a bare users row and return its id."""
     return conn.execute(
         "insert into users (auth0_sub) values (%s) returning id",
         (f"auth0|{uuid.uuid4().hex}",),
     ).fetchone()[0]
+
+
+def _business(conn, owner_id: str) -> str:
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    conn.execute(
+        "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
+        (slug, "Acme", owner_id),
+    )
+    return slug
 
 
 def test_first_request_allowed(pg_conn):
@@ -52,6 +62,24 @@ def test_users_have_independent_windows(pg_conn):
     assert check_rate_limit(pg_conn, a, limit=1, window_seconds=60).allowed is False
     # user b's counter is untouched by user a hitting the cap
     rb = check_rate_limit(pg_conn, b, limit=1, window_seconds=60)
+    assert rb.allowed is True
+    assert rb.count == 1
+
+
+def test_app_user_ids_can_use_same_limiter(pg_conn):
+    owner = _user(pg_conn)
+    slug = _business(pg_conn, owner)
+    app_a = app_identity.upsert_app_user(pg_conn, slug, "alice@example.com")
+    app_b = app_identity.upsert_app_user(pg_conn, slug, "bob@example.com")
+
+    seen = [
+        check_rate_limit(pg_conn, app_a.id, limit=2, window_seconds=60),
+        check_rate_limit(pg_conn, app_a.id, limit=2, window_seconds=60),
+        check_rate_limit(pg_conn, app_a.id, limit=2, window_seconds=60),
+    ]
+
+    assert [r.allowed for r in seen] == [True, True, False]
+    rb = check_rate_limit(pg_conn, app_b.id, limit=2, window_seconds=60)
     assert rb.allowed is True
     assert rb.count == 1
 

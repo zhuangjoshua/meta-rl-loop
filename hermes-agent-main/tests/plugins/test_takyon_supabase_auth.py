@@ -22,6 +22,7 @@ def _token(secret=SECRET, **over):
     claims = {
         "sub": SUB,
         "email": "User@Example.com",
+        "email_verified": True,
         "aud": "authenticated",
         "exp": int(time.time()) + 600,
         **over,
@@ -48,6 +49,12 @@ def test_rejects_expired():
 def test_rejects_wrong_audience():
     with pytest.raises(sa.SupabaseAuthError):
         sa.verify_supabase_jwt(_token(aud="not-authenticated"), secret=SECRET)
+
+
+def test_rejects_unverified_email_without_auth_server_confirmation(monkeypatch):
+    monkeypatch.setattr(sa, "_publishable_key", lambda: "")
+    with pytest.raises(sa.SupabaseAuthError):
+        sa.verify_supabase_jwt(_token(email_verified=False), secret=SECRET)
 
 
 def test_rejects_missing_secret():
@@ -77,6 +84,7 @@ def test_verifies_es256_token_via_jwks(monkeypatch):
         {
             "sub": SUB,
             "email": "ec@example.com",
+            "email_verified": True,
             "aud": "authenticated",
             "exp": int(time.time()) + 600,
         },
@@ -106,6 +114,7 @@ def test_verifies_hs256_token_via_auth_server_when_secret_missing(monkeypatch):
         lambda _token, *, project_url, publishable_key: {
             "id": SUB,
             "email": "user@example.com",
+            "email_confirmed_at": "2026-06-21T00:00:00Z",
             "project_url": project_url,
             "publishable_key": publishable_key,
         },

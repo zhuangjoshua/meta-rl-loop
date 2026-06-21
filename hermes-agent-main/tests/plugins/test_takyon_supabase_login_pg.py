@@ -38,6 +38,7 @@ def _token(sub: str, email: str) -> str:
         {
             "sub": sub,
             "email": email,
+            "email_verified": True,
             "aud": "authenticated",
             "exp": int(time.time()) + 600,
         },

@@ -984,6 +984,101 @@ def test_run_action_subprocess_requires_user_scope_on_operator(monkeypatch, tmp_
     assert env["DBUS_SESSION_BUS_ADDRESS"].startswith("unix:path=/run/user/")
 
 
+def test_run_action_subprocess_requires_user_scope_on_subuser(monkeypatch, tmp_path):
+    action_path = tmp_path / "sum.ts"
+    action_path.write_text("export default async function () { return { ok: true }; }\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(app_actions.platform, "system", lambda: "Linux")
+
+    def _fake_communicate(command, *, request_bytes, timeout_seconds, env=None):
+        return 1, b"", b"Failed to start transient scope unit: Interactive authentication required"
+
+    monkeypatch.setattr(app_actions, "_communicate_action_process", _fake_communicate)
+
+    with pytest.raises(app_actions.ActionConfigError, match="user-scoped systemd sandbox"):
+        app_actions._run_action_subprocess(
+            action_path=action_path,
+            base=app_actions.RailsBase(origin="http://127.0.0.1:9119", hostport="127.0.0.1:9119"),
+            outbound_hosts=[],
+            request={"payload": {}, "ctx": {}},
+            timeout_seconds=30,
+            cpu_quota_percent=50,
+            memory_max_mb=256,
+        )
+
+
+def test_run_action_subprocess_pins_outbound_hosts_to_resolved_ips(monkeypatch, tmp_path):
+    action_path = tmp_path / "sum.ts"
+    action_path.write_text("export default async function () { return { ok: true }; }\n", encoding="utf-8")
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.setattr(
+        app_actions.shutil,
+        "which",
+        lambda name: "/usr/bin/deno" if name == "deno" else None,
+    )
+    monkeypatch.setattr(app_actions.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        app_actions.socket,
+        "getaddrinfo",
+        lambda host, port=None, type=0: [
+            (app_actions.socket.AF_INET, app_actions.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
+        ],
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_communicate(command, *, request_bytes, timeout_seconds, env=None):
+        calls.append(list(command))
+        return 0, json.dumps({"ok": True, "result": {"status": "ok"}}).encode("utf-8"), b""
+
+    monkeypatch.setattr(app_actions, "_communicate_action_process", _fake_communicate)
+
+    result, run = app_actions._run_action_subprocess(
+        action_path=action_path,
+        base=app_actions.RailsBase(origin="http://127.0.0.1:9119", hostport="127.0.0.1:9119"),
+        outbound_hosts=["api.example.com:443"],
+        request={"payload": {}, "ctx": {}},
+        timeout_seconds=30,
+        cpu_quota_percent=50,
+        memory_max_mb=256,
+    )
+
+    assert result == {"status": "ok"}
+    assert run["isolation"] in {"subprocess", "subprocess-fallback"}
+    allow_net = next(part for part in calls[0] if part.startswith("--allow-net="))
+    assert allow_net == "--allow-net=127.0.0.1:9119,93.184.216.34:443"
+    assert "api.example.com" not in allow_net
+
+
+def test_run_action_subprocess_rejects_outbound_host_that_resolves_internal(monkeypatch, tmp_path):
+    action_path = tmp_path / "sum.ts"
+    action_path.write_text("export default async function () { return { ok: true }; }\n", encoding="utf-8")
+    monkeypatch.setattr(
+        app_actions.shutil,
+        "which",
+        lambda name: "/usr/bin/deno" if name == "deno" else None,
+    )
+    monkeypatch.setattr(
+        app_actions.socket,
+        "getaddrinfo",
+        lambda host, port=None, type=0: [
+            (app_actions.socket.AF_INET, app_actions.socket.SOCK_STREAM, 6, "", ("10.0.0.5", 0))
+        ],
+    )
+
+    with pytest.raises(app_actions.ActionConfigError, match="internal address"):
+        app_actions._run_action_subprocess(
+            action_path=action_path,
+            base=app_actions.RailsBase(origin="http://127.0.0.1:9119", hostport="127.0.0.1:9119"),
+            outbound_hosts=["api.example.com:443"],
+            request={"payload": {}, "ctx": {}},
+            timeout_seconds=30,
+            cpu_quota_percent=50,
+            memory_max_mb=256,
+        )
+
+
 def test_run_action_subprocess_logs_and_falls_back_on_non_operator(monkeypatch, tmp_path, caplog):
     action_path = tmp_path / "sum.ts"
     action_path.write_text("export default async function () { return { ok: true }; }\n", encoding="utf-8")

@@ -192,6 +192,38 @@ def test_gateway_resolves_reserves_and_settles(gateway_client, pg_conn):
     assert summary["committed_microusd"] == 600
 
 
+def test_gateway_rate_limits_per_app_user(monkeypatch, gateway_client, pg_conn):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_APP_AI_RATE_LIMIT", "1")
+    monkeypatch.setenv("TAKYON_APP_AI_RATE_WINDOW_SECONDS", "60")
+    slug, raw = _provision_business(pg_conn)
+    _user_a, session_a = _provision_session_user(pg_conn, slug, email="a@example.com", tier="paid")
+    _user_b, session_b = _provision_session_user(pg_conn, slug, email="b@example.com", tier="pro")
+    client = gateway_client(_canned_caller)
+
+    first = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_a),
+    )
+    blocked = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_a),
+    )
+    other_user = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_b),
+    )
+
+    assert first.status_code == 200
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["error"] == "rate_limited"
+    assert int(blocked.headers["Retry-After"]) >= 1
+    assert other_user.status_code == 200
+
+
 def test_gateway_provider_key_never_in_response(gateway_client, pg_conn):
     # Even with a caller that closes over a secret-looking key, that secret can never surface: the
     # endpoint builds the response only from the provider response, never from the closure's key.

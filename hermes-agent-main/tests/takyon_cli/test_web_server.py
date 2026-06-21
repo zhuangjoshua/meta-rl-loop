@@ -2696,6 +2696,7 @@ def test_app_directory_and_connections_routes_dispatch_session_scoped_handlers(m
     monkeypatch.setattr(web_server, "handle_business_disable_app_directory_entry", fake_disable_directory)
     monkeypatch.setattr(web_server, "handle_business_list_app_connections", fake_list_connections)
     monkeypatch.setattr(web_server, "handle_business_act_on_app_connection", fake_act_connection)
+    monkeypatch.setattr(web_server, "_takyon_app_rate_limit_directory_lookup", lambda **_: None)
     monkeypatch.setattr(web_server.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "dir_conn_nonce_123"})())
 
     web_server.app.state.bound_host = "127.0.0.1"
@@ -2851,6 +2852,7 @@ def test_app_connections_post_limits_directory_style_actions_and_hides_missing_t
     monkeypatch.setattr(web_server, "_takyon_app_rate_limit_directory_lookup", fake_rate_limit)
     monkeypatch.setattr(web_server, "handle_business_act_on_app_connection", fake_act_connection)
     monkeypatch.setattr(web_server.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "conn_limit_nonce_123"})())
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "coscale.app")
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2883,6 +2885,73 @@ def test_app_connections_post_limits_directory_style_actions_and_hides_missing_t
     assert [call["connection_action"] for call in action_calls] == ["like", "block"]
 
 
+def test_app_usage_route_refuses_positive_client_cost(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    usage_calls: list[dict[str, object]] = []
+
+    def fake_read_account(args):
+        return json.dumps({
+            "success": True,
+            "user": {"id": "app_user_123", "tier": "paid"},
+        })
+
+    def fake_record_usage(args):
+        usage_calls.append(args)
+        return json.dumps({"success": True, "usage_event": "evt_123"})
+
+    monkeypatch.setattr(web_server, "handle_business_read_app_account", fake_read_account)
+    monkeypatch.setattr(web_server, "handle_business_record_app_usage", fake_record_usage)
+    monkeypatch.setattr(web_server.uuid, "uuid4", lambda: type("FixedUUID", (), {"hex": "usage_nonce_123"})())
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "coscale.app")
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        positive = client.post(
+            "/api/takyon/apps/mathflow/usage",
+            json={"actual_cost_microusd": 1},
+            headers={
+                "Host": "mathflow.coscale.app",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+        zero = client.post(
+            "/api/takyon/apps/mathflow/usage",
+            json={"actual_cost_microusd": 0, "purpose": "audit"},
+            headers={
+                "Host": "mathflow.coscale.app",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert positive.status_code == 400
+    assert positive.json()["error"] == "priced app usage must flow through metered server brokers"
+    assert zero.status_code == 200
+    assert usage_calls == [{
+        "business": "mathflow",
+        "app_user_id": "app_user_123",
+        "app_user_tier": "paid",
+        "purpose": "audit",
+        "route": "/api/takyon/apps/mathflow/usage",
+        "status": "completed",
+        "estimated_cost_microusd": 0,
+        "actual_cost_microusd": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "provider_request_id": None,
+        "provider": None,
+        "model": None,
+        "metadata": {},
+        "idempotency_key": "usage:mathflow:app_user_123:usage_nonce_123",
+    }]
+
+
 def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -2895,6 +2964,8 @@ def test_app_actions_route_dispatches_session_scoped_handler(monkeypatch):
         return json.dumps({"success": True, "action": args["action"], "result": {"ok": True}})
 
     monkeypatch.setattr(web_server, "handle_business_invoke_app_action", fake_invoke_action)
+    monkeypatch.setattr(web_server, "_takyon_app_rate_limit_action_invoke", lambda **_: None)
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "coscale.app")
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -2934,6 +3005,8 @@ def test_app_actions_route_maps_missing_rail_and_budget_errors(monkeypatch):
         return json.dumps({"success": False, "error": "app usage would exceed budget cap 5000 microusd"})
 
     monkeypatch.setattr(web_server, "handle_business_invoke_app_action", fake_invoke_action)
+    monkeypatch.setattr(web_server, "_takyon_app_rate_limit_action_invoke", lambda **_: None)
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "coscale.app")
 
     web_server.app.state.bound_host = "127.0.0.1"
     try:
@@ -5823,6 +5896,7 @@ def test_records_query_route_dispatches_filters(monkeypatch):
         return _json.dumps({"success": True, "records": [], "next_cursor": ""})
 
     monkeypatch.setattr(web_server, "handle_business_list_app_records", fake_handler)
+    monkeypatch.setattr(web_server, "_takyon_app_rate_limit_directory_lookup", lambda **_: None)
     client = TestClient(web_server.app)
     resp = client.post(
         "/api/takyon/apps/mathflow/records/query",

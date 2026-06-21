@@ -40,6 +40,15 @@
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {
+		@app_auth_request path_regexp app_auth_request ^/api/takyon/apps/[^/]+/auth/request$
+		rate_limit @app_auth_request {
+			zone product_auth_request_80 {
+				key {client_ip}
+				events 5
+				window 1m
+			}
+		}
+
 		rate_limit {
 			zone product_all_80 {
 				key {client_ip}

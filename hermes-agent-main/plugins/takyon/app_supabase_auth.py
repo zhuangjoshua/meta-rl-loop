@@ -15,9 +15,9 @@ Verification follows Supabase's current guidance:
 - Legacy shared-secret tokens (HS256) verify either with an explicit/local JWT secret, or by asking
   the Supabase Auth server to validate the token and return the user.
 
-Fail-closed: a missing token, missing project config, bad signature, wrong audience, expiry, or Auth
-server rejection raises ``SupabaseAuthError`` — never a partial result a caller could mistake for
-success.
+Fail-closed: a missing token, missing project config, bad signature, wrong audience, expiry,
+unverified email, or Auth server rejection raises ``SupabaseAuthError`` — never a partial result
+a caller could mistake for success.
 """
 
 from __future__ import annotations
@@ -200,6 +200,62 @@ def _verified_user_via_auth_server(
     return payload
 
 
+def _truthy_claim(value: object) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return False
+
+
+def _merge_auth_user_claims(claims: dict, user_payload: dict) -> dict:
+    merged = dict(claims)
+    if user_payload.get("id"):
+        merged["sub"] = user_payload.get("id")
+    if user_payload.get("email"):
+        merged["email"] = user_payload.get("email")
+    for key in ("email_confirmed_at", "confirmed_at", "email_verified"):
+        value = user_payload.get(key)
+        if value not in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _claims_have_verified_email(claims: dict) -> bool:
+    email = str(claims.get("email") or "").strip()
+    if not email:
+        return False
+    if _truthy_claim(claims.get("email_verified")):
+        return True
+    return bool(claims.get("email_confirmed_at") or claims.get("confirmed_at"))
+
+
+def _ensure_verified_email_claims(
+    token: str,
+    claims: dict,
+    *,
+    project_url: str | None,
+) -> dict:
+    if _claims_have_verified_email(claims):
+        return claims
+
+    project = str(project_url or _project_url() or "").strip()
+    publishable_key = _publishable_key()
+    if project and publishable_key:
+        user_payload = _verified_user_via_auth_server(
+            token,
+            project_url=project,
+            publishable_key=publishable_key,
+        )
+        merged = _merge_auth_user_claims(claims, user_payload)
+        if _claims_have_verified_email(merged):
+            return merged
+
+    if not str(claims.get("email") or "").strip():
+        raise SupabaseAuthError("supabase token has no verified email")
+    raise SupabaseAuthError("supabase email is not verified")
+
+
 def _identity_from_claims(claims: dict) -> SupabaseIdentity:
     sub = str(claims.get("sub") or claims.get("id") or "").strip()
     if not sub:
@@ -223,8 +279,10 @@ def verify_supabase_jwt(
     """Verify a Supabase-issued access token (JWT) and return its identity, FAIL-CLOSED.
 
     ``exp`` and ``sub`` are required; the audience must match (default ``"authenticated"``).
-    Raises ``SupabaseAuthError`` on a missing token/config, bad signature, wrong audience, or
-    expiry. Returns the ``auth.users`` uuid and the (lower-cased) email."""
+    The identity must also carry a verified email, either in JWT claims or confirmed by the
+    Supabase Auth server. Raises ``SupabaseAuthError`` on a missing token/config, bad signature,
+    wrong audience, unverified email, or expiry. Returns the ``auth.users`` uuid and the
+    (lower-cased) email."""
     import jwt  # PyJWT
 
     raw = str(token or "").strip()
@@ -241,6 +299,7 @@ def verify_supabase_jwt(
             key = secret if secret is not None else _jwt_secret()
             if key:
                 claims = _decode_hs_token(raw, secret=key, audience=audience, leeway=leeway)
+                claims = _ensure_verified_email_claims(raw, claims, project_url=project)
                 return _identity_from_claims(claims)
             publishable_key = _publishable_key()
             if not project:
@@ -255,8 +314,8 @@ def verify_supabase_jwt(
                 project_url=project,
                 publishable_key=publishable_key,
             )
-            claims.setdefault("sub", user_payload.get("id"))
-            claims.setdefault("email", user_payload.get("email"))
+            claims = _merge_auth_user_claims(claims, user_payload)
+            claims = _ensure_verified_email_claims(raw, claims, project_url=project)
             return _identity_from_claims(claims)
 
         claims = _decode_asymmetric_token(
@@ -265,6 +324,7 @@ def verify_supabase_jwt(
             leeway=leeway,
             jwks_url=_jwks_url(project),
         )
+        claims = _ensure_verified_email_claims(raw, claims, project_url=project)
         return _identity_from_claims(claims)
     except jwt.PyJWTError as exc:
         raise SupabaseAuthError(f"invalid supabase token: {exc}") from exc

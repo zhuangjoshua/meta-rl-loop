@@ -1,9 +1,11 @@
-"""Per-user fixed-window rate limiter for the control-plane boundary (Phase 3).
+"""Per-principal fixed-window rate limiter for Takyon authority boundaries.
 
-The opaque API key is the entire per-user surface (mediationplan.md), so abuse
-control lives at the same grain: one counter per (user, time-window). A request is
-counted into the window it lands in; once a user crosses `limit` within a
-`window_seconds` window, further requests in that window are refused until it rolls.
+The opaque API key is the entire control-plane per-user surface, and app sessions
+are the product-plane sub-user surface, so abuse control lives at the matching
+principal grain: one counter per (principal, time-window). A request is counted
+into the window it lands in; once a principal crosses `limit` within a
+`window_seconds` window, further requests in that window are refused until it
+rolls.
 
 Fixed window, not a token bucket, on purpose: the whole decision is ONE atomic SQL
 statement — an upsert that increments and returns the new count in a single round
@@ -50,7 +52,13 @@ def check_rate_limit(
     current `window_seconds` window. Atomic: a single upsert increments the counter and
     returns the new value, so parallel requests cannot oversell the cap. The window is
     aligned to wall-clock epoch boundaries in the database, so all callers share one
-    notion of the current window regardless of process or connection."""
+    notion of the current window regardless of process or connection.
+
+    `user_id` is the persisted column name for compatibility; callers may pass a
+    top-level Takyon user id or an app sub-user id. Migration 0036 removes the old
+    users-only foreign key so the table can serve both boundaries without adding a
+    second limiter implementation.
+    """
     if limit <= 0:
         raise ValueError("limit must be > 0")
     if window_seconds <= 0:
