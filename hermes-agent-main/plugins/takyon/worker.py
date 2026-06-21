@@ -1014,8 +1014,13 @@ def _run_ceo_turn(
             f"business:{slug}"
         )
     # A turn that reported failure must NOT be billed or marked completed — raise so run_one
-    # refunds and fails/requeues (invariant #8).
-    if result.get("failed") is True or result.get("completed") is False:
+    # refunds and fails/requeues (invariant #8). BUT exhausting the iteration budget is NOT a
+    # failure: at the cap the loop force-summarizes (turn_exit_reason='max_iterations_reached'),
+    # so completed=False there means "ran out of calls", not "the work failed". Surface that via
+    # the returned `turn_completed` so a done-gated caller (bootstrap) can judge real success by
+    # durable state (did the surface publish?) instead of the raw iteration count.
+    hit_iteration_cap = str(result.get("turn_exit_reason") or "").startswith("max_iterations")
+    if result.get("failed") is True or (result.get("completed") is False and not hit_iteration_cap):
         raise RuntimeError(
             str(result.get("error") or (result.get("final_response") or "").strip() or "CEO wake reported failure")
         )
@@ -1027,7 +1032,11 @@ def _run_ceo_turn(
     _record_ceo_turn_chat(slug, final_response)
     cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
     cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
-    return final_response, cost_usd, cost_status
+    # turn_completed is False when the loop hit the iteration cap (a clean finish under the cap
+    # sets it True). Callers use it to tell "finished" from "ran out of budget"; the bootstrap
+    # handler resolves the latter against the product's publish (done-gate) state.
+    turn_completed = bool(result.get("completed"))
+    return final_response, cost_usd, cost_status, turn_completed
 
 
 def _business_owner_user_id(slug: str) -> str:
@@ -1092,7 +1101,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                 workspace_root=str(workspace_home or ""),
                 business_slug=slug,
             )
-            final_response, cost_usd, cost_status = _run_ceo_turn(
+            final_response, cost_usd, cost_status, _turn_completed = _run_ceo_turn(
                 slug=slug,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -1210,7 +1219,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 task_kind="ceo_bootstrap",
             )
             with _bound_operator_task_context(task_kind="ceo_bootstrap"):
-                final_response, cost_usd, cost_status = _run_ceo_turn(
+                final_response, cost_usd, cost_status, turn_completed = _run_ceo_turn(
                     slug=slug,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
@@ -1244,6 +1253,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         job_id=str(job.id),
         operator_user_id=owner_user_id,
     )
+    publish_status = "unknown"
     if surface_refresh:
         publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
         publish_status = str(publish.get("status") or surface_refresh.get("status") or "").strip() or "unknown"
@@ -1267,6 +1277,17 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             detail=detail,
             line=detail,
             command=command,
+        )
+
+    # Iteration-budget exhaustion is a real failure ONLY if the product never reached its
+    # done-gate. The surface contract defines done as published_or_exact_blocker: if the site
+    # published, the bootstrap met its goal — let run_one settle + complete it, cap or not (this
+    # is the fix for capped-but-live bootstraps being false-failed and re-run). If it capped
+    # BEFORE publishing, that's a genuine incomplete — raise so run_one requeues for continuation.
+    if not turn_completed and publish_status != "published":
+        raise RuntimeError(
+            f"bootstrap for business:{slug} exhausted its iteration budget before publishing "
+            f"(surface status={publish_status})"
         )
 
     wake_result: dict[str, object] | None = None

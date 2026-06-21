@@ -171,7 +171,7 @@ def test_drain_tick_uses_real_registry_for_ceo_wake(pg_conn, monkeypatch):
 
     def _fake_turn(*, slug, **_kw):  # noqa: A002 - mirror the real kw name
         seen["slug"] = slug
-        return "done", 0.0, "exact"
+        return "done", 0.0, "exact", True
 
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
     counts = worker.drain_tick(pg_conn, worker_id="w1")  # handlers defaults to HANDLERS
@@ -378,7 +378,7 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
 
     def _fake_turn(*, slug, system_prompt, user_prompt, toolsets, max_turns, inactivity_limit, **_kw):
         captured.update(slug=slug, toolsets=toolsets, max_turns=max_turns)
-        return "the CEO did things", 0.0734, "exact"
+        return "the CEO did things", 0.0734, "exact", True
 
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
@@ -842,7 +842,7 @@ def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):
 
     def _fake_turn(*, max_turns, **_kw):
         captured["max_turns"] = max_turns
-        return "", 0.0, "none"
+        return "", 0.0, "none", True
 
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
@@ -871,7 +871,7 @@ def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
         assert (workspace / "research" / "strategy.md").read_text() == "seed\n"
         (workspace / "metrics").mkdir(parents=True, exist_ok=True)
         (workspace / "metrics" / "summary.md").write_text("fresh\n")
-        return "ok", 0.0, "none"
+        return "ok", 0.0, "none", True
 
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
     result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
@@ -976,7 +976,7 @@ def test_refresh_business_surface_after_bootstrap_skips_missing_source_path(monk
 
 def test_zero_cost_turn_reports_zero_cents(monkeypatch):
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
-    monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("", 0.0, "none"))
+    monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("", 0.0, "none", True))
     result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
     assert result.actual_cost_cents == 0
 
