@@ -26088,6 +26088,54 @@ def _inject_search_console_meta_tag(site_root: Path, verification_token: str) ->
     return True
 
 
+def _await_search_console_token_live(
+    site_url: str,
+    verification_token: str,
+    *,
+    attempts: int = 12,
+    delay_seconds: float = 7.0,
+) -> bool:
+    """Poll the live public page until Google would find the google-site-verification token.
+
+    The META tag reaches the Cloudflare R2 edge asynchronously (object-overwrite consistency or the
+    next publish), so a verify call fired the instant after injection 400s with "token could not be
+    found". Poll the cache-busted live URL until the token's content value is actually served,
+    bounded so a never-live token blocks rather than hangs. Returns True once reachable."""
+    import re as _re
+    import time as _time
+    import urllib.parse as _urlparse
+    import urllib.request as _urlreq
+
+    url = str(site_url or "").strip()
+    raw = str(verification_token or "").strip()
+    if not url or not raw:
+        return False
+    match = _re.search(r'content="([^"]+)"', raw)
+    needle = (match.group(1) if match else raw).strip()
+    if not needle:
+        return False
+    for attempt in range(max(1, attempts)):
+        try:
+            sep = "&" if _urlparse.urlparse(url).query else "?"
+            req = _urlreq.Request(
+                f"{url}{sep}_gsc={attempt}",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                    "User-Agent": "takyon-gsc-probe",
+                },
+            )
+            with _urlreq.urlopen(req, timeout=15) as resp:
+                body = resp.read(300_000).decode("utf-8", "replace")
+            if "google-site-verification" in body and needle in body:
+                return True
+        except Exception:
+            pass
+        if attempt < attempts - 1:
+            _time.sleep(delay_seconds)
+    return False
+
+
 def handle_business_register_search_console(args: dict, **_: Any) -> str:
     """Register the published landing page as a Google Search Console URL-prefix property.
 
@@ -26253,14 +26301,14 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
             source_injected = _inject_search_console_meta_tag(site_root, verification_token)
             live_root = _product_live_current_root(business)
             live_injected = _inject_search_console_meta_tag(live_root, verification_token)
-            # The live landing is served from the Cloudflare R2 edge (keyed by live_build_id), not
-            # the VPS `current` dist. Injecting the META tag into the VPS dist alone never reaches
-            # the edge, so Google's verify fetch below 400s ("verification token could not be
-            # found"). Re-mirror the meta-injected live dist to R2 under its current build_id so the
-            # edge serves the token BEFORE we ask Google to verify. When R2 is unconfigured the VPS
-            # dist IS the live surface, so the plain injection already suffices (edge_synced stays
-            # True). Fail-closed: a failed edge sync blocks with a clear reason rather than asking
-            # Google to verify a token the live page does not serve.
+            # <slug>.coscale.app is served from the Cloudflare R2 edge: it resolves the
+            # <slug>/current pointer to a build_id and serves <slug>/<build_id>/index.html with NO
+            # origin fallback, so the VPS-dist injection above is invisible there. Overwrite the
+            # EXACT object the edge currently serves — read the live <slug>/current pointer and PUT
+            # the meta-injected index.html under that same build_id (no pointer flip, so it cannot
+            # race the bootstrap's own publishes). The verify below is then gated on a live-page
+            # poll. When R2 is unconfigured the VPS dist IS the live surface, so the plain injection
+            # already suffices (edge_synced stays True).
             edge_synced = True
             if live_injected:
                 try:
@@ -26270,18 +26318,27 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 if _takyon_storage.r2_configured():
                     edge_synced = False
                     try:
-                        live_build_id = live_build_pointer(business)
-                        if live_build_id:
-                            _takyon_storage.write_public_site_to_r2(slug, live_build_id, live_root)
+                        backend = _takyon_storage.R2StorageBackend()
+                        served_build_id = (
+                            backend.get(_takyon_storage.public_site_pointer_key(slug))
+                            .decode("utf-8")
+                            .strip()
+                        )
+                        index_bytes = (live_root / "index.html").read_bytes()
+                        if served_build_id and index_bytes:
+                            backend.put(
+                                _takyon_storage.public_site_object_key(slug, served_build_id, "index.html"),
+                                index_bytes,
+                                digest=hashlib.sha256(index_bytes).hexdigest(),
+                            )
                             edge_synced = True
                     except Exception as exc:
                         logging.getLogger("takyon.r2").warning(
-                            "GSC meta re-mirror to R2 failed (verify would not see the token): "
-                            "slug=%s err=%s",
+                            "GSC meta R2 edge write failed (verify may not see the token): slug=%s err=%s",
                             slug,
                             exc,
                         )
-            meta_injected = bool(source_injected and live_injected and edge_synced)
+            meta_injected = bool(source_injected and live_injected)
             if not meta_injected:
                 # The verify fetch needs the tag on the LIVE page; the source injection alone is not
                 # enough. Surface exactly which side failed so the operator/CEO knows whether to
@@ -26304,6 +26361,19 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                     verification_token=verification_token,
                     source_injected=bool(source_injected),
                     live_injected=bool(live_injected),
+                    edge_synced=bool(edge_synced),
+                )
+
+            # The META tag reaches the R2 edge asynchronously (overwrite consistency or the next
+            # publish), so a verify fired the instant after the write 400s with "token could not be
+            # found". Poll the live page until Google would actually find the token, then verify.
+            if not _await_search_console_token_live(site_url, verification_token):
+                return _blocked(
+                    "blocked_search_console_token_not_live",
+                    "the google-site-verification META tag was injected but did not become reachable "
+                    f"on the live page {site_url} within the propagation window; it is in the source "
+                    "and will go live on the next publish — retry registration then",
+                    verification_token=verification_token,
                     edge_synced=bool(edge_synced),
                 )
 
