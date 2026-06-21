@@ -8136,15 +8136,30 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     return client_host in _LOOPBACK_HOSTS
 
 
+def _ws_session_token_is_valid(ws: "WebSocket") -> bool:
+    """A valid server-issued, auth0-gated `_SESSION_TOKEN` on the WS upgrade is sufficient auth.
+
+    The token is injected ONLY into the auth0-gated SPA index (window.__TAKYON_SESSION_TOKEN__), so a
+    caller that presents a matching token has already passed the Auth0 gate to obtain it. The auth0
+    COOKIE, by contrast, does not reliably survive a Cloudflare-proxied WebSocket upgrade — it rides
+    the HTTP requests fine (so the dashboard page loads), but the `wss` handshake arrives without it,
+    which 4401'd EVERY dashboard create + live-chat connection with `auth0_cookie_missing`. The token,
+    which the client already carries in the WS query string, is the reliable WS credential."""
+    tok = str(ws.query_params.get("token", "") or "")
+    return bool(tok) and hmac.compare_digest(tok.encode(), _SESSION_TOKEN.encode())
+
+
 def _ws_auth0_session_is_allowed(ws: "WebSocket") -> bool:
-    """Require the Auth0 dashboard cookie on the configured public host."""
+    """Allow the WS on a valid auth0 cookie OR a valid (auth0-gated) session token."""
     try:
         cfg = _auth0_config()
     except Auth0ConfigError:
         return False
     if not cfg or not _auth0_required_for_host(ws.headers):
         return True
-    return _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) is not None
+    if _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) is not None:
+        return True
+    return _ws_session_token_is_valid(ws)
 
 
 def _ws_auth0_reject_reason(ws: "WebSocket") -> str:
@@ -8156,6 +8171,10 @@ def _ws_auth0_reject_reason(ws: "WebSocket") -> str:
     if not cfg or not _auth0_required_for_host(ws.headers):
         return ""
     if _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) is not None:
+        return ""
+    # The auth0 cookie doesn't survive the Cloudflare-proxied WS upgrade; a valid auth0-gated session
+    # token is the WS's authoritative credential (see _ws_session_token_is_valid).
+    if _ws_session_token_is_valid(ws):
         return ""
     return "auth0_cookie_missing"
 
