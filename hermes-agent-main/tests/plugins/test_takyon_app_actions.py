@@ -1671,6 +1671,214 @@ def test_recorded_live_truth_metadata_labels_intended_live_state():
     assert truth["probe"] == "unknown"
 
 
+# --- Action-runtime robustness fixes (red-team: idempotency replay, undeclared invoke, run lock) ---
+
+
+class _InvokeStore:
+    """Minimal store surface that the real `invoke_action` control flow needs, with NO Postgres /
+    deno dependency. Heavy collaborators (reserve/settle/subprocess) are monkeypatched per test."""
+
+    def __init__(self, root, surface):
+        self._root = root
+        self._surface = surface
+        self.events: list[dict[str, Any]] = []
+
+    @contextmanager
+    def _connect(self):
+        yield object()
+
+    def _app_surface_contract(self, conn, business):
+        return self._surface
+
+    def _business_root(self, business, sync: bool = True):
+        return self._root / "businesses" / business
+
+    def _resolve_business_file(self, business, relpath, require_output_root: bool = False):
+        return self._business_root(business) / relpath
+
+    def _record_event(self, conn, **kwargs):
+        self.events.append(kwargs)
+
+
+def _write_action_file(store, business, name, body):
+    actions = store._business_root(business) / "product" / "site" / "actions"
+    actions.mkdir(parents=True, exist_ok=True)
+    (actions / f"{name}.ts").write_text(body, encoding="utf-8")
+
+
+_REAL_HANDLER = "export default async (payload, ctx) => ({ ok: true });\n"
+_STUB_HANDLER = 'export const action = "x";\nexport const description = "stub, no handler";\n'
+_HTTP_SURFACE = {
+    "status": "active",
+    "source_path": "product/site",
+    "runtime_features": ["auth", "account"],
+    "product_workflow": {},
+    "rail_state": {},
+}
+
+
+def _principal(uid="u_A", tier="paid"):
+    return {"kind": "session", "session_token": "s", "user": {"id": uid, "email": f"{uid}@e.com", "tier": tier}}
+
+
+def _stub_runtime_config(monkeypatch):
+    monkeypatch.setattr(
+        app_actions,
+        "_action_runtime_config",
+        lambda: {
+            "invoke_price_microusd": 2000,
+            "http_timeout_seconds": 30,
+            "schedule_timeout_seconds": 60,
+            "cpu_quota_percent": 50,
+            "memory_max_mb": 256,
+        },
+    )
+    monkeypatch.setattr(
+        app_actions,
+        "resolve_rails_base",
+        lambda bound_origin="": app_actions.RailsBase(origin="http://127.0.0.1:9119", hostport="127.0.0.1:9119"),
+    )
+
+
+def test_invoke_refuses_undeclared_uncertified_action(tmp_path, monkeypatch):
+    """Fix (MEDIUM): an action whose FILE exists but is not in the HTTP-certified set (here a stub
+    with no real handler) must be refused at invoke — not run as an undeclared/unexposed action."""
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "ghost", _STUB_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(
+        app_actions, "_run_action_subprocess",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("uncertified action must not run")),
+    )
+
+    with pytest.raises(app_actions.ActionContractError, match="not an HTTP-certified action"):
+        app_actions.invoke_action(
+            store, business_slug="biz", action_name="ghost", payload={},
+            principal=_principal(), trigger="http", idempotency_key="k1",
+        )
+
+
+def test_invoke_replay_returns_cached_success_without_rerunning(tmp_path, monkeypatch):
+    """Fix (HIGH): replaying a reused idempotency_key whose prior attempt SUCCEEDED returns the
+    cached receipt and must NOT re-execute the action's side effect."""
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(
+        app_actions, "_run_action_subprocess",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("replay must not re-run the subprocess")),
+    )
+    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: True)
+
+    receipt_rel = app_actions._receipt_relpath("biz", "coach", "k-dup")
+    receipt_abs = store._resolve_business_file("biz", receipt_rel)
+    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
+    receipt_abs.write_text(
+        json.dumps({"success": True, "result": {"echo": "cached"}, "run": {"isolation": "prior"}, "receipt_path": receipt_rel}),
+        encoding="utf-8",
+    )
+
+    out = app_actions.invoke_action(
+        store, business_slug="biz", action_name="coach", payload={},
+        principal=_principal(), trigger="http", idempotency_key="k-dup",
+    )
+    assert out == {"success": True, "action": "coach", "result": {"echo": "cached"}, "run": {"isolation": "prior"}, "receipt": receipt_rel}
+
+
+def test_invoke_replay_surfaces_prior_failure_without_rerunning(tmp_path, monkeypatch):
+    """A reused key whose prior attempt FAILED replays the terminal failure (no re-run, no ungated
+    re-reserve after the prior release)."""
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(
+        app_actions, "_run_action_subprocess",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("failed-replay must not re-run")),
+    )
+    receipt_rel = app_actions._receipt_relpath("biz", "coach", "k-fail")
+    receipt_abs = store._resolve_business_file("biz", receipt_rel)
+    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
+    receipt_abs.write_text(json.dumps({"success": False, "error": "provider exploded"}), encoding="utf-8")
+
+    with pytest.raises(app_actions.ActionReplayConflict, match="provider exploded"):
+        app_actions.invoke_action(
+            store, business_slug="biz", action_name="coach", payload={},
+            principal=_principal(), trigger="http", idempotency_key="k-fail",
+        )
+
+
+def test_invoke_replay_in_flight_reservation_refuses(tmp_path, monkeypatch):
+    """A reused key with a reservation on record but NO terminal receipt is in flight / crashed
+    mid-run; re-running would double-execute, so it is refused with a conflict."""
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: True)
+    monkeypatch.setattr(
+        app_actions, "_run_action_subprocess",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("in-flight replay must not run")),
+    )
+
+    with pytest.raises(app_actions.ActionReplayConflict, match="in flight"):
+        app_actions.invoke_action(
+            store, business_slug="biz", action_name="coach", payload={},
+            principal=_principal(), trigger="http", idempotency_key="k-inflight",
+        )
+
+
+def test_invoke_fresh_path_runs_and_writes_receipt(tmp_path, monkeypatch):
+    """Regression guard for the restructure: a fresh certified action reserves, runs, settles, and
+    writes a terminal receipt exactly once."""
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: False)
+    monkeypatch.setattr(app_actions, "_reserve_usage", lambda *a, **k: None)
+    monkeypatch.setattr(app_actions, "_settle_usage", lambda *a, **k: None)
+    runs: list[int] = []
+
+    def _fake_run(**kw):
+        runs.append(1)
+        return {"answer": 42}, {"isolation": "subprocess"}
+
+    monkeypatch.setattr(app_actions, "_run_action_subprocess", _fake_run)
+
+    out = app_actions.invoke_action(
+        store, business_slug="biz", action_name="coach", payload={"q": "x"},
+        principal=_principal(), trigger="http", idempotency_key="k-fresh",
+    )
+    assert len(runs) == 1
+    assert out["success"] is True
+    assert out["result"] == {"answer": 42}
+    receipt_rel = app_actions._receipt_relpath("biz", "coach", "k-fresh")
+    receipt = json.loads(store._resolve_business_file("biz", receipt_rel).read_text(encoding="utf-8"))
+    assert receipt["success"] is True
+    assert receipt["result"] == {"answer": 42}
+    # and the run lock was released (per-customer key freed for re-use)
+    assert not app_actions._active_business_runs
+
+
+def test_run_lock_is_per_customer_not_per_business():
+    """Fix (LOW): the run lock is keyed per (business, customer) so one customer cannot block
+    another; the same customer still cannot run two concurrent actions."""
+    a = "biz\x1fuserA"
+    b = "biz\x1fuserB"
+    app_actions._acquire_business_run(a)
+    try:
+        # a different customer of the SAME business is not blocked
+        app_actions._acquire_business_run(b)
+        app_actions._release_business_run(b)
+        # the SAME customer is blocked while their action is in flight
+        with pytest.raises(app_actions.ActionAlreadyRunning):
+            app_actions._acquire_business_run(a)
+    finally:
+        app_actions._release_business_run(a)
+    # released keys can be re-acquired
+    app_actions._acquire_business_run(a)
+    app_actions._release_business_run(a)
+    assert not app_actions._active_business_runs
+
+
 def test_recorded_live_truth_metadata_prefers_live_build_pointer_over_stale_status():
     truth = takyon_core._recorded_live_truth_metadata(
         {

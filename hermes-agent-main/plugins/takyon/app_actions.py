@@ -241,6 +241,15 @@ class ActionResultTooLarge(AppActionError):
     code = "action_result_too_large"
 
 
+class ActionReplayConflict(AppActionError):
+    """A reused idempotency_key whose prior attempt is in flight or left an indeterminate state.
+    Replaying it would either double-execute the action's side effect or re-run after the prior
+    reservation already released its budget (ungated spend), so the replay is refused rather than
+    re-run. A successful prior attempt is replayed from its receipt instead of raising this."""
+
+    code = "action_replay_conflict"
+
+
 @dataclass(frozen=True)
 class RailsBase:
     origin: str
@@ -1108,7 +1117,8 @@ def invoke_action(
     if not isinstance(surface, Mapping) or str(surface.get("status") or "").strip() == "missing":
         raise ActionContractError("app surface contract is missing")
     workflow = _surface_product_workflow_shape(dict(surface))
-    specs = file_backed_action_specs(store._business_root(business_slug) / "product" / "site", workflow)
+    site_root = store._business_root(business_slug) / "product" / "site"
+    specs = file_backed_action_specs(site_root, workflow)
     outbound_hosts = normalize_outbound_hosts(workflow.get("outbound_hosts"))
     validate_action_contract(specs=specs, outbound_hosts=outbound_hosts, runtime_features=list(surface.get("runtime_features") or []))
     spec = next((item for item in specs if str(item.get("name")) == action_name), None)
@@ -1117,18 +1127,28 @@ def invoke_action(
         raise ActionContractError(f"action {action_name} is declared for {expected_trigger}, not {trigger}")
     if trigger == "schedule" and spec is None:
         raise ActionContractError(f"schedule action {action_name} must declare a schedule trigger")
+    # Customer-invokable (non-schedule) actions must be in the SAME HTTP-certified set the surface
+    # declaration gate computes — a real, UI-referenced, handler-backed action. This refuses an
+    # invoke of an undeclared / un-exposed / stub action file that merely happens to exist on disk.
+    if trigger != "schedule" and action_name not in site_http_action_names(site_root, surface):
+        raise ActionContractError(f"action {action_name} is not an HTTP-certified action for this product")
     session_token = str(principal.get("session_token") or "").strip()
     if not session_token:
         raise AppActionError("session_token is required")
     base = resolve_rails_base(bound_origin=bound_origin)
-    actions_dir = store._business_root(business_slug) / "product" / "site" / "actions"
+    actions_dir = site_root / "actions"
     action_path = actions_dir / f"{action_name}.ts"
     if not action_path.exists():
         raise ActionContractError(f"action {action_name} has no file at product/site/actions/{action_name}.ts")
-    _acquire_business_run(business_slug)
     reservation_key = str(idempotency_key or "").strip()
     if not reservation_key:
         raise AppActionError("idempotency_key is required")
+    usage_business = business_slug
+    app_user_id = str((principal.get("user") or {}).get("id") or "") or None
+    app_user_tier = str((principal.get("user") or {}).get("tier") or "") or None
+    # Run lock keyed per (business, customer) so one customer's action cannot block another's (see
+    # _acquire_business_run). Service / scheduled runs (no app_user_id) share a per-kind key.
+    run_lock_key = f"{business_slug}\x1f{app_user_id or ('service:' + str(principal.get('kind') or 'service'))}"
     config = _action_runtime_config()
     timeout_seconds = (
         int(config["schedule_timeout_seconds"])
@@ -1165,10 +1185,34 @@ def invoke_action(
     }
     estimate = int(config["invoke_price_microusd"])
     run_metadata: dict[str, Any] = {}
-    usage_business = business_slug
-    app_user_id = str((principal.get("user") or {}).get("id") or "") or None
-    app_user_tier = str((principal.get("user") or {}).get("tier") or "") or None
+    # Acquire the run lock immediately before the guarded block so the finally always releases it
+    # (the prior placement leaked the lock if receipt/request setup raised in between).
+    _acquire_business_run(run_lock_key)
+    reserved = False
     try:
+        # ── Idempotency replay gate ──────────────────────────────────────────────────────────
+        # A reused idempotency_key must NEVER re-execute the action's side effect. A terminal
+        # receipt is the durable proof a prior attempt already finished: replay a success, surface
+        # a prior failure — either way do not re-run. If no terminal receipt exists but a usage
+        # reservation for the key is already on record, the prior attempt is in flight / crashed
+        # mid-run; refuse rather than double-execute (or re-run ungated after a budget release).
+        if receipt_abs.exists():
+            cached = _read_receipt_payload(receipt_abs)
+            if cached is not None:
+                if cached.get("success"):
+                    return {
+                        "success": True,
+                        "action": action_name,
+                        "result": cached.get("result"),
+                        "run": cached.get("run") or {},
+                        "receipt": receipt_rel,
+                    }
+                raise ActionReplayConflict(
+                    f"idempotency_key already used; prior attempt failed: "
+                    f"{str(cached.get('error') or 'unknown error')}"
+                )
+        if _reservation_exists(store, usage_business, reservation_key):
+            raise ActionReplayConflict("action_replay_in_progress: idempotency_key is already in flight")
         _reserve_usage(
             store,
             usage_business,
@@ -1179,6 +1223,7 @@ def invoke_action(
             route=f"/api/takyon/apps/{business_slug}/actions/{action_name}",
             metadata={"trigger": trigger, "principal": str(principal.get("kind") or "session")},
         )
+        reserved = True
         result, run_metadata = _run_action_subprocess(
             action_path=action_path,
             base=base,
@@ -1228,27 +1273,31 @@ def invoke_action(
             "receipt": receipt_rel,
         }
     except Exception as exc:
-        _release_usage(
-            store,
-            usage_business,
-            reservation_key=reservation_key,
-            error=str(exc),
-            metadata={"action": action_name, "trigger": trigger},
-        )
-        failure_receipt = {
-            "success": False,
-            "business": business_slug,
-            "action": action_name,
-            "trigger": trigger,
-            "principal": str(principal.get("kind") or "session"),
-            "error": str(exc),
-            "run": run_metadata,
-            "receipt_path": receipt_rel,
-        }
-        _write_receipt(receipt_abs, failure_receipt)
+        # Only the fresh path (we actually reserved + ran) releases the reservation and writes a
+        # failure receipt. A replay conflict / cached-failure replay raised before reserving must
+        # NOT release the in-flight reservation or clobber the prior terminal receipt.
+        if reserved:
+            _release_usage(
+                store,
+                usage_business,
+                reservation_key=reservation_key,
+                error=str(exc),
+                metadata={"action": action_name, "trigger": trigger},
+            )
+            failure_receipt = {
+                "success": False,
+                "business": business_slug,
+                "action": action_name,
+                "trigger": trigger,
+                "principal": str(principal.get("kind") or "session"),
+                "error": str(exc),
+                "run": run_metadata,
+                "receipt_path": receipt_rel,
+            }
+            _write_receipt(receipt_abs, failure_receipt)
         raise
     finally:
-        _release_business_run(business_slug)
+        _release_business_run(run_lock_key)
 
 
 def _mint_service_session(conn: Any, business_slug: str, app_user_id: str) -> str:
@@ -1311,6 +1360,45 @@ def _write_receipt(path: Path, payload: Mapping[str, Any]) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(path, _json_dumps(dict(payload)) + "\n")
+
+
+def _read_receipt_payload(path: Path) -> dict[str, Any] | None:
+    """Read a terminal action receipt for idempotent replay. Returns None on any read/parse error
+    so a corrupt receipt falls through to the reservation-existence check rather than crashing."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _reservation_exists(store: Any, business_slug: str, reservation_key: str) -> bool:
+    """True if a usage reservation for this idempotency key already exists (any status). This is
+    the durable, cross-process replay signal: a reused key whose reservation is present but has no
+    terminal receipt is in flight (or crashed mid-run), and must not be re-executed."""
+    try:
+        from .core import _PGConn
+    except Exception:
+        from plugins.takyon.core import _PGConn
+    try:
+        with store._connect() as conn:
+            if isinstance(conn, _PGConn):
+                with store._leaf_conn(conn) as raw:
+                    row = raw.execute(
+                        "select 1 from app_usage_events "
+                        "where business_slug = %s and reservation_key = %s limit 1",
+                        (business_slug, reservation_key),
+                    ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT 1 FROM app_usage_events WHERE id = ? LIMIT 1",
+                    (reservation_key,),
+                ).fetchone()
+            return row is not None
+    except Exception:
+        # Fail OPEN to the pre-fix behavior (treat as fresh) rather than block a legitimate request
+        # on a transient read error; the reserve below is still atomically idempotent on the key.
+        return False
 
 
 def _reserve_usage(
@@ -1622,13 +1710,16 @@ def _run_action_subprocess(
         return payload.get("result"), metadata
 
 
-def _acquire_business_run(business_slug: str) -> None:
+def _acquire_business_run(run_key: str) -> None:
+    """In-process run lock. `run_key` is scoped per (business, customer) — NOT per business — so a
+    slow or hostile action from one customer cannot block every other customer of the same
+    business. A single customer still cannot run two concurrent actions (same key)."""
     with _active_business_runs_lock:
-        if business_slug in _active_business_runs:
+        if run_key in _active_business_runs:
             raise ActionAlreadyRunning("action_already_running")
-        _active_business_runs.add(business_slug)
+        _active_business_runs.add(run_key)
 
 
-def _release_business_run(business_slug: str) -> None:
+def _release_business_run(run_key: str) -> None:
     with _active_business_runs_lock:
-        _active_business_runs.discard(business_slug)
+        _active_business_runs.discard(run_key)
