@@ -948,11 +948,15 @@ def _surface_live_publication_state(surface: dict[str, Any] | None, *, business:
     payload = surface if isinstance(surface, dict) else {}
     build_id = str(payload.get("live_build_id") or "").strip()
     recorded_status = str(payload.get("publish_status") or "not_published").strip().lower() or "not_published"
-    publish_target = str(
+    # Recompute-on-read: rebase any stale legacy base domain (pre-rebrand fourmanifold.com) to the
+    # current company base domain so every consumer of the surface contract (dashboard overview
+    # payload, product/surface.md mirror, truth metadata) emits the current host and a refresh never
+    # flips between the stale persisted column and the computed host.
+    publish_target = _rebase_to_company_domain(str(
         payload.get("publish_target")
         or (_product_publish_target(business) if str(business or "").strip() else "")
-    ).strip()
-    recorded_public_url = str(payload.get("public_url") or "").strip()
+    ).strip())
+    recorded_public_url = _rebase_to_company_domain(str(payload.get("public_url") or "").strip())
     recorded_published_at = str(payload.get("published_at") or "").strip()
     publish_blocker = str(payload.get("publish_blocker") or "").strip()
     if build_id:
@@ -11114,6 +11118,43 @@ def _product_publish_target(slug: str, explicit: Any = None) -> str:
     if not path.startswith("/"):
         path = f"/{path}"
     return urllib.parse.urlunparse((parsed.scheme, host, path, "", "", ""))
+
+
+# Legacy company base domains a pre-rebrand business may have persisted in its surface contract.
+# A persisted "<slug>.fourmanifold.com" must read back as the CURRENT base domain so the dashboard
+# never "quantum"-flips between the stale persisted host and the computed current host on refresh.
+_LEGACY_COMPANY_BASE_DOMAINS = frozenset({"fourmanifold.com"})
+
+
+def _rebase_to_company_domain(url: str) -> str:
+    """Rewrite a legacy company base domain (e.g. fourmanifold.com) in `url` to the current company
+    base domain (coscale.app), preserving the <slug> label, scheme, and path. Returns `url`
+    unchanged when it carries no legacy base domain. This is the recompute-on-read chokepoint: it
+    makes a stale persisted publish_target/public_url resolve to the current host on every read, so
+    a refresh is stable regardless of what the column still holds."""
+    raw = str(url or "").strip()
+    if not raw:
+        return raw
+    try:
+        parsed = urllib.parse.urlparse(raw if "://" in raw else f"https://{raw}")
+    except Exception:
+        return raw
+    netloc = (parsed.netloc or "").strip()
+    if not netloc:
+        return raw
+    hostname = netloc.split("@")[-1].split(":")[0].lower()
+    current = str(_company_base_domain() or "").strip().lower()
+    if not current:
+        return raw
+    for legacy in _LEGACY_COMPANY_BASE_DOMAINS:
+        if legacy == current:
+            continue
+        if hostname == legacy or hostname.endswith("." + legacy):
+            new_hostname = hostname[: len(hostname) - len(legacy)] + current
+            return urllib.parse.urlunparse(
+                (parsed.scheme or "https", new_hostname, parsed.path or "/", "", "", "")
+            )
+    return raw
 
 
 def _is_shared_renderer_publish_policy(value: Any) -> bool:
