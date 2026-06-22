@@ -15,6 +15,10 @@
 	tls /etc/ssl/certs/fourmanifold-cloudflare-origin.crt /etc/ssl/private/fourmanifold-cloudflare-origin.key
 }
 
+(coscale_cloudflare_origin_tls) {
+	tls /etc/ssl/certs/coscale-cloudflare-origin.crt /etc/ssl/private/coscale-cloudflare-origin.key
+}
+
 (fourmanifold_edge_only) {
 	@origin_bypass {
 		not remote_ip 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32 127.0.0.1/8 ::1/128 10.116.0.0/20
@@ -64,4 +68,40 @@
 	}
 
 	respond "not found" 404
+}
+
+# Direct-edge product /api origin for the Phase B decoupling (CF worker -> subuser-direct).
+# The worker forwards <slug>.coscale.app/api/* to subuser-origin.coscale.app (THIS host) via
+# resolveOverride, preserving the original Host, so this block matches by the product slug.
+# coscale Origin cert + edge-only (CF-IP 403) + per-IP rate zones renamed *_443 (so the sliding
+# windows do NOT merge with the :80 zones). Dormant until the worker is re-pointed; it sits ready
+# and locked to Cloudflare IPs BEFORE any subuser-origin DNS record exists, so the origin is never
+# briefly open. Mirrors the operator's proven *.coscale.app block but proxies to its own :9119.
+*.coscale.app {
+	import coscale_cloudflare_origin_tls
+	import fourmanifold_edge_only
+
+	encode zstd gzip
+
+	@app_auth_request_443 path_regexp app_auth_request_443 ^/api/takyon/apps/[^/]+/auth/request$
+	rate_limit @app_auth_request_443 {
+		zone product_auth_request_443 {
+			key {client_ip}
+			events 5
+			window 1m
+		}
+	}
+
+	rate_limit {
+		zone product_all_443 {
+			key {client_ip}
+			events 600
+			window 1m
+		}
+	}
+
+	reverse_proxy 127.0.0.1:9119 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto https
+	}
 }
