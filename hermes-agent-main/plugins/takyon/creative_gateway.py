@@ -1821,14 +1821,40 @@ def build_creative_gateway_router() -> APIRouter:
             pixel_id=pixel_id,
             script_src=str(pixel_cfg.get("script_src") or "").strip(),
         )
-        edge_synced = core._sync_meta_pixel_live_index_to_r2(business, live_root) if installed_vps else False
+        # Republish through the canonical build path so a NEW content-addressed build_id is
+        # produced with the pixel baked in at build time. The edge serves
+        # <slug>/current -> build_id -> index.html with NO origin fallback, so overwriting the
+        # live dist or a single served build_id never reaches it (and the next product rebuild
+        # drops it again). _publish_product_surface_path injects the snippet before hashing the
+        # build (gated on _surface_meta_pixel_enabled), mirrors every file to R2 under the new
+        # build_id, and flips the pointer -- the same robust pattern the GSC tag uses, and it
+        # survives future rebuilds because the enabled flag is re-checked on every publish.
+        enabled_surface = {
+            **surface,
+            "metadata": {
+                **(metadata if isinstance(metadata, dict) else {}),
+                "meta_pixel": meta_pixel_metadata,
+            },
+        }
+        try:
+            republish = core._publish_product_surface_path(
+                business_root=business_root,
+                slug=business,
+                source_path=source_path,
+                publish_target=core._product_publish_target(business, surface.get("publish_target")),
+                source_revision=getattr(store, "_canonical_workspace_revision", lambda _s: 0)(business),
+                surface=enabled_surface,
+            )
+        except Exception as exc:  # pragma: no cover - fail truthfully, never fabricate
+            republish = {"status": "error", "blocker": str(exc)[:200]}
+        edge_published = str(republish.get("status") or "") == "published"
         subuser_sync = core._sync_subuser_product_site(business, live_root) if installed_vps else {
             "synced": False,
             "status": "skipped",
         }
         public_status, public_html, probe_url = _meta_fetch_html(public_url)
         installed_r2 = public_status == 200 and _meta_pixel_marker_present(core, public_html, pixel_id)
-        ok = bool(source_installed and installed_vps and installed_r2 and conversion.get("ok"))
+        ok = bool(source_installed and installed_vps and edge_published and installed_r2 and conversion.get("ok"))
         receipt = {
             "success": ok,
             "status": "installed" if ok else "blocked",
@@ -1845,7 +1871,10 @@ def build_creative_gateway_router() -> APIRouter:
             "source_publish_label": publish_source_label,
             "installed_vps": installed_vps,
             "installed_r2": installed_r2,
-            "edge_synced": edge_synced,
+            "edge_published": edge_published,
+            "republished_build_id": str(republish.get("live_build_id") or ""),
+            "republish_status": str(republish.get("status") or ""),
+            "republish_blocker": str(republish.get("blocker") or ""),
             "subuser_sync": subuser_sync,
             "public_probe_status": public_status,
             "public_probe_url": probe_url,

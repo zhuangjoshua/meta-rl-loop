@@ -26765,39 +26765,6 @@ def _inject_meta_pixel_snippet(site_root: Path, *, pixel_id: str, script_src: st
     return True
 
 
-def _sync_meta_pixel_live_index_to_r2(slug: str, live_root: Path) -> bool:
-    """Overwrite the currently-served R2 index.html after live snippet injection."""
-    try:
-        from . import storage as _takyon_storage
-    except Exception:
-        from plugins.takyon import storage as _takyon_storage
-    if not _takyon_storage.r2_configured():
-        return False
-    try:
-        backend = _takyon_storage.R2StorageBackend()
-        served_build_id = (
-            backend.get(_takyon_storage.public_site_pointer_key(slug))
-            .decode("utf-8")
-            .strip()
-        )
-        index_bytes = (live_root / "index.html").read_bytes()
-        if not served_build_id or not index_bytes:
-            return False
-        backend.put(
-            _takyon_storage.public_site_object_key(slug, served_build_id, "index.html"),
-            index_bytes,
-            digest=hashlib.sha256(index_bytes).hexdigest(),
-        )
-        return True
-    except Exception as exc:
-        logging.getLogger("takyon.r2").warning(
-            "Meta pixel R2 edge write failed: slug=%s err=%s",
-            slug,
-            exc,
-        )
-        return False
-
-
 def _surface_meta_pixel_enabled(surface: Mapping[str, Any] | None) -> bool:
     metadata = surface.get("metadata") if isinstance(surface, Mapping) else {}
     if not isinstance(metadata, Mapping):

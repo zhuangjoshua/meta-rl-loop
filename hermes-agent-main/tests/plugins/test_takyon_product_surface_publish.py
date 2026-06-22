@@ -51,6 +51,54 @@ def test_publish_product_surface_writes_immutable_build_and_flips_current_pointe
     assert (current_root / "assets" / "app.css").read_text(encoding="utf-8") == "body{color:#123456}\n"
 
 
+def test_publish_product_surface_bakes_meta_pixel_into_served_build_when_enabled(tmp_path, monkeypatch):
+    """Opt-in Meta pixel is baked into the build BEFORE the build_id hash, so the served
+    (content-addressed) build carries it. This is the fix for meta_pixel_ensure's perennial
+    installed_r2=false: overwriting the live dist / one served build_id never reaches the edge
+    and is dropped by the next rebuild; baking it on every enabled publish does."""
+    business_root = tmp_path / "businesses" / "climbly"
+    dist = business_root / "product" / "site" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<html><head><title>x</title></head><body>app</body></html>\n", encoding="utf-8"
+    )
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    pixel_id = "1340991031280635"
+    monkeypatch.setattr(
+        takyon_core, "_meta_pixel_config", lambda: {"pixel_id": pixel_id, "script_src": ""}
+    )
+
+    enabled = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="climbly",
+        source_path="product/site",
+        publish_target="https://climbly.fourmanifold.com/",
+        surface={"metadata": {"meta_pixel": {"enabled": True, "pixel_id": pixel_id}}},
+    )
+    assert enabled["status"] == "published"
+    served = (publish_root / "climbly" / "current" / "index.html").read_text(encoding="utf-8")
+    assert f'data-takyon-meta-pixel="{pixel_id}"' in served  # baked into the SERVED build
+
+    # Opt-in only: a publish without the enabled flag must NOT carry the pixel.
+    (dist / "index.html").write_text(
+        "<html><head><title>x</title></head><body>v2</body></html>\n", encoding="utf-8"
+    )
+    disabled = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="climbly",
+        source_path="product/site",
+        publish_target="https://climbly.fourmanifold.com/",
+        surface={"metadata": {"meta_pixel": {"enabled": False}}},
+    )
+    assert disabled["status"] == "published"
+    served_off = (publish_root / "climbly" / "current" / "index.html").read_text(encoding="utf-8")
+    assert "data-takyon-meta-pixel" not in served_off
+
+
 def test_publish_product_surface_prefers_dist_over_source_root_when_both_exist(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"
