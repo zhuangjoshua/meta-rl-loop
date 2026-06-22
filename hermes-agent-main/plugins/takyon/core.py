@@ -12401,6 +12401,11 @@ def _publish_product_surface_path(
                 pixel_id=pixel_id,
                 script_src=str(pixel.get("script_src") or "").strip(),
             )
+    # Shared Umami analytics is baked into EVERY published build (not per-business): the R2 edge
+    # serves bytes raw, so the legacy serve-time inject in web_server._serve_product_site_file no
+    # longer reaches the edge. Self-gates on analytics.umami.enabled+website_id+script_src; "" => no-op.
+    if _inject_umami_snippet(publish_source):
+        result["umami_injected"] = True
     publish_root = _product_publish_root()
     backend = storage.get_storage_backend()
     build_digests = storage.workspace_file_digests(publish_source)
@@ -26754,6 +26759,55 @@ def _inject_meta_pixel_snippet(site_root: Path, *, pixel_id: str, script_src: st
     except OSError:
         return False
     if f'data-takyon-meta-pixel="{html.escape(str(pixel_id), quote=True)}"' in text or f"fbq('init',{json.dumps(str(pixel_id))})" in text:
+        return True
+    lowered = text.lower()
+    close_head = lowered.find("</head>")
+    if close_head == -1:
+        return False
+    try:
+        index_path.write_text(text[:close_head] + snippet + text[close_head:], encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _umami_analytics_snippet() -> str:
+    """Return the shared Umami <script> tag baked into every published product build, or "" if
+    analytics is disabled/unconfigured (no tag, no faked tracking).
+
+    One shared website id across all businesses; each site is segmented downstream by its own
+    subdomain hostname (Umami records it from the request host). Mirrors the legacy serve-time
+    injector ``takyon_cli.web_server._umami_analytics_snippet`` but bakes at BUILD time, because
+    the R2 edge serves bytes raw -- the serve-time injection in ``_serve_product_site_file`` no
+    longer reaches the edge once a site is served from R2."""
+    try:
+        cfg = _analytics_umami_config()
+        if cfg.get("enabled"):
+            website_id = str(cfg.get("website_id") or "").strip()
+            script_src = str(cfg.get("script_src") or "").strip()
+            if website_id and script_src:
+                src = html.escape(script_src, quote=True)
+                wid = html.escape(website_id, quote=True)
+                return f'<script defer src="{src}" data-website-id="{wid}"></script>'
+    except Exception:
+        pass
+    return ""
+
+
+def _inject_umami_snippet(site_root: Path) -> bool:
+    """Inject the shared Umami analytics <script> into an HTML index under `site_root`. Idempotent;
+    self-gates (returns False when analytics is disabled/unconfigured)."""
+    snippet = _umami_analytics_snippet()
+    if not snippet:
+        return False
+    index_path = site_root / "index.html"
+    try:
+        if not index_path.is_file():
+            return False
+        text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if "data-website-id=" in text or snippet in text:
         return True
     lowered = text.lower()
     close_head = lowered.find("</head>")

@@ -99,6 +99,53 @@ def test_publish_product_surface_bakes_meta_pixel_into_served_build_when_enabled
     assert "data-takyon-meta-pixel" not in served_off
 
 
+def test_publish_product_surface_bakes_umami_analytics_into_served_build(tmp_path, monkeypatch):
+    """Shared Umami analytics is baked into every published build, so the R2 edge (which serves
+    bytes raw) carries it. Self-gates on analytics.umami.enabled — fixes the regression where the
+    R2 cutover dropped the legacy serve-time-injected tag from every product page."""
+    business_root = tmp_path / "businesses" / "trackly"
+    dist = business_root / "product" / "site" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text(
+        "<html><head><title>x</title></head><body>a</body></html>\n", encoding="utf-8"
+    )
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.setattr(
+        takyon_core,
+        "_analytics_umami_config",
+        lambda: {"enabled": True, "website_id": "53c7278e-x", "script_src": "https://cloud.umami.is/script.js"},
+    )
+
+    r = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="trackly",
+        source_path="product/site",
+        publish_target="https://trackly.fourmanifold.com/",
+    )
+    assert r["status"] == "published"
+    served = (publish_root / "trackly" / "current" / "index.html").read_text(encoding="utf-8")
+    assert 'data-website-id="53c7278e-x"' in served
+    assert "cloud.umami.is/script.js" in served
+
+    # Disabled analytics → no tag baked.
+    (dist / "index.html").write_text(
+        "<html><head><title>x</title></head><body>b</body></html>\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(takyon_core, "_analytics_umami_config", lambda: {"enabled": False})
+    takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="trackly",
+        source_path="product/site",
+        publish_target="https://trackly.fourmanifold.com/",
+    )
+    served_off = (publish_root / "trackly" / "current" / "index.html").read_text(encoding="utf-8")
+    assert "data-website-id" not in served_off
+
+
 def test_publish_product_surface_prefers_dist_over_source_root_when_both_exist(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     site = business_root / "product" / "site"
