@@ -1155,8 +1155,18 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
     "google_search_console": ("TAKYON_GSC_SERVICE_ACCOUNT_KEY",),
     "llm": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"),
-    "meta": ("COMPOSIO_API_KEY",),
-    "metaads": ("COMPOSIO_API_KEY",),
+    "meta": (
+        "META_SYSTEM_USER_ACCESS_TOKEN",
+        "META_ACCESS_TOKEN",
+        "META_CAPI_TOKEN",
+        "COMPOSIO_API_KEY",
+    ),
+    "metaads": (
+        "META_SYSTEM_USER_ACCESS_TOKEN",
+        "META_ACCESS_TOKEN",
+        "META_CAPI_TOKEN",
+        "COMPOSIO_API_KEY",
+    ),
     "openai": ("OPENAI_API_KEY",),
     "openrouter": ("OPENROUTER_API_KEY",),
     "parallel": ("PARALLEL_API_KEY",),
@@ -12276,6 +12286,7 @@ def _publish_product_surface_path(
     source_path: str,
     publish_target: str,
     source_revision: int = 0,
+    surface: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     from . import storage
 
@@ -12297,6 +12308,15 @@ def _publish_product_surface_path(
     if publish_source is None:
         result["blocker"] = _product_publish_readiness_blocker(source_root)
         return result
+    if _surface_meta_pixel_enabled(surface):
+        pixel = _meta_pixel_config()
+        pixel_id = str(pixel.get("pixel_id") or "").strip() if isinstance(pixel, Mapping) else ""
+        if pixel_id:
+            result["meta_pixel_injected"] = _inject_meta_pixel_snippet(
+                publish_source,
+                pixel_id=pixel_id,
+                script_src=str(pixel.get("script_src") or "").strip(),
+            )
     publish_root = _product_publish_root()
     backend = storage.get_storage_backend()
     build_digests = storage.workspace_file_digests(publish_source)
@@ -20175,6 +20195,7 @@ def _finalize_product_surface_refresh(
             source_path=str(refresh.get("source_path") or source_path),
             publish_target=publish_target,
             source_revision=getattr(store, "_canonical_workspace_revision", lambda _slug: 0)(business),
+            surface=surface,
         )
     else:
         publish = {
@@ -26602,6 +26623,106 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _meta_pixel_config() -> dict[str, Any]:
+    """Read analytics.meta_pixel from the merged Takyon config."""
+    try:
+        from takyon_cli.config import load_config
+
+        pixel = (load_config().get("analytics") or {}).get("meta_pixel")
+        if isinstance(pixel, dict):
+            return dict(pixel)
+    except Exception:
+        return {}
+    return {}
+
+
+def _meta_pixel_snippet(pixel_id: str, *, script_src: str = "") -> str:
+    pid = str(pixel_id or "").strip()
+    if not pid:
+        return ""
+    src = html.escape(str(script_src or "https://connect.facebook.net/en_US/fbevents.js").strip(), quote=True)
+    escaped_pid = html.escape(pid, quote=True)
+    js_pid = json.dumps(pid)
+    js_src = json.dumps(str(script_src or "https://connect.facebook.net/en_US/fbevents.js").strip())
+    return (
+        f'<script data-takyon-meta-pixel="{escaped_pid}">'
+        "!function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?"
+        "n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;"
+        "n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);"
+        "t.async=!0;t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}"
+        f"(window,document,'script',{js_src});fbq('init',{js_pid});fbq('track','PageView');"
+        "</script>"
+        f'<noscript><img height="1" width="1" style="display:none" alt="" '
+        f'src="https://www.facebook.com/tr?id={escaped_pid}&ev=PageView&noscript=1" /></noscript>'
+    )
+
+
+def _inject_meta_pixel_snippet(site_root: Path, *, pixel_id: str, script_src: str = "") -> bool:
+    """Inject the shared Meta Pixel snippet into an HTML index under `site_root`."""
+    snippet = _meta_pixel_snippet(pixel_id, script_src=script_src)
+    if not snippet:
+        return False
+    index_path = site_root / "index.html"
+    try:
+        if not index_path.is_file():
+            return False
+        text = index_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if f'data-takyon-meta-pixel="{html.escape(str(pixel_id), quote=True)}"' in text or f"fbq('init',{json.dumps(str(pixel_id))})" in text:
+        return True
+    lowered = text.lower()
+    close_head = lowered.find("</head>")
+    if close_head == -1:
+        return False
+    try:
+        index_path.write_text(text[:close_head] + snippet + text[close_head:], encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _sync_meta_pixel_live_index_to_r2(slug: str, live_root: Path) -> bool:
+    """Overwrite the currently-served R2 index.html after live snippet injection."""
+    try:
+        from . import storage as _takyon_storage
+    except Exception:
+        from plugins.takyon import storage as _takyon_storage
+    if not _takyon_storage.r2_configured():
+        return True
+    try:
+        backend = _takyon_storage.R2StorageBackend()
+        served_build_id = (
+            backend.get(_takyon_storage.public_site_pointer_key(slug))
+            .decode("utf-8")
+            .strip()
+        )
+        index_bytes = (live_root / "index.html").read_bytes()
+        if not served_build_id or not index_bytes:
+            return False
+        backend.put(
+            _takyon_storage.public_site_object_key(slug, served_build_id, "index.html"),
+            index_bytes,
+            digest=hashlib.sha256(index_bytes).hexdigest(),
+        )
+        return True
+    except Exception as exc:
+        logging.getLogger("takyon.r2").warning(
+            "Meta pixel R2 edge write failed: slug=%s err=%s",
+            slug,
+            exc,
+        )
+        return False
+
+
+def _surface_meta_pixel_enabled(surface: Mapping[str, Any] | None) -> bool:
+    metadata = surface.get("metadata") if isinstance(surface, Mapping) else {}
+    if not isinstance(metadata, Mapping):
+        return False
+    meta_pixel = metadata.get("meta_pixel")
+    return isinstance(meta_pixel, Mapping) and bool(meta_pixel.get("enabled"))
+
+
 _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _META_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
@@ -26647,30 +26768,49 @@ def _meta_daily_budget_cap() -> float:
         return _META_MAX_DAILY_BUDGET_USD_DEFAULT
 
 
-def _meta_env_value(env_key: str) -> str:
-    if safebox.is_sensitive_env_key(env_key):
-        try:
-            value = safebox.read_env_backed_value(env_key) or ""
-        except Exception:
-            value = os.getenv(env_key) or ""
-    else:
-        value = os.getenv(env_key) or ""
-    return str(value).strip()
+def _meta_env_value(*env_keys: str, allow_env_fallback: bool = True) -> str:
+    keys = tuple(str(key or "").strip() for key in env_keys if str(key or "").strip())
+    if not keys:
+        return ""
+    try:
+        value = safebox.first_env_backed_value(*keys)
+    except Exception:
+        value = ""
+    if value:
+        return str(value).strip()
+    if allow_env_fallback:
+        # Test/local-dev fallback only. Production services carry TAKYON_HOST_ROLE +
+        # TAKYON_SAFEBOX_URL, so the Safebox read above is the live authority path.
+        for key in keys:
+            value = os.getenv(key) or ""
+            if value:
+                return str(value).strip()
+    return ""
 
 
 def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
-    """Resolve Meta Ads config from env and the active Composio connection."""
+    """Resolve Meta Ads config from the Safebox-backed Meta token first.
+
+    Composio remains a compatibility fallback for old deployments, but the
+    primary production rail is the non-expiring Meta system-user token stored in
+    Safebox (`META_SYSTEM_USER_ACCESS_TOKEN` / `META_ACCESS_TOKEN`).
+    """
     load_takyon_env()
-    version = (os.getenv("META_GRAPH_VERSION") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
+    version = (_meta_env_value("META_GRAPH_VERSION") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
     if not version:
         version = _META_DEFAULT_GRAPH_VERSION
     elif not version.startswith("v"):
         version = f"v{version}"
+    token = _meta_env_value(
+        "META_SYSTEM_USER_ACCESS_TOKEN",
+        "META_ACCESS_TOKEN",
+        allow_env_fallback=False,
+    )
     cfg = {
-        "token": "",
+        "token": token,
         "version": version,
-        "ad_account_id": (os.getenv("META_AD_ACCOUNT_ID") or "").strip(),
-        "page_id": (os.getenv("META_PAGE_ID") or "").strip(),
+        "ad_account_id": _meta_env_value("META_AD_ACCOUNT_ID"),
+        "page_id": _meta_env_value("META_PAGE_ID"),
         "composio_connected_account_id": "",
         "composio_user_id": (
             _meta_env_value("COMPOSIO_METAADS_USER_ID")
@@ -26679,11 +26819,14 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
         ),
         "composio_alias": _meta_env_value("COMPOSIO_METAADS_ALIAS") or "takyon-prod-meta-ads",
     }
-    if require_token:
+    if require_token and not cfg["token"]:
         try:
             cfg["composio_connected_account_id"] = composio_distribution.resolve_metaads_connected_account_id()
         except Exception as exc:
-            raise TakyonError(f"Meta action requires a Composio Meta Ads connection: {exc}") from exc
+            raise TakyonError(
+                "Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN "
+                f"in Safebox (or a legacy Composio Meta Ads connection): {exc}"
+            ) from exc
     return cfg
 
 
@@ -26738,13 +26881,60 @@ def _meta_graph(
     host: str = "graph.facebook.com",
     timeout: int = 60,
 ) -> dict[str, Any]:
-    """Call the Meta Graph API via the Composio Meta Ads connection."""
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if not connected_account_id:
-        raise TakyonError("Meta action requires an active Composio Meta Ads connection")
+    """Call the Meta Graph API with the Safebox-backed system token.
+
+    Legacy Composio proxying remains only as a fallback when no Meta token is
+    configured. The direct path keeps Open Graph authority tied to the durable
+    system-user token instead of a brittle third-party mirror.
+    """
+    token = str(cfg.get("token") or "").strip()
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     rel = path.lstrip("/")
     method = method.upper()
+    if token:
+        try:
+            import httpx
+        except Exception as exc:  # pragma: no cover - dependency missing
+            raise TakyonError("Meta Graph direct calls require the httpx package") from exc
+        url = f"https://{host}/{cfg['version']}/{rel}"
+        request_kwargs: dict[str, Any] = {"timeout": float(timeout)}
+        payload = {**clean, "access_token": token}
+        if method == "GET":
+            request_kwargs["params"] = payload
+        else:
+            request_kwargs["data"] = payload
+        try:
+            resp = httpx.request(method, url, **request_kwargs)
+            data = resp.json()
+        except Exception as exc:
+            raise TakyonError(f"Meta Graph {method} /{rel} failed: {exc}") from exc
+        if resp.status_code >= 400 or (isinstance(data, Mapping) and data.get("error")):
+            error = data.get("error") if isinstance(data, Mapping) else {}
+            message = (
+                str(error.get("message") or "").strip()
+                if isinstance(error, Mapping)
+                else ""
+            )
+            code = (
+                str(error.get("code") or "").strip()
+                if isinstance(error, Mapping)
+                else ""
+            )
+            detail = message or getattr(resp, "text", "")
+            raise TakyonError(
+                f"Meta Graph {method} /{rel} failed"
+                + (f" (code {code})" if code else "")
+                + (f": {detail}" if detail else "")
+            )
+        if isinstance(data, Mapping):
+            return dict(data)
+        if isinstance(data, list):
+            return {"data": data}
+        return {}
+
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if not connected_account_id:
+        raise TakyonError("Meta action requires a Meta system-user token or active Composio Meta Ads connection")
     try:
         payload = composio_distribution.metaads_proxy_request(
             method=method,
@@ -26777,8 +26967,26 @@ def _meta_upload_advideo(
     business: str = "",
     video_rel: str = "",
 ) -> str:
-    """Upload a local mp4 to Meta via Composio using a short-lived signed file URL."""
+    """Upload a local mp4 to Meta using a short-lived signed file URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
+    token = str(cfg.get("token") or "").strip()
+    if token:
+        if not business or not video_rel:
+            raise TakyonError("Meta video upload requires the business slug and ad_video_path")
+        signed_url = _business_file_presigned_get_url(business, video_rel)
+        result = _meta_graph(
+            "POST",
+            f"{acct}/advideos",
+            {"name": name, "file_url": signed_url},
+            cfg,
+            host="graph-video.facebook.com",
+            timeout=180,
+        )
+        video_id = str(result.get("id") or "").strip()
+        if not video_id:
+            raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
+        return video_id
+
     connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
     if not connected_account_id:
         raise TakyonError("Meta action requires an active Composio Meta Ads connection")
@@ -26805,8 +27013,43 @@ def _meta_upload_advideo(
 
 
 def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any]:
-    """Upload a local image to Meta via Composio and return the image hash and URL."""
+    """Upload a local image to Meta and return the image hash and URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
+    token = str(cfg.get("token") or "").strip()
+    if token:
+        try:
+            import httpx
+        except Exception as exc:  # pragma: no cover - dependency missing
+            raise TakyonError("Meta image upload requires the httpx package") from exc
+        mime = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+        try:
+            with image_path.open("rb") as handle:
+                resp = httpx.post(
+                    f"https://graph.facebook.com/{cfg['version']}/{acct}/adimages",
+                    data={"access_token": token, "name": image_path.name},
+                    files={"filename": (image_path.name, handle, mime)},
+                    timeout=180.0,
+                )
+            data = resp.json()
+        except Exception as exc:
+            raise TakyonError(f"Meta image upload failed: {exc}") from exc
+        if resp.status_code >= 400 or (isinstance(data, Mapping) and data.get("error")):
+            error = data.get("error") if isinstance(data, Mapping) else {}
+            message = str(error.get("message") or "").strip() if isinstance(error, Mapping) else ""
+            raise TakyonError(f"Meta image upload failed: {message or getattr(resp, 'text', '')}")
+        result = dict(data) if isinstance(data, Mapping) else {}
+        images = result.get("images") if isinstance(result.get("images"), Mapping) else {}
+        first = next(iter(images.values()), {}) if images else {}
+        if isinstance(first, Mapping):
+            image_hash = str(first.get("hash") or result.get("hash") or "").strip()
+            image_url = str(first.get("url") or result.get("url") or "").strip()
+        else:
+            image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
+            image_url = str(result.get("url") or result.get("image_url") or "").strip()
+        if not image_hash:
+            raise TakyonError(f"Meta image upload returned no image hash for {image_path.name}")
+        return {"hash": image_hash, "url": image_url or None}
+
     connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
     if not connected_account_id:
         raise TakyonError("Meta action requires an active Composio Meta Ads connection")

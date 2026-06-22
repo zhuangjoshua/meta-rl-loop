@@ -19,6 +19,9 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +77,194 @@ def _require_internal_session(
             status_code=401,
             detail="invalid_dashboard_session_token",
             headers=_UNAUTH_HEADERS,
+        )
+
+
+def _meta_float(value: Any) -> float:
+    try:
+        return float(str(value or "0").strip() or "0")
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _meta_int(value: Any) -> int:
+    try:
+        return int(float(str(value or "0").strip() or "0"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _meta_gateway_pixel_config(core: Any) -> tuple[dict[str, Any], str]:
+    pixel = core._meta_pixel_config()
+    if not isinstance(pixel, dict):
+        pixel = {}
+    pixel_id = str(pixel.get("pixel_id") or "").strip()
+    if not bool(pixel.get("enabled")) or not pixel_id:
+        return pixel, ""
+    return pixel, pixel_id
+
+
+def _meta_safe_receipt_path(core: Any, rel: str) -> str:
+    return core._safe_relpath(rel, field="receipt").as_posix()
+
+
+def _meta_write_receipt(core: Any, business_root: Path, rel: str, payload: dict[str, Any]) -> str:
+    receipt_rel = _meta_safe_receipt_path(core, rel)
+    receipt_abs = (business_root / receipt_rel).resolve()
+    if business_root.resolve() not in (receipt_abs, *receipt_abs.parents):
+        raise HTTPException(status_code=400, detail="receipt path escaped business root")
+    core._atomic_write_text(
+        receipt_abs,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return receipt_rel
+
+
+def _meta_public_url(core: Any, business: str, surface: dict[str, Any] | None = None) -> str:
+    surface = surface if isinstance(surface, dict) else {}
+    raw = (
+        surface.get("public_url")
+        or surface.get("publish_target")
+        or core._product_publish_target(business)
+    )
+    return core._product_publish_target(business, raw)
+
+
+def _meta_pixel_marker_present(core: Any, html: str, pixel_id: str) -> bool:
+    if not html:
+        return False
+    return (
+        f'data-takyon-meta-pixel="{pixel_id}"' in html
+        or f"fbq('init',{json.dumps(str(pixel_id))})" in html
+        or f"tr?id={urllib.parse.quote(str(pixel_id))}" in html
+    )
+
+
+def _meta_fetch_html(url: str) -> tuple[int, str, str]:
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query.append(("_takyon_meta_pixel_probe", str(int(time.time()))))
+    probe_url = urllib.parse.urlunsplit(
+        (
+            parsed.scheme or "https",
+            parsed.netloc,
+            parsed.path or "/",
+            urllib.parse.urlencode(query),
+            "",
+        )
+    )
+    request = urllib.request.Request(
+        probe_url,
+        headers={"User-Agent": "Takyon Meta pixel verifier"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read(2_000_000).decode("utf-8", errors="replace")
+            return int(getattr(response, "status", 0) or 0), body, probe_url
+    except urllib.error.HTTPError as exc:
+        body = exc.read(2_000_000).decode("utf-8", errors="replace")
+        return int(exc.code or 0), body, probe_url
+    except Exception as exc:
+        return 0, "", f"{probe_url} ({exc})"
+
+
+def _meta_custom_conversion_name(business: str, event_type: str) -> str:
+    return f"Takyon {business} {event_type}"
+
+
+def _meta_find_custom_conversion(
+    core: Any,
+    cfg: dict[str, Any],
+    *,
+    ad_account_id: str,
+    business: str,
+    pixel_id: str,
+    event_type: str,
+    public_url: str,
+) -> dict[str, Any] | None:
+    acct = core._meta_account_path(ad_account_id)
+    try:
+        result = core._meta_graph(
+            "GET",
+            f"{acct}/customconversions",
+            {
+                "fields": "id,name,pixel_id,custom_event_type,rule",
+                "limit": 100,
+            },
+            cfg,
+        )
+    except Exception:
+        return None
+    rows = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), list) else []
+    expected_name = _meta_custom_conversion_name(business, event_type).lower()
+    host = urllib.parse.urlparse(public_url).netloc.lower()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip().lower()
+        row_pixel = str(row.get("pixel_id") or "").strip()
+        row_event = str(row.get("custom_event_type") or "").strip().upper()
+        rule_text = json.dumps(row.get("rule") or "", sort_keys=True).lower()
+        if name == expected_name:
+            return dict(row)
+        if row_pixel == pixel_id and row_event == event_type and business.lower() in name:
+            return dict(row)
+        if row_pixel == pixel_id and host and host in rule_text:
+            return dict(row)
+    return None
+
+
+def _meta_ensure_custom_conversion(
+    core: Any,
+    cfg: dict[str, Any],
+    *,
+    ad_account_id: str,
+    business: str,
+    pixel_id: str,
+    event_type: str,
+    public_url: str,
+    conversion_path: str,
+) -> dict[str, Any]:
+    existing = _meta_find_custom_conversion(
+        core,
+        cfg,
+        ad_account_id=ad_account_id,
+        business=business,
+        pixel_id=pixel_id,
+        event_type=event_type,
+        public_url=public_url,
+    )
+    if existing:
+        return {"ok": True, "status": "existing", "custom_conversion": existing}
+    acct = core._meta_account_path(ad_account_id)
+    parsed = urllib.parse.urlparse(public_url)
+    url_contains = parsed.netloc + (conversion_path if conversion_path.startswith("/") else f"/{conversion_path}")
+    try:
+        created = core._meta_graph(
+            "POST",
+            f"{acct}/customconversions",
+            {
+                "name": _meta_custom_conversion_name(business, event_type),
+                "pixel_id": pixel_id,
+                "custom_event_type": event_type,
+                "rule": json.dumps({"url": {"i_contains": url_contains}}, sort_keys=True),
+            },
+            cfg,
+        )
+        return {"ok": bool(created.get("id")), "status": "created", "custom_conversion": created}
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error": str(exc)}
+
+
+def _meta_record_event(core: Any, store: Any, business: str, event_type: str, payload: dict[str, Any]) -> None:
+    with store._connect() as conn:
+        store._ensure_business(conn, business)
+        store._record_event(
+            conn,
+            scope=f"business:{business}/metrics",
+            business_slug=business,
+            event_type=event_type,
+            payload=payload,
         )
 
 
@@ -1388,6 +1579,397 @@ def build_creative_gateway_router() -> APIRouter:
             "level": level,
             "object_id": object_id,
             "rows": rows,
+        }
+
+    @router.post("/meta-evaluate")
+    def meta_evaluate(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        level = str(body.get("level") or "campaign").strip().lower()
+        if level not in {"campaign", "adset", "ad"}:
+            raise HTTPException(status_code=400, detail="level must be campaign, adset, or ad")
+        object_id = str(body.get("object_id") or body.get(f"{level}_id") or "").strip()
+        if not object_id:
+            raise HTTPException(status_code=400, detail="object_id is required")
+
+        cfg = core._meta_config(require_token=True)
+        window = str(body.get("window") or "last_7d").strip().lower() or "last_7d"
+        date_preset = {
+            "today": "today",
+            "yesterday": "yesterday",
+            "last_3d": "last_3d",
+            "last_7d": "last_7d",
+            "last_14d": "last_14d",
+            "last_28d": "last_28d",
+            "last_30d": "last_30d",
+        }.get(window, "last_7d")
+        params = {
+            "fields": ",".join(
+                [
+                    "account_currency",
+                    "date_start",
+                    "date_stop",
+                    "impressions",
+                    "reach",
+                    "clicks",
+                    "spend",
+                    "cpc",
+                    "cpm",
+                    "ctr",
+                ]
+            ),
+            "date_preset": date_preset,
+        }
+        try:
+            result = core._meta_graph("GET", f"{object_id}/insights", params, cfg)
+        except Exception as exc:
+            return {
+                "success": False,
+                "status": "failed",
+                "business": business,
+                "level": level,
+                "object_id": object_id,
+                "window": window,
+                "error": str(exc),
+            }
+        rows = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), list) else []
+        totals = core._meta_aggregate_insights_rows(rows)
+        targets = body.get("targets") if isinstance(body.get("targets"), dict) else {}
+        target_cpc_cents = _meta_int(targets.get("cpc_cents"))
+        if not target_cpc_cents and targets.get("cpc_usd") is not None:
+            target_cpc_cents = int(round(_meta_float(targets.get("cpc_usd")) * 100))
+        spend_cents = int(totals.get("spend_cents") or 0)
+        impressions = int(totals.get("impressions") or 0)
+        clicks = int(totals.get("clicks") or 0)
+        ctr = float(totals.get("ctr") or 0.0)
+        cpc_cents = int(round(float(totals.get("cpc") or 0.0) * 100)) if clicks else 0
+
+        verdict = "learning"
+        recommended_action = "wait"
+        reasons: list[str] = []
+        if impressions < 100 or spend_cents < 100:
+            reasons.append("insufficient_delivery")
+        elif clicks <= 0 and spend_cents >= 500:
+            verdict = "needs_work"
+            recommended_action = "pause_or_iterate"
+            reasons.append("spent_without_clicks")
+        elif ctr < 0.5 and impressions >= 1000:
+            verdict = "needs_work"
+            recommended_action = "iterate_creative_or_targeting"
+            reasons.append("low_ctr")
+        elif target_cpc_cents and cpc_cents > target_cpc_cents:
+            verdict = "needs_work"
+            recommended_action = "lower_budget_or_iterate"
+            reasons.append("cpc_above_target")
+        else:
+            verdict = "promising"
+            recommended_action = "continue"
+            reasons.append("delivery_within_basic_thresholds")
+
+        now = core._now()
+        slug = core._file_slug(f"{level}-{object_id}-{body.get('idempotency_key') or int(time.time())}", "meta-evaluation")
+        receipt = {
+            "success": True,
+            "status": "evaluated",
+            "business": business,
+            "level": level,
+            "object_id": object_id,
+            "window": window,
+            "date_preset": date_preset,
+            "verdict": verdict,
+            "recommended_action": recommended_action,
+            "reasons": reasons,
+            "metrics": totals,
+            "targets": targets,
+            "graph_version": cfg["version"],
+            "created_at": now,
+        }
+        business_root = store._business_root(business)
+        receipt_rel = _meta_write_receipt(
+            core,
+            business_root,
+            f"metrics/meta-ads/{core._slugify(business)}/evaluations/{slug}.json",
+            receipt,
+        )
+        receipt["receipt"] = receipt_rel
+        _meta_record_event(core, store, business, "meta_ad.evaluate", receipt)
+        store._sync_business_workspace_remote(business)
+        return receipt
+
+    @router.post("/meta-pixel-ensure")
+    def meta_pixel_ensure(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        business_root = store._business_root(business)
+        pixel_cfg, pixel_id = _meta_gateway_pixel_config(core)
+        if not pixel_id:
+            return {
+                "success": False,
+                "status": "blocked",
+                "reason": "meta_pixel_unconfigured",
+                "business": business,
+            }
+        cfg = core._meta_config(require_token=True)
+        ad_account_id = str(body.get("ad_account_id") or cfg.get("ad_account_id") or "").strip()
+        if not ad_account_id:
+            return {
+                "success": False,
+                "status": "blocked",
+                "reason": "meta_ad_account_unconfigured",
+                "business": business,
+            }
+        conversion_path = str(body.get("conversion_path") or "/").strip() or "/"
+        if "://" in conversion_path or conversion_path.startswith("//"):
+            raise HTTPException(status_code=400, detail="conversion_path must be a site-local path")
+        if not conversion_path.startswith("/"):
+            conversion_path = f"/{conversion_path}"
+        event_type = str(body.get("custom_event_type") or "LEAD").strip().upper() or "LEAD"
+        if not event_type.replace("_", "").isalnum():
+            raise HTTPException(status_code=400, detail="custom_event_type contains invalid characters")
+
+        with store._connect() as db:
+            store._ensure_business(db, business)
+            surface = store._app_surface_contract(db, business)
+        source_path = str(surface.get("source_path") or "").strip()
+        if not source_path:
+            return {
+                "success": False,
+                "status": "blocked",
+                "reason": "product_surface_missing",
+                "business": business,
+            }
+        public_url = _meta_public_url(core, business, surface)
+        conversion = _meta_ensure_custom_conversion(
+            core,
+            cfg,
+            ad_account_id=ad_account_id,
+            business=business,
+            pixel_id=pixel_id,
+            event_type=event_type,
+            public_url=public_url,
+            conversion_path=conversion_path,
+        )
+        metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+        meta_pixel_metadata = {
+            **(metadata.get("meta_pixel") if isinstance(metadata.get("meta_pixel"), dict) else {}),
+            "enabled": True,
+            "pixel_id": pixel_id,
+            "conversion_path": conversion_path,
+            "custom_event_type": event_type,
+            "custom_conversion_id": str(
+                ((conversion.get("custom_conversion") or {}) if isinstance(conversion, dict) else {}).get("id") or ""
+            ),
+            "public_url": public_url,
+            "updated_at": core._now(),
+        }
+        with store._connect() as db:
+            store._ensure_business(db, business)
+            current = store._app_surface_contract(db, business)
+            current_metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
+            merged_metadata = {**current_metadata, "meta_pixel": meta_pixel_metadata}
+            db.execute(
+                "UPDATE app_surface_contracts SET metadata_json = ?, updated_at = ? WHERE business_slug = ?",
+                (json.dumps(merged_metadata, ensure_ascii=False, sort_keys=True), core._now(), business),
+            )
+            store._rewrite_app_files(db, business)
+            store._record_event(
+                db,
+                scope=f"business:{business}/app",
+                business_slug=business,
+                event_type="meta_pixel.ensure_metadata",
+                payload={"metadata": {"meta_pixel": meta_pixel_metadata}},
+            )
+
+        source_installed = False
+        publish_source_label = ""
+        try:
+            source_rel = core._safe_relpath(source_path, field="source_path")
+            source_root = (business_root / source_rel).resolve()
+            if business_root.resolve() in (source_root, *source_root.parents):
+                publish_source, publish_source_label = core._product_static_publish_source(source_root)
+                if publish_source is not None:
+                    source_installed = core._inject_meta_pixel_snippet(
+                        publish_source,
+                        pixel_id=pixel_id,
+                        script_src=str(pixel_cfg.get("script_src") or "").strip(),
+                    )
+        except Exception:
+            source_installed = False
+
+        live_root = core._product_live_current_root(business)
+        installed_vps = core._inject_meta_pixel_snippet(
+            live_root,
+            pixel_id=pixel_id,
+            script_src=str(pixel_cfg.get("script_src") or "").strip(),
+        )
+        edge_synced = core._sync_meta_pixel_live_index_to_r2(business, live_root) if installed_vps else False
+        public_status, public_html, probe_url = _meta_fetch_html(public_url)
+        installed_r2 = public_status == 200 and _meta_pixel_marker_present(core, public_html, pixel_id)
+        ok = bool(source_installed and installed_vps and installed_r2 and conversion.get("ok"))
+        receipt = {
+            "success": ok,
+            "status": "installed" if ok else "blocked",
+            "business": business,
+            "pixel_id": pixel_id,
+            "public_url": public_url,
+            "conversion_path": conversion_path,
+            "custom_event_type": event_type,
+            "custom_conversion_ok": bool(conversion.get("ok")),
+            "custom_conversion": conversion.get("custom_conversion"),
+            "custom_conversion_status": conversion.get("status"),
+            "custom_conversion_error": conversion.get("error"),
+            "installed_source": source_installed,
+            "source_publish_label": publish_source_label,
+            "installed_vps": installed_vps,
+            "installed_r2": installed_r2,
+            "edge_synced": edge_synced,
+            "public_probe_status": public_status,
+            "public_probe_url": probe_url,
+            "created_at": core._now(),
+        }
+        receipt_rel = _meta_write_receipt(
+            core,
+            business_root,
+            f"metrics/meta-pixel/{core._slugify(business)}/ensure.json",
+            receipt,
+        )
+        receipt["receipt"] = receipt_rel
+        _meta_record_event(core, store, business, "meta_pixel.ensure", receipt)
+        store._sync_business_workspace_remote(business)
+        return receipt
+
+    @router.post("/meta-pixel-verify")
+    def meta_pixel_verify(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        business_root = store._business_root(business)
+        pixel_cfg, pixel_id = _meta_gateway_pixel_config(core)
+        if not pixel_id:
+            return {
+                "success": False,
+                "status": "blocked",
+                "reason": "meta_pixel_unconfigured",
+                "business": business,
+                "ok": False,
+            }
+        with store._connect() as db:
+            store._ensure_business(db, business)
+            surface = store._app_surface_contract(db, business)
+        public_url = _meta_public_url(core, business, surface)
+        live_index = core._product_live_current_root(business) / "index.html"
+        try:
+            live_html = live_index.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            live_html = ""
+        installed_vps = _meta_pixel_marker_present(core, live_html, pixel_id)
+        public_status, public_html, probe_url = _meta_fetch_html(public_url)
+        installed_r2 = public_status == 200 and _meta_pixel_marker_present(core, public_html, pixel_id)
+
+        cfg = core._meta_config(require_token=True)
+        dataset: dict[str, Any] = {}
+        dataset_error = ""
+        try:
+            dataset = core._meta_graph(
+                "GET",
+                pixel_id,
+                {"fields": "id,name,is_unavailable,last_fired_time"},
+                cfg,
+            )
+        except Exception as exc:
+            dataset_error = str(exc)
+        dataset_ok = bool(dataset.get("id") == pixel_id and not dataset.get("is_unavailable"))
+
+        metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+        meta_pixel = metadata.get("meta_pixel") if isinstance(metadata.get("meta_pixel"), dict) else {}
+        event_type = str(meta_pixel.get("custom_event_type") or body.get("custom_event_type") or "LEAD").strip().upper() or "LEAD"
+        custom = _meta_find_custom_conversion(
+            core,
+            cfg,
+            ad_account_id=str(body.get("ad_account_id") or cfg.get("ad_account_id") or "").strip(),
+            business=business,
+            pixel_id=pixel_id,
+            event_type=event_type,
+            public_url=public_url,
+        ) if str(body.get("ad_account_id") or cfg.get("ad_account_id") or "").strip() else None
+        custom_conversion_ok = bool(custom and custom.get("id"))
+        ok = bool(installed_vps and installed_r2 and dataset_ok and custom_conversion_ok)
+        receipt = {
+            "success": ok,
+            "status": "ok" if ok else "blocked",
+            "business": business,
+            "pixel_id": pixel_id,
+            "public_url": public_url,
+            "installed_vps": installed_vps,
+            "installed_r2": installed_r2,
+            "dataset_ok": dataset_ok,
+            "dataset": dataset,
+            "dataset_error": dataset_error,
+            "custom_conversion_ok": custom_conversion_ok,
+            "custom_conversion": custom,
+            "public_probe_status": public_status,
+            "public_probe_url": probe_url,
+            "ok": ok,
+            "created_at": core._now(),
+        }
+        receipt_rel = _meta_write_receipt(
+            core,
+            business_root,
+            f"metrics/meta-pixel/{core._slugify(business)}/preflight.json",
+            receipt,
+        )
+        receipt["receipt"] = receipt_rel
+        _meta_record_event(core, store, business, "meta_pixel.verify", receipt)
+        store._sync_business_workspace_remote(business)
+        return receipt
+
+    @router.post("/meta-pixel-read")
+    def meta_pixel_read(
+        body: dict | None = Body(default=None),
+        _: None = Depends(_require_internal_session),
+    ) -> dict[str, Any]:
+        body = body or {}
+        core = _core()
+        store = core._store()
+        business = core._resolved_business_slug(body, required=True)
+        business_root = store._business_root(business)
+        with store._connect() as db:
+            store._ensure_business(db, business)
+            surface = store._app_surface_contract(db, business)
+        metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+        meta_pixel = metadata.get("meta_pixel") if isinstance(metadata.get("meta_pixel"), dict) else {}
+
+        def read_json(rel: str) -> dict[str, Any] | None:
+            path = business_root / _meta_safe_receipt_path(core, rel)
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+        ensure_receipt = read_json(f"metrics/meta-pixel/{core._slugify(business)}/ensure.json")
+        verify_receipt = read_json(f"metrics/meta-pixel/{core._slugify(business)}/preflight.json")
+        return {
+            "success": True,
+            "status": "read",
+            "business": business,
+            "public_url": _meta_public_url(core, business, surface),
+            "meta_pixel": meta_pixel,
+            "ensure_receipt": ensure_receipt,
+            "verify_receipt": verify_receipt,
         }
 
     @router.post("/reddit-launch")
