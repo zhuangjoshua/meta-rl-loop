@@ -101,9 +101,14 @@ class _UsageLedgerAdapter:
 
         key = str(uuid.uuid4())
         with _safebox_db_conn() as conn:
+            # A PRODUCT (sub-user) scope ALWAYS gets a concrete per-user limit so the 0037 gate is
+            # actually enforced (it only enforces when the limit is not null). On any entitlement/plan
+            # miss the plan-derived limit is 0 ⇒ reserve refuses (402), never None ⇒ "no cap". Only an
+            # OPERATOR scope (app_user_id is None) gets None (no per-user cap on operator spend).
             limit = None
             tier = None
             if scope.app_user_id:
+                plan = None
                 ent = app_entitlements.get_active_entitlement(conn, scope.business_slug, scope.app_user_id)
                 if ent is not None:
                     tier = getattr(ent, "tier", None)
@@ -112,7 +117,7 @@ class _UsageLedgerAdapter:
                         if getattr(ent, "plan_key", None)
                         else None
                     )
-                    limit = _user_weekly_budget_microusd(plan)
+                limit = _user_weekly_budget_microusd(plan)
             app_usage.reserve_usage(
                 conn,
                 scope.business_slug,
@@ -394,6 +399,73 @@ def _gemini_image_provider_caller(payload: dict[str, Any]):
     return _call
 
 
+def _anthropic_estimate(payload: dict[str, Any]):
+    """Build the SERVER-side estimate closure ``(scope) -> int`` for an Anthropic Messages call.
+
+    The estimate mirrors the provider caller's own pricing source: the billed cost of the canonical
+    payload's estimated input tokens + the requested max_tokens (the worst-case output), so a client
+    cannot pass a tiny ``estimate_microusd`` to duck the per-user cap and then run an expensive call.
+    Fail-closed: an unpriced model raises ``BrokerLedgerError`` before any reserve."""
+    from . import ai_provider
+
+    _built, model, estimated_input_tokens = ai_provider.anthropic_payload(payload or {})
+    max_tokens = int((_built or {}).get("max_tokens") or 0)
+
+    def _estimate(_scope: CapabilityScope) -> int:
+        try:
+            _realized, billed = ai_provider.billed_microusd_cost(
+                model, int(estimated_input_tokens), int(max_tokens)
+            )
+        except ai_provider.AnthropicPricingUnavailable as exc:
+            raise BrokerLedgerError("anthropic_pricing_unavailable") from exc
+        return int(billed)
+
+    return _estimate
+
+
+def _tavily_estimate(payload: dict[str, Any]):
+    """Build the SERVER-side estimate closure for a Tavily search/extract call: the EXACT per-request
+    price for the resolved operation/units (the same figure the provider caller settles). Fail-closed:
+    an unpriced operation raises ``BrokerLedgerError`` before any reserve."""
+    from . import ai_provider
+
+    body = dict(payload or {})
+    endpoint = str(body.get("endpoint") or body.get("operation") or "search").strip("/").lower()
+    operation = str(body.get("operation") or endpoint).strip().lower()
+    units = max(1, int(body.get("units") or 1))
+
+    def _estimate(_scope: CapabilityScope) -> int:
+        try:
+            return int(ai_provider.tavily_request_microusd(operation, units=units))
+        except ai_provider.TavilyPricingUnavailable as exc:
+            raise BrokerLedgerError("tavily_pricing_unavailable") from exc
+
+    return _estimate
+
+
+def _gemini_image_estimate(payload: dict[str, Any]):
+    """Build the SERVER-side estimate closure for a Gemini image call: the EXACT canonical request
+    price for the image model (the same figure the provider caller settles). Fail-closed: an unpriced
+    image action raises ``BrokerLedgerError`` before any reserve."""
+    from decimal import ROUND_CEILING, Decimal
+
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+
+    from . import creative_gateway
+
+    def _estimate(_scope: CapabilityScope) -> int:
+        priced = estimate_usage_cost(
+            creative_gateway._GEMINI_IMAGE_MODEL,
+            CanonicalUsage(request_count=1),
+            provider="gemini",
+        )
+        if priced.amount_usd is None:
+            raise BrokerLedgerError("gemini_image_pricing_unavailable")
+        return int((priced.amount_usd * Decimal("1000000")).to_integral_value(rounding=ROUND_CEILING))
+
+    return _estimate
+
+
 def _broker_provider_route(
     body: "_ProviderCallBody",
     *,
@@ -401,10 +473,13 @@ def _broker_provider_route(
     provider: str,
     key_resolver,
     caller_builder,
+    estimate_builder,
 ) -> dict[str, Any]:
     """Shared body for the three provider routes: resolve/mint the token, then hand the whole brokered
-    call to ``safebox_broker.handle_provider_request`` so verify -> single-use -> reserve -> key-local
-    -> settle/release all happen INSIDE the safebox process. Returns the KEY-FREE provider result."""
+    call to ``safebox_broker.handle_provider_request`` so verify -> ceiling -> reserve -> single-use
+    -> key-local -> settle/release all happen INSIDE the safebox process. The reserve is gated on
+    ``max(server_estimate, client_estimate)`` (``estimate_builder`` mirrors the provider's own pricing
+    source) so a client cannot pass a tiny estimate to duck the cap. Returns the KEY-FREE result."""
     from . import safebox_broker
     from .safebox_capability import CapabilityError
 
@@ -415,11 +490,16 @@ def _broker_provider_route(
     now = int(time.time())
     token = str(body.token or "").strip()
     if not token:
-        # No pre-minted token: mint one here from the supplied identity, then broker it. This keeps a
-        # single round-trip viable while still passing through the same authoritative validation.
+        # No pre-minted token: mint one here from the supplied identity, then broker it. The
+        # entitlement/ceiling decision and the provider invocation must be the SAME action, so the
+        # supplied action MUST map to THIS route's audience before we mint — otherwise a caller could
+        # mint a cheap action and broker an expensive provider under it.
+        inline_action = str(body.action or "").strip()
+        if _ACTION_AUDIENCE_DEFAULTS.get(inline_action) != audience:
+            raise HTTPException(status_code=400, detail="action_audience_mismatch")
         token = _mint_capability_token(
             business=str(body.business or ""),
-            action=str(body.action or ""),
+            action=inline_action,
             max_cost_microusd=int(body.estimate_microusd),
             session_token=body.session_token,
             operator_user_id=None,
@@ -430,6 +510,7 @@ def _broker_provider_route(
 
     ledger = _UsageLedgerAdapter(provider=provider)
     provider_caller = caller_builder(body.payload or {})
+    estimate_fn = estimate_builder(body.payload or {})
 
     try:
         return safebox_broker.handle_provider_request(
@@ -442,11 +523,20 @@ def _broker_provider_route(
             key_resolver=key_resolver,
             provider_caller=provider_caller,
             estimate_microusd=int(body.estimate_microusd),
+            estimate_fn=estimate_fn,
         )
     except CapabilityError as exc:
         raise HTTPException(status_code=401, detail=f"capability_invalid: {exc}") from exc
     except safebox_broker.BrokerError as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from exc
+    except (RuntimeError, BrokerLedgerError) as exc:
+        # A provider/ledger failure: never leak the upstream provider body. A fail-closed
+        # *_unconfigured (missing key) or *_pricing_unavailable (unpriced action) is a 503 with its
+        # own clear code; anything else is a generic 502.
+        message = str(exc)
+        if message.endswith("_unconfigured") or message.endswith("_pricing_unavailable"):
+            raise HTTPException(status_code=503, detail=message) from exc
+        raise HTTPException(status_code=502, detail="provider_error") from exc
 
 
 def _mint_capability_token(
@@ -831,11 +921,14 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, str]:
         _require_internal_token(authorization)
-        audience = (
-            str(body.audience or "").strip()
-            or _ACTION_AUDIENCE_DEFAULTS.get(str(body.action or "").strip())
-            or str(body.action or "").strip()
-        )
+        # Audience is derived SOLELY from the action map. We IGNORE body.audience: the
+        # entitlement/ceiling decision and the provider invocation must be the SAME action, so a
+        # caller must never be able to mint action="ping" but audience="anthropic.messages" and then
+        # broker an expensive provider call under a cheap action's scope. An action with no mapped
+        # audience is unbrokerable -> 400.
+        audience = _ACTION_AUDIENCE_DEFAULTS.get(str(body.action or "").strip())
+        if not audience:
+            raise HTTPException(status_code=400, detail="unmappable_action")
         ttl_seconds = int(body.ttl_seconds or _CAP_TTL_SECONDS)
         if ttl_seconds <= 0:
             raise HTTPException(status_code=400, detail="ttl_must_be_positive")
@@ -863,6 +956,7 @@ def build_safebox_app() -> FastAPI:
             provider="anthropic",
             key_resolver=_anthropic_key_resolver,
             caller_builder=_anthropic_provider_caller,
+            estimate_builder=_anthropic_estimate,
         )
 
     @app.post("/v1/providers/tavily/search")
@@ -877,6 +971,7 @@ def build_safebox_app() -> FastAPI:
             provider="tavily",
             key_resolver=_tavily_key_resolver,
             caller_builder=_tavily_provider_caller,
+            estimate_builder=_tavily_estimate,
         )
 
     @app.post("/v1/providers/gemini/image")
@@ -891,6 +986,7 @@ def build_safebox_app() -> FastAPI:
             provider="gemini",
             key_resolver=_gemini_image_key_resolver,
             caller_builder=_gemini_image_provider_caller,
+            estimate_builder=_gemini_image_estimate,
         )
 
     return app

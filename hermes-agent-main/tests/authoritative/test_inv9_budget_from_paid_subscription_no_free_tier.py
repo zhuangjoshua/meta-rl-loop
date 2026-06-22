@@ -126,14 +126,11 @@ def test_no_user_monthly_free_floor_constant():
 def test_no_entitlement_means_zero_budget_not_floor():
     """No active paid plan ⇒ 0 budget — NOT a $0.50 (or any positive) free floor.
 
-    `_user_monthly_budget_microusd(None)` is the "no plan policy" path. Under
+    `_user_weekly_budget_microusd(None)` is the "no plan policy" path. Under
     invariant 9 it must resolve to 0 so that, with the per-user gate active, the
-    reserve refuses (the gateway then surfaces 402). Today it returns the $0.50
-    floor — a free tier.
-
-    RED on current code: ai_gateway.py:257-258 returns _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD.
+    reserve refuses (the gateway then surfaces 402).
     """
-    assert ai_gateway._user_monthly_budget_microusd(None) == 0, (
+    assert ai_gateway._user_weekly_budget_microusd(None) == 0, (
         "No plan ⇒ budget must be 0 (refuse → 402), not a free floor."
     )
 
@@ -141,28 +138,31 @@ def test_no_entitlement_means_zero_budget_not_floor():
 def test_free_tier_plan_grants_zero_budget():
     """A `free` tier plan left at 0 must stay 0 — no floor top-up.
 
-    Today `_user_monthly_budget_microusd` (ai_gateway.py:260-261) detects a free
-    tier at 0 and substitutes the $0.50 floor, manufacturing a free allowance.
     Invariant 9: budget comes ONLY from a PAID subscription; a free tier funds 0.
-
-    RED on current code: the free-tier branch returns the floor.
     """
     free_plan = _plan(tier="free", included_ai_budget_microusd=0)
-    assert ai_gateway._user_monthly_budget_microusd(free_plan) == 0, (
+    assert ai_gateway._user_weekly_budget_microusd(free_plan) == 0, (
         "A free-tier plan must grant exactly its configured (0) budget, not the floor."
     )
 
 
-def test_paid_plan_budget_is_exactly_included_ai_budget():
-    """A paid plan's per-user budget == its `included_ai_budget_microusd`, exactly.
+def test_paid_plan_budget_is_the_included_ai_budget_prorated_to_the_window():
+    """A paid plan's per-user budget == its `included_ai_budget_microusd` pro-rated to
+    the usage window, with NO markup/scaling beyond that documented pro-ration.
 
-    This half already holds on current code (paid tiers honor their configured
-    cap), and it must KEEP holding after the floor is removed — the regression
-    guard that "remove the floor" doesn't also break paid budgets. The budget is
-    the plan's y-term, with no markup/scaling applied to it.
+    The plan's `included_ai_budget_microusd` is a MONTHLY allowance; the usage window is
+    the ISO week, so the per-window budget is that allowance × window_days /
+    funding_period_days (so a full ~30-day month totals the monthly allowance — the fix
+    for the ~4.3× weekly overspend a raw monthly allowance over a weekly window caused).
+    This is the regression guard that "remove the free floor" did not also break paid
+    budgets, and that the ONLY transform applied to the y-term is the window pro-ration
+    (no markup). Asserted against the module's own window constants, not a literal, so it
+    stays a contract about the relationship rather than a snapshot of the number.
     """
-    paid_plan = _plan(tier="pro", included_ai_budget_microusd=4_200_000)
-    assert ai_gateway._user_monthly_budget_microusd(paid_plan) == 4_200_000
+    monthly = 4_200_000
+    paid_plan = _plan(tier="pro", included_ai_budget_microusd=monthly)
+    expected = monthly * ai_gateway._USAGE_WINDOW_DAYS // ai_gateway._PLAN_FUNDING_PERIOD_DAYS
+    assert ai_gateway._user_weekly_budget_microusd(paid_plan) == expected
 
 
 # ── 3. Unentitled ⇒ refused on BOTH the gateway AND the actions paths ───────────

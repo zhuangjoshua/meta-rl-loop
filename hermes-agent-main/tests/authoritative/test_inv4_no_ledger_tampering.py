@@ -55,6 +55,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import pathlib
 import textwrap
 import uuid
 
@@ -75,6 +76,36 @@ def _func_source(func) -> str:
 
 def _func_ast(func) -> ast.AST:
     return ast.parse(_func_source(func))
+
+
+# The 0037 refactor moved the product-usage RESERVE/SETTLE/RELEASE row ops out of open Python writes
+# in app_usage.py and into SECURITY DEFINER SQL functions (the privilege boundary — only the gate can
+# write the ledger). The money-integrity guards (finalized-status no-op, true-actual settle with NO
+# estimate cap, idempotent reservation_key lookup) therefore now live in the migration SQL, not the
+# Python source, so the source-level invariant tests assert them THERE.
+_LEDGER_BOUNDARY_SQL = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "plugins"
+    / "takyon"
+    / "db"
+    / "migrations"
+    / "0037_safebox_ledger_boundary.sql"
+)
+
+
+def _ledger_boundary_sql() -> str:
+    return _LEDGER_BOUNDARY_SQL.read_text(encoding="utf-8")
+
+
+def _sql_function_body(sql: str, fn_name: str) -> str:
+    """Slice the body of ``create or replace function <fn_name>(`` up to the next
+    ``create or replace function `` (or EOF). Lets the source-level tests assert a guard lives in ONE
+    specific gate function, not merely somewhere in the migration."""
+    marker = f"create or replace function {fn_name}("
+    start = sql.find(marker)
+    assert start != -1, f"{fn_name} not found in 0037 ledger-boundary SQL"
+    rest = sql.find("create or replace function ", start + len(marker))
+    return sql[start:] if rest == -1 else sql[start:rest]
 
 
 def _raises_valueerror_nodes(tree: ast.AST) -> list[ast.Raise]:
@@ -157,18 +188,28 @@ def test_business_credits_commit_refuses_over_commit_in_source():
 
 
 def test_app_usage_settle_is_money_truth_not_a_silent_cap_recheck():
-    """app_usage.settle_usage deliberately does NOT re-check actual <= reserved (money is
-    already spent; recording it is mandatory). This pins that documented choice so the
-    invariant-4 "actual <= reserved" clause is not falsely expected here — it lives on the
-    billing/credits rails. If someone later makes settle_usage silently DROP real spend to
-    fit the estimate, that is a different bug and this test documents the boundary."""
-    src = _func_source(app_usage.settle_usage)
-    # It records the true actual, and never raises ValueError for actual exceeding the
-    # estimate (only for a negative actual).
-    assert "actual_cost_microusd = %s" in src
-    assert "estimated_cost_microusd" not in src.split("with conn.transaction()")[-1], (
-        "settle_usage now compares actual against the estimate — verify this is intended; "
-        "the reserve/credits rails own the actual<=reserved gate"
+    """The settle gate deliberately does NOT re-check actual <= reserved (money is already
+    spent; recording it is mandatory). This pins that documented choice so the invariant-4
+    "actual <= reserved" clause is not falsely expected here — it lives on the billing/credits
+    rails. Post-0037 the settle row op is the ``safebox_settle_usage`` SECURITY DEFINER function,
+    so we assert there: it writes the TRUE provider actual and never caps it to the estimate
+    (no ``least(`` / ``min(`` and no read of the reserved ``estimated_cost_microusd``)."""
+    settle = _sql_function_body(_ledger_boundary_sql(), "safebox_settle_usage")
+    # It records the true actual the caller supplied (the settle write), not a capped figure.
+    assert "actual_cost_microusd = p_actual_cost_microusd" in settle, (
+        "safebox_settle_usage no longer records the true provider actual"
+    )
+    # No cap/clamp of the actual against the reserved estimate anywhere in the function (that would
+    # silently drop real spend).
+    assert "least(" not in settle.lower(), "safebox_settle_usage now caps actual via least(...)"
+    assert "min(" not in settle.lower(), "safebox_settle_usage now caps actual via min(...)"
+    # The WRITE path (the UPDATE ... SET that records the cost) must not read the reserved estimate to
+    # bound the actual. The finalized-no-op SELECT legitimately reads back the full event row (every
+    # column, incl. estimated_cost_microusd), so scope the estimate check to the UPDATE write block.
+    update_write = settle.split("update app_usage_events set", 1)[-1].split("returning", 1)[0]
+    assert "estimated_cost_microusd" not in update_write, (
+        "safebox_settle_usage's write now reads the reserved estimate to cap the actual — verify "
+        "intended; the reserve/credits rails own the actual<=reserved gate"
     )
 
 
@@ -200,14 +241,24 @@ def test_billing_settle_and_refund_guard_on_prior_finalization_in_source():
 
 
 def test_app_usage_finalizers_guard_on_finalized_status_in_source():
-    """app_usage.settle_usage / release_usage must no-op once the event is finalized.
-    Confirmed in source: both check ``event.status in _FINALIZED_STATUSES`` and return the
-    existing row."""
+    """The settle / release gates must no-op once the event is finalized (no double-charge /
+    double-refund on a replayed finalizer). Post-0037 the row ops are the
+    ``safebox_settle_usage`` / ``safebox_release_usage`` SECURITY DEFINER functions, so we assert
+    the finalized-status guard THERE: each checks ``status in ('completed', 'failed', 'released')``
+    before writing and returns the existing row instead."""
+    # The Python finalized-status set still mirrors the SQL guard (it is the typed exception/no-op
+    # contract app_usage exposes), so pin the two together.
     assert app_usage._FINALIZED_STATUSES == ("completed", "failed", "released")
-    for func in (app_usage.settle_usage, app_usage.release_usage):
-        src = _func_source(func)
-        assert "_FINALIZED_STATUSES" in src, f"{func.__name__} lost its replay guard"
-        assert "return event" in src, f"{func.__name__} no longer returns the existing row"
+    sql = _ledger_boundary_sql()
+    for fn_name in ("safebox_settle_usage", "safebox_release_usage"):
+        body = _sql_function_body(sql, fn_name)
+        assert "status in ('completed', 'failed', 'released')" in body, (
+            f"{fn_name} lost its finalized-status replay guard"
+        )
+        # The finalized branch returns the existing row (a no-op), it does not re-write the ledger.
+        assert "r.is_noop := true" in body, (
+            f"{fn_name} no longer no-ops on a replayed finalizer"
+        )
 
 
 def test_business_credits_commit_and_release_guard_on_prior_finalization_in_source():
@@ -229,10 +280,12 @@ def test_reserve_paths_are_idempotent_on_their_key_in_source():
     once, never twice). Confirmed in source for all three rails."""
     # billing.reserve: replays the reservation_key's reserve entries.
     assert "reservation_key = %s and kind = 'reserve'" in _func_source(billing.reserve)
-    # app_usage.reserve_usage: returns the existing row for a duplicate reservation_key.
-    au = _func_source(app_usage.reserve_usage)
-    assert "where business_slug = %s and reservation_key = %s" in au
-    assert "if existing is not None" in au
+    # app_usage.reserve_usage: post-0037 the row op is the ``safebox_reserve_usage`` SECURITY DEFINER
+    # function — its idempotent-on-key lookup short-circuits to the existing row before any new hold.
+    reserve = _sql_function_body(_ledger_boundary_sql(), "safebox_reserve_usage")
+    assert "where e.business_slug = p_business_slug and e.reservation_key = p_reservation_key" in reserve, (
+        "safebox_reserve_usage lost its idempotent reservation_key lookup"
+    )
     # business_credits.reserve_credits: returns the existing reserve for a duplicate key.
     bc = _func_source(business_credits.reserve_credits)
     assert "kind = 'reserve'" in bc

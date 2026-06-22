@@ -37,7 +37,12 @@ def broker_call(
     execute: Callable[[CapabilityScope], Any],
 ) -> Any:
     """Verify -> claim nonce -> execute(scope). Raises CapabilityError (bad/expired/wrong-audience token)
-    or BrokerError (replay). `nonce_store` needs `.claim(nonce, expires_at, now=...) -> bool`."""
+    or BrokerError (replay). `nonce_store` needs `.claim(nonce, expires_at, now=...) -> bool`.
+
+    NOTE: the full provider path (`handle_provider_request`) does NOT route its reserve/settle through
+    this helper — it must reserve BEFORE the single irreversible nonce claim so a refused/transient
+    reserve does not burn a pre-minted token. This helper stays for the bare verify->claim->execute
+    shape used by callers that have nothing to reserve before the claim."""
     scope, nonce, exp = verify_capability(
         token, signing_key=signing_key, expected_audience=expected_audience, now=now
     )
@@ -57,41 +62,60 @@ def handle_provider_request(
     key_resolver: Callable[[CapabilityScope], str],
     provider_caller: Callable[[CapabilityScope, str], tuple[Any, int]],
     estimate_microusd: int,
+    estimate_fn: Callable[[CapabilityScope], int] | None = None,
 ) -> Any:
     """The full brokered provider call, entirely inside the safebox process / host:
 
-      verify token -> claim nonce -> RESERVE budget keyed on the validated {business, app_user}
-      -> resolve the provider key LOCALLY -> call the provider -> SETTLE actual (or RELEASE on
-      failure) -> return a KEY-FREE result.
+      verify token -> ceiling-check -> RESERVE budget keyed on the validated {business, app_user}
+      -> claim nonce (single-use, BEFORE the irreversible provider call) -> resolve the provider key
+      LOCALLY -> call the provider -> SETTLE actual (or RELEASE on failure) -> return a KEY-FREE result.
 
     The provider key is resolved and used only inside `key_resolver`/`provider_caller` here on the
     safebox; it never enters the response. Spend is reserved before the call against the AUTHORITATIVE
     scope, so a caller can neither forge usage nor see the key. `ledger` needs
     `.reserve(scope, estimate)->reservation`, `.settle(reservation, actual)`, `.release(reservation)`;
     `provider_caller` returns `(key_free_result, actual_microusd)`.
-    """
 
-    def execute(scope: CapabilityScope) -> Any:
-        est = int(estimate_microusd)
-        if int(scope.max_cost_microusd) and est > int(scope.max_cost_microusd):
-            raise BrokerError("estimate_exceeds_ceiling")
-        reservation = ledger.reserve(scope, est)  # raises (e.g. AppBudgetExceeded) on insufficient funds
-        try:
-            key = key_resolver(scope)
-            if not key:
-                raise BrokerError("provider_key_unconfigured")
-            result, actual = provider_caller(scope, key)
-        except Exception:
-            ledger.release(reservation)
-            raise
-        ledger.settle(reservation, int(actual))
-        return result
+    `max_cost_microusd` on the scope is a HARD ceiling: the estimate gated against it is
+    `max(server_estimate, client_estimate)`, where the server estimate (when `estimate_fn` is given)
+    is computed from the provider's own pricing source so a client cannot pass a tiny estimate to duck
+    the cap. An est above the ceiling is refused; a 0 ceiling means a 0 est only (a free action) — any
+    positive est against a 0 ceiling is refused.
 
-    return broker_call(
-        token=token,
-        signing_key=signing_key,
-        expected_audience=audience,
-        now=now,
-        nonce_store=nonce_store,
-        execute=execute,
+    Ordering (money + replay integrity): the ledger RESERVE happens BEFORE the nonce claim, so a
+    refused or transient-failed reserve never burns a pre-minted single-use token (a retry can
+    succeed). The nonce claim still precedes the irreversible provider call, so a replayed token that
+    survives to here releases the just-made hold and refuses."""
+    # 1. Verify the token -> the AUTHORITATIVE scope (signature + audience + expiry).
+    scope, nonce, exp = verify_capability(
+        token, signing_key=signing_key, expected_audience=audience, now=now
     )
+
+    # 2. Ceiling-check the SERVER-floored estimate against the hard ceiling (mc==0 ⇒ only est==0 ok).
+    server_estimate = int(estimate_fn(scope)) if estimate_fn else 0
+    est = max(server_estimate, int(estimate_microusd))
+    ceiling = int(scope.max_cost_microusd)
+    if est > ceiling:
+        raise BrokerError("estimate_exceeds_ceiling")
+
+    # 3. Reserve BEFORE the single-use nonce claim (a refused/transient reserve must not burn the
+    #    token). reserve() raises (e.g. AppBudgetExceeded) on insufficient funds.
+    reservation = ledger.reserve(scope, est)
+
+    # 4. Claim the nonce exactly once. A replay here means the token was already spent: release the
+    #    hold we just made and refuse. This claim still precedes the irreversible provider call below.
+    if not nonce_store.claim(nonce, exp, now=now):
+        ledger.release(reservation)
+        raise BrokerError("replayed_token")
+
+    # 5. Resolve the key LOCALLY and call the provider; settle on success, release on any failure.
+    try:
+        key = key_resolver(scope)
+        if not key:
+            raise BrokerError("provider_key_unconfigured")
+        result, actual = provider_caller(scope, key)
+    except Exception:
+        ledger.release(reservation)
+        raise
+    ledger.settle(reservation, int(actual))
+    return result

@@ -58,7 +58,7 @@ from plugins.takyon.ai_gateway import (
     GatewayMessageError,
     broker_provider_call,
     _require_active_entitlement,
-    _user_monthly_budget_microusd,
+    _user_weekly_budget_microusd,
     _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD,
 )
 from plugins.takyon.app_usage import (
@@ -91,6 +91,28 @@ def _body_of(func) -> str:
     return src
 
 
+# The 0037 refactor moved the reserve/settle/release ROW OPS out of open Python writes into SECURITY
+# DEFINER SQL functions (the gate is now the ONLY sanctioned writer of app_usage_events). The structural
+# gate guards invariant 1 pins therefore live in that migration's SQL; the Python envelope calls the SQL
+# and translates a refusal row into the typed exception via `_raise_for_gate_refusal`. The assertions
+# below read both homes so the "reserve refuses, release records zero" contract is pinned where it lives.
+_LEDGER_BOUNDARY_SQL = (
+    Path(__file__).resolve().parents[2]
+    / "plugins" / "takyon" / "db" / "migrations" / "0037_safebox_ledger_boundary.sql"
+)
+
+
+def _sql_function_body(fn_name: str) -> str:
+    """Slice `create or replace function <fn_name>(...)` out of the 0037 migration so a guard is
+    asserted INSIDE its own function, not merely somewhere in the file."""
+    sql = _LEDGER_BOUNDARY_SQL.read_text(encoding="utf-8")
+    marker = f"create or replace function {fn_name}("
+    start = sql.find(marker)
+    assert start != -1, f"{fn_name} not found in 0037 ledger-boundary migration"
+    nxt = sql.find("create or replace function ", start + len(marker))
+    return sql[start : nxt if nxt != -1 else len(sql)]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Seam A: the reserve → (settle | release) envelope exists and is THE gate
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,13 +133,20 @@ def test_reserve_usage_is_the_refusing_gate():
     gate must be able to say no, or it is not a gate. Asserted at source level
     (the raises are inside a PG transaction; behavior is exercised in test_pg_*).
     """
-    src = _source_of(reserve_usage)
-    assert "raise AppBudgetInactive" in src
-    assert "raise AppBudgetExceeded" in src
-    # Idempotent on reservation_key: a replay returns the existing reserved row
-    # rather than holding twice (no double-spend, no double-charge).
-    assert "reservation_key" in src
-    assert 'status != "active"' in src or "status != 'active'" in src
+    reserve_src = _source_of(reserve_usage)
+    # (b) reserve_usage runs the SQL gate and translates any refusal row into the typed exception.
+    assert "safebox_reserve_usage" in reserve_src
+    assert "_raise_for_gate_refusal" in reserve_src
+    # (c) the translator can actually say no — both refusal legs raise their typed exception.
+    translator_src = _source_of(app_usage._raise_for_gate_refusal)
+    assert "raise AppBudgetInactive" in translator_src
+    assert "raise AppBudgetExceeded" in translator_src
+    # (a) the SQL gate emits the inactive + over-cap refusals and is idempotent on reservation_key (a
+    # replay returns the existing reserved row rather than holding twice — no double-spend/charge).
+    gate_sql = _sql_function_body("safebox_reserve_usage")
+    assert "'budget_inactive'" in gate_sql
+    assert "'budget_exceeded'" in gate_sql
+    assert "e.reservation_key = p_reservation_key" in gate_sql
 
 
 def test_settle_never_rechecks_cap_truth_is_mandatory():
@@ -136,9 +165,10 @@ def test_release_frees_hold_without_recording_spend():
     """release_usage is the failure leg of the envelope: it frees the reservation
     and records ZERO actual spend (so committed drops back by the held estimate).
     A provider error must release, never settle a phantom charge."""
-    src = _source_of(release_usage)
-    assert "actual_cost_microusd = 0" in src
-    assert "released" in src or "failed" in src
+    assert "safebox_release_usage" in _source_of(release_usage)
+    gate_sql = _sql_function_body("safebox_release_usage")
+    assert "actual_cost_microusd = 0" in gate_sql
+    assert "released" in gate_sql or "failed" in gate_sql
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -326,10 +356,10 @@ def test_gap4_centralized_per_user_floor_is_unified_to_plan_or_zero():
     longer a live fallback in the gateway's per-user-budget resolver. RED here is
     the TARGET (the floor still exists at ai_gateway.py:248 today).
     """
-    floor_src = _source_of(_user_monthly_budget_microusd)
-    # Currently `_user_monthly_budget_microusd` falls back to the $0.50 default
-    # for plan is None and for a 0-budget free tier. The unified end-state removes
-    # that floor from the billable path.
+    floor_src = _source_of(_user_weekly_budget_microusd)
+    # The unified per-user resolver `_user_weekly_budget_microusd` must NOT fall back to
+    # the $0.50 default for `plan is None` or a 0-budget free tier — it resolves
+    # plan-derived-or-0, so the floor constant is not referenced on the billable path.
     assert "_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD" not in floor_src, (
         "GAP #4/INV9 OPEN: the gateway per-user resolver still falls back to the "
         "$0.50 default floor instead of plan-derived-or-0."

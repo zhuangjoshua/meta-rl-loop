@@ -170,6 +170,90 @@ def test_mint_requires_internal_token(client):
     assert resp.status_code == 401
 
 
+def test_mint_rejects_unmappable_action(client):
+    # An action with no mapped audience is unbrokerable: the mint route refuses it (400) rather than
+    # falling back to the raw action string as the audience.
+    resp = client.post(
+        "/v1/token/mint",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "ping",  # not in _ACTION_AUDIENCE_DEFAULTS
+            "max_cost_microusd": 1000,
+            "operator_user_id": "user_A",
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "unmappable_action"
+
+
+def test_mint_ignores_body_audience_and_uses_the_action_map(client):
+    # A caller cannot mint action="anthropic.messages" under a forged audience: body.audience is
+    # IGNORED, the audience is derived SOLELY from the action map (so entitlement/ceiling and the
+    # provider invocation are the SAME action).
+    resp = client.post(
+        "/v1/token/mint",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "anthropic.messages",
+            "max_cost_microusd": 1000,
+            "operator_user_id": "user_A",
+            "audience": "tavily.search",  # attempted override — must be ignored
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["audience"] == safebox_app._ANTHROPIC_AUDIENCE
+
+
+def test_provider_route_unentitled_session_large_estimate_is_403_not_charged(client, monkeypatch):
+    # A product session with NO active paid entitlement requesting a positive-cost provider call must
+    # be refused at the authoritative mint (403 subscription_required) BEFORE any reserve/charge.
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_X"))
+    monkeypatch.setattr(app_entitlements, "get_active_entitlement", lambda c, b, u: None)
+
+    reserved = []
+    # If we ever reach the ledger, record it — the test asserts we never do.
+    monkeypatch.setattr(
+        safebox_app._UsageLedgerAdapter,
+        "reserve",
+        lambda self, scope, est: reserved.append((scope.business_slug, est)),
+    )
+
+    resp = client.post(
+        "/v1/providers/anthropic/messages",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "anthropic.messages",
+            "session_token": "sess-abc",
+            "payload": {"prompt": "hi"},
+            "estimate_microusd": 5_000_000,
+        },
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "subscription_required"
+    assert reserved == []  # never reserved, never charged
+
+
+def test_provider_route_action_audience_mismatch_is_400(client):
+    # Inline-mint path: the supplied action must map to THIS route's audience, else 400 — a caller
+    # cannot mint a cheap action and broker an expensive provider under it.
+    resp = client.post(
+        "/v1/providers/anthropic/messages",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "tavily.search",  # maps to tavily, not the anthropic route's audience
+            "session_token": "sess-abc",
+            "payload": {"prompt": "hi"},
+            "estimate_microusd": 2000,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "action_audience_mismatch"
+
+
 def test_provider_route_fails_closed_without_signing_key(monkeypatch):
     # If the safebox host has no capability signing key, brokering must fail closed (503), never
     # proceed unsigned.

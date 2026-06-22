@@ -130,3 +130,112 @@ def test_unconfigured_key_releases_and_raises():
             ledger=ledger, key_resolver=lambda s: "", provider_caller=lambda s, k: ({}, 0), estimate_microusd=2000,
         )
     assert ("release",) in ledger.events
+
+
+def test_zero_ceiling_refuses_any_positive_estimate_before_reserve():
+    """max_cost_microusd is a HARD ceiling: a 0 ceiling means a free action (est==0) only. A positive
+    estimate against a 0 ceiling must be refused before any reserve / provider call, NOT skipped."""
+    ledger = FakeLedger()
+    called = []
+    with pytest.raises(BrokerError, match="estimate_exceeds_ceiling"):
+        handle_provider_request(
+            token=_mint(_scope(max_cost_microusd=0)), signing_key=KEY, audience=AUD, now=NOW + 10,
+            nonce_store=InMemoryNonceStore(), ledger=ledger, key_resolver=lambda s: called.append("key") or "k",
+            provider_caller=lambda s, k: called.append("call") or ({}, 0), estimate_microusd=5000,
+        )
+    assert ledger.events == []  # never reserved
+    assert not called           # never resolved a key, never called the provider
+
+
+def test_server_estimate_floor_overrides_a_tiny_client_estimate():
+    """The reserve is gated on max(server_estimate, client_estimate): a sub-user that passes a tiny
+    client estimate to duck the cap is reserved on the SERVER floor (the provider's own price)."""
+    ledger = FakeLedger()
+    result = handle_provider_request(
+        token=_mint(_scope(max_cost_microusd=5000)), signing_key=KEY, audience=AUD, now=NOW + 10,
+        nonce_store=InMemoryNonceStore(), ledger=ledger, key_resolver=lambda s: "k",
+        provider_caller=lambda s, k: ({"ok": True}, 4000),
+        estimate_microusd=1,            # client lowballs to 1 µUSD
+        estimate_fn=lambda s: 4000,     # server floor mirrors the real provider price
+    )
+    assert result == {"ok": True}
+    # Reserved on the server floor, not the client's 1.
+    assert ("reserve", "climblog", "cust_X", 4000) in ledger.events
+    assert not any(e[0] == "reserve" and e[3] == 1 for e in ledger.events)
+
+
+def test_server_estimate_floor_over_ceiling_is_refused_even_with_tiny_client_estimate():
+    """A tiny client estimate cannot duck the ceiling: the SERVER floor is ceiling-checked, so a
+    server estimate above the ceiling is refused before any reserve, even at client estimate 1."""
+    ledger = FakeLedger()
+    with pytest.raises(BrokerError, match="estimate_exceeds_ceiling"):
+        handle_provider_request(
+            token=_mint(_scope(max_cost_microusd=1000)), signing_key=KEY, audience=AUD, now=NOW + 10,
+            nonce_store=InMemoryNonceStore(), ledger=ledger, key_resolver=lambda s: "k",
+            provider_caller=lambda s, k: ({}, 0), estimate_microusd=1, estimate_fn=lambda s: 9000,
+        )
+    assert ledger.events == []
+
+
+def test_refused_reserve_does_not_burn_the_token_nonce_so_a_retry_succeeds():
+    """The nonce is claimed AFTER the ledger reserve, so a refused/transient-failed reserve does NOT
+    permanently burn a pre-minted single-use token: a later retry on the same token succeeds."""
+    store = InMemoryNonceStore()
+    tok = _mint()
+
+    class _FlakyLedger(FakeLedger):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def reserve(self, scope, est):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("transient reserve failure")
+            return super().reserve(scope, est)
+
+    ledger = _FlakyLedger()
+    # First attempt: reserve raises BEFORE the nonce is claimed.
+    with pytest.raises(RuntimeError, match="transient reserve failure"):
+        handle_provider_request(
+            token=tok, signing_key=KEY, audience=AUD, now=NOW + 10, nonce_store=store,
+            ledger=ledger, key_resolver=lambda s: "k", provider_caller=lambda s, k: ({"ok": 1}, 100),
+            estimate_microusd=200,
+        )
+    assert ledger.events == []  # nothing reserved, nothing released
+    # Retry on the SAME token now succeeds — the nonce was never burned.
+    result = handle_provider_request(
+        token=tok, signing_key=KEY, audience=AUD, now=NOW + 11, nonce_store=store,
+        ledger=ledger, key_resolver=lambda s: "k", provider_caller=lambda s, k: ({"ok": 1}, 100),
+        estimate_microusd=200,
+    )
+    assert result == {"ok": 1}
+    assert ("reserve", "climblog", "cust_X", 200) in ledger.events
+    assert ("settle", 100) in ledger.events
+
+
+def test_post_reserve_replay_releases_the_hold_and_refuses():
+    """If a token survives to the broker but its nonce was already claimed (replay), the reserve made
+    just before the claim is RELEASED and the call is refused — no orphaned hold, no provider call."""
+    store = InMemoryNonceStore()
+    tok = _mint()
+    # Burn the token's nonce via a first successful broker.
+    first = FakeLedger()
+    handle_provider_request(
+        token=tok, signing_key=KEY, audience=AUD, now=NOW + 10, nonce_store=store,
+        ledger=first, key_resolver=lambda s: "k", provider_caller=lambda s, k: ({"ok": 1}, 100),
+        estimate_microusd=200,
+    )
+    # Replay the SAME token: it reserves, then the nonce claim fails -> release + refuse.
+    ledger = FakeLedger()
+    called = []
+    with pytest.raises(BrokerError, match="replayed_token"):
+        handle_provider_request(
+            token=tok, signing_key=KEY, audience=AUD, now=NOW + 11, nonce_store=store,
+            ledger=ledger, key_resolver=lambda s: called.append("key") or "k",
+            provider_caller=lambda s, k: called.append("call") or ({}, 0), estimate_microusd=200,
+        )
+    assert ("reserve", "climblog", "cust_X", 200) in ledger.events
+    assert ("release",) in ledger.events
+    assert not any(e[0] == "settle" for e in ledger.events)
+    assert not called  # never resolved a key, never called the provider on the replay
