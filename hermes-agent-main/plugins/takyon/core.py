@@ -12347,7 +12347,8 @@ def _ensure_product_edge_route(slug: str) -> None:
         existing = {
             rt.get("pattern") for rt in (_cf("GET", f"/zones/{zid}/workers/routes").get("result") or [])
         }
-        if pattern in existing:
+        wildcard_pattern = f"*.{zone}/*"
+        if pattern in existing or wildcard_pattern in existing:
             return
         created = _cf("POST", f"/zones/{zid}/workers/routes", {"pattern": pattern, "script": worker})
         if created.get("success"):
