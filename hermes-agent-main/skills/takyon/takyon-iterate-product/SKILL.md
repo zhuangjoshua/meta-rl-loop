@@ -83,7 +83,7 @@ Pricing is the one change that can silently harm existing customers, so treat ea
 - For pricing or checkout changes, call `business_upsert_app_plan` before claiming the UI is truthful.
 - For runtime-surface changes, keep `product/surface.md` accurate with `business_upsert_app_surface_contract`.
 - Follow all source and plan changes with `business_refresh_product_surface` so the shared `_takyon/` kit and published surface reflect the real current state.
-- If you add or change an action file, verify it with `business_check_runtime_capabilities` and a real `business_invoke_app_action` run before reporting success.
+- Before reporting success, inspect the built artifact the change produced — the refreshed `product/site/` source, `product/surface.md`, and published/served result, not the worker's summary — and confirm it visibly satisfies the operator's request; do not report done until you have seen the produced result match the ask. For any changed action, also run `business_check_runtime_capabilities` to confirm it certifies (and `business_invoke_app_action` where the action is invocable).
 
 ## Procedure
 

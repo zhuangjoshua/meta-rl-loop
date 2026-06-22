@@ -1652,7 +1652,7 @@ def _ceo_bootstrap_turn_config(
             active_mode,
             business_name=business_name,
         ),
-        "ephemeral_system_prompt": _load_ceo_prompt(),
+        "ephemeral_system_prompt": _ceo_prompt_for_bootstrap(),
         # Same CEO toolset as the interactive/cron turns: ``takyon-authority`` carries the spendful
         # business methods this first-business turn legitimately drives (e.g. app-plan/access-shell
         # provisioning). They stay quarantined in their own toolset (never folded into ``takyon``) so
@@ -3412,6 +3412,26 @@ def _run_agent(
 
 def _load_ceo_prompt() -> str:
     return _CEO_PROMPT_PATH.read_text(encoding="utf-8")
+
+
+def _strip_fenced_block(text: str, name: str) -> str:
+    """Drop an HTML-comment-fenced span (``<!-- name:START -->`` … ``<!-- name:END -->``)
+    from a prompt. Lets one rule in the shared ceo.md be scoped to a single turn kind in
+    code without forking the file. No-op if the fence is absent."""
+    start, end = f"<!-- {name}:START -->", f"<!-- {name}:END -->"
+    i, j = text.find(start), text.find(end)
+    if i == -1 or j == -1 or j < i:
+        return text
+    j += len(end)
+    if j < len(text) and text[j] == "\n":
+        j += 1
+    return text[:i] + text[j:]
+
+
+def _ceo_prompt_for_bootstrap() -> str:
+    # Bootstrap runs the standard build sequence under its own instruction, not a single
+    # operator request to inspect — so drop the per-request completion-discipline rule.
+    return _strip_fenced_block(_load_ceo_prompt(), "COMPLETION-DISCIPLINE")
 
 
 def run_takyon_command(
