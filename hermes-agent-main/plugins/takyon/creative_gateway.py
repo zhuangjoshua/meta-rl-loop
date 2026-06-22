@@ -1822,6 +1822,10 @@ def build_creative_gateway_router() -> APIRouter:
             script_src=str(pixel_cfg.get("script_src") or "").strip(),
         )
         edge_synced = core._sync_meta_pixel_live_index_to_r2(business, live_root) if installed_vps else False
+        subuser_sync = core._sync_subuser_product_site(business, live_root) if installed_vps else {
+            "synced": False,
+            "status": "skipped",
+        }
         public_status, public_html, probe_url = _meta_fetch_html(public_url)
         installed_r2 = public_status == 200 and _meta_pixel_marker_present(core, public_html, pixel_id)
         ok = bool(source_installed and installed_vps and installed_r2 and conversion.get("ok"))
@@ -1842,6 +1846,7 @@ def build_creative_gateway_router() -> APIRouter:
             "installed_vps": installed_vps,
             "installed_r2": installed_r2,
             "edge_synced": edge_synced,
+            "subuser_sync": subuser_sync,
             "public_probe_status": public_status,
             "public_probe_url": probe_url,
             "created_at": core._now(),

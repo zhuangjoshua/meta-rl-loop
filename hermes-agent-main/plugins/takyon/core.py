@@ -11340,6 +11340,88 @@ def _subuser_product_site_summary(slug: str) -> dict[str, Any]:
     }
 
 
+def _sync_subuser_product_site(slug: str, live_root: Path) -> dict[str, Any]:
+    """Sync one already-built live product site to the sub-user VPS."""
+    summary = _subuser_product_site_summary(slug)
+    rsync = shutil.which("rsync")
+    ssh = shutil.which("ssh")
+    if not rsync:
+        return {**summary, "synced": False, "status": "blocked", "error": "rsync is unavailable"}
+    if not ssh:
+        return {**summary, "synced": False, "status": "blocked", "error": "ssh is unavailable"}
+    ssh_key = _subuser_vps_ssh_key_path()
+    if not ssh_key.exists():
+        return {
+            **summary,
+            "synced": False,
+            "status": "blocked",
+            "error": f"sub-user VPS ssh key not found: {ssh_key}",
+        }
+    source = live_root.resolve()
+    if not source.is_dir():
+        return {
+            **summary,
+            "synced": False,
+            "status": "missing_source",
+            "error": f"live product site not found: {source}",
+        }
+    remote_path = _subuser_remote_product_site_path(slug)
+    remote_parent = str(remote_path.parent)
+    ssh_base = [
+        ssh,
+        "-i",
+        str(ssh_key),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
+    try:
+        mkdir_proc = subprocess.run(
+            [*ssh_base, summary["target"], f"mkdir -p -- {shlex.quote(remote_parent)}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if mkdir_proc.returncode != 0:
+            return {
+                **summary,
+                "synced": False,
+                "status": "failed",
+                "error": (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip(),
+            }
+        rsync_proc = subprocess.run(
+            [
+                rsync,
+                "-az",
+                "--delete",
+                "-e",
+                " ".join(shlex.quote(part) for part in ssh_base),
+                f"{source}/",
+                f"{summary['target']}:{shlex.quote(str(remote_path))}/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except Exception as exc:
+        return {**summary, "synced": False, "status": "failed", "error": str(exc)}
+    if rsync_proc.returncode != 0:
+        return {
+            **summary,
+            "synced": False,
+            "status": "failed",
+            "error": (rsync_proc.stderr or rsync_proc.stdout or f"rsync exited {rsync_proc.returncode}").strip(),
+        }
+    return {**summary, "synced": True, "status": "synced"}
+
+
 def _delete_subuser_product_site(slug: str) -> dict[str, Any]:
     summary = _subuser_product_site_summary(slug)
     ssh = shutil.which("ssh")
