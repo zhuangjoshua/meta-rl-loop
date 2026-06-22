@@ -7088,6 +7088,83 @@ def _docker_claude_worker_binary_mounts(*, docker_exe: str, repo_root: Path) -> 
     }
 
 
+# Coding-worker broker lockdown (SAFEBOX-BROKER-REMEDIATION-PLAN STEP D). OFF by default so the live
+# coding-worker keeps running unchanged until the safebox broker route (STEP B: the Anthropic broker
+# endpoint + /v1/token/mint) is deployed and verified per the plan's hard "move → verify → delete"
+# rule — flipping this on before the broker route exists fails every worker closed, which is itself a
+# regression. When ON, the container gets NO raw provider key (the SDK is pointed at the safebox broker
+# with a minted, scope+cost-bound operator capability token) and is --network-confined so it can reach
+# ONLY the safebox.
+_CLAUDE_AGENT_BROKER_ENV = "TAKYON_CLAUDE_AGENT_BROKER"
+_CLAUDE_AGENT_BROKER_URL_ENV = "TAKYON_CLAUDE_AGENT_BROKER_URL"
+_CLAUDE_AGENT_BROKER_NETWORK_ENV = "TAKYON_CLAUDE_AGENT_BROKER_NETWORK"
+# Operator-plane capability action + cost ceiling for a coding-worker run. The ceiling mirrors the
+# self-reported per-run worker budget (maxBudgetUsd default 2 USD) so the safebox reserve enforces the
+# same cap as a real boundary instead of a client convention.
+_CLAUDE_AGENT_BROKER_ACTION = "claude_agent_task"
+_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = 2_000_000
+
+
+def _claude_agent_broker_lockdown_enabled() -> bool:
+    raw = str(os.getenv(_CLAUDE_AGENT_BROKER_ENV, "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "force"}
+
+
+def _claude_agent_broker_url() -> str:
+    """Safebox broker base URL the worker SDK is pointed at when the lockdown is enabled.
+
+    Defaults to the configured safebox remote URL (the worker can reach ONLY the safebox under the
+    --network confinement), and may be overridden for a dedicated broker hostname.
+    """
+    override = str(os.getenv(_CLAUDE_AGENT_BROKER_URL_ENV, "") or "").strip().rstrip("/")
+    if override:
+        return override
+    try:
+        return str(safebox._remote_base_url() or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+def _claude_agent_broker_network() -> str:
+    """Docker network name that reaches ONLY the safebox broker.
+
+    The operator must pre-create a confined network whose sole reachable endpoint is the safebox; the
+    container is attached to it instead of the default bridge so it has no general egress.
+    """
+    return str(os.getenv(_CLAUDE_AGENT_BROKER_NETWORK_ENV, "") or "").strip()
+
+
+def _mint_claude_agent_operator_capability() -> str:
+    """Request a short-TTL, scope+cost-bound OPERATOR capability token from the safebox /v1/token/mint
+    route for one coding-worker run. The signing key lives ONLY in the safebox (it validates ownership
+    via ``authorize_operator_call`` and mints with ``mint_capability``), so the worker host never holds
+    it and cannot forge or widen scope. Returns the token or "" — the caller fails closed on "".
+    """
+    business = str(_session_business_slug() or "").strip()
+    if not business:
+        return ""
+    try:
+        operator_user_id = str(_store()._active_operator_user_id() or "").strip()
+    except Exception:
+        operator_user_id = ""
+    if not operator_user_id:
+        return ""
+    payload = {
+        "plane": "operator",
+        "business_slug": business,
+        "operator_user_id": operator_user_id,
+        "action": _CLAUDE_AGENT_BROKER_ACTION,
+        "max_cost_microusd": _CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD,
+    }
+    try:
+        result = safebox._remote_json("POST", "/v1/token/mint", payload)
+    except Exception:
+        return ""
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("token") or "").strip()
+
+
 def _run_claude_agent_task_in_docker(
     *,
     payload: dict[str, Any],
@@ -7120,9 +7197,42 @@ def _run_claude_agent_task_in_docker(
         **_anthropic_runtime_env(),
         "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
     })
+
+    # Coding-worker broker lockdown (STEP D). OFF by default → unchanged behavior below. When ON, the
+    # raw provider key is NEVER injected into the container env; instead the SDK is pointed at the
+    # safebox broker (ANTHROPIC_BASE_URL) and authenticated with a short-TTL, scope+cost-bound operator
+    # capability token minted by the safebox (the signing key + the real provider key both stay on the
+    # safebox host). The container is also --network-confined so it can reach ONLY the safebox. Per the
+    # plan's "move → verify → delete" rule the path fails CLOSED if the broker URL or token is missing.
+    broker_lockdown = _claude_agent_broker_lockdown_enabled()
+    broker_base_url = ""
+    broker_capability_token = ""
+    broker_network = ""
+    if broker_lockdown:
+        broker_base_url = _claude_agent_broker_url()
+        if not broker_base_url:
+            raise TakyonError(
+                "Claude Agent worker broker lockdown is enabled but no safebox broker URL is "
+                f"configured (set {_CLAUDE_AGENT_BROKER_URL_ENV} or {safebox._SAFEBOX_REMOTE_URL_ENV})"
+            )
+        broker_capability_token = _mint_claude_agent_operator_capability()
+        if not broker_capability_token:
+            raise TakyonError(
+                "Claude Agent worker broker lockdown is enabled but the safebox refused to mint an "
+                "operator capability token for this run (no business/operator identity, or "
+                "/v1/token/mint unavailable)"
+            )
+        broker_network = _claude_agent_broker_network()
+        if not broker_network:
+            raise TakyonError(
+                "Claude Agent worker broker lockdown is enabled but no confined docker network is "
+                f"configured (set {_CLAUDE_AGENT_BROKER_NETWORK_ENV} to a network that reaches ONLY "
+                "the safebox)"
+            )
+
+    # In lockdown the SDK auth is the capability token (sent to the broker base URL); the raw
+    # ANTHROPIC_API_KEY / ANTHROPIC_TOKEN never enter the container env.
     env_keys = [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_TOKEN",
         "CLAUDE_AGENT_SDK_CLIENT_APP",
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -7131,11 +7241,18 @@ def _run_claude_agent_task_in_docker(
         "https_proxy",
         "no_proxy",
     ]
+    if not broker_lockdown:
+        env_keys = ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", *env_keys]
     env_args: list[str] = []
     for key in env_keys:
         value = runtime_env.get(key)
         if value is not None and value != "":
             env_args.extend(["-e", f"{key}={value}"])
+    if broker_lockdown:
+        # The SDK reads ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY from env; point it at the safebox broker
+        # with the capability token as the bearer. No raw provider key is present.
+        env_args.extend(["-e", f"ANTHROPIC_BASE_URL={broker_base_url}"])
+        env_args.extend(["-e", f"ANTHROPIC_API_KEY={broker_capability_token}"])
 
     sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(docker_exe=docker, repo_root=repo_root)
     for key, value in sdk_env.items():
@@ -7178,6 +7295,10 @@ def _run_claude_agent_task_in_docker(
     # starves serving — observed: during two concurrent builds a 2-vCPU host stopped answering SSH
     # and live product sites timed out (HTTP 000). A hard --cpus quota leaves headroom for serving;
     # --memory keeps a runaway build from OOMing the host. Env-overridable for larger hosts.
+    # Broker lockdown: attach to the confined safebox-only network instead of the default bridge so
+    # the container has NO general egress — its only reachable endpoint is the safebox broker.
+    network_args: list[str] = ["--network", broker_network] if broker_lockdown and broker_network else []
+
     run_cmd = [
         docker,
         "run",
@@ -7187,6 +7308,7 @@ def _run_claude_agent_task_in_docker(
         "--read-only",
         *_build_sandbox_resource_args(),
         *security_args,
+        *network_args,
         "--tmpfs",
         "/root:rw,exec,size=512m",
         "--tmpfs",

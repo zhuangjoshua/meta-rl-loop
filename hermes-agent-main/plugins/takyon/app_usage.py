@@ -205,6 +205,63 @@ def _event_from_row(row) -> UsageEvent:
     )
 
 
+# The reserve/settle/release row ops live in the migration-0037 SECURITY DEFINER functions
+# (safebox_reserve_usage / safebox_settle_usage / safebox_release_usage), which are the ONLY
+# sanctioned writers of app_usage_events — the gate's privilege boundary. Each returns a
+# `safebox_usage_gate_result` composite: a leading `refusal` discriminator, an `is_noop` flag, and
+# figure columns, then the 19 event columns (in _EVENT_COLUMNS order). _GATE_RESULT_PREFIX is the
+# count of those leading non-event columns, so the event sub-row is `row[_GATE_RESULT_PREFIX:]` and
+# feeds _event_from_row unchanged. Refusals are mapped back to the SAME typed exceptions (with the
+# SAME fields) the in-Python gate raised, so callers and tests see identical behavior.
+#   row[0] refusal   row[1] is_noop   row[2] fig_status   row[3] fig_hard_limit_microusd
+#   row[4] fig_user_limit_microusd   row[5] fig_committed_microusd   row[6] fig_requested_microusd
+_GATE_RESULT_PREFIX = 7
+
+
+def _raise_for_gate_refusal(
+    row,
+    *,
+    business_slug: str,
+    app_user_id: str | None = None,
+    reservation_key: str | None = None,
+) -> None:
+    """If the gate result carries a refusal, raise the matching typed exception with exact figures;
+    otherwise return (the caller then builds the UsageEvent from the event sub-row)."""
+    refusal = row[0]
+    if refusal is None:
+        return
+    if refusal == "budget_inactive":
+        raise AppBudgetInactive(business_slug, str(row[2]))  # fig_status
+    if refusal == "app_user_not_found":
+        raise AppUserNotFound(app_user_id)
+    if refusal == "app_user_budget_exceeded":
+        raise AppUserBudgetExceeded(
+            app_user_id=app_user_id,
+            user_monthly_limit_microusd=int(row[4]),  # fig_user_limit_microusd
+            committed_microusd=int(row[5]),  # fig_committed_microusd
+            requested_microusd=int(row[6]),  # fig_requested_microusd
+        )
+    if refusal == "budget_exceeded":
+        raise AppBudgetExceeded(
+            hard_limit_microusd=int(row[3]),  # fig_hard_limit_microusd
+            committed_microusd=int(row[5]),  # fig_committed_microusd
+            requested_microusd=int(row[6]),  # fig_requested_microusd
+        )
+    if refusal == "unknown_reservation":
+        raise UnknownReservation(reservation_key)
+    raise AppUsageError(f"unexpected gate refusal: {refusal!r}")  # pragma: no cover - defensive
+
+
+def _gate_row_is_noop(row) -> bool:
+    """True when the gate call was an idempotent no-op on an already-finalized row (row[1])."""
+    return bool(row[1])
+
+
+def _event_from_gate_row(row) -> UsageEvent:
+    """Build the UsageEvent from a non-refusal gate result (the event sub-row after the prefix)."""
+    return _event_from_row(row[_GATE_RESULT_PREFIX:])
+
+
 def _require_app_user(conn, business_slug: str, app_user_id: str) -> None:
     """Verify the sub-user belongs to THIS business (the FK alone would allow a cross-business
     id). Mirrors the SQLite guard at core.py:5351."""
@@ -422,52 +479,22 @@ def reserve_usage(
         raise ValueError("reservation_key is required")
     if user_monthly_limit_microusd is not None and app_user_id is None:
         raise ValueError("app_user_id is required when user_monthly_limit_microusd is set")
-    with conn.transaction():
-        budget = _ensure_budget_locked(conn, business_slug)
-        if budget.status != "active":
-            raise AppBudgetInactive(business_slug, budget.status)
-        existing = conn.execute(
-            f"select {_EVENT_COLUMNS} from app_usage_events "
-            "where business_slug = %s and reservation_key = %s",
-            (business_slug, key),
-        ).fetchone()
-        if existing is not None:
-            return _event_from_row(existing)
-        if app_user_id is not None:
-            _require_app_user(conn, business_slug, app_user_id)
-        if app_user_id is not None and user_monthly_limit_microusd is not None:
-            user_committed = _app_user_committed_microusd(
-                conn, business_slug, app_user_id, budget.current_period_start
-            )
-            if user_committed + estimated_cost_microusd > user_monthly_limit_microusd:
-                raise AppUserBudgetExceeded(
-                    app_user_id=app_user_id,
-                    user_monthly_limit_microusd=user_monthly_limit_microusd,
-                    committed_microusd=user_committed,
-                    requested_microusd=estimated_cost_microusd,
-                )
-        # Per-business pool gate: ONLY when an explicit cap is set (sentinel None = no pool cap,
-        # invariant 9 — the per-subuser subscription gate above is then the sole budget gate).
-        if budget.hard_limit_microusd is not None:
-            committed = _committed_microusd(conn, business_slug, budget.current_period_start)
-            if committed + estimated_cost_microusd > budget.hard_limit_microusd:
-                raise AppBudgetExceeded(
-                    hard_limit_microusd=budget.hard_limit_microusd,
-                    committed_microusd=committed,
-                    requested_microusd=estimated_cost_microusd,
-                )
-        row = conn.execute(
-            "insert into app_usage_events "
-            "(business_slug, app_user_id, app_user_tier, reservation_key, purpose, route, "
-            " status, estimated_cost_microusd, provider, model, metadata) "
-            "values (%s, %s, %s, %s, %s, %s, 'reserved', %s, %s, %s, %s::jsonb) "
-            f"returning {_EVENT_COLUMNS}",
-            (
-                business_slug, app_user_id, app_user_tier, key, purpose, route,
-                estimated_cost_microusd, provider, model, _json_dumps(metadata or {}),
-            ),
-        ).fetchone()
-    return _event_from_row(row)
+    # The atomic-under-the-budget-row-lock body now lives in the migration-0037 SECURITY DEFINER
+    # function safebox_reserve_usage (the gate is the ONLY sanctioned writer of app_usage_events).
+    # Its row ops are a verbatim port of the former in-Python body: open+lock+weekly-roll the budget,
+    # inactive→refuse, idempotent reservation_key short circuit, sub-user existence + per-subuser
+    # gate, per-business pool gate, then insert the 'reserved' row. Refusals come back as a
+    # discriminator and are re-raised here as the identical typed exceptions.
+    row = conn.execute(
+        "select * from safebox_reserve_usage(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+        (
+            business_slug, estimated_cost_microusd, key, app_user_id,
+            user_monthly_limit_microusd, app_user_tier, purpose, route,
+            provider, model, _json_dumps(metadata or {}),
+        ),
+    ).fetchone()
+    _raise_for_gate_refusal(row, business_slug=business_slug, app_user_id=app_user_id)
+    return _event_from_gate_row(row)
 
 
 def settle_usage(
@@ -494,38 +521,24 @@ def settle_usage(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    with conn.transaction():
-        existing = conn.execute(
-            f"select {_EVENT_COLUMNS} from app_usage_events "
-            "where business_slug = %s and reservation_key = %s for update",
-            (business_slug, key),
-        ).fetchone()
-        if existing is None:
-            raise UnknownReservation(key)
-        event = _event_from_row(existing)
-        if event.status in _FINALIZED_STATUSES:
-            return event
-        row = conn.execute(
-            "update app_usage_events set "
-            " status = 'completed', "
-            " actual_cost_microusd = %s, "
-            " input_tokens = coalesce(%s, input_tokens), "
-            " output_tokens = coalesce(%s, output_tokens), "
-            " provider_request_id = coalesce(%s, provider_request_id), "
-            " provider = coalesce(%s, provider), "
-            " model = coalesce(%s, model), "
-            " metadata = metadata || coalesce(%s::jsonb, '{}'::jsonb), "
-            " completed_at = now(), "
-            " updated_at = now() "
-            f"where business_slug = %s and reservation_key = %s returning {_EVENT_COLUMNS}",
-            (
-                actual_cost_microusd, input_tokens, output_tokens, provider_request_id,
-                provider, model,
-                None if metadata is None else _json_dumps(metadata),
-                business_slug, key,
-            ),
-        ).fetchone()
-    settled = _event_from_row(row)
+    # Row ops in the migration-0037 SECURITY DEFINER function safebox_settle_usage (verbatim port):
+    # lock the event row, unknown→refuse, finalized→no-op return, else reserved→completed recording
+    # the actual with the same COALESCE-preserve + metadata-merge and NO cap re-check (money-truth).
+    row = conn.execute(
+        "select * from safebox_settle_usage(%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+        (
+            business_slug, key, actual_cost_microusd, input_tokens, output_tokens,
+            provider_request_id, provider, model,
+            None if metadata is None else _json_dumps(metadata),
+        ),
+    ).fetchone()
+    _raise_for_gate_refusal(row, business_slug=business_slug, reservation_key=key)
+    settled = _event_from_gate_row(row)
+    # An idempotent no-op on an already-finalized row returns BEFORE the mirror — exactly as the
+    # former in-Python `return event` short-circuit did (it returned from inside the transaction,
+    # never reaching this mirror call). Only a fresh settle mirrors.
+    if _gate_row_is_noop(row):
+        return settled
     # Post-commit: mirror the settled cost into OpenMeter for exact-cost aggregation
     # (GOAL_RULES §4 buy-not-build). Fire-and-forget and FAIL-SAFE — the authoritative ledger
     # already committed above, so a mirror failure (or OpenMeter being disabled) must never
@@ -582,34 +595,19 @@ def release_usage(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    with conn.transaction():
-        existing = conn.execute(
-            f"select {_EVENT_COLUMNS} from app_usage_events "
-            "where business_slug = %s and reservation_key = %s for update",
-            (business_slug, key),
-        ).fetchone()
-        if existing is None:
-            raise UnknownReservation(key)
-        event = _event_from_row(existing)
-        if event.status in _FINALIZED_STATUSES:
-            return event
-        new_status = "failed" if error else "released"
-        row = conn.execute(
-            "update app_usage_events set "
-            " status = %s, "
-            " actual_cost_microusd = 0, "
-            " error = coalesce(%s, error), "
-            " metadata = metadata || coalesce(%s::jsonb, '{}'::jsonb), "
-            " completed_at = now(), "
-            " updated_at = now() "
-            f"where business_slug = %s and reservation_key = %s returning {_EVENT_COLUMNS}",
-            (
-                new_status, error,
-                None if metadata is None else _json_dumps(metadata),
-                business_slug, key,
-            ),
-        ).fetchone()
-    return _event_from_row(row)
+    # Row ops in the migration-0037 SECURITY DEFINER function safebox_release_usage (verbatim port):
+    # lock the event row, unknown→refuse, finalized→no-op return, else reserved→failed (error given)
+    # | released (clean cancel), actual cost zeroed, error coalesced, metadata merged. The 'failed'
+    # vs 'released' split on `error` is decided inside the function (error not null → failed).
+    row = conn.execute(
+        "select * from safebox_release_usage(%s, %s, %s, %s::jsonb)",
+        (
+            business_slug, key, error,
+            None if metadata is None else _json_dumps(metadata),
+        ),
+    ).fetchone()
+    _raise_for_gate_refusal(row, business_slug=business_slug, reservation_key=key)
+    return _event_from_gate_row(row)
 
 
 def record_completed_usage(

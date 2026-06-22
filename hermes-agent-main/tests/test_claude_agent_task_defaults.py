@@ -861,6 +861,146 @@ def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp
     assert "ANTHROPIC_TOKEN=remote-oauth-token" in joined
 
 
+def _patch_docker_for_lockdown(tmp_path, monkeypatch):
+    """Shared docker stubs so the lockdown tests exercise the real env/network assembly."""
+    from tools.environments import docker as docker_env
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: None)
+    monkeypatch.setattr(docker_env, "_host_user_identity_mount_args", lambda user_spec: [])
+    monkeypatch.setattr(docker_env, "_build_security_args", lambda run_as_host_user=False: [])
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(takyon_core, "_docker_claude_worker_binary_mounts", lambda **kwargs: ([], {}))
+    monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: dict(extra or {}))
+
+
+def test_run_claude_agent_task_in_docker_lockdown_drops_raw_key_and_confines_network(tmp_path, monkeypatch):
+    """STEP D: with the broker lockdown ON the container gets NO raw provider key, is pointed at the
+    safebox broker with a minted capability token, and is --network-confined to the safebox only."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-provider-key-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "raw-provider-token-should-not-leak")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "https://safebox.internal")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", "takyon-safebox-only")
+    monkeypatch.setattr(
+        takyon_core, "_mint_claude_agent_operator_capability", lambda: "cap-token-xyz"
+    )
+
+    run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={
+            "business": "latexflow",
+            "workspace": "product/site",
+            "instruction": "Build the product shell.",
+        },
+        workspace_path=workspace,
+        timeout_ms=30_000,
+    )
+
+    joined = " ".join(run_cmd)
+    # No raw provider key/token anywhere in the container invocation.
+    assert "raw-provider-key-should-not-leak" not in joined
+    assert "raw-provider-token-should-not-leak" not in joined
+    assert "ANTHROPIC_TOKEN=" not in joined
+    # SDK pointed at the broker, authenticated with the minted capability token.
+    assert "ANTHROPIC_BASE_URL=https://safebox.internal" in joined
+    assert "ANTHROPIC_API_KEY=cap-token-xyz" in joined
+    # Network confined to the safebox-only network (no default-bridge egress).
+    assert "--network" in run_cmd
+    assert run_cmd[run_cmd.index("--network") + 1] == "takyon-safebox-only"
+    # Other sandbox flags preserved.
+    assert "--read-only" in run_cmd
+    assert "HOME=/tmp" in joined
+
+
+def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_broker_url(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_URL", raising=False)
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+
+    import pytest
+
+    with pytest.raises(takyon_core.TakyonError):
+        takyon_core._run_claude_agent_task_in_docker(
+            payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
+            workspace_path=workspace,
+            timeout_ms=30_000,
+        )
+
+
+def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_token(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "https://safebox.internal")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", "takyon-safebox-only")
+    monkeypatch.setattr(takyon_core, "_mint_claude_agent_operator_capability", lambda: "")
+
+    import pytest
+
+    with pytest.raises(takyon_core.TakyonError):
+        takyon_core._run_claude_agent_task_in_docker(
+            payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
+            workspace_path=workspace,
+            timeout_ms=30_000,
+        )
+
+
+def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_network(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "https://safebox.internal")
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", raising=False)
+    monkeypatch.setattr(
+        takyon_core, "_mint_claude_agent_operator_capability", lambda: "cap-token-xyz"
+    )
+
+    import pytest
+
+    with pytest.raises(takyon_core.TakyonError):
+        takyon_core._run_claude_agent_task_in_docker(
+            payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
+            workspace_path=workspace,
+            timeout_ms=30_000,
+        )
+
+
+def test_run_claude_agent_task_in_docker_default_path_keeps_raw_key_and_no_broker(tmp_path, monkeypatch):
+    """Lockdown OFF (default): raw key injected, no broker base URL, no --network override —
+    the existing coding-worker path is unchanged so no regression."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-key")
+
+    run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
+        workspace_path=workspace,
+        timeout_ms=30_000,
+    )
+
+    joined = " ".join(run_cmd)
+    assert "ANTHROPIC_API_KEY=raw-key" in joined
+    assert "ANTHROPIC_BASE_URL=" not in joined
+    assert "--network" not in run_cmd
+
+
 def test_missing_env_for_requirement_accepts_safebox_backed_anthropic_token(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)

@@ -499,3 +499,71 @@ def test_concurrent_identical_reservation_key_holds_once(pg_conn):
         (slug,),
     ).fetchone()[0]
     assert rows == 1
+
+
+# ── ledger privilege boundary (migration 0037) ──────────────────────────────────────
+# The reserve/settle/release row ops now live in SECURITY DEFINER functions that are the ONLY
+# sanctioned writers of app_usage_events. The restricted app-request role (takyon_app, migration
+# 0030) keeps SELECT but LOSES direct INSERT/UPDATE/DELETE, so a forged or stray write under the
+# app scope is denied at the DB while the gate function — owned by the privileged role — still
+# writes. This is the integrity boundary the safebox broker depends on.
+
+
+def test_takyon_app_role_cannot_write_usage_events_directly(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_usage.ensure_app_budget(pg_conn, slug)
+    # Drop to the restricted app-request role for the forged write, exactly as a stray app-scoped
+    # query would run; RESET ROLE afterwards so the fixture teardown keeps its privileged role.
+    pg_conn.execute("set role takyon_app")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "insert into app_usage_events "
+                "(business_slug, reservation_key, route, purpose, status, actual_cost_microusd) "
+                "values (%s, 'forge', 'app', 'product_usage', 'completed', 999)",
+                (slug,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+    # The forged row was never written.
+    assert app_usage.list_usage_events(pg_conn, slug) == []
+    # SELECT is retained: the role can still read (the 0027 RLS read path needs it).
+    pg_conn.execute("set role takyon_app")
+    try:
+        pg_conn.execute("select count(*) from app_usage_events where business_slug = %s", (slug,))
+    finally:
+        pg_conn.execute("reset role")
+
+
+def test_gate_function_writes_usage_even_under_restricted_app_role(pg_conn):
+    # The SECURITY DEFINER gate runs as its privileged owner, so reserve_usage SUCCEEDS even when the
+    # connection is dropped to the non-writing app role — the gate is the one sanctioned writer.
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=1_000)
+    pg_conn.execute("set role takyon_app")
+    try:
+        ev = app_usage.reserve_usage(
+            pg_conn, slug, estimated_cost_microusd=100, reservation_key="r1"
+        )
+    finally:
+        pg_conn.execute("reset role")
+    assert ev.status == "reserved"
+    assert ev.estimated_cost_microusd == 100
+    assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 100
+
+
+def test_reconcile_held_usage_releases_orphaned_holds(pg_conn):
+    # A reserved row whose provider call never settled/released would pin its estimate against
+    # committed spend forever; the reconciliation sweep releases reserved rows past an age cutoff.
+    slug = _business(pg_conn, _owner(pg_conn))
+    app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=1_000)
+    app_usage.reserve_usage(pg_conn, slug, estimated_cost_microusd=400, reservation_key="held")
+    assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 400
+    # cutoff 0s → every reserved row is eligible; one orphaned hold is reconciled to 'released'.
+    released = pg_conn.execute("select safebox_reconcile_held_usage(%s)", (0,)).fetchone()[0]
+    assert released == 1
+    ev = app_usage.list_usage_events(pg_conn, slug)[0]
+    assert ev.status == "released"
+    assert ev.actual_cost_microusd == 0
+    # the held estimate is freed — committed drops back to zero.
+    assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 0

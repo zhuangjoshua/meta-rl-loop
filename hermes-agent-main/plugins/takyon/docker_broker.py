@@ -15,7 +15,6 @@ from typing import Any
 
 _BROKER_URL_ENV = "TAKYON_DOCKER_BROKER_URL"
 _BROKER_TOKEN_ENV = "TAKYON_DOCKER_BROKER_TOKEN"
-_SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 
 
 def broker_url() -> str:
@@ -23,10 +22,12 @@ def broker_url() -> str:
 
 
 def broker_token() -> str:
-    direct = str(os.getenv(_BROKER_TOKEN_ENV) or "").strip()
-    if direct:
-        return direct
-    return str(os.getenv(_SAFEBOX_TOKEN_ENV) or "").strip()
+    # Least-privilege credential: the docker broker authorizes ONLY container lifecycle (it cannot
+    # vend secrets or spend), so it gets its OWN dedicated token and never reuses the master
+    # ``TAKYON_SAFEBOX_TOKEN``. Co-locating the safebox master token here was the red-team's
+    # blast-radius bug (one client-plane env read → every secret); the docker broker must hold a
+    # token that authorizes nothing but the docker proxy.
+    return str(os.getenv(_BROKER_TOKEN_ENV) or "").strip()
 
 
 def broker_enabled() -> bool:

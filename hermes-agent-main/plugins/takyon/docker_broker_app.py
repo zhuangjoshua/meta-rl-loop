@@ -21,7 +21,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 _BROKER_TOKEN_ENV = "TAKYON_DOCKER_BROKER_TOKEN"
-_SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 
 _RUN_FLAG_NOARG = {"--rm", "--init", "-i", "-d", "--read-only"}
 _RUN_FLAG_WITH_ARG = {
@@ -71,10 +70,11 @@ class _RemoveBody(BaseModel):
 
 
 def _broker_token() -> str:
-    direct = str(os.getenv(_BROKER_TOKEN_ENV) or "").strip()
-    if direct:
-        return direct
-    return str(os.getenv(_SAFEBOX_TOKEN_ENV) or "").strip()
+    # The docker proxy authorizes ONLY container lifecycle, so it has its OWN dedicated credential and
+    # never accepts the master ``TAKYON_SAFEBOX_TOKEN``. Sharing the master token here was the
+    # red-team's blast-radius bug — a single client-plane env read should not also authorize the
+    # docker proxy.
+    return str(os.getenv(_BROKER_TOKEN_ENV) or "").strip()
 
 
 def _require_internal_token(authorization: str | None = Header(default=None)) -> None:
