@@ -246,6 +246,7 @@ def _meta_ensure_custom_conversion(
             {
                 "name": _meta_custom_conversion_name(business, event_type),
                 "pixel_id": pixel_id,
+                "event_source_id": pixel_id,
                 "custom_event_type": event_type,
                 "rule": json.dumps({"url": {"i_contains": url_contains}}, sort_keys=True),
             },
@@ -1796,12 +1797,20 @@ def build_creative_gateway_router() -> APIRouter:
             source_rel = core._safe_relpath(source_path, field="source_path")
             source_root = (business_root / source_rel).resolve()
             if business_root.resolve() in (source_root, *source_root.parents):
+                source_installed = core._inject_meta_pixel_snippet(
+                    source_root,
+                    pixel_id=pixel_id,
+                    script_src=str(pixel_cfg.get("script_src") or "").strip(),
+                )
                 publish_source, publish_source_label = core._product_static_publish_source(source_root)
                 if publish_source is not None:
-                    source_installed = core._inject_meta_pixel_snippet(
-                        publish_source,
-                        pixel_id=pixel_id,
-                        script_src=str(pixel_cfg.get("script_src") or "").strip(),
+                    source_installed = (
+                        core._inject_meta_pixel_snippet(
+                            publish_source,
+                            pixel_id=pixel_id,
+                            script_src=str(pixel_cfg.get("script_src") or "").strip(),
+                        )
+                        or source_installed
                     )
         except Exception:
             source_installed = False

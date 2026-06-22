@@ -26689,7 +26689,7 @@ def _sync_meta_pixel_live_index_to_r2(slug: str, live_root: Path) -> bool:
     except Exception:
         from plugins.takyon import storage as _takyon_storage
     if not _takyon_storage.r2_configured():
-        return True
+        return False
     try:
         backend = _takyon_storage.R2StorageBackend()
         served_build_id = (
