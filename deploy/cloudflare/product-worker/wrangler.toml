@@ -27,6 +27,16 @@ bucket_name = "product-sites"
 [vars]
 ORIGIN_HOST = "origin.coscale.app"
 
+# Phase B decoupling: product <slug>.coscale.app/api/* is forwarded to the subuser's OWN hardened
+# edge (grey-cloud subuser-origin.coscale.app -> 134.209.123.8, with a more-specific
+# `subuser-origin.coscale.app/* -> no worker` route so it can't loop) instead of the operator.
+# RESERVED_HOSTS still go to ORIGIN_HOST. Canary control: SUBUSER_API_HOSTS is a comma list of
+# product hosts whose /api goes to the subuser, or "*" for all. EMPTY = operator (today's behaviour)
+# -> deploying this is a NO-OP until SUBUSER_API_HOSTS is set. Roll out: "" -> "<canary>.coscale.app"
+# -> "*", verifying a fresh-business auth+checkout E2E at each step. Operator block removed last.
+SUBUSER_ORIGIN_HOST = "subuser-origin.coscale.app"
+SUBUSER_API_HOSTS = ""
+
 # ── Routes ──────────────────────────────────────────────────────────────────
 # Routes are intentionally managed by the Takyon publish path, not by `wrangler deploy`:
 # `plugins/takyon/core.py::_ensure_product_edge_route` creates per-business routes such as

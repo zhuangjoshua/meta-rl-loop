@@ -38,7 +38,11 @@ const RESERVED_HOSTS = new Set([
 
 const PRODUCT_BASE_DOMAIN = "coscale.app";
 const PRODUCT_HOST_SUFFIX = `.${PRODUCT_BASE_DOMAIN}`;
-const ORIGIN_HOSTS = new Set(["origin.coscale.app"]);
+// Grey-cloud origin hostnames the worker forwards TO (via resolveOverride) and must never itself
+// serve/forward as a product host: origin.coscale.app -> operator; subuser-origin.coscale.app ->
+// subuser. Both have a more-specific `<host>/* -> no worker` route so the passthrough can't loop;
+// this set is belt-and-suspenders in case the *.coscale.app/* wildcard ever catches them.
+const ORIGIN_HOSTS = new Set(["origin.coscale.app", "subuser-origin.coscale.app"]);
 
 // Product slug grammar — mirrors `_safe_product_slug` in
 // hermes-agent-main/takyon_cli/web_server.py:8414 (single char, or
@@ -104,7 +108,7 @@ export default {
     // generate, checkout, webhooks, /api/pty, /api/events all live under /api/*
     // (see web_server.py:3021 `/api/takyon/apps/{business}/{route:path}`).
     if (RESERVED_HOSTS.has(host) || url.pathname.startsWith("/api/")) {
-      return forwardToOrigin(request, env);
+      return forwardToOrigin(request, env, apiOriginFor(host, env));
     }
 
     // ── Static rail (R2) ────────────────────────────────────────────────
@@ -112,7 +116,7 @@ export default {
     // is not /api/* is not a thing this site serves — send it to the origin so
     // behaviour is identical to today (origin returns its own 404/405).
     if (request.method !== "GET" && request.method !== "HEAD") {
-      return forwardToOrigin(request, env);
+      return forwardToOrigin(request, env, apiOriginFor(host, env));
     }
 
     const slug = host.slice(0, -PRODUCT_HOST_SUFFIX.length);
@@ -125,21 +129,42 @@ export default {
 };
 
 /**
- * Forward a request to the real origin (operator Caddy) unchanged.
+ * Choose which grey-cloud origin a forwarded (non-static) request goes to.
+ *
+ * Reserved operator hosts ALWAYS go to the operator control plane (`env.ORIGIN_HOST`).
+ * Product `/api/*` goes to the subuser's own hardened edge (`env.SUBUSER_ORIGIN_HOST`)
+ * once that host is canary-listed in `env.SUBUSER_API_HOSTS` (comma list, or "*" for all),
+ * taking the operator OUT of the customer path. Default (`SUBUSER_API_HOSTS` empty) = operator,
+ * i.e. byte-for-byte today's behaviour — so deploying this change is a no-op until the var is set.
+ */
+function apiOriginFor(host, env) {
+  if (RESERVED_HOSTS.has(host)) return env.ORIGIN_HOST;
+  const sub = (env.SUBUSER_ORIGIN_HOST || "").trim();
+  const list = (env.SUBUSER_API_HOSTS || "").trim().toLowerCase();
+  if (sub && list) {
+    if (list === "*") return sub;
+    const allow = new Set(list.split(",").map((s) => s.trim()).filter(Boolean));
+    if (allow.has(host)) return sub;
+  }
+  return env.ORIGIN_HOST;
+}
+
+/**
+ * Forward a request to a real origin (operator or subuser Caddy) unchanged.
  *
  * The Worker route covers product hosts such as `wandr.coscale.app/*`, so `fetch(request)` against the
- * same hostname would re-enter this Worker (infinite loop). We pin the subrequest
- * to a grey-clouded origin hostname (`env.ORIGIN_HOST`, e.g. origin.coscale.app
- * -> 137.184.75.57, DNS-only / not proxied, NOT on the Worker route) via
- * `cf.resolveOverride`, while keeping the ORIGINAL Host header so Caddy still
+ * same hostname would re-enter this Worker (infinite loop). We pin the subrequest to a grey-clouded
+ * origin hostname (`originHost`, e.g. origin.coscale.app -> 137.184.75.57 operator, or
+ * subuser-origin.coscale.app -> 134.209.123.8 subuser; both DNS-only / not proxied / NOT on the
+ * Worker route) via `cf.resolveOverride`, while keeping the ORIGINAL Host header so Caddy still
  * matches the per-business site block and serves the right cert/SNI.
  *
- * Because the subrequest still egresses from Cloudflare's network, it arrives at
- * Caddy from a Cloudflare IP and passes `fourmanifold_edge_only`. Direct clients
- * hitting origin.coscale.app are NOT on the CF IP allowlist and still get 403.
+ * Because the subrequest still egresses from Cloudflare's network, it arrives at Caddy from a
+ * Cloudflare IP and passes `fourmanifold_edge_only`. Direct clients hitting the origin record are
+ * NOT on the CF IP allowlist and still get 403.
  */
-function forwardToOrigin(request, env) {
-  const originHost = env.ORIGIN_HOST; // e.g. "origin.coscale.app"
+function forwardToOrigin(request, env, originHost) {
+  originHost = (originHost || env.ORIGIN_HOST || "").trim();
   if (!originHost) {
     // Misconfiguration: never silently bypass auth by serving anything else.
     return new Response("origin not configured", { status: 503 });
