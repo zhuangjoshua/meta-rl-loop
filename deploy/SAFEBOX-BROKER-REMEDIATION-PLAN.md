@@ -228,6 +228,42 @@ cross-tenant rejections (cross-user / cross-business / cross-sub-user) MUST fail
 `.env` from every VPS. THEN the operator rotates ALL provider keys + safebox creds. Post-rotation EXFIL
 sweep still 0; fresh-business dashboard E2E + a metered AI call still work.
 
+---
+
+## CODEX — DEPLOY DIRECTIVE (execute now, gate by gate; stop on any red gate)
+The code is on `main` at commit `684e3e3e` (ledger boundary + broker routes + worker lockdown) and
+`6769941e` (the broker core). Deploy both hosts with the key `~/.ssh/takyon_argon_alpha14`
+(operator `137.184.75.57`, subuser `134.209.123.8`); runtime path `/opt/takyon/hermes-agent-main`.
+Provision the new safebox-only secret **`TAKYON_CAP_SIGNING_KEY`** (32+ random bytes) into the safebox
+host only, and a dedicated **`TAKYON_DOCKER_BROKER_TOKEN`** for the docker-broker. Then:
+
+1. **STEP A — ledger boundary.** `git pull` on both runtimes (or rsync the 10 changed files). Apply
+   `0037_safebox_ledger_boundary.sql` to the control-plane Postgres. **GATE:** as `takyon_app`,
+   `insert into app_usage_events …` → *permission denied*; a real metered `/generate` + `/search`
+   still bills identically (run the PG gateway/usage suites: `test_takyon_app_usage_pg.py`,
+   `test_takyon_ai_gateway_pg.py`). RED → stop + report.
+2. **STEP B — broker routes.** Restart the safebox service; give it a least-priv DB conn for the ledger
+   adapter. **GATE:** safebox boots; a real `POST /v1/providers/anthropic/messages` (with a minted token)
+   returns a **key-free** result; `tcpdump`/logs show the provider request leaves the **safebox** host;
+   `ps`/`/proc/<pid>/environ` on the subuser/operator show **no provider key**.
+3. **STEP C — client cutover** (WRITE this per runbook STEP C, then deploy): point ai_gateway/
+   creative_gateway/stripe_util at the broker; delete the in-client raw-key resolution; drop the
+   `bypass=True` gateway conn. **GATE:** grep → zero provider-key fetches in client code; PG gateway
+   suite green; product `/generate`+`/search` work through the broker.
+4. **STEP D — worker.** Create the confined docker network (egress ONLY to the safebox); set
+   `TAKYON_CLAUDE_AGENT_BROKER=1`. **GATE:** `ps` on the worker host shows no key; container has no
+   default-bridge egress; a real `business_claude_agent_task` still runs. Then delete the OFF branch.
+5. **STEP E — delete unsafe.** Remove `GET /v1/env/{key}`, `/v1/env/first`, `/v1/env/snapshot`, `/v1/env`
+   from safebox_app.py; replace shared-bearer auth on remaining admin routes. **GATE:** safebox boots;
+   `curl …/v1/env/snapshot` → 404; all product/worker AI still works (only via broker).
+6. **STEP F — verify.** Run `tests/plugins/test_safebox_*`; re-run the design red-team; **EXFIL sweep = 0**
+   across every host (`ps`/env/logs/receipts/git/transcripts); the three cross-tenant rejections fail.
+7. **STEP G — cleanup + handoff.** `git filter-repo` `secrets/.env` (+ `polsia3/.env.local`) from history
+   (coordinate force-push with Joshua); delete the secret `.env` from every host. **Hand back to the
+   operator to rotate all provider keys + safebox creds, then E2E in the dashboard.**
+
+Push every applied change to `main` (git must mirror prod). Do NOT proceed past a red gate.
+
 ### Why this isn't shipped from this session
 The migration (STEP A) ports live billing logic and the deletions (STEP C/E) remove live routes — applied
 blind without the running safebox/PG/providers, a single slip is a total outage for every customer. Per the
