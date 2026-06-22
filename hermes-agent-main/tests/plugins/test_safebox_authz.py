@@ -112,6 +112,17 @@ def test_operator_call_enforces_ownership_cross_user_rejected():
         )
 
 
+def test_operator_call_accepts_tuple_rows_from_live_psycopg():
+    scope = authorize_operator_call(
+        _Conn(("user_A",)),
+        business_slug="climblog",
+        operator_user_id="user_A",
+        action="coding.task",
+        max_cost_microusd=5000,
+    )
+    assert scope.takyon_user_id == "user_A"
+
+
 def test_unknown_business_rejected(monkeypatch):
     monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: _user("cust_X"))
     monkeypatch.setattr(app_entitlements, "get_active_entitlement", lambda c, b, u: _ent("pro"))

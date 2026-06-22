@@ -18,6 +18,8 @@ read. The returned CapabilityScope is then signed by safebox_capability.mint_cap
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from .safebox_capability import CapabilityScope
 
 _UNENTITLING = {"", "free", "none", "unentitled"}
@@ -33,7 +35,7 @@ def _resolve_owner_user_id(conn, business_slug: str) -> str:
     ).fetchone()
     if row is None:
         raise AuthzError("unknown_business")
-    owner = str(row["owner_user_id"] or "").strip()
+    owner = str((row["owner_user_id"] if isinstance(row, Mapping) else row[0]) or "").strip()
     if not owner:
         raise AuthzError("business_owner_missing")
     return owner
