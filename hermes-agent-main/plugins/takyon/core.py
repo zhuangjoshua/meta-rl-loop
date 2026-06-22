@@ -804,6 +804,66 @@ _COMMENTARY_BUSINESS_PATHS = {
     "summary.md",
 }
 
+
+def _three_way_text_merge(base: bytes, ours: bytes, theirs: bytes) -> bytes | None:
+    """Line-based 3-way merge of a text file (``base`` = common ancestor; ``ours`` / ``theirs`` are
+    the two sides).
+
+    Returns the merged bytes when ``ours`` and ``theirs`` edited NON-overlapping regions of ``base``
+    — e.g. the build worker rewrote the page body while the logo/GSC step edited index.html's
+    ``<head>`` — so two tools touching the same file coexist instead of hard-failing the commit.
+    Returns ``None`` (telling the caller to fall back to its normal conflict handling) when the inputs
+    are not UTF-8 text (binary), are too large to merge cheaply, or the SAME region was edited on both
+    sides (a true conflict). Conservative by construction: any ambiguity yields ``None``, so a merge
+    can only auto-resolve the unambiguous case and never silently corrupt a file."""
+    if base == ours:
+        return theirs
+    if base == theirs or ours == theirs:
+        return ours
+    if max(len(base), len(ours), len(theirs)) > 4_000_000:
+        return None
+    try:
+        b = base.decode("utf-8")
+        o = ours.decode("utf-8")
+        t = theirs.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    import difflib
+
+    bl = b.splitlines(keepends=True)
+    ol = o.splitlines(keepends=True)
+    tl = t.splitlines(keepends=True)
+
+    def _edits(side_lines: list[str]) -> list[tuple[int, int, list[str]]]:
+        out: list[tuple[int, int, list[str]]] = []
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            a=bl, b=side_lines, autojunk=False
+        ).get_opcodes():
+            if tag != "equal":
+                out.append((i1, i2, side_lines[j1:j2]))
+        return out
+
+    ours_edits = _edits(ol)
+    theirs_edits = _edits(tl)
+    # A region of base edited by BOTH sides is a true conflict when the ranges overlap (half-open),
+    # and two pure insertions (i1 == i2) at the very same base offset are an ambiguous-order conflict.
+    for oi1, oi2, _o in ours_edits:
+        for ti1, ti2, _t in theirs_edits:
+            if oi1 < ti2 and ti1 < oi2:
+                return None
+            if oi1 == oi2 and ti1 == ti2 and oi1 == ti1:
+                return None
+    merged: list[str] = []
+    pos = 0
+    for i1, i2, repl in sorted(ours_edits + theirs_edits, key=lambda e: (e[0], e[1])):
+        if i1 < pos:
+            return None  # defensive: an overlap slipped past the check above
+        merged.extend(bl[pos:i1])
+        merged.extend(repl)
+        pos = i2
+    merged.extend(bl[pos:])
+    return "".join(merged).encode("utf-8")
+
 # Bounded optimistic-concurrency retry for the canonical workspace commit (build-worker sync). A
 # concurrent committer can advance head between our base read and our revision INSERT, surfacing a
 # rare RECOVERABLE conflict (the business_revisions PK unique violation, or a serialization/deadlock
@@ -13738,6 +13798,20 @@ class TakyonStore:
             if str(path).strip() and str(digest).strip()
         }
 
+    def _workspace_file_bytes(self, backend: Any, slug: str, digest: str | None) -> bytes | None:
+        """Fetch a committed workspace file's content from the content-addressed store by digest.
+        Used to obtain the base/head versions for a 3-way merge during a stale-base rebase. Fail-soft:
+        returns ``None`` (caller treats the file as unmergeable) on any read/integrity error."""
+        from . import storage
+
+        clean = str(digest or "").strip()
+        if not clean:
+            return None
+        try:
+            return backend.get(storage.workspace_cas_key(_slugify(slug), clean))
+        except Exception:
+            return None
+
     def _rebase_business_workspace_to_head(
         self,
         *,
@@ -13783,6 +13857,39 @@ class TakyonStore:
             # refresh regenerates it from canonical state. Only a conflict on a SUBSTANTIVE file (real
             # product source, receipts, etc.) is a true concurrent-edit hazard worth blocking on.
             substantive_conflicts = [rel for rel in conflicts if rel not in _COMMENTARY_BUSINESS_PATHS]
+            # A substantive file changed on BOTH sides is only a TRUE conflict when the SAME lines were
+            # edited on both. Two tools editing DIFFERENT regions of one file — e.g. the build worker
+            # rewriting the page body while the logo/GSC step edits index.html's <head> — must merge,
+            # not wedge the commit. Run a per-file 3-way text merge (base, ours=workspace, theirs=head);
+            # a clean merge keeps the merged content as the local override (re-applied on top of head
+            # below). Binary files and real line-overlap conflicts fall through to the hard-fail. This
+            # is the git-style merge that lets concurrent edits coexist, eliminating the index.html
+            # multi-writer wedge for every flow (bootstrap, product-workflow, iterate).
+            if substantive_conflicts:
+                merged_resolved: list[str] = []
+                for rel in substantive_conflicts:
+                    target = (workspace_root / rel).resolve()
+                    if workspace_root not in (target, *target.parents):
+                        continue
+                    base_bytes = self._workspace_file_bytes(backend, normalized, base_files.get(rel))
+                    head_bytes = self._workspace_file_bytes(backend, normalized, head_files.get(rel))
+                    if base_bytes is None or head_bytes is None:
+                        continue
+                    try:
+                        ours_bytes = target.read_bytes()
+                    except OSError:
+                        continue
+                    merged = _three_way_text_merge(base_bytes, ours_bytes, head_bytes)
+                    if merged is None:
+                        continue
+                    try:
+                        target.write_bytes(merged)
+                    except OSError:
+                        continue
+                    merged_resolved.append(rel)
+                substantive_conflicts = [
+                    rel for rel in substantive_conflicts if rel not in merged_resolved
+                ]
             if substantive_conflicts:
                 preview = ", ".join(substantive_conflicts[:5])
                 suffix = " ..." if len(substantive_conflicts) > 5 else ""
@@ -13790,10 +13897,12 @@ class TakyonStore:
                     f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
                     f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
                 )
-            # Drop the local (stale) render of each commentary conflict so head's committed version
-            # stands after re-materialize below; do NOT snapshot/re-apply it as a local override.
+            # Commentary conflicts (and any not cleanly merged) -> drop the local render so head's
+            # committed version stands after re-materialize below. A cleanly MERGED substantive file
+            # stays in local_changed so its merged bytes are snapshotted + re-applied on top of head.
             for rel in conflicts:
-                local_changed.discard(rel)
+                if rel in _COMMENTARY_BUSINESS_PATHS:
+                    local_changed.discard(rel)
 
         local_overrides: dict[str, bytes | None] = {}
         for rel in sorted(local_changed):
@@ -28303,6 +28412,133 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _meta_insights_dedup(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse Meta insight rows to one per (level, object_id, date_start, date_stop).
+
+    metrics/meta-ads/<slug>/insights.jsonl is append-only; re-syncing the same window
+    appends a fresh row. The aggregator keeps the latest by created_at so a re-sync
+    never double-counts (meta skill v2 implementation-notes.md sect. 3).
+    """
+    latest: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        totals = row.get("totals") if isinstance(row.get("totals"), dict) else {}
+        key = (
+            str(row.get("level") or ""),
+            str(row.get("object_id") or ""),
+            str(totals.get("date_start") or row.get("date_start") or ""),
+            str(totals.get("date_stop") or row.get("date_stop") or ""),
+        )
+        created = str(row.get("created_at") or "")
+        prev = latest.get(key)
+        if prev is None or created >= str(prev.get("created_at") or ""):
+            latest[key] = row
+    return list(latest.values())
+
+
+def _meta_v2_gateway_result(endpoint: str, payload: dict[str, Any]) -> str:
+    """Call the creative authority route and normalize to the JSON-string tool contract.
+
+    The authority route returns a dict; registry handlers must return a JSON string.
+    Tolerates a pre-serialized string (test mocks) so the shape is stable either way.
+    """
+    result = _call_creative_runtime_gateway(endpoint, payload)
+    return result if isinstance(result, str) else tool_result(result)
+
+
+# --- business_meta_ad_evaluate (v2) -----------------------------------------
+def handle_business_meta_ad_evaluate(args: dict, **_: Any) -> str:
+    """Judge a Meta campaign/adset/ad good/bad/neutral with a recommended action.
+
+    Orchestration only — every threshold, the learning/fatigue/attribution rules, and
+    the verdict->action map live in the skill's references/benchmarks.md. The authority
+    route gathers window metrics (reusing a <24h matching sync, else triggering a sync)
+    plus MCP insight signals, scores against benchmarks (business `targets` override the
+    CPA/ROAS baseline), and writes metrics/meta-ads/<slug>/evaluations/<id>.json.
+    Recommends only; any action runs through business_meta_ad_control under the spend gate.
+    """
+    try:
+        return _meta_v2_gateway_result(
+            "meta-evaluate",
+            {
+                "business": args.get("business"),
+                "scope": args.get("scope") or _business_scope(args),
+                "level": args.get("level"),
+                "object_id": args.get("object_id"),
+                "window": args.get("window") or "last_7d",
+                "targets": args.get("targets"),
+                "idempotency_key": args.get("idempotency_key"),
+            },
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+# --- business_meta_pixel_ensure (v2) ----------------------------------------
+def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
+    """Lazily make this business's site carry the shared pixel + a per-business conversion.
+
+    Idempotent. The authority route requires analytics.meta_pixel.pixel_id (else BLOCK —
+    the shared pixel + domain verification is one-time manual setup, never faked), sets
+    metadata.meta_pixel.enabled so the build-time injector bakes the snippet into
+    index.html <head> (reaches both VPS + R2), ensures the per-business custom conversion
+    (MCP write or Graph POST /customconversions on <slug>.coscale.app/<conversion_path>),
+    verifies, and writes metrics/meta-pixel/<slug>/ensure.json. Fails truthfully if any
+    proof is missing.
+    """
+    try:
+        return _meta_v2_gateway_result(
+            "meta-pixel-ensure",
+            {
+                "business": args.get("business"),
+                "scope": args.get("scope") or _business_scope(args),
+                "conversion_path": args.get("conversion_path") or "/",
+                "custom_event_type": args.get("custom_event_type") or "LEAD",
+                "idempotency_key": args.get("idempotency_key"),
+            },
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+# --- business_meta_pixel_verify (v2) ----------------------------------------
+def handle_business_meta_pixel_verify(args: dict, **_: Any) -> str:
+    """Read-only pixel health check used by the meta-ads preflight.
+
+    Two proofs: (A) fetch https://<slug>.coscale.app/ and assert the pixel snippet is in
+    the served HTML <head> on BOTH the VPS and R2 paths; (B) dataset health + this
+    business's custom conversion via the MCP. ok is true only when both proofs pass.
+    Writes metrics/meta-pixel/<slug>/preflight.json; never claims functional from source.
+    """
+    try:
+        return _meta_v2_gateway_result(
+            "meta-pixel-verify",
+            {
+                "business": args.get("business"),
+                "scope": args.get("scope") or _business_scope(args),
+                "idempotency_key": args.get("idempotency_key"),
+            },
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+# --- business_read_meta_pixel (v2) ------------------------------------------
+def handle_business_read_meta_pixel(args: dict, **_: Any) -> str:
+    """Report current pixel status from surface metadata + the latest verify receipt."""
+    try:
+        return _meta_v2_gateway_result(
+            "meta-pixel-read",
+            {
+                "business": args.get("business"),
+                "scope": args.get("scope") or _business_scope(args),
+            },
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def _reddit_daily_budget_cap() -> float:
     raw = os.getenv("TAKYON_REDDIT_MAX_DAILY_BUDGET_USD")
     try:
@@ -33543,6 +33779,71 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_ad_evaluate",
+        "description": "Evaluate a Meta campaign/adset/ad as good/bad/neutral with a recommended action, using benchmarks + MCP insight signals.",
+        "handler": handle_business_meta_ad_evaluate,
+        "schema": _schema(
+            "business_meta_ad_evaluate",
+            "Judge Meta ad performance and recommend an action.",
+            {
+                "business": _BUSINESS_PROP,
+                "level": {"type": "string", "enum": ["campaign", "adset", "ad"]},
+                "object_id": {"type": "string"},
+                "window": {"type": "string"},
+                "targets": {"type": "object"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "level", "object_id", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_pixel_ensure",
+        "description": "Ensure this business's site carries the shared Meta pixel + a per-business custom conversion (lazy; run before the first Meta ad).",
+        "handler": handle_business_meta_pixel_ensure,
+        "schema": _schema(
+            "business_meta_pixel_ensure",
+            "Install the shared pixel on the site and create the per-business custom conversion.",
+            {
+                "business": _BUSINESS_PROP,
+                "conversion_path": {"type": "string"},
+                "custom_event_type": {"type": "string"},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_meta_pixel_verify",
+        "description": "Verify a business's pixel is installed (both serving paths) and the dataset is receiving events; confirm its custom conversion exists.",
+        "handler": handle_business_meta_pixel_verify,
+        "schema": _schema(
+            "business_meta_pixel_verify",
+            "Health-check a business's Meta pixel and custom conversion.",
+            {
+                "business": _BUSINESS_PROP,
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_read_meta_pixel",
+        "description": "Report a business's current Meta pixel status from surface metadata and the latest verify receipt.",
+        "handler": handle_business_read_meta_pixel,
+        "schema": _schema(
+            "business_read_meta_pixel",
+            "Read a business's Meta pixel status.",
+            {"business": _BUSINESS_PROP},
+            ["business"],
         ),
     },
     {

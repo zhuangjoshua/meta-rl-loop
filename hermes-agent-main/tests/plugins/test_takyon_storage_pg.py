@@ -776,3 +776,35 @@ def test_stale_base_conflict_on_substantive_source_still_raises(pg_store_dsn, tm
         with conn:
             with pytest.raises(core_module.TakyonError, match="stale workspace base"):
                 store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r3", expected_base_revision=r1)
+
+
+def test_stale_base_conflict_non_overlapping_substantive_merges(pg_store_dsn, tmp_path, monkeypatch):
+    """Two tools editing DIFFERENT regions of the same substantive file (the build worker's body vs
+    the logo/GSC step's <head>) must 3-way MERGE, not hard-fail — keeping both edits. This is the
+    index.html multi-writer wedge fix."""
+    store, slug = _seed_quota_free_business(pg_store_dsn, tmp_path, monkeypatch)
+    ws = store._business_root(slug, sync=False)
+    (ws / "product" / "site").mkdir(parents=True, exist_ok=True)
+    idx = ws / "product" / "site" / "index.html"
+    idx.write_text("<head>\n<title>T</title>\n</head>\n<body>\n<p>old</p>\n</body>\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r1 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r1", expected_base_revision=0)
+
+    # Upstream (logo step) advances head by inserting a <head> tag.
+    idx.write_text("<head>\n<title>T</title>\n<link rel=icon>\n</head>\n<body>\n<p>old</p>\n</body>\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r2 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r2", expected_base_revision=r1)
+
+    # Stale build worker pinned to r1 rewrites the BODY → non-overlapping → must merge, not raise.
+    idx.write_text("<head>\n<title>T</title>\n</head>\n<body>\n<p>new</p>\n</body>\n", encoding="utf-8")
+    with store._connect() as conn:
+        with conn:
+            r3 = store._commit_business_workspace_revision(conn, slug, actor="agent", reason="r3", expected_base_revision=r1)
+
+    assert r3 > r2
+    merged = idx.read_text(encoding="utf-8")
+    assert "<link rel=icon>" in merged  # the logo step's <head> edit survived
+    assert "<p>new</p>" in merged       # the build worker's body edit survived
+    assert "<p>old</p>" not in merged
