@@ -1356,13 +1356,14 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
+# Fallback design packs used ONLY when the caller passes no `guidance_skills`. The bootstrap CEO
+# now selects the single fitting style pack per business and passes it explicitly, so this default
+# is a backstop. Keep it lean — base method + one generic style — so a caller that omits guidance
+# never silently makes the worker carry all six packs through its whole loop. Per-business fit comes
+# from the CEO's explicit pick; this fallback is intentionally generic.
 _DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
     "claude-design",
     "claude-design-openai",
-    "claude-design-stripe",
-    "claude-design-superhuman",
-    "claude-design-vibrant",
-    "claude-design-doodle",
 )
 def _resolve_worker_guidance_skills(
     args: dict[str, Any],
