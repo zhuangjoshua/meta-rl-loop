@@ -9,7 +9,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, distribution, outreach, campaigns]
-    related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, takyon-reddit, ugc-video-ad, takyon-meta-ads, takyon-reddit-ads, takyon-static-ad-creative-generator]
+    related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, takyon-reddit, ugc-video-ad, takyon-meta-ads-v2, takyon-reddit-ads, takyon-static-ad-creative-generator]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_create_workspace, business_publish_test_outreach, business_enqueue_job]
     routing:
@@ -47,7 +47,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Use when the operator asks to launch, continue, or review outreach or campaigns.
 - Use when the business needs a visible campaign workspace, lane plan, or campaign update that spans more than one post or reply.
 - Do not use this skill for channel-native X drafting or X thread handling; use `takyon-x`.
-- Do not use this skill for live paid Meta or Reddit ad execution; hand that move to `takyon-meta-ads` or `takyon-reddit-ads`.
+- Do not use this skill for live paid Meta or Reddit ad execution; hand that move to `takyon-meta-ads-v2` or `takyon-reddit-ads`.
 - Do not use for product-surface changes that belong in `takyon-build-product`.
 
 ## Quick Reference
@@ -65,7 +65,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Start with `business_read_business` and usually `business_calculate_pulse` so you know whether replies are waiting and what campaign state already exists.
 - If you need to inspect specific campaign files, use `business_read_file` or `business_list_files` instead of guessing the current state.
 - If the work turns into X-native drafting or reply handling, switch to `takyon-x`.
-- If the work turns into live organic Reddit posting/commenting, switch to `takyon-reddit`. If it turns into a live paid Meta or Reddit launch, switch to `takyon-meta-ads` or `takyon-reddit-ads`.
+- If the work turns into live organic Reddit posting/commenting, switch to `takyon-reddit`. If it turns into a live paid Meta or Reddit launch, switch to `takyon-meta-ads-v2` or `takyon-reddit-ads`.
 - If replies are large or noisy and you first need a compact triage, load `takyon-conversation-followup` before deciding whether the campaign should change.
 - If a provider-backed publish path is blocked, use the publish tools or `business_enqueue_job` to record the real blocker; do not hand-claim success.
 
@@ -103,7 +103,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 3. Inspect the current campaign workspace. `distribution/campaign/` is canonical, and `distribution/surface.md` is the coarse summary. If only the legacy `distribution/phase-1-outreach/` tree exists, move or merge that visible campaign state into `distribution/campaign/` first. If `distribution/campaign/` is missing or too stale to trust after that check, create or refresh it with `business_create_workspace` and write the current campaign files there.
 4. Update the visible campaign artifacts: objective, audience, lanes, assets, current blockers, and next iteration. Keep them business-scoped and durable instead of burying them in chat output.
 5. If the campaign needs the copied UGC video ad path, run `ugc-video-ad`, then store the resulting `product/ugc-ads/<slug>/` publication path in the campaign workspace after `business_ugc_ad_write` records it.
-6. If the next move is live organic Reddit posting or commenting, keep the strategy here but hand the execution to `takyon-reddit`. If the next move is a live paid Meta or Reddit campaign, keep the strategy and asset decisions here, but hand the execution to `takyon-meta-ads` or `takyon-reddit-ads` instead of stretching this skill into channel-owned launch/control work.
+6. If the next move is live organic Reddit posting or commenting, keep the strategy here but hand the execution to `takyon-reddit`. If the next move is a live paid Meta or Reddit campaign, keep the strategy and asset decisions here, but hand the execution to `takyon-meta-ads-v2` or `takyon-reddit-ads` instead of stretching this skill into channel-owned launch/control work.
 7. If the publish path should remain local, call `business_publish_test_outreach` and expect a suppressed local artifact under `distribution/local-published/` plus a receipt.
 8. If the business is in live mode and the next move is provider-backed, route X work to `takyon-x`, route organic Reddit work to `takyon-reddit`, route Reddit paid work to `takyon-reddit-ads`, and use `business_enqueue_job` only to record deferred external work that already belongs to a truthful owned rail.
 9. Before choosing or changing a campaign angle, read current `research/` state and keep the audience, promise, objection, and angle aligned so the updated distribution direction stays consistent with `research/strategy.md` rather than drifting into a shadow strategy.

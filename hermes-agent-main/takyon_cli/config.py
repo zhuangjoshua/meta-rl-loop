@@ -1791,6 +1791,21 @@ DEFAULT_CONFIG = {
             # Cache TTL (seconds) for stats reads, to respect API rate limits.
             "stats_cache_seconds": 300,
         },
+        # Shared Meta pixel for published product sites (takyon-meta-ads-v2).
+        # One pixel/dataset across all <slug>.coscale.app businesses; per-business
+        # attribution is layered on top via per-business custom conversions. The base
+        # snippet is baked into the build <head> (favicon-injector pattern) so it reaches
+        # the Cloudflare R2 edge. pixel_id and script_src are public; any CAPI/dataset
+        # token stays in Safebox (META_CAPI_TOKEN), never in code.
+        "meta_pixel": {
+            # Master switch for the rail. Per-business activation is additionally gated on
+            # the business's metadata.meta_pixel.enabled.
+            "enabled": True,
+            # The ONE shared Meta pixel/dataset id (non-secret — ships in page HTML).
+            "pixel_id": "1340991031280635",
+            # Public base pixel loader.
+            "script_src": "https://connect.facebook.net/en_US/fbevents.js",
+        },
     },
 
     # Config schema version - bump this when adding new required fields

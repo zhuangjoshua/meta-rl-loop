@@ -193,7 +193,7 @@ def test_bundled_takyon_skills_exist():
         "takyon-conversation-followup",
         "takyon-distribution",
         "takyon-market-research",
-        "takyon-meta-ads",
+        "takyon-meta-ads-v2",
         "takyon-reddit",
         "takyon-reddit-ads",
         "takyon-x",

@@ -10,7 +10,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, reddit, ads, paid, distribution, image, video, carousel]
-    related_skills: [ugc-video-ad, static-ad-creative-generator, takyon-distribution, takyon-business-metrics, takyon-meta-ads]
+    related_skills: [ugc-video-ad, static-ad-creative-generator, takyon-distribution, takyon-business-metrics, takyon-meta-ads-v2]
     requires_toolsets: [takyon, takyon-authority]
     requires_tools:
       [

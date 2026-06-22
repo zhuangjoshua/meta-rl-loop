@@ -33,7 +33,7 @@ Observed key names are present locally as of 2026-05-25; values are intentionall
 - `takyon-business-metrics`
 - `takyon-x`
 - `takyon-reddit`
-- `takyon-meta-ads`
+- `takyon-meta-ads-v2`
 - `takyon-reddit-ads`
 
 These skills should declare readiness in Hermes-native frontmatter:

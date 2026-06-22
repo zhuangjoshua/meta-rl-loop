@@ -5421,7 +5421,7 @@ async def start_takyon_business_outreach_channel(
         "meta": {
             "label": "Meta",
             "kind": "meta.campaign_start",
-            "requested_skill": "takyon-meta-ads",
+            "requested_skill": "takyon-meta-ads-v2",
         },
     }
     spec = channel_specs.get(channel)

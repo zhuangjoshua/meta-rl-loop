@@ -42,6 +42,10 @@ provides_tools:
   - business_meta_ad_bind_manual_launch
   - business_meta_ad_control
   - business_meta_ad_insights_sync
+  - business_meta_ad_evaluate
+  - business_meta_pixel_ensure
+  - business_meta_pixel_verify
+  - business_read_meta_pixel
   - business_x_metrics_sync
   - business_reddit_publish_outreach
   - business_reddit_ad_launch

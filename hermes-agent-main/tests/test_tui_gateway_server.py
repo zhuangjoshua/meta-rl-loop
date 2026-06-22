@@ -6042,7 +6042,7 @@ def test_business_overview_exposes_modular_outreach_channels(tmp_path):
                             "status": "queued",
                             "payload": {
                                 "channel": "meta",
-                                "requested_skill": "takyon-meta-ads",
+                                "requested_skill": "takyon-meta-ads-v2",
                                 "summary": "Start Meta outreach lane.",
                             },
                             "created_at": "2026-06-04T09:50:00Z",
