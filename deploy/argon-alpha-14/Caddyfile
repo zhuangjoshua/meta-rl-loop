@@ -123,20 +123,12 @@ research-composer.fourmanifold.com {
 	respond "not found" 404
 }
 
-# Business product sites on the coscale.app domain, terminated with coscale.app's own Cloudflare
-# Origin cert and proxied to the sub-user product plane on 10.116.0.3:80. The app runtime rejects
-# any host that isn't a real business.
-*.coscale.app {
-	import coscale_cloudflare_origin_tls
-	import fourmanifold_edge_only
-
-	encode zstd gzip
-
-	reverse_proxy 10.116.0.3:80 {
-		header_up Host {host}
-		header_up X-Forwarded-Proto https
-	}
-}
+# Product sites on coscale.app are served entirely off the Cloudflare product Worker: static from
+# R2, and /api/* forwarded subuser-direct to the subuser's OWN hardened :443 edge
+# (SUBUSER_API_HOSTS="*" in deploy/cloudflare/product-worker/wrangler.toml). The operator is no
+# longer in the product data path, so there is intentionally NO *.coscale.app block here — do not
+# re-add one. Only app.fourmanifold.com (operator dashboard) and its /api/webhooks/stripe forward
+# above remain operator-served.
 
 :80 {
 	import fourmanifold_edge_only
@@ -153,17 +145,8 @@ research-composer.fourmanifold.com {
 		}
 	}
 
-	@product {
-		host *.coscale.app
-		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
-	}
-	handle @product {
-		reverse_proxy 10.116.0.3:80 {
-			header_up Host {host}
-			header_up X-Forwarded-Proto http
-		}
-	}
-
+	# Product *.coscale.app no longer relays through the operator on :80 either — the product Worker
+	# forwards /api subuser-direct (see the note above). Anything else on :80 is not found.
 	handle {
 		respond "not found" 404
 	}

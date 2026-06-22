@@ -30,12 +30,16 @@ ORIGIN_HOST = "origin.coscale.app"
 # Phase B decoupling: product <slug>.coscale.app/api/* is forwarded to the subuser's OWN hardened
 # edge (grey-cloud subuser-origin.coscale.app -> 134.209.123.8, with a more-specific
 # `subuser-origin.coscale.app/* -> no worker` route so it can't loop) instead of the operator.
-# RESERVED_HOSTS still go to ORIGIN_HOST. Canary control: SUBUSER_API_HOSTS is a comma list of
-# product hosts whose /api goes to the subuser, or "*" for all. EMPTY = operator (today's behaviour)
-# -> deploying this is a NO-OP until SUBUSER_API_HOSTS is set. Roll out: "" -> "<canary>.coscale.app"
-# -> "*", verifying a fresh-business auth+checkout E2E at each step. Operator block removed last.
+# RESERVED_HOSTS still go to ORIGIN_HOST (operator dashboard/control plane).
+# SUBUSER_API_HOSTS selects which product hosts' /api the worker sends subuser-direct: a comma list,
+# or "*" for ALL. This value is the SOURCE OF TRUTH and is BAKED on every worker (re)deploy — keep
+# the end-state here, not as a transient CF-API var, or the next redeploy reverts it (that is exactly
+# what stalled this cutover before). End state: "*" = every product business (all future ones at
+# birth) is served subuser-direct; the operator *.coscale.app /api double-route is then deleted, not
+# kept as a fallback. Acceptance gate: a fresh business created through the dashboard works subuser-
+# direct (auth + checkout + webhook + usage) BEFORE the operator legacy block is removed.
 SUBUSER_ORIGIN_HOST = "subuser-origin.coscale.app"
-SUBUSER_API_HOSTS = ""
+SUBUSER_API_HOSTS = "*"
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 # Routes are intentionally managed by the Takyon publish path, not by `wrangler deploy`:
