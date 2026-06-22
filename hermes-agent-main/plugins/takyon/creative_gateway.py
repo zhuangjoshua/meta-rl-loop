@@ -1821,32 +1821,17 @@ def build_creative_gateway_router() -> APIRouter:
             pixel_id=pixel_id,
             script_src=str(pixel_cfg.get("script_src") or "").strip(),
         )
-        # Republish through the canonical build path so a NEW content-addressed build_id is
-        # produced with the pixel baked in at build time. The edge serves
-        # <slug>/current -> build_id -> index.html with NO origin fallback, so overwriting the
-        # live dist or a single served build_id never reaches it (and the next product rebuild
-        # drops it again). _publish_product_surface_path injects the snippet before hashing the
-        # build (gated on _surface_meta_pixel_enabled), mirrors every file to R2 under the new
-        # build_id, and flips the pointer -- the same robust pattern the GSC tag uses, and it
-        # survives future rebuilds because the enabled flag is re-checked on every publish.
-        enabled_surface = {
-            **surface,
-            "metadata": {
-                **(metadata if isinstance(metadata, dict) else {}),
-                "meta_pixel": meta_pixel_metadata,
-            },
-        }
-        try:
-            republish = core._publish_product_surface_path(
-                business_root=business_root,
-                slug=business,
-                source_path=source_path,
-                publish_target=core._product_publish_target(business, surface.get("publish_target")),
-                source_revision=getattr(store, "_canonical_workspace_revision", lambda _s: 0)(business),
-                surface=enabled_surface,
-            )
-        except Exception as exc:  # pragma: no cover - fail truthfully, never fabricate
-            republish = {"status": "error", "blocker": str(exc)[:200]}
+        # The edge serves <slug>/current -> build_id -> index.html with NO origin fallback, so the
+        # snippet just injected into the live dist only reaches the edge as a fresh keyed build.
+        # Republish the already-built live dist to R2 under a NEW content-addressed build_id and
+        # flip the pointer (synchronous; no Vite rebuild). meta_pixel.enabled is now persisted on
+        # the surface above, so future product rebuilds keep the pixel via the publish-time bake
+        # (_surface_meta_pixel_enabled in _publish_product_surface_path).
+        republish = (
+            core._republish_live_dist_to_r2(business, live_root)
+            if installed_vps
+            else {"status": "skipped", "live_build_id": "", "blocker": "live dist injection failed"}
+        )
         edge_published = str(republish.get("status") or "") == "published"
         subuser_sync = core._sync_subuser_product_site(business, live_root) if installed_vps else {
             "synced": False,

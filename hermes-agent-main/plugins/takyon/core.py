@@ -26765,6 +26765,46 @@ def _inject_meta_pixel_snippet(site_root: Path, *, pixel_id: str, script_src: st
     return True
 
 
+def _republish_live_dist_to_r2(slug: str, live_root: Path) -> dict[str, Any]:
+    """Publish the already-built live dist to R2 under a NEW content-addressed build_id and flip
+    the pointer. Used by meta_pixel_ensure after injecting the snippet into the live dist: the edge
+    serves ``<slug>/current -> build_id -> index.html`` with NO origin fallback, so an in-place
+    edit of the live dist (or of a single already-served build_id) never reaches the edge and is
+    dropped by the next rebuild. A fresh keyed build is the only thing the edge will serve. No Vite
+    rebuild -- the served dist already exists at ``live_root``; future product rebuilds keep the
+    pixel via the publish-time bake (``_surface_meta_pixel_enabled`` in
+    ``_publish_product_surface_path``). Fail-soft + truthful: returns status/blocker, never raises."""
+    from . import storage
+
+    result: dict[str, Any] = {"status": "skipped", "live_build_id": "", "blocker": ""}
+    try:
+        if not (live_root / "index.html").is_file():
+            result["blocker"] = "live dist missing index.html"
+            return result
+        if not storage.r2_configured():
+            result["blocker"] = "r2_unconfigured"
+            return result
+        safe_slug = _slugify(slug)
+        backend = storage.get_storage_backend()
+        build_id = hashlib.sha256(
+            _json_dumps(
+                {"slug": safe_slug, "files": storage.workspace_file_digests(live_root)}
+            ).encode("utf-8")
+        ).hexdigest()[:32]
+        try:
+            storage.write_build_artifact(backend, safe_slug, build_id, live_root)
+        except Exception:  # pragma: no cover - artifact is for re-materialization; R2 is what serves
+            pass
+        mirror = storage.write_public_site_to_r2(safe_slug, build_id, live_root)
+        result.update({"status": "published", "live_build_id": str(mirror.get("build_id") or build_id)})
+    except Exception as exc:  # pragma: no cover - fail truthfully, never fabricate a live edge
+        result["blocker"] = str(exc)[:200]
+        logging.getLogger("takyon.r2").warning(
+            "meta pixel live-dist republish failed: slug=%s err=%s", slug, exc
+        )
+    return result
+
+
 def _surface_meta_pixel_enabled(surface: Mapping[str, Any] | None) -> bool:
     metadata = surface.get("metadata") if isinstance(surface, Mapping) else {}
     if not isinstance(metadata, Mapping):
