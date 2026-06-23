@@ -156,7 +156,7 @@ def test_reserve_refuses_insufficient_credits_before_provider(client, ledger, mo
 
     monkeypatch.setattr(
         creative_gateway,
-        "_gemini_generate_logo_png",
+        "_gemini_generate_image_raw",
         lambda **k: pytest.fail("provider called despite insufficient credits"),
     )
     resp = _reserve(client)
@@ -180,7 +180,7 @@ def test_logo_reserve_then_provider_then_commit_is_key_free_and_once(client, led
         return b"\x89PNG\r\n\x1a\nFAKELOGO"
 
     monkeypatch.setattr(creative_gateway, "_resolve_gemini_image_key", lambda: _REAL_KEY)
-    monkeypatch.setattr(creative_gateway, "_gemini_generate_logo_png", _fake_gen)
+    monkeypatch.setattr(creative_gateway, "_gemini_generate_image_raw", _fake_gen)
 
     # 1. Reserve -> creative capability (credits reserved EXACTLY once).
     resp = _reserve(client)
@@ -212,7 +212,7 @@ def test_logo_reserve_then_provider_then_commit_is_key_free_and_once(client, led
     )
     assert presp.status_code == 200, presp.text
     pdata = presp.json()
-    assert pdata["format"] == "png"
+    assert pdata["format"] == "raw"  # safebox returns RAW provider bytes; runtime alpha-keys to PNG
     assert pdata["image_base64"]
     assert _REAL_KEY not in presp.text  # KEY-FREE
     assert captured["api_key"] == _REAL_KEY  # resolved locally on the safebox
@@ -241,7 +241,7 @@ def test_provider_route_missing_capability_is_401(client, ledger, monkeypatch):
 
     monkeypatch.setattr(
         creative_gateway,
-        "_gemini_generate_logo_png",
+        "_gemini_generate_image_raw",
         lambda **k: pytest.fail("provider called without a capability"),
     )
     resp = client.post(
@@ -256,7 +256,7 @@ def test_provider_route_garbage_capability_is_401(client, ledger, monkeypatch):
 
     monkeypatch.setattr(
         creative_gateway,
-        "_gemini_generate_logo_png",
+        "_gemini_generate_image_raw",
         lambda **k: pytest.fail("provider called with a garbage capability"),
     )
     resp = client.post(

@@ -483,10 +483,12 @@ def _render_logo_png(prompt: str, *, capability_token: str) -> bytes:
     ``logo_generate`` credits via ``safebox.creative_reserve`` and holds the returned creative
     capability (``capability_token``). This function presents that token to the gated
     ``/v1/providers/gemini/logo`` route; the safebox VERIFIES the capability, resolves the raw Gemini
-    key LOCALLY, renders, post-processes the white background to alpha, and returns the KEY-FREE
-    ``{"image_base64","format"}`` payload, which this function decodes to PNG bytes. The business
-    runtime never resolves a raw key and never reserves credits itself. Fails closed
-    (``RemoteSafeboxError`` / refusal) and never falls back to a raw key.
+    key LOCALLY, makes ONLY the keyed provider call, and returns the KEY-FREE
+    ``{"image_base64","format"}`` payload of RAW provider image bytes. The white-background -> alpha
+    keying is a pure pixel transform with no secret dependency, so it runs HERE on the runtime plane
+    (where numpy lives), never on the secret host. The business runtime never resolves a raw key and
+    never reserves credits itself. Fails closed (``RemoteSafeboxError`` / refusal) and never falls
+    back to a raw key.
 
     This is uniform across planes: on a runtime plane it is an HTTP call to the remote safebox; on the
     safebox host / local dev ``safebox.creative_provider_call`` runs the SAME route in-process. There is
@@ -498,20 +500,22 @@ def _render_logo_png(prompt: str, *, capability_token: str) -> bytes:
     image_b64 = str((result or {}).get("image_base64") or "")
     if not image_b64:
         raise RuntimeError("gemini image gate returned no image data")
-    return base64.b64decode(image_b64)
+    # The safebox returns the RAW provider image bytes (key + API call only — no build on the secret
+    # host). Key the solid-white backdrop to real alpha HERE on the runtime plane (numpy lives here).
+    return _key_white_background_to_alpha(base64.b64decode(image_b64))
 
 
-def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
-    """Call Gemini image generation and return PNG bytes with a real alpha channel.
+def _gemini_generate_image_raw(*, api_key: str, prompt: str) -> bytes:
+    """Call Gemini image generation and return the RAW provider image bytes — NO post-processing.
 
-    Imports the provider SDK lazily and passes the key as an explicit
-    ``genai.Client(api_key=…)`` argument — never via ``os.environ``. Raises on
-    any provider/SDK failure so the caller releases the credit reservation.
-
-    Gemini bakes an opaque/checkerboard background even when asked for
-    transparency, so the prompt requests a solid pure-white backdrop and the raw
-    PNG is post-processed (``_key_white_background_to_alpha``) into real alpha
-    before returning.
+    This is the ONLY step that needs the provider key, so it is the ONLY step that runs on the
+    safebox (the gated provider route resolves the key locally and calls this). It passes the key as
+    an explicit ``genai.Client(api_key=…)`` argument — never via ``os.environ`` — and returns the
+    image bytes exactly as the provider produced them (PNG or JPEG). The white-background alpha-keying
+    / crop is a pure pixel transform with NO secret dependency, so it runs on the RUNTIME plane via
+    ``_key_white_background_to_alpha`` AFTER the broker returns — never on the secret host (which is
+    why this never imports numpy). Raises on any provider/SDK failure so the caller releases the
+    credit reservation.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -560,6 +564,12 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
         contents=[prompt],
     )
     for part in _parts_from_response(response):
+        # Prefer the provider's RAW inline bytes (no PIL/numpy on the safebox). Fall back to the SDK
+        # image object (PIL format-encode only, still no pixel transform) when a part exposes
+        # as_image() but no inline_data.
+        raw = _inline_data_bytes(part)
+        if raw:
+            return raw
         as_image = getattr(part, "as_image", None)
         if callable(as_image):
             try:
@@ -567,11 +577,20 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
             except Exception:
                 image = None
             if image is not None:
-                return _key_white_background_to_alpha(_image_to_png_bytes(image))
-        raw = _inline_data_bytes(part)
-        if raw:
-            return _key_white_background_to_alpha(raw)
+                return _image_to_png_bytes(image)
     raise RuntimeError("Gemini image generation returned no image data")
+
+
+def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
+    """Back-compat in-process helper: raw Gemini image + alpha post-process in ONE call.
+
+    Only safe where numpy is available (the runtime / local-dev). The safebox provider route does
+    NOT call this — it calls ``_gemini_generate_image_raw`` and returns raw bytes; the runtime applies
+    ``_key_white_background_to_alpha`` after the broker call (see ``_render_logo_png``).
+    """
+    return _key_white_background_to_alpha(
+        _gemini_generate_image_raw(api_key=api_key, prompt=prompt)
+    )
 
 
 def build_creative_gateway_router() -> APIRouter:

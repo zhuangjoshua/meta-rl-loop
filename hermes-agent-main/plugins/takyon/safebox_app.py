@@ -1135,8 +1135,11 @@ def _gemini_image_provider_caller(payload: dict[str, Any]):
         actual_microusd = int(
             (priced.amount_usd * Decimal("1000000")).to_integral_value(rounding=ROUND_CEILING)
         )
-        png_bytes = creative_gateway._gemini_generate_logo_png(api_key=key, prompt=prompt)
-        result = {"image_base64": _b64.b64encode(png_bytes).decode("ascii"), "format": "png"}
+        # Secret boundary: the safebox makes ONLY the keyed provider call and returns the RAW image
+        # bytes. The alpha-key / PNG post-process is a pure pixel transform (no secret) and runs on
+        # the runtime plane after the broker returns — never here (the safebox has no numpy).
+        raw_bytes = creative_gateway._gemini_generate_image_raw(api_key=key, prompt=prompt)
+        result = {"image_base64": _b64.b64encode(raw_bytes).decode("ascii"), "format": "raw"}
         return result, int(actual_microusd)
 
     return _call
@@ -1279,8 +1282,10 @@ def _creative_gemini_caller(payload: dict[str, Any]):
         key = creative_gateway._resolve_gemini_image_key()
         if not key:
             raise BrokerLedgerError("gemini_unconfigured")
-        png_bytes = creative_gateway._gemini_generate_logo_png(api_key=key, prompt=prompt)
-        return {"image_base64": _b64.b64encode(png_bytes).decode("ascii"), "format": "png"}
+        # Secret boundary: keyed provider call only; return RAW bytes. The runtime alpha-keys after
+        # the broker returns (no numpy/PIL build on the secret host).
+        raw_bytes = creative_gateway._gemini_generate_image_raw(api_key=key, prompt=prompt)
+        return {"image_base64": _b64.b64encode(raw_bytes).decode("ascii"), "format": "raw"}
 
     return _call
 

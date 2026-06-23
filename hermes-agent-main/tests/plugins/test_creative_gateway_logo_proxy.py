@@ -55,10 +55,14 @@ def test_render_logo_presents_capability_to_gated_route(monkeypatch):
     monkeypatch.setattr(gw.safebox, "creative_provider_call", _fake_provider_call)
     monkeypatch.setattr(gw, "_resolve_gemini_image_key", _boom_resolver)
     monkeypatch.setattr(gw, "_gemini_generate_logo_png", _boom_local)
+    monkeypatch.setattr(gw, "_gemini_generate_image_raw", _boom_local)
+    # The safebox now returns RAW provider bytes; the runtime keys white -> alpha. Stub that pixel
+    # transform to identity so this test asserts the gating/decode contract, not numpy output.
+    monkeypatch.setattr(gw, "_key_white_background_to_alpha", lambda data: data)
 
     out = gw._render_logo_png("draw an icon", capability_token="cap-logo-xyz")
 
-    assert out == png  # (b) decoded from image_base64
+    assert out == png  # (b) decoded from image_base64, then alpha-keyed ON THE RUNTIME (stubbed here)
     assert calls == [("gemini", "logo", {"prompt": "draw an icon"}, "cap-logo-xyz")]
 
 
@@ -147,20 +151,21 @@ def test_gemini_logo_generation_uses_current_sdk_parts_shape(monkeypatch):
     assert captured["saved_format"] == "PNG"
 
 
-def test_gemini_logo_generation_prefers_as_image_over_raw_inline(monkeypatch):
-    """When both helpers are present, use ``as_image()`` so the Safebox hands the
-    postprocessor PNG bytes from the SDK image helper."""
+def test_gemini_raw_prefers_inline_bytes_over_as_image(monkeypatch):
+    """``_gemini_generate_image_raw`` (the SAFEBOX step) returns the provider's RAW inline bytes
+    verbatim when present — it must NOT re-encode via ``as_image()``. The safebox hands back exactly
+    what the provider produced; the runtime owns the alpha-key/PNG post-process."""
     gw = _gw()
-    png = b"\x89PNG\r\n\x1a\nPNGDATA"
+    raw_inline = b"\xff\xd8raw-jpeg-bytes"
     captured: dict[str, object] = {}
 
     class _FakeInline:
-        data = base64.b64encode(b"\xff\xd8jpeg").decode("ascii")
+        data = base64.b64encode(raw_inline).decode("ascii")
 
     class _FakeImage:
         def save(self, fileobj, format):
-            captured["saved_format"] = format
-            fileobj.write(png)
+            captured["as_image_used"] = True
+            fileobj.write(b"\x89PNG\r\n\x1a\nSHOULD-NOT-BE-USED")
 
     class _FakePart:
         inline_data = _FakeInline()
@@ -183,12 +188,11 @@ def test_gemini_logo_generation_prefers_as_image_over_raw_inline(monkeypatch):
     fake_google = types.ModuleType("google")
     fake_google.genai = fake_genai
     monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setattr(gw, "_key_white_background_to_alpha", lambda data: data)
 
-    out = gw._gemini_generate_logo_png(api_key="gem-key", prompt="draw a lunchbox")
+    out = gw._gemini_generate_image_raw(api_key="gem-key", prompt="draw a lunchbox")
 
-    assert out == png
-    assert captured["saved_format"] == "PNG"
+    assert out == raw_inline  # raw provider bytes, returned verbatim by the safebox step
+    assert "as_image_used" not in captured  # inline preferred; as_image() never invoked
 
 
 def test_gemini_logo_generation_postprocesses_inline_bytes_directly(monkeypatch):
