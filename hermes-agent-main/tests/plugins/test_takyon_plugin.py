@@ -3636,6 +3636,36 @@ def test_required_env_must_exist(tmp_path, monkeypatch):
         )
 
 
+def test_anthropic_requirement_allows_keyfree_safebox_broker(monkeypatch):
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+
+    result = takyon_core._require_api_access(
+        {"action": "agent.record", "business": "latexflow", "requires_api": ["anthropic"]}
+    )
+
+    assert result["missing_credentials_suppressed"] == []
+
+
+def test_anthropic_requirement_still_fails_without_raw_key_or_broker(monkeypatch):
+    for key in (
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "TAKYON_CLAUDE_AGENT_BROKER",
+        "TAKYON_CLAUDE_AGENT_BROKER_URL",
+        "TAKYON_SAFEBOX_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(TakyonError, match="missing API/env"):
+        takyon_core._require_api_access(
+            {"action": "agent.record", "business": "latexflow", "requires_api": ["anthropic"]}
+        )
+
+
 def test_product_deploy_job_is_vercel_gated_in_test_mode(tmp_path, monkeypatch):
     monkeypatch.setitem(_API_ENV_ALIASES, "vercel", ("TAKYON_TEST_VERCEL_TOKEN",))
     monkeypatch.delenv("TAKYON_TEST_VERCEL_TOKEN", raising=False)

@@ -8734,8 +8734,24 @@ def _missing_env_for_requirement(requirement: str) -> list[str]:
         return []
     alias = _API_ENV_ALIASES.get(key.lower())
     if alias:
+        if key.lower() == "anthropic" and _anthropic_safebox_broker_configured():
+            return []
         return [] if any(_env_requirement_value(name) for name in alias) else ["/".join(alias)]
     return [] if _env_requirement_value(key) else [key]
+
+
+def _anthropic_safebox_broker_configured() -> bool:
+    """True when Anthropic calls are satisfied by the key-free Safebox proxy path.
+
+    This is deliberately only a preflight answer: the coding-worker path still mints a scoped
+    ``operator.session`` capability for the real business owner before invoking the SDK and fails
+    closed if minting is refused. This guard just prevents the old raw-env check from blocking that
+    safer broker path.
+    """
+    try:
+        return bool(_claude_agent_broker_lockdown_enabled() and _claude_agent_broker_url())
+    except Exception:
+        return False
 
 
 def _credential_requirements(op: dict[str, Any]) -> list[str]:
