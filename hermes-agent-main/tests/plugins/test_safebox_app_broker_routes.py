@@ -254,6 +254,32 @@ def test_provider_route_action_audience_mismatch_is_400(client):
     assert resp.json()["detail"] == "action_audience_mismatch"
 
 
+def test_provider_route_malformed_payload_is_400_not_500(client):
+    # A valid pre-minted token but a malformed provider payload (anthropic_payload rejects an empty
+    # messages body) must surface as a clean 400 — the payload builders run BEFORE token verification,
+    # so a 500 here would mean a malformed body crashes the route (regression: the builders used to run
+    # outside the guard).
+    minted = client.post(
+        "/v1/token/mint",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "anthropic.messages",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+    assert minted.status_code == 200, minted.text
+    token = minted.json()["token"]
+    resp = client.post(
+        "/v1/providers/anthropic/messages",
+        headers=_auth(),
+        json={"token": token, "payload": {}, "estimate_microusd": 2000},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "invalid_provider_payload"
+
+
 def test_provider_route_fails_closed_without_signing_key(monkeypatch):
     # If the safebox host has no capability signing key, brokering must fail closed (503), never
     # proceed unsigned.

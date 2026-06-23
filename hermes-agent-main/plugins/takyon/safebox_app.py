@@ -512,8 +512,16 @@ def _broker_provider_route(
         )
 
     ledger = _UsageLedgerAdapter(provider=provider)
-    provider_caller = caller_builder(body.payload or {})
-    estimate_fn = estimate_builder(body.payload or {})
+
+    # The builders parse/validate the provider payload (e.g. anthropic_payload rejects an empty/bad
+    # messages body), so they can raise on a malformed request. Guard them in their OWN narrow try so a
+    # bad payload surfaces as a clean 400 — never a 500, and never shadowing the broker handler chain
+    # below (a pre-minted-token call skips the inline-mint that would otherwise 400 first).
+    try:
+        provider_caller = caller_builder(body.payload or {})
+        estimate_fn = estimate_builder(body.payload or {})
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_provider_payload") from exc
 
     try:
         return safebox_broker.handle_provider_request(
