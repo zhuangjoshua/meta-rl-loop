@@ -1318,50 +1318,56 @@ def _operator_create_balance_preflight(
         conn.close()
 
 
-# Free starter creative credits granted to every new business on create so the bootstrap logo and
-# first X post auto-run instead of failing closed on a 0-credit balance. 3 credits = X (1) + logo (2).
-_BUSINESS_BOOTSTRAP_FREE_CREDITS = 3
+def _business_bootstrap_free_credits() -> int:
+    try:
+        from . import safebox
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import safebox
+
+    return safebox.business_bootstrap_free_credits()
 
 
-def _seed_business_free_credits(slug: str) -> None:
+def _seed_business_free_credits(slug: str, *, operator_user_id: str | None = None) -> None:
     """Open the business creative-credit account and grant the free starter pack on create.
 
-    Idempotent on the slug (``business_credits.grant_credits`` no-ops on a replayed idempotency_key),
-    so a retried create never re-grants. Fail-open only for non-Postgres dev runs, where there is no
-    creative-credit ledger to seed and local creation must not be blocked. This makes the bootstrap
-    logo + first X auto-run; without it both fail closed on a zero credit balance."""
+    Idempotent on the slug inside Safebox, so a retried create never re-grants. Fail-open only for
+    identity-less / non-Postgres dev runs, where there is no authoritative create charge to verify and
+    local creation must not be blocked. This makes the bootstrap logo + first X auto-run; without it
+    both fail closed on a zero credit balance."""
     from .core import _db_backend
 
     business_slug = str(slug or "").strip()
-    if not business_slug or _db_backend() != "postgres":
+    user_id = _resolved_operator_user_id(operator_user_id)
+    if not business_slug or not user_id or _db_backend() != "postgres":
         return  # no creative-credit ledger to seed (dev / non-Postgres)
 
     import psycopg
 
     try:
-        from . import business_credits
+        from . import safebox
         from .runtime_app import resolve_database_url
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
-        from plugins.takyon import business_credits
+        from plugins.takyon import safebox
         from plugins.takyon.runtime_app import resolve_database_url
 
     conn = psycopg.connect(resolve_database_url(), autocommit=True)
     try:
-        business_credits.open_business_credit_account(conn, business_slug)
-        business_credits.grant_credits(
+        safebox.grant_business_bootstrap_credits(
             conn,
             business_slug,
-            _BUSINESS_BOOTSTRAP_FREE_CREDITS,
-            idempotency_key=f"{business_slug}-bootstrap-free-seed",
-            metadata={"reason": "bootstrap free starter (X+logo)"},
+            user_id,
         )
     finally:
         conn.close()
 
 
-def _try_seed_business_free_credits(slug: str) -> dict[str, Any]:
+def _try_seed_business_free_credits(
+    slug: str,
+    *,
+    operator_user_id: str | None = None,
+) -> dict[str, Any]:
     try:
-        _seed_business_free_credits(slug)
+        _seed_business_free_credits(slug, operator_user_id=operator_user_id)
     except Exception as exc:  # noqa: BLE001 - starter credits must not strand create before bootstrap.
         return {
             "action": "business_credits.bootstrap_free_seed",
@@ -1373,7 +1379,7 @@ def _try_seed_business_free_credits(slug: str) -> dict[str, Any]:
         "action": "business_credits.bootstrap_free_seed",
         "business": str(slug or "").strip(),
         "status": "ok",
-        "credits": _BUSINESS_BOOTSTRAP_FREE_CREDITS,
+        "credits": _business_bootstrap_free_credits(),
     }
 
 
@@ -3812,7 +3818,10 @@ def run_takyon_command(
             # business row and the durable bootstrap job. If the creative-credit ledger is temporarily
             # unavailable, bootstrap still starts and records the precise blocker when it reaches
             # spendful creative work.
-            starter_credit_seed = _try_seed_business_free_credits(slug)
+            starter_credit_seed = _try_seed_business_free_credits(
+                slug,
+                operator_user_id=resolved_operator_user_id,
+            )
             return {
                 "success": True,
                 "business": slug,
@@ -3822,7 +3831,10 @@ def run_takyon_command(
                 "bootstrap_job": bootstrap_job,
                 "starter_credit_seed": starter_credit_seed,
             }
-        starter_credit_seed = _try_seed_business_free_credits(slug)
+        starter_credit_seed = _try_seed_business_free_credits(
+            slug,
+            operator_user_id=resolved_operator_user_id,
+        )
         if not should_schedule:
             if isinstance(business_result, dict):
                 return {**business_result, "starter_credit_seed": starter_credit_seed}

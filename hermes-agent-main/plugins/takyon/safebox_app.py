@@ -588,6 +588,11 @@ class _OpenCreativeCreditAccountBody(BaseModel):
     business_slug: str
 
 
+class _BusinessBootstrapCreditsBody(BaseModel):
+    business_slug: str
+    operator_user_id: str
+
+
 class _OpenBillingAccountBody(BaseModel):
     user_id: str
     allowance_included_cents: int | None = None
@@ -2018,6 +2023,32 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         safebox._local_open_business_credit_account(None, body.business_slug)
         return {"ok": True}
+
+    @app.post("/v1/creative-credits/bootstrap-starter")
+    def grant_business_bootstrap_credits(
+        body: _BusinessBootstrapCreditsBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            balances = safebox._local_grant_business_bootstrap_credits(
+                None,
+                body.business_slug,
+                body.operator_user_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+            "credited_credits": safebox.business_bootstrap_free_credits(),
+        }
 
     @app.get("/v1/creative-credits/{business_slug}")
     def get_creative_credit_balances(

@@ -17,7 +17,7 @@ import types
 import pytest
 from starlette.testclient import TestClient
 
-from plugins.takyon import app_entitlements, app_identity, safebox_app
+from plugins.takyon import app_entitlements, app_identity, business_credits, safebox_app
 from plugins.takyon.safebox_capability import verify_capability
 
 _SIGNING_KEY = "safebox-only-signing-key-not-on-any-client"
@@ -214,6 +214,53 @@ def test_legacy_creative_credit_spend_routes_are_closed(client):
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "creative_credit_spend_requires_creative_gate"
+
+
+def test_business_bootstrap_credits_route_uses_fixed_policy(client, monkeypatch):
+    calls = []
+
+    def _grant(_conn, business_slug, operator_user_id):
+        calls.append({"business_slug": business_slug, "operator_user_id": operator_user_id})
+        return business_credits.CreativeCreditBalances(
+            business_slug=business_slug,
+            balance_credits=3,
+            reserved_credits=0,
+        )
+
+    monkeypatch.setattr(safebox_app.safebox, "_local_grant_business_bootstrap_credits", _grant)
+    monkeypatch.setattr(safebox_app.safebox, "business_bootstrap_free_credits", lambda: 3)
+
+    resp = client.post(
+        "/v1/creative-credits/bootstrap-starter",
+        headers=_auth(),
+        json={"business_slug": "climblog", "operator_user_id": "user_A"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "ok": True,
+        "business_slug": "climblog",
+        "balance_credits": 3,
+        "reserved_credits": 0,
+        "credited_credits": 3,
+    }
+    assert calls == [{"business_slug": "climblog", "operator_user_id": "user_A"}]
+
+
+def test_business_bootstrap_credits_route_refuses_unverified_create_charge(client, monkeypatch):
+    def _grant(_conn, business_slug, operator_user_id):
+        raise PermissionError("business_bootstrap_credit_requires_create_charge")
+
+    monkeypatch.setattr(safebox_app.safebox, "_local_grant_business_bootstrap_credits", _grant)
+
+    resp = client.post(
+        "/v1/creative-credits/bootstrap-starter",
+        headers=_auth(),
+        json={"business_slug": "climblog", "operator_user_id": "user_A"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "business_bootstrap_credit_requires_create_charge"
 
 
 def test_starter_allowance_requires_verified_auth0_session(client, monkeypatch):

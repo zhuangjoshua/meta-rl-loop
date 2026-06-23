@@ -409,6 +409,35 @@ def test_remote_safebox_creative_credit_checkout_delegates_to_service(monkeypatc
     ]
 
 
+def test_remote_safebox_business_bootstrap_credit_delegates_fixed_policy(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None):
+        calls.append((method, path, payload))
+        return {
+            "business_slug": "acme",
+            "balance_credits": 3,
+            "reserved_credits": 0,
+            "credited_credits": 3,
+        }
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    balances = safebox.grant_business_bootstrap_credits(None, "acme", "user-1")
+
+    assert balances.business_slug == "acme"
+    assert balances.balance_credits == 3
+    assert balances.reserved_credits == 0
+    assert calls == [
+        (
+            "POST",
+            "/v1/creative-credits/bootstrap-starter",
+            {"business_slug": "acme", "operator_user_id": "user-1"},
+        )
+    ]
+
+
 def test_remote_safebox_creative_credit_grant_refuses_arbitrary_amount(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
 

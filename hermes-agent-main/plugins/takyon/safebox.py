@@ -825,6 +825,58 @@ def _starter_allowance_cents() -> int:
         return 100
 
 
+def business_bootstrap_free_credits() -> int:
+    """Fixed creative-credit starter pack for a newly paid-for business bootstrap.
+
+    This is intentionally a safebox-side policy constant, not a caller-supplied amount: a runtime
+    plane may ask for the bootstrap starter pack, but it cannot choose how many credits to mint.
+    """
+    raw = str(os.environ.get("TAKYON_BUSINESS_BOOTSTRAP_FREE_CREDITS") or "").strip()
+    if not raw:
+        return 3
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 3
+
+
+def _safebox_key_slug(value: Any, limit: int = 48) -> str:
+    raw = str(value or "").strip().lower()
+    chars: list[str] = []
+    previous_dash = False
+    for char in raw:
+        if char.isalnum() or char == "_":
+            chars.append(char)
+            previous_dash = False
+        elif char == "-" or char.isspace() or char in ":/.":
+            if not previous_dash:
+                chars.append("-")
+                previous_dash = True
+        elif not previous_dash:
+            chars.append("-")
+            previous_dash = True
+    slug = "".join(chars).strip("-_")[:limit].strip("-_")
+    return slug or "part"
+
+
+def _safebox_idempotency_key(prefix: str, *parts: Any, max_length: int = 180) -> str:
+    raw_parts = [str(part) for part in parts if part is not None and str(part) != ""]
+    raw = json.dumps([prefix, *raw_parts], ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    human_parts = [_safebox_key_slug(prefix), *(_safebox_key_slug(part) for part in raw_parts)]
+    human = ":".join(part for part in human_parts if part).strip(":") or "takyon"
+    suffix = f":{digest}"
+    if len(human) + len(suffix) > max_length:
+        human = human[: max(1, max_length - len(suffix))].rstrip(":-")
+    return f"{human}{suffix}"
+
+
+def _business_create_charge_reservation_key(business_slug: str) -> str:
+    # Mirrors plugins.takyon.cli._operator_create_balance_preflight. Keep the literal percent string
+    # stable so the safebox can verify that the bootstrap starter grant is tied to the paid create gate.
+    return _safebox_idempotency_key("operator-create-charge", str(business_slug or "").strip(), "3")
+
+
 def _local_open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 0) -> None:
     with _creative_credit_conn(conn) as billing_conn:
         billing_conn.execute(
@@ -983,6 +1035,62 @@ def _local_grant_credits(
             idempotency_key,
             metadata=metadata,
             stripe_ref=stripe_ref,
+        )
+
+
+def _local_grant_business_bootstrap_credits(
+    conn,
+    business_slug: str,
+    operator_user_id: str,
+) -> CreativeCreditBalances:
+    slug = str(business_slug or "").strip()
+    user_ref = str(operator_user_id or "").strip()
+    if not slug:
+        raise ValueError("missing business_slug")
+    if not user_ref:
+        raise ValueError("missing operator_user_id")
+    credits = business_bootstrap_free_credits()
+    if credits <= 0:
+        return _local_get_business_credit_balances(conn, slug)
+    reservation_key = _business_create_charge_reservation_key(slug)
+    with _creative_credit_conn(conn) as credit_conn:
+        row = credit_conn.execute(
+            "select owner_user_id from businesses where slug = %s",
+            (slug,),
+        ).fetchone()
+        if row is None:
+            raise LookupError("business_not_found")
+        owner_user_id = str(row[0] if not isinstance(row, dict) else row.get("owner_user_id") or "").strip()
+        if owner_user_id != user_ref:
+            raise PermissionError("business_bootstrap_credit_owner_mismatch")
+        charged = credit_conn.execute(
+            """
+            select coalesce(sum(amount_cents), 0) as charged_cents
+              from billing_entries
+             where user_id = %s
+               and reservation_key = %s
+               and kind = 'settle'
+            """,
+            (user_ref, reservation_key),
+        ).fetchone()
+        charged_cents = int(
+            charged[0]
+            if charged is not None and not isinstance(charged, dict)
+            else (charged or {}).get("charged_cents") or 0
+        )
+        if charged_cents <= 0:
+            raise PermissionError("business_bootstrap_credit_requires_create_charge")
+        return _local_grant_credits(
+            credit_conn,
+            slug,
+            credits,
+            f"{slug}-bootstrap-free-seed",
+            metadata={
+                "reason": "bootstrap free starter (X+logo)",
+                "operator_user_id": user_ref,
+                "create_charge_reservation_key": reservation_key,
+                "grant_policy": "business_bootstrap_starter",
+            },
         )
 
 
@@ -1329,6 +1437,33 @@ def open_business_credit_account(conn, business_slug: str) -> None:
         )
         return
     _local_open_business_credit_account(conn, slug)
+
+
+def grant_business_bootstrap_credits(
+    conn,
+    business_slug: str,
+    operator_user_id: str,
+) -> CreativeCreditBalances:
+    """Grant the fixed create-time starter credits through safebox provisioning policy.
+
+    Remote planes cannot call ``grant_credits`` with arbitrary amounts. This path mints only the
+    fixed bootstrap starter pack, and the safebox verifies the business owner plus the paid create
+    charge before writing the grant.
+    """
+    slug = str(business_slug or "").strip()
+    user_ref = str(operator_user_id or "").strip()
+    if not slug:
+        raise ValueError("missing business_slug")
+    if not user_ref:
+        raise ValueError("missing operator_user_id")
+    if _use_remote_authority():
+        payload = _remote_json(
+            "POST",
+            "/v1/creative-credits/bootstrap-starter",
+            {"business_slug": slug, "operator_user_id": user_ref},
+        )
+        return _balances_from_payload(payload, business_slug=slug)
+    return _local_grant_business_bootstrap_credits(conn, slug, user_ref)
 
 
 def open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 0) -> None:
