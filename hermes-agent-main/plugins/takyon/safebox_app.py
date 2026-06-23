@@ -1955,7 +1955,12 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
-        _storage_business_slug(body.prefix)
+        try:
+            _storage_business_slug(body.prefix)
+        except HTTPException as exc:
+            if exc.detail == "unknown_business":
+                return {"provider": provider, "prefix": body.prefix, "digests": {}}
+            raise
         try:
             return {"provider": provider, "prefix": body.prefix, "digests": safebox.storage_list_digests(provider, body.prefix)}
         except Exception as exc:
@@ -1968,7 +1973,12 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
-        _storage_business_slug(body.prefix)
+        try:
+            _storage_business_slug(body.prefix)
+        except HTTPException as exc:
+            if exc.detail == "unknown_business":
+                return {"provider": provider, "prefix": body.prefix, "sizes": {}}
+            raise
         try:
             return {"provider": provider, "prefix": body.prefix, "sizes": safebox.storage_list_object_sizes(provider, body.prefix)}
         except Exception as exc:

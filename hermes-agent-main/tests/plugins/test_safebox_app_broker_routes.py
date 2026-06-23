@@ -335,6 +335,44 @@ def test_storage_routes_require_business_scoped_prefix(client, monkeypatch):
     assert resp.json()["detail"] == "storage_scope_required"
 
 
+def test_storage_list_unknown_business_is_empty_for_bootstrap(client, monkeypatch):
+    class _MissingBusinessConn:
+        def execute(self, sql, params=None):
+            return _OwnerCursor(None)
+
+    @contextlib.contextmanager
+    def _missing_business_conn():
+        yield _MissingBusinessConn()
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _missing_business_conn)
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "storage_list_digests",
+        lambda *a, **k: pytest.fail("unknown business list must not hit storage"),
+    )
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "storage_list_object_sizes",
+        lambda *a, **k: pytest.fail("unknown business list must not hit storage"),
+    )
+
+    digest_resp = client.post(
+        "/v1/storage/list-digests",
+        headers=_auth(),
+        json={"provider": "supabase_s3", "prefix": "fresh-bootstrap/product/"},
+    )
+    assert digest_resp.status_code == 200
+    assert digest_resp.json()["digests"] == {}
+
+    sizes_resp = client.post(
+        "/v1/storage/list-sizes",
+        headers=_auth(),
+        json={"provider": "supabase_s3", "prefix": "fresh-bootstrap/product/"},
+    )
+    assert sizes_resp.status_code == 200
+    assert sizes_resp.json()["sizes"] == {}
+
+
 def test_mint_rejects_unmappable_action(client):
     # An action with no mapped audience is unbrokerable: the mint route refuses it (400) rather than
     # falling back to the raw action string as the audience.
