@@ -53,7 +53,6 @@ def main() -> int:
         "SUPABASE_ANON_KEY",
         "NEXT_PUBLIC_SUPABASE_ANON_KEY",
     )
-    legacy_secret = str(safebox.read_env_backed_value("SUPABASE_JWT_SECRET") or "").strip()
     missing: list[str] = []
     if not project_url:
         missing.append("SUPABASE_URL")
@@ -67,7 +66,7 @@ def main() -> int:
     key_name = "SUPABASE_PUBLISHABLE_KEY" if publishable else "SUPABASE_ANON_KEY"
     sys.stdout.write(
         "Validated Supabase auth config via Safebox "
-        f"(SUPABASE_URL, {key_name}; legacy SUPABASE_JWT_SECRET={'present' if legacy_secret else 'absent'})\n"
+        f"(SUPABASE_URL, {key_name}; legacy SUPABASE_JWT_SECRET not vendable)\n"
     )
     return 0
 
