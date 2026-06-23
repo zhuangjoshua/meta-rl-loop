@@ -268,7 +268,7 @@ class _OperatorBudgetAdapter:
                     operator_user_id,
                     0,
                     key,
-                    business_slug=scope.business_slug,
+                    business_slug=(scope.business_slug or None),
                     job_id=f"operator_proxy:{scope.action}",
                 )
                 return {"operator_user_id": operator_user_id, "reservation_key": key, "reserved_cents": 0}
@@ -278,7 +278,7 @@ class _OperatorBudgetAdapter:
                     operator_user_id,
                     estimate_cents,
                     key,
-                    business_slug=scope.business_slug,
+                    business_slug=(scope.business_slug or None),
                     job_id=f"operator_proxy:{scope.action}",
                 )
             except billing.NoBillingAccount as exc:

@@ -221,7 +221,9 @@ def _authorize_operator_proxy(
             raise HTTPException(status_code=503, detail="platform_operator_unconfigured")
         scope = CapabilityScope(
             takyon_user_id=operator_user_id,
-            business_slug="platform",
+            # Platform-operator spend is NOT tied to a business; an empty slug -> billing.reserve gets
+            # None (billing_entries.business_slug FKs businesses, and there is no "platform" business).
+            business_slug="",
             app_user_id=None,
             action="operator.proxy",
             max_cost_microusd=0,
