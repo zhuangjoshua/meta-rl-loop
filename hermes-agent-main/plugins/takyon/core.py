@@ -1256,12 +1256,20 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
 # add a name here only when a runtime plane provably needs to fetch it.
 #
 # RESIDUAL (documented, follow-up): a few entries below are themselves verification/identity/data-plane
-# authority that a runtime plane still fetches today — `STRIPE_WEBHOOK_SECRET` (sub-user app-webhook
-# verifies locally), `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session
-# signing), the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge provisioning).
-# The principle-correct end state is to move their USE onto the safebox (verify/sign there, like the
-# billing webhook) so the runtime never holds them; until then they must stay on the allowlist or the
-# runtime regresses. Tracked as the next hardening step.
+# authority that a runtime plane still fetches today. The principle-correct end state is to move their
+# USE onto the safebox (verify/sign there, like the billing webhook) so the runtime never holds them;
+# until then they must stay on the allowlist or the runtime regresses. Tracked as the next hardening
+# step. In rough priority order:
+#   * `SUPABASE_JWT_SECRET` — HIGHEST PRIORITY. It is the SYMMETRIC HS256 product-customer JWT secret,
+#     and `app_supabase_auth.verify_supabase_jwt` selects the verification alg from the ATTACKER-supplied
+#     token header (alg-confusion): reading this secret lets a token-holder forge product JWTs for any
+#     sub-user of any business (cross-business account takeover). Fix: pin verification to the asymmetric
+#     issuer (RS256/ES256 via JWKS) and REJECT attacker `HS*`, verify server-side on the safebox, and
+#     drop this from the allowlist. Kept for now only so the legacy HS fallback path does not regress.
+#   * `STRIPE_WEBHOOK_SECRET` (sub-user app-webhook verifies locally — forge app entitlement events),
+#     `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session signing — operator
+#     impersonation), the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge
+#     provisioning). Same end state: move their use server-side.
 _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
     {
         # DB
