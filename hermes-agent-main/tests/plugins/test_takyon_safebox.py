@@ -8,6 +8,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from plugins.takyon import safebox
+from plugins.takyon import core as takyon_core
 from plugins.takyon.safebox_app import build_safebox_app
 from plugins.takyon.stripe_util import build_signature_header
 from plugins.takyon.user_api_keys import generate_api_key
@@ -554,6 +555,123 @@ def test_remote_safebox_signed_webhook_processors_delegate_to_process_routes(mon
     assert calls == [
         ("POST", "/v1/billing/webhook/process", {"raw_body": "{}", "signature": "sig"}),
         ("POST", "/v1/stripe/app-webhook/process", {"raw_body": "{}", "signature": "sig"}),
+    ]
+
+
+def test_remote_safebox_app_checkout_reconcile_delegates_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        return {
+            "ok": True,
+            "session_id": "cs_paid_1",
+            "business_slug": "acme",
+            "processed": {"recorded": True, "business_slug": "acme"},
+            "subscription": None,
+        }
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    result = safebox.reconcile_app_checkout_session(
+        None,
+        session_id="cs_paid_1",
+        expected_business_slug="acme",
+        app_user_id="app-user-1",
+        customer_email="buyer@example.com",
+    )
+
+    assert result["processed"]["recorded"] is True
+    assert calls == [
+        (
+            "POST",
+            "/v1/stripe/app-checkout/reconcile",
+            {
+                "session_id": "cs_paid_1",
+                "business_slug": "acme",
+                "app_user_id": "app-user-1",
+                "customer_email": "buyer@example.com",
+            },
+        )
+    ]
+
+
+def test_pg_checkout_recovery_uses_safebox_reconcile_when_remote(monkeypatch):
+    class _Rows:
+        def __init__(self, *, one=None, many=None):
+            self._one = one
+            self._many = many or []
+
+        def fetchone(self):
+            return self._one
+
+        def fetchall(self):
+            return self._many
+
+    class _FakePG:
+        def execute(self, sql, params=None):
+            normalized = sql.lower()
+            if "from app_entitlements" in normalized:
+                return _Rows(one=None)
+            if "from app_checkout_intents" in normalized:
+                return _Rows(many=[{"stripe_checkout_session_id": "cs_paid_1"}])
+            raise AssertionError(sql)
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    calls: list[dict[str, str | None]] = []
+
+    def _fake_reconcile(conn, *, session_id, expected_business_slug=None, app_user_id=None, customer_email=None):
+        calls.append(
+            {
+                "session_id": session_id,
+                "expected_business_slug": expected_business_slug,
+                "app_user_id": app_user_id,
+                "customer_email": customer_email,
+            }
+        )
+        return {
+            "ok": True,
+            "processed": {
+                "recorded": True,
+                "business_slug": expected_business_slug,
+                "app_user_id": app_user_id,
+            },
+            "subscription": {"recorded": True},
+        }
+
+    monkeypatch.setattr(safebox, "_use_remote_authority", lambda: True)
+    monkeypatch.setattr(safebox, "reconcile_app_checkout_session", _fake_reconcile)
+
+    conn = takyon_core._PGConn(_FakePG())
+    result = takyon_core._maybe_reconcile_pg_completed_checkout(
+        object(),
+        conn,
+        "acme",
+        {"id": "app-user-1", "email": "Buyer@Example.com"},
+    )
+
+    assert result == {
+        "attempted": True,
+        "session_id": "cs_paid_1",
+        "checkout": {"recorded": True, "business_slug": "acme", "app_user_id": "app-user-1"},
+        "subscription": {"recorded": True},
+    }
+    assert calls == [
+        {
+            "session_id": "cs_paid_1",
+            "expected_business_slug": "acme",
+            "app_user_id": "app-user-1",
+            "customer_email": "buyer@example.com",
+        }
     ]
 
 

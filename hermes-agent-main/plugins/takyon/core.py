@@ -21925,6 +21925,38 @@ def _maybe_reconcile_pg_completed_checkout(
     ).fetchall()
     if not pending_rows:
         return {"attempted": False, "reason": "no_pending_checkout"}
+
+    try:
+        use_safebox_recovery = bool(safebox._use_remote_authority())
+    except Exception:
+        use_safebox_recovery = False
+    if use_safebox_recovery:
+        last_error = ""
+        for row in pending_rows:
+            session_id = str(row["stripe_checkout_session_id"] or "").strip()
+            if not session_id:
+                continue
+            try:
+                recovered = safebox.reconcile_app_checkout_session(
+                    conn,
+                    session_id=session_id,
+                    expected_business_slug=business,
+                    app_user_id=user_id or None,
+                    customer_email=user_email or None,
+                )
+            except (LookupError, PermissionError, RuntimeError, ValueError, safebox.RemoteSafeboxError) as exc:
+                last_error = str(exc)
+                continue
+            checkout_result = recovered.get("processed") if isinstance(recovered, dict) else None
+            if isinstance(checkout_result, dict) and checkout_result.get("recorded"):
+                return {
+                    "attempted": True,
+                    "session_id": session_id,
+                    "checkout": checkout_result,
+                    "subscription": recovered.get("subscription") if isinstance(recovered, dict) else None,
+                }
+        return {"attempted": True, "error": last_error or "checkout_not_reconciled"}
+
     try:
         from . import stripe_util
     except ImportError:  # pragma: no cover - alternate load path when run as a top-level package

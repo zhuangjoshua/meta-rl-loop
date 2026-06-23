@@ -1796,6 +1796,83 @@ def process_stripe_app_webhook(raw_body: str, signature: str) -> dict[str, Any]:
         return app_payments.record_webhook_and_process(conn, event)
 
 
+def reconcile_app_checkout_session(
+    conn,
+    *,
+    session_id: str,
+    expected_business_slug: str | None = None,
+    app_user_id: str | None = None,
+    customer_email: str | None = None,
+) -> dict[str, Any]:
+    """Recover one completed product-app Checkout session through Safebox authority.
+
+    This is the non-webhook companion to :func:`process_stripe_app_webhook`: the runtime plane may
+    know a pending Stripe Checkout session id, but only the safebox may retrieve the Stripe session and
+    turn it into entitlement/revenue/custody writes. A shared bearer token therefore remains
+    reachability, not custody authority.
+    """
+    stripe_session_id = str(session_id or "").strip()
+    if not stripe_session_id:
+        raise ValueError("session_id is required")
+    expected_slug = str(expected_business_slug or "").strip()
+    expected_user = str(app_user_id or "").strip()
+    expected_email = str(customer_email or "").strip()
+    if _use_remote_authority():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/stripe/app-checkout/reconcile",
+                {
+                    "session_id": stripe_session_id,
+                    "business_slug": expected_slug or None,
+                    "app_user_id": expected_user or None,
+                    "customer_email": expected_email or None,
+                },
+                timeout=35.0,
+            )
+        except RemoteSafeboxError as exc:
+            detail = _remote_error_detail(exc)
+            message = str(detail.get("error") or detail.get("detail") or str(exc)).strip() or str(exc)
+            if exc.status_code == 404:
+                raise LookupError(message) from exc
+            if exc.status_code == 409:
+                raise RuntimeError(message) from exc
+            if exc.status_code == 400:
+                raise ValueError(message) from exc
+            if exc.status_code == 403:
+                raise PermissionError(message) from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+
+    from . import app_payments, stripe_util
+
+    session = stripe_util.stripe_request(f"checkout/sessions/{stripe_session_id}", {}, method="GET")
+    if str(session.get("status") or "").strip().lower() != "complete":
+        raise RuntimeError("checkout_session_not_complete")
+    if str(session.get("payment_status") or "").strip().lower() not in {"paid", "no_payment_required"}:
+        raise RuntimeError("checkout_session_unpaid")
+    with _creative_credit_conn(conn) as payment_conn:
+        result = app_payments.reconcile_checkout_session(
+            payment_conn,
+            session,
+            provider_event_id=f"checkout.session.reconcile:{stripe_session_id}",
+            event_created=session.get("created"),
+        )
+        subscription_result = None
+        subscription_id = str(session.get("subscription") or "").strip()
+        if subscription_id:
+            subscription = stripe_util.stripe_request(f"subscriptions/{subscription_id}", {}, method="GET")
+            if isinstance(subscription, dict):
+                subscription_result = app_payments.reconcile_subscription(payment_conn, subscription)
+    return {
+        "ok": True,
+        "session_id": stripe_session_id,
+        "business_slug": expected_slug or result.get("business_slug"),
+        "processed": result,
+        "subscription": subscription_result,
+    }
+
+
 def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBalances:
     """Read one business creative-credit balance through Safebox authority."""
     slug = str(business_slug or "").strip()

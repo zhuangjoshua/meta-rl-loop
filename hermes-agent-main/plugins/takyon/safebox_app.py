@@ -767,6 +767,13 @@ class _StripeAppWebhookVerifyBody(BaseModel):
     signature: str
 
 
+class _AppCheckoutReconcileBody(BaseModel):
+    session_id: str
+    business_slug: str | None = None
+    app_user_id: str | None = None
+    customer_email: str | None = None
+
+
 class _Auth0LoginStateBody(BaseModel):
     state: str
     nonce: str
@@ -2246,6 +2253,96 @@ def build_safebox_app() -> FastAPI:
 
         with _safebox_db_conn() as conn:
             return app_payments.record_webhook_and_process(conn, event)
+
+    @app.post("/v1/stripe/app-checkout/reconcile")
+    def reconcile_stripe_app_checkout(
+        body: _AppCheckoutReconcileBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Recovery path for a completed hosted Checkout session when the webhook has not arrived yet.
+        # The runtime can request reconciliation by session id, but the safebox retrieves the Stripe
+        # object locally, verifies it is a Takyon app checkout, and performs entitlement/revenue/custody
+        # processing on the safebox DB role. The shared transport token never gets custody authority.
+        _require_internal_token(authorization)
+        from . import app_payments, stripe_util
+
+        session_id = str(body.session_id or "").strip()
+        if not session_id or not session_id.startswith("cs_"):
+            raise HTTPException(status_code=400, detail="invalid_checkout_session")
+        try:
+            session = safebox.stripe_request(f"checkout/sessions/{session_id}", {}, method="GET")
+        except stripe_util.StripeError as exc:
+            message = str(exc)
+            if " failed: 404" in message:
+                raise HTTPException(status_code=404, detail="unknown_checkout_session") from exc
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="stripe_unconfigured") from exc
+            raise HTTPException(status_code=502, detail="stripe_error") from exc
+        if not isinstance(session, dict) or not session:
+            raise HTTPException(status_code=404, detail="unknown_checkout_session")
+        business = _require_takyon_app_stripe_object(session, require_source=True)
+        expected_business = str(body.business_slug or "").strip()
+        if expected_business and _require_safe_slug(expected_business) != business:
+            raise HTTPException(status_code=403, detail="checkout_business_mismatch")
+        if str(session.get("status") or "").strip().lower() != "complete":
+            raise HTTPException(status_code=409, detail="checkout_session_not_complete")
+        if str(session.get("payment_status") or "").strip().lower() not in {"paid", "no_payment_required"}:
+            raise HTTPException(status_code=409, detail="checkout_session_unpaid")
+
+        expected_user = str(body.app_user_id or "").strip()
+        expected_email = str(body.customer_email or "").strip().lower()
+        metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+        intent_id = str(metadata.get("checkout_intent_id") or "").strip()
+        client_reference_id = str(session.get("client_reference_id") or "").strip()
+        with _safebox_db_conn() as conn:
+            intent = None
+            if intent_id:
+                intent = conn.execute(
+                    "select business_slug, app_user_id, customer_email "
+                    "from app_checkout_intents where id = %s",
+                    (intent_id,),
+                ).fetchone()
+            if intent is None and client_reference_id:
+                intent = conn.execute(
+                    "select business_slug, app_user_id, customer_email "
+                    "from app_checkout_intents where client_reference_id = %s",
+                    (client_reference_id,),
+                ).fetchone()
+            if intent is None:
+                raise HTTPException(status_code=404, detail="missing_checkout_intent")
+            intent_business = str(intent[0] or "").strip()
+            intent_user = str(intent[1] or "").strip()
+            intent_email = str(intent[2] or "").strip().lower()
+            if intent_business != business:
+                raise HTTPException(status_code=403, detail="checkout_intent_business_mismatch")
+            if expected_user and intent_user and intent_user != expected_user:
+                raise HTTPException(status_code=403, detail="checkout_user_mismatch")
+            if expected_email and intent_email and intent_email != expected_email:
+                raise HTTPException(status_code=403, detail="checkout_email_mismatch")
+            checkout_result = app_payments.reconcile_checkout_session(
+                conn,
+                session,
+                provider_event_id=f"checkout.session.reconcile:{session_id}",
+                event_created=session.get("created"),
+            )
+            subscription_result = None
+            subscription_id = str(session.get("subscription") or "").strip()
+            if subscription_id:
+                try:
+                    subscription = safebox.stripe_request(
+                        f"subscriptions/{subscription_id}", {}, method="GET"
+                    )
+                except stripe_util.StripeError:
+                    subscription = {}
+                if isinstance(subscription, dict) and subscription:
+                    subscription_result = app_payments.reconcile_subscription(conn, subscription)
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "business_slug": business,
+            "processed": checkout_result,
+            "subscription": subscription_result,
+        }
 
     @app.post("/v1/creative-credits/reserve")
     def reserve_creative_credits(
