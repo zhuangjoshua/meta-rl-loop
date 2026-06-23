@@ -17,6 +17,8 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .ledger_gate import gate_fetchone
+
 
 class BusinessCreditsError(Exception):
     """Base for business creative-credit ledger errors."""
@@ -81,6 +83,47 @@ def _row_get(row, key: str, index: int):
     return row[index]
 
 
+def _gate_cell(row, index: int):
+    """Read a SECURITY DEFINER gate-result column by position, tolerating tuple and dict row
+    factories (``select * from func(...)`` expands the composite columns positionally)."""
+    if isinstance(row, Mapping):
+        return list(row.values())[index]
+    return row[index]
+
+
+# The migration-0038 SECURITY DEFINER functions (safebox_credits_*) are the only sanctioned writers
+# of the creative-credit ledger once the runtime runs as the demoted `takyon_runtime` role. The
+# mutating ops below invoke those functions under the restricted role (ledger_gate); the function
+# bodies are a verbatim port of the former in-Python row ops (FOR UPDATE locks, idempotency,
+# balance math). Result composite columns, in order:
+#   0 refusal   1 fig_requested_credits   2 fig_available_credits   3 business_slug
+#   4 balance_credits   5 reserved_credits   6 reserved_credits_out
+
+
+def _raise_for_credits_refusal(row, *, reservation_key: str | None = None) -> None:
+    """If the gate result carries a refusal, raise the matching typed exception; else return."""
+    refusal = _gate_cell(row, 0)
+    if refusal is None:
+        return
+    if refusal == "insufficient_credits":
+        raise InsufficientCreativeCredits(
+            requested_credits=int(_gate_cell(row, 1)),
+            available_credits=int(_gate_cell(row, 2)),
+        )
+    if refusal == "unknown_reservation":
+        raise UnknownCreativeCreditReservation(reservation_key)
+    raise BusinessCreditsError(f"unexpected gate refusal: {refusal!r}")  # pragma: no cover - defensive
+
+
+def _balances_from_gate(row) -> "CreativeCreditBalances":
+    """Build CreativeCreditBalances from a non-refusal gate result (cols 3/4/5)."""
+    return CreativeCreditBalances(
+        business_slug=str(_gate_cell(row, 3)),
+        balance_credits=int(_gate_cell(row, 4)),
+        reserved_credits=int(_gate_cell(row, 5)),
+    )
+
+
 def _entry_from_row(row) -> CreativeCreditEntry:
     return CreativeCreditEntry(
         id=int(_row_get(row, "id", 0)),
@@ -121,35 +164,16 @@ def _reserved_credits(conn, business_slug: str) -> int:
     return int(_row_get(row, "reserved_credits", 0) or 0)
 
 
-def _ensure_account_locked(conn, business_slug: str) -> tuple[str, int]:
-    conn.execute(
-        """
-        insert into business_creative_credit_accounts (business_slug)
-        values (%s)
-        on conflict (business_slug) do nothing
-        """,
-        (business_slug,),
-    )
-    row = conn.execute(
-        f"""
-        select {_ACCOUNT_COLUMNS}
-        from business_creative_credit_accounts
-        where business_slug = %s
-        for update
-        """,
-        (business_slug,),
-    ).fetchone()
-    return str(_row_get(row, "business_slug", 0)), int(_row_get(row, "balance_credits", 1))
+# The former in-Python account open+lock helper (_ensure_account_locked) moved into the migration-0038
+# SECURITY DEFINER functions (safebox_credits_*); the mutating ops now reach the ledger only through
+# those functions under the restricted runtime role.
 
 
 def open_business_credit_account(conn, business_slug: str) -> None:
     """Idempotently open the business creative-credit account at zero."""
-    conn.execute(
-        """
-        insert into business_creative_credit_accounts (business_slug)
-        values (%s)
-        on conflict (business_slug) do nothing
-        """,
+    gate_fetchone(
+        conn,
+        "select safebox_credits_open_account(%s)",
         (business_slug,),
     )
 
@@ -193,67 +217,15 @@ def grant_credits(
     if not key:
         raise ValueError("idempotency_key is required")
     stripe_reference = str(stripe_ref or "").strip() or None
-    with conn.transaction():
-        business_slug, balance = _ensure_account_locked(conn, business_slug)
-        if stripe_reference:
-            prior_session = conn.execute(
-                """
-                select 1
-                from business_creative_credit_entries
-                where business_slug = %s
-                  and kind = 'grant'
-                  and stripe_ref = %s
-                limit 1
-                """,
-                (business_slug, stripe_reference),
-            ).fetchone()
-            if prior_session is not None:
-                return CreativeCreditBalances(
-                    business_slug=business_slug,
-                    balance_credits=balance,
-                    reserved_credits=_reserved_credits(conn, business_slug),
-                )
-        prior = conn.execute(
-            "select 1 from business_creative_credit_entries where idempotency_key = %s",
-            (key,),
-        ).fetchone()
-        if prior is not None:
-            return CreativeCreditBalances(
-                business_slug=business_slug,
-                balance_credits=balance,
-                reserved_credits=_reserved_credits(conn, business_slug),
-            )
-        new_balance = balance + credits
-        conn.execute(
-            """
-            update business_creative_credit_accounts
-            set balance_credits = %s, updated_at = now()
-            where business_slug = %s
-            """,
-            (new_balance, business_slug),
-        )
-        conn.execute(
-            """
-            insert into business_creative_credit_entries (
-              business_slug, kind, amount_credits, balance_after_credits,
-              idempotency_key, metadata, stripe_ref
-            )
-            values (%s, 'grant', %s, %s, %s, %s::jsonb, %s)
-            """,
-            (
-                business_slug,
-                credits,
-                new_balance,
-                key,
-                _json_dumps(metadata or {}),
-                stripe_reference,
-            ),
-        )
-        return CreativeCreditBalances(
-            business_slug=business_slug,
-            balance_credits=new_balance,
-            reserved_credits=_reserved_credits(conn, business_slug),
-        )
+    # Row ops in the migration-0038 SECURITY DEFINER function safebox_credits_grant (verbatim port):
+    # open+lock the account, idempotent on stripe_ref (per-business 'grant') AND idempotency_key
+    # (replay returns current balances), else credit the pack and write the 'grant' entry.
+    row = gate_fetchone(
+        conn,
+        "select * from safebox_credits_grant(%s, %s, %s, %s::jsonb, %s)",
+        (business_slug, credits, key, _json_dumps(metadata or {}), stripe_reference),
+    )
+    return _balances_from_gate(row)
 
 
 def reserve_credits(
@@ -270,52 +242,16 @@ def reserve_credits(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    with conn.transaction():
-        business_slug, balance = _ensure_account_locked(conn, business_slug)
-        existing = conn.execute(
-            f"""
-            select {_ENTRY_COLUMNS}
-            from business_creative_credit_entries
-            where reservation_key = %s
-              and kind = 'reserve'
-            """,
-            (key,),
-        ).fetchone()
-        if existing is not None:
-            entry = _entry_from_row(existing)
-            return CreativeCreditReservation(key=key, reserved_credits=entry.amount_credits)
-        if credits > balance:
-            raise InsufficientCreativeCredits(
-                requested_credits=credits,
-                available_credits=balance,
-            )
-        new_balance = balance - credits
-        conn.execute(
-            """
-            update business_creative_credit_accounts
-            set balance_credits = %s, updated_at = now()
-            where business_slug = %s
-            """,
-            (new_balance, business_slug),
-        )
-        conn.execute(
-            """
-            insert into business_creative_credit_entries (
-              business_slug, kind, amount_credits, balance_after_credits,
-              reservation_key, idempotency_key, metadata
-            )
-            values (%s, 'reserve', %s, %s, %s, %s, %s::jsonb)
-            """,
-            (
-                business_slug,
-                credits,
-                new_balance,
-                key,
-                key,
-                _json_dumps(metadata or {}),
-            ),
-        )
-        return CreativeCreditReservation(key=key, reserved_credits=credits)
+    # Row ops in the migration-0038 SECURITY DEFINER function safebox_credits_reserve (verbatim
+    # port): open+lock the account, idempotent reservation_key short circuit (replay returns the
+    # same held amount), InsufficientCreativeCredits refusal (nothing written), else hold the credits.
+    row = gate_fetchone(
+        conn,
+        "select * from safebox_credits_reserve(%s, %s, %s, %s::jsonb)",
+        (business_slug, credits, key, _json_dumps(metadata or {})),
+    )
+    _raise_for_credits_refusal(row, reservation_key=key)
+    return CreativeCreditReservation(key=key, reserved_credits=int(_gate_cell(row, 6)))
 
 
 def commit_credits(
@@ -329,77 +265,34 @@ def commit_credits(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    with conn.transaction():
+    # Pre-check the actual-credits preconditions in Python (ValueErrors, not ledger refusals) so the
+    # spend>=0 + spend<=reserved invariants are enforced BEFORE the gate writes — exactly as before.
+    # The reserve-amount read is a pure SELECT (still permitted under the demoted role). Unknown
+    # reservation is decided inside the gate function, but checking here keeps the ValueError ordering
+    # for a present reservation with a bad actual_credits.
+    if actual_credits is not None:
         reserve_row = conn.execute(
-            f"""
-            select {_ENTRY_COLUMNS}
-            from business_creative_credit_entries
-            where reservation_key = %s
-              and kind = 'reserve'
-            for update
-            """,
+            "select amount_credits from business_creative_credit_entries "
+            "where reservation_key = %s and kind = 'reserve'",
             (key,),
         ).fetchone()
-        if reserve_row is None:
-            raise UnknownCreativeCreditReservation(key)
-        reserve = _entry_from_row(reserve_row)
-        business_slug, balance = _ensure_account_locked(conn, reserve.business_slug)
-        prior = conn.execute(
-            f"""
-            select {_ENTRY_COLUMNS}
-            from business_creative_credit_entries
-            where reservation_key = %s
-              and kind in ('commit', 'release')
-            order by id asc
-            limit 1
-            """,
-            (key,),
-        ).fetchone()
-        if prior is not None:
-            return CreativeCreditBalances(
-                business_slug=business_slug,
-                balance_credits=balance,
-                reserved_credits=_reserved_credits(conn, business_slug),
-            )
-        spent = reserve.amount_credits if actual_credits is None else int(actual_credits)
-        if spent < 0:
-            raise ValueError("actual_credits must be >= 0")
-        if spent > reserve.amount_credits:
-            raise ValueError(
-                f"actual credits {spent} exceed reserved {reserve.amount_credits}"
-            )
-        refund = reserve.amount_credits - spent
-        new_balance = balance + refund
-        conn.execute(
-            """
-            update business_creative_credit_accounts
-            set balance_credits = %s, updated_at = now()
-            where business_slug = %s
-            """,
-            (new_balance, business_slug),
-        )
-        conn.execute(
-            """
-            insert into business_creative_credit_entries (
-              business_slug, kind, amount_credits, balance_after_credits,
-              reservation_key, idempotency_key, metadata
-            )
-            values (%s, 'commit', %s, %s, %s, %s, %s::jsonb)
-            """,
-            (
-                business_slug,
-                spent,
-                new_balance,
-                key,
-                f"{key}:commit",
-                _json_dumps(metadata or {}),
-            ),
-        )
-        return CreativeCreditBalances(
-            business_slug=business_slug,
-            balance_credits=new_balance,
-            reserved_credits=_reserved_credits(conn, business_slug),
-        )
+        if reserve_row is not None:
+            reserved = int(_row_get(reserve_row, "amount_credits", 0))
+            spent = int(actual_credits)
+            if spent < 0:
+                raise ValueError("actual_credits must be >= 0")
+            if spent > reserved:
+                raise ValueError(f"actual credits {spent} exceed reserved {reserved}")
+    # Row ops in the migration-0038 SECURITY DEFINER function safebox_credits_commit (verbatim port):
+    # lock the reserve + account rows, UnknownCreativeCreditReservation when absent, prior
+    # commit/release → no-op returning current balances, else refund reserved−actual back to balance.
+    row = gate_fetchone(
+        conn,
+        "select * from safebox_credits_commit(%s, %s, %s::jsonb)",
+        (key, actual_credits, _json_dumps(metadata or {})),
+    )
+    _raise_for_credits_refusal(row, reservation_key=key)
+    return _balances_from_gate(row)
 
 
 def release_credits(
@@ -412,69 +305,16 @@ def release_credits(
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    with conn.transaction():
-        reserve_row = conn.execute(
-            f"""
-            select {_ENTRY_COLUMNS}
-            from business_creative_credit_entries
-            where reservation_key = %s
-              and kind = 'reserve'
-            for update
-            """,
-            (key,),
-        ).fetchone()
-        if reserve_row is None:
-            raise UnknownCreativeCreditReservation(key)
-        reserve = _entry_from_row(reserve_row)
-        business_slug, balance = _ensure_account_locked(conn, reserve.business_slug)
-        prior = conn.execute(
-            f"""
-            select {_ENTRY_COLUMNS}
-            from business_creative_credit_entries
-            where reservation_key = %s
-              and kind in ('commit', 'release')
-            order by id asc
-            limit 1
-            """,
-            (key,),
-        ).fetchone()
-        if prior is not None:
-            return CreativeCreditBalances(
-                business_slug=business_slug,
-                balance_credits=balance,
-                reserved_credits=_reserved_credits(conn, business_slug),
-            )
-        new_balance = balance + reserve.amount_credits
-        conn.execute(
-            """
-            update business_creative_credit_accounts
-            set balance_credits = %s, updated_at = now()
-            where business_slug = %s
-            """,
-            (new_balance, business_slug),
-        )
-        conn.execute(
-            """
-            insert into business_creative_credit_entries (
-              business_slug, kind, amount_credits, balance_after_credits,
-              reservation_key, idempotency_key, metadata
-            )
-            values (%s, 'release', %s, %s, %s, %s, %s::jsonb)
-            """,
-            (
-                business_slug,
-                reserve.amount_credits,
-                new_balance,
-                key,
-                f"{key}:release",
-                _json_dumps(metadata or {}),
-            ),
-        )
-        return CreativeCreditBalances(
-            business_slug=business_slug,
-            balance_credits=new_balance,
-            reserved_credits=_reserved_credits(conn, business_slug),
-        )
+    # Row ops in the migration-0038 SECURITY DEFINER function safebox_credits_release (verbatim
+    # port): lock the reserve + account rows, UnknownCreativeCreditReservation when absent, prior
+    # commit/release → no-op, else return the full reservation to balance.
+    row = gate_fetchone(
+        conn,
+        "select * from safebox_credits_release(%s, %s::jsonb)",
+        (key, _json_dumps(metadata or {})),
+    )
+    _raise_for_credits_refusal(row, reservation_key=key)
+    return _balances_from_gate(row)
 
 
 def list_credit_entries(conn, business_slug: str) -> list[CreativeCreditEntry]:

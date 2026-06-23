@@ -22,9 +22,19 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .ledger_gate import gate_fetchone
+
 _DEFAULT_APP_FEE_BPS = 2000  # 20%, matches secrets/.env default
+
+
+def _cell(row, index: int):
+    """Read a gate-result column by position, tolerating both tuple and dict row factories."""
+    if isinstance(row, Mapping):
+        return list(row.values())[index]
+    return row[index]
 
 
 class CustodyError(Exception):
@@ -68,12 +78,34 @@ def app_fee_bps() -> int:
     return max(0, min(10000, bps))
 
 
+# The mutating ops route their writes through the migration-0038 SECURITY DEFINER functions
+# (safebox_custody_*), the only sanctioned writers of the custody ledger once the runtime runs as the
+# demoted `takyon_runtime` role. Each runs under the restricted role (ledger_gate); the function still
+# executes its row ops with the owner's privileges, so the money math is unchanged. Result columns:
+#   0 refusal   1 fig_requested_cents   2 fig_owed_cents   3 new_owed
+
+
+def _raise_for_custody_refusal(row, *, user_id: str | None = None) -> None:
+    """If the gate result carries a refusal, raise the matching typed exception; else return."""
+    refusal = _cell(row, 0)
+    if refusal is None:
+        return
+    if refusal == "no_custody_account":
+        raise NoCustodyAccount(user_id)
+    if refusal == "insufficient_custody":
+        raise InsufficientCustody(
+            requested_cents=int(_cell(row, 1)),
+            owed_cents=int(_cell(row, 2)),
+        )
+    raise CustodyError(f"unexpected gate refusal: {refusal!r}")  # pragma: no cover - defensive
+
+
 def open_custody_account(conn, user_id: str, *, currency: str = "usd") -> None:
     """Open the user's single custody account. Idempotent and transaction-free so it
     composes inside the provisioning transaction."""
-    conn.execute(
-        "insert into custody_accounts (user_id, currency) values (%s, %s) "
-        "on conflict (user_id) do nothing",
+    gate_fetchone(
+        conn,
+        "select safebox_custody_open_account(%s, %s)",
         (user_id, currency),
     )
 
@@ -109,38 +141,25 @@ def accrue(
     entry_metadata = dict(metadata or {})
     if withheld:
         entry_metadata["withheld_cents"] = withheld
-    with conn.transaction():
-        acct = conn.execute(
-            "select owed_balance_cents from custody_accounts "
-            "where user_id = %s for update",
-            (user_id,),
-        ).fetchone()
-        if acct is None:
-            raise NoCustodyAccount(user_id)
-        if _entry_exists(conn, idempotency_key):
-            return int(acct[0])
-        new_owed = int(acct[0]) + net
-        conn.execute(
-            "update custody_accounts set owed_balance_cents = %s, updated_at = now() "
-            "where user_id = %s",
-            (new_owed, user_id),
-        )
-        conn.execute(
-            "insert into custody_entries (user_id, business_slug, kind, gross_cents, "
-            "fee_cents, net_cents, stripe_ref, idempotency_key, metadata) "
-            "values (%s, %s, 'accrual', %s, %s, %s, %s, %s, %s::jsonb)",
-            (
-                user_id,
-                business_slug,
-                gross_cents,
-                fee,
-                net,
-                stripe_ref,
-                idempotency_key,
-                json.dumps(entry_metadata or {}, ensure_ascii=False, sort_keys=True),
-            ),
-        )
-    return new_owed
+    # Row ops in the migration-0038 SECURITY DEFINER function safebox_custody_accrue (verbatim port):
+    # lock the account, NoCustodyAccount when absent, idempotent on idempotency_key (replay returns
+    # owed), else accrue net to owed + write the 'accrual' entry. Fee/net policy math stays above.
+    row = gate_fetchone(
+        conn,
+        "select * from safebox_custody_accrue(%s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+        (
+            user_id,
+            business_slug,
+            gross_cents,
+            fee,
+            net,
+            idempotency_key,
+            stripe_ref,
+            json.dumps(entry_metadata or {}, ensure_ascii=False, sort_keys=True),
+        ),
+    )
+    _raise_for_custody_refusal(row, user_id=user_id)
+    return int(_cell(row, 3))  # new_owed
 
 
 def payout(
@@ -157,33 +176,16 @@ def payout(
     at the API layer; the ledger only guards owed ≥ amount."""
     if amount_cents <= 0:
         raise ValueError("amount_cents must be > 0")
-    with conn.transaction():
-        acct = conn.execute(
-            "select owed_balance_cents, paid_out_cents from custody_accounts "
-            "where user_id = %s for update",
-            (user_id,),
-        ).fetchone()
-        if acct is None:
-            raise NoCustodyAccount(user_id)
-        owed, paid_out = int(acct[0]), int(acct[1])
-        if _entry_exists(conn, idempotency_key):
-            return owed
-        if amount_cents > owed:
-            raise InsufficientCustody(requested_cents=amount_cents, owed_cents=owed)
-        new_owed = owed - amount_cents
-        new_paid = paid_out + amount_cents
-        conn.execute(
-            "update custody_accounts set owed_balance_cents = %s, paid_out_cents = %s, "
-            "updated_at = now() where user_id = %s",
-            (new_owed, new_paid, user_id),
-        )
-        conn.execute(
-            "insert into custody_entries (user_id, kind, gross_cents, fee_cents, "
-            "net_cents, stripe_ref, idempotency_key) "
-            "values (%s, 'payout', %s, 0, %s, %s, %s)",
-            (user_id, amount_cents, -amount_cents, stripe_ref, idempotency_key),
-        )
-    return new_owed
+    # Row ops in the migration-0038 SECURITY DEFINER function safebox_custody_payout (verbatim port):
+    # lock the account, NoCustodyAccount when absent, idempotent on idempotency_key (replay returns
+    # owed), InsufficientCustody when amount>owed (nothing written), else drain owed + bump paid_out.
+    row = gate_fetchone(
+        conn,
+        "select * from safebox_custody_payout(%s, %s, %s, %s)",
+        (user_id, amount_cents, idempotency_key, stripe_ref),
+    )
+    _raise_for_custody_refusal(row, user_id=user_id)
+    return int(_cell(row, 3))  # new_owed
 
 
 def get_custody_balances(conn, user_id: str) -> CustodyBalances:
@@ -231,12 +233,5 @@ def reconcile_custody(conn, user_id: str) -> dict:
         drift["paid_out_negative"] = paid_out
     return {"ok": not drift, "drift": drift}
 
-
-def _entry_exists(conn, idempotency_key: str) -> bool:
-    return (
-        conn.execute(
-            "select 1 from custody_entries where idempotency_key = %s",
-            (idempotency_key,),
-        ).fetchone()
-        is not None
-    )
+# The former in-Python idempotency helper (_entry_exists) moved into the migration-0038 SECURITY
+# DEFINER functions (safebox_custody_*), now the only sanctioned writers of the custody ledger.

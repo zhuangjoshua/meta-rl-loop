@@ -1,0 +1,240 @@
+"""Postgres integration tests for the runtime least-privilege boundary (migration 0038, gap G3).
+
+The runtime connects to Postgres as the database OWNER (BYPASSRLS), so it directly holds raw
+INSERT/UPDATE/DELETE on the operator billing + custody ledgers (0002), the business creative-credit
+ledger (0012), and businesses.owner_user_id — every money write is reachable OUTSIDE the
+reserve→settle/refund gates. Migration 0038 demotes a separate, NON-bypassing `takyon_runtime` role
+off those tables and routes every money write through SECURITY DEFINER functions the role may only
+EXECUTE. This suite pins the boundary the same way test_takyon_app_usage_pg.py:504-563 pins 0037's:
+
+  * under `set role takyon_runtime`, a direct INSERT/UPDATE on billing_accounts / billing_entries /
+    custody_accounts / custody_entries / business_creative_credit_accounts / _entries and a direct
+    UPDATE of businesses.owner_user_id are DENIED (psycopg.errors.InsufficientPrivilege);
+  * the SECURITY DEFINER funcs (invoked by the Python ledger ops) STILL write under the restricted
+    role — the gate is the one sanctioned writer;
+  * SELECT on the money tables is retained (reconciliation + balance derivation need it);
+  * the runtime may still INSERT a business and UPDATE its non-owner columns (only owner_user_id is
+    column-revoked).
+
+The EXISTING money suites (test_takyon_billing_pg.py / _business_credits_pg.py / _custody_pg.py) run
+the same Python ops as the throwaway-DB OWNER and prove the func-routed money math is preserved.
+
+Real engine on real Postgres (never mocks). Skips unless psycopg is importable and
+TAKYON_TEST_PG_DSN is set.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+psycopg = pytest.importorskip("psycopg")
+
+from plugins.takyon import billing, business_credits, custody  # noqa: E402
+from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
+
+
+def _sub() -> str:
+    return f"auth0|{uuid.uuid4().hex}"
+
+
+def _owner(conn) -> str:
+    uid, _, _ = provision_user_on_first_login(conn, _sub())
+    return uid
+
+
+def _business(conn, owner_id, name="Acme") -> str:
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    conn.execute(
+        "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
+        (slug, name, owner_id),
+    )
+    return slug
+
+
+# ── the boundary: direct money-table DML is denied under the demoted runtime role ──────────
+
+
+def test_runtime_role_cannot_write_billing_accounts_directly(pg_conn):
+    uid = _owner(pg_conn)
+    billing.open_billing_account(pg_conn, uid)
+    before = billing.get_billing_balances(pg_conn, uid).allowance_included_cents
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "update billing_accounts set allowance_included_cents = 999999 where user_id = %s",
+                (uid,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+    # The forged grant never landed — the allowance is unchanged.
+    assert billing.get_billing_balances(pg_conn, uid).allowance_included_cents == before
+
+
+def test_runtime_role_cannot_write_billing_entries_directly(pg_conn):
+    uid = _owner(pg_conn)
+    billing.open_billing_account(pg_conn, uid)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "insert into billing_entries (user_id, bucket, kind, amount_cents, "
+                "balance_after_cents, idempotency_key) "
+                "values (%s, 'allowance', 'grant', 999999, 0, 'forge')",
+                (uid,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+
+
+def test_runtime_role_cannot_write_custody_accounts_directly(pg_conn):
+    uid = _owner(pg_conn)
+    custody.open_custody_account(pg_conn, uid)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "update custody_accounts set owed_balance_cents = 0 where user_id = %s",
+                (uid,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+
+
+def test_runtime_role_cannot_write_creative_credit_accounts_directly(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    business_credits.open_business_credit_account(pg_conn, slug)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "update business_creative_credit_accounts set balance_credits = 100000 "
+                "where business_slug = %s",
+                (slug,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+    assert business_credits.get_business_credit_balances(pg_conn, slug).balance_credits == 0
+
+
+def test_runtime_role_cannot_write_creative_credit_entries_directly(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    business_credits.open_business_credit_account(pg_conn, slug)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "insert into business_creative_credit_entries "
+                "(business_slug, kind, amount_credits, balance_after_credits, idempotency_key) "
+                "values (%s, 'grant', 100000, 100000, 'forge')",
+                (slug,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+
+
+def test_runtime_role_cannot_repoint_business_owner(pg_conn):
+    owner_a = _owner(pg_conn)
+    owner_b = _owner(pg_conn)
+    slug = _business(pg_conn, owner_a)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "update businesses set owner_user_id = %s where slug = %s",
+                (owner_b, slug),
+            )
+    finally:
+        pg_conn.execute("reset role")
+    # Ownership unchanged.
+    row = pg_conn.execute(
+        "select owner_user_id from businesses where slug = %s", (slug,)
+    ).fetchone()
+    assert str(row[0]) == owner_a
+
+
+def test_runtime_role_can_still_insert_business_and_update_non_owner_columns(pg_conn):
+    # Only owner_user_id is column-revoked; the runtime can still create a business and change its
+    # other columns (e.g. mode). This proves the column-level revoke did not over-broadly block DML.
+    owner_a = _owner(pg_conn)
+    slug = f"biz-{uuid.uuid4().hex[:8]}"
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        pg_conn.execute(
+            "insert into businesses (slug, name, owner_user_id) values (%s, %s, %s)",
+            (slug, "Acme", owner_a),
+        )
+        pg_conn.execute("update businesses set mode = 'live' where slug = %s", (slug,))
+    finally:
+        pg_conn.execute("reset role")
+    row = pg_conn.execute("select mode from businesses where slug = %s", (slug,)).fetchone()
+    assert row[0] == "live"
+
+
+# ── the gate still writes under the restricted role ────────────────────────────────────────
+
+
+def test_billing_ops_write_under_restricted_runtime_role(pg_conn):
+    # The SECURITY DEFINER funcs run as their privileged owner, so the Python billing ops SUCCEED
+    # even when the connection is dropped to the non-writing runtime role.
+    uid = _owner(pg_conn)
+    billing.open_billing_account(pg_conn, uid)
+    billing.grant_allowance(pg_conn, uid, 1000, "grant-1")
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        res = billing.reserve(pg_conn, uid, 400, "rk-1")
+        assert res.allowance_cents == 400
+        billing.settle(pg_conn, "rk-1", 250)
+    finally:
+        pg_conn.execute("reset role")
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.allowance_used_cents == 250  # 400 held, settled 250, 150 released
+    assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
+
+
+def test_credit_ops_write_under_restricted_runtime_role(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    business_credits.grant_credits(pg_conn, slug, 50, "grant-1")
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        resv = business_credits.reserve_credits(pg_conn, slug, 20, "rk-1")
+        assert resv.reserved_credits == 20
+        business_credits.commit_credits(pg_conn, "rk-1", actual_credits=12)
+    finally:
+        pg_conn.execute("reset role")
+    bal = business_credits.get_business_credit_balances(pg_conn, slug)
+    assert bal.balance_credits == 38  # 50 - 20 reserve = 30, commit actual 12 refunds 8 -> 38
+    assert bal.reserved_credits == 0
+
+
+def test_custody_ops_write_under_restricted_runtime_role(pg_conn):
+    uid = _owner(pg_conn)
+    slug = _business(pg_conn, uid)  # custody_entries.business_slug FKs to businesses
+    custody.open_custody_account(pg_conn, uid)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        new_owed = custody.accrue(pg_conn, uid, slug, 1000, "evt-1", fee_bps=2000)
+        assert new_owed == 800  # 20% fee
+        owed_after = custody.payout(pg_conn, uid, 300, "po-1")
+        assert owed_after == 500
+    finally:
+        pg_conn.execute("reset role")
+    bal = custody.get_custody_balances(pg_conn, uid)
+    assert bal.owed_balance_cents == 500
+    assert bal.paid_out_cents == 300
+    assert custody.reconcile_custody(pg_conn, uid)["ok"] is True
+
+
+def test_runtime_role_retains_select_on_money_tables(pg_conn):
+    # SELECT is retained (reconciliation + balance derivation need it under any scope).
+    uid = _owner(pg_conn)
+    billing.open_billing_account(pg_conn, uid)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        pg_conn.execute("select count(*) from billing_accounts where user_id = %s", (uid,))
+        pg_conn.execute("select count(*) from custody_accounts")
+        pg_conn.execute("select count(*) from business_creative_credit_accounts")
+    finally:
+        pg_conn.execute("reset role")
