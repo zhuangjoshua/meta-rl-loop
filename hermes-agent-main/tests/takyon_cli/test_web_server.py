@@ -6032,3 +6032,130 @@ class TestStaticAssetCaching:
         with patch.object(ws, "_umami_analytics_snippet", return_value=""):
             resp = ws._product_site_file_response(asset)
         assert resp.headers["Cache-Control"] == ws._IMMUTABLE_CACHE_CONTROL
+
+
+# ---------------------------------------------------------------------------
+# POST /api/takyon/businesses/{slug}/wake-now — operator "Wake CEO now" button.
+# Enqueues an immediate ceo_wake job on the canonical wake rail (enqueue-only,
+# money-gated, idempotent against an already-pending wake).
+# ---------------------------------------------------------------------------
+
+
+def _wake_now_principal(slugs=("alpha", "beta")):
+    return types.SimpleNamespace(user_id="user-123", status="active", business_slugs=tuple(slugs))
+
+
+class _WakeNowCM:
+    def __init__(self, value):
+        self._value = value
+
+    def __enter__(self):
+        return self._value
+
+    def __exit__(self, *_a):
+        return False
+
+
+class _WakeNowFakeStore:
+    def __init__(self, *_a, **_k):
+        pass
+
+    def _connect(self):
+        return _WakeNowCM(object())
+
+    def _leaf_conn(self, _conn):
+        return _WakeNowCM(object())
+
+
+def test_wake_now_rejects_unauthenticated(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _r: None)
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user=None))
+    with pytest.raises(web_server.HTTPException) as exc:
+        asyncio.run(web_server.wake_takyon_business_now(request, "alpha"))
+    assert exc.value.status_code == 401
+
+
+def test_wake_now_rejects_unowned_business(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(
+        web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal(("alpha",))
+    )
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "x"}))
+    with pytest.raises(web_server.HTTPException) as exc:
+        asyncio.run(web_server.wake_takyon_business_now(request, "ghost"))
+    assert exc.value.status_code == 404
+
+
+def test_wake_now_enqueues_money_gated_ceo_wake(monkeypatch):
+    import plugins.takyon.cli as takyon_cli_mod
+    import plugins.takyon.core as core
+    import plugins.takyon.jobs as jobs
+    import takyon_cli.web_server as web_server
+
+    captured = {}
+
+    def _fake_enqueue(_conn, slug, kind, *, idempotency_key, payload=None, max_attempts=5):
+        captured.update(
+            slug=slug,
+            kind=kind,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            max_attempts=max_attempts,
+        )
+        return types.SimpleNamespace(id="job-xyz")
+
+    monkeypatch.setattr(
+        web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal()
+    )
+    monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _r: "postgres://runtime")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(core, "TakyonStore", _WakeNowFakeStore)
+    monkeypatch.setattr(jobs, "list_jobs", lambda _conn, _slug, limit=50: [])
+    monkeypatch.setattr(jobs, "enqueue", _fake_enqueue)
+    monkeypatch.setattr(takyon_cli_mod, "_operator_turn_estimate_cents", lambda: 50)
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "x"}))
+    result = asyncio.run(web_server.wake_takyon_business_now(request, "alpha"))
+
+    assert result["success"] is True
+    assert result["slug"] == "alpha"
+    assert result["job_id"] == "job-xyz"
+    assert result["status"] == "queued"
+    assert result["already_pending"] is False
+    # Canonical wake rail: a ceo_wake job on the shared queue, requeued on worker restart.
+    assert captured["kind"] == "ceo_wake"
+    assert captured["slug"] == "alpha"
+    assert captured["max_attempts"] == 5
+    # Money-gated: a positive estimate must ride the payload so jobs.run_one reserves budget.
+    assert captured["payload"]["estimate_cents"] == 50
+    assert captured["payload"]["trigger"] == "dashboard_wake_now"
+
+
+def test_wake_now_dedups_already_pending_wake(monkeypatch):
+    import plugins.takyon.core as core
+    import plugins.takyon.jobs as jobs
+    import takyon_cli.web_server as web_server
+
+    pending = types.SimpleNamespace(id="job-pending", kind="ceo_wake", status="running")
+
+    def _enqueue_must_not_run(*_a, **_k):
+        raise AssertionError("enqueue must not be called when a wake is already pending")
+
+    monkeypatch.setattr(
+        web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal()
+    )
+    monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _r: "postgres://runtime")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(core, "TakyonStore", _WakeNowFakeStore)
+    monkeypatch.setattr(jobs, "list_jobs", lambda _conn, _slug, limit=50: [pending])
+    monkeypatch.setattr(jobs, "enqueue", _enqueue_must_not_run)
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "x"}))
+    result = asyncio.run(web_server.wake_takyon_business_now(request, "alpha"))
+
+    assert result["already_pending"] is True
+    assert result["job_id"] == "job-pending"
+    assert result["status"] == "running"

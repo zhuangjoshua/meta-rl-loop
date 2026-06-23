@@ -222,6 +222,19 @@ export const api = {
         body: JSON.stringify({ paused }),
       },
     ),
+  // Enqueue an immediate CEO wake so the worker runs a turn now instead of waiting for the next
+  // scheduled wake. Enqueue-only on the server; the turn's narration arrives via the workspace stream.
+  wakeTakyonBusinessNow: (slug: string) =>
+    fetchJSON<{
+      success: boolean;
+      slug: string;
+      job_id: string;
+      status: string;
+      already_pending: boolean;
+    }>(`/api/takyon/businesses/${encodeURIComponent(slug)}/wake-now`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }),
   getTakyonBusinessCreativeCreditPacks: (slug: string) =>
     fetchJSON<TakyonBusinessCreativeCreditPacksResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/packs`,

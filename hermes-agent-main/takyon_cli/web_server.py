@@ -5038,6 +5038,96 @@ async def set_takyon_business_wake_state(request: Request, slug: str) -> dict[st
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/takyon/businesses/{slug}/wake-now")
+async def wake_takyon_business_now(request: Request, slug: str) -> dict[str, Any]:
+    """Operator "Wake CEO now": enqueue an immediate CEO turn instead of waiting for the next
+    scheduled wake (e.g. ``every 6h``).
+
+    A wake is NOT a separate mechanism — it is a ``kind='ceo_wake'`` row on the shared ``jobs`` queue,
+    the exact row ``dispatch_due_wakes()`` enqueues on schedule and ``cli._run_pg_ceo_wake_once``
+    enqueues for the ``/wake`` shell command. This endpoint reuses that canonical rail and ENQUEUES
+    ONLY: it never drains the turn inline, because the dashboard process deliberately does not run CEO
+    turns (``TAKYON_DASHBOARD_EMBEDDED_WORKER=0``) — ``takyon-worker.service`` claims and runs the job
+    on its next poll (~15s), and the turn's narration surfaces through the normal workspace event
+    stream just like a scheduled wake. The job carries ``estimate_cents`` so ``jobs.run_one`` reserves
+    budget on the owner's account before the turn runs (money-gated, fail-closed — identical to the
+    CLI ``/wake`` path). Idempotent against an already-pending wake so a double-click cannot queue two
+    concurrent turns; a manual wake works even while the recurring loop is paused (an explicit
+    one-shot nudge, since ``wake_schedules.enabled`` only gates the scheduler, not direct enqueue).
+    """
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        from uuid import uuid4
+
+        from plugins.takyon import jobs
+        from plugins.takyon.cli import _idempotency_key, _operator_turn_estimate_cents
+        from plugins.takyon.core import TakyonStore, _db_backend
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
+        # ``jobs`` is a privileged write — go through the leaf (elevated) connection, the same path the
+        # CLI wake-now and the dashboard's own wake_schedules reads use.
+        with store._connect() as conn:
+            with store._leaf_conn(conn) as raw:
+                # Dedup: if a wake is already queued/running for this business, return it rather than
+                # enqueue a second concurrent CEO turn (a double-click is a no-op, not a double-spend).
+                pending = next(
+                    (
+                        job
+                        for job in jobs.list_jobs(raw, slug, limit=50)
+                        if job.kind == "ceo_wake" and job.status in {"queued", "running"}
+                    ),
+                    None,
+                )
+                if pending is not None:
+                    return {
+                        "success": True,
+                        "slug": slug,
+                        "job_id": str(pending.id),
+                        "status": pending.status,
+                        "already_pending": True,
+                    }
+                job = jobs.enqueue(
+                    raw,
+                    slug,
+                    "ceo_wake",
+                    idempotency_key=_idempotency_key("dashboard-wake-now", slug, uuid4().hex),
+                    payload={
+                        "estimate_cents": _operator_turn_estimate_cents(),
+                        "ui_origin": "litebulb.topbar",
+                        "trigger": "dashboard_wake_now",
+                    },
+                    # A worker restart should requeue the wake rather than permanently drop it.
+                    max_attempts=5,
+                )
+        return {
+            "success": True,
+            "slug": slug,
+            "job_id": str(job.id),
+            "status": "queued",
+            "already_pending": False,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business wake-now failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/takyon/operator/meta-campaigns")
 async def get_takyon_operator_meta_campaigns(request: Request) -> dict[str, Any]:
     """Read-only Meta campaign handoff queue for the SAI operator surface."""

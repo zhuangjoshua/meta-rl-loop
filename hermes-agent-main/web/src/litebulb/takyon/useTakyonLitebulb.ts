@@ -753,6 +753,16 @@ export function useTakyonLitebulb() {
     await loadHome();
   }, [loadHome]);
 
+  // Operator "Wake now": enqueue an immediate ceo_wake so the worker runs a CEO turn on its next
+  // tick instead of waiting for the scheduled cadence (e.g. every 6h). Enqueue-only — the turn's
+  // narration arrives through the normal workspace event stream, so we just refresh home afterward.
+  const wakeBusinessNow = useCallback(async (slug: string) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
+    await api.wakeTakyonBusinessNow(businessSlug);
+    await loadHome();
+  }, [loadHome]);
+
   const startCreativeCreditCheckout = useCallback(async (slug: string, credits: number) => {
     const businessSlug = trimText(slug).toLowerCase();
     const creditCount = Number.isFinite(credits) ? Math.max(0, Math.round(credits)) : 0;
@@ -1744,6 +1754,7 @@ export function useTakyonLitebulb() {
     createBusiness,
     saveChannelCreditBudgets,
     setBusinessWakeState,
+    wakeBusinessNow,
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,
