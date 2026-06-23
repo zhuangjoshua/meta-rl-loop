@@ -74,16 +74,21 @@ working). The runtime connects as Supabase superuser `postgres` via the legacy p
 (auth_query) — a custom `takyon_runtime` LOGIN role with a password **can** authenticate through it (direct
 `:5432` is the fallback). 205 authoritative+safebox tests green; 47 money pg-tests pass through the routed path.
 
-## 5. What is IN FLIGHT (a background agent — check for its completion notification)
+## 5. NOT STARTED — the immediate next step (correction)
 
-**G3 mint-to-safebox refactor** (the cutover-gating fix). 0038 currently GRANTs `takyon_runtime` EXECUTE on the
-**minting** funcs (`safebox_billing_grant_allowance/open_account`, `safebox_credits_grant/open_account`,
-`safebox_custody_accrue/open_account/payout`) — so an attacker as `takyon_runtime` could still mint by CALLING
-the func. The agent is: routing billing+custody **mints** through the safebox (mirroring how creative-credits
-already route via `/v1/creative-credits/*`), and adding `revoke execute on <mint_fn> from takyon_runtime` so the
-runtime keeps only the **spend** funcs (reserve/settle/refund/commit/release, balance-bounded). PG-validated.
-**When it lands: review its diff, integrate (it's a worktree), run the pg-suite, expect another small `inv4`
-source-check touch-up, commit.**
+**G3 mint-to-safebox refactor** (the cutover-gating fix) is **NOT done and NOT in flight** — an earlier version of
+this handoff wrongly described it as an in-flight background agent; no such agent was launched. Verified in the
+committed tree (`3374ca2c`): `0038` has **no `revoke execute`** anywhere and still **grants the mint funcs to
+`takyon_runtime`** (billing 424-425, credits 701-702, custody 841-843), and `safebox_app.py` has **only
+`/v1/creative-credits/*`** routes (no `/v1/billing/*` or `/v1/custody/*`). So an attacker as `takyon_runtime`
+could still mint by CALLING `safebox_billing_grant_allowance` / `safebox_credits_grant` / `safebox_custody_accrue`
+/ `safebox_custody_payout`.
+
+**Do this as a focused, PG-validated change (it gates the cutover):** add safebox `/v1/billing/*` + `/v1/custody/*`
+**mint** routes mirroring `/v1/creative-credits/*`; route the *mint* calls in `billing.py`/`custody.py` through them
+(creative-credits already route this way); add `revoke execute on <mint_fn> from takyon_runtime` to `0038` so the
+runtime keeps only the **spend** funcs (reserve/settle/refund/commit/release, balance-bounded); update the
+`inv4`/`inv5` source-inspection tests to assert the guard lives in the SQL func. Validate on a throwaway PG rig.
 
 ## 6. What REMAINS for true green (ordered)
 
