@@ -75,6 +75,7 @@ def client(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
     monkeypatch.setenv("TAKYON_CAP_SIGNING_KEY", "test-signing-key-value")
     monkeypatch.setenv("DATABASE_URL", "postgres://example/db")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.delenv("TAKYON_RUNTIME_DATABASE_URL", raising=False)
     return TestClient(build_safebox_app())
 
@@ -116,6 +117,15 @@ def test_database_egress_prefers_runtime_dsn_override(client, monkeypatch):
     snapshot = client.get("/v1/env/snapshot", headers=_AUTH)
     assert snapshot.status_code == 200
     assert snapshot.json()["snapshot"]["DATABASE_URL"] == "postgres://runtime/db"
+
+
+def test_first_route_keeps_public_infra_fallback(client):
+    first = client.post(
+        "/v1/env/first",
+        json={"keys": ["SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL"]},
+        headers=_AUTH,
+    )
+    assert first.status_code == 200 and first.json()["value"] == "https://example.supabase.co"
 
 
 def test_write_and_delete_routes_refuse_sensitive_keys(client):

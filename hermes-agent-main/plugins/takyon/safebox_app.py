@@ -757,7 +757,10 @@ def _env_egress_value(name: str) -> str:
         ).strip()
         if runtime_database_url:
             return runtime_database_url
-    return safebox.read_env_backed_value(n)
+    try:
+        return safebox.read_env_backed_value(n)
+    except KeyError:
+        return str(os.environ.get(n) or safebox.load_env().get(n) or "").strip()
 
 
 def _first_env_egress_value(names: Iterable[str]) -> str:
