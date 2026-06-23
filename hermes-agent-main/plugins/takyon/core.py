@@ -1227,6 +1227,77 @@ def provider_key_denylist() -> frozenset[str]:
     return frozenset(denied)
 
 
+# ── The safebox's OWN authority secrets (GOAL_RULES §1 / authority principle) ──────────────────────
+# The HMAC capability signing key and the master transport token are the secrets that let a caller
+# BECOME an authority: read the signing key and you can forge any capability offline (any account, any
+# ceiling); read/own the master token and you pass as an authenticated plane. They are therefore
+# CATEGORICALLY non-egress and non-ingress over /v1/env — never returned, never overwritten, on any
+# route, regardless of provider classification. This is the structural fix for the G1 class of bug: a
+# DENYLIST leaks anything you forget to list; these secrets simply are not in the egress ALLOWLIST.
+_SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
+    {
+        "TAKYON_CAP_SIGNING_KEY",
+        "TAKYON_SAFEBOX_TOKEN",
+    }
+)
+
+# Infra secrets the runtime planes legitimately fetch over /v1/env (DB / Stripe / Auth0 / Supabase / R2
+# / Cloudflare / Postmark / Umami / Vercel / search-console). The /v1/env egress gate is an ALLOWLIST
+# (deny-by-default): a newly added secret is non-vendable until explicitly listed here — the inverse of
+# a denylist, where forgetting to list a sensitive name silently leaks it. Exact names AND prefixes
+# match; paid-provider keys (`provider_key_denylist`) and the self-authority secrets above are hard-
+# denied even if a future rule would otherwise admit them.
+_INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
+    {
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRES_PRISMA_URL",
+        "POSTGRES_URL_NON_POOLING",
+        "VERCEL_TOKEN",
+        "TAKYON_GSC_SERVICE_ACCOUNT_KEY",
+        "UMAMI_API_KEY",
+    }
+)
+_INFRA_ENV_ALLOW_PREFIXES: tuple[str, ...] = (
+    "POSTGRES_",
+    "SUPABASE_",
+    "STRIPE_",
+    "AUTH0_",
+    "POSTMARK",
+    "R2_",
+    "CLOUDFLARE_",
+    "UMAMI_",
+    "TAKYON_GSC_",
+)
+
+
+def safebox_self_authority_secret_names() -> frozenset[str]:
+    """The safebox's own authority secrets — never vended or overwritten over /v1/env, on any route.
+
+    See ``_SAFEBOX_SELF_AUTHORITY_SECRETS``. Authority principle: the safebox never egresses, or accepts
+    a write to, the secret that would let a caller become an authority (forge capabilities / pose as a
+    plane). Possession of the shared transport token is reachability, NOT authority."""
+    return _SAFEBOX_SELF_AUTHORITY_SECRETS
+
+
+def env_egress_allowed(name: str) -> bool:
+    """/v1/env READ policy as an ALLOWLIST of infra secrets (deny-by-default).
+
+    Hard-denies the self-authority secrets and every paid-provider key first (those can never leave the
+    safebox over HTTP), then admits only the curated infra names/prefixes the runtime planes need.
+    Anything unrecognised is denied — so a sensitive secret added later cannot silently vend."""
+    n = str(name or "").strip()
+    if not n:
+        return False
+    if n in _SAFEBOX_SELF_AUTHORITY_SECRETS:
+        return False
+    if n in provider_key_denylist():
+        return False
+    if n in _INFRA_ENV_ALLOW_EXACT:
+        return True
+    return any(n.startswith(p) for p in _INFRA_ENV_ALLOW_PREFIXES)
+
+
 _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "ai_gateway_setup": ("llm",),
     "ceo_wakeup": ("llm",),

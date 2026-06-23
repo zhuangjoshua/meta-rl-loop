@@ -640,6 +640,57 @@ def _refuse_provider_key(name: str) -> None:
         raise HTTPException(status_code=404, detail="provider_key_not_vended")
 
 
+# ── /v1/env egress is an ALLOWLIST, and the safebox's own authority secrets are categorically out ───
+# (authority principle / GOAL_RULES §1). A denylist leaks anything you forget to list — which is how the
+# HMAC signing key + master token were vending (G1). The read gate is now deny-by-default
+# (``_env_egress_allowed``); the write/delete gate hard-refuses the self-authority secrets so they can
+# never be overwritten or removed over HTTP either.
+_SAFEBOX_SELF_AUTHORITY_FALLBACK: frozenset[str] = frozenset(
+    {"TAKYON_CAP_SIGNING_KEY", "TAKYON_SAFEBOX_TOKEN"}
+)
+
+
+def _self_authority_secret_names() -> frozenset[str]:
+    try:
+        from . import core
+
+        return core.safebox_self_authority_secret_names()
+    except Exception:
+        return _SAFEBOX_SELF_AUTHORITY_FALLBACK
+
+
+def _refuse_self_authority_secret_write(name: str) -> None:
+    """The safebox NEVER accepts a write/delete to its OWN authority secrets (HMAC signing key, master
+    token) over /v1/env — overwriting them would let a caller forge capabilities or pin a known token.
+    403, separate from the deny-by-default read allowlist."""
+    if str(name or "").strip() in _self_authority_secret_names():
+        raise HTTPException(status_code=403, detail="authority_secret_immutable")
+
+
+def _env_egress_allowed(name: str) -> bool:
+    """/v1/env READ allowlist (deny-by-default). Delegates to ``core.env_egress_allowed``; on a core
+    import failure, fails closed for the self-authority secrets + paid-provider keys while still serving
+    the known infra names/prefixes so a transient error can't black out the runtime's DB/Stripe/Auth0
+    fetches."""
+    try:
+        from . import core
+
+        return core.env_egress_allowed(name)
+    except Exception:
+        n = str(name or "").strip()
+        if not n or n in _SAFEBOX_SELF_AUTHORITY_FALLBACK or _is_denied_provider_key(n):
+            return False
+        if n in {
+            "DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING",
+            "VERCEL_TOKEN", "TAKYON_GSC_SERVICE_ACCOUNT_KEY", "UMAMI_API_KEY",
+        }:
+            return True
+        return n.startswith(
+            ("POSTGRES_", "SUPABASE_", "STRIPE_", "AUTH0_", "POSTMARK", "R2_", "CLOUDFLARE_",
+             "UMAMI_", "TAKYON_GSC_")
+        )
+
+
 def _anthropic_key_resolver(_scope: CapabilityScope) -> str:
     """Resolve the SHARED Anthropic key LOCALLY on the safebox (never returned to a caller)."""
     from . import ai_provider
@@ -1150,41 +1201,45 @@ def build_safebox_app() -> FastAPI:
     @app.get("/v1/env/{key}")
     def read_env_value(key: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
         _require_internal_token(authorization)
-        # GOAL_RULES §1 step 4: a runtime plane may never pull a raw paid-provider key over HTTP. A
-        # denied key 404s (no value), exactly as if absent. Infra secrets (DB/Stripe/Auth0/…) serve.
-        _refuse_provider_key(key)
+        # Egress is a deny-by-default ALLOWLIST of infra secrets. The self-authority secrets (signing
+        # key, master token) and every paid-provider key are NOT on it, so they 404 here (no value,
+        # indistinguishable from absent) — closing the G1 leak structurally rather than by denylist.
+        if not _env_egress_allowed(key):
+            raise HTTPException(status_code=404, detail="not_vendable")
         return {"value": safebox.read_env_backed_value(key)}
 
     @app.post("/v1/env/first")
     def first_env_value(body: _FirstEnvBody, authorization: str | None = Header(default=None)) -> dict[str, str]:
         _require_internal_token(authorization)
-        # Filter denied provider-key aliases OUT of the candidate list, then resolve the first
-        # non-denied value. If the request asks ONLY for denied keys, refuse (404) rather than vend.
-        allowed = [k for k in (body.keys or []) if not _is_denied_provider_key(k)]
+        # Keep only allowlisted infra names, then resolve the first present value. A request for only
+        # non-allowlisted keys (provider keys, the signing key, the master token, …) refuses (404).
+        allowed = [k for k in (body.keys or []) if _env_egress_allowed(k)]
         if not allowed:
-            raise HTTPException(status_code=404, detail="provider_key_not_vended")
+            raise HTTPException(status_code=404, detail="not_vendable")
         return {"value": safebox.first_env_backed_value(*allowed)}
 
     @app.post("/v1/env/{key}")
     def save_env_value(key: str, body: _EnvValueBody, authorization: str | None = Header(default=None)) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _refuse_self_authority_secret_write(key)
         safebox.save_env_backed_value(key, body.value)
         return {"ok": True}
 
     @app.delete("/v1/env/{key}")
     def delete_env_value(key: str, authorization: str | None = Header(default=None)) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _refuse_self_authority_secret_write(key)
         return {"removed": safebox.remove_env_backed_value(key)}
 
     @app.get("/v1/env/snapshot")
     def env_snapshot(authorization: str | None = Header(default=None)) -> dict[str, dict[str, str]]:
         _require_internal_token(authorization)
-        # Strip every denied paid-provider key out of the bulk snapshot — the runtime planes get the
-        # infra secrets they need but no raw provider key ever leaves the safebox over HTTP.
+        # Allowlist the bulk snapshot too — the runtime planes get only the infra secrets they need;
+        # provider keys, the signing key, and the master token are never present in the snapshot.
         snapshot = {
             name: value
             for name, value in safebox.sensitive_env_snapshot().items()
-            if not _is_denied_provider_key(name)
+            if _env_egress_allowed(name)
         }
         return {"snapshot": snapshot}
 
@@ -1194,12 +1249,12 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, list[str]]:
         _require_internal_token(authorization)
-        # Names only (no values), but still hide the denied provider keys so a client never sees a
-        # paid-provider key advertised as vendable through this route.
+        # Names only (no values), and only the allowlisted infra names — a client never even sees the
+        # provider keys, the signing key, or the master token advertised as vendable through this route.
         keys = [
             name
             for name in safebox.list_env_backed_keys(sensitive_only=sensitive_only != "0")
-            if not _is_denied_provider_key(name)
+            if _env_egress_allowed(name)
         ]
         return {"keys": keys}
 

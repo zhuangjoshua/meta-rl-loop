@@ -447,40 +447,36 @@ def test_per_action_anthropic_capability_is_accepted_and_metered(client, monkeyp
     assert _settles() == [("settle", "r0", 1500)]
 
 
-def test_internal_token_path_is_still_metered(client, monkeypatch):
-    # TRANSITIONAL: the shared internal token is accepted, but the call is STILL money-gated against the
-    # platform operator budget — there is NO ungated path.
-    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 4000)
-    monkeypatch.setattr(
-        safebox_provider_proxy, "_anthropic_actual_microusd_from_response", lambda p, r: 4000
-    )
-    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
-    _patch_httpx(monkeypatch)
-    _FakeClient.response = _FakeResponse(200, {"id": "msg_internal"})
-    resp = client.post(
-        "/v1/messages",
-        headers=_auth(),  # internal token, NOT a capability
-        json={"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
-    )
-    assert resp.status_code == 200
-    _assert_no_key(resp)
-    assert _reserves() == [("reserve", _OPERATOR, 4000, "r0")]
-    assert _settles() == [("settle", "r0", 4000)]
-
-
-def test_internal_token_path_fails_closed_without_platform_operator(monkeypatch):
-    # If the internal token is presented but no platform operator budget identity is configured, the
-    # transitional path fails CLOSED (503) rather than spending ungated.
-    monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
-    monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, _SIGNING_KEY.decode())
-    monkeypatch.delenv("TAKYON_PLATFORM_OPERATOR_USER_ID", raising=False)
-    monkeypatch.delenv("TAKYON_OPERATOR_USER_ID", raising=False)
-    monkeypatch.setattr(safebox_app, "_OperatorBudgetAdapter", _FakeBudget)
+def test_bare_internal_token_is_refused_no_spend(client, monkeypatch):
+    # Authority principle / G2: the shared internal token is transport REACHABILITY, not spend authority
+    # (every plane holds it). A /v1/messages call with the bare token and NO capability is refused 401
+    # BEFORE any reserve and without ever reaching the upstream provider — no ungated, no token-spend path.
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
     monkeypatch.setattr(
         safebox_provider_proxy.httpx,
         "Client",
-        lambda *a, **k: pytest.fail("upstream must not be reached without a metered operator"),
+        lambda *a, **k: pytest.fail("upstream must not be reached for a bare-token call"),
+    )
+    resp = client.post(
+        "/v1/messages",
+        headers=_auth(),  # bare internal token, NOT a capability
+        json={"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 401
+    assert _reserves() == []  # refused before any money reserve
+
+
+def test_bare_internal_token_refused_even_with_platform_operator(monkeypatch):
+    # Even with a platform-operator id configured, the bare internal token buys NOTHING (G2): the old
+    # transitional platform-operator scope is gone, so a bare-token /v1/messages is 401, never reserved.
+    monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
+    monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, _SIGNING_KEY.decode())
+    monkeypatch.setenv("TAKYON_PLATFORM_OPERATOR_USER_ID", "op-platform")
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
+    monkeypatch.setattr(
+        safebox_provider_proxy.httpx,
+        "Client",
+        lambda *a, **k: pytest.fail("upstream must not be reached for a bare-token call"),
     )
     local_client = TestClient(safebox_app.build_safebox_app())
     resp = local_client.post(
@@ -488,8 +484,7 @@ def test_internal_token_path_fails_closed_without_platform_operator(monkeypatch)
         headers=_auth(),
         json={"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
     )
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == "platform_operator_unconfigured"
+    assert resp.status_code == 401
 
 
 # ══ Tavily (money-gated) ══════════════════════════════════════════════════════════════════════════

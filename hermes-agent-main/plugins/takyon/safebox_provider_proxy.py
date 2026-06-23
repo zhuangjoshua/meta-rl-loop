@@ -61,7 +61,6 @@ Hard invariants for every route here:
 from __future__ import annotations
 
 import json as _json
-import os as _os
 import time as _time
 from typing import Any, Iterator
 
@@ -139,20 +138,6 @@ class _ProxyAuth:
         self.via = via
 
 
-def _platform_operator_user_id() -> str:
-    """The PLATFORM operator user id the TRANSITIONAL internal-token path meters against.
-
-    Resolved safebox-side from ``TAKYON_PLATFORM_OPERATOR_USER_ID`` (preferred) or the legacy
-    ``TAKYON_OPERATOR_USER_ID`` convenience. The internal token is trusted but its spend must still land
-    on a real control-plane billing account, so this names that account. Returns "" when unset —
-    the internal-token path then fails CLOSED (no ungated spend)."""
-    return str(
-        _os.environ.get("TAKYON_PLATFORM_OPERATOR_USER_ID")
-        or _os.environ.get("TAKYON_OPERATOR_USER_ID")
-        or ""
-    ).strip()
-
-
 def _authorize_operator_proxy(
     authorization: str | None,
     x_api_key: str | None,
@@ -161,26 +146,19 @@ def _authorize_operator_proxy(
 ) -> _ProxyAuth:
     """Authorize an operator proxy call and return the scope to meter against.
 
-    Accepts, in order:
-      (a) a valid signed, unexpired SESSION-scoped operator capability (audience ``operator.session``) OR
-          the route's per-action capability (e.g. ``anthropic.messages`` / ``tavily.search``) — the
-          verified scope is AUTHORITATIVE and its signed ceiling is enforced; the token is NOT
-          single-use (no nonce claim), so it is reusable across the run's many calls;
-      (b) the TRANSITIONAL shared internal token ``TAKYON_SAFEBOX_TOKEN`` — a synthetic PLATFORM-operator
-          scope is metered against the platform operator budget (no ceiling, but reserve/settle still
-          enforced). To be removed once all operator clients mint session capabilities.
-
-    Fails closed 401 when neither is presented. The internal-token path additionally fails closed (503)
-    when no platform operator identity is configured — there is no ungated path."""
-    import hmac as _hmac
-
+    Authority is a CAPABILITY ONLY (authority principle / G2): a valid signed, unexpired SESSION-scoped
+    operator capability (audience ``operator.session``) OR the route's per-action capability (e.g.
+    ``anthropic.messages`` / ``tavily.search``). The verified scope is AUTHORITATIVE and its signed
+    per-call ceiling is enforced; the token is NOT single-use (no nonce claim), so it is reusable across
+    the run's many calls. The shared internal ``TAKYON_SAFEBOX_TOKEN`` is TRANSPORT reachability, never
+    spend authority — every runtime plane holds it, so accepting it would let anyone who compromises a
+    plane spend uncapped against the platform operator budget. Fails closed 401 when no valid capability
+    is presented."""
     from .safebox_app import (
         _OPERATOR_SESSION_AUDIENCE,
-        _SAFEBOX_TOKEN_ENV,
-        _allow_tokenless,
         _cap_signing_key,
     )
-    from .safebox_capability import CapabilityError, CapabilityScope, verify_capability
+    from .safebox_capability import CapabilityError, verify_capability
 
     cred = _presented_credential(authorization, x_api_key)
     now = int(_time.time())
@@ -205,34 +183,12 @@ def _authorize_operator_proxy(
                 via=f"capability:{audience}",
             )
 
-    # (b) TRANSITIONAL internal-token path — accepted but STILL money-gated against a platform operator.
-    expected = str(_os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
-    internal_ok = False
-    if expected:
-        if cred and _hmac.compare_digest(cred.encode(), expected.encode()):
-            internal_ok = True
-    elif _allow_tokenless():
-        internal_ok = True
-    if internal_ok:
-        operator_user_id = _platform_operator_user_id()
-        if not operator_user_id:
-            # No ungated path: the internal token is accepted only when a platform operator budget exists
-            # to meter against. Fail closed so the transitional path can never spend ungated.
-            raise HTTPException(status_code=503, detail="platform_operator_unconfigured")
-        scope = CapabilityScope(
-            takyon_user_id=operator_user_id,
-            # Platform-operator spend is NOT tied to a business; an empty slug -> billing.reserve gets
-            # None (billing_entries.business_slug FKs businesses, and there is no "platform" business).
-            business_slug="",
-            app_user_id=None,
-            action="operator.proxy",
-            max_cost_microusd=0,
-        )
-        return _ProxyAuth(
-            scope=scope, ceiling_microusd=0, enforce_ceiling=False, via="internal_token"
-        )
-
-    raise HTTPException(status_code=401, detail="unauthorized")
+    # (b) The shared internal token is NOT spend authority (authority principle / G2). It is held by
+    # every runtime plane, so accepting it for spend gave anyone who compromised a plane an uncapped
+    # per-call channel against the platform operator budget. Operator clients (CEO loop, coding worker)
+    # present a minted, ceiling-bound operator.session capability via branch (a); a bare token — or
+    # anything unsigned — is refused. No ungated, no token-authorized spend path remains.
+    raise HTTPException(status_code=401, detail="operator_capability_required")
 
 
 # ── Anthropic streaming usage parsing ─────────────────────────────────────────────────────────────

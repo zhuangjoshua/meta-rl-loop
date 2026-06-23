@@ -68,6 +68,19 @@ Default deployment rule: if the change is code, tracked config, routing, UI, ser
 
 ### Safebox authoritative gating — architecture + deploy runbook
 
+**Authority principle (GOAL_RULES §0 — the one rule the boundary descends from):** authority is a
+capability the safebox MINTS and VERIFIES — never inferred from possession of a shared secret, never
+read from state the caller can write. A correct surface asks only "is this a valid capability the
+safebox minted for exactly this action/account/cost?" — never "which plane is calling / what token does
+it hold". Corollaries: (1) the shared `TAKYON_SAFEBOX_TOKEN` is transport REACHABILITY, not authority —
+no spend or secret-egress may rest on it (every plane holds it); (2) the safebox never egresses or
+accepts a write to its own authority secrets (`TAKYON_CAP_SIGNING_KEY`, `TAKYON_SAFEBOX_TOKEN`), and
+`/v1/env` is an infra **allowlist** (`core.env_egress_allowed`, deny-by-default), not a denylist; (3)
+ownership/allowance/balance state is writable only by the safebox's own DB role — the runtime gets a
+NOBYPASSRLS non-owner role and money/identity writes go through SECURITY DEFINER funcs. When you touch
+any safebox surface, re-derive nothing — apply §0. A red-team that finds an authority decision resting
+on the token, a self-secret leaking over `/v1/env`, or a runtime-writable ledger is a §0 violation.
+
 Invariant (GOAL_RULES, operator-mandated): **every paid provider call is money-gated AUTHORITATIVELY inside the safebox before any key resolves; there is no gating outside the safebox and no ungated path.** The safebox holds the keys, makes the provider call, and reserves→settles the right rail keyed on a VERIFIED capability scope. The gate always keys on one of the two CANONICAL accounts — the Takyon **user** (operator) or the product **sub-user** — never a synthetic "platform" account.
 
 Rails (all enforced in `plugins/takyon/safebox_app.py` / `safebox_provider_proxy.py` on the safebox's own DB conn):

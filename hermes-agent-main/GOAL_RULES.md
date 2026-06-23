@@ -5,6 +5,34 @@ section (`GOAL_RULES §N`). The overriding rule: **the safebox is the only place
 or a paid call is authorized; every paid provider call is money-gated AUTHORITATIVELY inside the
 safebox before any key resolves; there is no gating outside the safebox and no ungated path.**
 
+## §0 — The authority principle (the one rule the whole boundary descends from)
+
+**Authority is a capability the safebox MINTS and VERIFIES — never inferred from possession of a shared
+secret, and never read from state the caller can write.** The safebox does not re-derive how to trust a
+caller per surface; every privileged decision reduces to this one rule. A correct surface asks only:
+"is this a valid capability the safebox minted for exactly this action / account / cost?" — never
+"which plane is calling" or "what token does it hold". Three corollaries, each a place the boundary has
+failed (G1/G2/G3):
+
+1. **The shared `TAKYON_SAFEBOX_TOKEN` is transport REACHABILITY, not authority.** Every plane holds it
+   (and so does anyone who compromises one), so it can only answer "may this peer reach the safebox at
+   all" — never "may this peer spend / read this secret". No privileged outcome may rest on the token
+   alone; spend is authorized by a signed capability (server-derived scope, single-use/TTL/audience/
+   ceiling). *(G2: the bare token bought uncapped operator spend — removed; the proxy now requires a
+   capability.)*
+2. **The safebox never egresses — or accepts a write to — the secrets that let a caller BECOME an
+   authority.** Its HMAC signing key (`TAKYON_CAP_SIGNING_KEY`) and master token (`TAKYON_SAFEBOX_TOKEN`)
+   are categorically non-egress/non-ingress over `/v1/env`, on every route. `/v1/env` is therefore an
+   **ALLOWLIST** of the infra secrets the runtime needs (deny-by-default: `core.env_egress_allowed`),
+   not a denylist where a forgotten name silently leaks. *(G1: the signing key vended over /v1/env —
+   fixed.)*
+3. **State the safebox derives a scope from (ownership, allowance, balances) is writable ONLY by the
+   safebox's own DB role — never the runtime's.** Otherwise "server-derived scope" is a lie the caller
+   authored. The runtime connects with a least-privilege NOBYPASSRLS non-owner role that cannot write
+   money/identity tables; the authoritative ledgers move only through SECURITY DEFINER functions owned
+   by the privileged role (mirror migration 0037). *(G3: the runtime is the BYPASSRLS owner — in
+   progress, migration 0038.)*
+
 ## §1 — Authoritative gating on the safebox (the secret boundary)
 
 - Provider keys (model/image/video/search/social) live ONLY on the safebox host. A runtime plane
