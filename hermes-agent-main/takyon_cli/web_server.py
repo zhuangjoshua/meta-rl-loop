@@ -4365,26 +4365,12 @@ async def create_takyon_operator_billing_portal(request: Request) -> dict[str, A
         body = {}
     return_path = _same_origin_path(str(body.get("return_path") or "/"))
     try:
-        from plugins.takyon.control_api import create_operator_billing_portal_session
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon import safebox
 
-        try:
-            url = _request_runtime_database_url(request)
-            if not url:
-                raise RuntimeNotConfigured("database_unconfigured")
-        except RuntimeNotConfigured as exc:
-            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
-        import psycopg
-
-        conn = psycopg.connect(url, autocommit=True)
-        try:
-            session = create_operator_billing_portal_session(
-                conn,
-                str(principal.user_id),
-                return_url=_dashboard_absolute_url(request, return_path),
-            )
-        finally:
-            conn.close()
+        session = safebox.create_operator_billing_portal(
+            str(principal.user_id),
+            return_url=_dashboard_absolute_url(request, return_path),
+        )
     except HTTPException:
         raise
     except ValueError as exc:
@@ -4455,32 +4441,14 @@ async def create_takyon_operator_subscription_checkout(request: Request) -> dict
         raise HTTPException(status_code=400, detail="plan_id is required")
     return_path = _same_origin_path(str(body.get("return_path") or "/"))
     try:
-        from plugins.takyon.control_api import (
-            create_operator_subscription_checkout_session,
-            ensure_operator_billing_customer,
+        from plugins.takyon import safebox
+
+        result = safebox.create_operator_subscription_checkout(
+            str(principal.user_id),
+            plan_id=plan_id,
+            success_url=_dashboard_absolute_url(request, return_path),
+            cancel_url=_dashboard_absolute_url(request, return_path),
         )
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
-
-        try:
-            url = _request_runtime_database_url(request)
-            if not url:
-                raise RuntimeNotConfigured("database_unconfigured")
-        except RuntimeNotConfigured as exc:
-            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
-        import psycopg
-
-        conn = psycopg.connect(url, autocommit=True)
-        try:
-            customer = ensure_operator_billing_customer(conn, str(principal.user_id))
-            session, plan = create_operator_subscription_checkout_session(
-                str(principal.user_id),
-                plan_id=plan_id,
-                success_url=_dashboard_absolute_url(request, return_path),
-                cancel_url=_dashboard_absolute_url(request, return_path),
-                customer_id=str(customer.get("id") or "").strip() or None,
-            )
-        finally:
-            conn.close()
     except HTTPException:
         raise
     except LookupError as exc:
@@ -4497,10 +4465,10 @@ async def create_takyon_operator_subscription_checkout(request: Request) -> dict
             ) from exc
         raise HTTPException(status_code=502, detail=message) from exc
     return {
-        "checkout_url": session.get("url"),
-        "session_id": session.get("id"),
-        "plan_id": plan["id"],
-        "plan_name": plan["name"],
+        "checkout_url": result.get("checkout_url"),
+        "session_id": result.get("session_id"),
+        "plan_id": result.get("plan_id"),
+        "plan_name": result.get("plan_name"),
     }
 
 
@@ -4517,26 +4485,13 @@ async def create_takyon_operator_payout_connect(request: Request) -> dict[str, A
     refresh_qs = urllib.parse.urlencode({"return_to": return_path})
     refresh_path = f"/api/takyon/operator/payouts/connect/refresh?{refresh_qs}"
     try:
-        from plugins.takyon.control_api import create_operator_payout_connect_link
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon import safebox
 
-        try:
-            url = _request_runtime_database_url(request)
-            if not url:
-                raise RuntimeNotConfigured("database_unconfigured")
-        except RuntimeNotConfigured as exc:
-            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
-        import psycopg
-        conn = psycopg.connect(url, autocommit=True)
-        try:
-            link = create_operator_payout_connect_link(
-                conn,
-                str(principal.user_id),
-                return_url=_dashboard_absolute_url(request, return_path),
-                refresh_url=_dashboard_absolute_url(request, refresh_path),
-            )
-        finally:
-            conn.close()
+        link = safebox.create_operator_payout_connect(
+            str(principal.user_id),
+            return_url=_dashboard_absolute_url(request, return_path),
+            refresh_url=_dashboard_absolute_url(request, refresh_path),
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - surface an honest UI error
@@ -4566,26 +4521,13 @@ async def refresh_takyon_operator_payout_connect(
     refresh_qs = urllib.parse.urlencode({"return_to": safe_return})
     refresh_path = f"/api/takyon/operator/payouts/connect/refresh?{refresh_qs}"
     try:
-        from plugins.takyon.control_api import create_operator_payout_connect_link
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon import safebox
 
-        try:
-            url = _request_runtime_database_url(request)
-            if not url:
-                raise RuntimeNotConfigured("database_unconfigured")
-        except RuntimeNotConfigured as exc:
-            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
-        import psycopg
-        conn = psycopg.connect(url, autocommit=True)
-        try:
-            link = create_operator_payout_connect_link(
-                conn,
-                str(principal.user_id),
-                return_url=_dashboard_absolute_url(request, safe_return),
-                refresh_url=_dashboard_absolute_url(request, refresh_path),
-            )
-        finally:
-            conn.close()
+        link = safebox.create_operator_payout_connect(
+            str(principal.user_id),
+            return_url=_dashboard_absolute_url(request, safe_return),
+            refresh_url=_dashboard_absolute_url(request, refresh_path),
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - surface an honest UI error

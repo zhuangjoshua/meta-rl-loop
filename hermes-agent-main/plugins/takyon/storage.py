@@ -174,11 +174,17 @@ def _sensitive_config_value(name: str) -> str:
         return str(value).strip()
     try:
         return str(safebox.read_env_backed_value(name) or "").strip()
-    except safebox.SafeboxAuthorityUnavailable:
+    except (safebox.RemoteSafeboxError, safebox.SafeboxAuthorityUnavailable):
         return ""
 
 
+def _remote_storage_authority_enabled() -> bool:
+    return safebox._remote_enabled() and not safebox._local_authority_enabled()
+
+
 def _supabase_storage_fully_configured() -> bool:
+    if _remote_storage_authority_enabled():
+        return bool(all(_env_backed_config_value(name) for name in _SUPABASE_STORAGE_CONFIG_KEYS))
     return bool(
         all(_env_backed_config_value(name) for name in _SUPABASE_STORAGE_CONFIG_KEYS)
         and all(_sensitive_config_value(name) for name in _SUPABASE_STORAGE_SECRET_KEYS)
@@ -904,12 +910,50 @@ class R2StorageBackend:
         return out
 
 
+class SafeboxStorageBackend:
+    """Remote object-store backend.
+
+    Runtime planes never receive S3/R2 write credentials. They hand bounded object operations to the
+    safebox, which resolves the object-store key locally and performs the S3-compatible request.
+    """
+
+    def __init__(self, provider: str) -> None:
+        name = str(provider or "").strip()
+        if name not in {"supabase_s3", "r2"}:
+            raise StorageError(f"unknown safebox storage provider: {provider!r}")
+        self.name = name
+
+    def put(self, key: str, data: bytes, *, digest: str) -> None:
+        safebox.storage_put(self.name, _safe_rel(key, field="object key"), data, digest=digest)
+
+    def get(self, key: str) -> bytes:
+        try:
+            return safebox.storage_get(self.name, _safe_rel(key, field="object key"))
+        except safebox.RemoteSafeboxError as exc:
+            if exc.status_code == 404:
+                raise ObjectNotFound(key) from exc
+            raise
+
+    def delete(self, key: str) -> None:
+        safebox.storage_delete(self.name, _safe_rel(key, field="object key"))
+
+    def list_digests(self, prefix: str) -> dict[str, str]:
+        safe_prefix = _safe_rel(prefix.rstrip("/"), field="prefix") if prefix.strip("/") else ""
+        return safebox.storage_list_digests(self.name, safe_prefix)
+
+    def list_object_sizes(self, prefix: str) -> dict[str, int]:
+        safe_prefix = _safe_rel(prefix.rstrip("/"), field="prefix") if prefix.strip("/") else ""
+        return safebox.storage_list_object_sizes(self.name, safe_prefix)
+
+
 def r2_configured() -> bool:
     """True iff the public R2 product-site mirror is fully provisioned.
 
     Lets every caller of :func:`write_public_site_to_r2` no-op cleanly when ``R2_*`` is unset, so the
     Supabase publish path is unchanged until the operator turns the edge mirror on. ``R2_S3_REGION``
     is intentionally NOT required (defaults to ``"auto"``)."""
+    if _remote_storage_authority_enabled():
+        return bool(_env_backed_config_value("R2_S3_ENDPOINT") and _env_backed_config_value("R2_BUCKET"))
     return bool(
         _env_backed_config_value("R2_S3_ENDPOINT")
         and _env_backed_config_value("R2_BUCKET")
@@ -957,7 +1001,12 @@ def write_public_site_to_r2(
     (raising :class:`StorageUnconfigured` if ``R2_*`` is absent). Returns the uploaded
     ``{slug, build_id, files, pointer_key}`` for the caller's receipt."""
     safe_slug = _safe_slug(slug)
-    r2 = backend if backend is not None else R2StorageBackend()
+    if backend is not None:
+        r2 = backend
+    elif _remote_storage_authority_enabled():
+        r2 = SafeboxStorageBackend("r2")
+    else:
+        r2 = R2StorageBackend()
     root = Path(build_root).expanduser().resolve()
     digests = workspace_file_digests(root)
     uploaded: dict[str, str] = {}
@@ -991,6 +1040,8 @@ def get_storage_backend(*, root: str | os.PathLike[str] | None = None) -> Storag
     if kind == "local":
         return LocalStorageBackend(root)
     if kind == "supabase_s3":
+        if _remote_storage_authority_enabled():
+            return SafeboxStorageBackend("supabase_s3")
         return SupabaseS3StorageBackend()
     raise StorageError(f"unknown TAKYON_STORAGE_BACKEND: {kind!r} (expected 'local' or 'supabase_s3')")
 

@@ -24,6 +24,14 @@ _SECRET = "whsec_test_abc123"
 _BODY = '{"id":"evt_1","type":"checkout.session.completed"}'
 
 
+@pytest.fixture(autouse=True)
+def _stripe_requests_run_on_safebox(monkeypatch):
+    # The raw Stripe REST helper is now a safebox-local authority primitive. Runtime planes call the
+    # safebox action route instead of resolving STRIPE_SECRET_KEY themselves.
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+
+
 def test_verify_roundtrips_freshly_signed_payload():
     header = build_signature_header(_BODY, _SECRET)
     # Returns None (raises nothing) on a good signature.

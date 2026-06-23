@@ -798,8 +798,7 @@ def test_operator_home_endpoint_combines_businesses_and_account(monkeypatch):
 def test_operator_billing_portal_route_creates_stripe_session(monkeypatch):
     from starlette.testclient import TestClient
 
-    import plugins.takyon.control_api as control_api
-    import psycopg
+    import plugins.takyon.safebox as safebox
     import takyon_cli.web_server as web_server
 
     principal = types.SimpleNamespace(
@@ -809,17 +808,7 @@ def test_operator_billing_portal_route_creates_stripe_session(monkeypatch):
     )
     captured: dict[str, object] = {}
 
-    class _FakeConn:
-        def close(self):
-            captured["closed"] = True
-
-    def _fake_connect(url, autocommit=True):
-        captured["database_url"] = url
-        captured["autocommit"] = autocommit
-        return _FakeConn()
-
-    def _fake_portal(conn, user_id, *, return_url):
-        captured["conn"] = conn
+    def _fake_portal(user_id, *, return_url):
         captured["user_id"] = user_id
         captured["return_url"] = return_url
         return {
@@ -834,8 +823,7 @@ def test_operator_billing_portal_route_creates_stripe_session(monkeypatch):
         "_dashboard_absolute_url",
         lambda _request, path: f"https://app.example.com{path}",
     )
-    monkeypatch.setattr(psycopg, "connect", _fake_connect)
-    monkeypatch.setattr(control_api, "create_operator_billing_portal_session", _fake_portal)
+    monkeypatch.setattr(safebox, "create_operator_billing_portal", _fake_portal)
 
     client = TestClient(web_server.app)
     client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
@@ -850,11 +838,8 @@ def test_operator_billing_portal_route_creates_stripe_session(monkeypatch):
         "portal_url": "https://billing.stripe.com/p/session/test_123",
         "customer_id": "cus_test_123",
     }
-    assert captured["database_url"] == "postgres://runtime-db"
-    assert captured["autocommit"] is True
     assert captured["user_id"] == "user-123"
     assert captured["return_url"] == "https://app.example.com/settings/billing"
-    assert captured["closed"] is True
 
 
 def test_creative_credit_checkout_route_skips_redundant_db_lookup(monkeypatch):

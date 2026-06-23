@@ -230,6 +230,302 @@ def _remote_json(
         ) from exc
 
 
+def _public_config_value(name: str) -> str:
+    value = os.environ.get(name)
+    if value is not None:
+        return str(value).strip()
+    return str(load_env().get(name) or "").strip()
+
+
+def stripe_request(path: str, params: dict[str, Any] | None = None, *, method: str = "POST") -> dict[str, Any]:
+    """Run one tightly allowlisted Stripe API operation on the safebox.
+
+    Runtime planes use this instead of fetching ``STRIPE_SECRET_KEY``. The safebox route validates the
+    Stripe path/method shape before the local authority code resolves the key, so the shared transport
+    token cannot become a generic Stripe API tunnel.
+    """
+    stripe_path = str(path or "").strip().lstrip("/")
+    stripe_method = str(method or "POST").strip().upper()
+    if not stripe_path:
+        raise ValueError("stripe path is required")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/stripe/request",
+            {"path": stripe_path, "params": dict(params or {}), "method": stripe_method},
+            timeout=35.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+    from . import stripe_util
+
+    return stripe_util.stripe_request(stripe_path, dict(params or {}), method=stripe_method)
+
+
+def send_postmark_email(
+    *,
+    to_email: str,
+    subject: str,
+    text_body: str,
+    html_body: str | None = None,
+    message_stream: str | None = None,
+) -> dict[str, Any]:
+    """Send a transactional email with the Postmark token resolved only on the safebox."""
+    body = {
+        "to_email": str(to_email or "").strip(),
+        "subject": str(subject or ""),
+        "text_body": str(text_body or ""),
+        "html_body": None if html_body is None else str(html_body),
+        "message_stream": str(message_stream or "").strip() or None,
+    }
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json("POST", "/v1/postmark/send", body, timeout=35.0)
+        return payload if isinstance(payload, dict) else {}
+
+    token = read_env_backed_value("POSTMARK_SERVER_TOKEN")
+    from_email = _public_config_value("POSTMARK_FROM_EMAIL")
+    if not token or not from_email:
+        raise RuntimeError("postmark_unconfigured")
+    payload: dict[str, Any] = {
+        "From": from_email,
+        "To": body["to_email"],
+        "Subject": body["subject"],
+        "TextBody": body["text_body"],
+    }
+    if body.get("html_body"):
+        payload["HtmlBody"] = body["html_body"]
+    stream = body.get("message_stream") or _public_config_value("TAKYON_APP_EMAIL_MESSAGE_STREAM")
+    if stream:
+        payload["MessageStream"] = stream
+    req = urllib.request.Request(
+        "https://api.postmarkapp.com/email",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "X-Postmark-Server-Token": token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            response_body = json.loads(response.read().decode("utf-8"))
+            return {
+                "message_id": response_body.get("MessageID"),
+                "provider": "postmark",
+                "status": "sent",
+            }
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"postmark_send_failed:{exc.code}:{detail}") from exc
+
+
+def ensure_product_edge_route(slug: str) -> dict[str, Any]:
+    """Ensure one product host route in Cloudflare using the token only on the safebox."""
+    safe_slug = str(slug or "").strip().lower()
+    if not safe_slug:
+        raise ValueError("slug is required")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/cloudflare/product-edge-route",
+            {"slug": safe_slug},
+            timeout=35.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    import re
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,95}", safe_slug):
+        raise ValueError("unsafe slug")
+    token = first_env_backed_value("CLOUDFLARE_API_TOKEN")
+    if not token:
+        return {"slug": safe_slug, "status": "unconfigured", "created": False}
+    zone = (_public_config_value("CLOUDFLARE_ZONE_NAME") or "coscale.app").strip()
+    worker = (_public_config_value("TAKYON_PRODUCT_EDGE_WORKER") or "takyon-product-worker").strip()
+    pattern = f"{safe_slug}.{zone}/*"
+
+    def _cf(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        req = urllib.request.Request(
+            "https://api.cloudflare.com/client/v4" + path,
+            data=(json.dumps(payload).encode("utf-8") if payload is not None else None),
+            method=method,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                return json.loads(exc.read().decode("utf-8", errors="replace"))
+            except Exception:
+                return {"success": False, "errors": [{"message": str(exc)}]}
+
+    zones = _cf("GET", f"/zones?name={urllib.parse.quote(zone)}").get("result") or []
+    zone_id = zones[0].get("id") if zones else None
+    if not zone_id:
+        return {"slug": safe_slug, "status": "zone_not_found", "created": False}
+    existing = {
+        route.get("pattern")
+        for route in (_cf("GET", f"/zones/{zone_id}/workers/routes").get("result") or [])
+        if isinstance(route, dict)
+    }
+    wildcard_pattern = f"*.{zone}/*"
+    if pattern in existing or wildcard_pattern in existing:
+        return {"slug": safe_slug, "status": "exists", "created": False, "pattern": pattern}
+    created = _cf("POST", f"/zones/{zone_id}/workers/routes", {"pattern": pattern, "script": worker})
+    if created.get("success"):
+        return {"slug": safe_slug, "status": "created", "created": True, "pattern": pattern}
+    errors = [
+        str(err.get("message") or err)
+        for err in (created.get("errors") or [])
+        if isinstance(err, dict)
+    ]
+    return {"slug": safe_slug, "status": "failed", "created": False, "pattern": pattern, "errors": errors}
+
+
+def delete_vercel_project_domain(domain: str) -> dict[str, Any]:
+    """Delete one Vercel project domain with the Vercel token resolved only on the safebox."""
+    name = str(domain or "").strip().lower()
+    if not name or "/" in name or "@" in name or len(name) > 253:
+        raise ValueError("invalid domain")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/vercel/domain/delete",
+            {"domain": name},
+            timeout=35.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    token = read_env_backed_value("VERCEL_TOKEN")
+    project = _public_config_value("VERCEL_PROJECT_ID")
+    team = _public_config_value("VERCEL_TEAM_ID")
+    if not token:
+        raise RuntimeError("vercel_token_unconfigured")
+    if not project:
+        raise RuntimeError("vercel_project_unconfigured")
+    query = urllib.parse.urlencode({"teamId": team}) if team else ""
+    url = (
+        "https://api.vercel.com/v9/projects/"
+        f"{urllib.parse.quote(project, safe='')}/domains/{urllib.parse.quote(name, safe='')}"
+        f"{'?' + query if query else ''}"
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps({"removeRedirects": True}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="DELETE",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            response.read()
+            return {
+                "domain": name,
+                "provider": "vercel",
+                "status": "removed",
+                "http_status": int(getattr(response, "status", 200) or 200),
+                "external_side_effects": "deleted",
+            }
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 404:
+            return {
+                "domain": name,
+                "provider": "vercel",
+                "status": "not_found",
+                "http_status": 404,
+                "external_side_effects": "none",
+            }
+        raise RuntimeError(f"vercel_domain_delete_failed:{exc.code}:{detail}") from exc
+
+
+def _storage_backend(provider: str):
+    from . import storage
+
+    kind = str(provider or "").strip()
+    if kind == "supabase_s3":
+        return storage.SupabaseS3StorageBackend()
+    if kind == "r2":
+        return storage.R2StorageBackend()
+    raise ValueError(f"unknown storage provider: {provider!r}")
+
+
+def storage_put(provider: str, key: str, data: bytes, *, digest: str) -> dict[str, Any]:
+    safe_key = str(key or "").strip()
+    if len(data) > 256 * 1024 * 1024:
+        raise ValueError("storage object too large")
+    if _remote_enabled() and not _local_authority_enabled():
+        return _remote_json(
+            "POST",
+            "/v1/storage/put",
+            {
+                "provider": str(provider or ""),
+                "key": safe_key,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+                "digest": str(digest or ""),
+            },
+            timeout=120.0,
+        )
+    _storage_backend(provider).put(safe_key, data, digest=str(digest or ""))
+    return {"provider": str(provider or ""), "key": safe_key, "stored": True}
+
+
+def storage_get(provider: str, key: str) -> bytes:
+    safe_key = str(key or "").strip()
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/storage/get",
+            {"provider": str(provider or ""), "key": safe_key},
+            timeout=120.0,
+        )
+        return base64.b64decode(str(payload.get("data_b64") or ""))
+    return _storage_backend(provider).get(safe_key)
+
+
+def storage_delete(provider: str, key: str) -> dict[str, Any]:
+    safe_key = str(key or "").strip()
+    if _remote_enabled() and not _local_authority_enabled():
+        return _remote_json(
+            "POST",
+            "/v1/storage/delete",
+            {"provider": str(provider or ""), "key": safe_key},
+            timeout=35.0,
+        )
+    _storage_backend(provider).delete(safe_key)
+    return {"provider": str(provider or ""), "key": safe_key, "deleted": True}
+
+
+def storage_list_digests(provider: str, prefix: str) -> dict[str, str]:
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/storage/list-digests",
+            {"provider": str(provider or ""), "prefix": str(prefix or "")},
+            timeout=120.0,
+        )
+        digests = payload.get("digests")
+        return {str(k): str(v) for k, v in digests.items()} if isinstance(digests, dict) else {}
+    return _storage_backend(provider).list_digests(str(prefix or ""))
+
+
+def storage_list_object_sizes(provider: str, prefix: str) -> dict[str, int]:
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/storage/list-sizes",
+            {"provider": str(provider or ""), "prefix": str(prefix or "")},
+            timeout=120.0,
+        )
+        sizes = payload.get("sizes")
+        return {str(k): int(v or 0) for k, v in sizes.items()} if isinstance(sizes, dict) else {}
+    return _storage_backend(provider).list_object_sizes(str(prefix or ""))
+
+
 # ── Provider broker client (STEP C cutover) ─────────────────────────────────────────────────────
 # Runtime planes (operator / sub-user) call the safebox BROKER instead of fetching a raw provider key
 # over /v1/env/*. The key never leaves the safebox: the broker verifies the capability scope, meters
@@ -1109,6 +1405,139 @@ def process_stripe_billing_webhook(raw_body: str, signature: str) -> dict[str, A
 
     with _creative_credit_conn(None) as conn:
         return process_billing_webhook_event(conn, event)
+
+
+def get_operator_payout_state(user_id: str, *, refresh_live: bool = True) -> dict[str, Any]:
+    """Read one operator payout state, refreshing Stripe Connect only on the safebox."""
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/operator/payouts/state",
+            {"user_id": user_ref, "refresh_live": bool(refresh_live)},
+            timeout=30.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+    from .control_api import get_operator_payout_state as _get
+
+    with _creative_credit_conn(None) as conn:
+        state = _get(conn, user_ref, refresh_live=bool(refresh_live))
+    return {
+        "user_id": state.user_id,
+        "stripe_connect_account_id": state.stripe_connect_account_id,
+        "stripe_connect_status": state.stripe_connect_status,
+        "payouts_enabled": bool(state.payouts_enabled),
+        "details_submitted": bool(state.details_submitted),
+        "payout_currency": state.payout_currency,
+        "owed_balance_cents": int(state.owed_balance_cents),
+        "paid_out_cents": int(state.paid_out_cents),
+    }
+
+
+def create_operator_billing_portal(user_id: str, *, return_url: str) -> dict[str, Any]:
+    """Create an operator billing portal session using Stripe only on the safebox."""
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/operator/billing/portal",
+            {"user_id": user_ref, "return_url": str(return_url or "")},
+            timeout=30.0,
+        )
+        return {
+            "url": payload.get("portal_url") or payload.get("url"),
+            "customer": payload.get("customer_id") or payload.get("customer"),
+        } if isinstance(payload, dict) else {}
+    from .control_api import create_operator_billing_portal_session
+
+    with _creative_credit_conn(None) as conn:
+        return create_operator_billing_portal_session(conn, user_ref, return_url=return_url)
+
+
+def create_operator_subscription_checkout(
+    user_id: str,
+    *,
+    plan_id: str,
+    success_url: str,
+    cancel_url: str,
+) -> dict[str, Any]:
+    """Create an operator subscription checkout using a safebox-derived customer and Stripe key."""
+    user_ref = str(user_id or "").strip()
+    plan_ref = str(plan_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if not plan_ref:
+        raise ValueError("plan_id is required")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/operator/billing/subscription/checkout",
+            {
+                "user_id": user_ref,
+                "plan_id": plan_ref,
+                "success_url": str(success_url or ""),
+                "cancel_url": str(cancel_url or ""),
+            },
+            timeout=30.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+    from .control_api import (
+        create_operator_subscription_checkout_session,
+        ensure_operator_billing_customer,
+    )
+
+    with _creative_credit_conn(None) as conn:
+        customer = ensure_operator_billing_customer(conn, user_ref)
+        session, plan = create_operator_subscription_checkout_session(
+            user_ref,
+            plan_id=plan_ref,
+            success_url=success_url,
+            cancel_url=cancel_url,
+            customer_id=str(customer.get("id") or "").strip() or None,
+        )
+    return {
+        "checkout_url": session.get("url"),
+        "session_id": session.get("id"),
+        "plan_id": plan["id"],
+        "plan_name": plan["name"],
+    }
+
+
+def create_operator_payout_connect(
+    user_id: str,
+    *,
+    return_url: str,
+    refresh_url: str,
+) -> dict[str, Any]:
+    """Create a Stripe Connect onboarding/login link using Stripe only on the safebox."""
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/operator/payouts/connect",
+            {
+                "user_id": user_ref,
+                "return_url": str(return_url or ""),
+                "refresh_url": str(refresh_url or ""),
+            },
+            timeout=30.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+    from .control_api import create_operator_payout_connect_link
+
+    with _creative_credit_conn(None) as conn:
+        return create_operator_payout_connect_link(
+            conn,
+            user_ref,
+            return_url=return_url,
+            refresh_url=refresh_url,
+        )
 
 
 def open_custody_account(conn, user_id: str, *, currency: str = "usd") -> None:

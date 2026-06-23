@@ -51,10 +51,21 @@ def _store(tmp_path: Path) -> _SQLiteStore:
         "input_tokens INTEGER, output_tokens INTEGER, provider_request_id TEXT, provider TEXT, model TEXT, "
         "metadata_json TEXT, error TEXT, created_at TEXT NOT NULL, completed_at TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE app_entitlements ("
+        "id TEXT PRIMARY KEY, business_slug TEXT NOT NULL, app_user_id TEXT NOT NULL, "
+        "tier TEXT NOT NULL, status TEXT NOT NULL, source TEXT, plan_key TEXT, metadata_json TEXT, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
     now = _now()
     conn.execute(
         "INSERT INTO app_users (id, business_slug, email, status, tier, created_at, updated_at) "
         "VALUES ('u1', 'biz', 'casey@example.com', 'active', 'pro', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO app_entitlements (id, business_slug, app_user_id, tier, status, source, plan_key, created_at, updated_at) "
+        "VALUES ('ent-u1', 'biz', 'u1', 'pro', 'active', 'stripe', 'pro', ?, ?)",
         (now, now),
     )
     conn.execute(

@@ -440,6 +440,20 @@ def create_operator_subscription_checkout_session(
     once. Money authority stays in Stripe (the price) and the existing allowance ledger;
     this only routes the operator to the hosted checkout for a tier they picked.
     """
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        if price_id and not plan_id:
+            raise LookupError(f"unknown_operator_plan_price:{price_id}")
+        payload = safebox.create_operator_subscription_checkout(
+            user_id,
+            plan_id=str(plan_id or ""),
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+        return (
+            {"url": payload.get("checkout_url"), "id": payload.get("session_id")},
+            {"id": payload.get("plan_id"), "name": payload.get("plan_name")},
+        )
+
     plan: dict[str, Any] | None
     if plan_id:
         plan = _operator_plan(plan_id)
@@ -793,6 +807,9 @@ def create_operator_billing_portal_session(
 ) -> dict[str, Any]:
     if not str(return_url or "").strip():
         raise ValueError("return_url is required")
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        payload = safebox.create_operator_billing_portal(user_id, return_url=return_url)
+        return {"url": payload.get("portal_url"), "customer": payload.get("customer_id")}
     customer = ensure_operator_billing_customer(conn, user_id)
     customer_id = str(customer.get("id") or "").strip()
     if not customer_id:
@@ -812,6 +829,19 @@ def get_operator_payout_state(
     *,
     refresh_live: bool = True,
 ) -> OperatorPayoutState:
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        payload = safebox.get_operator_payout_state(user_id, refresh_live=refresh_live)
+        return OperatorPayoutState(
+            user_id=str(payload.get("user_id") or user_id),
+            stripe_connect_account_id=payload.get("stripe_connect_account_id"),
+            stripe_connect_status=str(payload.get("stripe_connect_status") or "none"),
+            payouts_enabled=bool(payload.get("payouts_enabled")),
+            details_submitted=bool(payload.get("details_submitted")),
+            payout_currency=str(payload.get("payout_currency") or "usd"),
+            owed_balance_cents=int(payload.get("owed_balance_cents") or 0),
+            paid_out_cents=int(payload.get("paid_out_cents") or 0),
+        )
+
     row = _read_operator_payout_row(conn, user_id, for_update=False)
     account_id = None if row[0] is None else str(row[0])
     cached_status = str(row[1] or "none")
@@ -877,6 +907,12 @@ def create_operator_payout_connect_link(
         raise ValueError("return_url is required")
     if not str(refresh_url or "").strip():
         raise ValueError("refresh_url is required")
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        return safebox.create_operator_payout_connect(
+            user_id,
+            return_url=return_url,
+            refresh_url=refresh_url,
+        )
     row = _read_operator_payout_row(conn, user_id, for_update=False)
     account_id = None if row[0] is None else str(row[0])
     cached_status = str(row[1] or "none")
@@ -1569,13 +1605,11 @@ def build_control_router() -> APIRouter:
         the operator pays is the Stripe price on that tier, never a caller-supplied amount.
         Requires STRIPE_SECRET_KEY; absent ⇒ 503 (never a faked URL)."""
         try:
-            customer = ensure_operator_billing_customer(conn, principal.user_id)
-            session, plan = create_operator_subscription_checkout_session(
+            result = safebox.create_operator_subscription_checkout(
                 principal.user_id,
                 plan_id=body.plan_id,
                 success_url=body.success_url,
                 cancel_url=body.cancel_url,
-                customer_id=str(customer.get("id") or "").strip() or None,
             )
         except LookupError as exc:
             raise HTTPException(status_code=404, detail="unknown_operator_plan") from exc
@@ -1591,10 +1625,10 @@ def build_control_router() -> APIRouter:
                 ) from exc
             raise HTTPException(status_code=502, detail=f"stripe_error: {msg}") from exc
         return {
-            "checkout_url": session.get("url"),
-            "session_id": session.get("id"),
-            "plan_id": plan["id"],
-            "plan_name": plan["name"],
+            "checkout_url": result.get("checkout_url"),
+            "session_id": result.get("session_id"),
+            "plan_id": result.get("plan_id"),
+            "plan_name": result.get("plan_name"),
         }
 
     @router.post("/billing/webhook")

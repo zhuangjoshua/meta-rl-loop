@@ -1254,20 +1254,10 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
 # names a runtime plane actually requests (enumerated from the read_env_backed_value/first call sites);
 # add a name here only when a runtime plane provably needs to fetch it.
 #
-# RESIDUAL (documented, follow-up): a few entries below are themselves verification/identity/data-plane
-# authority that a runtime plane still fetches today. The principle-correct end state is to move their
-# USE onto the safebox (verify/sign there, like the billing webhook) so the runtime never holds them;
-# until then they must stay on the allowlist or the runtime regresses. Tracked as the next hardening
-# step. (SUPABASE_JWT_SECRET was the worst of these and is now FIXED — dropped above; the runtime no
-# longer verifies product JWTs with the symmetric secret, closing the alg-confusion takeover.
-# STRIPE_WEBHOOK_SECRET is also now FIXED — dropped above; the sub-user app webhook is verified
-# server-side on the safebox like the flow-A billing webhook, so the runtime never holds the signing
-# secret and forged app entitlement/subscription events are closed. AUTH0_CLIENT_SECRET/AUTH0_SECRET
-# are likewise FIXED: the dashboard runtime asks the safebox to mint login state, exchange+verify the
-# Auth0 callback, and verify session cookies, so it never fetches the OAuth client secret or session
-# signing secret.) Remaining:
-#   * the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge provisioning).
-#     Same end state: move their use server-side.
+# Authority-equivalent residuals are intentionally absent here: Stripe/Postmark/Vercel/Cloudflare
+# actions and S3/R2 object-store operations now execute through safebox action routes. Runtime planes
+# may still fetch public config (URLs, client IDs, bucket names, sender address), but they never fetch
+# the secret that lets them impersonate payment, email, deploy/edge, or object-store authority.
 _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
     {
         # DB
@@ -1279,22 +1269,22 @@ _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
         "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "TAKYON_SUPABASE_URL",
         "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY",
         "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-        "SUPABASE_S3_ACCESS_KEY_ID", "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "SUPABASE_S3_ACCESS_KEY_ID",
         "SUPABASE_S3_ENDPOINT", "SUPABASE_S3_REGION",
         # R2 object store
-        "R2_S3_ACCESS_KEY_ID", "R2_S3_SECRET_ACCESS_KEY",
+        "R2_S3_ACCESS_KEY_ID",
         # Stripe (payment rail). STRIPE_WEBHOOK_SECRET is intentionally NOT here: the sub-user
         # (flow-B) app webhook is now verified server-side on the safebox
         # (/v1/stripe/app-webhook/verify), mirroring the flow-A billing webhook, so no runtime plane
         # fetches the signing secret and it can never be vended.
-        "STRIPE_SECRET_KEY",
         # Transactional email
-        "POSTMARK_SERVER_TOKEN", "POSTMARK_FROM_EMAIL",
+        "POSTMARK_FROM_EMAIL",
         # Auth0 public browser/OIDC config only. AUTH0_CLIENT_SECRET and AUTH0_SECRET are intentionally
         # NOT here: the safebox performs the OAuth code exchange and signs/verifies dashboard sessions.
         "AUTH0_DOMAIN", "AUTH0_CLIENT_ID",
         # Deploy / edge
-        "CLOUDFLARE_API_TOKEN", "VERCEL_TOKEN",
+        "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "CLOUDFLARE_ZONE_NAME",
+        "TAKYON_PRODUCT_EDGE_WORKER",
         # Search console, analytics, object-store bucket
         "TAKYON_GSC_SERVICE_ACCOUNT_KEY", "UMAMI_API_KEY", "TAKYON_STORAGE_BUCKET",
         # Dashboard session token (operator plane creative/gateway tools)
@@ -12623,55 +12613,15 @@ def _ensure_product_edge_route(slug: str) -> None:
     (skips if the route already exists) and fail-soft: it needs ``CLOUDFLARE_API_TOKEN`` resolvable
     from the safebox; on any error it logs and returns so the publish is never affected. The VPS
     static path keeps serving as the fallback if the route is missing."""
-    import json as _json
-    import urllib.error as _ue
-    import urllib.request as _ur
-
     log = logging.getLogger("takyon.r2")
     try:
         from plugins.takyon import safebox
 
-        token = safebox.first_env_backed_value("CLOUDFLARE_API_TOKEN")
-        if not token:
-            return
-        zone = (os.environ.get("CLOUDFLARE_ZONE_NAME") or _DEFAULT_COMPANY_BASE_DOMAIN).strip()
-        worker = (os.environ.get("TAKYON_PRODUCT_EDGE_WORKER") or "takyon-product-worker").strip()
-        pattern = f"{_slugify(slug)}.{zone}/*"
-
-        def _cf(method: str, path: str, body=None):
-            req = _ur.Request(
-                "https://api.cloudflare.com/client/v4" + path,
-                data=(_json.dumps(body).encode() if body is not None else None),
-                method=method,
-                headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-            )
-            try:
-                return _json.load(_ur.urlopen(req, timeout=20))
-            except _ue.HTTPError as exc:
-                try:
-                    return _json.load(exc)
-                except Exception:
-                    return {"success": False}
-
-        zones = _cf("GET", f"/zones?name={zone}").get("result") or []
-        zid = zones[0].get("id") if zones else None
-        if not zid:
-            return
-        existing = {
-            rt.get("pattern") for rt in (_cf("GET", f"/zones/{zid}/workers/routes").get("result") or [])
-        }
-        wildcard_pattern = f"*.{zone}/*"
-        if pattern in existing or wildcard_pattern in existing:
-            return
-        created = _cf("POST", f"/zones/{zid}/workers/routes", {"pattern": pattern, "script": worker})
-        if created.get("success"):
-            log.info("created product edge route %s -> %s", pattern, worker)
-        else:
-            log.warning(
-                "product edge route create failed for %s: %s",
-                pattern,
-                [e.get("message") for e in (created.get("errors") or [])],
-            )
+        result = safebox.ensure_product_edge_route(slug)
+        if result.get("created"):
+            log.info("created product edge route %s", result.get("pattern") or slug)
+        elif result.get("status") == "failed":
+            log.warning("product edge route create failed for %s: %s", slug, result.get("errors"))
     except Exception as exc:  # pragma: no cover - best-effort edge routing
         log.warning("ensure product edge route failed (publish unaffected): slug=%s err=%s", slug, exc)
 
@@ -16120,52 +16070,10 @@ class TakyonStore:
         return {"matched": summary, "removed": removed}
 
     def _delete_vercel_project_domain(self, domain: str) -> dict[str, Any]:
-        load_takyon_env()
-        token = safebox.read_env_backed_value("VERCEL_TOKEN")
-        project = os.getenv("VERCEL_PROJECT_ID")
-        team = os.getenv("VERCEL_TEAM_ID")
-        if not token:
-            raise TakyonError("domain cleanup requires VERCEL_TOKEN")
-        if not project:
-            raise TakyonError("domain cleanup requires VERCEL_PROJECT_ID")
-
-        query = urllib.parse.urlencode({"teamId": team}) if team else ""
-        url = (
-            "https://api.vercel.com/v9/projects/"
-            f"{urllib.parse.quote(project, safe='')}/domains/{urllib.parse.quote(domain, safe='')}"
-            f"{'?' + query if query else ''}"
-        )
-        request = urllib.request.Request(
-            url,
-            data=json.dumps({"removeRedirects": True}).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="DELETE",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                response.read()
-                return {
-                    "domain": domain,
-                    "provider": "vercel",
-                    "status": "removed",
-                    "http_status": int(getattr(response, "status", 200) or 200),
-                    "external_side_effects": "deleted",
-                }
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 404:
-                return {
-                    "domain": domain,
-                    "provider": "vercel",
-                    "status": "not_found",
-                    "http_status": 404,
-                    "external_side_effects": "none",
-                }
-            raise TakyonError(f"Vercel domain cleanup failed for {domain}: {exc.code} {body}") from exc
+            return safebox.delete_vercel_project_domain(domain)
+        except Exception as exc:
+            raise TakyonError(f"Vercel domain cleanup failed for {domain}: {exc}") from exc
 
     def _delete_business_domains(self, domains: list[str], *, confirm: bool) -> dict[str, Any]:
         if not confirm:
@@ -19930,33 +19838,10 @@ def _ugc_ad_record(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
-    if not key:
-        raise TakyonError("Stripe action requires STRIPE_SECRET_KEY")
-    # Hard rail (GOAL_RULES §0): refuse a live Stripe key (`sk_live_…`) BEFORE any network call.
-    # This deployment is restricted to Stripe test mode; a mis-provisioned live key must never
-    # reach the wire and move real money.
-    if str(key).strip().startswith("sk_live_"):
-        raise TakyonError(
-            "refusing to use a live Stripe key (sk_live_): this deployment is restricted to "
-            "Stripe test mode (sk_test_)"
-        )
-    data = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None}).encode("utf-8")
-    request = urllib.request.Request(
-        f"https://api.stripe.com/v1/{path.lstrip('/')}",
-        data=data,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise TakyonError(f"Stripe {path} failed: {exc.code} {body}") from exc
+        return safebox.stripe_request(path, params, method="POST")
+    except Exception as exc:
+        raise TakyonError(f"Stripe {path} failed: {exc}") from exc
 
 
 def _stripe_object_id(value: Any) -> str | None:
@@ -19976,31 +19861,23 @@ def _subscription_entitlement_status(status: str) -> str:
 
 
 def _postmark_magic_link(email: str, product_name: str, link: str) -> str | None:
-    load_takyon_env()
-    token = safebox.read_env_backed_value("POSTMARK_SERVER_TOKEN")
-    from_email = os.getenv("POSTMARK_FROM_EMAIL")
-    if not token or not from_email:
-        raise TakyonError("magic-link email requires POSTMARK_SERVER_TOKEN and POSTMARK_FROM_EMAIL")
-    payload = {
-        "From": from_email,
-        "To": email,
-        "Subject": f"Sign in to {product_name}",
-        "TextBody": f"Use this secure link to sign in to {product_name}:\n\n{link}\n\nThis link expires in 15 minutes and can be used once.",
-        "HtmlBody": f"<p>Use this secure link to sign in to {product_name}:</p><p><a href=\"{link}\">Sign in to {product_name}</a></p><p>This link expires in 15 minutes and can be used once.</p>",
-    }
-    request = urllib.request.Request(
-        "https://api.postmarkapp.com/email",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"X-Postmark-Server-Token": token, "Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return body.get("MessageID")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise TakyonError(f"Postmark magic link failed: {exc.code} {body}") from exc
+        body = safebox.send_postmark_email(
+            to_email=email,
+            subject=f"Sign in to {product_name}",
+            text_body=(
+                f"Use this secure link to sign in to {product_name}:\n\n{link}\n\n"
+                "This link expires in 15 minutes and can be used once."
+            ),
+            html_body=(
+                f'<p>Use this secure link to sign in to {product_name}:</p>'
+                f'<p><a href="{link}">Sign in to {product_name}</a></p>'
+                "<p>This link expires in 15 minutes and can be used once.</p>"
+            ),
+        )
+        return body.get("message_id")
+    except Exception as exc:
+        raise TakyonError(f"Postmark magic link failed: {exc}") from exc
 
 
 def _ensure_stripe_price(conn: sqlite3.Connection, slug: str, plan: dict[str, Any], business_name: str) -> dict[str, Any]:

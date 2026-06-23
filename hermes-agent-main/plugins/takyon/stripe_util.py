@@ -43,6 +43,11 @@ def stripe_request(
     GET params are query-encoded. Returns the parsed JSON object.
     Raises StripeError if STRIPE_SECRET_KEY is absent (the call is never faked) or Stripe
     returns a non-2xx response."""
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        try:
+            return safebox.stripe_request(path, params, method=method)
+        except safebox.RemoteSafeboxError as exc:
+            raise StripeError(str(exc)) from exc
     key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
     if not key:
         raise StripeError("Stripe action requires STRIPE_SECRET_KEY")

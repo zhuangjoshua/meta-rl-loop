@@ -12,8 +12,6 @@ import hashlib
 import json
 import os
 import re
-import urllib.error
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
@@ -130,45 +128,25 @@ def _send_postmark(
     html_body: str | None,
 ) -> str | None:
     try:
-        from .core import TakyonError, load_takyon_env
         from . import safebox
     except Exception:
-        from plugins.takyon.core import TakyonError, load_takyon_env
         from plugins.takyon import safebox
 
-    load_takyon_env()
-    token = safebox.read_env_backed_value("POSTMARK_SERVER_TOKEN")
-    from_email = os.getenv("POSTMARK_FROM_EMAIL")
-    if not token or not from_email:
-        raise AppEmailError("product email requires POSTMARK_SERVER_TOKEN and POSTMARK_FROM_EMAIL")
-    payload: dict[str, Any] = {
-        "From": from_email,
-        "To": to_email,
-        "Subject": subject,
-        "TextBody": text_body,
-    }
-    if html_body:
-        payload["HtmlBody"] = html_body
-    message_stream = str(os.getenv("TAKYON_APP_EMAIL_MESSAGE_STREAM") or "").strip()
-    if message_stream:
-        payload["MessageStream"] = message_stream
-    request = urllib.request.Request(
-        "https://api.postmarkapp.com/email",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "X-Postmark-Server-Token": token,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = json.loads(response.read().decode("utf-8"))
-            return body.get("MessageID")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        raise AppEmailError(f"product email provider failed: {exc.code} {detail}") from exc
+        body = safebox.send_postmark_email(
+            to_email=to_email,
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            message_stream=str(os.getenv("TAKYON_APP_EMAIL_MESSAGE_STREAM") or "").strip() or None,
+        )
+        return body.get("message_id")
+    except Exception as exc:
+        if "postmark_unconfigured" in str(exc):
+            raise AppEmailError(
+                "product email requires POSTMARK_SERVER_TOKEN and POSTMARK_FROM_EMAIL"
+            ) from exc
+        raise AppEmailError(f"product email provider failed: {exc}") from exc
 
 
 def _receipt_relpath(business_slug: str, purpose: str, reservation_key: str) -> str:

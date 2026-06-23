@@ -7,6 +7,7 @@ Safebox authority module as the single backing implementation.
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import os
@@ -109,6 +110,32 @@ _ACTION_AUDIENCE_DEFAULTS = {
 # Default short TTL for minted capability tokens (seconds). The token is also single-use (nonce) and
 # audience-bound, so a leaked token does exactly one {tenant, action, <=cost} thing within this window.
 _CAP_TTL_SECONDS = 300
+
+
+def _normalize_stripe_request(path: str, method: str, params: dict[str, Any] | None) -> tuple[str, str, dict[str, Any]]:
+    stripe_path = str(path or "").strip().lstrip("/")
+    stripe_method = str(method or "POST").strip().upper()
+    if not stripe_path or "?" in stripe_path or "\\" in stripe_path or ".." in stripe_path.split("/"):
+        raise HTTPException(status_code=403, detail="stripe_path_not_allowed")
+    clean_params = dict(params or {})
+    parts = stripe_path.split("/")
+    if stripe_method == "POST" and stripe_path in {"products", "prices", "checkout/sessions"}:
+        return stripe_path, stripe_method, clean_params
+    if stripe_method == "GET" and len(parts) == 3 and parts[:2] == ["checkout", "sessions"] and parts[2].startswith("cs_"):
+        return stripe_path, stripe_method, clean_params
+    if len(parts) == 2 and parts[0] == "subscriptions" and parts[1].startswith("sub_"):
+        if stripe_method == "GET":
+            return stripe_path, stripe_method, clean_params
+        if stripe_method == "POST" and set(clean_params) <= {"cancel_at_period_end"}:
+            return stripe_path, stripe_method, clean_params
+    raise HTTPException(status_code=403, detail="stripe_path_not_allowed")
+
+
+def _storage_provider(provider: str) -> str:
+    value = str(provider or "").strip()
+    if value not in {"supabase_s3", "r2"}:
+        raise HTTPException(status_code=400, detail="unknown_storage_provider")
+    return value
 
 
 def _cap_signing_key() -> bytes:
@@ -478,6 +505,68 @@ class _StarterAllowanceBody(BaseModel):
 class _OperatorSubscriptionSyncBody(BaseModel):
     user_id: str
     refresh_live: bool | None = True
+
+
+class _OperatorPayoutStateBody(BaseModel):
+    user_id: str
+    refresh_live: bool | None = True
+
+
+class _OperatorBillingPortalBody(BaseModel):
+    user_id: str
+    return_url: str
+
+
+class _OperatorSubscriptionCheckoutBody(BaseModel):
+    user_id: str
+    plan_id: str
+    success_url: str
+    cancel_url: str
+
+
+class _OperatorPayoutConnectBody(BaseModel):
+    user_id: str
+    return_url: str
+    refresh_url: str
+
+
+class _StripeRequestBody(BaseModel):
+    path: str
+    params: dict[str, Any] | None = None
+    method: str | None = "POST"
+
+
+class _PostmarkSendBody(BaseModel):
+    to_email: str
+    subject: str
+    text_body: str
+    html_body: str | None = None
+    message_stream: str | None = None
+
+
+class _ProductEdgeRouteBody(BaseModel):
+    slug: str
+
+
+class _VercelDomainDeleteBody(BaseModel):
+    domain: str
+
+
+class _StoragePutBody(BaseModel):
+    provider: str
+    key: str
+    data_b64: str
+    digest: str
+
+
+class _StorageKeyBody(BaseModel):
+    provider: str
+    key: str
+
+
+class _StorageListBody(BaseModel):
+    provider: str
+    prefix: str
 
 
 class _OpenCustodyAccountBody(BaseModel):
@@ -1509,6 +1598,237 @@ def build_safebox_app() -> FastAPI:
         with _safebox_db_conn() as conn:
             state = _sync(conn, body.user_id, refresh_live=bool(body.refresh_live))
         return safebox._operator_subscription_state_payload(state)
+
+    @app.post("/v1/operator/payouts/state")
+    def operator_payout_state(
+        body: _OperatorPayoutStateBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.get_operator_payout_state(
+                body.user_id,
+                refresh_live=bool(body.refresh_live),
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="user_not_found") from exc
+        except Exception as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="payout_state_unconfigured") from exc
+            raise HTTPException(status_code=502, detail=message) from exc
+
+    @app.post("/v1/operator/billing/portal")
+    def operator_billing_portal(
+        body: _OperatorBillingPortalBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            session = safebox.create_operator_billing_portal(
+                body.user_id,
+                return_url=body.return_url,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="user_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="billing_portal_unconfigured") from exc
+            raise HTTPException(status_code=502, detail=message) from exc
+        return {
+            "portal_url": session.get("url"),
+            "customer_id": session.get("customer"),
+        }
+
+    @app.post("/v1/operator/billing/subscription/checkout")
+    def operator_subscription_checkout(
+        body: _OperatorSubscriptionCheckoutBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.create_operator_subscription_checkout(
+                body.user_id,
+                plan_id=body.plan_id,
+                success_url=body.success_url,
+                cancel_url=body.cancel_url,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="unknown_operator_plan") from exc
+        except ValueError as exc:
+            if "operator_email_unavailable" in str(exc):
+                raise HTTPException(status_code=409, detail="operator_email_unavailable") from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="operator_subscription_unconfigured") from exc
+            raise HTTPException(status_code=502, detail=message) from exc
+
+    @app.post("/v1/operator/payouts/connect")
+    def operator_payout_connect(
+        body: _OperatorPayoutConnectBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.create_operator_payout_connect(
+                body.user_id,
+                return_url=body.return_url,
+                refresh_url=body.refresh_url,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="user_not_found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="payout_connect_unconfigured") from exc
+            raise HTTPException(status_code=502, detail=message) from exc
+
+    @app.post("/v1/stripe/request")
+    def stripe_request(
+        body: _StripeRequestBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        path, method, params = _normalize_stripe_request(body.path, body.method or "POST", body.params)
+        try:
+            return safebox.stripe_request(path, params, method=method)
+        except Exception as exc:
+            message = str(exc)
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="stripe_unconfigured") from exc
+            raise HTTPException(status_code=502, detail="stripe_error") from exc
+
+    @app.post("/v1/postmark/send")
+    def postmark_send(
+        body: _PostmarkSendBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        if "@" not in str(body.to_email or ""):
+            raise HTTPException(status_code=400, detail="invalid_recipient")
+        if not str(body.subject or "").strip() or not str(body.text_body or "").strip():
+            raise HTTPException(status_code=400, detail="missing_email_body")
+        try:
+            return safebox.send_postmark_email(
+                to_email=body.to_email,
+                subject=body.subject,
+                text_body=body.text_body,
+                html_body=body.html_body,
+                message_stream=body.message_stream,
+            )
+        except Exception as exc:
+            message = str(exc)
+            if "postmark_unconfigured" in message or "POSTMARK_SERVER_TOKEN" in message:
+                raise HTTPException(status_code=503, detail="postmark_unconfigured") from exc
+            raise HTTPException(status_code=502, detail="postmark_error") from exc
+
+    @app.post("/v1/cloudflare/product-edge-route")
+    def cloudflare_product_edge_route(
+        body: _ProductEdgeRouteBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.ensure_product_edge_route(body.slug)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            message = str(exc)
+            if "CLOUDFLARE_API_TOKEN" in message:
+                raise HTTPException(status_code=503, detail="cloudflare_unconfigured") from exc
+            raise HTTPException(status_code=502, detail="cloudflare_error") from exc
+
+    @app.post("/v1/vercel/domain/delete")
+    def vercel_domain_delete(
+        body: _VercelDomainDeleteBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.delete_vercel_project_domain(body.domain)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            message = str(exc)
+            if "vercel_token_unconfigured" in message or "VERCEL_TOKEN" in message:
+                raise HTTPException(status_code=503, detail="vercel_unconfigured") from exc
+            if "vercel_project_unconfigured" in message:
+                raise HTTPException(status_code=503, detail="vercel_project_unconfigured") from exc
+            raise HTTPException(status_code=502, detail="vercel_error") from exc
+
+    @app.post("/v1/storage/put")
+    def storage_put(
+        body: _StoragePutBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        try:
+            data = base64.b64decode(str(body.data_b64 or ""), validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid_base64") from exc
+        try:
+            return safebox.storage_put(provider, body.key, data, digest=body.digest)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/storage/get")
+    def storage_get(
+        body: _StorageKeyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        try:
+            data = safebox.storage_get(provider, body.key)
+        except Exception as exc:
+            if type(exc).__name__ == "ObjectNotFound":
+                raise HTTPException(status_code=404, detail="object_not_found") from exc
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"provider": provider, "key": body.key, "data_b64": base64.b64encode(data).decode("ascii")}
+
+    @app.post("/v1/storage/delete")
+    def storage_delete(
+        body: _StorageKeyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        try:
+            return safebox.storage_delete(provider, body.key)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/storage/list-digests")
+    def storage_list_digests(
+        body: _StorageListBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        try:
+            return {"provider": provider, "prefix": body.prefix, "digests": safebox.storage_list_digests(provider, body.prefix)}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/storage/list-sizes")
+    def storage_list_sizes(
+        body: _StorageListBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        try:
+            return {"provider": provider, "prefix": body.prefix, "sizes": safebox.storage_list_object_sizes(provider, body.prefix)}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/v1/billing/webhook/process")
     def process_billing_webhook(

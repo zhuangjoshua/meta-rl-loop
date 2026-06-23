@@ -29,11 +29,26 @@ def test_env_egress_denies_provider_keys():
 
 
 def test_env_egress_admits_infra_only():
-    for k in ("DATABASE_URL", "POSTGRES_URL", "STRIPE_SECRET_KEY",
-              "AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "SUPABASE_S3_SECRET_ACCESS_KEY",
-              "R2_S3_SECRET_ACCESS_KEY", "UMAMI_API_KEY", "VERCEL_TOKEN", "CLOUDFLARE_API_TOKEN",
+    for k in ("DATABASE_URL", "POSTGRES_URL",
+              "AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "SUPABASE_S3_ACCESS_KEY_ID",
+              "R2_S3_ACCESS_KEY_ID", "POSTMARK_FROM_EMAIL", "UMAMI_API_KEY",
+              "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "CLOUDFLARE_ZONE_NAME",
               "TAKYON_GSC_SERVICE_ACCOUNT_KEY"):
         assert core.env_egress_allowed(k) is True, k
+
+
+def test_env_egress_denies_residual_authority_secrets():
+    # These used to be the remaining authority-equivalent vends. Runtime planes now call safebox
+    # action routes for payment, email, object store, deploy/domain, and edge mutation instead.
+    for k in (
+        "STRIPE_SECRET_KEY",
+        "POSTMARK_SERVER_TOKEN",
+        "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "R2_S3_SECRET_ACCESS_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "VERCEL_TOKEN",
+    ):
+        assert core.env_egress_allowed(k) is False, k
 
 
 def test_env_egress_denies_auth0_authority_secrets():
@@ -83,6 +98,12 @@ def client(monkeypatch):
     monkeypatch.setenv("TAKYON_CAP_SIGNING_KEY", "test-signing-key-value")
     monkeypatch.setenv("AUTH0_CLIENT_SECRET", "auth0-client-secret-value")
     monkeypatch.setenv("AUTH0_SECRET", "auth0-cookie-secret-value")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "stripe-secret-value")
+    monkeypatch.setenv("POSTMARK_SERVER_TOKEN", "postmark-token-value")
+    monkeypatch.setenv("SUPABASE_S3_SECRET_ACCESS_KEY", "supabase-s3-secret-value")
+    monkeypatch.setenv("R2_S3_SECRET_ACCESS_KEY", "r2-s3-secret-value")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cloudflare-token-value")
+    monkeypatch.setenv("VERCEL_TOKEN", "vercel-token-value")
     monkeypatch.setenv("DATABASE_URL", "postgres://example/db")
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.delenv("TAKYON_RUNTIME_DATABASE_URL", raising=False)
@@ -93,12 +114,29 @@ _AUTH = {"Authorization": "Bearer test-token"}
 
 
 def test_read_route_refuses_authority_secrets(client):
-    for k in ("TAKYON_CAP_SIGNING_KEY", "TAKYON_SAFEBOX_TOKEN", "AUTH0_CLIENT_SECRET", "AUTH0_SECRET"):
+    for k in (
+        "TAKYON_CAP_SIGNING_KEY",
+        "TAKYON_SAFEBOX_TOKEN",
+        "AUTH0_CLIENT_SECRET",
+        "AUTH0_SECRET",
+        "STRIPE_SECRET_KEY",
+        "POSTMARK_SERVER_TOKEN",
+        "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "R2_S3_SECRET_ACCESS_KEY",
+        "CLOUDFLARE_API_TOKEN",
+        "VERCEL_TOKEN",
+    ):
         r = client.get(f"/v1/env/{k}", headers=_AUTH)
         assert r.status_code == 404, (k, r.status_code, r.text)
         assert "test-signing-key-value" not in r.text
         assert "auth0-client-secret-value" not in r.text
         assert "auth0-cookie-secret-value" not in r.text
+        assert "stripe-secret-value" not in r.text
+        assert "postmark-token-value" not in r.text
+        assert "supabase-s3-secret-value" not in r.text
+        assert "r2-s3-secret-value" not in r.text
+        assert "cloudflare-token-value" not in r.text
+        assert "vercel-token-value" not in r.text
 
 
 def test_first_route_refuses_when_only_denied_keys(client):
