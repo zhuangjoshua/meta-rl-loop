@@ -1068,6 +1068,7 @@ export function useTakyonLitebulb() {
       ensureAssistantMessage();
       await gateway.request("prompt.submit", {
         session_id: sessionId,
+        business_slug: businessSlug,
         text,
       });
     } catch {
@@ -1439,6 +1440,7 @@ export function useTakyonLitebulb() {
         try {
           await gateway.request("prompt.submit", {
             session_id: sessionId,
+            business_slug: activeBusiness.slug,
             text: value,
           });
           void loadWorkspace(activeBusiness.slug).catch(() => undefined);

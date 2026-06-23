@@ -18,6 +18,8 @@ Contract:
 """
 
 import base64
+import sys
+import types
 
 import pytest
 
@@ -94,3 +96,96 @@ def test_render_logo_gate_error_propagates(monkeypatch):
 
     with pytest.raises(_Boom):
         gw._render_logo_png("prompt", capability_token="cap")
+
+
+def test_gemini_logo_generation_uses_current_sdk_parts_shape(monkeypatch):
+    """Gemini text-to-image now returns top-level ``response.parts`` in the Python SDK docs.
+    The Safebox adapter must use that shape, avoid the older IMAGE-only config override, and emit
+    PNG bytes even when the SDK hands back a PIL-like image object."""
+    gw = _gw()
+    png = b"\x89PNG\r\n\x1a\nPNGDATA"
+    captured: dict[str, object] = {}
+
+    class _FakeImage:
+        def save(self, fileobj, format):
+            captured["saved_format"] = format
+            fileobj.write(png)
+
+    class _FakePart:
+        text = None
+        inline_data = None
+
+        def as_image(self):
+            return _FakeImage()
+
+    class _FakeResponse:
+        parts = [_FakePart()]
+
+    class _FakeModels:
+        def generate_content(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeResponse()
+
+    class _FakeClient:
+        def __init__(self, *, api_key):
+            captured["api_key"] = api_key
+            self.models = _FakeModels()
+
+    fake_genai = types.SimpleNamespace(Client=_FakeClient)
+    fake_google = types.ModuleType("google")
+    fake_google.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(gw, "_key_white_background_to_alpha", lambda data: data)
+
+    out = gw._gemini_generate_logo_png(api_key="gem-key", prompt="draw a lunchbox")
+
+    assert out == png
+    assert captured["api_key"] == "gem-key"
+    assert captured["model"] == gw._GEMINI_IMAGE_MODEL
+    assert captured["contents"] == ["draw a lunchbox"]
+    assert "config" not in captured
+    assert captured["saved_format"] == "PNG"
+
+
+def test_gemini_logo_generation_prefers_as_image_over_raw_inline(monkeypatch):
+    """When both helpers are present, use ``as_image()`` so the Safebox normalizes provider output to
+    PNG bytes instead of returning whatever inline mime type Gemini happened to send."""
+    gw = _gw()
+    png = b"\x89PNG\r\n\x1a\nPNGDATA"
+    captured: dict[str, object] = {}
+
+    class _FakeInline:
+        data = base64.b64encode(b"\xff\xd8jpeg").decode("ascii")
+
+    class _FakeImage:
+        def save(self, fileobj, format):
+            captured["saved_format"] = format
+            fileobj.write(png)
+
+    class _FakePart:
+        inline_data = _FakeInline()
+
+        def as_image(self):
+            return _FakeImage()
+
+    class _FakeResponse:
+        parts = [_FakePart()]
+
+    class _FakeModels:
+        def generate_content(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeClient:
+        def __init__(self, *, api_key):
+            self.models = _FakeModels()
+
+    fake_genai = types.SimpleNamespace(Client=_FakeClient)
+    fake_google = types.ModuleType("google")
+    fake_google.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(gw, "_key_white_background_to_alpha", lambda data: data)
+
+    out = gw._gemini_generate_logo_png(api_key="gem-key", prompt="draw a lunchbox")
+
+    assert out == png
+    assert captured["saved_format"] == "PNG"

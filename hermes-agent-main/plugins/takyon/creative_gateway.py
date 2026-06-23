@@ -534,30 +534,52 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
 
     try:
         from google import genai
-        from google.genai import types as genai_types
     except Exception as exc:  # provider SDK not installed
         raise RuntimeError(
             "google-genai is not installed; cannot render brand logo"
         ) from exc
 
+    def _image_to_png_bytes(image: Any) -> bytes:
+        import io
+
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _inline_data_bytes(part: Any) -> bytes:
+        inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
+        data = getattr(inline, "data", None) if inline is not None else None
+        if not data:
+            return b""
+        return base64.b64decode(data) if isinstance(data, str) else bytes(data)
+
+    def _parts_from_response(response: Any) -> list[Any]:
+        direct_parts = getattr(response, "parts", None)
+        if direct_parts:
+            return list(direct_parts)
+        parts: list[Any] = []
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts.extend(list(getattr(content, "parts", None) or []))
+        return parts
+
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
         model=_GEMINI_IMAGE_MODEL,
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-        ),
+        contents=[prompt],
     )
-    candidates = getattr(response, "candidates", None) or []
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-        for part in parts:
-            inline = getattr(part, "inline_data", None)
-            data = getattr(inline, "data", None) if inline is not None else None
-            if not data:
-                continue
-            raw = base64.b64decode(data) if isinstance(data, str) else bytes(data)
+    for part in _parts_from_response(response):
+        as_image = getattr(part, "as_image", None)
+        if callable(as_image):
+            try:
+                image = as_image()
+            except Exception:
+                image = None
+            if image is not None:
+                return _key_white_background_to_alpha(_image_to_png_bytes(image))
+        raw = _inline_data_bytes(part)
+        if raw:
             return _key_white_background_to_alpha(raw)
     raise RuntimeError("Gemini image generation returned no image data")
 

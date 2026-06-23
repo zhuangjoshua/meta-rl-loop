@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sqlite3
 import sys
@@ -49,6 +50,17 @@ class _FakeTransport:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _OperatorPrincipal:
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+
+class _AuthenticatedTransport(_FakeTransport):
+    def __init__(self, user_id: str):
+        super().__init__()
+        self.operator_principal = _OperatorPrincipal(user_id)
 
 
 def test_write_json_serializes_concurrent_writes(monkeypatch):
@@ -4254,6 +4266,17 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
                 "messages": [{"role": "assistant", "content": "ok"}],
             }
 
+    @contextmanager
+    def _fake_business_workspace(slug, **_kwargs):
+        workspace_home = tmp_path / "isolated-home"
+        business_root = workspace_home / "businesses" / slug
+        storage.sync_down(storage.LocalStorageBackend(bucket), slug, business_root)
+        try:
+            yield workspace_home
+        finally:
+            storage.sync_up(storage.LocalStorageBackend(bucket), slug, business_root)
+            shutil.rmtree(workspace_home, ignore_errors=True)
+
     server._sessions["sid"] = _session(agent=_Agent(), takyon_current_business="acme")
     try:
         monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
@@ -4262,6 +4285,14 @@ def test_prompt_submit_business_turn_uses_isolated_workspace(monkeypatch, tmp_pa
         monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
         monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
         monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(server, "_build_takyon_prompt_text", lambda _session, prompt, **_kw: prompt)
+        monkeypatch.setattr(server, "_takyon_record_session_runtime_event", lambda *_a, **_k: None)
+        monkeypatch.setattr(server, "_takyon_record_ceo_turn_chat", lambda *_a, **_k: None)
+        monkeypatch.setattr(server, "_finalize_product_surface_after_turn", lambda *_a, **_k: "")
+        monkeypatch.setattr(
+            "plugins.takyon.cli._business_workspace_execution_context",
+            _fake_business_workspace,
+        )
 
         resp = server.handle_request(
             {
@@ -4361,6 +4392,104 @@ def test_prompt_submit_gateway_agent_uses_isolated_turn_runner(monkeypatch):
         assert complete
         assert complete[-1][2]["text"] == "isolated ok"
     finally:
+        server._sessions.pop("sid", None)
+
+
+def test_prompt_submit_binds_authenticated_operator_for_business_turn(monkeypatch):
+    emitted: list[tuple] = []
+    called: dict[str, object] = {}
+
+    class _Agent:
+        _takyon_operator_gateway = True
+        session_id = "session-key"
+        session_estimated_cost_usd = 0.0
+        model = "test-model"
+        provider = "openrouter"
+        api_mode = "chat_completions"
+        base_url = "https://openrouter.ai/api/v1"
+        max_iterations = 90
+        enabled_toolsets = ["takyon", "web", "skills", "todo"]
+        disabled_toolsets = ["terminal", "file"]
+        request_overrides = {}
+        reasoning_config = None
+        service_tier = None
+        pass_session_id = False
+        skip_context_files = False
+        skip_memory = False
+
+        def run_conversation(self, *args, **kwargs):
+            raise AssertionError("inline run_conversation should not be used")
+
+    def _fake_runner(
+        sid,
+        session,
+        agent,
+        run_message,
+        history,
+        *,
+        operator_user_id,
+        business_slug,
+        streamer,
+    ):
+        called["operator_user_id"] = operator_user_id
+        called["business_slug"] = business_slug
+        return {
+            "result": {
+                "final_response": "bound ok",
+                "messages": [{"role": "assistant", "content": "bound ok"}],
+            },
+            "usage": {},
+            "usage_snapshot": {},
+            "session_id": "session-key",
+            "session_estimated_cost_usd": 0.0,
+        }
+
+    server._sessions["sid"] = _session(agent=_Agent())
+    token = bind_transport(_AuthenticatedTransport("user-123"))
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: emitted.append(args))
+        monkeypatch.setattr(server, "_get_db", lambda: None)
+        monkeypatch.setattr(server, "make_stream_renderer", lambda _cols: None)
+        monkeypatch.setattr(server, "render_message", lambda _raw, _cols: None)
+        monkeypatch.setattr(server, "_build_takyon_prompt_text", lambda session, prompt, **_kw: prompt)
+        monkeypatch.setattr(server, "_takyon_require_business_access", lambda _session, business, **_kw: None)
+        monkeypatch.setattr(server, "_takyon_record_session_runtime_event", lambda *_a, **_k: None)
+        monkeypatch.setattr(server, "_takyon_record_ceo_turn_chat", lambda *_a, **_k: None)
+        monkeypatch.setattr(server, "_finalize_product_surface_after_turn", lambda *_a, **_k: "")
+        monkeypatch.setattr(
+            "plugins.takyon.cli._operator_budget_reserve",
+            lambda **_kw: ("reserve-1", 0),
+        )
+        monkeypatch.setattr(
+            "plugins.takyon.cli._operator_budget_finalize",
+            lambda **_kw: "",
+        )
+        monkeypatch.setattr(server, "_run_isolated_gateway_turn", _fake_runner)
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {
+                    "session_id": "sid",
+                    "business_slug": "acme",
+                    "text": "build product workflow",
+                },
+            }
+        )
+
+        assert resp.get("result"), f"got error: {resp.get('error')}"
+        assert server._sessions["sid"]["takyon_operator_user_id"] == "user-123"
+        assert server._sessions["sid"]["takyon_current_business"] == "acme"
+        assert called == {
+            "operator_user_id": "user-123",
+            "business_slug": "acme",
+        }
+        complete = [evt for evt in emitted if evt and evt[0] == "message.complete"]
+        assert complete[-1][2]["text"] == "bound ok"
+    finally:
+        reset_transport(token)
         server._sessions.pop("sid", None)
 
 

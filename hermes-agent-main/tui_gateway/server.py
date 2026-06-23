@@ -4207,6 +4207,16 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    _bind_takyon_operator_user_id(session, params)
+    explicit_business_requested = bool(
+        str(params.get("business_slug") or params.get("business") or "").strip()
+    )
+    requested_business = _takyon_requested_business(session, params) if explicit_business_requested else ""
+    if explicit_business_requested and requested_business:
+        access_error = _takyon_require_business_access(session, requested_business)
+        if access_error:
+            return _err(rid, 4041, access_error)
+        session["takyon_current_business"] = requested_business
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
@@ -4645,8 +4655,11 @@ def _run_prompt_submit(
                 )
 
             resolved_operator_user_id = _resolved_operator_user_id(
-                _takyon_operator_user_id(session)
+                _bind_takyon_operator_user_id(session)
             )
+            if resolved_operator_user_id and not _takyon_operator_user_id(session):
+                session["takyon_operator_user_id"] = resolved_operator_user_id
+                session.pop("takyon_store", None)
             current_business = str(session.get("takyon_current_business") or "").strip()
             turn_key = ""
             if current_business:
@@ -4744,7 +4757,7 @@ def _run_prompt_submit(
                             agent.max_iterations = int(max_iterations_override)
                         session_tokens = _set_session_context(
                             session["session_key"],
-                            operator_user_id=_takyon_operator_user_id(session),
+                            operator_user_id=resolved_operator_user_id,
                             workspace_root=str(workspace_home or ""),
                             business_slug=current_business,
                         )
