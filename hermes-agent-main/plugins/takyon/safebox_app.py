@@ -322,10 +322,13 @@ def _anthropic_provider_caller(payload: dict[str, Any]):
         out_tok = int(usage.get("output_tokens") or 0)
         cache_read = int(usage.get("cache_read_input_tokens") or 0)
         cache_write = int(usage.get("cache_creation_input_tokens") or 0)
-        actual_microusd = ai_provider.microusd_cost(
+        # Settle the BILLED amount (realized provider cost + usage markup), matching the usage rail's
+        # pricing contract, the local ai_gateway settle, and the server-side reserve estimate — NOT the
+        # bare realized cost, which would silently drop the markup and under-charge every brokered call.
+        _realized, billed = ai_provider.billed_microusd_cost(
             model, in_tok, out_tok, cache_read_tokens=cache_read, cache_write_tokens=cache_write
         )
-        return raw, int(actual_microusd)
+        return raw, int(billed)
 
     return _call
 
@@ -480,7 +483,7 @@ def _broker_provider_route(
     -> key-local -> settle/release all happen INSIDE the safebox process. The reserve is gated on
     ``max(server_estimate, client_estimate)`` (``estimate_builder`` mirrors the provider's own pricing
     source) so a client cannot pass a tiny estimate to duck the cap. Returns the KEY-FREE result."""
-    from . import safebox_broker
+    from . import app_usage, safebox_broker
     from .safebox_capability import CapabilityError
 
     signing_key = _cap_signing_key()
@@ -529,6 +532,15 @@ def _broker_provider_route(
         raise HTTPException(status_code=401, detail=f"capability_invalid: {exc}") from exc
     except safebox_broker.BrokerError as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from exc
+    except (app_usage.AppBudgetInactive, app_usage.AppBudgetExceeded, app_usage.AppUserBudgetExceeded) as exc:
+        # The ONE money gate refused inside the broker reserve — business budget inactive/exhausted or
+        # the per-user weekly cap. Surface a clean 402 (out-of-funds), never a 500; the structured class
+        # name + message lets the client map it back to its canonical budget shape.
+        raise HTTPException(
+            status_code=402, detail={"error": type(exc).__name__, "detail": str(exc)}
+        ) from exc
+    except app_usage.AppUserNotFound as exc:
+        raise HTTPException(status_code=400, detail="unknown_app_user") from exc
     except (RuntimeError, BrokerLedgerError) as exc:
         # A provider/ledger failure: never leak the upstream provider body. A fail-closed
         # *_unconfigured (missing key) or *_pricing_unavailable (unpriced action) is a 503 with its

@@ -167,7 +167,9 @@ def _remote_headers(*, with_json: bool = False) -> dict[str, str]:
     return headers
 
 
-def _remote_json(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _remote_json(
+    method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: float = 10.0
+) -> dict[str, Any]:
     base = _remote_base_url()
     if not base:
         raise RuntimeError("Safebox remote URL is not configured")
@@ -177,7 +179,7 @@ def _remote_json(method: str, path: str, payload: dict[str, Any] | None = None) 
         body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(f"{base}{path}", data=body, method=method.upper(), headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as exc:
@@ -192,6 +194,92 @@ def _remote_json(method: str, path: str, payload: dict[str, Any] | None = None) 
             status_code=exc.code,
             payload=parsed if isinstance(parsed, dict) else {"detail": detail},
         ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        # Transport failure (timeout / connection refused / DNS), NOT an HTTP status — HTTPError is a
+        # URLError subclass and is handled above, so this only catches unreachable-safebox cases. Fail
+        # closed as a 504 so a brokered provider call surfaces a clean upstream error and never falls
+        # back to a raw key.
+        raise RemoteSafeboxError(
+            f"Safebox remote {method.upper()} {path} unreachable: {exc}",
+            status_code=504,
+            payload={"detail": "safebox_unreachable"},
+        ) from exc
+
+
+# ── Provider broker client (STEP C cutover) ─────────────────────────────────────────────────────
+# Runtime planes (operator / sub-user) call the safebox BROKER instead of fetching a raw provider key
+# over /v1/env/*. The key never leaves the safebox: the broker verifies the capability scope, meters
+# the usage ledger, resolves the key locally, calls the provider, and returns a KEY-FREE result. A
+# transitional flag (TAKYON_PROVIDER_BROKER, default off) lets the cutover deploy dormant and flip
+# per-plane; it is removed together with the /v1/env provider-key egress at the cleanup step.
+_PROVIDER_BROKER_FLAG_ENV = "TAKYON_PROVIDER_BROKER"
+_PROVIDER_BROKER_PATHS = {
+    ("anthropic", "messages"): "/v1/providers/anthropic/messages",
+    ("tavily", "search"): "/v1/providers/tavily/search",
+    ("gemini", "image"): "/v1/providers/gemini/image",
+}
+# Provider calls (Anthropic / Gemini) routinely exceed the 10s env-read timeout; give the broker round
+# trip room for the upstream provider latency plus the reserve/settle.
+_PROVIDER_BROKER_TIMEOUT_S = 180.0
+
+
+def provider_broker_enabled() -> bool:
+    """True when this (runtime) plane should route paid provider calls through the safebox broker
+    rather than resolving a raw key: the transitional flag is on AND a remote safebox is configured AND
+    this is not the safebox host itself. On the safebox host / local dev (local authority) this is
+    False — that host IS the authority and resolves the key locally."""
+    flag = str(os.environ.get(_PROVIDER_BROKER_FLAG_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+    return flag and _remote_enabled() and not _local_authority_enabled()
+
+
+def broker_provider_call(
+    provider: str,
+    op: str,
+    payload: dict[str, Any],
+    *,
+    estimate_microusd: int,
+    business: str | None = None,
+    action: str | None = None,
+    session_token: str | None = None,
+    token: str | None = None,
+    timeout: float = _PROVIDER_BROKER_TIMEOUT_S,
+) -> dict[str, Any]:
+    """POST a paid provider call to the safebox BROKER and return its KEY-FREE result.
+
+    Runtime-plane client for ``/v1/providers/*``. The provider KEY never reaches this process: the
+    safebox verifies the capability scope, reserves+settles the usage ledger ITSELF, resolves the key
+    locally, calls the provider, and returns only the provider's key-free response. Reuses the existing
+    ``TAKYON_SAFEBOX_TOKEN`` bearer via ``_remote_json``. Fails closed (``RemoteSafeboxError``) — it
+    never falls back to a raw key. The caller MUST NOT also reserve/settle usage: the broker is the one
+    money gate, so a client that also meters would double-charge.
+
+    Identity is either a pre-minted ``token`` (operator plane, via ``/v1/token/mint``) or the inline
+    ``session_token`` + ``business`` + ``action`` shape (product sub-user); the safebox mints-then-brokers
+    in one call for the latter. ``estimate_microusd`` is the client floor and, for inline mint, the
+    capability ceiling — compute it from ``agent/usage_pricing`` (a too-small value is refused at the
+    ceiling, never silently raised)."""
+    path = _PROVIDER_BROKER_PATHS.get((str(provider), str(op)))
+    if path is None:
+        raise ValueError(f"no safebox broker route for provider={provider!r} op={op!r}")
+    if not _remote_enabled():
+        # Defensive: callers gate on provider_broker_enabled() first; the broker client is remote-only
+        # and must never quietly fall back to a local raw key.
+        raise SafeboxAuthorityUnavailable(
+            f"provider broker requires {_SAFEBOX_REMOTE_URL_ENV}; not set on this plane"
+        )
+    body: dict[str, Any] = {
+        "payload": dict(payload or {}),
+        "estimate_microusd": int(estimate_microusd),
+    }
+    if token:
+        body["token"] = str(token)
+    if session_token:
+        body["session_token"] = str(session_token)
+    if business:
+        body["business"] = str(business)
+    if action:
+        body["action"] = str(action)
+    return _remote_json("POST", path, body, timeout=timeout)
 
 
 def _remote_error_detail(exc: RemoteSafeboxError) -> dict[str, Any]:

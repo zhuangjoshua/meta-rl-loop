@@ -49,7 +49,7 @@ from .ai_provider import (
     tavily_key,
     tavily_request_microusd,
 )
-from . import app_entitlements, app_identity, rate_limit
+from . import app_entitlements, app_identity, rate_limit, safebox
 from .app_gateway_keys import GatewayPrincipal, resolve_gateway_key
 from .app_runtime_constants import APP_SESSION_COOKIE
 from .app_usage import (
@@ -404,7 +404,13 @@ def broker_message_for_business(
     sees the provider key and never gets to bypass the budget rails.
     """
     body = body or {}
-    if caller is _CALLER_UNSET:
+    # Cut over to the safebox BROKER on runtime planes (flag on + remote authority): the provider key
+    # is resolved, the call made, and the spend metered INSIDE the safebox, so this process never fetches
+    # a raw key. A test/host that injects an explicit `caller` keeps the local metered path; on the
+    # safebox host / local dev (local authority) provider_broker_enabled() is False, so that host
+    # resolves the key locally — it IS the authority.
+    use_broker = caller is _CALLER_UNSET and safebox.provider_broker_enabled()
+    if caller is _CALLER_UNSET and not use_broker:
         caller = get_provider_caller()
 
     if not raw_session_token:
@@ -417,9 +423,10 @@ def broker_message_for_business(
         raise GatewayMessageError(status_code=403, detail="mismatched_app_user")
     _check_app_ai_rate_limit(conn, app_user)
 
-    # Invariant #8: no provider key configured -> block with a reason. Checked
-    # after auth (so callers cannot probe config) and before reservation.
-    if caller is None:
+    # Invariant #8: no provider key configured -> block with a reason. Checked after auth (so callers
+    # cannot probe config) and before reservation. On the broker path the safebox owns this check and
+    # returns 503 *_unconfigured itself, so we only assert it for the LOCAL caller here.
+    if not use_broker and caller is None:
         raise GatewayMessageError(status_code=503, detail="provider_unconfigured")
 
     try:
@@ -477,25 +484,45 @@ def broker_message_for_business(
             },
         }
 
-    provider_response, _reservation_key, actual_cost, _settled = broker_provider_call(
-        conn,
-        business_slug,
-        app_user=app_user,
-        plan=plan,
-        provider="anthropic",
-        model=model,
-        estimated_cost_microusd=estimated_cost,
-        purpose=str(body.get("purpose") or "ai_generate"),
-        audit_route=audit_route,
-        reserve_metadata={
-            "cost_rate_source": rate_source,
-            "usage_markup_bps": usage_markup_bps(),
-            "estimated_realized_cost_microusd": estimated_realized_cost,
-            "estimated_billed_cost_microusd": estimated_cost,
-        },
-        do_call=lambda: caller(payload),
-        actual_cost=_anthropic_actual_cost,
-    )
+    if use_broker:
+        # The safebox reserves on the validated {business, app_user}, resolves the key, calls Anthropic,
+        # and SETTLES the billed cost ITSELF — exactly ONE money gate. We must NOT reserve/settle here
+        # (that would double-charge). Send the RAW request body: the safebox re-runs anthropic_payload to
+        # build + price the call (idempotent with our pre-flight). `actual_cost` below is display-only;
+        # the authoritative settle already happened on the safebox.
+        try:
+            provider_response = safebox.broker_provider_call(
+                "anthropic",
+                "messages",
+                body,
+                estimate_microusd=estimated_cost,
+                business=business_slug,
+                action="anthropic.messages",
+                session_token=raw_session_token,
+            )
+        except safebox.RemoteSafeboxError as exc:
+            raise _broker_remote_error(exc) from exc
+        actual_cost = _anthropic_actual_cost(provider_response)[0]
+    else:
+        provider_response, _reservation_key, actual_cost, _settled = broker_provider_call(
+            conn,
+            business_slug,
+            app_user=app_user,
+            plan=plan,
+            provider="anthropic",
+            model=model,
+            estimated_cost_microusd=estimated_cost,
+            purpose=str(body.get("purpose") or "ai_generate"),
+            audit_route=audit_route,
+            reserve_metadata={
+                "cost_rate_source": rate_source,
+                "usage_markup_bps": usage_markup_bps(),
+                "estimated_realized_cost_microusd": estimated_realized_cost,
+                "estimated_billed_cost_microusd": estimated_cost,
+            },
+            do_call=lambda: caller(payload),
+            actual_cost=_anthropic_actual_cost,
+        )
 
     usage = provider_response.get("usage") or {}
     input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
@@ -551,6 +578,30 @@ def _gateway_reservation_error(exc: Exception) -> GatewayMessageError:
     raise exc
 
 
+def _broker_remote_error(exc: safebox.RemoteSafeboxError) -> GatewayMessageError:
+    """Map a safebox broker (``/v1/providers/*``) HTTP failure to the structured gateway error. The
+    broker is the authoritative money gate on the cutover path, so its status code carries the meaning:
+    402 budget/ceiling, 403 entitlement, 400 bad request, 401 capability, 503 provider-unconfigured /
+    unpriced, 502/504 upstream. The raw safebox/provider body is never surfaced verbatim to a product
+    caller."""
+    status = int(getattr(exc, "status_code", 502) or 502)
+    payload = getattr(exc, "payload", {}) or {}
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if status == 403:
+        # The safebox authz enforces missing-entitlement as 403; the gateway's canonical shape is 402.
+        return GatewayMessageError(status_code=402, detail={"error": "subscription_required"})
+    if status == 402:
+        return GatewayMessageError(status_code=402, detail=detail or {"error": "payment_required"})
+    if status == 503:
+        return GatewayMessageError(status_code=503, detail=detail or "provider_unconfigured")
+    if status == 400:
+        return GatewayMessageError(status_code=400, detail=detail or "bad_request")
+    if status == 401:
+        return GatewayMessageError(status_code=401, detail="capability_invalid")
+    # 502 / 504 / anything else: a generic upstream failure with no provider body leaked.
+    return GatewayMessageError(status_code=502, detail="provider_error")
+
+
 def _normalize_search_results(raw: dict | None) -> list[dict[str, Any]]:
     """Map a Tavily /search response to a key-free result list (title/url/content/position)."""
     out: list[dict[str, Any]] = []
@@ -602,7 +653,10 @@ def broker_search_for_business(
     product-runtime web search from an ungated operator-billed money leak into metered app usage.
     """
     body = body or {}
-    if searcher is _CALLER_UNSET:
+    # Same cutover switch as the message broker: runtime planes (flag + remote authority) route through
+    # the safebox; an injected `searcher` or the safebox host itself keeps the local metered path.
+    use_broker = searcher is _CALLER_UNSET and safebox.provider_broker_enabled()
+    if searcher is _CALLER_UNSET and not use_broker:
         searcher = get_search_caller()
 
     if not raw_session_token:
@@ -615,9 +669,10 @@ def broker_search_for_business(
         raise GatewayMessageError(status_code=403, detail="mismatched_app_user")
     _check_app_ai_rate_limit(conn, app_user)
 
-    # Invariant #8 (search): no Tavily key configured -> block. Checked after auth (callers cannot
-    # probe config) and before any reservation.
-    if searcher is None:
+    # Invariant #8 (search): no Tavily key configured -> block. Checked after auth (callers cannot probe
+    # config) and before any reservation. On the broker path the safebox owns this check, so we only
+    # assert it for the LOCAL searcher.
+    if not use_broker and searcher is None:
         raise GatewayMessageError(status_code=503, detail="search_unconfigured")
 
     operation = str(body.get("operation") or "search").strip().lower()
@@ -675,21 +730,39 @@ def broker_search_for_business(
         )
 
     # Fixed per-request price: estimate == actual, so the held amount IS the truth on settle.
-    raw, _reservation_key, _actual_cost, settled = broker_provider_call(
-        conn,
-        business_slug,
-        app_user=app_user,
-        plan=plan,
-        provider="tavily",
-        model=pricing_op,
-        estimated_cost_microusd=cost,
-        purpose=feature_name,
-        audit_route=audit_route,
-        reserve_metadata={"operation": operation, "units": units},
-        do_call=lambda: searcher({"endpoint": endpoint, "payload": provider_payload}),
-        actual_cost=lambda _raw: (cost, {"metadata": {"operation": operation, "units": units}}),
-        provider_error_detail="search_provider_error",
-    )
+    if use_broker:
+        # The safebox brokers tavily: reserve on the validated scope -> resolve key -> call -> settle the
+        # fixed per-request price, ITSELF (one money gate; no local reserve/settle here). The broker route
+        # pops endpoint/operation/units off the payload and sends the remainder to tavily.
+        try:
+            raw = safebox.broker_provider_call(
+                "tavily",
+                "search",
+                {"endpoint": endpoint, "operation": pricing_op, "units": units, **provider_payload},
+                estimate_microusd=cost,
+                business=business_slug,
+                action="tavily.search",
+                session_token=raw_session_token,
+            )
+        except safebox.RemoteSafeboxError as exc:
+            raise _broker_remote_error(exc) from exc
+        settled = True
+    else:
+        raw, _reservation_key, _actual_cost, settled = broker_provider_call(
+            conn,
+            business_slug,
+            app_user=app_user,
+            plan=plan,
+            provider="tavily",
+            model=pricing_op,
+            estimated_cost_microusd=cost,
+            purpose=feature_name,
+            audit_route=audit_route,
+            reserve_metadata={"operation": operation, "units": units},
+            do_call=lambda: searcher({"endpoint": endpoint, "payload": provider_payload}),
+            actual_cost=lambda _raw: (cost, {"metadata": {"operation": operation, "units": units}}),
+            provider_error_detail="search_provider_error",
+        )
 
     results = (
         _normalize_search_results(raw)
