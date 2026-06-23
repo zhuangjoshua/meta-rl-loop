@@ -939,6 +939,7 @@ def test_run_claude_agent_task_in_docker_authenticates_to_proxy_with_capability(
     assert "ANTHROPIC_API_KEY=cap-anthropic-msgs" in joined
     assert "raw-should-not-leak" not in joined
     assert "ANTHROPIC_TOKEN=" not in joined
+    assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1" in joined
     # No confined network configured → default bridge (still key-free via host NAT).
     assert "--network" not in run_cmd
 
@@ -1005,6 +1006,7 @@ def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp
     assert "ANTHROPIC_TOKEN=" not in joined
     assert "ANTHROPIC_API_KEY=cap-safebox" in joined
     assert "ANTHROPIC_BASE_URL=http://10.116.0.2:8000" in joined
+    assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1" in joined
 
 
 def _patch_docker_for_lockdown(tmp_path, monkeypatch):
@@ -1060,6 +1062,7 @@ def test_run_claude_agent_task_in_docker_lockdown_drops_raw_key_and_confines_net
     # SDK pointed at the broker, authenticated with the minted capability token.
     assert "ANTHROPIC_BASE_URL=https://safebox.internal" in joined
     assert "ANTHROPIC_API_KEY=cap-token-xyz" in joined
+    assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1" in joined
     # Network confined to the safebox-only network (no default-bridge egress).
     assert "--network" in run_cmd
     assert run_cmd[run_cmd.index("--network") + 1] == "takyon-safebox-only"
@@ -1233,6 +1236,7 @@ def test_non_docker_worker_env_uses_proxy_and_session_token_no_raw_key(monkeypat
     assert env["ANTHROPIC_BASE_URL"] == "http://10.116.0.2:8000"
     # Credential is the minted session token, never the raw key sitting in the host env.
     assert env["ANTHROPIC_API_KEY"] == "operator-session-token-xyz"
+    assert env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
     assert env["ANTHROPIC_API_KEY"] != "raw-key-should-not-leak"
     # The raw ANTHROPIC_TOKEN is never injected for the worker.
     assert "ANTHROPIC_TOKEN" not in env or env.get("ANTHROPIC_TOKEN") != "raw-token-should-not-leak"

@@ -7238,6 +7238,7 @@ def _docker_claude_worker_binary_mounts(*, docker_exe: str, repo_root: Path) -> 
 _CLAUDE_AGENT_BROKER_ENV = "TAKYON_CLAUDE_AGENT_BROKER"
 _CLAUDE_AGENT_BROKER_URL_ENV = "TAKYON_CLAUDE_AGENT_BROKER_URL"
 _CLAUDE_AGENT_BROKER_NETWORK_ENV = "TAKYON_CLAUDE_AGENT_BROKER_NETWORK"
+_CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
 # Per-CALL cost ceiling bound into the coding-worker's minted operator.session token. The safebox proxy
 # ENFORCES it as a per-CALL cap AND meters each brokered call against the operator's control-plane budget
 # (reserve->settle on every call). The token's AUDIENCE is "operator.session" (not a per-action audience):
@@ -7369,6 +7370,10 @@ def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) ->
         "ANTHROPIC_BASE_URL": broker_base_url,
         "ANTHROPIC_API_KEY": session_token,
         "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+        # Claude Code can emit experimental Anthropic beta fields such as
+        # context_management. Some org/provider paths reject those fields, so
+        # keep the brokered worker on the stable Messages API shape.
+        _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV: "1",
     })
     # Scrub any RAW Anthropic credential that rode in from the host process env (_runtime_env copies
     # os.environ). The SDK also reads ANTHROPIC_TOKEN / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN —
@@ -7414,6 +7419,10 @@ def _run_claude_agent_task_in_docker(
     # ANTHROPIC_TOKEN are NEVER read or injected here.
     runtime_env = _runtime_env({
         "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+        # Keep Claude Code's outbound request body/header stable for the
+        # safebox Messages proxy; beta fields such as context_management can
+        # be rejected upstream before the agent starts.
+        _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV: "1",
     })
 
     # Coding-worker broker lockdown — the ONLY provider-auth path (the legacy raw-key fallback is
@@ -7456,6 +7465,7 @@ def _run_claude_agent_task_in_docker(
     # ANTHROPIC_TOKEN never enter the container env. They are deliberately absent from env_keys.
     env_keys = [
         "CLAUDE_AGENT_SDK_CLIENT_APP",
+        _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV,
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
