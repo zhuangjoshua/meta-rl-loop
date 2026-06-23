@@ -694,19 +694,31 @@ def _refresh_business_surface_after_bootstrap(
     ):
         return None
 
-    raw = handle_business_refresh_product_surface(
-        {
-            "business": slug,
-            "source_path": source_path,
-            "publish_target": surface.get("publish_target"),
-            "publish_policy": surface.get("publish_policy"),
-            "activate_on_success": True,
-            "install": True,
-            "idempotency_key": f"{job_id}:bootstrap-final-surface-refresh",
-            "reason": "bootstrap final product surface refresh",
-            "actor": "worker",
-        }
-    )
+    tokens: list[object] = []
+    try:
+        if str(operator_user_id or "").strip():
+            from gateway.session_context import clear_session_vars, set_session_vars
+
+            tokens = set_session_vars(
+                user_id=str(operator_user_id or "").strip(),
+                task_kind="ceo_bootstrap",
+            )
+        raw = handle_business_refresh_product_surface(
+            {
+                "business": slug,
+                "source_path": source_path,
+                "publish_target": surface.get("publish_target"),
+                "publish_policy": surface.get("publish_policy"),
+                "activate_on_success": True,
+                "install": True,
+                "idempotency_key": f"{job_id}:bootstrap-final-surface-refresh",
+                "reason": "bootstrap final product surface refresh",
+                "actor": "worker",
+            }
+        )
+    finally:
+        if tokens:
+            clear_session_vars(tokens)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:

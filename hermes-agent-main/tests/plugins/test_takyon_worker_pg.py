@@ -959,6 +959,58 @@ def test_refresh_business_surface_after_bootstrap_uses_declared_surface(monkeypa
     assert seen["idempotency_key"] == "job-1:bootstrap-final-surface-refresh"
 
 
+def test_refresh_business_surface_after_bootstrap_binds_operator_identity(monkeypatch):
+    seen: dict[str, object] = {}
+
+    class _FakeStore:
+        def __init__(self, *args, **kwargs):
+            seen.setdefault("store_operator_user_id", kwargs.get("operator_user_id"))
+
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:acme"
+            assert query == "summary"
+            return {
+                "app": {
+                    "surface_contract": {
+                        "source_path": "product/site",
+                        "publish_target": "https://acme.fourmanifold.com/",
+                        "publish_policy": "publish_after_refresh",
+                    }
+                }
+            }
+
+    def _fake_refresh(args, **_kw):
+        seen.update(args)
+        seen["session_user_id"] = get_session_env("TAKYON_SESSION_USER_ID")
+        seen["session_business_slug"] = get_session_env("TAKYON_SESSION_BUSINESS_SLUG")
+        return json.dumps(
+            {
+                "success": True,
+                "surface_refresh": {
+                    "status": "passed",
+                    "publish": {
+                        "status": "published",
+                        "public_url": "https://acme.fourmanifold.com/",
+                    },
+                },
+            }
+        )
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+    monkeypatch.setattr(core, "handle_business_refresh_product_surface", _fake_refresh)
+
+    refreshed = worker._refresh_business_surface_after_bootstrap(
+        "acme",
+        job_id="job-1",
+        operator_user_id="owner-123",
+    )
+
+    assert refreshed["publish"]["status"] == "published"
+    assert seen["store_operator_user_id"] == "owner-123"
+    assert seen["session_user_id"] == "owner-123"
+    assert seen["session_business_slug"] == ""
+
+
 def test_refresh_business_surface_after_bootstrap_skips_missing_source_path(monkeypatch):
     class _FakeStore:
         def read(self, *, scope, query, include=None, limit=None):

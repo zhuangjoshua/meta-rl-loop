@@ -163,8 +163,9 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
         observed["clear_session_vars"] = list(tokens)
 
     @contextmanager
-    def _bound_run(run_id):
+    def _bound_context(*, run_id="", task_kind=""):
         observed["run_id"] = run_id
+        observed["task_kind"] = task_kind
         yield
 
     monkeypatch.setattr(takyon_worker, "_business_owner_user_id", lambda slug: "user-123")
@@ -172,7 +173,7 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
     monkeypatch.setattr("plugins.takyon.cli._business_workspace_execution_context", _workspace)
     monkeypatch.setattr("gateway.session_context.set_session_vars", _set_session_vars)
     monkeypatch.setattr("gateway.session_context.clear_session_vars", _clear_session_vars)
-    monkeypatch.setattr(takyon_core, "_bound_operator_task_run", _bound_run)
+    monkeypatch.setattr(takyon_core, "_bound_operator_task_context", _bound_context)
 
     def _tool(_args, **_kw):
         return json.dumps({"success": True, "summary": "ok"})
@@ -210,7 +211,9 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
         "user_id": "user-123",
         "workspace_root": "/tmp/takyon-worker-test-home",
         "business_slug": "acme",
+        "task_kind": "business_claude_agent_task",
     }
     assert observed["clear_session_vars"] == ["token"]
     assert observed["run_id"] == "wr-ctx"
+    assert observed["task_kind"] == "business_claude_agent_task"
     assert outcome.result == {"status": "completed", "work_request_id": "wr-ctx"}
