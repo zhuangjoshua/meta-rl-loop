@@ -39,6 +39,26 @@ _ANTHROPIC_AUDIENCE = "anthropic.messages"
 _TAVILY_AUDIENCE = "tavily.search"
 _GEMINI_IMAGE_AUDIENCE = "gemini.image"
 
+# ── Operator/platform SESSION capability audience ────────────────────────────────────────────────
+# The operator/platform plane (CEO agent + coding worker + platform web_tools) calls Anthropic /
+# Tavily through the safebox proxy with the stock SDK and a STATIC key, making MANY streaming calls.
+# A single-use-nonce capability cannot cover that. This audience binds a SESSION-scoped operator
+# capability: signed, operator+business-bound, with a per-CALL cost CEILING (``max_cost_microusd``)
+# and a minutes-to-hours TTL, and — unlike the per-call product/creative capabilities — REUSABLE
+# across calls (the proxy verifies it but does NOT claim a nonce, so a reused token is not a replay).
+# The safebox meters EACH call against the verified operator's control-plane budget keyed on
+# ``scope.takyon_user_id`` (the business owner = the operator). The audience is accepted by the three
+# operator proxy routes (``/v1/messages``, ``/v1/proxy/anthropic/messages``, ``/v1/proxy/tavily/{op}``)
+# in addition to the per-action audiences those routes already match, so one session token covers both
+# Anthropic and Tavily for a run.
+_OPERATOR_SESSION_AUDIENCE = "operator.session"
+
+# Default TTL for a session-scoped operator capability (seconds). Minutes-to-hours, NOT the 300s
+# per-call TTL — the CEO/worker run streams many calls under one token. Capped so a leaked session
+# token still expires within the bound.
+_OPERATOR_SESSION_TTL_SECONDS = 3600
+_OPERATOR_SESSION_TTL_MAX_SECONDS = 6 * 3600
+
 # ── Creative-credit audiences (logo / UGC video / static ad) ──────────────────────────────────────
 # These are the AUTHORITATIVE creative-credit gate audiences. A creative capability is minted by the
 # operator (boundary-1 ownership) against ONE creative action, and the safebox reserves the action's
@@ -80,6 +100,7 @@ _ACTION_AUDIENCE_DEFAULTS = {
     _ANTHROPIC_AUDIENCE: _ANTHROPIC_AUDIENCE,
     _TAVILY_AUDIENCE: _TAVILY_AUDIENCE,
     _GEMINI_IMAGE_AUDIENCE: _GEMINI_IMAGE_AUDIENCE,
+    _OPERATOR_SESSION_AUDIENCE: _OPERATOR_SESSION_AUDIENCE,
     _CREATIVE_LOGO_AUDIENCE: _CREATIVE_LOGO_AUDIENCE,
     _CREATIVE_UGC_AUDIENCE: _CREATIVE_UGC_AUDIENCE,
     _CREATIVE_STATIC_AD_AUDIENCE: _CREATIVE_STATIC_AD_AUDIENCE,
@@ -190,6 +211,131 @@ class _UsageLedgerAdapter:
                 reservation["reservation_key"],
                 error="broker_release",
             )
+
+
+def _microusd_to_cents_ceiling(microusd: int) -> int:
+    """Convert a microUSD magnitude to whole CENTS, rounding UP. The operator control-plane billing
+    rail (``billing.py``) is denominated in cents; provider spend is priced in microUSD. The HOLD must
+    never under-charge the authority, so the estimate is rounded toward +infinity — a sub-cent provider
+    call still reserves at least 1 cent, so a flood of sub-cent operator calls cannot stay forever free
+    against the cumulative ceiling. Settles re-clamp to the held cents (never over-charge the
+    reservation). This mirrors ``web_spend._microusd_to_cents_ceiling`` (the same operator rail)."""
+    from decimal import ROUND_CEILING, Decimal
+
+    return int((Decimal(int(max(0, microusd))) / Decimal(10_000)).quantize(Decimal("1"), rounding=ROUND_CEILING))
+
+
+class _OperatorBudgetAdapter:
+    """Operator control-plane money rail the OPERATOR proxy routes reserve/settle/release against.
+
+    The operator/platform plane (CEO agent, coding worker, platform web_tools) calls Anthropic / Tavily
+    through the safebox proxy. That spend is OPERATOR spend — it carries NO product ``app_user_id`` and
+    no product subscription, so it must be bounded by the OPERATOR's own control-plane billing authority
+    (``billing.py``, the Takyon-user -> platform rail), NOT the per-business product usage rail and NOT a
+    product entitlement. The authority is keyed on the verified ``scope.takyon_user_id`` — the business
+    owner resolved by ``authorize_operator_call`` / the session-token mint, i.e. the operator's own
+    Takyon-user id.
+
+    This mirrors the reserve/settle/release shape ``web_spend.py`` uses for ungated operator web egress:
+    convert the microUSD estimate to cents (ceiling), take a REAL hold on ``billing.reserve`` (which
+    locks the single ``billing_accounts`` row FOR UPDATE, draws the operator allowance, and raises
+    ``InsufficientBalance`` when the allowance can no longer cover the estimate — so the gate is
+    cumulative and fails CLOSED), then ``billing.settle`` the clamped actual on success / ``billing.refund``
+    the whole hold on failure. ``billing.reserve`` is idempotent on its reservation_key, so the broker can
+    pass the same key safely. All of this runs INSIDE the safebox process on the safebox's own DB
+    connection, so the gate is AUTHORITATIVE on the safebox — no client may reserve/settle the operator
+    rail.
+
+    The reservation handle carries the operator user id + reservation key + held cents so settle/release
+    finalize the SAME hold. The proxy passes the handle straight back; it never inspects it."""
+
+    def reserve(self, scope: "CapabilityScope", estimate_microusd: int):
+        from . import billing
+
+        operator_user_id = str(getattr(scope, "takyon_user_id", "") or "").strip()
+        if not operator_user_id:
+            # No operator identity on a verified operator scope is a fail-closed condition: an operator
+            # call with no billing authority must be refused, never run free.
+            raise BrokerLedgerError("operator_identity_missing")
+        estimate_cents = _microusd_to_cents_ceiling(int(estimate_microusd))
+        key = str(uuid.uuid4())
+        with _safebox_db_conn() as conn:
+            if estimate_cents <= 0:
+                # A zero-cost call (e.g. a 0 ceiling free action) still anchors a reservation_key so
+                # settle/release are well-defined and idempotent; billing.reserve writes a zero anchor.
+                billing.reserve(
+                    conn,
+                    operator_user_id,
+                    0,
+                    key,
+                    business_slug=scope.business_slug,
+                    job_id=f"operator_proxy:{scope.action}",
+                )
+                return {"operator_user_id": operator_user_id, "reservation_key": key, "reserved_cents": 0}
+            try:
+                resv = billing.reserve(
+                    conn,
+                    operator_user_id,
+                    estimate_cents,
+                    key,
+                    business_slug=scope.business_slug,
+                    job_id=f"operator_proxy:{scope.action}",
+                )
+            except billing.NoBillingAccount as exc:
+                # Every real operator is funded by the subscription/starter allowance; no account means
+                # "no money authority", which must fail CLOSED (not "free").
+                raise BrokerLedgerError("operator_no_billing_account") from exc
+            except billing.InsufficientBalance as exc:
+                # Cumulative ceiling: outstanding holds + settled spend already consume the authority, so
+                # this call cannot be covered. THIS is the money gate that refuses an out-of-budget
+                # operator BEFORE any provider key is resolved or any provider is called.
+                raise OperatorBudgetExceeded(
+                    estimate_cents=int(exc.estimate_cents),
+                    allowance_available_cents=int(exc.allowance_available_cents),
+                ) from exc
+        return {
+            "operator_user_id": operator_user_id,
+            "reservation_key": key,
+            "reserved_cents": int(resv.total_cents),
+        }
+
+    def settle(self, reservation, actual_microusd: int) -> None:
+        from . import billing
+
+        reserved_cents = int(reservation.get("reserved_cents") or 0)
+        if reserved_cents <= 0:
+            # Zero anchor: settle at 0 to finalize the hold (held -> spent, nothing to charge).
+            with _safebox_db_conn() as conn:
+                billing.settle(conn, reservation["reservation_key"], 0)
+            return
+        # billing.settle asserts actual <= reserved (it is custody of real money). The held estimate was
+        # rounded UP, so clamp the realized cents to the held cents — never over-charge the reservation.
+        actual_cents = min(_microusd_to_cents_ceiling(int(actual_microusd)), reserved_cents)
+        with _safebox_db_conn() as conn:
+            billing.settle(conn, reservation["reservation_key"], actual_cents)
+
+    def release(self, reservation) -> None:
+        from . import billing
+
+        with _safebox_db_conn() as conn:
+            # Return the whole operator billing hold to the authority (no spend recorded). Idempotent.
+            billing.refund(conn, reservation["reservation_key"])
+
+
+class OperatorBudgetExceeded(Exception):
+    """The operator's control-plane allowance can no longer cover the estimate (cumulative gate).
+
+    Carries the exact cents figures so the proxy can build a precise 402 / SSE error without leaking
+    anything else. Raised by ``_OperatorBudgetAdapter.reserve`` BEFORE any provider key resolution or
+    upstream call."""
+
+    def __init__(self, *, estimate_cents: int, allowance_available_cents: int) -> None:
+        self.estimate_cents = int(estimate_cents)
+        self.allowance_available_cents = int(allowance_available_cents)
+        super().__init__(
+            f"operator_budget_exceeded: need {estimate_cents} cents, "
+            f"allowance {allowance_available_cents} cents"
+        )
 
 
 def _creative_credit_price(audience: str, *, units: int = 1) -> int:
@@ -385,6 +531,18 @@ class _MintTokenBody(BaseModel):
     session_token: str | None = None
     operator_user_id: str | None = None
     audience: str | None = None
+    ttl_seconds: int | None = None
+
+
+class _OperatorSessionTokenBody(BaseModel):
+    # Mint a SESSION-scoped operator capability (audience = operator.session) for the operator/platform
+    # plane. The operator MUST own the business (boundary 1, validated via authorize_operator_call).
+    # ``max_cost_microusd`` is the per-CALL ceiling the proxy enforces on every metered call under this
+    # token; ``ttl_seconds`` is the session lifetime (minutes-to-hours, capped). The token is REUSABLE
+    # across calls — the proxy verifies it but does NOT claim a nonce.
+    business: str
+    operator_user_id: str
+    max_cost_microusd: int
     ttl_seconds: int | None = None
 
 
@@ -1278,6 +1436,44 @@ def build_safebox_app() -> FastAPI:
             now=int(time.time()),
         )
         return {"token": token, "audience": audience}
+
+    @app.post("/v1/operator/session-token")
+    def operator_session_token(
+        body: _OperatorSessionTokenBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Mint a SESSION-scoped operator capability (audience = operator.session) for one CEO/worker
+        run. Validates operator ownership of the business (boundary 1 via ``authorize_operator_call``),
+        binds the per-CALL cost ceiling, and issues a REUSABLE, TTL-bounded capability the operator plane
+        presents on every Anthropic / Tavily proxy call. The signing key lives ONLY on the safebox, so
+        the operator host cannot forge or widen scope. Internal-token only.
+
+        Distinct from ``/v1/token/mint``: that mints a SINGLE-USE (nonce-claimed) per-action capability
+        for the metered ``/v1/providers/*`` business broker; this mints a long-lived, reusable session
+        token for the operator PROXY routes, which meter EACH call against the operator's control-plane
+        budget without claiming a nonce."""
+        _require_internal_token(authorization)
+        ttl_seconds = int(body.ttl_seconds or _OPERATOR_SESSION_TTL_SECONDS)
+        if ttl_seconds <= 0:
+            raise HTTPException(status_code=400, detail="ttl_must_be_positive")
+        # Clamp the session TTL so a leaked token still expires within the hard bound.
+        ttl_seconds = min(ttl_seconds, _OPERATOR_SESSION_TTL_MAX_SECONDS)
+        token = _mint_capability_token(
+            business=body.business,
+            action=_OPERATOR_SESSION_AUDIENCE,
+            max_cost_microusd=int(body.max_cost_microusd),
+            session_token=None,
+            operator_user_id=body.operator_user_id,
+            audience=_OPERATOR_SESSION_AUDIENCE,
+            ttl_seconds=ttl_seconds,
+            now=int(time.time()),
+        )
+        return {
+            "token": token,
+            "audience": _OPERATOR_SESSION_AUDIENCE,
+            "ttl_seconds": ttl_seconds,
+            "max_cost_microusd": int(body.max_cost_microusd),
+        }
 
     @app.post("/v1/providers/anthropic/messages")
     def provider_anthropic_messages(
