@@ -1957,26 +1957,11 @@ def reserve_credits(
     if not slug:
         raise ValueError("missing business_slug")
     if _use_remote_authority():
-        try:
-            payload = _remote_json(
-                "POST",
-                "/v1/creative-credits/reserve",
-                {
-                    "business_slug": slug,
-                    "credits": int(credits),
-                    "reservation_key": key,
-                    "metadata": metadata or {},
-                },
-            )
-        except RemoteSafeboxError as exc:
-            detail = _remote_error_detail(exc)
-            if exc.status_code == 402:
-                raise InsufficientCreativeCredits(
-                    requested_credits=int(detail.get("requested_credits") or credits),
-                    available_credits=int(detail.get("available_credits") or 0),
-                ) from exc
-            raise
-        return _reservation_from_payload(payload, reservation_key=key)
+        raise CreativeGateRefused(
+            "creative_credit_spend_requires_creative_gate",
+            status_code=403,
+            payload={"error": "creative_credit_spend_requires_creative_gate"},
+        )
     return _local_reserve_credits(
         conn,
         slug,
@@ -1998,23 +1983,11 @@ def commit_credits(
     if not key:
         raise ValueError("reservation_key is required")
     if _use_remote_authority():
-        try:
-            payload = _remote_json(
-                "POST",
-                "/v1/creative-credits/commit",
-                {
-                    "reservation_key": key,
-                    "actual_credits": (
-                        None if actual_credits is None else int(actual_credits)
-                    ),
-                    "metadata": metadata or {},
-                },
-            )
-        except RemoteSafeboxError as exc:
-            if exc.status_code == 404:
-                raise UnknownCreativeCreditReservation(key) from exc
-            raise
-        return _balances_from_payload(payload, business_slug="")
+        raise CreativeGateRefused(
+            "creative_credit_spend_requires_creative_gate",
+            status_code=403,
+            payload={"error": "creative_credit_spend_requires_creative_gate"},
+        )
     return _local_commit_credits(
         conn,
         key,
@@ -2034,20 +2007,11 @@ def release_credits(
     if not key:
         raise ValueError("reservation_key is required")
     if _use_remote_authority():
-        try:
-            payload = _remote_json(
-                "POST",
-                "/v1/creative-credits/release",
-                {
-                    "reservation_key": key,
-                    "metadata": metadata or {},
-                },
-            )
-        except RemoteSafeboxError as exc:
-            if exc.status_code == 404:
-                raise UnknownCreativeCreditReservation(key) from exc
-            raise
-        return _balances_from_payload(payload, business_slug="")
+        raise CreativeGateRefused(
+            "creative_credit_spend_requires_creative_gate",
+            status_code=403,
+            payload={"error": "creative_credit_spend_requires_creative_gate"},
+        )
     return _local_release_credits(
         conn,
         key,

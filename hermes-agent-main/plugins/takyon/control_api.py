@@ -291,7 +291,7 @@ def _fallback_operator_plan_name() -> str:
 
 
 def _fallback_operator_weekly_allowance_cents() -> int:
-    return _env_nonnegative_int("TAKYON_OPERATOR_DEFAULT_WEEKLY_ALLOWANCE_CENTS", 10_000)
+    return _env_nonnegative_int("TAKYON_OPERATOR_DEFAULT_WEEKLY_ALLOWANCE_CENTS", 0)
 
 
 def operator_plan_name_for_business(conn, business_slug: str) -> str | None:

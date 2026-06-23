@@ -527,7 +527,7 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
             # call_tavily raises RuntimeError on HTTP error — no realized spend -> release the hold.
             _release(ledger, reservation)
             raise HTTPException(
-                status_code=502, detail={"error": "provider_error", "body": str(exc)[:500]}
+                status_code=502, detail={"error": "provider_error"}
             ) from exc
         except Exception:  # noqa: BLE001 — any other failure releases the hold
             _release(ledger, reservation)

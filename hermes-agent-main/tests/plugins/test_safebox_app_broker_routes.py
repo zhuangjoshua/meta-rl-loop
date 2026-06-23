@@ -80,9 +80,39 @@ def test_new_routes_are_registered_alongside_env_routes():
     assert "/v1/env/{key}" in paths
 
 
-def test_mint_operator_token_roundtrips_to_validated_scope(client, monkeypatch):
+def test_operator_session_token_roundtrips_to_validated_scope(client, monkeypatch):
     # Operator mint: boundary 1 only — the operator must own the business. The owner resolves to
-    # user_A (fake conn), and we mint for that operator, so minting succeeds.
+    # user_A (fake conn), and we mint for that operator through the dedicated operator session route.
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    token = data["token"]
+    assert data["audience"] == safebox_app._OPERATOR_SESSION_AUDIENCE
+
+    scope, nonce, exp = verify_capability(
+        token,
+        signing_key=_SIGNING_KEY.encode("utf-8"),
+        expected_audience=safebox_app._OPERATOR_SESSION_AUDIENCE,
+        now=0,
+    )
+    # The verified scope is the AUTHORITATIVE one the safebox derived (not a client-asserted value).
+    assert scope.takyon_user_id == "user_A"
+    assert scope.business_slug == "climblog"
+    assert scope.app_user_id is None  # operator/platform call has no product sub-user
+    assert scope.action == safebox_app._OPERATOR_SESSION_AUDIENCE
+    assert scope.max_cost_microusd == 5000
+    assert nonce and exp > 0
+
+
+def test_generic_mint_refuses_operator_identity(client):
     resp = client.post(
         "/v1/token/mint",
         headers=_auth(),
@@ -93,25 +123,23 @@ def test_mint_operator_token_roundtrips_to_validated_scope(client, monkeypatch):
             "operator_user_id": "user_A",
         },
     )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    token = data["token"]
-    # Known action -> canonical audience default, so the token is brokerable by the anthropic route.
-    assert data["audience"] == safebox_app._ANTHROPIC_AUDIENCE
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "operator_capabilities_use_session_route"
 
-    scope, nonce, exp = verify_capability(
-        token,
-        signing_key=_SIGNING_KEY.encode("utf-8"),
-        expected_audience=safebox_app._ANTHROPIC_AUDIENCE,
-        now=0,
+
+def test_generic_mint_refuses_creative_audiences(client):
+    resp = client.post(
+        "/v1/token/mint",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "creative.logo",
+            "max_cost_microusd": 1,
+            "session_token": "sess-abc",
+        },
     )
-    # The verified scope is the AUTHORITATIVE one the safebox derived (not a client-asserted value).
-    assert scope.takyon_user_id == "user_A"
-    assert scope.business_slug == "climblog"
-    assert scope.app_user_id is None  # operator/platform call has no product sub-user
-    assert scope.action == "anthropic.messages"
-    assert scope.max_cost_microusd == 5000
-    assert nonce and exp > 0
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "unmappable_action"
 
 
 def test_mint_product_token_roundtrips_with_subuser_scope(client, monkeypatch):
@@ -145,15 +173,16 @@ def test_mint_product_token_roundtrips_with_subuser_scope(client, monkeypatch):
     assert scope.max_cost_microusd == 3000
 
 
-def test_mint_requires_exactly_one_identity_shape(client):
-    # Neither identity -> ambiguous_identity (also covers "both" via the same XOR guard).
+def test_mint_requires_product_session_shape(client):
+    # The generic mint route is product-only now. Operator/platform and creative authorities go through
+    # their own safebox gates.
     resp = client.post(
         "/v1/token/mint",
         headers=_auth(),
         json={"business": "climblog", "action": "anthropic.messages", "max_cost_microusd": 1000},
     )
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "ambiguous_identity"
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "product_session_token_required"
 
 
 def test_mint_requires_internal_token(client):
@@ -164,10 +193,77 @@ def test_mint_requires_internal_token(client):
             "business": "climblog",
             "action": "anthropic.messages",
             "max_cost_microusd": 1000,
-            "operator_user_id": "user_A",
+            "session_token": "sess-abc",
         },
     )
     assert resp.status_code == 401
+
+
+def test_legacy_creative_credit_spend_routes_are_closed(client):
+    resp = client.post(
+        "/v1/creative-credits/reserve",
+        headers=_auth(),
+        json={
+            "business_slug": "climblog",
+            "credits": 1,
+            "reservation_key": "legacy-bypass",
+            "metadata": {},
+        },
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "creative_credit_spend_requires_creative_gate"
+
+
+def test_generic_stripe_route_requires_takyon_app_scope(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", lambda *a, **k: pytest.fail("stripe called"))
+    resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(),
+        json={"path": "checkout/sessions", "method": "POST", "params": {"mode": "payment"}},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "stripe_scope_required"
+
+
+def test_postmark_route_is_magic_link_only(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox, "send_postmark_email", lambda **kwargs: pytest.fail("postmark called")
+    )
+    resp = client.post(
+        "/v1/postmark/send",
+        headers=_auth(),
+        json={
+            "to_email": "customer@example.com",
+            "subject": "A totally normal marketing blast",
+            "text_body": "hello",
+        },
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "postmark_scope_required"
+
+
+def test_vercel_domain_delete_refuses_non_product_domain(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox, "delete_vercel_project_domain", lambda domain: pytest.fail("vercel called")
+    )
+    resp = client.post(
+        "/v1/vercel/domain/delete",
+        headers=_auth(),
+        json={"domain": "app.fourmanifold.com"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "domain_not_product_scoped"
+
+
+def test_storage_routes_require_business_scoped_prefix(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "storage_get", lambda *a, **k: pytest.fail("storage called"))
+    resp = client.post(
+        "/v1/storage/get",
+        headers=_auth(),
+        json={"provider": "supabase_s3", "key": ""},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "storage_scope_required"
 
 
 def test_mint_rejects_unmappable_action(client):
@@ -180,17 +276,21 @@ def test_mint_rejects_unmappable_action(client):
             "business": "climblog",
             "action": "ping",  # not in _ACTION_AUDIENCE_DEFAULTS
             "max_cost_microusd": 1000,
-            "operator_user_id": "user_A",
+            "session_token": "sess-abc",
         },
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "unmappable_action"
 
 
-def test_mint_ignores_body_audience_and_uses_the_action_map(client):
+def test_mint_ignores_body_audience_and_uses_the_action_map(client, monkeypatch):
     # A caller cannot mint action="anthropic.messages" under a forged audience: body.audience is
     # IGNORED, the audience is derived SOLELY from the action map (so entitlement/ceiling and the
     # provider invocation are the SAME action).
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_X"))
+    monkeypatch.setattr(
+        app_entitlements, "get_active_entitlement", lambda c, b, u: types.SimpleNamespace(tier="pro")
+    )
     resp = client.post(
         "/v1/token/mint",
         headers=_auth(),
@@ -198,7 +298,7 @@ def test_mint_ignores_body_audience_and_uses_the_action_map(client):
             "business": "climblog",
             "action": "anthropic.messages",
             "max_cost_microusd": 1000,
-            "operator_user_id": "user_A",
+            "session_token": "sess-abc",
             "audience": "tavily.search",  # attempted override — must be ignored
         },
     )
@@ -254,11 +354,15 @@ def test_provider_route_action_audience_mismatch_is_400(client):
     assert resp.json()["detail"] == "action_audience_mismatch"
 
 
-def test_provider_route_malformed_payload_is_400_not_500(client):
+def test_provider_route_malformed_payload_is_400_not_500(client, monkeypatch):
     # A valid pre-minted token but a malformed provider payload (anthropic_payload rejects an empty
     # messages body) must surface as a clean 400 — the payload builders run BEFORE token verification,
     # so a 500 here would mean a malformed body crashes the route (regression: the builders used to run
     # outside the guard).
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_X"))
+    monkeypatch.setattr(
+        app_entitlements, "get_active_entitlement", lambda c, b, u: types.SimpleNamespace(tier="pro")
+    )
     minted = client.post(
         "/v1/token/mint",
         headers=_auth(),
@@ -266,7 +370,7 @@ def test_provider_route_malformed_payload_is_400_not_500(client):
             "business": "climblog",
             "action": "anthropic.messages",
             "max_cost_microusd": 5000,
-            "operator_user_id": "user_A",
+            "session_token": "sess-abc",
         },
     )
     assert minted.status_code == 200, minted.text

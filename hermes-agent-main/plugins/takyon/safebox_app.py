@@ -11,6 +11,7 @@ import base64
 import hmac
 import json
 import os
+import re
 import time
 import uuid
 from contextlib import contextmanager
@@ -101,10 +102,6 @@ _ACTION_AUDIENCE_DEFAULTS = {
     _ANTHROPIC_AUDIENCE: _ANTHROPIC_AUDIENCE,
     _TAVILY_AUDIENCE: _TAVILY_AUDIENCE,
     _GEMINI_IMAGE_AUDIENCE: _GEMINI_IMAGE_AUDIENCE,
-    _OPERATOR_SESSION_AUDIENCE: _OPERATOR_SESSION_AUDIENCE,
-    _CREATIVE_LOGO_AUDIENCE: _CREATIVE_LOGO_AUDIENCE,
-    _CREATIVE_UGC_AUDIENCE: _CREATIVE_UGC_AUDIENCE,
-    _CREATIVE_STATIC_AD_AUDIENCE: _CREATIVE_STATIC_AD_AUDIENCE,
 }
 
 # Default short TTL for minted capability tokens (seconds). The token is also single-use (nonce) and
@@ -120,6 +117,7 @@ def _normalize_stripe_request(path: str, method: str, params: dict[str, Any] | N
     clean_params = dict(params or {})
     parts = stripe_path.split("/")
     if stripe_method == "POST" and stripe_path in {"products", "prices", "checkout/sessions"}:
+        _require_takyon_app_stripe_params(stripe_path, clean_params)
         return stripe_path, stripe_method, clean_params
     if stripe_method == "GET" and len(parts) == 3 and parts[:2] == ["checkout", "sessions"] and parts[2].startswith("cs_"):
         return stripe_path, stripe_method, clean_params
@@ -136,6 +134,103 @@ def _storage_provider(provider: str) -> str:
     if value not in {"supabase_s3", "r2"}:
         raise HTTPException(status_code=400, detail="unknown_storage_provider")
     return value
+
+
+_SAFE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,95}$")
+
+
+def _require_safe_slug(value: str, *, detail: str = "unsafe_slug") -> str:
+    slug = str(value or "").strip().lower()
+    if not _SAFE_SLUG_RE.fullmatch(slug):
+        raise HTTPException(status_code=403, detail=detail)
+    return slug
+
+
+def _require_existing_business(slug: str) -> str:
+    business = _require_safe_slug(slug)
+    with _safebox_db_conn() as conn:
+        row = conn.execute("select 1 from businesses where slug = %s", (business,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=403, detail="unknown_business")
+    return business
+
+
+def _storage_business_slug(path: str) -> str:
+    raw = str(path or "").strip().strip("/")
+    if not raw:
+        raise HTTPException(status_code=403, detail="storage_scope_required")
+    return _require_existing_business(raw.split("/", 1)[0])
+
+
+def _domain_business_slug(domain: str) -> str:
+    name = str(domain or "").strip().lower().strip(".")
+    base = str(
+        os.environ.get("PUBLIC_COMPANY_BASE_DOMAIN")
+        or safebox.load_env().get("PUBLIC_COMPANY_BASE_DOMAIN")
+        or os.environ.get("TAKYON_COMPANY_BASE_DOMAIN")
+        or safebox.load_env().get("TAKYON_COMPANY_BASE_DOMAIN")
+        or "coscale.app"
+    ).strip().lower().strip(".")
+    suffix = f".{base}"
+    if name == base or not name.endswith(suffix):
+        raise HTTPException(status_code=403, detail="domain_not_product_scoped")
+    labels = name[: -len(suffix)].split(".")
+    if not labels or not labels[-1]:
+        raise HTTPException(status_code=403, detail="domain_not_product_scoped")
+    return _require_existing_business(labels[-1])
+
+
+def _metadata_value(params: dict[str, Any], key: str) -> str:
+    return str(params.get(f"metadata[{key}]") or params.get(f"metadata[{key.lower()}]") or "").strip()
+
+
+def _require_takyon_app_stripe_params(path: str, params: dict[str, Any]) -> str:
+    business_name = _metadata_value(params, "business")
+    if not business_name:
+        raise HTTPException(status_code=403, detail="stripe_scope_required")
+    business = _require_existing_business(business_name)
+    if _metadata_value(params, "source") != "takyon_app":
+        raise HTTPException(status_code=403, detail="stripe_scope_required")
+    if path in {"products", "prices"} and not _metadata_value(params, "plan_key"):
+        raise HTTPException(status_code=403, detail="stripe_plan_scope_required")
+    if path == "checkout/sessions":
+        if not _metadata_value(params, "plan_key") or not _metadata_value(params, "checkout_intent_id"):
+            raise HTTPException(status_code=403, detail="stripe_checkout_scope_required")
+        for url_key in ("success_url", "cancel_url"):
+            url = str(params.get(url_key) or "").strip()
+            if not url.startswith("https://") or any(ch.isspace() for ch in url):
+                raise HTTPException(status_code=403, detail="stripe_redirect_not_allowed")
+    return business
+
+
+def _require_takyon_app_stripe_object(payload: dict[str, Any], *, require_source: bool = False) -> str:
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    business = str(metadata.get("business") or "").strip()
+    if not business:
+        raise HTTPException(status_code=403, detail="stripe_scope_required")
+    if require_source and str(metadata.get("source") or "").strip() != "takyon_app":
+        raise HTTPException(status_code=403, detail="stripe_scope_required")
+    return _require_existing_business(business)
+
+
+def _require_magic_link_email(body: "_PostmarkSendBody") -> None:
+    subject = str(body.subject or "")
+    text = str(body.text_body or "")
+    html = str(body.html_body or "")
+    if not subject.startswith("Sign in to "):
+        raise HTTPException(status_code=403, detail="postmark_scope_required")
+    if "This link expires in 15 minutes and can be used once." not in text:
+        raise HTTPException(status_code=403, detail="postmark_scope_required")
+    for candidate in re.findall(r"https?://[^\s\"'<>]+", "\n".join([text, html])):
+        if not candidate.startswith("https://"):
+            raise HTTPException(status_code=403, detail="postmark_link_not_allowed")
+        host = candidate.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0].lower()
+        if not (
+            host == "app.fourmanifold.com"
+            or host.endswith(".coscale.app")
+            or host.endswith(".fourmanifold.com")
+        ):
+            raise HTTPException(status_code=403, detail="postmark_link_not_allowed")
 
 
 def _cap_signing_key() -> bytes:
@@ -659,8 +754,9 @@ class _ProviderCallBody(BaseModel):
 
 
 class _MintTokenBody(BaseModel):
-    # Product (sub-user) mint: session_token + business. Operator/platform mint: operator_user_id +
-    # business. action + max_cost_microusd scope the minted capability. Exactly one identity shape.
+    # Product (sub-user) mint only: session_token + business. Operator/platform sessions go through
+    # /v1/operator/session-token, and creative capabilities go through /v1/creative/reserve after a
+    # safebox-side credit reserve. action + max_cost_microusd scope the minted capability.
     business: str
     action: str
     max_cost_microusd: int
@@ -1698,8 +1794,25 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         path, method, params = _normalize_stripe_request(body.path, body.method or "POST", body.params)
         try:
-            return safebox.stripe_request(path, params, method=method)
+            if path == "checkout/sessions" and method == "POST":
+                price_id = str(params.get("line_items[0][price]") or "").strip()
+                if price_id:
+                    price = safebox.stripe_request(f"prices/{price_id}", {}, method="GET")
+                    business = _require_takyon_app_stripe_object(price, require_source=True)
+                    if business != _metadata_value(params, "business"):
+                        raise HTTPException(status_code=403, detail="stripe_price_scope_mismatch")
+            if path.startswith("subscriptions/"):
+                subscription = safebox.stripe_request(path, {}, method="GET")
+                _require_takyon_app_stripe_object(subscription)
+                if method == "GET":
+                    return subscription
+            result = safebox.stripe_request(path, params, method=method)
+            if method == "GET" and path.startswith("checkout/sessions/"):
+                _require_takyon_app_stripe_object(result, require_source=True)
+            return result
         except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
             message = str(exc)
             if "STRIPE_SECRET_KEY" in message:
                 raise HTTPException(status_code=503, detail="stripe_unconfigured") from exc
@@ -1715,6 +1828,7 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="invalid_recipient")
         if not str(body.subject or "").strip() or not str(body.text_body or "").strip():
             raise HTTPException(status_code=400, detail="missing_email_body")
+        _require_magic_link_email(body)
         try:
             return safebox.send_postmark_email(
                 to_email=body.to_email,
@@ -1736,7 +1850,10 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         try:
-            return safebox.ensure_product_edge_route(body.slug)
+            slug = _require_existing_business(body.slug)
+            return safebox.ensure_product_edge_route(slug)
+        except HTTPException:
+            raise
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -1752,7 +1869,10 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         try:
+            _domain_business_slug(body.domain)
             return safebox.delete_vercel_project_domain(body.domain)
+        except HTTPException:
+            raise
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
@@ -1770,6 +1890,7 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
+        _storage_business_slug(body.key)
         try:
             data = base64.b64decode(str(body.data_b64 or ""), validate=True)
         except Exception as exc:
@@ -1786,6 +1907,7 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
+        _storage_business_slug(body.key)
         try:
             data = safebox.storage_get(provider, body.key)
         except Exception as exc:
@@ -1801,6 +1923,7 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
+        _storage_business_slug(body.key)
         try:
             return safebox.storage_delete(provider, body.key)
         except Exception as exc:
@@ -1813,6 +1936,7 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
+        _storage_business_slug(body.prefix)
         try:
             return {"provider": provider, "prefix": body.prefix, "digests": safebox.storage_list_digests(provider, body.prefix)}
         except Exception as exc:
@@ -1825,6 +1949,7 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         provider = _storage_provider(body.provider)
+        _storage_business_slug(body.prefix)
         try:
             return {"provider": provider, "prefix": body.prefix, "sizes": safebox.storage_list_object_sizes(provider, body.prefix)}
         except Exception as exc:
@@ -2024,27 +2149,7 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
-        try:
-            reservation = safebox._local_reserve_credits(
-                None,
-                body.business_slug,
-                body.credits,
-                body.reservation_key,
-                metadata=body.metadata,
-            )
-        except safebox.InsufficientCreativeCredits as exc:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": str(exc),
-                    "requested_credits": exc.requested_credits,
-                    "available_credits": exc.available_credits,
-                },
-            ) from exc
-        return {
-            "key": reservation.key,
-            "reserved_credits": reservation.reserved_credits,
-        }
+        raise HTTPException(status_code=403, detail="creative_credit_spend_requires_creative_gate")
 
     @app.post("/v1/creative-credits/commit")
     def commit_creative_credits(
@@ -2052,23 +2157,7 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
-        try:
-            balances = safebox._local_commit_credits(
-                None,
-                body.reservation_key,
-                actual_credits=body.actual_credits,
-                metadata=body.metadata,
-            )
-        except safebox.UnknownCreativeCreditReservation as exc:
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "unknown_creative_credit_reservation", "reservation_key": str(exc)},
-            ) from exc
-        return {
-            "business_slug": balances.business_slug,
-            "balance_credits": balances.balance_credits,
-            "reserved_credits": balances.reserved_credits,
-        }
+        raise HTTPException(status_code=403, detail="creative_credit_spend_requires_creative_gate")
 
     @app.post("/v1/creative-credits/release")
     def release_creative_credits(
@@ -2076,22 +2165,7 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
-        try:
-            balances = safebox._local_release_credits(
-                None,
-                body.reservation_key,
-                metadata=body.metadata,
-            )
-        except safebox.UnknownCreativeCreditReservation as exc:
-            raise HTTPException(
-                status_code=404,
-                detail={"error": "unknown_creative_credit_reservation", "reservation_key": str(exc)},
-            ) from exc
-        return {
-            "business_slug": balances.business_slug,
-            "balance_credits": balances.balance_credits,
-            "reserved_credits": balances.reserved_credits,
-        }
+        raise HTTPException(status_code=403, detail="creative_credit_spend_requires_creative_gate")
 
     # ── Capability mint + action-shaped broker routes (Phase 2 cutover prep) ──────────────────────
     # These are ADDITIVE alongside /v1/env/*; the env egress routes stay live until Codex STEP E
@@ -2109,8 +2183,13 @@ def build_safebox_app() -> FastAPI:
         # Audience is derived SOLELY from the action map. We IGNORE body.audience: the
         # entitlement/ceiling decision and the provider invocation must be the SAME action, so a
         # caller must never be able to mint action="ping" but audience="anthropic.messages" and then
-        # broker an expensive provider call under a cheap action's scope. An action with no mapped
-        # audience is unbrokerable -> 400.
+        # broker an expensive provider call under a cheap action's scope. This endpoint mints only
+        # product/sub-user single-use capabilities. Operator and creative capabilities have their own
+        # safebox gates because they carry identity authority / fixed-credit reserve authority.
+        if str(body.operator_user_id or "").strip():
+            raise HTTPException(status_code=403, detail="operator_capabilities_use_session_route")
+        if not str(body.session_token or "").strip():
+            raise HTTPException(status_code=403, detail="product_session_token_required")
         audience = _ACTION_AUDIENCE_DEFAULTS.get(str(body.action or "").strip())
         if not audience:
             raise HTTPException(status_code=400, detail="unmappable_action")
@@ -2229,8 +2308,8 @@ def build_safebox_app() -> FastAPI:
         from . import safebox
 
         action = str(body.action or "").strip()
-        audience = _ACTION_AUDIENCE_DEFAULTS.get(action)
-        if not audience or audience not in _CREATIVE_AUDIENCE_CREDIT_ACTION:
+        audience = action if action in _CREATIVE_AUDIENCE_CREDIT_ACTION else ""
+        if not audience:
             raise HTTPException(status_code=400, detail="unmappable_creative_action")
         reservation_key = str(body.reservation_key or "").strip()
         if not reservation_key:

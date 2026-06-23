@@ -23233,10 +23233,12 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                 params["subscription_data[metadata][business]"] = business
                 params["subscription_data[metadata][plan_key]"] = plan_key
                 params["subscription_data[metadata][checkout_intent_id]"] = intent_id
+                params["subscription_data[metadata][source]"] = "takyon_app"
             else:
                 params["payment_intent_data[metadata][business]"] = business
                 params["payment_intent_data[metadata][plan_key]"] = plan_key
                 params["payment_intent_data[metadata][checkout_intent_id]"] = intent_id
+                params["payment_intent_data[metadata][source]"] = "takyon_app"
             if test_mode:
                 checkout_url = _test_app_checkout_url(
                     business=business,

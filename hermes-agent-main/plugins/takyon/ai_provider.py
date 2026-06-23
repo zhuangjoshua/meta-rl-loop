@@ -377,8 +377,8 @@ def call_tavily(endpoint: str, payload: dict, api_key: str) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Tavily API returned {exc.code}: {detail[:500]}") from exc
+        exc.read()
+        raise RuntimeError(f"Tavily API returned {exc.code}") from exc
 
 
 def anthropic_text(response: dict) -> str:
