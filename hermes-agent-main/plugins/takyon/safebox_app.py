@@ -13,7 +13,7 @@ import os
 import time
 import uuid
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Iterable
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -735,6 +735,42 @@ def _env_egress_allowed(name: str) -> bool:
         }
 
 
+_RUNTIME_DATABASE_EGRESS_NAMES: frozenset[str] = frozenset(
+    {"DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING"}
+)
+_RUNTIME_DATABASE_URL_ENV = "TAKYON_RUNTIME_DATABASE_URL"
+
+
+def _env_egress_value(name: str) -> str:
+    """Resolve an allowlisted value for runtime-plane egress.
+
+    The safebox itself keeps its owner DATABASE_URL locally so provider proxies, webhook processors, and
+    money gates can still run with authority. Runtime planes must receive the least-privilege database
+    DSN after the G3 cutover, so database aliases egress as TAKYON_RUNTIME_DATABASE_URL when configured.
+    """
+    n = str(name or "").strip()
+    if n in _RUNTIME_DATABASE_EGRESS_NAMES:
+        runtime_database_url = str(
+            os.environ.get(_RUNTIME_DATABASE_URL_ENV)
+            or safebox.load_env().get(_RUNTIME_DATABASE_URL_ENV)
+            or ""
+        ).strip()
+        if runtime_database_url:
+            return runtime_database_url
+    return safebox.read_env_backed_value(n)
+
+
+def _first_env_egress_value(names: Iterable[str]) -> str:
+    allowed = [str(name or "").strip() for name in names if _env_egress_allowed(str(name or "").strip())]
+    if not allowed:
+        raise HTTPException(status_code=404, detail="not_vendable")
+    for name in allowed:
+        value = _env_egress_value(name)
+        if value:
+            return value
+    return ""
+
+
 def _anthropic_key_resolver(_scope: CapabilityScope) -> str:
     """Resolve the SHARED Anthropic key LOCALLY on the safebox (never returned to a caller)."""
     from . import ai_provider
@@ -1242,6 +1278,18 @@ def build_safebox_app() -> FastAPI:
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/v1/env/snapshot")
+    def env_snapshot(authorization: str | None = Header(default=None)) -> dict[str, dict[str, str]]:
+        _require_internal_token(authorization)
+        # Allowlist the bulk snapshot too — the runtime planes get only the infra secrets they need;
+        # provider keys, the signing key, and the master token are never present in the snapshot.
+        snapshot = {
+            name: _env_egress_value(name)
+            for name in safebox.sensitive_env_snapshot()
+            if _env_egress_allowed(name)
+        }
+        return {"snapshot": snapshot}
+
     @app.get("/v1/env/{key}")
     def read_env_value(key: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
         _require_internal_token(authorization)
@@ -1250,17 +1298,14 @@ def build_safebox_app() -> FastAPI:
         # indistinguishable from absent) — closing the G1 leak structurally rather than by denylist.
         if not _env_egress_allowed(key):
             raise HTTPException(status_code=404, detail="not_vendable")
-        return {"value": safebox.read_env_backed_value(key)}
+        return {"value": _env_egress_value(key)}
 
     @app.post("/v1/env/first")
     def first_env_value(body: _FirstEnvBody, authorization: str | None = Header(default=None)) -> dict[str, str]:
         _require_internal_token(authorization)
         # Keep only allowlisted infra names, then resolve the first present value. A request for only
         # non-allowlisted keys (provider keys, the signing key, the master token, …) refuses (404).
-        allowed = [k for k in (body.keys or []) if _env_egress_allowed(k)]
-        if not allowed:
-            raise HTTPException(status_code=404, detail="not_vendable")
-        return {"value": safebox.first_env_backed_value(*allowed)}
+        return {"value": _first_env_egress_value(body.keys or [])}
 
     @app.post("/v1/env/{key}")
     def save_env_value(key: str, body: _EnvValueBody, authorization: str | None = Header(default=None)) -> dict[str, bool]:
@@ -1274,18 +1319,6 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         _refuse_env_write(key)
         return {"removed": safebox.remove_env_backed_value(key)}
-
-    @app.get("/v1/env/snapshot")
-    def env_snapshot(authorization: str | None = Header(default=None)) -> dict[str, dict[str, str]]:
-        _require_internal_token(authorization)
-        # Allowlist the bulk snapshot too — the runtime planes get only the infra secrets they need;
-        # provider keys, the signing key, and the master token are never present in the snapshot.
-        snapshot = {
-            name: value
-            for name, value in safebox.sensitive_env_snapshot().items()
-            if _env_egress_allowed(name)
-        }
-        return {"snapshot": snapshot}
 
     @app.get("/v1/env")
     def env_keys(

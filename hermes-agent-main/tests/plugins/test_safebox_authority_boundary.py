@@ -75,6 +75,7 @@ def client(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
     monkeypatch.setenv("TAKYON_CAP_SIGNING_KEY", "test-signing-key-value")
     monkeypatch.setenv("DATABASE_URL", "postgres://example/db")
+    monkeypatch.delenv("TAKYON_RUNTIME_DATABASE_URL", raising=False)
     return TestClient(build_safebox_app())
 
 
@@ -97,6 +98,24 @@ def test_first_route_refuses_when_only_denied_keys(client):
 def test_read_route_serves_infra_secret(client):
     r = client.get("/v1/env/DATABASE_URL", headers=_AUTH)
     assert r.status_code == 200 and r.json()["value"] == "postgres://example/db"
+
+
+def test_database_egress_prefers_runtime_dsn_override(client, monkeypatch):
+    monkeypatch.setenv("TAKYON_RUNTIME_DATABASE_URL", "postgres://runtime/db")
+
+    r = client.get("/v1/env/DATABASE_URL", headers=_AUTH)
+    assert r.status_code == 200 and r.json()["value"] == "postgres://runtime/db"
+
+    first = client.post(
+        "/v1/env/first",
+        json={"keys": ["DATABASE_URL", "POSTGRES_URL"]},
+        headers=_AUTH,
+    )
+    assert first.status_code == 200 and first.json()["value"] == "postgres://runtime/db"
+
+    snapshot = client.get("/v1/env/snapshot", headers=_AUTH)
+    assert snapshot.status_code == 200
+    assert snapshot.json()["snapshot"]["DATABASE_URL"] == "postgres://runtime/db"
 
 
 def test_write_and_delete_routes_refuse_sensitive_keys(client):
