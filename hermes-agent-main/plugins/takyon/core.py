@@ -16604,6 +16604,15 @@ class TakyonStore:
                 return _json_loads(prior["result_json"], {"success": True, "idempotent": True})
 
             staged = [self._normalize_operation(conn, parsed, op, principal=principal) for op in operations]
+            # A brand-new business needs one visible control-plane row before the remote Safebox
+            # storage authority will accept the first workspace manifest/CAS writes. Keep all existing
+            # business writes on the old single-transaction path; split only first-time business.upsert.
+            postcommit_workspace_sync = any(
+                str(item.get("action") or "") == "business.upsert"
+                and str(item.get("business_slug") or "").strip()
+                and not bool(item.get("business_existed"))
+                for item in staged
+            )
 
             results: list[dict[str, Any]] = []
             # No business mirror flock here: it deadlocked the worker (commit re-entered the
@@ -16630,20 +16639,37 @@ class TakyonStore:
                                 normalized,
                                 self._canonical_workspace_revision(normalized),
                             )
-                for slug, base_revision in sorted(touched_workspaces.items()):
-                    self._commit_business_workspace_revision(
-                        conn,
-                        slug,
-                        actor=actor,
-                        reason=reason or "Takyon durable commit",
-                        expected_base_revision=base_revision,
-                    )
                 final = {"success": True, "scope": str(parsed["raw"]), "results": results}
-                conn.execute(
-                    "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
-                    (idempotency_key, op_hash, _json_dumps(final), _now()),
-                )
-            return final
+                if not postcommit_workspace_sync:
+                    for slug, base_revision in sorted(touched_workspaces.items()):
+                        self._commit_business_workspace_revision(
+                            conn,
+                            slug,
+                            actor=actor,
+                            reason=reason or "Takyon durable commit",
+                            expected_base_revision=base_revision,
+                        )
+                    conn.execute(
+                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
+                        (idempotency_key, op_hash, _json_dumps(final), _now()),
+                    )
+
+        if postcommit_workspace_sync:
+            with self._connect() as conn:
+                with conn:
+                    for slug, base_revision in sorted(touched_workspaces.items()):
+                        self._commit_business_workspace_revision(
+                            conn,
+                            slug,
+                            actor=actor,
+                            reason=reason or "Takyon durable commit",
+                            expected_base_revision=base_revision,
+                        )
+                    conn.execute(
+                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
+                        (idempotency_key, op_hash, _json_dumps(final), _now()),
+                    )
+        return final
 
     def _normalize_operation(self, conn: sqlite3.Connection, parsed_scope: dict[str, str | None], op: dict[str, Any], *, principal: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(op, dict):
@@ -16747,6 +16773,8 @@ class TakyonStore:
         normalized["target_scope"] = target_scope
         normalized["business_mode"] = business_mode
         normalized["credential_gate"] = credential_gate
+        if action == "business.upsert":
+            normalized["business_existed"] = bool(existing)
         return normalized
 
     def _apply_operation(

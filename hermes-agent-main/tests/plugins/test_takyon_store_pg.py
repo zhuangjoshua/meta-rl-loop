@@ -769,6 +769,38 @@ def test_business_upsert_lands_owned_business_with_resolved_platform_owner(pg_st
         assert principal is not None and "ownedco" in principal.business_slugs
 
 
+def test_new_business_workspace_commit_runs_after_business_row_is_visible(pg_store, pg_store_dsn, monkeypatch):
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|operator-visible-create")
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        control_plane.ensure_platform_owner(conn)
+
+    original = takyon_core.TakyonStore._commit_business_workspace_revision
+    visible_counts: list[int] = []
+
+    def _record_visibility(self, conn, slug, **kwargs):
+        with psycopg.connect(pg_store_dsn, autocommit=True) as raw:
+            visible_counts.append(
+                raw.execute("select count(*) from businesses where slug = %s", (slug,)).fetchone()[0]
+            )
+        return original(self, conn, slug, **kwargs)
+
+    monkeypatch.setattr(takyon_core.TakyonStore, "_commit_business_workspace_revision", _record_visibility)
+    result = pg_store.commit(
+        scope="business:visibleco",
+        operations=[{"action": "business.upsert", "business": "visibleco", "name": "Visible Co"}],
+        idempotency_key="p83-visible-create-1",
+        reason="p8.3 visible create",
+        actor="test",
+    )
+
+    assert result["success"] is True
+    assert visible_counts == [1]
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        assert conn.execute(
+            "select count(*) from idempotency_keys where key = %s", ("p83-visible-create-1",)
+        ).fetchone()[0] == 1
+
+
 def test_business_upsert_blocks_when_platform_owner_unprovisioned(pg_store, pg_store_dsn, monkeypatch):
     # Invariant #8: no NULL/fake owner. With the configured platform sub NOT provisioned, business.upsert
     # blocks with an actionable reason AND leaves no half-created business row (the commit rolls back).
