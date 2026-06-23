@@ -1,5 +1,10 @@
 # Safebox secret-boundary / money-gate hardening — continuation handoff
 
+> **➤ SUPERSEDED BY `SAFEBOX-TRUE-GREEN-GOAL.md`** — that file is the canonical `/goal` spec (corrected current
+> state + the mint/spend-split authorization design + ordered remaining work). Use it. This doc remains for
+> extended background only; where they differ, the GOAL file wins (notably: the mint split is **NOT** in flight,
+> it is the immediate next step).
+
 **For:** the next Claude Code instance picking this up.
 **Date:** 2026-06-23. **Repo:** `tejdiv/takyon-workspace` (outer). **Branch:** `main`. **HEAD at handoff:** `d2f0d76b`.
 
