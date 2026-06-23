@@ -93,3 +93,4 @@ AUTH0.md
 lfd/
 changes.md
 /you
+secrets/.env
