@@ -23,6 +23,10 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import base64
+import hashlib
+import hmac
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,6 +125,18 @@ class StripeAppWebhookUnconfigured(RuntimeError):
 
 class StripeAppWebhookInvalidSignature(RuntimeError):
     """The presented Stripe app (flow-B) webhook signature failed verification."""
+
+
+class Auth0AuthorityUnconfigured(RuntimeError):
+    """Auth0 authority is unavailable because Safebox lacks required config/secrets."""
+
+
+class Auth0AuthorityRejected(RuntimeError):
+    """An Auth0 login/session token failed Safebox-owned verification."""
+
+    def __init__(self, message: str, *, status_code: int = 403):
+        super().__init__(message)
+        self.status_code = int(status_code)
 
 
 def is_sensitive_env_key(key: str) -> bool:
@@ -1863,6 +1879,339 @@ def first_env_backed_value(*keys: str) -> str:
         if value:
             return value
     return ""
+
+
+def _auth0_b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _auth0_b64url_decode(raw: str) -> bytes:
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
+
+
+def _auth0_sign_payload(secret: str, payload: dict[str, Any]) -> str:
+    body = _auth0_b64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{body}.{_auth0_b64url_encode(sig)}"
+
+
+def _auth0_unsign_payload(secret: str, token: str) -> dict[str, Any] | None:
+    try:
+        body, sig = str(token or "").split(".", 1)
+        expected = hmac.new(
+            secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(_auth0_b64url_decode(sig), expected):
+            return None
+        payload = json.loads(_auth0_b64url_decode(body).decode("utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _auth0_env_value(*keys: str) -> str:
+    try:
+        env_values = load_env()
+    except Exception:
+        env_values = {}
+    for key in keys:
+        name = str(key or "").strip()
+        if not name:
+            continue
+        value = str(os.environ.get(name) or env_values.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _auth0_csv_env(*keys: str) -> tuple[str, ...]:
+    values: list[str] = []
+    for key in keys:
+        raw = _auth0_env_value(key)
+        if not raw:
+            continue
+        for item in raw.replace(";", ",").split(","):
+            cleaned = item.strip().lower()
+            if cleaned and cleaned not in values:
+                values.append(cleaned)
+    return tuple(values)
+
+
+def _auth0_normalise_domain(domain: str) -> str:
+    value = str(domain or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    return value.rstrip("/")
+
+
+def _auth0_same_origin_path(path: str) -> str:
+    value = str(path or "")
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/"
+    return value
+
+
+def _auth0_secret() -> str:
+    try:
+        secret = read_env_backed_value("AUTH0_SECRET")
+    except SafeboxAuthorityUnavailable as exc:
+        raise Auth0AuthorityUnconfigured("auth0_secret_unconfigured") from exc
+    if not secret:
+        raise Auth0AuthorityUnconfigured("auth0_secret_unconfigured")
+    return secret
+
+
+def _auth0_client_secret() -> str:
+    try:
+        secret = read_env_backed_value("AUTH0_CLIENT_SECRET")
+    except SafeboxAuthorityUnavailable as exc:
+        raise Auth0AuthorityUnconfigured("auth0_client_secret_unconfigured") from exc
+    if not secret:
+        raise Auth0AuthorityUnconfigured("auth0_client_secret_unconfigured")
+    return secret
+
+
+def _auth0_domain() -> str:
+    domain = _auth0_normalise_domain(_auth0_env_value("AUTH0_DOMAIN"))
+    if not domain:
+        raise Auth0AuthorityUnconfigured("auth0_domain_unconfigured")
+    return domain
+
+
+def _auth0_client_id() -> str:
+    client_id = _auth0_env_value("AUTH0_CLIENT_ID")
+    if not client_id:
+        raise Auth0AuthorityUnconfigured("auth0_client_id_unconfigured")
+    return client_id
+
+
+def _auth0_allowed_domains() -> tuple[str, ...]:
+    return _auth0_csv_env(
+        "TAKYON_DASHBOARD_ALLOWED_EMAIL_DOMAINS",
+        "AUTH0_ALLOWED_EMAIL_DOMAINS",
+        "ARGON_BETA_ALLOWED_EMAIL_DOMAINS",
+    )
+
+
+def _auth0_allowed_emails() -> tuple[str, ...]:
+    return _auth0_csv_env("TAKYON_DASHBOARD_ALLOWED_EMAILS", "AUTH0_ALLOWED_EMAILS")
+
+
+def _auth0_email_allowed(email: str) -> bool:
+    cleaned = str(email or "").strip().lower()
+    if not cleaned or "@" not in cleaned:
+        return False
+    allowed_emails = _auth0_allowed_emails()
+    if allowed_emails and cleaned in allowed_emails:
+        return True
+    domain = cleaned.rsplit("@", 1)[1]
+    allowed_domains = _auth0_allowed_domains()
+    if allowed_domains:
+        return domain in allowed_domains
+    return True
+
+
+def _auth0_authorize_claims(claims: dict[str, Any]) -> dict[str, Any]:
+    email = str(claims.get("email") or "").strip().lower()
+    if not email:
+        raise Auth0AuthorityRejected("Auth0 profile did not include an email address", status_code=403)
+    if claims.get("email_verified") is not True:
+        raise Auth0AuthorityRejected("Auth0 email address is not verified", status_code=403)
+    if not _auth0_email_allowed(email):
+        raise Auth0AuthorityRejected(f"{email} is not allowed for this dashboard", status_code=403)
+    return {
+        "sub": str(claims.get("sub") or ""),
+        "email": email,
+        "name": str(claims.get("name") or email),
+        "email_verified": True,
+    }
+
+
+def auth0_login_state(
+    *,
+    state: str,
+    nonce: str,
+    return_to: str,
+    issued_at: int | None = None,
+) -> dict[str, Any]:
+    """Mint opaque Auth0 login state/nonce cookies with the Safebox-owned cookie secret.
+
+    Runtime planes may initiate a browser redirect, but they do not hold ``AUTH0_SECRET`` and cannot
+    mint arbitrary dashboard sessions. This route only signs pre-login CSRF/nonce state; identity
+    authority is completed by ``auth0_exchange_callback`` after Safebox verifies the Auth0 ID token.
+    """
+    state_value = str(state or "").strip()
+    nonce_value = str(nonce or "").strip()
+    if not state_value or not nonce_value:
+        raise Auth0AuthorityRejected("auth0_state_nonce_required", status_code=400)
+    body = {
+        "state": state_value,
+        "nonce": nonce_value,
+        "return_to": _auth0_same_origin_path(return_to),
+        "issued_at": int(issued_at if issued_at is not None else time.time()),
+    }
+    if _use_remote_authority():
+        return _remote_json("POST", "/v1/auth0/login-state", body, timeout=10.0)
+    secret = _auth0_secret()
+    return {
+        "state_token": _auth0_sign_payload(
+            secret,
+            {"state": state_value, "return_to": body["return_to"], "iat": body["issued_at"]},
+        ),
+        "nonce_token": _auth0_sign_payload(
+            secret,
+            {"nonce": nonce_value, "iat": body["issued_at"]},
+        ),
+        "return_to": body["return_to"],
+    }
+
+
+def _auth0_exchange_code(*, code: str, redirect_uri: str) -> dict[str, Any]:
+    domain = _auth0_domain()
+    client_id = _auth0_client_id()
+    client_secret = _auth0_client_secret()
+    payload = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": str(code or ""),
+        "redirect_uri": str(redirect_uri or ""),
+    }
+    if not payload["code"] or not payload["redirect_uri"]:
+        raise Auth0AuthorityRejected("auth0_code_redirect_required", status_code=400)
+    req = urllib.request.Request(
+        f"{domain}/oauth/token",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15.0) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        raise Auth0AuthorityRejected("auth0_token_exchange_failed", status_code=403) from exc
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise Auth0AuthorityRejected("auth0_token_exchange_unavailable", status_code=503) from exc
+    if not isinstance(data, dict) or not data.get("id_token"):
+        raise Auth0AuthorityRejected("Auth0 token response did not include an id_token", status_code=403)
+    return data
+
+
+def _auth0_verify_id_token(*, id_token: str, expected_nonce: str) -> dict[str, Any]:
+    try:
+        import jwt
+        from jwt import PyJWKClient
+    except ImportError as exc:  # pragma: no cover - dependency is pinned.
+        raise Auth0AuthorityUnconfigured("PyJWT[crypto] is required for Auth0 validation") from exc
+
+    domain = _auth0_domain()
+    client_id = _auth0_client_id()
+    try:
+        jwks_client = PyJWKClient(f"{domain}/.well-known/jwks.json")
+        signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=client_id,
+            issuer=f"{domain}/",
+            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+        )
+    except Exception as exc:
+        raise Auth0AuthorityRejected("auth0_id_token_invalid", status_code=403) from exc
+    if claims.get("nonce") != expected_nonce:
+        raise Auth0AuthorityRejected("Auth0 nonce mismatch", status_code=400)
+    return claims if isinstance(claims, dict) else {}
+
+
+def auth0_exchange_callback(
+    *,
+    code: str,
+    state: str,
+    state_token: str,
+    nonce_token: str,
+    redirect_uri: str,
+    now: int | None = None,
+    state_max_age_seconds: int = 10 * 60,
+    session_max_age_seconds: int = 12 * 60 * 60,
+) -> dict[str, Any]:
+    """Complete Auth0 login on the Safebox: verify state, exchange code, verify ID token, sign session."""
+    body = {
+        "code": str(code or ""),
+        "state": str(state or ""),
+        "state_token": str(state_token or ""),
+        "nonce_token": str(nonce_token or ""),
+        "redirect_uri": str(redirect_uri or ""),
+        "now": now,
+        "state_max_age_seconds": int(state_max_age_seconds),
+        "session_max_age_seconds": int(session_max_age_seconds),
+    }
+    if _use_remote_authority():
+        return _remote_json("POST", "/v1/auth0/callback", body, timeout=25.0)
+
+    secret = _auth0_secret()
+    state_payload = _auth0_unsign_payload(secret, body["state_token"])
+    nonce_payload = _auth0_unsign_payload(secret, body["nonce_token"])
+    current = int(now if now is not None else time.time())
+    max_age = max(1, int(state_max_age_seconds))
+    if (
+        not state_payload
+        or state_payload.get("state") != body["state"]
+        or int(state_payload.get("iat") or 0) < current - max_age
+    ):
+        raise Auth0AuthorityRejected("Auth0 state mismatch", status_code=400)
+    if (
+        not nonce_payload
+        or not nonce_payload.get("nonce")
+        or int(nonce_payload.get("iat") or 0) < current - max_age
+    ):
+        raise Auth0AuthorityRejected("Auth0 nonce expired", status_code=400)
+    token_data = _auth0_exchange_code(code=body["code"], redirect_uri=body["redirect_uri"])
+    claims = _auth0_verify_id_token(
+        id_token=str(token_data["id_token"]),
+        expected_nonce=str(nonce_payload.get("nonce") or ""),
+    )
+    user = _auth0_authorize_claims(claims)
+    ttl = max(60, min(24 * 60 * 60, int(session_max_age_seconds)))
+    expires_at = current + ttl
+    session_token = _auth0_sign_payload(secret, {**user, "iat": current, "exp": expires_at})
+    return {
+        "user": user,
+        "session_token": session_token,
+        "return_to": _auth0_same_origin_path(str(state_payload.get("return_to") or "/")),
+        "expires_at": expires_at,
+    }
+
+
+def auth0_verify_session(*, session_token: str, now: int | None = None) -> dict[str, Any] | None:
+    """Verify an Auth0 dashboard session token with the Safebox-owned cookie secret and policy."""
+    token = str(session_token or "")
+    if _use_remote_authority():
+        payload = _remote_json("POST", "/v1/auth0/session/verify", {"session_token": token, "now": now})
+        if not payload.get("authenticated"):
+            return None
+        user = payload.get("user")
+        return user if isinstance(user, dict) else None
+
+    secret = _auth0_secret()
+    payload = _auth0_unsign_payload(secret, token)
+    if not payload:
+        return None
+    current = int(now if now is not None else time.time())
+    try:
+        if int(payload.get("exp") or 0) < current:
+            return None
+    except (TypeError, ValueError):
+        return None
+    email = str(payload.get("email") or "").strip().lower()
+    if payload.get("email_verified") is not True or not _auth0_email_allowed(email):
+        return None
+    return payload
 
 
 def save_env_backed_value(key: str, value: str) -> None:

@@ -535,6 +535,29 @@ class _StripeAppWebhookVerifyBody(BaseModel):
     signature: str
 
 
+class _Auth0LoginStateBody(BaseModel):
+    state: str
+    nonce: str
+    return_to: str = "/"
+    issued_at: int | None = None
+
+
+class _Auth0CallbackBody(BaseModel):
+    code: str
+    state: str
+    state_token: str
+    nonce_token: str
+    redirect_uri: str
+    now: int | None = None
+    state_max_age_seconds: int = 10 * 60
+    session_max_age_seconds: int = 12 * 60 * 60
+
+
+class _Auth0SessionVerifyBody(BaseModel):
+    session_token: str
+    now: int | None = None
+
+
 class _ProviderCallBody(BaseModel):
     # Either a pre-minted capability token, OR (session_token + business + action) for the safebox to
     # mint-then-broker in one call. The provider payload is the provider-specific request body.
@@ -1337,6 +1360,63 @@ def build_safebox_app() -> FastAPI:
             if _env_egress_allowed(name)
         ]
         return {"keys": keys}
+
+    @app.post("/v1/auth0/login-state")
+    def auth0_login_state(
+        body: _Auth0LoginStateBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.auth0_login_state(
+                state=body.state,
+                nonce=body.nonce,
+                return_to=body.return_to,
+                issued_at=body.issued_at,
+            )
+        except safebox.Auth0AuthorityUnconfigured as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except safebox.Auth0AuthorityRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.post("/v1/auth0/callback")
+    def auth0_callback(
+        body: _Auth0CallbackBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            return safebox.auth0_exchange_callback(
+                code=body.code,
+                state=body.state,
+                state_token=body.state_token,
+                nonce_token=body.nonce_token,
+                redirect_uri=body.redirect_uri,
+                now=body.now,
+                state_max_age_seconds=body.state_max_age_seconds,
+                session_max_age_seconds=body.session_max_age_seconds,
+            )
+        except safebox.Auth0AuthorityUnconfigured as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except safebox.Auth0AuthorityRejected as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.post("/v1/auth0/session/verify")
+    def auth0_session_verify(
+        body: _Auth0SessionVerifyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            user = safebox.auth0_verify_session(
+                session_token=body.session_token,
+                now=body.now,
+            )
+        except safebox.Auth0AuthorityUnconfigured as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        if not user:
+            return {"authenticated": False}
+        return {"authenticated": True, "user": user}
 
     @app.post("/v1/user-api-keys/register")
     def register_user_key(

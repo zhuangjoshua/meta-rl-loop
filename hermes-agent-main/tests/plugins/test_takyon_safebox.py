@@ -72,6 +72,144 @@ def test_first_env_backed_value_survives_unreadable_env(monkeypatch):
     )
 
 
+def test_auth0_login_state_and_session_verify_are_safebox_owned(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
+    monkeypatch.setenv("ARGON_BETA_ALLOWED_EMAIL_DOMAINS", "fourmanifold.com")
+
+    login_state = safebox.auth0_login_state(
+        state="state-1",
+        nonce="nonce-1",
+        return_to="/chat",
+        issued_at=1000,
+    )
+
+    assert set(login_state) >= {"state_token", "nonce_token", "return_to"}
+    assert login_state["return_to"] == "/chat"
+    assert "cookie-signing-secret" not in json.dumps(login_state)
+
+    user = {
+        "sub": "auth0|operator",
+        "email": "operator@fourmanifold.com",
+        "name": "Operator",
+        "email_verified": True,
+    }
+    session = safebox._auth0_sign_payload(  # type: ignore[attr-defined]
+        "cookie-signing-secret",
+        {**user, "iat": 1001, "exp": 2000},
+    )
+
+    assert safebox.auth0_verify_session(session_token=session, now=1500)["email"] == user["email"]
+    assert safebox.auth0_verify_session(session_token="not-a-session", now=1500) is None
+
+
+def test_auth0_callback_route_signs_session_after_safebox_verification(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
+    monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
+    monkeypatch.setenv("AUTH0_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("ARGON_BETA_ALLOWED_EMAIL_DOMAINS", "fourmanifold.com")
+
+    login_state = safebox.auth0_login_state(
+        state="state-1",
+        nonce="nonce-1",
+        return_to="/chat",
+        issued_at=1000,
+    )
+
+    def fake_exchange(*, code: str, redirect_uri: str):
+        assert code == "ok"
+        assert redirect_uri == "https://app.example.com/auth/callback"
+        return {"id_token": "id-token"}
+
+    def fake_verify(*, id_token: str, expected_nonce: str):
+        assert id_token == "id-token"
+        assert expected_nonce == "nonce-1"
+        return {
+            "sub": "auth0|operator",
+            "email": "operator@fourmanifold.com",
+            "email_verified": True,
+            "name": "Operator",
+        }
+
+    monkeypatch.setattr(safebox, "_auth0_exchange_code", fake_exchange)
+    monkeypatch.setattr(safebox, "_auth0_verify_id_token", fake_verify)
+
+    client = TestClient(build_safebox_app())
+    resp = client.post(
+        "/v1/auth0/callback",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "code": "ok",
+            "state": "state-1",
+            "state_token": login_state["state_token"],
+            "nonce_token": login_state["nonce_token"],
+            "redirect_uri": "https://app.example.com/auth/callback",
+            "now": 1005,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["user"]["email"] == "operator@fourmanifold.com"
+    assert body["return_to"] == "/chat"
+    assert "cookie-signing-secret" not in resp.text
+    verify = client.post(
+        "/v1/auth0/session/verify",
+        headers={"Authorization": "Bearer test-token"},
+        json={"session_token": body["session_token"], "now": 1010},
+    )
+    assert verify.status_code == 200
+    assert verify.json()["authenticated"] is True
+
+
+def test_auth0_callback_route_rejects_disallowed_email(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
+    monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
+    monkeypatch.setenv("AUTH0_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
+    monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
+    monkeypatch.setenv("ARGON_BETA_ALLOWED_EMAIL_DOMAINS", "fourmanifold.com")
+
+    login_state = safebox.auth0_login_state(
+        state="state-1",
+        nonce="nonce-1",
+        return_to="/chat",
+        issued_at=1000,
+    )
+    monkeypatch.setattr(safebox, "_auth0_exchange_code", lambda **_kwargs: {"id_token": "id-token"})
+    monkeypatch.setattr(
+        safebox,
+        "_auth0_verify_id_token",
+        lambda **_kwargs: {
+            "sub": "auth0|outsider",
+            "email": "someone@example.com",
+            "email_verified": True,
+            "name": "Outsider",
+        },
+    )
+
+    client = TestClient(build_safebox_app())
+    resp = client.post(
+        "/v1/auth0/callback",
+        headers={"Authorization": "Bearer test-token"},
+        json={
+            "code": "ok",
+            "state": "state-1",
+            "state_token": login_state["state_token"],
+            "nonce_token": login_state["nonce_token"],
+            "redirect_uri": "https://app.example.com/auth/callback",
+            "now": 1005,
+        },
+    )
+
+    assert resp.status_code == 403
+    assert "not allowed" in resp.text
+
+
 def test_read_env_backed_value_allows_sensitive_api_keys(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

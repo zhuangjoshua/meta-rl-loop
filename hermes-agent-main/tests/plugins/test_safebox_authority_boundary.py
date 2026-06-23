@@ -30,10 +30,17 @@ def test_env_egress_denies_provider_keys():
 
 def test_env_egress_admits_infra_only():
     for k in ("DATABASE_URL", "POSTGRES_URL", "STRIPE_SECRET_KEY",
-              "AUTH0_CLIENT_SECRET", "AUTH0_DOMAIN", "SUPABASE_S3_SECRET_ACCESS_KEY",
+              "AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "SUPABASE_S3_SECRET_ACCESS_KEY",
               "R2_S3_SECRET_ACCESS_KEY", "UMAMI_API_KEY", "VERCEL_TOKEN", "CLOUDFLARE_API_TOKEN",
               "TAKYON_GSC_SERVICE_ACCOUNT_KEY"):
         assert core.env_egress_allowed(k) is True, k
+
+
+def test_env_egress_denies_auth0_authority_secrets():
+    # Dashboard OAuth exchange + cookie signing now happen on the safebox. The runtime only needs
+    # public Auth0 domain/client id; these authority-equivalent secrets must not vend over /v1/env.
+    for k in ("AUTH0_CLIENT_SECRET", "AUTH0_SECRET"):
+        assert core.env_egress_allowed(k) is False, k
 
 
 def test_env_egress_denies_app_webhook_secret():
@@ -74,6 +81,8 @@ def client(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
     monkeypatch.setenv("TAKYON_CAP_SIGNING_KEY", "test-signing-key-value")
+    monkeypatch.setenv("AUTH0_CLIENT_SECRET", "auth0-client-secret-value")
+    monkeypatch.setenv("AUTH0_SECRET", "auth0-cookie-secret-value")
     monkeypatch.setenv("DATABASE_URL", "postgres://example/db")
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.delenv("TAKYON_RUNTIME_DATABASE_URL", raising=False)
@@ -84,10 +93,12 @@ _AUTH = {"Authorization": "Bearer test-token"}
 
 
 def test_read_route_refuses_authority_secrets(client):
-    for k in ("TAKYON_CAP_SIGNING_KEY", "TAKYON_SAFEBOX_TOKEN"):
+    for k in ("TAKYON_CAP_SIGNING_KEY", "TAKYON_SAFEBOX_TOKEN", "AUTH0_CLIENT_SECRET", "AUTH0_SECRET"):
         r = client.get(f"/v1/env/{k}", headers=_AUTH)
         assert r.status_code == 404, (k, r.status_code, r.text)
         assert "test-signing-key-value" not in r.text
+        assert "auth0-client-secret-value" not in r.text
+        assert "auth0-cookie-secret-value" not in r.text
 
 
 def test_first_route_refuses_when_only_denied_keys(client):

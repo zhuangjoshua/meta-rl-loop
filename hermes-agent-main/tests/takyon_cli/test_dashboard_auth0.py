@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import urllib.parse
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,13 +22,16 @@ def auth0_env(monkeypatch):
     monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
     monkeypatch.setenv("APP_BASE_URL", f"https://{HOST}")
     monkeypatch.setenv("ARGON_BETA_ALLOWED_EMAIL_DOMAINS", "fourmanifold.com")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+    ws._clear_auth0_config_cache()
     ws.app.state.bound_host = "127.0.0.1"
     try:
         yield ws
     finally:
         if hasattr(ws.app.state, "bound_host"):
             del ws.app.state.bound_host
-        ws._AUTH0_JWKS_CLIENTS.clear()
+        ws._clear_auth0_config_cache()
 
 
 def _client(ws) -> TestClient:
@@ -42,10 +46,19 @@ def _state_from_login(resp) -> str:
     return urllib.parse.parse_qs(parsed.query)["state"][0]
 
 
+def _signed_session(user: dict[str, object]) -> str:
+    from plugins.takyon import safebox
+
+    return safebox._auth0_sign_payload(  # type: ignore[attr-defined]
+        "cookie-signing-secret",
+        {**user, "iat": int(time.time()), "exp": int(time.time()) + 3600},
+    )
+
+
 def test_public_app_host_redirects_spa_to_auth0_login(auth0_env):
     client = _client(auth0_env)
 
-    resp = client.get("/", follow_redirects=False)
+    resp = client.get("/sessions", follow_redirects=False)
 
     assert resp.status_code == 302
     assert resp.headers["location"].startswith("/auth/login?")
@@ -115,23 +128,26 @@ def test_auth0_callback_sets_dashboard_session_for_fourmanifold_email(
     login = client.get("/auth/login?return_to=/chat", follow_redirects=False)
     state = _state_from_login(login)
 
-    async def fake_exchange(cfg, *, code, redirect_uri):
-        assert code == "ok"
-        assert redirect_uri == f"https://{HOST}/auth/callback"
-        return {"id_token": "id-token"}
+    user = {
+        "sub": "auth0|1",
+        "email": "operator@fourmanifold.com",
+        "email_verified": True,
+        "name": "Operator",
+    }
 
-    def fake_verify(cfg, *, id_token, expected_nonce):
-        assert id_token == "id-token"
-        assert expected_nonce
+    async def fake_complete(cfg, *, code, state, state_token, nonce_token, redirect_uri):
+        assert code == "ok"
+        assert state
+        assert state_token
+        assert nonce_token
+        assert redirect_uri == f"https://{HOST}/auth/callback"
         return {
-            "sub": "auth0|1",
-            "email": "operator@fourmanifold.com",
-            "email_verified": True,
-            "name": "Operator",
+            "user": user,
+            "session_token": _signed_session(user),
+            "return_to": "/chat",
         }
 
-    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
-    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+    monkeypatch.setattr(auth0_env, "_auth0_complete_callback", fake_complete)
 
     resp = client.get(
         f"/auth/callback?code=ok&state={urllib.parse.quote(state)}",
@@ -151,19 +167,20 @@ def test_auth0_me_reports_current_dashboard_user(auth0_env, monkeypatch):
     login = client.get("/auth/login?return_to=/chat", follow_redirects=False)
     state = _state_from_login(login)
 
-    async def fake_exchange(cfg, *, code, redirect_uri):
-        return {"id_token": "id-token"}
-
-    def fake_verify(cfg, *, id_token, expected_nonce):
-        return {
+    async def fake_complete(cfg, *, code, state, state_token, nonce_token, redirect_uri):
+        user = {
             "sub": "auth0|me",
             "email": "operator@fourmanifold.com",
             "email_verified": True,
             "name": "Operator Me",
         }
+        return {
+            "user": user,
+            "session_token": _signed_session(user),
+            "return_to": "/chat",
+        }
 
-    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
-    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+    monkeypatch.setattr(auth0_env, "_auth0_complete_callback", fake_complete)
 
     resp = client.get(f"/auth/callback?code=ok&state={state}", follow_redirects=False)
 
@@ -186,19 +203,20 @@ def test_auth0_logout_clears_dashboard_session(auth0_env, monkeypatch):
     login = client.get("/auth/login?return_to=/chat", follow_redirects=False)
     state = _state_from_login(login)
 
-    async def fake_exchange(cfg, *, code, redirect_uri):
-        return {"id_token": "id-token"}
-
-    def fake_verify(cfg, *, id_token, expected_nonce):
-        return {
+    async def fake_complete(cfg, *, code, state, state_token, nonce_token, redirect_uri):
+        user = {
             "sub": "auth0|logout",
             "email": "operator@fourmanifold.com",
             "email_verified": True,
             "name": "Operator Logout",
         }
+        return {
+            "user": user,
+            "session_token": _signed_session(user),
+            "return_to": "/chat",
+        }
 
-    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
-    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+    monkeypatch.setattr(auth0_env, "_auth0_complete_callback", fake_complete)
 
     resp = client.get(f"/auth/callback?code=ok&state={state}", follow_redirects=False)
     assert resp.status_code == 302
@@ -216,18 +234,10 @@ def test_auth0_callback_rejects_non_fourmanifold_email(auth0_env, monkeypatch):
     login = client.get("/auth/login", follow_redirects=False)
     state = _state_from_login(login)
 
-    async def fake_exchange(cfg, *, code, redirect_uri):
-        return {"id_token": "id-token"}
+    async def fake_complete(cfg, *, code, state, state_token, nonce_token, redirect_uri):
+        raise auth0_env.Auth0ConfigError("someone@example.com is not allowed for this dashboard")
 
-    def fake_verify(cfg, *, id_token, expected_nonce):
-        return {
-            "sub": "auth0|2",
-            "email": "someone@example.com",
-            "email_verified": True,
-        }
-
-    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
-    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+    monkeypatch.setattr(auth0_env, "_auth0_complete_callback", fake_complete)
 
     resp = client.get(f"/auth/callback?code=ok&state={state}")
 
@@ -240,18 +250,10 @@ def test_auth0_callback_rejects_unverified_email(auth0_env, monkeypatch):
     login = client.get("/auth/login", follow_redirects=False)
     state = _state_from_login(login)
 
-    async def fake_exchange(cfg, *, code, redirect_uri):
-        return {"id_token": "id-token"}
+    async def fake_complete(cfg, *, code, state, state_token, nonce_token, redirect_uri):
+        raise auth0_env.Auth0ConfigError("Auth0 email address is not verified")
 
-    def fake_verify(cfg, *, id_token, expected_nonce):
-        return {
-            "sub": "auth0|3",
-            "email": "operator@fourmanifold.com",
-            "email_verified": False,
-        }
-
-    monkeypatch.setattr(auth0_env, "_auth0_exchange_code", fake_exchange)
-    monkeypatch.setattr(auth0_env, "_auth0_verify_id_token", fake_verify)
+    monkeypatch.setattr(auth0_env, "_auth0_complete_callback", fake_complete)
 
     resp = client.get(f"/auth/callback?code=ok&state={state}")
 
@@ -263,8 +265,6 @@ def test_auth0_allowed_identities_label_reports_email_allowlist(auth0_env):
     cfg = auth0_env.Auth0DashboardConfig(
         domain="https://fourmanifold.auth0.com",
         client_id="client-id",
-        client_secret="client-secret",
-        secret="cookie-signing-secret",
         base_url=f"https://{HOST}",
         allowed_domains=(),
         allowed_emails=("jmzworkhub@gmail.com",),
@@ -278,8 +278,6 @@ def test_auth0_allowed_identities_label_reports_email_and_domain_allowlists(auth
     cfg = auth0_env.Auth0DashboardConfig(
         domain="https://fourmanifold.auth0.com",
         client_id="client-id",
-        client_secret="client-secret",
-        secret="cookie-signing-secret",
         base_url=f"https://{HOST}",
         allowed_domains=("fourmanifold.com",),
         allowed_emails=("jmzworkhub@gmail.com",),

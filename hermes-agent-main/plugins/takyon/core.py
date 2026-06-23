@@ -1216,7 +1216,7 @@ def provider_key_denylist() -> frozenset[str]:
     Built from the SINGLE canonical alias source ``_API_ENV_ALIASES`` (minus the infra providers in
     ``_INFRA_API_ALIAS_PROVIDERS``), unioned with the extra deployed-unit spellings, so adding a new
     paid provider to the alias map automatically extends the denylist with no second list to maintain.
-    Infra secrets (DATABASE_URL/POSTGRES_*, STRIPE_*, AUTH0_*, SUPABASE_*, VERCEL_*, CLOUDFLARE_*,
+    Infra secrets (DATABASE_URL/POSTGRES_*, STRIPE_*, Auth0 public config, SUPABASE_*, VERCEL_*, CLOUDFLARE_*,
     POSTMARK*, UMAMI_*, search-console, …) are deliberately NOT denied — the runtime needs them."""
     denied: set[str] = set(_EXTRA_PROVIDER_KEY_ALIASES)
     for provider, aliases in _API_ENV_ALIASES.items():
@@ -1262,10 +1262,12 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
 # longer verifies product JWTs with the symmetric secret, closing the alg-confusion takeover.
 # STRIPE_WEBHOOK_SECRET is also now FIXED — dropped above; the sub-user app webhook is verified
 # server-side on the safebox like the flow-A billing webhook, so the runtime never holds the signing
-# secret and forged app entitlement/subscription events are closed.) Remaining:
-#   * `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session signing — operator
-#     impersonation), the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge
-#     provisioning). Same end state: move their use server-side.
+# secret and forged app entitlement/subscription events are closed. AUTH0_CLIENT_SECRET/AUTH0_SECRET
+# are likewise FIXED: the dashboard runtime asks the safebox to mint login state, exchange+verify the
+# Auth0 callback, and verify session cookies, so it never fetches the OAuth client secret or session
+# signing secret.) Remaining:
+#   * the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge provisioning).
+#     Same end state: move their use server-side.
 _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
     {
         # DB
@@ -1288,8 +1290,9 @@ _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
         "STRIPE_SECRET_KEY",
         # Transactional email
         "POSTMARK_SERVER_TOKEN", "POSTMARK_FROM_EMAIL",
-        # Auth0 (dashboard server-side OAuth + session signing — residual)
-        "AUTH0_CLIENT_SECRET", "AUTH0_SECRET", "AUTH0_DOMAIN", "AUTH0_CLIENT_ID",
+        # Auth0 public browser/OIDC config only. AUTH0_CLIENT_SECRET and AUTH0_SECRET are intentionally
+        # NOT here: the safebox performs the OAuth code exchange and signs/verifies dashboard sessions.
+        "AUTH0_DOMAIN", "AUTH0_CLIENT_ID",
         # Deploy / edge
         "CLOUDFLARE_API_TOKEN", "VERCEL_TOKEN",
         # Search console, analytics, object-store bucket

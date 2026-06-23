@@ -186,14 +186,10 @@ def test_request_runtime_database_url_is_cached_per_request(monkeypatch):
     assert seen == ["resolved"]
 
 
-def test_auth0_config_caches_remote_secret_reads(monkeypatch):
+def test_auth0_config_caches_public_config_without_secret_reads(monkeypatch):
     import takyon_cli.web_server as web_server
 
     calls: list[str] = []
-    secrets = {
-        "AUTH0_CLIENT_SECRET": "client-secret",
-        "AUTH0_SECRET": "cookie-secret",
-    }
 
     web_server._clear_auth0_config_cache()
     monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
@@ -203,7 +199,7 @@ def test_auth0_config_caches_remote_secret_reads(monkeypatch):
     monkeypatch.setattr(
         web_server.takyon_safebox,
         "read_env_backed_value",
-        lambda key: calls.append(str(key)) or secrets[str(key)],
+        lambda key: calls.append(str(key)) or "",
     )
 
     first = web_server._auth0_config()
@@ -211,9 +207,11 @@ def test_auth0_config_caches_remote_secret_reads(monkeypatch):
 
     assert first is not None
     assert second is not None
-    assert first.client_secret == "client-secret"
-    assert second.secret == "cookie-secret"
-    assert calls == ["AUTH0_CLIENT_SECRET", "AUTH0_SECRET"]
+    assert first.domain == "https://example.us.auth0.com"
+    assert second.client_id == "client-id"
+    assert not hasattr(first, "client_secret")
+    assert not hasattr(second, "secret")
+    assert calls == []
     web_server._clear_auth0_config_cache()
 
 
@@ -275,9 +273,10 @@ def test_dashboard_embedded_worker_requires_explicit_opt_in(monkeypatch):
     assert started == ["init:takyon-dashboard-worker:1", "start"]
 
 
-def test_auth0_config_reads_secrets_through_safebox(monkeypatch):
+def test_auth0_config_reads_public_auth0_config_only(monkeypatch):
     import takyon_cli.web_server as web_server
 
+    web_server._clear_auth0_config_cache()
     monkeypatch.setattr(
         web_server,
         "_env_value",
@@ -289,10 +288,7 @@ def test_auth0_config_reads_secrets_through_safebox(monkeypatch):
     monkeypatch.setattr(
         web_server.takyon_safebox,
         "read_env_backed_value",
-        lambda key: {
-            "AUTH0_CLIENT_SECRET": "client-secret",
-            "AUTH0_SECRET": "cookie-secret",
-        }.get(key, ""),
+        lambda key: (_ for _ in ()).throw(AssertionError(f"unexpected secret read: {key}")),
     )
 
     cfg = web_server._auth0_config()
@@ -300,11 +296,12 @@ def test_auth0_config_reads_secrets_through_safebox(monkeypatch):
     assert cfg is not None
     assert cfg.domain == "https://fourmanifold.auth0.com"
     assert cfg.client_id == "client-id"
-    assert cfg.client_secret == "client-secret"
-    assert cfg.secret == "cookie-secret"
+    assert not hasattr(cfg, "client_secret")
+    assert not hasattr(cfg, "secret")
+    web_server._clear_auth0_config_cache()
 
 
-def test_auth0_config_returns_none_when_safebox_unavailable_and_not_forced(monkeypatch):
+def test_auth0_config_does_not_require_safebox_authority_when_not_forced(monkeypatch):
     import takyon_cli.web_server as web_server
 
     web_server._clear_auth0_config_cache()
@@ -320,11 +317,11 @@ def test_auth0_config_returns_none_when_safebox_unavailable_and_not_forced(monke
         ),
     )
 
-    assert web_server._auth0_config() is None
+    assert web_server._auth0_config() is not None
     web_server._clear_auth0_config_cache()
 
 
-def test_auth0_config_raises_when_safebox_unavailable_and_forced(monkeypatch):
+def test_auth0_config_does_not_require_safebox_authority_when_forced(monkeypatch):
     import takyon_cli.web_server as web_server
 
     web_server._clear_auth0_config_cache()
@@ -340,8 +337,8 @@ def test_auth0_config_raises_when_safebox_unavailable_and_forced(monkeypatch):
         ),
     )
 
-    with pytest.raises(web_server.Auth0ConfigError, match="Safebox authority is unavailable"):
-        web_server._auth0_config()
+    cfg = web_server._auth0_config()
+    assert cfg is not None and cfg.force is True
     web_server._clear_auth0_config_cache()
 
 
@@ -2205,6 +2202,7 @@ def test_auth0_required_for_skill_lab_host_when_public_dashboard_auth_is_enabled
     monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
     monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
     monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "fourmanifold.com")
     monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
 
     assert web_server._auth0_required_for_host({"host": "app.fourmanifold.com"}) is True
@@ -2221,14 +2219,12 @@ def test_auth0_login_uses_request_host_for_skill_lab_callback(monkeypatch):
     monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
     monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
     monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "fourmanifold.com")
     monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
     monkeypatch.setattr(
         web_server.takyon_safebox,
-        "read_env_backed_value",
-        lambda key: {
-            "AUTH0_CLIENT_SECRET": "client-secret",
-            "AUTH0_SECRET": "cookie-secret",
-        }.get(str(key), ""),
+        "auth0_login_state",
+        lambda **_kwargs: {"state_token": "state-token", "nonce_token": "nonce-token"},
     )
 
     client = TestClient(web_server.app)
@@ -2255,15 +2251,8 @@ def test_auth0_logout_uses_request_host_for_skill_lab_return_to(monkeypatch):
     monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
     monkeypatch.setenv("AUTH0_CLIENT_ID", "client-id")
     monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "fourmanifold.com")
     monkeypatch.delenv("TAKYON_DASHBOARD_AUTH0", raising=False)
-    monkeypatch.setattr(
-        web_server.takyon_safebox,
-        "read_env_backed_value",
-        lambda key: {
-            "AUTH0_CLIENT_SECRET": "client-secret",
-            "AUTH0_SECRET": "cookie-secret",
-        }.get(str(key), ""),
-    )
 
     client = TestClient(web_server.app)
     response = client.get(

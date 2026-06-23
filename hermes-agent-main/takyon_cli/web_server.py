@@ -11,7 +11,6 @@ Usage:
 
 import asyncio
 import base64
-import hashlib
 import html
 import hmac
 import importlib.util
@@ -637,7 +636,6 @@ _AUTH0_STATE_COOKIE = "takyon_auth0_state"
 _AUTH0_NONCE_COOKIE = "takyon_auth0_nonce"
 _AUTH0_COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60
 _AUTH0_STATE_MAX_AGE_SECONDS = 10 * 60
-_AUTH0_JWKS_CLIENTS: dict[str, Any] = {}
 _AUTH0_CONFIG_CACHE_MISSING = object()
 _AUTH0_CONFIG_CACHE_KEY: tuple[str, ...] | None = None
 _AUTH0_CONFIG_CACHE_VALUE: object = _AUTH0_CONFIG_CACHE_MISSING
@@ -653,8 +651,6 @@ class Auth0DashboardConfig:
 
     domain: str
     client_id: str
-    client_secret: str
-    secret: str
     base_url: str
     allowed_domains: tuple[str, ...]
     allowed_emails: tuple[str, ...]
@@ -793,25 +789,11 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
 
     domain = _normalise_auth0_domain(_env_value("AUTH0_DOMAIN"))
     client_id = _env_value("AUTH0_CLIENT_ID")
-    try:
-        client_secret = takyon_safebox.read_env_backed_value("AUTH0_CLIENT_SECRET")
-        secret = takyon_safebox.read_env_backed_value("AUTH0_SECRET")
-    except takyon_safebox.SafeboxAuthorityUnavailable as exc:
-        if force is True:
-            raise Auth0ConfigError(
-                "Auth0 dashboard auth is enabled but Safebox authority is unavailable: "
-                f"{exc}"
-            ) from exc
-        _AUTH0_CONFIG_CACHE_KEY = cache_key
-        _AUTH0_CONFIG_CACHE_VALUE = None
-        return None
     base_url = _default_public_base_url()
 
     required = {
         "AUTH0_DOMAIN": domain,
         "AUTH0_CLIENT_ID": client_id,
-        "AUTH0_CLIENT_SECRET": client_secret,
-        "AUTH0_SECRET": secret,
     }
     missing = [key for key, value in required.items() if not value]
     if missing:
@@ -827,8 +809,6 @@ def _auth0_config() -> Optional[Auth0DashboardConfig]:
     cfg = Auth0DashboardConfig(
         domain=domain,
         client_id=client_id,
-        client_secret=client_secret,
-        secret=secret,
         base_url=base_url,
         allowed_domains=_csv_env(
             "TAKYON_DASHBOARD_ALLOWED_EMAIL_DOMAINS",
@@ -895,37 +875,6 @@ def _auth0_required_for_host(headers: Any) -> bool:
     if force is True:
         return True
     return _request_host(headers) in _configured_public_hosts()
-
-
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(raw: str) -> bytes:
-    padding = "=" * (-len(raw) % 4)
-    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
-
-
-def _sign_payload(secret: str, payload: dict[str, Any]) -> str:
-    body = _b64url_encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    )
-    sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
-    return f"{body}.{_b64url_encode(sig)}"
-
-
-def _unsign_payload(secret: str, token: str) -> Optional[dict[str, Any]]:
-    try:
-        body, sig = token.split(".", 1)
-        expected = hmac.new(
-            secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256
-        ).digest()
-        if not hmac.compare_digest(_b64url_decode(sig), expected):
-            return None
-        payload = json.loads(_b64url_decode(body).decode("utf-8"))
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        return None
 
 
 def _cookie_value(cookie_header: str, name: str) -> str:
@@ -1034,16 +983,12 @@ def _session_from_cookie_header(
     token = _cookie_value(cookie_header, _AUTH0_SESSION_COOKIE)
     if not token:
         return None
-    payload = _unsign_payload(cfg.secret, token)
-    if not payload:
-        return None
     try:
-        if int(payload.get("exp") or 0) < int(time.time()):
-            return None
-    except (TypeError, ValueError):
+        user = takyon_safebox.auth0_verify_session(session_token=token)
+    except Exception as exc:  # noqa: BLE001 - auth must fail closed if Safebox is unavailable
+        _log.warning("Auth0 dashboard session verification failed: %s", exc)
         return None
-    email = str(payload.get("email") or "")
-    return payload if _email_allowed(email, cfg) else None
+    return user if isinstance(user, dict) else None
 
 
 def _auth0_public_path(path: str) -> bool:
@@ -1066,81 +1011,31 @@ def _auth0_public_path(path: str) -> bool:
     ))
 
 
-async def _auth0_exchange_code(
+async def _auth0_complete_callback(
     cfg: Auth0DashboardConfig,
     *,
     code: str,
+    state: str,
+    state_token: str,
+    nonce_token: str,
     redirect_uri: str,
 ) -> dict[str, Any]:
-    import httpx
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-        resp = await client.post(
-            f"{cfg.domain}/oauth/token",
-            json={
-                "grant_type": "authorization_code",
-                "client_id": cfg.client_id,
-                "client_secret": cfg.client_secret,
-                "code": code,
-                "redirect_uri": redirect_uri,
-            },
-            headers={"Accept": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    if not isinstance(data, dict) or not data.get("id_token"):
-        raise Auth0ConfigError("Auth0 token response did not include an id_token")
-    return data
-
-
-def _auth0_verify_id_token(
-    cfg: Auth0DashboardConfig,
-    *,
-    id_token: str,
-    expected_nonce: str,
-) -> dict[str, Any]:
     try:
-        import jwt
-        from jwt import PyJWKClient
-    except ImportError as exc:  # pragma: no cover - dependency is pinned.
-        raise Auth0ConfigError("PyJWT[crypto] is required for Auth0 validation") from exc
-
-    issuer = f"{cfg.domain}/"
-    jwks_client = _AUTH0_JWKS_CLIENTS.get(cfg.domain)
-    if jwks_client is None:
-        jwks_client = PyJWKClient(f"{cfg.domain}/.well-known/jwks.json")
-        _AUTH0_JWKS_CLIENTS[cfg.domain] = jwks_client
-    signing_key = jwks_client.get_signing_key_from_jwt(id_token)
-    claims = jwt.decode(
-        id_token,
-        signing_key.key,
-        algorithms=["RS256"],
-        audience=cfg.client_id,
-        issuer=issuer,
-        options={"require": ["exp", "iat", "iss", "aud", "sub"]},
-    )
-    if claims.get("nonce") != expected_nonce:
-        raise Auth0ConfigError("Auth0 nonce mismatch")
-    return claims
-
-
-def _auth0_authorize_claims(
-    cfg: Auth0DashboardConfig,
-    claims: dict[str, Any],
-) -> dict[str, Any]:
-    email = str(claims.get("email") or "").strip().lower()
-    if not email:
-        raise Auth0ConfigError("Auth0 profile did not include an email address")
-    if claims.get("email_verified") is not True:
-        raise Auth0ConfigError("Auth0 email address is not verified")
-    if not _email_allowed(email, cfg):
-        raise Auth0ConfigError(f"{email} is not allowed for this dashboard")
-    return {
-        "sub": str(claims.get("sub") or ""),
-        "email": email,
-        "name": str(claims.get("name") or email),
-        "email_verified": True,
-    }
+        return await asyncio.to_thread(
+            takyon_safebox.auth0_exchange_callback,
+            code=code,
+            state=state,
+            state_token=state_token,
+            nonce_token=nonce_token,
+            redirect_uri=redirect_uri,
+            state_max_age_seconds=_AUTH0_STATE_MAX_AGE_SECONDS,
+            session_max_age_seconds=_AUTH0_COOKIE_MAX_AGE_SECONDS,
+        )
+    except takyon_safebox.RemoteSafeboxError as exc:
+        detail = exc.payload.get("detail") if isinstance(exc.payload, dict) else None
+        raise Auth0ConfigError(str(detail or "Safebox Auth0 callback failed")) from exc
+    except takyon_safebox.SafeboxAuthorityUnavailable as exc:
+        raise Auth0ConfigError("Safebox authority is unavailable for Auth0 callback") from exc
 
 
 def _auth0_error_response(message: str, status_code: int = 403) -> Response:
@@ -1479,14 +1374,22 @@ async def auth0_login(request: Request):
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     return_to = _same_origin_path(request.query_params.get("return_to") or "/")
-    state_payload = _sign_payload(
-        cfg.secret,
-        {
-            "state": state,
-            "return_to": return_to,
-            "iat": int(time.time()),
-        },
-    )
+    try:
+        login_state = await asyncio.to_thread(
+            takyon_safebox.auth0_login_state,
+            state=state,
+            nonce=nonce,
+            return_to=return_to,
+            issued_at=int(time.time()),
+        )
+    except Exception as exc:  # noqa: BLE001 - a missing Safebox secret must fail closed
+        _log.warning("Auth0 dashboard login-state mint failed: %s", exc)
+        return _auth0_error_response("Auth0 login is unavailable", 503)
+    state_token = str(login_state.get("state_token") or "")
+    nonce_token = str(login_state.get("nonce_token") or "")
+    if not state_token or not nonce_token:
+        _log.warning("Auth0 dashboard login-state mint returned incomplete tokens")
+        return _auth0_error_response("Auth0 login is unavailable", 503)
     redirect_uri = _auth0_redirect_uri(cfg, request)
     params = {
         "response_type": "code",
@@ -1503,7 +1406,7 @@ async def auth0_login(request: Request):
         cfg,
         request,
         key=_AUTH0_STATE_COOKIE,
-        value=state_payload,
+        value=state_token,
         max_age=_AUTH0_STATE_MAX_AGE_SECONDS,
     )
     _auth0_cookie_response(
@@ -1511,7 +1414,7 @@ async def auth0_login(request: Request):
         cfg,
         request,
         key=_AUTH0_NONCE_COOKIE,
-        value=_sign_payload(cfg.secret, {"nonce": nonce, "iat": int(time.time())}),
+        value=nonce_token,
         max_age=_AUTH0_STATE_MAX_AGE_SECONDS,
     )
     return response
@@ -1955,39 +1858,27 @@ async def auth0_callback(request: Request):
     if not code or not state:
         return _auth0_error_response("Missing Auth0 callback code or state", 400)
 
-    state_payload = _unsign_payload(
-        cfg.secret,
-        _cookie_value(request.headers.get("cookie", ""), _AUTH0_STATE_COOKIE),
-    )
-    nonce_payload = _unsign_payload(
-        cfg.secret,
-        _cookie_value(request.headers.get("cookie", ""), _AUTH0_NONCE_COOKIE),
-    )
-    now = int(time.time())
-    if (
-        not state_payload
-        or state_payload.get("state") != state
-        or int(state_payload.get("iat") or 0) < now - _AUTH0_STATE_MAX_AGE_SECONDS
-    ):
-        return _auth0_error_response("Auth0 state mismatch", 400)
-    if (
-        not nonce_payload
-        or int(nonce_payload.get("iat") or 0) < now - _AUTH0_STATE_MAX_AGE_SECONDS
-    ):
-        return _auth0_error_response("Auth0 nonce expired", 400)
+    cookie_header = request.headers.get("cookie", "")
+    state_token = _cookie_value(cookie_header, _AUTH0_STATE_COOKIE)
+    nonce_token = _cookie_value(cookie_header, _AUTH0_NONCE_COOKIE)
+    if not state_token or not nonce_token:
+        return _auth0_error_response("Auth0 state cookie missing", 400)
 
     try:
-        token_data = await _auth0_exchange_code(
+        auth0_result = await _auth0_complete_callback(
             cfg,
             code=code,
+            state=state,
+            state_token=state_token,
+            nonce_token=nonce_token,
             redirect_uri=_auth0_redirect_uri(cfg, request),
         )
-        claims = _auth0_verify_id_token(
-            cfg,
-            id_token=str(token_data["id_token"]),
-            expected_nonce=str(nonce_payload.get("nonce") or ""),
-        )
-        user = _auth0_authorize_claims(cfg, claims)
+        user = auth0_result.get("user") if isinstance(auth0_result, dict) else None
+        if not isinstance(user, dict):
+            raise Auth0ConfigError("Auth0 callback did not return a verified user")
+        session_token = str(auth0_result.get("session_token") or "")
+        if not session_token:
+            raise Auth0ConfigError("Auth0 callback did not return a session token")
     except Exception as exc:
         _log.warning("Auth0 dashboard login rejected: %s", exc)
         return _auth0_error_response(str(exc), 403)
@@ -1996,10 +1887,8 @@ async def auth0_callback(request: Request):
     # Postgres; never raises (the dashboard cookie tier is independent of the control-plane boundary).
     _provision_dashboard_user_if_postgres(user)
 
-    expires_at = now + _AUTH0_COOKIE_MAX_AGE_SECONDS
-    session_token = _sign_payload(cfg.secret, {**user, "iat": now, "exp": expires_at})
     response = RedirectResponse(
-        _same_origin_path(str(state_payload.get("return_to") or "/")),
+        _same_origin_path(str(auth0_result.get("return_to") or "/")),
         status_code=302,
     )
     _auth0_cookie_response(
