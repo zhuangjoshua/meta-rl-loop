@@ -102,6 +102,52 @@ def _sanitize_upstream_error(status_code: int, body: str) -> HTTPException:
     )
 
 
+def _presented_credential(authorization: str | None, x_api_key: str | None) -> str:
+    """The credential a caller presents. The Anthropic SDK sends it as the ``x-api-key`` header (so a
+    caller can set ANTHROPIC_BASE_URL=<safebox> + ANTHROPIC_API_KEY=<safebox token / capability> and the
+    stock SDK just works); other callers may use ``Authorization: Bearer``. x-api-key wins if present."""
+    xk = str(x_api_key or "").strip()
+    if xk:
+        return xk
+    auth = str(authorization or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return auth
+
+
+def _authorize_anthropic_proxy(authorization: str | None, x_api_key: str | None) -> None:
+    """Authorize an Anthropic proxy call. Accepts EITHER (a) the shared internal token
+    ``TAKYON_SAFEBOX_TOKEN`` — the trusted operator/platform plane (CEO agent, platform tools) — OR
+    (b) a valid signed, unexpired CAPABILITY token with the anthropic audience — the scoped, cost-bound
+    per-run worker path. Fails closed 401 otherwise. The credential may arrive via x-api-key (SDK) or
+    Authorization."""
+    import hmac as _hmac
+    import os as _os
+    import time as _time
+
+    from .safebox_app import _ANTHROPIC_AUDIENCE, _SAFEBOX_TOKEN_ENV, _allow_tokenless, _cap_signing_key
+    from .safebox_capability import CapabilityError, verify_capability
+
+    cred = _presented_credential(authorization, x_api_key)
+    expected = str(_os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
+    if expected:
+        if cred and _hmac.compare_digest(cred.encode(), expected.encode()):
+            return  # trusted internal token (operator/platform plane)
+    elif _allow_tokenless():
+        return  # explicit local-test-rig opt-out (never set on a deployed host)
+    # Not the internal token — accept a valid scoped capability (the worker's per-run token).
+    signing_key = _cap_signing_key()
+    if signing_key and cred:
+        try:
+            verify_capability(
+                cred, signing_key=signing_key, expected_audience=_ANTHROPIC_AUDIENCE, now=int(_time.time())
+            )
+            return
+        except CapabilityError:
+            pass
+    raise HTTPException(status_code=401, detail="unauthorized")
+
+
 def register_provider_proxy_routes(app: FastAPI) -> None:
     """Register the operator/platform provider-proxy routes DIRECTLY on the safebox app.
 
@@ -182,24 +228,28 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
             data = {}
         return JSONResponse(content=data, status_code=resp.status_code)
 
-    def _anthropic_messages(body: Any, authorization: str | None):
-        _require_internal_token(authorization)
+    def _anthropic_messages(body: Any, authorization: str | None, x_api_key: str | None):
+        _authorize_anthropic_proxy(authorization, x_api_key)
         payload = _as_json_object(body)
         return _anthropic_passthrough(payload)
 
     @router.post("/v1/proxy/anthropic/messages")
     def proxy_anthropic_messages(
-        body: Any = Body(default=None), authorization: str | None = Header(default=None)
+        body: Any = Body(default=None),
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="x-api-key"),
     ):
-        return _anthropic_messages(body, authorization)
+        return _anthropic_messages(body, authorization, x_api_key)
 
     @router.post("/v1/messages")
     def proxy_anthropic_messages_sdk(
-        body: Any = Body(default=None), authorization: str | None = Header(default=None)
+        body: Any = Body(default=None),
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="x-api-key"),
     ):
         # ALSO mounted at the stock Anthropic SDK path so a caller can set ANTHROPIC_BASE_URL to the
         # safebox root and have the SDK work unmodified.
-        return _anthropic_messages(body, authorization)
+        return _anthropic_messages(body, authorization, x_api_key)
 
     # ── Tavily search / extract passthrough ──────────────────────────────────────────────────────
     @router.post("/v1/proxy/tavily/{operation}")
