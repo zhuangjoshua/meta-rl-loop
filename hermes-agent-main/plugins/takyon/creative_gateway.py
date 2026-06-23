@@ -546,6 +546,19 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
         image.save(buf, format="PNG")
         return buf.getvalue()
 
+    def _raw_image_to_png_bytes(raw: bytes) -> bytes:
+        if not raw:
+            return raw
+        try:
+            import io
+
+            from PIL import Image
+
+            with Image.open(io.BytesIO(raw)) as image:
+                return _image_to_png_bytes(image.convert("RGBA"))
+        except Exception:
+            return raw
+
     def _inline_data_bytes(part: Any) -> bytes:
         inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
         data = getattr(inline, "data", None) if inline is not None else None
@@ -580,7 +593,7 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
                 return _key_white_background_to_alpha(_image_to_png_bytes(image))
         raw = _inline_data_bytes(part)
         if raw:
-            return _key_white_background_to_alpha(raw)
+            return _key_white_background_to_alpha(_raw_image_to_png_bytes(raw))
     raise RuntimeError("Gemini image generation returned no image data")
 
 

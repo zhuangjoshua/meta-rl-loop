@@ -18,6 +18,7 @@ Contract:
 """
 
 import base64
+import io
 import sys
 import types
 
@@ -189,3 +190,40 @@ def test_gemini_logo_generation_prefers_as_image_over_raw_inline(monkeypatch):
 
     assert out == png
     assert captured["saved_format"] == "PNG"
+
+
+def test_gemini_logo_generation_normalizes_inline_jpeg_to_png(monkeypatch):
+    """Some Gemini responses expose only raw inline bytes. Normalize those bytes to PNG before the
+    Safebox route labels the response as PNG."""
+    Image = pytest.importorskip("PIL.Image")
+    gw = _gw()
+    source = Image.new("RGB", (1, 1), (255, 255, 255))
+    jpeg_buf = io.BytesIO()
+    source.save(jpeg_buf, format="JPEG")
+
+    class _FakeInline:
+        data = base64.b64encode(jpeg_buf.getvalue()).decode("ascii")
+
+    class _FakePart:
+        inline_data = _FakeInline()
+
+    class _FakeResponse:
+        parts = [_FakePart()]
+
+    class _FakeModels:
+        def generate_content(self, **kwargs):
+            return _FakeResponse()
+
+    class _FakeClient:
+        def __init__(self, *, api_key):
+            self.models = _FakeModels()
+
+    fake_genai = types.SimpleNamespace(Client=_FakeClient)
+    fake_google = types.ModuleType("google")
+    fake_google.genai = fake_genai
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setattr(gw, "_key_white_background_to_alpha", lambda data: data)
+
+    out = gw._gemini_generate_logo_png(api_key="gem-key", prompt="draw a lunchbox")
+
+    assert out.startswith(b"\x89PNG\r\n\x1a\n")
