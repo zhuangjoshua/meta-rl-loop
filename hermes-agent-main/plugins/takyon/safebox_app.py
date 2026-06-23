@@ -1009,6 +1009,15 @@ def build_safebox_app() -> FastAPI:
             estimate_builder=_gemini_image_estimate,
         )
 
+    # ── Operator/platform provider proxy (internal-token only, platform-billed, key-free) ─────────
+    # The TRUSTED operator/platform counterpart to the metered /v1/providers/* business broker above:
+    # it resolves the real provider key LOCALLY and forwards, so operator/platform/worker code can call
+    # paid providers WITHOUT ever holding a raw key. Mounted from its own module to keep the broker and
+    # the proxy in separate, uniform surfaces.
+    from .safebox_provider_proxy import register_provider_proxy_routes
+
+    register_provider_proxy_routes(app)
+
     return app
 
 

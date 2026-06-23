@@ -282,6 +282,93 @@ def broker_provider_call(
     return _remote_json("POST", path, body, timeout=timeout)
 
 
+# ── Operator/platform provider proxy client ─────────────────────────────────────────────────────
+# Operator/platform/worker counterpart to ``broker_provider_call``: instead of the metered, capability
+# -gated business broker (/v1/providers/*), these helpers talk to the TRUSTED operator/platform PROXY
+# (/v1/proxy/*) so this plane can call paid providers WITHOUT ever holding a raw key. The proxy resolves
+# the real key LOCALLY on the safebox and forwards; the key never reaches this process. Fail-closed:
+# both helpers REQUIRE a configured remote safebox and never fall back to a raw key.
+_PROVIDER_PROXY_TIMEOUT_S = 180.0
+
+
+def provider_proxy_base_url() -> str:
+    """The safebox remote base URL for operator/platform provider-proxy use (e.g. as
+    ``ANTHROPIC_BASE_URL`` so the stock Anthropic SDK streams through ``/v1/messages``). Returns "" when
+    no remote safebox is configured — callers MUST treat "" as "proxy unavailable", never fall back to a
+    raw key/base URL."""
+    return _remote_base_url()
+
+
+def proxy_request(
+    provider: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    stream: bool = False,
+    timeout: float = _PROVIDER_PROXY_TIMEOUT_S,
+):
+    """Call the operator/platform provider PROXY at ``/v1/proxy/<provider>/<path>`` and return the
+    KEY-FREE result.
+
+    Non-streaming: POSTs JSON via the existing internal-token transport (``_remote_json``) and returns
+    the parsed JSON dict. Streaming (``stream=True``): yields raw response bytes (the verbatim SSE
+    stream) so a caller can re-emit the provider event stream.
+
+    The provider KEY never reaches this process: the safebox resolves it locally and forwards. Fails
+    closed (``RemoteSafeboxError`` / ``SafeboxAuthorityUnavailable``) — it NEVER falls back to a raw key.
+    """
+    prov = str(provider or "").strip().strip("/")
+    sub = str(path or "").strip().strip("/")
+    if not prov:
+        raise ValueError("provider is required")
+    route = f"/v1/proxy/{prov}" + (f"/{sub}" if sub else "")
+    base = _remote_base_url()
+    if not base:
+        # The proxy is remote-only and must never quietly fall back to a local raw key.
+        raise SafeboxAuthorityUnavailable(
+            f"provider proxy requires {_SAFEBOX_REMOTE_URL_ENV}; not set on this plane"
+        )
+    if not stream:
+        return _remote_json("POST", route, dict(payload or {}), timeout=timeout)
+    return _proxy_stream_bytes(base + route, dict(payload or {}), timeout=timeout)
+
+
+def _proxy_stream_bytes(url: str, payload: dict[str, Any], *, timeout: float):
+    """Yield the verbatim response bytes from a streaming proxy POST (e.g. the Anthropic SSE stream),
+    using the same internal-token bearer as ``_remote_json``. Fails closed as ``RemoteSafeboxError`` on
+    an HTTP error status or a transport failure — never falls back to a raw key."""
+    headers = _remote_headers(with_json=True)
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            parsed = {"detail": raw.strip() or exc.reason}
+        raise RemoteSafeboxError(
+            f"Safebox proxy stream POST {url} failed: {parsed}",
+            status_code=exc.code,
+            payload=parsed if isinstance(parsed, dict) else {"detail": raw.strip()},
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RemoteSafeboxError(
+            f"Safebox proxy stream POST {url} unreachable: {exc}",
+            status_code=504,
+            payload={"detail": "safebox_unreachable"},
+        ) from exc
+    try:
+        while True:
+            chunk = resp.read(8192)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        resp.close()
+
+
 def _remote_error_detail(exc: RemoteSafeboxError) -> dict[str, Any]:
     detail = exc.payload.get("detail")
     if isinstance(detail, dict):
