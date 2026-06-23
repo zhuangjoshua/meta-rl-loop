@@ -124,6 +124,11 @@ def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path,
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -171,6 +176,11 @@ def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, mo
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -224,6 +234,11 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
         lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
     )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -284,6 +299,11 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
         lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
     )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -355,6 +375,11 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
         lambda skills: (list(skills), "[Hermes guidance skill: inferred-product-site]" if skills else ""),
     )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -420,6 +445,11 @@ def test_claude_agent_task_settles_reported_actual_cost(tmp_path, monkeypatch):
     monkeypatch.setattr(takyon_core, "_finalize_operator_task_budget", fake_finalize)
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -469,6 +499,11 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_compose_worker_guidance_block", lambda skills: (list(skills), ""))
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -496,7 +531,7 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     store = _FakeStore(outer_home)
     store._workspace_root_override = outer_home
 
-    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int, business: str = "", operator_user_id: str = ""):
         captured["docker_workspace_path"] = workspace_path
         captured["docker_timeout_ms"] = timeout_ms
         return ["docker", "run"], payload, str(tmp_path), {}
@@ -537,6 +572,11 @@ def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -624,7 +664,7 @@ def test_claude_agent_task_blocks_docker_product_site_when_canonical_readback_di
 
     store._sync_business_workspace_remote = fake_sync
 
-    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int, business: str = "", operator_user_id: str = ""):
         return ["docker", "run"], payload, str(tmp_path), {}
 
     def fake_process(*, payload: dict[str, object], cwd: str, **kwargs):
@@ -657,6 +697,11 @@ def test_claude_agent_task_blocks_docker_product_site_when_canonical_readback_di
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -690,7 +735,7 @@ def test_claude_agent_task_refreshes_docker_product_site_from_canonical_readback
     store._workspace_root_override = outer_home
     refresh_calls: list[dict[str, object]] = []
 
-    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int):
+    def fake_docker_runner(*, payload: dict[str, object], workspace_path: Path, timeout_ms: int, business: str = "", operator_user_id: str = ""):
         return ["docker", "run"], payload, str(tmp_path), {}
 
     def fake_process(*, payload: dict[str, object], cwd: str, **kwargs):
@@ -744,6 +789,11 @@ def test_claude_agent_task_refreshes_docker_product_site_from_canonical_readback
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_in_docker", fake_docker_runner)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -792,6 +842,15 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
     )
     monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
     monkeypatch.setattr(takyon_core, "_runtime_env", lambda extra=None: {"ANTHROPIC_API_KEY": "test-key", **(extra or {})})
+    # The worker is key-free via the safebox proxy (the only path); stand up the proxy so the host-user
+    # / tmpfs / security-arg assembly under test runs.
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-host-user",
+    )
 
     run_cmd, payload, worker_cwd, worker_env = takyon_core._run_claude_agent_task_in_docker(
         payload={
@@ -801,8 +860,11 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
         },
         workspace_path=workspace,
         timeout_ms=30_000,
+        business="latexflow",
+        operator_user_id="user-123",
     )
 
+    joined = " ".join(run_cmd)
     assert "-i" in run_cmd
     assert "--user" in run_cmd
     user_index = run_cmd.index("--user")
@@ -816,9 +878,15 @@ def test_run_claude_agent_task_in_docker_uses_host_user_and_container_only_tmp_h
     assert "HOME=/tmp" in run_cmd
     assert "/etc/passwd,readonly" in " ".join(run_cmd)
     assert "/etc/group,readonly" in " ".join(run_cmd)
+    # No raw provider key from _runtime_env leaks into the container even though one was present.
+    assert "ANTHROPIC_API_KEY=test-key" not in joined
+    assert "ANTHROPIC_API_KEY=cap-host-user" in joined
 
 
-def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp_path, monkeypatch):
+def test_run_claude_agent_task_in_docker_authenticates_to_proxy_with_capability(tmp_path, monkeypatch):
+    """The worker reaches the safebox PROXY key-free: ANTHROPIC_BASE_URL is the safebox ROOT (the SDK
+    appends /v1/messages) and ANTHROPIC_API_KEY is the minted operator capability — no raw provider key
+    from _runtime_env / safebox ever enters the container."""
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     repo_root = tmp_path / "repo"
@@ -826,25 +894,30 @@ def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp
 
     from tools.environments import docker as docker_env
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
     monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: None)
     monkeypatch.setattr(docker_env, "_host_user_identity_mount_args", lambda user_spec: [])
     monkeypatch.setattr(docker_env, "_build_security_args", lambda run_as_host_user=False: [])
     monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
     monkeypatch.setattr(takyon_core, "_docker_claude_worker_binary_mounts", lambda **kwargs: ([], {}))
+    # _runtime_env would otherwise surface a raw provider secret; ensure even then it never reaches the
+    # container under the proxy path.
+    monkeypatch.setattr(
+        takyon_core,
+        "_runtime_env",
+        lambda extra=None: {"ANTHROPIC_API_KEY": "raw-should-not-leak", **(extra or {})},
+    )
 
-    def fake_first_env_backed_value(*names):
-        if names == ("ANTHROPIC_API_KEY",):
-            return "remote-api-key"
-        if names == ("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
-            return "remote-oauth-token"
-        return ""
-
-    monkeypatch.setattr(takyon_core.safebox, "first_env_backed_value", fake_first_env_backed_value)
-    monkeypatch.setattr(takyon_core.safebox, "read_env_backed_value", lambda key: "")
+    # Lockdown defaults ON because a remote safebox is configured (no explicit broker flag).
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER", raising=False)
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.116.0.2:8000")
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_URL", raising=False)
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", raising=False)
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-anthropic-msgs",
+    )
 
     run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
         payload={
@@ -854,11 +927,84 @@ def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp
         },
         workspace_path=workspace,
         timeout_ms=30_000,
+        business="latexflow",
+        operator_user_id="user-123",
     )
 
     joined = " ".join(run_cmd)
-    assert "ANTHROPIC_API_KEY=remote-api-key" in joined
-    assert "ANTHROPIC_TOKEN=remote-oauth-token" in joined
+    # Base URL is the safebox ROOT (no /v1/messages suffix — the SDK appends it).
+    assert "ANTHROPIC_BASE_URL=http://10.116.0.2:8000" in joined
+    assert "/v1/messages" not in joined
+    # Auth is the minted operator.session token, never a raw key.
+    assert "ANTHROPIC_API_KEY=cap-anthropic-msgs" in joined
+    assert "raw-should-not-leak" not in joined
+    assert "ANTHROPIC_TOKEN=" not in joined
+    # No confined network configured → default bridge (still key-free via host NAT).
+    assert "--network" not in run_cmd
+
+
+def test_claude_agent_operator_session_audience_accepted_by_proxy(monkeypatch):
+    """The worker mints an operator.session token (via /v1/operator/session-token); the proxy's operator
+    authorizer accepts that audience on every Anthropic call, so the minted token is a credential the
+    proxy authorizes."""
+    from plugins.takyon import safebox_app
+
+    # The session-token mint binds the operator.session audience, and the proxy authorizer always folds
+    # that audience into its accepted set (safebox_provider_proxy._authorize_operator_proxy).
+    assert safebox_app._OPERATOR_SESSION_AUDIENCE == "operator.session"
+    assert (
+        safebox_app._ACTION_AUDIENCE_DEFAULTS[safebox_app._OPERATOR_SESSION_AUDIENCE]
+        == safebox_app._OPERATOR_SESSION_AUDIENCE
+    )
+
+
+def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp_path, monkeypatch):
+    """Even when a raw provider key sits in the host env, the proxy path keeps it OUT of the container:
+    the SDK is keyed only by the minted operator.session token against the proxy root, and the raw-key
+    resolver no longer exists on the worker plane."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+
+    from tools.environments import docker as docker_env
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-api-key-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "raw-oauth-token-should-not-leak")
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(docker_env, "_resolve_host_user_spec", lambda: None)
+    monkeypatch.setattr(docker_env, "_host_user_identity_mount_args", lambda user_spec: [])
+    monkeypatch.setattr(docker_env, "_build_security_args", lambda run_as_host_user=False: [])
+    monkeypatch.setattr(takyon_core, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(takyon_core, "_docker_claude_worker_binary_mounts", lambda **kwargs: ([], {}))
+
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-safebox",
+    )
+
+    run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={
+            "business": "latexflow",
+            "workspace": "product/site",
+            "instruction": "Build the product shell.",
+        },
+        workspace_path=workspace,
+        timeout_ms=30_000,
+        business="latexflow",
+        operator_user_id="user-123",
+    )
+
+    joined = " ".join(run_cmd)
+    # The raw key sitting in the host env NEVER enters the container; only the session token does.
+    assert "raw-api-key-should-not-leak" not in joined
+    assert "raw-oauth-token-should-not-leak" not in joined
+    assert "ANTHROPIC_TOKEN=" not in joined
+    assert "ANTHROPIC_API_KEY=cap-safebox" in joined
+    assert "ANTHROPIC_BASE_URL=http://10.116.0.2:8000" in joined
 
 
 def _patch_docker_for_lockdown(tmp_path, monkeypatch):
@@ -889,7 +1035,9 @@ def test_run_claude_agent_task_in_docker_lockdown_drops_raw_key_and_confines_net
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "https://safebox.internal")
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", "takyon-safebox-only")
     monkeypatch.setattr(
-        takyon_core, "_mint_claude_agent_operator_capability", lambda: "cap-token-xyz"
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-token-xyz",
     )
 
     run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
@@ -900,6 +1048,8 @@ def test_run_claude_agent_task_in_docker_lockdown_drops_raw_key_and_confines_net
         },
         workspace_path=workspace,
         timeout_ms=30_000,
+        business="latexflow",
+        operator_user_id="user-123",
     )
 
     joined = " ".join(run_cmd)
@@ -934,6 +1084,8 @@ def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_broker_ur
             payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
             workspace_path=workspace,
             timeout_ms=30_000,
+            business="latexflow",
+            operator_user_id="user-123",
         )
 
 
@@ -945,28 +1097,10 @@ def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_token(tmp
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "https://safebox.internal")
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", "takyon-safebox-only")
-    monkeypatch.setattr(takyon_core, "_mint_claude_agent_operator_capability", lambda: "")
-
-    import pytest
-
-    with pytest.raises(takyon_core.TakyonError):
-        takyon_core._run_claude_agent_task_in_docker(
-            payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
-            workspace_path=workspace,
-            timeout_ms=30_000,
-        )
-
-
-def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_network(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    workspace.mkdir(parents=True)
-    _patch_docker_for_lockdown(tmp_path, monkeypatch)
-
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
-    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "https://safebox.internal")
-    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", raising=False)
     monkeypatch.setattr(
-        takyon_core, "_mint_claude_agent_operator_capability", lambda: "cap-token-xyz"
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "",
     )
 
     import pytest
@@ -976,29 +1110,196 @@ def test_run_claude_agent_task_in_docker_lockdown_fails_closed_without_network(t
             payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
             workspace_path=workspace,
             timeout_ms=30_000,
+            business="latexflow",
+            operator_user_id="user-123",
         )
 
 
-def test_run_claude_agent_task_in_docker_default_path_keeps_raw_key_and_no_broker(tmp_path, monkeypatch):
-    """Lockdown OFF (default): raw key injected, no broker base URL, no --network override —
-    the existing coding-worker path is unchanged so no regression."""
+def test_run_claude_agent_task_in_docker_keyless_without_network_uses_default_bridge(tmp_path, monkeypatch):
+    """A confined network is OPTIONAL hardening: with NO network configured the worker is STILL key-free
+    (proxy reachable via host NAT on the default bridge). Missing network must NOT fail closed."""
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     _patch_docker_for_lockdown(tmp_path, monkeypatch)
 
-    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-provider-key-should-not-leak")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", raising=False)
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-token-xyz",
+    )
 
     run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
         payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
         workspace_path=workspace,
         timeout_ms=30_000,
+        business="latexflow",
+        operator_user_id="user-123",
     )
 
     joined = " ".join(run_cmd)
-    assert "ANTHROPIC_API_KEY=raw-key" in joined
-    assert "ANTHROPIC_BASE_URL=" not in joined
+    # Still key-free against the proxy.
+    assert "raw-provider-key-should-not-leak" not in joined
+    assert "ANTHROPIC_BASE_URL=http://10.116.0.2:8000" in joined
+    assert "ANTHROPIC_API_KEY=cap-token-xyz" in joined
+    # No confined network → default bridge (no --network override).
     assert "--network" not in run_cmd
+
+
+def test_run_claude_agent_task_in_docker_defaults_to_proxy_when_remote_safebox_configured(tmp_path, monkeypatch):
+    """No explicit broker flag, but a remote safebox IS configured → lockdown defaults ON (key-free via
+    the proxy). The raw-key worker path is gone, so this is the ONLY way the worker runs on a deployed
+    plane."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER", raising=False)
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_URL", raising=False)
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_NETWORK", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-provider-key-should-not-leak")
+    # The broker URL DEFAULTS to the configured safebox remote URL (root), and lockdown DEFAULTS ON
+    # because a remote safebox is configured.
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "cap-default-on",
+    )
+
+    run_cmd, _payload, _worker_cwd, _worker_env = takyon_core._run_claude_agent_task_in_docker(
+        payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
+        workspace_path=workspace,
+        timeout_ms=30_000,
+        business="latexflow",
+        operator_user_id="user-123",
+    )
+
+    joined = " ".join(run_cmd)
+    assert "raw-provider-key-should-not-leak" not in joined
+    # Base URL resolved from the safebox remote URL (root, no /v1/messages suffix).
+    assert "ANTHROPIC_BASE_URL=http://10.116.0.2:8000" in joined
+    assert "ANTHROPIC_API_KEY=cap-default-on" in joined
+
+
+def test_run_claude_agent_task_in_docker_no_raw_key_path_when_lockdown_disabled(tmp_path, monkeypatch):
+    """The legacy raw-key path is DELETED: explicitly disabling the broker with no remote safebox does
+    NOT fall back to a raw key — it fails closed."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    _patch_docker_for_lockdown(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "off")
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-key")
+
+    import pytest
+
+    with pytest.raises(takyon_core.TakyonError):
+        takyon_core._run_claude_agent_task_in_docker(
+            payload={"business": "latexflow", "workspace": "product/site", "instruction": "x"},
+            workspace_path=workspace,
+            timeout_ms=30_000,
+            business="latexflow",
+            operator_user_id="user-123",
+        )
+
+
+def test_non_docker_worker_env_uses_proxy_and_session_token_no_raw_key(monkeypatch):
+    """The NON-docker (host-subprocess) Claude worker is key-free too: ANTHROPIC_BASE_URL = the safebox
+    ROOT + ANTHROPIC_API_KEY = a minted operator.session token (real owner), NO raw provider key — closing
+    the audit's open hole at the non-docker fallback."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-key-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "raw-token-should-not-leak")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+
+    minted: dict[str, object] = {}
+
+    def fake_mint(business, operator_user_id):
+        minted["business"] = business
+        minted["operator_user_id"] = operator_user_id
+        return "operator-session-token-xyz"
+
+    monkeypatch.setattr(takyon_core, "_mint_claude_agent_operator_session_token", fake_mint)
+
+    env = takyon_core._claude_agent_non_docker_worker_env("latexflow", "owner-1")
+
+    # Pointed at the safebox ROOT (no /v1/messages suffix — the SDK appends it).
+    assert env["ANTHROPIC_BASE_URL"] == "http://10.116.0.2:8000"
+    # Credential is the minted session token, never the raw key sitting in the host env.
+    assert env["ANTHROPIC_API_KEY"] == "operator-session-token-xyz"
+    assert env["ANTHROPIC_API_KEY"] != "raw-key-should-not-leak"
+    # The raw ANTHROPIC_TOKEN is never injected for the worker.
+    assert "ANTHROPIC_TOKEN" not in env or env.get("ANTHROPIC_TOKEN") != "raw-token-should-not-leak"
+    # Minted for the REAL owner + business.
+    assert minted == {"business": "latexflow", "operator_user_id": "owner-1"}
+
+
+def test_non_docker_worker_env_fails_closed_when_lockdown_disabled(monkeypatch):
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "off")
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_BROKER_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "raw-key")
+
+    import pytest
+
+    with pytest.raises(takyon_core.TakyonError):
+        takyon_core._claude_agent_non_docker_worker_env("latexflow", "owner-1")
+
+
+def test_non_docker_worker_env_fails_closed_when_mint_refused(monkeypatch):
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://10.116.0.2:8000")
+    monkeypatch.setattr(
+        takyon_core,
+        "_mint_claude_agent_operator_session_token",
+        lambda business, operator_user_id: "",
+    )
+
+    import pytest
+
+    with pytest.raises(takyon_core.TakyonError):
+        takyon_core._claude_agent_non_docker_worker_env("latexflow", "owner-1")
+
+
+def test_mint_claude_agent_operator_session_token_passes_owner_to_safebox(monkeypatch):
+    """The worker's session-token minter forwards the EXPLICIT resolved business owner to the safebox
+    (not a session global), so the durable worker process mints for the real owner."""
+    captured: dict[str, object] = {}
+
+    def fake_mint(business, operator_user_id, *, max_cost_microusd):
+        captured["business"] = business
+        captured["operator_user_id"] = operator_user_id
+        captured["max_cost_microusd"] = max_cost_microusd
+        return "operator-session-token-xyz"
+
+    monkeypatch.setattr(takyon_core.safebox, "mint_operator_session_token", fake_mint)
+
+    token = takyon_core._mint_claude_agent_operator_session_token("latexflow", "owner-1")
+
+    assert token == "operator-session-token-xyz"
+    assert captured["business"] == "latexflow"
+    assert captured["operator_user_id"] == "owner-1"
+    assert captured["max_cost_microusd"] == takyon_core._CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD
+
+
+def test_mint_claude_agent_operator_session_token_fails_closed_on_error(monkeypatch):
+    def boom(*a, **k):
+        raise takyon_core.safebox.RemoteSafeboxError(
+            "not_business_owner", status_code=403, payload={"detail": "not_business_owner"}
+        )
+
+    monkeypatch.setattr(takyon_core.safebox, "mint_operator_session_token", boom)
+    # Any mint failure → "" so the caller refuses the run (no raw-key fallback).
+    assert takyon_core._mint_claude_agent_operator_session_token("latexflow", "owner-1") == ""
+    # Missing identity → "" without even calling the safebox.
+    assert takyon_core._mint_claude_agent_operator_session_token("", "owner-1") == ""
+    assert takyon_core._mint_claude_agent_operator_session_token("latexflow", "") == ""
 
 
 def test_missing_env_for_requirement_accepts_safebox_backed_anthropic_token(monkeypatch):
@@ -1047,6 +1348,11 @@ def test_claude_agent_task_returns_worker_failure_diagnostics(tmp_path, monkeypa
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -1106,6 +1412,11 @@ def test_claude_agent_task_preserves_worker_stderr_from_sdk_stdout(tmp_path, mon
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -1148,6 +1459,11 @@ def test_claude_agent_task_formats_signal_terminated_worker_error(tmp_path, monk
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -1213,6 +1529,11 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(
@@ -1404,6 +1725,11 @@ def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_o
     )
     monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
 
     result = json.loads(
         handle_business_claude_agent_task(

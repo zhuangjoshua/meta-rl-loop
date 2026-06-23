@@ -7088,33 +7088,53 @@ def _docker_claude_worker_binary_mounts(*, docker_exe: str, repo_root: Path) -> 
     }
 
 
-# Coding-worker broker lockdown (SAFEBOX-BROKER-REMEDIATION-PLAN STEP D). OFF by default so the live
-# coding-worker keeps running unchanged until the safebox broker route (STEP B: the Anthropic broker
-# endpoint + /v1/token/mint) is deployed and verified per the plan's hard "move → verify → delete"
-# rule — flipping this on before the broker route exists fails every worker closed, which is itself a
-# regression. When ON, the container gets NO raw provider key (the SDK is pointed at the safebox broker
-# with a minted, scope+cost-bound operator capability token) and is --network-confined so it can reach
-# ONLY the safebox.
+# Coding-worker broker lockdown (SAFEBOX-BROKER-REMEDIATION-PLAN STEP D, now the ONLY path). The
+# container NEVER receives a raw provider key: the bundled Anthropic SDK is pointed at the safebox
+# PROXY (ANTHROPIC_BASE_URL = safebox root; the proxy serves the stock /v1/messages path and streams
+# verbatim) and authenticated with a short-TTL, scope+cost-bound operator CAPABILITY token minted by
+# the safebox. The real provider key + the capability signing key both stay on the safebox host. The
+# legacy raw-key fallback has been DELETED per the operator: there is no second path. Lockdown is the
+# default whenever a remote safebox is configured; it fails CLOSED (raises) if the broker URL or the
+# minted token is missing, so a misconfigured plane refuses to run rather than silently degrading.
 _CLAUDE_AGENT_BROKER_ENV = "TAKYON_CLAUDE_AGENT_BROKER"
 _CLAUDE_AGENT_BROKER_URL_ENV = "TAKYON_CLAUDE_AGENT_BROKER_URL"
 _CLAUDE_AGENT_BROKER_NETWORK_ENV = "TAKYON_CLAUDE_AGENT_BROKER_NETWORK"
-# Operator-plane capability action + cost ceiling for a coding-worker run. The ceiling mirrors the
-# self-reported per-run worker budget (maxBudgetUsd default 2 USD) so the safebox reserve enforces the
-# same cap as a real boundary instead of a client convention.
-_CLAUDE_AGENT_BROKER_ACTION = "claude_agent_task"
+# Per-CALL cost ceiling bound into the coding-worker's minted operator.session token. The safebox proxy
+# ENFORCES it as a per-CALL cap AND meters each brokered call against the operator's control-plane budget
+# (reserve->settle on every call). The token's AUDIENCE is "operator.session" (not a per-action audience):
+# minted via /v1/operator/session-token after authorize_operator_call validates business ownership, it is
+# REUSABLE and TTL-bounded, so the worker's many streaming calls reuse the one token for its TTL. The
+# ceiling mirrors the self-reported per-run worker budget (maxBudgetUsd default 2 USD).
 _CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = 2_000_000
 
 
 def _claude_agent_broker_lockdown_enabled() -> bool:
+    """Whether the coding worker runs key-free against the safebox proxy (the only supported path).
+
+    Default ON whenever a remote safebox is configured (the broker URL defaults to that safebox), so a
+    deployed plane is keyless by default. An explicit off-value (``0``/``off``/``false``/``no``) forces
+    it OFF — but with the raw-key path deleted that simply means the worker has no provider auth and the
+    SDK call fails; it is retained only as an escape hatch for hosts that point the SDK elsewhere. An
+    explicit truthy value forces it ON even without a remote safebox (e.g. a dedicated broker URL)."""
     raw = str(os.getenv(_CLAUDE_AGENT_BROKER_ENV, "") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on", "force"}
+    if raw in {"1", "true", "yes", "on", "force"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    # Unset: default ON when a remote safebox is configured (the proxy lives there).
+    try:
+        return bool(safebox._remote_enabled())
+    except Exception:
+        return False
 
 
 def _claude_agent_broker_url() -> str:
-    """Safebox broker base URL the worker SDK is pointed at when the lockdown is enabled.
+    """Safebox proxy ROOT URL the worker SDK is pointed at (ANTHROPIC_BASE_URL).
 
-    Defaults to the configured safebox remote URL (the worker can reach ONLY the safebox under the
-    --network confinement), and may be overridden for a dedicated broker hostname.
+    Must be the safebox ROOT (e.g. ``http://10.116.0.2:8000``), NOT ``.../v1/messages``: the stock
+    Anthropic SDK appends ``/v1/messages`` to ANTHROPIC_BASE_URL, and the proxy serves that exact path.
+    Defaults to the configured safebox remote URL (with any trailing slash stripped so the SDK's
+    appended path is well-formed); overridable for a dedicated proxy hostname via the broker-URL env.
     """
     override = str(os.getenv(_CLAUDE_AGENT_BROKER_URL_ENV, "") or "").strip().rstrip("/")
     if override:
@@ -7126,43 +7146,98 @@ def _claude_agent_broker_url() -> str:
 
 
 def _claude_agent_broker_network() -> str:
-    """Docker network name that reaches ONLY the safebox broker.
+    """OPTIONAL docker network name that confines the container's egress to the safebox proxy.
 
-    The operator must pre-create a confined network whose sole reachable endpoint is the safebox; the
-    container is attached to it instead of the default bridge so it has no general egress.
+    When set, the container is attached to this network (via the ``--network`` arg) instead of the
+    default bridge. The operator pre-creates it with ``deploy/shared/ensure-worker-broker-network.sh``,
+    which restricts the container subnet's egress to the safebox IP + DNS via host iptables (an
+    ``internal`` bridge cannot reach the VPC-private safebox, so confinement is enforced at the host
+    firewall, not by docker alone). UNSET is allowed: the worker is still KEY-FREE on the default bridge
+    (it reaches the safebox proxy through host NAT) — full network confinement is the remaining
+    hardening, keyless is the must-have.
     """
     return str(os.getenv(_CLAUDE_AGENT_BROKER_NETWORK_ENV, "") or "").strip()
 
 
-def _mint_claude_agent_operator_capability() -> str:
-    """Request a short-TTL, scope+cost-bound OPERATOR capability token from the safebox /v1/token/mint
-    route for one coding-worker run. The signing key lives ONLY in the safebox (it validates ownership
-    via ``authorize_operator_call`` and mints with ``mint_capability``), so the worker host never holds
-    it and cannot forge or widen scope. Returns the token or "" — the caller fails closed on "".
-    """
-    business = str(_session_business_slug() or "").strip()
-    if not business:
+def _mint_claude_agent_operator_session_token(business: str, operator_user_id: str) -> str:
+    """Mint a SESSION-scoped operator capability (audience ``operator.session``) for one coding-worker
+    run, carrying the REAL business-owner identity, and return the token.
+
+    Minted via ``safebox.mint_operator_session_token`` (POST ``/v1/operator/session-token``): the safebox
+    validates that ``operator_user_id`` OWNS ``business`` (boundary 1 via ``authorize_operator_call``),
+    binds the per-CALL cost ceiling, and issues a REUSABLE, TTL-bounded capability the SDK presents as
+    ANTHROPIC_API_KEY (with ANTHROPIC_BASE_URL = the safebox ROOT). The proxy
+    (``safebox_provider_proxy._authorize_operator_proxy``) accepts the ``operator.session`` audience and
+    meters EACH call against THAT owner's control-plane ``billing.py`` allowance (reserve->settle,
+    ceiling-enforced). The capability signing key + the raw provider key both stay on the safebox host, so
+    the worker host never holds either and cannot forge or widen scope. The token is reusable across the
+    run's many streaming calls (verified per call, no nonce claim).
+
+    Identity is the EXPLICIT resolved business owner (from ``businesses.owner_user_id``), not a session
+    global — the durable worker process has no operator session binding, so re-deriving it from
+    ``_active_operator_user_id`` there would yield the empty/platform principal. Returns the token or ""
+    — the caller fails CLOSED on "" (no raw-key fallback exists)."""
+    slug = str(business or "").strip()
+    owner = str(operator_user_id or "").strip()
+    if not slug or not owner:
         return ""
     try:
-        operator_user_id = str(_store()._active_operator_user_id() or "").strip()
+        return str(
+            safebox.mint_operator_session_token(
+                slug,
+                owner,
+                max_cost_microusd=_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD,
+            )
+            or ""
+        ).strip()
     except Exception:
-        operator_user_id = ""
-    if not operator_user_id:
+        # Fail closed: any mint failure (unreachable safebox, not-business-owner, no token) means the
+        # worker has no key-free auth. Return "" so the caller refuses the run rather than running keyless
+        # against an unauthenticated proxy or (worse) reaching for a raw key that no longer exists.
         return ""
-    payload = {
-        "plane": "operator",
-        "business_slug": business,
-        "operator_user_id": operator_user_id,
-        "action": _CLAUDE_AGENT_BROKER_ACTION,
-        "max_cost_microusd": _CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD,
-    }
-    try:
-        result = safebox._remote_json("POST", "/v1/token/mint", payload)
-    except Exception:
-        return ""
-    if not isinstance(result, dict):
-        return ""
-    return str(result.get("token") or "").strip()
+
+
+def _claude_agent_non_docker_worker_env(business: str, operator_user_id: str) -> dict[str, str]:
+    """Assemble the KEY-FREE env for the NON-docker (host-subprocess) Claude coding worker.
+
+    Same broker-lockdown contract as the docker lane, minus container/network isolation: the bundled
+    Anthropic SDK is pointed at the safebox PROXY ROOT (ANTHROPIC_BASE_URL) and authenticated with a
+    minted operator.session token (real owner) — NO raw ANTHROPIC_API_KEY / ANTHROPIC_TOKEN is ever read
+    or injected. Fails CLOSED (raises ``TakyonError``) when broker lockdown is disabled, the proxy URL is
+    missing, or the safebox refuses the mint, so a misconfigured plane refuses to run the host subprocess
+    rather than reaching for a raw key (there is no longer a raw-key path here)."""
+    if not _claude_agent_broker_lockdown_enabled():
+        raise TakyonError(
+            "Claude Agent coding worker requires the safebox proxy (broker lockdown) but it is disabled "
+            f"({_CLAUDE_AGENT_BROKER_ENV} set to an off-value with no remote safebox configured). The "
+            "raw-key worker path has been removed; configure the safebox so the worker can run key-free."
+        )
+    broker_base_url = _claude_agent_broker_url()
+    if not broker_base_url:
+        raise TakyonError(
+            "Claude Agent coding worker is key-free via the safebox proxy but no proxy URL is "
+            f"configured (set {_CLAUDE_AGENT_BROKER_URL_ENV} or {safebox._SAFEBOX_REMOTE_URL_ENV} to the "
+            "safebox ROOT, e.g. http://10.116.0.2:8000)"
+        )
+    session_token = _mint_claude_agent_operator_session_token(business, operator_user_id)
+    if not session_token:
+        raise TakyonError(
+            "Claude Agent coding worker is key-free via the safebox proxy but the safebox refused to "
+            "mint an operator.session token for this run (no business/owner identity, the operator does "
+            "not own the business, or /v1/operator/session-token is unavailable)"
+        )
+    env = _runtime_env({
+        "ANTHROPIC_BASE_URL": broker_base_url,
+        "ANTHROPIC_API_KEY": session_token,
+        "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
+    })
+    # Scrub any RAW Anthropic credential that rode in from the host process env (_runtime_env copies
+    # os.environ). The SDK also reads ANTHROPIC_TOKEN / ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN —
+    # if any of those held a raw key it would bypass the proxy. The worker authenticates SOLELY with the
+    # minted operator.session token (ANTHROPIC_API_KEY) against the proxy ROOT; no raw key on the plane.
+    for raw_cred in ("ANTHROPIC_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        env.pop(raw_cred, None)
+    return env
 
 
 def _run_claude_agent_task_in_docker(
@@ -7170,6 +7245,8 @@ def _run_claude_agent_task_in_docker(
     payload: dict[str, Any],
     workspace_path: Path,
     timeout_ms: int,
+    business: str,
+    operator_user_id: str,
 ) -> tuple[list[str], dict[str, Any], str, Mapping[str, str]]:
     from tools.environments.docker import (
         _build_security_args,
@@ -7193,45 +7270,51 @@ def _run_claude_agent_task_in_docker(
         "cwd": "/workspace",
         "root": "/workspace",
     }
+    # No raw provider auth on the worker plane: the SDK is pointed at the safebox PROXY ROOT and
+    # authenticated with a minted operator.session token below. The raw ANTHROPIC_API_KEY /
+    # ANTHROPIC_TOKEN are NEVER read or injected here.
     runtime_env = _runtime_env({
-        **_anthropic_runtime_env(),
         "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
     })
 
-    # Coding-worker broker lockdown (STEP D). OFF by default → unchanged behavior below. When ON, the
-    # raw provider key is NEVER injected into the container env; instead the SDK is pointed at the
-    # safebox broker (ANTHROPIC_BASE_URL) and authenticated with a short-TTL, scope+cost-bound operator
-    # capability token minted by the safebox (the signing key + the real provider key both stay on the
-    # safebox host). The container is also --network-confined so it can reach ONLY the safebox. Per the
-    # plan's "move → verify → delete" rule the path fails CLOSED if the broker URL or token is missing.
-    broker_lockdown = _claude_agent_broker_lockdown_enabled()
-    broker_base_url = ""
-    broker_capability_token = ""
-    broker_network = ""
-    if broker_lockdown:
-        broker_base_url = _claude_agent_broker_url()
-        if not broker_base_url:
-            raise TakyonError(
-                "Claude Agent worker broker lockdown is enabled but no safebox broker URL is "
-                f"configured (set {_CLAUDE_AGENT_BROKER_URL_ENV} or {safebox._SAFEBOX_REMOTE_URL_ENV})"
-            )
-        broker_capability_token = _mint_claude_agent_operator_capability()
-        if not broker_capability_token:
-            raise TakyonError(
-                "Claude Agent worker broker lockdown is enabled but the safebox refused to mint an "
-                "operator capability token for this run (no business/operator identity, or "
-                "/v1/token/mint unavailable)"
-            )
-        broker_network = _claude_agent_broker_network()
-        if not broker_network:
-            raise TakyonError(
-                "Claude Agent worker broker lockdown is enabled but no confined docker network is "
-                f"configured (set {_CLAUDE_AGENT_BROKER_NETWORK_ENV} to a network that reaches ONLY "
-                "the safebox)"
-            )
+    # Coding-worker broker lockdown — the ONLY provider-auth path (the legacy raw-key fallback is
+    # DELETED). The raw ANTHROPIC_API_KEY / ANTHROPIC_TOKEN are NEVER injected into the container env;
+    # instead the bundled Anthropic SDK is pointed at the safebox PROXY ROOT (ANTHROPIC_BASE_URL; the
+    # proxy serves the stock /v1/messages path the SDK appends) and authenticated with a SESSION-scoped
+    # operator CAPABILITY token (audience = operator.session) minted by the safebox for the REAL business
+    # owner. The capability signing key + the real provider key both stay on the safebox host, and the
+    # proxy meters EACH call against THAT owner's control-plane billing allowance. The worker is ALWAYS
+    # key-free: it reaches the proxy through host NAT on the default bridge, and is additionally
+    # --network-confined to the safebox-only network when one is configured. The path fails CLOSED
+    # (raises) if the proxy URL or the minted token is missing, so a misconfigured plane refuses to run
+    # rather than silently falling back to a raw key (there is no longer a raw-key path to fall back to).
+    if not _claude_agent_broker_lockdown_enabled():
+        raise TakyonError(
+            "Claude Agent coding worker requires the safebox proxy (broker lockdown) but it is disabled "
+            f"({_CLAUDE_AGENT_BROKER_ENV} set to an off-value with no remote safebox configured). The "
+            "raw-key worker path has been removed; configure the safebox so the worker can run key-free."
+        )
+    broker_base_url = _claude_agent_broker_url()
+    if not broker_base_url:
+        raise TakyonError(
+            "Claude Agent coding worker is key-free via the safebox proxy but no proxy URL is "
+            f"configured (set {_CLAUDE_AGENT_BROKER_URL_ENV} or {safebox._SAFEBOX_REMOTE_URL_ENV} to the "
+            "safebox ROOT, e.g. http://10.116.0.2:8000)"
+        )
+    broker_capability_token = _mint_claude_agent_operator_session_token(business, operator_user_id)
+    if not broker_capability_token:
+        raise TakyonError(
+            "Claude Agent coding worker is key-free via the safebox proxy but the safebox refused to "
+            "mint an operator.session token for this run (no business/owner identity, the operator does "
+            "not own the business, or /v1/operator/session-token is unavailable)"
+        )
+    # OPTIONAL network confinement: attach to the safebox-only network when one is configured; UNSET is
+    # allowed (the worker is still key-free on the default bridge via host NAT — full egress confinement
+    # is the remaining hardening, keyless is the must-have).
+    broker_network = _claude_agent_broker_network()
 
-    # In lockdown the SDK auth is the capability token (sent to the broker base URL); the raw
-    # ANTHROPIC_API_KEY / ANTHROPIC_TOKEN never enter the container env.
+    # The SDK auth is the capability token (sent to the proxy base URL); the raw ANTHROPIC_API_KEY /
+    # ANTHROPIC_TOKEN never enter the container env. They are deliberately absent from env_keys.
     env_keys = [
         "CLAUDE_AGENT_SDK_CLIENT_APP",
         "HTTP_PROXY",
@@ -7241,18 +7324,15 @@ def _run_claude_agent_task_in_docker(
         "https_proxy",
         "no_proxy",
     ]
-    if not broker_lockdown:
-        env_keys = ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", *env_keys]
     env_args: list[str] = []
     for key in env_keys:
         value = runtime_env.get(key)
         if value is not None and value != "":
             env_args.extend(["-e", f"{key}={value}"])
-    if broker_lockdown:
-        # The SDK reads ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY from env; point it at the safebox broker
-        # with the capability token as the bearer. No raw provider key is present.
-        env_args.extend(["-e", f"ANTHROPIC_BASE_URL={broker_base_url}"])
-        env_args.extend(["-e", f"ANTHROPIC_API_KEY={broker_capability_token}"])
+    # The SDK reads ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY from env; point it at the safebox proxy ROOT
+    # with the capability token as the credential. No raw provider key is present.
+    env_args.extend(["-e", f"ANTHROPIC_BASE_URL={broker_base_url}"])
+    env_args.extend(["-e", f"ANTHROPIC_API_KEY={broker_capability_token}"])
 
     sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(docker_exe=docker, repo_root=repo_root)
     for key, value in sdk_env.items():
@@ -7295,9 +7375,11 @@ def _run_claude_agent_task_in_docker(
     # starves serving — observed: during two concurrent builds a 2-vCPU host stopped answering SSH
     # and live product sites timed out (HTTP 000). A hard --cpus quota leaves headroom for serving;
     # --memory keeps a runaway build from OOMing the host. Env-overridable for larger hosts.
-    # Broker lockdown: attach to the confined safebox-only network instead of the default bridge so
-    # the container has NO general egress — its only reachable endpoint is the safebox broker.
-    network_args: list[str] = ["--network", broker_network] if broker_lockdown and broker_network else []
+    # Network confinement (OPTIONAL hardening): when a safebox-only network is configured, attach to it
+    # instead of the default bridge so the container has NO general egress — its only reachable endpoint
+    # is the safebox proxy. When unset, the worker stays on the default bridge and reaches the proxy
+    # through host NAT (still key-free; egress confinement is the remaining hardening).
+    network_args: list[str] = ["--network", broker_network] if broker_network else []
 
     run_cmd = [
         docker,
@@ -7970,46 +8052,6 @@ def _runtime_path_prefixes() -> list[Path]:
         _repo_root() / "node_modules" / ".bin",
         Path(sys.executable).resolve().parent,
     ]
-
-
-def _runtime_sensitive_env_value(*names: str) -> str:
-    resolved_names = [str(name or "").strip() for name in names if str(name or "").strip()]
-    for name in resolved_names:
-        direct = str(os.getenv(name) or "").strip()
-        if direct:
-            return direct
-    if not resolved_names:
-        return ""
-    try:
-        mirrored = str(safebox.first_env_backed_value(*resolved_names) or "").strip()
-    except Exception:
-        mirrored = ""
-    if mirrored:
-        return mirrored
-    for name in resolved_names:
-        try:
-            mirrored = str(safebox.read_env_backed_value(name) or "").strip()
-        except Exception:
-            mirrored = ""
-        if mirrored:
-            return mirrored
-    return ""
-
-
-def _anthropic_runtime_env() -> dict[str, str]:
-    """Anthropic auth env for isolated/local Claude workers.
-
-    This lets operator/subuser runtimes fetch the active credential from Safebox at launch time
-    instead of requiring a long-lived raw provider secret in the host EnvironmentFile.
-    """
-    resolved: dict[str, str] = {}
-    api_key = _runtime_sensitive_env_value("ANTHROPIC_API_KEY")
-    token = _runtime_sensitive_env_value("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
-    if api_key:
-        resolved["ANTHROPIC_API_KEY"] = api_key
-    if token:
-        resolved["ANTHROPIC_TOKEN"] = token
-    return resolved
 
 
 def _runtime_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -32180,6 +32222,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         payload=attempt_payload,
                         workspace_path=workspace_path,
                         timeout_ms=timeout_ms,
+                        business=business,
+                        operator_user_id=operator_user_id,
                     )
                     proc = _run_claude_agent_task_process(
                         run_cmd=run_cmd,
@@ -32191,15 +32235,16 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         workspace_rel=workspace_rel,
                     )
                 else:
+                    # Non-docker host subprocess: same broker-lockdown contract as the docker lane —
+                    # ANTHROPIC_BASE_URL = safebox proxy ROOT + a minted operator.session token (real
+                    # owner), NO raw provider key. Fails closed if the safebox is unreachable / refuses
+                    # the mint (there is no raw-key fallback to inject here anymore).
                     proc = _run_claude_agent_task_process(
                         run_cmd=[node, str(script)],
                         payload=attempt_payload,
                         cwd=str(_repo_root()),
                         timeout_ms=timeout_ms,
-                        env=_runtime_env({
-                            **_anthropic_runtime_env(),
-                            "CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent",
-                        }),
+                        env=_claude_agent_non_docker_worker_env(business, operator_user_id),
                         business=business,
                         workspace_rel=workspace_rel,
                     )

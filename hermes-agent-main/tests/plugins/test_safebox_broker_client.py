@@ -114,3 +114,82 @@ def test_remote_json_maps_unreachable_to_504(monkeypatch):
         safebox._remote_json("POST", "/v1/providers/anthropic/messages", {"x": 1}, timeout=5)
     assert ei.value.status_code == 504
     assert ei.value.payload.get("detail") == "safebox_unreachable"
+
+
+# ── Operator session-token mint (POST /v1/operator/session-token) ────────────────────────────────────
+#
+# The operator CEO loop + coding worker present this token (audience operator.session) on every Anthropic
+# proxy call instead of a raw key. The client just POSTs the (business, owner, ceiling) and returns the
+# token, fail-closed.
+
+
+def test_mint_operator_session_token_posts_owner_and_returns_token(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    captured: dict[str, object] = {}
+
+    def fake_remote_json(method, path, payload=None, *, timeout=10.0):
+        captured["method"] = method
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"token": "operator-session-token-xyz", "audience": "operator.session"}
+
+    monkeypatch.setattr(safebox, "_remote_json", fake_remote_json)
+
+    token = safebox.mint_operator_session_token("latexflow", "owner-1", max_cost_microusd=2_000_000)
+
+    assert token == "operator-session-token-xyz"
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/v1/operator/session-token"
+    assert captured["payload"] == {
+        "business": "latexflow",
+        "operator_user_id": "owner-1",
+        "max_cost_microusd": 2_000_000,
+    }
+
+
+def test_mint_operator_session_token_includes_ttl_when_given(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    captured: dict[str, object] = {}
+
+    def fake_remote_json(method, path, payload=None, *, timeout=10.0):
+        captured["payload"] = payload
+        return {"token": "tok"}
+
+    monkeypatch.setattr(safebox, "_remote_json", fake_remote_json)
+
+    safebox.mint_operator_session_token("latexflow", "owner-1", ttl_seconds=1800)
+    assert captured["payload"]["ttl_seconds"] == 1800
+
+
+def test_mint_operator_session_token_requires_business_and_owner(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    with pytest.raises(safebox.RemoteSafeboxError):
+        safebox.mint_operator_session_token("", "owner-1")
+    with pytest.raises(safebox.RemoteSafeboxError):
+        safebox.mint_operator_session_token("latexflow", "")
+
+
+def test_mint_operator_session_token_requires_remote_safebox(monkeypatch):
+    monkeypatch.delenv("TAKYON_SAFEBOX_URL", raising=False)
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable):
+        safebox.mint_operator_session_token("latexflow", "owner-1")
+
+
+def test_mint_operator_session_token_fails_closed_on_empty_token(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setattr(safebox, "_remote_json", lambda *a, **k: {"token": ""})
+    with pytest.raises(safebox.RemoteSafeboxError):
+        safebox.mint_operator_session_token("latexflow", "owner-1")
+
+
+def test_mint_operator_session_token_propagates_safebox_refusal(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+
+    def fake_remote_json(*a, **k):
+        raise safebox.RemoteSafeboxError(
+            "not_business_owner", status_code=403, payload={"detail": "not_business_owner"}
+        )
+
+    monkeypatch.setattr(safebox, "_remote_json", fake_remote_json)
+    with pytest.raises(safebox.RemoteSafeboxError):
+        safebox.mint_operator_session_token("latexflow", "wrong-owner")

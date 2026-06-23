@@ -299,6 +299,62 @@ def provider_proxy_base_url() -> str:
     return _remote_base_url()
 
 
+# Operator session-token mint default ceiling (per-CALL cost cap the safebox proxy enforces on every
+# metered call under the minted token). 2 USD mirrors the operator-turn / coding-worker per-run budget;
+# the safebox additionally clamps the TTL, so a leaked token still expires within the hard bound.
+_OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD = 2_000_000
+
+
+def mint_operator_session_token(
+    business: str,
+    operator_user_id: str,
+    *,
+    max_cost_microusd: int = _OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD,
+    ttl_seconds: int | None = None,
+) -> str:
+    """Mint a SESSION-scoped operator capability (audience ``operator.session``) for one CEO/coding-worker
+    run and return the token.
+
+    The operator plane presents this token as ``ANTHROPIC_API_KEY`` (with ``ANTHROPIC_BASE_URL`` = the
+    safebox ROOT) on every Anthropic/Tavily proxy call. The safebox validates that ``operator_user_id``
+    OWNS ``business`` (boundary 1 via ``authorize_operator_call``), binds the per-CALL cost ceiling, and
+    issues a REUSABLE, TTL-bounded capability — so the operator host never holds the raw provider key and
+    cannot forge or widen scope.
+
+    Uses the same internal-token transport (``_remote_json`` -> ``/v1/operator/session-token``) as the
+    other broker clients. Fails CLOSED: raises ``RemoteSafeboxError`` when the safebox is unreachable,
+    refuses the mint (e.g. the operator does not own the business), or returns no token — it NEVER falls
+    back to a raw key. The caller MUST treat any exception as "no key-free auth" and refuse the run."""
+    slug = str(business or "").strip()
+    owner = str(operator_user_id or "").strip()
+    if not slug or not owner:
+        raise RemoteSafeboxError(
+            "operator session token requires both a business and an owner operator_user_id",
+            status_code=400,
+            payload={"detail": "missing_identity"},
+        )
+    if not _remote_enabled():
+        raise SafeboxAuthorityUnavailable(
+            f"operator session token requires {_SAFEBOX_REMOTE_URL_ENV}; not set on this plane"
+        )
+    body: dict[str, Any] = {
+        "business": slug,
+        "operator_user_id": owner,
+        "max_cost_microusd": int(max_cost_microusd),
+    }
+    if ttl_seconds is not None:
+        body["ttl_seconds"] = int(ttl_seconds)
+    result = _remote_json("POST", "/v1/operator/session-token", body, timeout=10.0)
+    token = str((result or {}).get("token") or "").strip() if isinstance(result, dict) else ""
+    if not token:
+        raise RemoteSafeboxError(
+            "Safebox /v1/operator/session-token returned no token",
+            status_code=502,
+            payload={"detail": "no_session_token"},
+        )
+    return token
+
+
 def proxy_request(
     provider: str,
     path: str,

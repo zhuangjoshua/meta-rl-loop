@@ -299,10 +299,91 @@ class _OperatorGatewayHandler:
             return _json_error(502, f"operator gateway upstream request failed: {exc}")
 
 
+def _operator_anthropic_broker_lockdown() -> bool:
+    """Whether the operator CEO loop must route Anthropic through the safebox PROXY (key-free) rather
+    than resolving a raw provider key locally. Defaults ON whenever a remote safebox is configured (same
+    contract as the coding worker's ``core._claude_agent_broker_lockdown_enabled``)."""
+    from plugins.takyon import core as takyon_core
+
+    return bool(takyon_core._claude_agent_broker_lockdown_enabled())
+
+
+def _resolve_anthropic_broker_runtime(
+    context: OperatorGatewayContext,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the key-free anthropic runtime for a CEO turn: point upstream at the safebox PROXY ROOT and
+    authenticate with a minted ``operator.session`` token carrying the REAL business owner.
+
+    The raw provider key is NEVER resolved on this plane — the safebox holds it and meters each proxied
+    call against THAT owner's control-plane billing allowance. Fails CLOSED (raises) when the proxy URL or
+    the owner cannot be resolved or the mint is refused, so the CEO turn refuses rather than falling back
+    to a raw key."""
+    from plugins.takyon import core as takyon_core
+    from plugins.takyon import safebox
+
+    broker_base_url = str(takyon_core._claude_agent_broker_url() or "").strip().rstrip("/")
+    if not broker_base_url:
+        raise RuntimeError(
+            "operator anthropic broker lockdown is on but no safebox proxy URL is configured "
+            "(set TAKYON_CLAUDE_AGENT_BROKER_URL or TAKYON_SAFEBOX_URL to the safebox ROOT)"
+        )
+    business_slug = str(context.business_slug or "").strip()
+    operator_user_id = _resolve_operator_owner_user_id(context)
+    if not business_slug or not operator_user_id:
+        raise RuntimeError(
+            "operator anthropic broker lockdown requires a business + its resolved owner to mint an "
+            "operator.session token; one is missing for this CEO turn"
+        )
+    session_token = str(
+        safebox.mint_operator_session_token(business_slug, operator_user_id) or ""
+    ).strip()
+    if not session_token:
+        raise RuntimeError(
+            "the safebox refused to mint an operator.session token for this CEO turn (the operator does "
+            "not own the business, or /v1/operator/session-token is unavailable)"
+        )
+    return {
+        "provider": context.provider or "anthropic",
+        "requested_provider": context.requested_provider or context.provider or "anthropic",
+        "api_mode": "anthropic_messages",
+        # The safebox proxy serves the stock /v1/messages path the SDK appends, so the upstream base is
+        # the safebox ROOT and the session token is the credential. No raw provider key is resolved.
+        "base_url": broker_base_url,
+        "api_key": session_token,
+    }
+
+
+def _resolve_operator_owner_user_id(context: OperatorGatewayContext) -> str:
+    """Resolve the REAL business-owner user id for the CEO turn's business. Prefers the authoritative
+    ``businesses.owner_user_id`` read; falls back to the operator id the launch path already injected on
+    the context. Returns "" when neither is available (the caller fails closed)."""
+    business_slug = str(context.business_slug or "").strip()
+    if business_slug:
+        try:
+            from plugins.takyon.core import TakyonStore
+
+            store = TakyonStore()
+            with store._connect() as conn:
+                business = store._ensure_business(conn, business_slug)
+            owner = str((business or {}).get("owner_user_id") or "").strip()
+            if owner:
+                return owner
+        except Exception:
+            logger.debug("operator gateway: owner_user_id read failed", exc_info=True)
+    return str(context.operator_user_id or "").strip()
+
+
 def _resolve_runtime_for_request(
     context: OperatorGatewayContext,
     body: dict[str, Any],
 ) -> dict[str, Any]:
+    # Anthropic CEO turns route THROUGH the safebox proxy (key-free, operator.session) under broker
+    # lockdown — the raw provider key is never resolved on this plane. Other api_modes still resolve a
+    # runtime locally (those providers have no safebox proxy route yet).
+    if str(context.api_mode or "").strip().lower() == "anthropic_messages" and _operator_anthropic_broker_lockdown():
+        return _resolve_anthropic_broker_runtime(context, body)
+
     from takyon_cli.runtime_provider import resolve_runtime_provider
 
     target_model = str(body.get("model") or "").strip() or None
