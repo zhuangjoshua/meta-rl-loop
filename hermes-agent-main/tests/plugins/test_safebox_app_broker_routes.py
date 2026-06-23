@@ -33,12 +33,14 @@ class _OwnerCursor:
 
 
 class _OwnerConn:
-    """Fake safebox conn: the only query the mint path runs is the owner_user_id lookup."""
+    """Fake safebox conn for ownership and verified Auth0 user lookups."""
 
     def __init__(self, owner):
         self._owner = owner
 
     def execute(self, sql, params=None):
+        if "from users where auth0_sub" in str(sql):
+            return _OwnerCursor((self._owner,))
         return _OwnerCursor({"owner_user_id": self._owner})
 
 
@@ -212,6 +214,73 @@ def test_legacy_creative_credit_spend_routes_are_closed(client):
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "creative_credit_spend_requires_creative_gate"
+
+
+def test_starter_allowance_requires_verified_auth0_session(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "auth0_verify_session", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "_local_grant_starter_allowance",
+        lambda *a, **k: pytest.fail("starter allowance grant must not run"),
+    )
+
+    resp = client.post(
+        "/v1/billing/starter-allowance",
+        headers=_auth(),
+        json={"user_id": "user_A"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "starter_session_required"
+
+
+def test_starter_allowance_derives_user_from_verified_auth0_session(client, monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "auth0_verify_session",
+        lambda **_kwargs: {"sub": "auth0|starter", "email": "owner@example.com", "email_verified": True},
+    )
+
+    def _grant(_conn, user_id, *, idempotency_subject=None):
+        calls.append({"user_id": user_id, "idempotency_subject": idempotency_subject})
+        return 100
+
+    monkeypatch.setattr(safebox_app.safebox, "_local_grant_starter_allowance", _grant)
+
+    resp = client.post(
+        "/v1/billing/starter-allowance",
+        headers=_auth(),
+        json={"user_id": "user_A", "session_token": "signed-session"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["user_id"] == "user_A"
+    assert resp.json()["included_cents"] == 100
+    assert calls == [{"user_id": "user_A", "idempotency_subject": "auth0:auth0|starter"}]
+
+
+def test_starter_allowance_refuses_session_user_mismatch(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "auth0_verify_session",
+        lambda **_kwargs: {"sub": "auth0|starter", "email": "owner@example.com", "email_verified": True},
+    )
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "_local_grant_starter_allowance",
+        lambda *a, **k: pytest.fail("mismatched starter grant must not run"),
+    )
+
+    resp = client.post(
+        "/v1/billing/starter-allowance",
+        headers=_auth(),
+        json={"user_id": "other-user", "session_token": "signed-session"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "starter_user_mismatch"
 
 
 def test_generic_stripe_route_requires_takyon_app_scope(client, monkeypatch):

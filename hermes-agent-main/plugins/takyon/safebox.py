@@ -853,10 +853,20 @@ def _local_grant_allowance(
     return int(billing._cell(row, 4))
 
 
-def _local_grant_starter_allowance(conn, user_id: str) -> int:
+def _starter_allowance_idempotency_key(subject: str) -> str:
+    cleaned = str(subject or "").strip()
+    if not cleaned:
+        return ""
+    return "starter-allowance:" + hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
+
+
+def _local_grant_starter_allowance(conn, user_id: str, *, idempotency_subject: str | None = None) -> int:
     included_cents = _starter_allowance_cents()
     if included_cents <= 0:
         return 0
+    idempotency_key = _starter_allowance_idempotency_key(
+        idempotency_subject or f"user:{user_id}"
+    )
     with _creative_credit_conn(conn) as billing_conn:
         _local_open_billing_account(billing_conn, user_id)
         with billing_conn.transaction():
@@ -881,7 +891,7 @@ def _local_grant_starter_allowance(conn, user_id: str) -> int:
             billing_conn,
             user_id,
             included_cents,
-            f"starter-allowance:{user_id}",
+            idempotency_key,
         )
 
 
@@ -1341,17 +1351,31 @@ def open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 
     _local_open_billing_account(conn, user_ref, allowance_included_cents=amount)
 
 
-def grant_starter_allowance(conn, user_id: str) -> int:
-    """Grant the one-time starter allowance, with replay/balance checks inside the safebox."""
+def grant_starter_allowance(conn, user_id: str, *, session_token: str | None = None) -> int:
+    """Grant the one-time starter allowance, with replay/balance checks inside the safebox.
+
+    Remote starter grants require a verified Auth0 dashboard session. A caller that only has the shared
+    transport token can still open a zero account, but cannot mint allowance for an arbitrary user id.
+    """
     user_ref = str(user_id or "").strip()
     if not user_ref:
         raise ValueError("missing user_id")
     if _remote_enabled() and not _local_authority_enabled():
+        token = str(session_token or "").strip()
+        if not token:
+            return 0
         payload = _remote_json(
             "POST",
             "/v1/billing/starter-allowance",
-            {"user_id": user_ref},
+            {"user_id": user_ref, "session_token": token},
         )
+        returned_user = str(payload.get("user_id") or "").strip()
+        if returned_user and returned_user != user_ref:
+            raise RemoteSafeboxError(
+                "Safebox starter allowance returned a different user",
+                status_code=403,
+                payload={"detail": "starter_user_mismatch"},
+            )
         return int(payload.get("included_cents") or 0)
     return _local_grant_starter_allowance(conn, user_ref)
 

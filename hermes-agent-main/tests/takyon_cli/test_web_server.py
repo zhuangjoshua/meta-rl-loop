@@ -576,6 +576,55 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     assert result["owned_business_count"] == 2
 
 
+def test_operator_account_read_failure_keeps_operator_plans(monkeypatch):
+    import plugins.takyon.core as core
+    import psycopg
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=(),
+    )
+    plans = [{"id": "starter", "name": "Starter"}]
+
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _request: "postgres://runtime")
+    monkeypatch.setattr(web_server, "_operator_plans_summary", lambda: plans)
+    monkeypatch.setattr(psycopg, "connect", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "auth0|1"}))
+    result = web_server._takyon_operator_account_payload(request, principal)
+
+    assert result["available"] is False
+    assert result["reason"] == "read_failed"
+    assert result["operator_plans"] == plans
+
+
+def test_auth0_session_cookie_result_carries_verified_session_token(monkeypatch):
+    import takyon_cli.web_server as web_server
+
+    cfg = web_server.Auth0DashboardConfig(
+        domain="https://example.auth0.com",
+        client_id="client",
+        base_url="https://app.example.com",
+        allowed_domains=(),
+        allowed_emails=(),
+        force=True,
+    )
+    monkeypatch.setattr(
+        web_server.takyon_safebox,
+        "auth0_verify_session",
+        lambda session_token: {"sub": "auth0|1", "email": "owner@example.com", "email_verified": True},
+    )
+
+    user = web_server._session_from_cookie_header("takyon_dashboard_auth=session-123", cfg)
+
+    assert user is not None
+    assert user["sub"] == "auth0|1"
+    assert user["_session_token"] == "session-123"
+
+
 def test_local_dashboard_principal_falls_back_to_platform_owner(monkeypatch):
     import takyon_cli.web_server as web_server
 

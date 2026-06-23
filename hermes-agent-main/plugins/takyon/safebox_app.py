@@ -594,7 +594,8 @@ class _OpenBillingAccountBody(BaseModel):
 
 
 class _StarterAllowanceBody(BaseModel):
-    user_id: str
+    session_token: str | None = None
+    user_id: str | None = None
 
 
 class _OperatorSubscriptionSyncBody(BaseModel):
@@ -1680,8 +1681,26 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
-        included = safebox._local_grant_starter_allowance(None, body.user_id)
-        return {"ok": True, "user_id": body.user_id, "included_cents": int(included)}
+        user = safebox.auth0_verify_session(session_token=str(body.session_token or ""))
+        if not isinstance(user, dict):
+            raise HTTPException(status_code=403, detail="starter_session_required")
+        auth0_sub = str(user.get("sub") or "").strip()
+        if not auth0_sub:
+            raise HTTPException(status_code=403, detail="starter_session_required")
+        with _safebox_db_conn() as conn:
+            row = conn.execute("select id from users where auth0_sub = %s", (auth0_sub,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="starter_user_not_found")
+        user_id = str(row[0])
+        requested_user = str(body.user_id or "").strip()
+        if requested_user and requested_user != user_id:
+            raise HTTPException(status_code=403, detail="starter_user_mismatch")
+        included = safebox._local_grant_starter_allowance(
+            None,
+            user_id,
+            idempotency_subject=f"auth0:{auth0_sub}",
+        )
+        return {"ok": True, "user_id": user_id, "included_cents": int(included)}
 
     @app.post("/v1/billing/operator-subscription/sync")
     def sync_operator_subscription_allowance(

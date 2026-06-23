@@ -62,7 +62,7 @@ def _starter_allowance_cents() -> int:
         return 100
 
 
-def _ensure_starter_allowance(conn, user_id: str) -> int:
+def _ensure_starter_allowance(conn, user_id: str, *, session_token: str | None = None) -> int:
     """Grant the landing-page starter allowance once to an otherwise-empty account.
 
     This keeps "your first company is on the house" honest for both fresh Auth0
@@ -90,7 +90,7 @@ def _ensure_starter_allowance(conn, user_id: str) -> int:
         ).fetchone()
         if existing_entry is not None:
             return included
-    return int(safebox.grant_starter_allowance(conn, user_id))
+    return int(safebox.grant_starter_allowance(conn, user_id, session_token=session_token))
 
 
 def _mint_api_key_record(conn, user_id: str) -> tuple[str, str]:
@@ -107,6 +107,14 @@ def _mint_api_key_record(conn, user_id: str) -> tuple[str, str]:
         safebox.delete_user_api_key(key_id)
         raise
     return key_id, raw
+
+
+def _active_api_key_exists(conn, user_id: str) -> bool:
+    row = conn.execute(
+        "select 1 from user_api_keys where user_id = %s and revoked_at is null limit 1",
+        (user_id,),
+    ).fetchone()
+    return row is not None
 
 
 def get_or_create_user(conn, auth0_sub: str, email: str | None = None) -> tuple[str, bool]:
@@ -134,22 +142,25 @@ def get_or_create_user(conn, auth0_sub: str, email: str | None = None) -> tuple[
 
 
 def provision_user_on_first_login(
-    conn, auth0_sub: str, email: str | None = None
+    conn,
+    auth0_sub: str,
+    email: str | None = None,
+    *,
+    session_token: str | None = None,
 ) -> tuple[str, bool, str | None]:
     """First-login JIT provisioning (the zero-friction onboarding step).
 
-    In one transaction: ensure a `users` row exists for this Auth0 `sub`, and ONLY
-    when it is brand new, mint its single API key. So a half-provisioned user (row
-    without a key, or key without a row) can never be observed.
+    Ensure a `users` row exists for this Auth0 `sub`, open the two zero-balance money accounts through
+    Safebox authority, then mint the single API key only after those account opens succeed.
 
     Returns (user_id, created, raw_key): `raw_key` is the freshly minted key on the
     very first login (returned exactly once, never stored in clear) and None on every
     later login. Idempotent and race-safe — a concurrent first login yields
     created=False and does not mint a second key.
 
-    On first creation, the same transaction also opens the user's two money accounts
-    (billing + custody, both at zero) so a half-provisioned user — identity without
-    ledgers — can never be observed. Both opens are idempotent on their own.
+    The user row commits before remote Safebox account opens so the Safebox can satisfy the account
+    foreign keys on its own connection. The account opens and active-key check are idempotent, so a
+    retry repairs any earlier interruption without minting a second active key.
     """
     user_id = ""
     created = False
@@ -158,15 +169,19 @@ def provision_user_on_first_login(
     try:
         with conn.transaction():
             user_id, created = get_or_create_user(conn, auth0_sub, email)
-            if created:
-                minted_key_id, raw = _mint_api_key_record(conn, user_id)
-                safebox.open_billing_account(conn, user_id)
-                safebox.open_custody_account(conn, user_id)
+        safebox.open_billing_account(conn, user_id)
+        safebox.open_custody_account(conn, user_id)
+        if not _active_api_key_exists(conn, user_id):
+            minted_key_id, raw = _mint_api_key_record(conn, user_id)
     except Exception:
         if minted_key_id:
             safebox.delete_user_api_key(minted_key_id)
+            try:
+                conn.execute("delete from user_api_keys where id = %s", (minted_key_id,))
+            except Exception:
+                pass
         raise
-    _ensure_starter_allowance(conn, user_id)
+    _ensure_starter_allowance(conn, user_id, session_token=session_token)
     return user_id, created, raw
 
 
@@ -253,9 +268,15 @@ def resolve_auth0_principal(
     email: str | None = None,
     *,
     key_id: str = "dashboard-session",
+    session_token: str | None = None,
 ) -> ResolvedPrincipal | None:
     """Resolve an Auth0-backed dashboard identity to the canonical principal shape."""
-    user_id, _created, _raw_key = provision_user_on_first_login(conn, auth0_sub, email)
+    user_id, _created, _raw_key = provision_user_on_first_login(
+        conn,
+        auth0_sub,
+        email,
+        session_token=session_token,
+    )
     return resolve_user_principal(conn, user_id, key_id=key_id)
 
 

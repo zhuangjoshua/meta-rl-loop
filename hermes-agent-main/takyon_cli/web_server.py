@@ -988,6 +988,9 @@ def _session_from_cookie_header(
     except Exception as exc:  # noqa: BLE001 - auth must fail closed if Safebox is unavailable
         _log.warning("Auth0 dashboard session verification failed: %s", exc)
         return None
+    if isinstance(user, dict):
+        user = dict(user)
+        user["_session_token"] = token
     return user if isinstance(user, dict) else None
 
 
@@ -1420,7 +1423,11 @@ async def auth0_login(request: Request):
     return response
 
 
-def _provision_dashboard_user_if_postgres(user: dict[str, Any]) -> None:
+def _provision_dashboard_user_if_postgres(
+    user: dict[str, Any],
+    *,
+    session_token: str | None = None,
+) -> None:
     """Just-in-time provision the top-level Takyon user for a verified dashboard login (task #6).
 
     Runs ONLY on the Postgres backend — in the SQLite era there is no ``users`` table to provision
@@ -1456,7 +1463,12 @@ def _provision_dashboard_user_if_postgres(user: dict[str, Any]) -> None:
         email = str(user.get("email") or "") or None
         conn = psycopg.connect(url, autocommit=True)
         try:
-            user_id, created, raw_key = provision_user_on_first_login(conn, sub, email)
+            user_id, created, raw_key = provision_user_on_first_login(
+                conn,
+                sub,
+                email,
+                session_token=session_token or str(user.get("_session_token") or "") or None,
+            )
         finally:
             conn.close()
         if created:
@@ -1503,6 +1515,7 @@ def _resolve_dashboard_principal(
                 conn,
                 str(user.get("sub") or ""),
                 str(user.get("email") or "") or None,
+                session_token=str(user.get("_session_token") or "") or None,
             )
         finally:
             conn.close()
@@ -1885,7 +1898,7 @@ async def auth0_callback(request: Request):
 
     # Task #6: JIT-provision the top-level Takyon user for this verified identity. Guarded no-op off
     # Postgres; never raises (the dashboard cookie tier is independent of the control-plane boundary).
-    _provision_dashboard_user_if_postgres(user)
+    _provision_dashboard_user_if_postgres(user, session_token=session_token)
 
     response = RedirectResponse(
         _same_origin_path(str(auth0_result.get("return_to") or "/")),
@@ -3493,6 +3506,7 @@ def _operator_plans_summary() -> list[dict[str, Any]]:
 
 
 def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[str, Any]:
+    operator_plans = _operator_plans_summary()
     try:
         from plugins.takyon import billing
         from plugins.takyon.control_api import (
@@ -3509,6 +3523,7 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
                 "owned_business_count": len(principal.business_slugs),
                 "status": principal.status,
                 "user_id": str(principal.user_id),
+                "operator_plans": operator_plans,
             }
 
         try:
@@ -3522,6 +3537,7 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
                 "owned_business_count": len(principal.business_slugs),
                 "status": principal.status,
                 "user_id": str(principal.user_id),
+                "operator_plans": operator_plans,
             }
 
         import psycopg
@@ -3571,7 +3587,7 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
             "allowance_percent_used": allowance_percent_used,
             "operator_plan_name": subscription_state.plan_name,
             "operator_plan_weekly_allowance_cents": int(subscription_state.weekly_allowance_cents or 0),
-            "operator_plans": _operator_plans_summary(),
+            "operator_plans": operator_plans,
             "allowance_period_start": (
                 balances.allowance_period_start.isoformat()
                 if getattr(balances, "allowance_period_start", None) is not None
@@ -3595,6 +3611,7 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
             "payouts_enabled": bool(payout_state.payouts_enabled),
             "details_submitted": bool(payout_state.details_submitted),
             "user_id": str(principal.user_id),
+            "operator_plans": operator_plans,
         }
     except Exception as exc:  # noqa: BLE001 - UI should degrade honestly, not crash
         _log.warning("dashboard operator account read failed: %s", exc)
@@ -3604,6 +3621,7 @@ def _takyon_operator_account_payload(request: Request, principal: Any) -> dict[s
             "owned_business_count": len(principal.business_slugs),
             "status": principal.status,
             "user_id": str(principal.user_id),
+            "operator_plans": operator_plans,
         }
 
 
