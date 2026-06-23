@@ -331,27 +331,28 @@ def test_safebox_app_fails_closed_when_token_is_unconfigured(tmp_path, monkeypat
     assert allowed.json() == {"value": "postgres://infra-serves"}
 
 
-def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
+def test_safebox_app_requires_internal_token_and_serves_infra_read_only(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgres://provisioned-on-host")
 
     client = TestClient(build_safebox_app())
 
-    unauthorized = client.get("/v1/env/DATABASE_URL")
-    assert unauthorized.status_code == 401
+    # Auth required.
+    assert client.get("/v1/env/DATABASE_URL").status_code == 401
 
-    # Round-trip an INFRA secret (not a paid-provider key): write then read it back over /v1/env.
-    # The runtime planes still need DB/Stripe/Auth0/… delivered this way.
     headers = {"Authorization": "Bearer shared-token"}
-    saved = client.post("/v1/env/DATABASE_URL", json={"value": "postgres://round-trip"}, headers=headers)
-    assert saved.status_code == 200
-    assert saved.json() == {"ok": True}
-
+    # Infra secrets (provisioned out-of-band on the safebox host) READ back over /v1/env.
     read_back = client.get("/v1/env/DATABASE_URL", headers=headers)
     assert read_back.status_code == 200
-    assert read_back.json() == {"value": "postgres://round-trip"}
+    assert read_back.json() == {"value": "postgres://provisioned-on-host"}
+
+    # But WRITING env over HTTP is refused — no runtime plane provisions secrets this way, which closes
+    # the DATABASE_URL clobber/DoS vector. The stored value is unchanged.
+    saved = client.post("/v1/env/DATABASE_URL", json={"value": "postgres://attacker"}, headers=headers)
+    assert saved.status_code == 403
+    assert client.get("/v1/env/DATABASE_URL", headers=headers).json() == {"value": "postgres://provisioned-on-host"}
 
 
 def test_v1_env_routes_refuse_provider_keys_but_serve_infra(tmp_path, monkeypatch):

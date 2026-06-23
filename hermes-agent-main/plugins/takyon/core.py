@@ -1238,36 +1238,59 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
     {
         "TAKYON_CAP_SIGNING_KEY",
         "TAKYON_SAFEBOX_TOKEN",
+        # Secrets the safebox uses as its OWN inbound-verification / RLS-bypass authority and that NO
+        # runtime plane fetches over /v1/env (the safebox verifies billing webhooks locally; the
+        # service-role key has zero call sites). Vending either lets a caller forge a money-granting
+        # Stripe billing event or bypass RLS — so they are never vended OR written, like the cap key.
+        "STRIPE_BILLING_WEBHOOK_SECRET",
+        "SUPABASE_SERVICE_ROLE_KEY",
     }
 )
 
-# Infra secrets the runtime planes legitimately fetch over /v1/env (DB / Stripe / Auth0 / Supabase / R2
-# / Cloudflare / Postmark / Umami / Vercel / search-console). The /v1/env egress gate is an ALLOWLIST
-# (deny-by-default): a newly added secret is non-vendable until explicitly listed here — the inverse of
-# a denylist, where forgetting to list a sensitive name silently leaks it. Exact names AND prefixes
-# match; paid-provider keys (`provider_key_denylist`) and the self-authority secrets above are hard-
-# denied even if a future rule would otherwise admit them.
+# Infra secrets the runtime planes legitimately fetch over /v1/env. The egress gate is an EXACT-NAME
+# ALLOWLIST (deny-by-default): a name not on this list is non-vendable, so forgetting to list a
+# sensitive secret denies it (the inverse of a denylist, where a forgotten name silently leaks — the
+# G1 bug class). Broad PREFIX admission was removed: it swept in signature-verification authority
+# (`*_WEBHOOK_SECRET`, `AUTH0_*_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`). This list is exactly the set of
+# names a runtime plane actually requests (enumerated from the read_env_backed_value/first call sites);
+# add a name here only when a runtime plane provably needs to fetch it.
+#
+# RESIDUAL (documented, follow-up): a few entries below are themselves verification/identity/data-plane
+# authority that a runtime plane still fetches today — `STRIPE_WEBHOOK_SECRET` (sub-user app-webhook
+# verifies locally), `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session
+# signing), the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge provisioning).
+# The principle-correct end state is to move their USE onto the safebox (verify/sign there, like the
+# billing webhook) so the runtime never holds them; until then they must stay on the allowlist or the
+# runtime regresses. Tracked as the next hardening step.
 _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
     {
-        "DATABASE_URL",
-        "POSTGRES_URL",
-        "POSTGRES_PRISMA_URL",
-        "POSTGRES_URL_NON_POOLING",
-        "VERCEL_TOKEN",
-        "TAKYON_GSC_SERVICE_ACCOUNT_KEY",
-        "UMAMI_API_KEY",
+        # DB
+        "DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING",
+        # Supabase (public config + product-JWT verify + object store)
+        "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "TAKYON_SUPABASE_URL",
+        "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY",
+        "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+        "SUPABASE_JWT_SECRET",
+        "SUPABASE_S3_ACCESS_KEY_ID", "SUPABASE_S3_SECRET_ACCESS_KEY",
+        "SUPABASE_S3_ENDPOINT", "SUPABASE_S3_REGION",
+        # R2 object store
+        "R2_S3_ACCESS_KEY_ID", "R2_S3_SECRET_ACCESS_KEY",
+        # Stripe (payment rail + sub-user app-webhook verify — residual)
+        "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+        # Transactional email
+        "POSTMARK_SERVER_TOKEN", "POSTMARK_FROM_EMAIL",
+        # Auth0 (dashboard server-side OAuth + session signing — residual)
+        "AUTH0_CLIENT_SECRET", "AUTH0_SECRET", "AUTH0_DOMAIN", "AUTH0_CLIENT_ID",
+        # Deploy / edge
+        "CLOUDFLARE_API_TOKEN", "VERCEL_TOKEN",
+        # Search console, analytics, object-store bucket
+        "TAKYON_GSC_SERVICE_ACCOUNT_KEY", "UMAMI_API_KEY", "TAKYON_STORAGE_BUCKET",
+        # Dashboard session token (operator plane creative/gateway tools)
+        "TAKYON_DASHBOARD_SESSION_TOKEN",
+        # OpenMeter usage-metering backend
+        "TAKYON_OPENMETER_URL", "OPENMETER_URL", "OPENMETER_API_URL",
+        "OPENMETER_API_TOKEN", "TAKYON_OPENMETER_API_TOKEN",
     }
-)
-_INFRA_ENV_ALLOW_PREFIXES: tuple[str, ...] = (
-    "POSTGRES_",
-    "SUPABASE_",
-    "STRIPE_",
-    "AUTH0_",
-    "POSTMARK",
-    "R2_",
-    "CLOUDFLARE_",
-    "UMAMI_",
-    "TAKYON_GSC_",
 )
 
 
@@ -1293,9 +1316,7 @@ def env_egress_allowed(name: str) -> bool:
         return False
     if n in provider_key_denylist():
         return False
-    if n in _INFRA_ENV_ALLOW_EXACT:
-        return True
-    return any(n.startswith(p) for p in _INFRA_ENV_ALLOW_PREFIXES)
+    return n in _INFRA_ENV_ALLOW_EXACT
 
 
 _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {

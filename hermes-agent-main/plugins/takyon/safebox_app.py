@@ -659,12 +659,36 @@ def _self_authority_secret_names() -> frozenset[str]:
         return _SAFEBOX_SELF_AUTHORITY_FALLBACK
 
 
-def _refuse_self_authority_secret_write(name: str) -> None:
-    """The safebox NEVER accepts a write/delete to its OWN authority secrets (HMAC signing key, master
-    token) over /v1/env — overwriting them would let a caller forge capabilities or pin a known token.
-    403, separate from the deny-by-default read allowlist."""
-    if str(name or "").strip() in _self_authority_secret_names():
-        raise HTTPException(status_code=403, detail="authority_secret_immutable")
+def _is_sensitive_env_name(name: str) -> bool:
+    try:
+        return bool(safebox.is_sensitive_env_key(name))
+    except Exception:
+        n = str(name or "").strip()
+        return bool(n) and (
+            n == "DATABASE_URL"
+            or n.endswith((
+                "_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
+                "_SECRET_ACCESS_KEY", "_WEBHOOK_SECRET", "_CLIENT_SECRET", "_ACCESS_KEY_ID",
+            ))
+        )
+
+
+def _refuse_env_write(name: str) -> None:
+    """No runtime plane writes env over HTTP — secrets are provisioned out-of-band on the safebox host.
+    So POST/DELETE /v1/env refuse ANY sensitive key (provider key, self-authority/verification secret,
+    or any *_KEY/_TOKEN/_SECRET/_PASSWORD), in any case — closing the DATABASE_URL clobber/DoS, the
+    provider-key swap (keys the safebox's own proxies resolve locally), and the lowercase-500 vector.
+    403."""
+    n = str(name or "").strip()
+    if not n:
+        raise HTTPException(status_code=403, detail="env_write_forbidden")
+    for cand in {n, n.upper()}:
+        if (
+            cand in _self_authority_secret_names()
+            or _is_denied_provider_key(cand)
+            or _is_sensitive_env_name(cand)
+        ):
+            raise HTTPException(status_code=403, detail="env_write_forbidden")
 
 
 def _env_egress_allowed(name: str) -> bool:
@@ -677,18 +701,14 @@ def _env_egress_allowed(name: str) -> bool:
 
         return core.env_egress_allowed(name)
     except Exception:
+        # Fail closed: a core import hiccup must not re-open egress. Deny self-authority + provider keys,
+        # admit only the few critical infra names to bootstrap (exact only, no prefixes).
         n = str(name or "").strip()
         if not n or n in _SAFEBOX_SELF_AUTHORITY_FALLBACK or _is_denied_provider_key(n):
             return False
-        if n in {
+        return n in {
             "DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING",
-            "VERCEL_TOKEN", "TAKYON_GSC_SERVICE_ACCOUNT_KEY", "UMAMI_API_KEY",
-        }:
-            return True
-        return n.startswith(
-            ("POSTGRES_", "SUPABASE_", "STRIPE_", "AUTH0_", "POSTMARK", "R2_", "CLOUDFLARE_",
-             "UMAMI_", "TAKYON_GSC_")
-        )
+        }
 
 
 def _anthropic_key_resolver(_scope: CapabilityScope) -> str:
@@ -1221,14 +1241,14 @@ def build_safebox_app() -> FastAPI:
     @app.post("/v1/env/{key}")
     def save_env_value(key: str, body: _EnvValueBody, authorization: str | None = Header(default=None)) -> dict[str, bool]:
         _require_internal_token(authorization)
-        _refuse_self_authority_secret_write(key)
+        _refuse_env_write(key)
         safebox.save_env_backed_value(key, body.value)
         return {"ok": True}
 
     @app.delete("/v1/env/{key}")
     def delete_env_value(key: str, authorization: str | None = Header(default=None)) -> dict[str, bool]:
         _require_internal_token(authorization)
-        _refuse_self_authority_secret_write(key)
+        _refuse_env_write(key)
         return {"removed": safebox.remove_env_backed_value(key)}
 
     @app.get("/v1/env/snapshot")
