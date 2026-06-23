@@ -1359,6 +1359,24 @@ def _seed_business_free_credits(slug: str) -> None:
         conn.close()
 
 
+def _try_seed_business_free_credits(slug: str) -> dict[str, Any]:
+    try:
+        _seed_business_free_credits(slug)
+    except Exception as exc:  # noqa: BLE001 - starter credits must not strand create before bootstrap.
+        return {
+            "action": "business_credits.bootstrap_free_seed",
+            "business": str(slug or "").strip(),
+            "status": "failed",
+            "error": str(exc),
+        }
+    return {
+        "action": "business_credits.bootstrap_free_seed",
+        "business": str(slug or "").strip(),
+        "status": "ok",
+        "credits": _BUSINESS_BOOTSTRAP_FREE_CREDITS,
+    }
+
+
 def _operator_budget_reserve(
     *,
     operator_user_id: str,
@@ -3780,11 +3798,6 @@ def run_takyon_command(
         business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
         if str(business_record.get("slug") or "").strip() != slug:
             raise RuntimeError(f"business creation did not persist for {slug}")
-        # Free starter creative-credit seed: open the business creative-credit account and grant 3
-        # FREE credits (enough for the bootstrap X post = 1 + logo = 2) so the bootstrap logo and
-        # first X auto-run instead of failing closed on a 0-credit balance. Idempotent on the slug;
-        # a retried create re-grants nothing. Fail-open only for non-Postgres dev runs.
-        _seed_business_free_credits(slug)
         active_mode = "live"
         if auto_start:
             bootstrap_job = _enqueue_pg_ceo_bootstrap(
@@ -3795,6 +3808,11 @@ def run_takyon_command(
                 schedule=schedule if should_schedule else None,
                 max_turns=max(1, min(int(max_turns or _DEFAULT_BOOTSTRAP_MAX_TURNS), _DEFAULT_BOOTSTRAP_MAX_TURNS)),
             )
+            # Free starter creative-credit seed is useful, but it must never sit between the durable
+            # business row and the durable bootstrap job. If the creative-credit ledger is temporarily
+            # unavailable, bootstrap still starts and records the precise blocker when it reaches
+            # spendful creative work.
+            starter_credit_seed = _try_seed_business_free_credits(slug)
             return {
                 "success": True,
                 "business": slug,
@@ -3802,8 +3820,12 @@ def run_takyon_command(
                 "schedule": schedule if should_schedule else "",
                 "init": business_result,
                 "bootstrap_job": bootstrap_job,
+                "starter_credit_seed": starter_credit_seed,
             }
+        starter_credit_seed = _try_seed_business_free_credits(slug)
         if not should_schedule:
+            if isinstance(business_result, dict):
+                return {**business_result, "starter_credit_seed": starter_credit_seed}
             return business_result
         cron_result = store.commit(
             scope=_scope_for_business(slug),
@@ -3825,6 +3847,7 @@ def run_takyon_command(
                 *(business_result.get("results") or []),
                 *(cron_result.get("results") or []),
             ],
+            "starter_credit_seed": starter_credit_seed,
         }
 
     if command == "budget":

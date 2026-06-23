@@ -75,6 +75,58 @@ def test_create_enqueues_bootstrap_after_business_persists(monkeypatch):
     assert result["bootstrap_job"]["job_id"] == "job-123"
 
 
+def test_create_enqueues_bootstrap_even_when_starter_credit_seed_fails(monkeypatch):
+    monkeypatch.setattr(takyon_cli, "_require_agent_model_config", lambda *args, **kwargs: None)
+
+    observed = {"enqueued": None}
+    state = {"business": {"slug": "meal-coach", "mode": "live"}}
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def commit(self, *, scope, operations, **kwargs):
+            return {"results": [{"action": "business.upsert"}]}
+
+        def read(self, *, scope, query, **kwargs):
+            assert scope == "business:meal-coach"
+            assert query == "summary"
+            return state
+
+    def fake_enqueue(store, slug, *, goal, mode, schedule, max_turns):
+        observed["enqueued"] = slug
+        return {
+            "action": "ceo_bootstrap.enqueue",
+            "business": slug,
+            "job_id": "job-seed-fail",
+            "status": "queued",
+            "created": True,
+            "schedule": schedule or "",
+        }
+
+    def fail_seed(*_args, **_kwargs):
+        raise RuntimeError("creative credit ledger temporarily unavailable")
+
+    monkeypatch.setattr(takyon_cli, "TakyonStore", FakeStore)
+    monkeypatch.setattr(takyon_cli, "_read_model_config", lambda store: {})
+    monkeypatch.setattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", fake_enqueue)
+    monkeypatch.setattr(takyon_cli, "_business_exists", lambda *_a, **_k: False)
+    monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", lambda *_a, **_k: None)
+    monkeypatch.setattr(takyon_cli, "_seed_business_free_credits", fail_seed)
+
+    result = takyon_cli.run_takyon_command(
+        ["create", "--live", "meal-coach", "meal prep coach"],
+        model="",
+        max_turns=7,
+    )
+
+    assert observed["enqueued"] == "meal-coach"
+    assert result["success"] is True
+    assert result["bootstrap_job"]["job_id"] == "job-seed-fail"
+    assert result["starter_credit_seed"]["status"] == "failed"
+    assert "creative credit ledger temporarily unavailable" in result["starter_credit_seed"]["error"]
+
+
 def test_create_caps_bootstrap_turn_budget(monkeypatch):
     monkeypatch.setattr(takyon_cli, "_require_agent_model_config", lambda *args, **kwargs: None)
 
