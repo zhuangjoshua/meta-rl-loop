@@ -24,10 +24,12 @@ Grounded real symbols (all confirmed by opening the file):
   plugins/takyon/stripe_util.py:build_signature_header    (synthetic Stripe-Signature, no network)
   plugins/takyon/safebox.py:verify_stripe_billing_webhook (flow-A authority verify)
   plugins/takyon/safebox.py:StripeBillingWebhookUnconfigured / StripeBillingWebhookInvalidSignature
+  plugins/takyon/safebox.py:verify_stripe_app_webhook     (flow-B authority verify; runtime never holds the secret)
+  plugins/takyon/safebox.py:StripeAppWebhookUnconfigured / StripeAppWebhookInvalidSignature
   plugins/takyon/control_api.py:/billing/webhook          (503 on unconfigured, 400 on bad sig, idempotent crediting)
   plugins/takyon/safebox.py:grant_credits                 (creative-credit pack grant; idempotent on event id)
   plugins/takyon/app_payments.py:record_webhook_and_process (dedup on webhook_events ... for update)
-  plugins/takyon/core.py:handle_business_record_stripe_webhook (flow-B; refuses missing STRIPE_WEBHOOK_SECRET)
+  plugins/takyon/core.py:handle_business_record_stripe_webhook (flow-B; brokers verify via safebox)
 """
 
 from __future__ import annotations
@@ -194,10 +196,12 @@ def test_billing_grant_allowance_is_idempotent_on_key_by_source():
     returns the prior included amount and writes NO second ledger row. Asserted on the real source;
     the live-DB idempotency proof is the creative-credit-pack route test below."""
     src = inspect.getsource(billing.grant_allowance)
-    # Looks up a prior ledger entry by idempotency_key and returns early if present.
+    # Dedups on idempotency_key by delegating to the migration-0038 SECURITY DEFINER function
+    # safebox_billing_grant_allowance, which short-circuits a replay and returns the current included
+    # amount (verbatim port of the prior _entry_exists logic; the live-DB proof is the billing pg-suite).
     assert "idempotency_key" in src
-    assert "_entry_exists" in src
-    assert "return int(acct[0])" in src, "replay must return prior amount, not re-grant"
+    assert "safebox_billing_grant_allowance" in src
+    assert "idempotent" in src.lower()
 
 
 def test_app_payments_dedups_on_webhook_events_row_lock_by_source():
@@ -216,15 +220,20 @@ def test_app_payments_dedups_on_webhook_events_row_lock_by_source():
 def test_flow_b_record_webhook_handler_failcloses_without_secret_by_source():
     """The flow-B operator handler (handle_business_record_stripe_webhook) refuses when
     STRIPE_WEBHOOK_SECRET is absent and verifies the signature before reconciling — the
-    product-side analogue of the flow-A 503. Asserted on the real source."""
+    product-side analogue of the flow-A 503. Verification is now brokered through the safebox
+    (verify_stripe_app_webhook) so the runtime never holds the signing secret. Asserted on the
+    real source."""
     from plugins.takyon import core
 
     src = inspect.getsource(core.handle_business_record_stripe_webhook)
     assert "STRIPE_WEBHOOK_SECRET" in src
-    assert "_verify_stripe_signature" in src
+    # Verification goes through the safebox authority wrapper, not a local signature check — the
+    # runtime never fetches the raw signing secret.
+    assert "safebox.verify_stripe_app_webhook" in src
+    assert "_verify_stripe_signature" not in src
     assert "requires STRIPE_WEBHOOK_SECRET" in src
     # Signature verification precedes reconciliation.
-    assert src.index("_verify_stripe_signature") < src.index("record_webhook_and_process")
+    assert src.index("verify_stripe_app_webhook") < src.index("record_webhook_and_process")
 
 
 # ---------------------------------------------------------------------------

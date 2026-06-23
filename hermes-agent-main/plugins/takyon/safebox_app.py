@@ -511,6 +511,11 @@ class _StripeBillingWebhookVerifyBody(BaseModel):
     signature: str
 
 
+class _StripeAppWebhookVerifyBody(BaseModel):
+    raw_body: str
+    signature: str
+
+
 class _ProviderCallBody(BaseModel):
     # Either a pre-minted capability token, OR (session_token + business + action) for the safebox to
     # mint-then-broker in one call. The provider payload is the provider-specific request body.
@@ -1458,6 +1463,28 @@ def build_safebox_app() -> FastAPI:
         secret = safebox.read_env_backed_value("STRIPE_BILLING_WEBHOOK_SECRET")
         if not secret:
             raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
+        try:
+            stripe_util.verify_stripe_signature(body.raw_body, body.signature, secret)
+        except stripe_util.StripeError as exc:
+            raise HTTPException(status_code=400, detail="invalid_signature") from exc
+        event = json.loads(body.raw_body)
+        return {"event": event if isinstance(event, dict) else {}}
+
+    @app.post("/v1/stripe/app-webhook/verify")
+    def verify_stripe_app_webhook(
+        body: _StripeAppWebhookVerifyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Sub-user (flow-B) product app webhook verify — the secret-side analogue of the flow-A
+        # billing-webhook verify above. STRIPE_WEBHOOK_SECRET is read LOCALLY on the safebox and the
+        # signature is verified here; the parsed event is returned (NEVER the secret) so the runtime
+        # plane can reconcile entitlements without ever holding the signing key.
+        _require_internal_token(authorization)
+        from . import stripe_util
+
+        secret = safebox.read_env_backed_value("STRIPE_WEBHOOK_SECRET")
+        if not secret:
+            raise HTTPException(status_code=503, detail="app_webhook_unconfigured")
         try:
             stripe_util.verify_stripe_signature(body.raw_body, body.signature, secret)
         except stripe_util.StripeError as exc:

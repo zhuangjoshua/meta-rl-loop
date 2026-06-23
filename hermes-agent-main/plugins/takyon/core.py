@@ -10,7 +10,6 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX dev hosts
     fcntl = None  # type: ignore[assignment]
 import hashlib
-import hmac
 import html
 import json
 import logging
@@ -1260,9 +1259,11 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
 # USE onto the safebox (verify/sign there, like the billing webhook) so the runtime never holds them;
 # until then they must stay on the allowlist or the runtime regresses. Tracked as the next hardening
 # step. (SUPABASE_JWT_SECRET was the worst of these and is now FIXED — dropped above; the runtime no
-# longer verifies product JWTs with the symmetric secret, closing the alg-confusion takeover.) Remaining:
-#   * `STRIPE_WEBHOOK_SECRET` (sub-user app-webhook verifies locally — forge app entitlement events),
-#     `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session signing — operator
+# longer verifies product JWTs with the symmetric secret, closing the alg-confusion takeover.
+# STRIPE_WEBHOOK_SECRET is also now FIXED — dropped above; the sub-user app webhook is verified
+# server-side on the safebox like the flow-A billing webhook, so the runtime never holds the signing
+# secret and forged app entitlement/subscription events are closed.) Remaining:
+#   * `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session signing — operator
 #     impersonation), the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge
 #     provisioning). Same end state: move their use server-side.
 _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
@@ -1280,8 +1281,11 @@ _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
         "SUPABASE_S3_ENDPOINT", "SUPABASE_S3_REGION",
         # R2 object store
         "R2_S3_ACCESS_KEY_ID", "R2_S3_SECRET_ACCESS_KEY",
-        # Stripe (payment rail + sub-user app-webhook verify — residual)
-        "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+        # Stripe (payment rail). STRIPE_WEBHOOK_SECRET is intentionally NOT here: the sub-user
+        # (flow-B) app webhook is now verified server-side on the safebox
+        # (/v1/stripe/app-webhook/verify), mirroring the flow-A billing webhook, so no runtime plane
+        # fetches the signing secret and it can never be vended.
+        "STRIPE_SECRET_KEY",
         # Transactional email
         "POSTMARK_SERVER_TOKEN", "POSTMARK_FROM_EMAIL",
         # Auth0 (dashboard server-side OAuth + session signing — residual)
@@ -19952,27 +19956,6 @@ def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
         raise TakyonError(f"Stripe {path} failed: {exc.code} {body}") from exc
 
 
-def _verify_stripe_signature(raw_body: str, signature: str, secret: str) -> None:
-    parts: dict[str, list[str]] = {}
-    for part in str(signature or "").split(","):
-        if "=" not in part:
-            continue
-        key, value = part.split("=", 1)
-        parts.setdefault(key, []).append(value)
-    timestamp = parts.get("t", [""])[0]
-    signatures = parts.get("v1", [])
-    if not timestamp or not signatures:
-        raise TakyonError("invalid Stripe signature header")
-    try:
-        if abs(time.time() - int(timestamp)) > 300:
-            raise TakyonError("Stripe signature timestamp is outside tolerance")
-    except ValueError as exc:
-        raise TakyonError("invalid Stripe signature timestamp") from exc
-    expected = hmac.new(secret.encode("utf-8"), f"{timestamp}.{raw_body}".encode("utf-8"), hashlib.sha256).hexdigest()
-    if not any(hmac.compare_digest(expected, sig) for sig in signatures):
-        raise TakyonError("Stripe signature verification failed")
-
-
 def _stripe_object_id(value: Any) -> str | None:
     if isinstance(value, str):
         return value
@@ -23591,11 +23574,17 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
         signature = args.get("stripe_signature")
         if not raw_body or not signature:
             raise TakyonError("raw_body and stripe_signature are required")
-        secret = safebox.read_env_backed_value("STRIPE_WEBHOOK_SECRET")
-        if not secret:
-            raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET")
-        _verify_stripe_signature(str(raw_body), str(signature), secret)
-        event = json.loads(str(raw_body))
+        # Flow-B (sub-user app) webhook verification is brokered by the safebox: STRIPE_WEBHOOK_SECRET
+        # is read and the signature verified server-side (mirroring the flow-A billing webhook), so the
+        # runtime plane NEVER holds the signing secret and a runtime-plane attacker cannot forge app
+        # entitlement/subscription events. The safebox returns the PARSED event; reconciliation below is
+        # unchanged.
+        try:
+            event = safebox.verify_stripe_app_webhook(str(raw_body), str(signature))
+        except safebox.StripeAppWebhookUnconfigured as exc:
+            raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET") from exc
+        except safebox.StripeAppWebhookInvalidSignature as exc:
+            raise TakyonError("Stripe signature verification failed") from exc
         if not isinstance(event, dict):
             raise TakyonError("Stripe event payload is required")
         event_id = str(event.get("id") or uuid.uuid4().hex)

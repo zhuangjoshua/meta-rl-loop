@@ -697,6 +697,9 @@ def test_record_stripe_webhook_tool_accrues_to_owner_custody(pg_conn, tmp_path, 
     monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: None)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+    # App-webhook verify is brokered through the safebox; run as the safebox host so the secret is
+    # read and the signature verified LOCALLY (no remote authority required in-test).
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
 
     event = _checkout_event(
@@ -743,6 +746,9 @@ def test_record_stripe_webhook_tool_dedups_on_replay(pg_conn, tmp_path, monkeypa
     monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: None)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
+    # App-webhook verify is brokered through the safebox; run as the safebox host so the secret is
+    # read and the signature verified LOCALLY (no remote authority required in-test).
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
 
     event = _checkout_event(

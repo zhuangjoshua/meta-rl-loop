@@ -29,11 +29,18 @@ def test_env_egress_denies_provider_keys():
 
 
 def test_env_egress_admits_infra_only():
-    for k in ("DATABASE_URL", "POSTGRES_URL", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+    for k in ("DATABASE_URL", "POSTGRES_URL", "STRIPE_SECRET_KEY",
               "AUTH0_CLIENT_SECRET", "AUTH0_DOMAIN", "SUPABASE_S3_SECRET_ACCESS_KEY",
               "R2_S3_SECRET_ACCESS_KEY", "UMAMI_API_KEY", "VERCEL_TOKEN", "CLOUDFLARE_API_TOKEN",
               "TAKYON_GSC_SERVICE_ACCOUNT_KEY"):
         assert core.env_egress_allowed(k) is True, k
+
+
+def test_env_egress_denies_app_webhook_secret():
+    # STRIPE_WEBHOOK_SECRET is no longer fetched by any runtime plane: the sub-user (flow-B) app
+    # webhook is verified server-side on the safebox (/v1/stripe/app-webhook/verify), mirroring the
+    # flow-A billing webhook. The signing secret must never leave the safebox over /v1/env.
+    assert core.env_egress_allowed("STRIPE_WEBHOOK_SECRET") is False
 
 
 def test_env_egress_denies_safebox_verification_secrets():

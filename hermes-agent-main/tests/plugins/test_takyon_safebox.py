@@ -527,3 +527,139 @@ def test_safebox_app_verifies_billing_webhook_signature(monkeypatch):
     assert response.json() == {
         "event": {"id": "evt_123", "type": "checkout.session.completed"}
     }
+
+
+def test_safebox_app_verifies_app_webhook_signature(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_app_xyz")
+
+    client = TestClient(build_safebox_app())
+    body = json.dumps({"id": "evt_app_1", "type": "checkout.session.completed"})
+    headers = {"Authorization": "Bearer shared-token"}
+
+    unauthorized = client.post(
+        "/v1/stripe/app-webhook/verify",
+        json={"raw_body": body, "signature": build_signature_header(body, "whsec_app_xyz")},
+    )
+    assert unauthorized.status_code == 401
+
+    response = client.post(
+        "/v1/stripe/app-webhook/verify",
+        headers=headers,
+        json={"raw_body": body, "signature": build_signature_header(body, "whsec_app_xyz")},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "event": {"id": "evt_app_1", "type": "checkout.session.completed"}
+    }
+
+
+def test_safebox_app_webhook_forged_signature_is_400(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_app_xyz")
+
+    client = TestClient(build_safebox_app())
+    body = json.dumps({"id": "evt_app_2", "type": "checkout.session.completed"})
+    headers = {"Authorization": "Bearer shared-token"}
+
+    forged = build_signature_header(body, "whsec_attacker")
+    response = client.post(
+        "/v1/stripe/app-webhook/verify",
+        headers=headers,
+        json={"raw_body": body, "signature": forged},
+    )
+    assert response.status_code == 400
+
+
+def test_safebox_app_webhook_unconfigured_is_503(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
+
+    client = TestClient(build_safebox_app())
+    body = json.dumps({"id": "evt_app_3", "type": "checkout.session.completed"})
+    headers = {"Authorization": "Bearer shared-token"}
+
+    response = client.post(
+        "/v1/stripe/app-webhook/verify",
+        headers=headers,
+        json={"raw_body": body, "signature": build_signature_header(body, "whsec_app_xyz")},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "app_webhook_unconfigured"
+
+
+def test_verify_stripe_app_webhook_local_authority(monkeypatch):
+    # On the safebox host itself the wrapper reads STRIPE_WEBHOOK_SECRET locally and verifies — no
+    # remote POST. Returns the parsed event; never the secret.
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_local")
+    assert safebox._use_remote_authority() is False
+    body = json.dumps({"id": "evt_local", "type": "customer.subscription.updated"})
+    header = build_signature_header(body, "whsec_local")
+
+    event = safebox.verify_stripe_app_webhook(body, header)
+    assert event == {"id": "evt_local", "type": "customer.subscription.updated"}
+
+
+def test_verify_stripe_app_webhook_local_invalid_signature(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_local")
+    assert safebox._use_remote_authority() is False
+    body = json.dumps({"id": "evt_bad", "type": "checkout.session.completed"})
+    forged = build_signature_header(body, "whsec_attacker")
+    with pytest.raises(safebox.StripeAppWebhookInvalidSignature):
+        safebox.verify_stripe_app_webhook(body, forged)
+
+
+def test_verify_stripe_app_webhook_local_unconfigured(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
+    assert safebox._use_remote_authority() is False
+    assert safebox.read_env_backed_value("STRIPE_WEBHOOK_SECRET") == ""
+    body = json.dumps({"id": "evt_x", "type": "checkout.session.completed"})
+    header = build_signature_header(body, "whsec_local")
+    with pytest.raises(safebox.StripeAppWebhookUnconfigured):
+        safebox.verify_stripe_app_webhook(body, header)
+
+
+def test_verify_stripe_app_webhook_remote_authority_posts_to_route(monkeypatch):
+    # A remote-authority (runtime) plane POSTs to /v1/stripe/app-webhook/verify and trusts the parsed
+    # event the safebox returns — it never reads STRIPE_WEBHOOK_SECRET itself.
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "https://safebox.test")
+    assert safebox._use_remote_authority() is True
+
+    calls: list[tuple[str, str, dict]] = []
+
+    def _fake_remote_json(method, path, payload):
+        calls.append((method, path, payload))
+        return {"event": {"id": "evt_remote", "type": "checkout.session.completed"}}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote_json)
+    event = safebox.verify_stripe_app_webhook("{}", "t=1,v1=deadbeef")
+    assert event == {"id": "evt_remote", "type": "checkout.session.completed"}
+    assert calls == [("POST", "/v1/stripe/app-webhook/verify", {"raw_body": "{}", "signature": "t=1,v1=deadbeef"})]
+
+
+def test_verify_stripe_app_webhook_remote_maps_errors(monkeypatch):
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "https://safebox.test")
+    assert safebox._use_remote_authority() is True
+
+    def _raise(status):
+        def _inner(method, path, payload):
+            raise safebox.RemoteSafeboxError("boom", status_code=status, payload={})
+        return _inner
+
+    monkeypatch.setattr(safebox, "_remote_json", _raise(503))
+    with pytest.raises(safebox.StripeAppWebhookUnconfigured):
+        safebox.verify_stripe_app_webhook("{}", "sig")
+
+    monkeypatch.setattr(safebox, "_remote_json", _raise(400))
+    with pytest.raises(safebox.StripeAppWebhookInvalidSignature):
+        safebox.verify_stripe_app_webhook("{}", "sig")

@@ -115,6 +115,14 @@ class StripeBillingWebhookInvalidSignature(RuntimeError):
     """The presented Stripe billing webhook signature failed verification."""
 
 
+class StripeAppWebhookUnconfigured(RuntimeError):
+    """App (flow-B) webhook verification is unavailable because Safebox lacks the secret."""
+
+
+class StripeAppWebhookInvalidSignature(RuntimeError):
+    """The presented Stripe app (flow-B) webhook signature failed verification."""
+
+
 def is_sensitive_env_key(key: str) -> bool:
     name = str(key or "").strip()
     if not name:
@@ -1087,6 +1095,48 @@ def verify_stripe_billing_webhook(raw_body: str, signature: str) -> dict[str, An
         stripe_util.verify_stripe_signature(body, presented, secret)
     except stripe_util.StripeError as exc:
         raise StripeBillingWebhookInvalidSignature("invalid_signature") from exc
+    event = json.loads(body)
+    return event if isinstance(event, dict) else {}
+
+
+def verify_stripe_app_webhook(raw_body: str, signature: str) -> dict[str, Any]:
+    """Verify one Stripe app (flow-B) webhook through Safebox authority and return the event.
+
+    Mirrors ``verify_stripe_billing_webhook`` exactly: a remote-authority runtime plane POSTs the
+    raw body + signature to ``/v1/stripe/app-webhook/verify`` and the safebox reads
+    STRIPE_WEBHOOK_SECRET locally, verifies, and returns the parsed event (never the secret). On the
+    safebox host the secret is read and verified locally. Fails closed — a missing secret or an
+    authority-unavailable error raises StripeAppWebhookUnconfigured, a bad signature raises
+    StripeAppWebhookInvalidSignature; it NEVER returns an unverified event."""
+    body = str(raw_body or "")
+    presented = str(signature or "").strip()
+    if _use_remote_authority():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/stripe/app-webhook/verify",
+                {"raw_body": body, "signature": presented},
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 503:
+                raise StripeAppWebhookUnconfigured("app_webhook_unconfigured") from exc
+            if exc.status_code == 400:
+                raise StripeAppWebhookInvalidSignature("invalid_signature") from exc
+            raise
+        event = payload.get("event")
+        return event if isinstance(event, dict) else {}
+    from . import stripe_util
+
+    try:
+        secret = read_env_backed_value("STRIPE_WEBHOOK_SECRET")
+    except SafeboxAuthorityUnavailable as exc:
+        raise StripeAppWebhookUnconfigured("app_webhook_unconfigured") from exc
+    if not secret:
+        raise StripeAppWebhookUnconfigured("app_webhook_unconfigured")
+    try:
+        stripe_util.verify_stripe_signature(body, presented, secret)
+    except stripe_util.StripeError as exc:
+        raise StripeAppWebhookInvalidSignature("invalid_signature") from exc
     event = json.loads(body)
     return event if isinstance(event, dict) else {}
 

@@ -4145,6 +4145,9 @@ def test_pg_test_mode_checkout_uses_same_origin_receipt_url_when_origin_present(
 
 def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    # The sub-user app webhook is now verified server-side on the safebox; run this handler test as
+    # the safebox host so verify_stripe_app_webhook reads STRIPE_WEBHOOK_SECRET locally (no remote).
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
     store = TakyonStore(tmp_path)
     _commit(

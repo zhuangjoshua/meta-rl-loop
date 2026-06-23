@@ -104,9 +104,26 @@ def _sql_function_body(sql: str, fn_name: str) -> str:
     specific gate function, not merely somewhere in the migration."""
     marker = f"create or replace function {fn_name}("
     start = sql.find(marker)
-    assert start != -1, f"{fn_name} not found in 0037 ledger-boundary SQL"
+    assert start != -1, f"{fn_name} not found in ledger-boundary SQL"
     rest = sql.find("create or replace function ", start + len(marker))
     return sql[start:] if rest == -1 else sql[start:rest]
+
+
+# Migration 0038 moved the operator-BILLING / creative-CREDIT / CUSTODY reserve/settle/refund/grant row
+# ops out of open Python writes into SECURITY DEFINER functions (mirroring 0037 for product-usage), so
+# the runtime can be demoted off the money ledgers. The replay/idempotency guards now live in THAT SQL.
+_RUNTIME_LEAST_PRIV_SQL = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "plugins"
+    / "takyon"
+    / "db"
+    / "migrations"
+    / "0038_runtime_least_privilege.sql"
+)
+
+
+def _runtime_least_priv_sql() -> str:
+    return _RUNTIME_LEAST_PRIV_SQL.read_text(encoding="utf-8")
 
 
 def _raises_valueerror_nodes(tree: ast.AST) -> list[ast.Raise]:
@@ -179,7 +196,10 @@ def test_business_credits_commit_refuses_over_commit_in_source():
     ``if spent > reserve.amount_credits: raise ValueError(...)``."""
     src = _func_source(business_credits.commit_credits)
     tree = _func_ast(business_credits.commit_credits)
-    assert "spent > reserve.amount_credits" in src, (
+    # Post-0038 the over-commit / negative guards are pre-checked in the Python wrapper (ValueErrors,
+    # not ledger refusals) BEFORE the SECURITY DEFINER gate writes — exactly as before, just worded
+    # against the locally-read reserved amount.
+    assert "spent > reserved" in src, (
         "commit_credits lost its actual<=reserved guard"
     )
     assert _raises_valueerror_nodes(tree), (
@@ -219,26 +239,18 @@ def test_app_usage_settle_is_money_truth_not_a_silent_cap_recheck():
 # --------------------------------------------------------------------------------------
 
 def test_billing_settle_and_refund_guard_on_prior_finalization_in_source():
-    """A replayed settle/refund on a finalized reservation must be a no-op. Confirmed in
-    source: both call ``_finalized(conn, rk)`` and ``return`` early."""
-    assert callable(getattr(billing, "_finalized"))
-    for func in (billing.settle, billing.refund):
-        src = _func_source(func)
-        assert "_finalized(conn, rk)" in src, f"{func.__name__} lost its replay guard"
-        # The finalized branch returns without writing.
-        tree = _func_ast(func)
-        guarded_return = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.If):
-                cond = node.test
-                if (
-                    isinstance(cond, ast.Call)
-                    and isinstance(cond.func, ast.Name)
-                    and cond.func.id == "_finalized"
-                    and any(isinstance(b, ast.Return) for b in node.body)
-                ):
-                    guarded_return = True
-        assert guarded_return, f"{func.__name__} _finalized branch no longer returns early"
+    """A replayed settle/refund on a finalized reservation must be a no-op (first finalizer wins).
+    Post-0038 the billing settle/refund row ops are the ``safebox_billing_settle`` /
+    ``safebox_billing_refund`` SECURITY DEFINER functions, so the replay guard lives THERE: each
+    computes ``v_finalized`` (a prior settle/refund entry exists) and returns the row WITHOUT writing.
+    The live-DB no-op proof is the billing pg-suite."""
+    sql = _runtime_least_priv_sql()
+    for fn_name in ("safebox_billing_settle", "safebox_billing_refund"):
+        body = _sql_function_body(sql, fn_name)
+        assert "v_finalized" in body, f"{fn_name} lost its finalized replay guard"
+        assert "if v_finalized then" in body, f"{fn_name} no longer branches on prior finalization"
+        # The finalized branch returns the row (a no-op), it does not re-write the ledger.
+        assert "return r;" in body, f"{fn_name} no longer no-ops on a replayed finalizer"
 
 
 def test_app_usage_finalizers_guard_on_finalized_status_in_source():
@@ -263,34 +275,39 @@ def test_app_usage_finalizers_guard_on_finalized_status_in_source():
 
 
 def test_business_credits_commit_and_release_guard_on_prior_finalization_in_source():
-    """commit_credits / release_credits must no-op on a reservation already
-    committed/released. Confirmed in source: both query a ``prior`` commit/release row and
-    return the cached balances when it exists."""
-    for func in (business_credits.commit_credits, business_credits.release_credits):
-        src = _func_source(func)
-        assert "kind in ('commit', 'release')" in src, (
-            f"{func.__name__} lost its prior-finalization replay query"
+    """commit_credits / release_credits must no-op on a reservation already committed/released.
+    Post-0038 the row ops are the ``safebox_credits_commit`` / ``safebox_credits_release`` SECURITY
+    DEFINER functions, so the replay guard lives THERE: each queries a prior commit/release entry and
+    returns the current balances without writing. The live-DB no-op proof is the credits pg-suite."""
+    sql = _runtime_least_priv_sql()
+    for fn_name in ("safebox_credits_commit", "safebox_credits_release"):
+        body = _sql_function_body(sql, fn_name)
+        assert "kind in ('commit', 'release')" in body, (
+            f"{fn_name} lost its prior-finalization replay query"
         )
-        assert "if prior is not None" in src, (
-            f"{func.__name__} no longer no-ops on a replayed finalizer"
+        assert "return r;" in body, (
+            f"{fn_name} no longer no-ops on a replayed finalizer"
         )
 
 
 def test_reserve_paths_are_idempotent_on_their_key_in_source():
-    """Each reserve must return the SAME existing reservation on a replayed key (hold
-    once, never twice). Confirmed in source for all three rails."""
-    # billing.reserve: replays the reservation_key's reserve entries.
-    assert "reservation_key = %s and kind = 'reserve'" in _func_source(billing.reserve)
+    """Each reserve must return the SAME existing reservation on a replayed key (hold once, never
+    twice). Post-0038 the billing + creative-credit reserve row ops are SECURITY DEFINER functions; the
+    product-usage rail is the 0037 function. Each is asserted where its idempotent lookup now lives."""
+    # billing + creative-credit reserve (0038): idempotent-on-reservation_key lookup short-circuits to
+    # the existing hold before any new write.
+    rl_sql = _runtime_least_priv_sql()
+    for fn_name in ("safebox_billing_reserve", "safebox_credits_reserve"):
+        body = _sql_function_body(rl_sql, fn_name)
+        assert "reservation_key = p_reservation_key and kind = 'reserve'" in body, (
+            f"{fn_name} lost its idempotent reservation_key lookup"
+        )
     # app_usage.reserve_usage: post-0037 the row op is the ``safebox_reserve_usage`` SECURITY DEFINER
     # function — its idempotent-on-key lookup short-circuits to the existing row before any new hold.
     reserve = _sql_function_body(_ledger_boundary_sql(), "safebox_reserve_usage")
     assert "where e.business_slug = p_business_slug and e.reservation_key = p_reservation_key" in reserve, (
         "safebox_reserve_usage lost its idempotent reservation_key lookup"
     )
-    # business_credits.reserve_credits: returns the existing reserve for a duplicate key.
-    bc = _func_source(business_credits.reserve_credits)
-    assert "kind = 'reserve'" in bc
-    assert "if existing is not None" in bc
 
 
 # --------------------------------------------------------------------------------------
