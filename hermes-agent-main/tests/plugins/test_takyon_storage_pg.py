@@ -405,6 +405,39 @@ def test_supabase_listing_skips_head_requests_for_excluded_paths():
     assert backend._client.head_calls == ["biz-x/product/site/index.html"]
 
 
+def test_supabase_listing_normalizes_business_prefix_without_trailing_slash():
+    class _Paginator:
+        seen_prefixes: list[str] = []
+
+        def paginate(self, **kwargs):
+            self.seen_prefixes.append(kwargs["Prefix"])
+            yield {"Contents": [{"Key": "biz-x/__takyon/builds/build-1/index.html"}]}
+
+    class _Client:
+        def __init__(self):
+            self.paginator = _Paginator()
+
+        def get_paginator(self, name):
+            assert name == "list_objects_v2"
+            return self.paginator
+
+        def head_object(self, *, Bucket, Key):
+            assert Bucket == "bucket"
+            assert Key == "biz-x/__takyon/builds/build-1/index.html"
+            return {"Metadata": {"sha256": "abc123"}}
+
+        def get_object(self, *, Bucket, Key):  # pragma: no cover - should not be reached here
+            raise AssertionError((Bucket, Key))
+
+    backend = storage.SupabaseS3StorageBackend.__new__(storage.SupabaseS3StorageBackend)
+    backend.bucket = "bucket"
+    backend._client = _Client()
+
+    digests = backend.list_digests("biz-x")
+    assert backend._client.paginator.seen_prefixes == ["biz-x/"]
+    assert digests == {"biz-x/__takyon/builds/build-1/index.html": "abc123"}
+
+
 def test_supabase_listing_skips_objects_that_vanish_after_list():
     class _Paginator:
         def paginate(self, **_kwargs):

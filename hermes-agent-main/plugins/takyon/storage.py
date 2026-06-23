@@ -105,6 +105,13 @@ _SUPABASE_STORAGE_SECRET_KEYS: tuple[str, ...] = (
 logger = logging.getLogger(__name__)
 
 
+def _s3_list_prefix(prefix: str) -> str:
+    """Normalize object-store list prefixes so ``biz`` and ``biz/`` address one namespace."""
+    raw = str(prefix or "")
+    safe = _safe_rel(raw.rstrip("/"), field="prefix") if raw.strip("/") else ""
+    return f"{safe}/" if safe else ""
+
+
 def _workspace_scratch_parent(
     scratch_parent: str | os.PathLike[str] | None = None,
 ) -> Path:
@@ -760,6 +767,7 @@ class SupabaseS3StorageBackend:
 
     def list_digests(self, prefix: str) -> dict[str, str]:  # pragma: no cover - live only
         out: dict[str, str] = {}
+        prefix = _s3_list_prefix(prefix)
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
@@ -791,6 +799,7 @@ class SupabaseS3StorageBackend:
         # `Size` rides the list_objects_v2 page itself — no per-object head/get — so quota
         # accounting stays a single cheap listing even for large operators.
         out: dict[str, int] = {}
+        prefix = _s3_list_prefix(prefix)
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
@@ -880,6 +889,7 @@ class R2StorageBackend:
 
     def list_digests(self, prefix: str) -> dict[str, str]:  # pragma: no cover - live only
         out: dict[str, str] = {}
+        prefix = _s3_list_prefix(prefix)
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
@@ -903,6 +913,7 @@ class R2StorageBackend:
 
     def list_object_sizes(self, prefix: str) -> dict[str, int]:  # pragma: no cover - live only
         out: dict[str, int] = {}
+        prefix = _s3_list_prefix(prefix)
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
