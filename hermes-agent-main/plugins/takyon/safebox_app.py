@@ -466,6 +466,25 @@ class _OpenCreativeCreditAccountBody(BaseModel):
     business_slug: str
 
 
+class _OpenBillingAccountBody(BaseModel):
+    user_id: str
+    allowance_included_cents: int | None = None
+
+
+class _StarterAllowanceBody(BaseModel):
+    user_id: str
+
+
+class _OperatorSubscriptionSyncBody(BaseModel):
+    user_id: str
+    refresh_live: bool | None = True
+
+
+class _OpenCustodyAccountBody(BaseModel):
+    user_id: str
+    currency: str | None = "usd"
+
+
 class _GrantCreativeCreditsBody(BaseModel):
     business_slug: str
     credits: int
@@ -1341,6 +1360,66 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         return {"deleted": safebox.delete_user_api_key(key_id)}
 
+    @app.post("/v1/billing/accounts/open")
+    def open_billing_account(
+        body: _OpenBillingAccountBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        _require_internal_token(authorization)
+        # Account-open is allowed only as a zero-balance provisioning primitive. Any non-zero amount
+        # is a grant and must go through starter/subscription/webhook policy.
+        if int(body.allowance_included_cents or 0) != 0:
+            raise HTTPException(status_code=400, detail="billing_open_must_not_mint_allowance")
+        safebox._local_open_billing_account(None, body.user_id, allowance_included_cents=0)
+        return {"ok": True}
+
+    @app.post("/v1/billing/starter-allowance")
+    def grant_starter_allowance(
+        body: _StarterAllowanceBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        included = safebox._local_grant_starter_allowance(None, body.user_id)
+        return {"ok": True, "user_id": body.user_id, "included_cents": int(included)}
+
+    @app.post("/v1/billing/operator-subscription/sync")
+    def sync_operator_subscription_allowance(
+        body: _OperatorSubscriptionSyncBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from .control_api import sync_operator_subscription_allowance as _sync
+
+        with _safebox_db_conn() as conn:
+            state = _sync(conn, body.user_id, refresh_live=bool(body.refresh_live))
+        return safebox._operator_subscription_state_payload(state)
+
+    @app.post("/v1/billing/webhook/process")
+    def process_billing_webhook(
+        body: _StripeBillingWebhookVerifyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        try:
+            event = safebox.verify_stripe_billing_webhook(body.raw_body, body.signature)
+        except safebox.StripeBillingWebhookUnconfigured as exc:
+            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured") from exc
+        except safebox.StripeBillingWebhookInvalidSignature as exc:
+            raise HTTPException(status_code=400, detail="invalid_signature") from exc
+        from .control_api import process_billing_webhook_event
+
+        with _safebox_db_conn() as conn:
+            return process_billing_webhook_event(conn, event)
+
+    @app.post("/v1/custody/accounts/open")
+    def open_custody_account(
+        body: _OpenCustodyAccountBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        _require_internal_token(authorization)
+        safebox._local_open_custody_account(None, body.user_id, currency=body.currency or "usd")
+        return {"ok": True}
+
     @app.post("/v1/creative-credits/accounts/open")
     def open_creative_credit_account(
         body: _OpenCreativeCreditAccountBody,
@@ -1438,19 +1517,10 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
-        balances = safebox._local_grant_credits(
-            None,
-            body.business_slug,
-            body.credits,
-            body.idempotency_key,
-            metadata=body.metadata,
-            stripe_ref=body.stripe_ref,
+        raise HTTPException(
+            status_code=403,
+            detail="creative_credit_grant_requires_verified_checkout_or_webhook",
         )
-        return {
-            "business_slug": balances.business_slug,
-            "balance_credits": balances.balance_credits,
-            "reserved_credits": balances.reserved_credits,
-        }
 
     @app.post("/v1/stripe/billing-webhook/verify")
     def verify_stripe_billing_webhook(
@@ -1491,6 +1561,26 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="invalid_signature") from exc
         event = json.loads(body.raw_body)
         return {"event": event if isinstance(event, dict) else {}}
+
+    @app.post("/v1/stripe/app-webhook/process")
+    def process_stripe_app_webhook(
+        body: _StripeAppWebhookVerifyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Signature verification and entitlement/revenue/custody processing happen together on the
+        # safebox, so custody accrual is tied to a genuine signed Stripe event instead of a
+        # shared-token caller-supplied amount.
+        _require_internal_token(authorization)
+        try:
+            event = safebox.verify_stripe_app_webhook(body.raw_body, body.signature)
+        except safebox.StripeAppWebhookUnconfigured as exc:
+            raise HTTPException(status_code=503, detail="app_webhook_unconfigured") from exc
+        except safebox.StripeAppWebhookInvalidSignature as exc:
+            raise HTTPException(status_code=400, detail="invalid_signature") from exc
+        from . import app_payments
+
+        with _safebox_db_conn() as conn:
+            return app_payments.record_webhook_and_process(conn, event)
 
     @app.post("/v1/creative-credits/reserve")
     def reserve_creative_credits(

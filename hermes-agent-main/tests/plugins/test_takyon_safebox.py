@@ -271,6 +271,50 @@ def test_remote_safebox_creative_credit_checkout_delegates_to_service(monkeypatc
     ]
 
 
+def test_remote_safebox_creative_credit_grant_refuses_arbitrary_amount(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable, match="verified checkout/webhook"):
+        safebox.grant_credits(None, "acme", 999999, "attacker-grant")
+
+
+def test_remote_safebox_billing_and_custody_open_delegate_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None):
+        calls.append((method, path, payload))
+        return {"ok": True}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    safebox.open_billing_account(None, "user-1")
+    safebox.open_custody_account(None, "user-1", currency="usd")
+
+    assert calls == [
+        ("POST", "/v1/billing/accounts/open", {"user_id": "user-1", "allowance_included_cents": 0}),
+        ("POST", "/v1/custody/accounts/open", {"user_id": "user-1", "currency": "usd"}),
+    ]
+
+
+def test_remote_safebox_signed_webhook_processors_delegate_to_process_routes(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        return {"ok": True, "provider_event_id": "evt_1", "type": "checkout.session.completed"}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    assert safebox.process_stripe_billing_webhook("{}", "sig")["ok"] is True
+    assert safebox.process_stripe_app_webhook("{}", "sig")["ok"] is True
+    assert calls == [
+        ("POST", "/v1/billing/webhook/process", {"raw_body": "{}", "signature": "sig"}),
+        ("POST", "/v1/stripe/app-webhook/process", {"raw_body": "{}", "signature": "sig"}),
+    ]
+
+
 def test_remote_safebox_creative_credit_reserve_maps_insufficient_credits(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
 
@@ -503,6 +547,26 @@ def test_safebox_app_requires_internal_token_and_creates_creative_credit_checkou
     }
 
 
+def test_safebox_app_refuses_arbitrary_creative_credit_grant(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+
+    client = TestClient(build_safebox_app())
+    response = client.post(
+        "/v1/creative-credits/grant",
+        headers={"Authorization": "Bearer shared-token"},
+        json={
+            "business_slug": "acme",
+            "credits": 999999,
+            "idempotency_key": "attacker",
+            "metadata": {},
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "creative_credit_grant_requires_verified_checkout_or_webhook"
+
+
 def test_safebox_app_verifies_billing_webhook_signature(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
@@ -553,6 +617,48 @@ def test_safebox_app_verifies_app_webhook_signature(monkeypatch):
     assert response.json() == {
         "event": {"id": "evt_app_1", "type": "checkout.session.completed"}
     }
+
+
+def test_safebox_app_processes_app_webhook_after_signature_verify(monkeypatch):
+    from plugins.takyon import app_payments
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_app_process")
+
+    calls = []
+
+    class _Conn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr("psycopg.connect", lambda *a, **k: _Conn())
+    monkeypatch.setattr("plugins.takyon.runtime_app.resolve_database_url", lambda: "postgres://owner")
+
+    def _fake_process(conn, event):
+        calls.append((conn, event))
+        return {
+            "provider_event_id": event["id"],
+            "type": event["type"],
+            "deduplicated": False,
+            "processed": {"recorded": True},
+        }
+
+    monkeypatch.setattr(app_payments, "record_webhook_and_process", _fake_process)
+
+    client = TestClient(build_safebox_app())
+    body = json.dumps({"id": "evt_app_process", "type": "checkout.session.completed"})
+    headers = {"Authorization": "Bearer shared-token"}
+
+    response = client.post(
+        "/v1/stripe/app-webhook/process",
+        headers=headers,
+        json={"raw_body": body, "signature": build_signature_header(body, "whsec_app_process")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["processed"] == {"recorded": True}
+    assert calls and calls[0][1]["id"] == "evt_app_process"
 
 
 def test_safebox_app_webhook_forged_signature_is_400(monkeypatch):

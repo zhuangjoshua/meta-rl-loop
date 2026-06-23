@@ -219,21 +219,23 @@ def test_app_payments_dedups_on_webhook_events_row_lock_by_source():
 
 def test_flow_b_record_webhook_handler_failcloses_without_secret_by_source():
     """The flow-B operator handler (handle_business_record_stripe_webhook) refuses when
-    STRIPE_WEBHOOK_SECRET is absent and verifies the signature before reconciling — the
-    product-side analogue of the flow-A 503. Verification is now brokered through the safebox
-    (verify_stripe_app_webhook) so the runtime never holds the signing secret. Asserted on the
-    real source."""
-    from plugins.takyon import core
+    STRIPE_WEBHOOK_SECRET is absent and processes the signed event on the safebox — the
+    product-side analogue of the flow-A 503. The runtime never holds the signing secret and never
+    invokes custody accrual with caller-supplied amounts. Asserted on the real source."""
+    from plugins.takyon import core, safebox_app
 
     src = inspect.getsource(core.handle_business_record_stripe_webhook)
     assert "STRIPE_WEBHOOK_SECRET" in src
-    # Verification goes through the safebox authority wrapper, not a local signature check — the
-    # runtime never fetches the raw signing secret.
-    assert "safebox.verify_stripe_app_webhook" in src
+    # Verification + reconciliation go through the safebox authority wrapper, not a local signature
+    # check followed by runtime-plane custody accrual.
+    assert "safebox.process_stripe_app_webhook" in src
     assert "_verify_stripe_signature" not in src
     assert "requires STRIPE_WEBHOOK_SECRET" in src
-    # Signature verification precedes reconciliation.
-    assert src.index("verify_stripe_app_webhook") < src.index("record_webhook_and_process")
+    assert "record_webhook_and_process" not in src
+
+    app_src = inspect.getsource(safebox_app.build_safebox_app)
+    assert '"/v1/stripe/app-webhook/process"' in app_src
+    assert app_src.index("verify_stripe_app_webhook") < app_src.index("record_webhook_and_process")
 
 
 # ---------------------------------------------------------------------------

@@ -150,6 +150,12 @@ grant execute on function takyon_rls_effective_email() to takyon_runtime;
 
 -- The 0037 usage-gate functions: grant EXECUTE to takyon_runtime too (it can no longer write
 -- app_usage_events directly, exactly like takyon_app).
+revoke execute on function safebox_reserve_usage(
+    text, bigint, text, uuid, bigint, text, text, text, text, text, jsonb) from public;
+revoke execute on function safebox_settle_usage(
+    text, text, bigint, integer, integer, text, text, text, jsonb) from public;
+revoke execute on function safebox_release_usage(text, text, text, jsonb) from public;
+revoke execute on function safebox_reconcile_held_usage(bigint) from public;
 grant execute on function safebox_reserve_usage(
     text, bigint, text, uuid, bigint, text, text, text, text, text, jsonb) to takyon_runtime;
 grant execute on function safebox_settle_usage(
@@ -421,8 +427,13 @@ begin
 end;
 $$;
 
-grant execute on function safebox_billing_open_account(uuid, bigint) to takyon_runtime;
-grant execute on function safebox_billing_grant_allowance(uuid, bigint, text, timestamptz, timestamptz) to takyon_runtime;
+revoke execute on function safebox_billing_open_account(uuid, bigint) from public;
+revoke execute on function safebox_billing_grant_allowance(uuid, bigint, text, timestamptz, timestamptz) from public;
+revoke execute on function safebox_billing_open_account(uuid, bigint) from takyon_runtime;
+revoke execute on function safebox_billing_grant_allowance(uuid, bigint, text, timestamptz, timestamptz) from takyon_runtime;
+revoke execute on function safebox_billing_reserve(uuid, bigint, text, text, text) from public;
+revoke execute on function safebox_billing_settle(text, bigint) from public;
+revoke execute on function safebox_billing_refund(text) from public;
 grant execute on function safebox_billing_reserve(uuid, bigint, text, text, text) to takyon_runtime;
 grant execute on function safebox_billing_settle(text, bigint) to takyon_runtime;
 grant execute on function safebox_billing_refund(text) to takyon_runtime;
@@ -697,9 +708,15 @@ begin
 end;
 $$;
 
+revoke execute on function safebox_credits_reserved(text) from public;
+revoke execute on function safebox_credits_open_account(text) from public;
+revoke execute on function safebox_credits_grant(text, bigint, text, jsonb, text) from public;
+revoke execute on function safebox_credits_open_account(text) from takyon_runtime;
+revoke execute on function safebox_credits_grant(text, bigint, text, jsonb, text) from takyon_runtime;
+revoke execute on function safebox_credits_reserve(text, bigint, text, jsonb) from public;
+revoke execute on function safebox_credits_commit(text, bigint, jsonb) from public;
+revoke execute on function safebox_credits_release(text, jsonb) from public;
 grant execute on function safebox_credits_reserved(text) to takyon_runtime;
-grant execute on function safebox_credits_open_account(text) to takyon_runtime;
-grant execute on function safebox_credits_grant(text, bigint, text, jsonb, text) to takyon_runtime;
 grant execute on function safebox_credits_reserve(text, bigint, text, jsonb) to takyon_runtime;
 grant execute on function safebox_credits_commit(text, bigint, jsonb) to takyon_runtime;
 grant execute on function safebox_credits_release(text, jsonb) to takyon_runtime;
@@ -838,6 +855,9 @@ begin
 end;
 $$;
 
-grant execute on function safebox_custody_open_account(uuid, text) to takyon_runtime;
-grant execute on function safebox_custody_accrue(uuid, text, bigint, bigint, bigint, text, text, jsonb) to takyon_runtime;
-grant execute on function safebox_custody_payout(uuid, bigint, text, text) to takyon_runtime;
+revoke execute on function safebox_custody_open_account(uuid, text) from public;
+revoke execute on function safebox_custody_accrue(uuid, text, bigint, bigint, bigint, text, text, jsonb) from public;
+revoke execute on function safebox_custody_payout(uuid, bigint, text, text) from public;
+revoke execute on function safebox_custody_open_account(uuid, text) from takyon_runtime;
+revoke execute on function safebox_custody_accrue(uuid, text, bigint, bigint, bigint, text, text, jsonb) from takyon_runtime;
+revoke execute on function safebox_custody_payout(uuid, bigint, text, text) from takyon_runtime;

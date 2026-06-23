@@ -486,6 +486,149 @@ def _reservation_from_payload(
     )
 
 
+def _operator_subscription_state_payload(state: Any) -> dict[str, Any]:
+    if isinstance(state, dict):
+        return dict(state)
+    keys = (
+        "user_id",
+        "customer_id",
+        "subscription_id",
+        "subscription_status",
+        "plan_name",
+        "weekly_allowance_cents",
+        "allowance_period_start",
+        "allowance_resets_at",
+        "synced",
+    )
+    return {key: getattr(state, key, None) for key in keys}
+
+
+def _starter_allowance_cents() -> int:
+    raw = str(os.environ.get("TAKYON_STARTER_ALLOWANCE_CENTS") or "").strip()
+    if not raw:
+        return 100
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 100
+
+
+def _local_open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 0) -> None:
+    with _creative_credit_conn(conn) as billing_conn:
+        billing_conn.execute(
+            "select safebox_billing_open_account(%s, %s)",
+            (user_id, int(allowance_included_cents or 0)),
+        )
+
+
+def _local_grant_allowance(
+    conn,
+    user_id: str,
+    included_cents: int,
+    idempotency_key: str,
+    *,
+    period_start=None,
+    resets_at=None,
+) -> int:
+    from . import billing
+
+    with _creative_credit_conn(conn) as billing_conn:
+        row = billing_conn.execute(
+            "select * from safebox_billing_grant_allowance(%s, %s, %s, %s, %s)",
+            (user_id, int(included_cents), str(idempotency_key or ""), period_start, resets_at),
+        ).fetchone()
+    billing._raise_for_billing_refusal(row, user_id=user_id)
+    return int(billing._cell(row, 4))
+
+
+def _local_grant_starter_allowance(conn, user_id: str) -> int:
+    included_cents = _starter_allowance_cents()
+    if included_cents <= 0:
+        return 0
+    with _creative_credit_conn(conn) as billing_conn:
+        _local_open_billing_account(billing_conn, user_id)
+        with billing_conn.transaction():
+            acct = billing_conn.execute(
+                "select allowance_included_cents, allowance_used_cents "
+                "from billing_accounts where user_id = %s for update",
+                (user_id,),
+            ).fetchone()
+            if acct is None:
+                raise RuntimeError(f"billing account missing for user {user_id}")
+            included = int(acct[0] or 0)
+            used = int(acct[1] or 0)
+            if included > 0 or used > 0:
+                return included
+            existing_entry = billing_conn.execute(
+                "select 1 from billing_entries where user_id = %s limit 1",
+                (user_id,),
+            ).fetchone()
+            if existing_entry is not None:
+                return included
+        return _local_grant_allowance(
+            billing_conn,
+            user_id,
+            included_cents,
+            f"starter-allowance:{user_id}",
+        )
+
+
+def _local_open_custody_account(conn, user_id: str, *, currency: str = "usd") -> None:
+    with _creative_credit_conn(conn) as custody_conn:
+        custody_conn.execute(
+            "select safebox_custody_open_account(%s, %s)",
+            (user_id, str(currency or "usd")),
+        )
+
+
+def _local_accrue_custody(
+    conn,
+    user_id: str,
+    business_slug: str,
+    gross_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    fee_bps: int | None = None,
+    withheld_cents: int = 0,
+    metadata: dict | None = None,
+) -> int:
+    from . import custody
+
+    with _creative_credit_conn(conn) as custody_conn:
+        return custody.accrue(
+            custody_conn,
+            user_id,
+            business_slug,
+            gross_cents,
+            idempotency_key,
+            stripe_ref=stripe_ref,
+            fee_bps=fee_bps,
+            withheld_cents=withheld_cents,
+            metadata=metadata,
+        )
+
+
+def _local_payout_custody(
+    conn,
+    user_id: str,
+    amount_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+) -> int:
+    from . import custody
+
+    with _creative_credit_conn(conn) as custody_conn:
+        return custody.payout(
+            custody_conn,
+            user_id,
+            amount_cents,
+            idempotency_key,
+            stripe_ref=stripe_ref,
+        )
+
+
 def _local_open_business_credit_account(conn, business_slug: str) -> None:
     backend = _creative_credit_backend()
     with _creative_credit_conn(conn) as credit_conn:
@@ -866,6 +1009,189 @@ def open_business_credit_account(conn, business_slug: str) -> None:
     _local_open_business_credit_account(conn, slug)
 
 
+def open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 0) -> None:
+    """Open a zero/explicit billing account through safebox authority.
+
+    This route does not mint spend; any non-zero allowance still has to come through a bounded
+    starter/subscription/webhook path.
+    """
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    amount = int(allowance_included_cents or 0)
+    if _remote_enabled() and not _local_authority_enabled():
+        _remote_json(
+            "POST",
+            "/v1/billing/accounts/open",
+            {"user_id": user_ref, "allowance_included_cents": amount},
+        )
+        return
+    _local_open_billing_account(conn, user_ref, allowance_included_cents=amount)
+
+
+def grant_starter_allowance(conn, user_id: str) -> int:
+    """Grant the one-time starter allowance, with replay/balance checks inside the safebox."""
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/billing/starter-allowance",
+            {"user_id": user_ref},
+        )
+        return int(payload.get("included_cents") or 0)
+    return _local_grant_starter_allowance(conn, user_ref)
+
+
+def sync_operator_subscription_allowance(user_id: str, *, refresh_live: bool = True) -> dict[str, Any]:
+    """Ask the safebox to derive the operator allowance from Stripe/DB state.
+
+    The caller supplies only the account identity and whether live Stripe refresh is allowed; the
+    safebox derives any minted allowance from its own Stripe read or a verified webhook event.
+    """
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/billing/operator-subscription/sync",
+            {"user_id": user_ref, "refresh_live": bool(refresh_live)},
+            timeout=30.0,
+        )
+        return payload if isinstance(payload, dict) else {}
+    from .control_api import sync_operator_subscription_allowance as _sync
+
+    with _creative_credit_conn(None) as conn:
+        return _operator_subscription_state_payload(
+            _sync(conn, user_ref, refresh_live=bool(refresh_live))
+        )
+
+
+def process_stripe_billing_webhook(raw_body: str, signature: str) -> dict[str, Any]:
+    """Verify and process the flow-A billing webhook on the safebox."""
+    body = str(raw_body or "")
+    presented = str(signature or "").strip()
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/billing/webhook/process",
+                {"raw_body": body, "signature": presented},
+                timeout=30.0,
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 503:
+                raise StripeBillingWebhookUnconfigured("billing_webhook_unconfigured") from exc
+            if exc.status_code == 400:
+                raise StripeBillingWebhookInvalidSignature("invalid_signature") from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+    event = verify_stripe_billing_webhook(body, presented)
+    from .control_api import process_billing_webhook_event
+
+    with _creative_credit_conn(None) as conn:
+        return process_billing_webhook_event(conn, event)
+
+
+def open_custody_account(conn, user_id: str, *, currency: str = "usd") -> None:
+    """Open a zero custody account through safebox authority."""
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        _remote_json(
+            "POST",
+            "/v1/custody/accounts/open",
+            {"user_id": user_ref, "currency": str(currency or "usd")},
+        )
+        return
+    _local_open_custody_account(conn, user_ref, currency=currency)
+
+
+def accrue_custody(
+    conn,
+    user_id: str,
+    business_slug: str,
+    gross_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    fee_bps: int | None = None,
+    withheld_cents: int = 0,
+    metadata: dict | None = None,
+) -> int:
+    """Safebox-local custody accrual.
+
+    Remote runtime planes should not call this with caller-supplied amounts; they process the signed
+    app-payment webhook through ``process_stripe_app_webhook`` instead.
+    """
+    if _remote_enabled() and not _local_authority_enabled():
+        raise SafeboxAuthorityUnavailable(
+            "custody accrual must be derived from a signed app-payment webhook on the safebox"
+        )
+    return _local_accrue_custody(
+        conn,
+        user_id,
+        business_slug,
+        gross_cents,
+        idempotency_key,
+        stripe_ref=stripe_ref,
+        fee_bps=fee_bps,
+        withheld_cents=withheld_cents,
+        metadata=metadata,
+    )
+
+
+def payout_custody(
+    conn,
+    user_id: str,
+    amount_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+) -> int:
+    """Safebox-local custody payout primitive; public HTTP access is operator-capability gated."""
+    if _remote_enabled() and not _local_authority_enabled():
+        raise SafeboxAuthorityUnavailable(
+            "custody payout must use the operator-authorized safebox payout route"
+        )
+    return _local_payout_custody(
+        conn,
+        user_id,
+        amount_cents,
+        idempotency_key,
+        stripe_ref=stripe_ref,
+    )
+
+
+def process_stripe_app_webhook(raw_body: str, signature: str) -> dict[str, Any]:
+    """Verify and process the flow-B product app webhook on the safebox."""
+    body = str(raw_body or "")
+    presented = str(signature or "").strip()
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/stripe/app-webhook/process",
+                {"raw_body": body, "signature": presented},
+                timeout=30.0,
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 503:
+                raise StripeAppWebhookUnconfigured("app_webhook_unconfigured") from exc
+            if exc.status_code == 400:
+                raise StripeAppWebhookInvalidSignature("invalid_signature") from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+    event = verify_stripe_app_webhook(body, presented)
+    from . import app_payments
+
+    with _creative_credit_conn(None) as conn:
+        return app_payments.record_webhook_and_process(conn, event)
+
+
 def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBalances:
     """Read one business creative-credit balance through Safebox authority."""
     slug = str(business_slug or "").strip()
@@ -1150,23 +1476,18 @@ def grant_credits(
     metadata: dict | None = None,
     stripe_ref: str | None = None,
 ) -> CreativeCreditBalances:
-    """Grant purchased business creative credits through Safebox authority."""
+    """Grant purchased business creative credits through safebox-local authority.
+
+    Remote planes must use a verified checkout/webhook processor; accepting an arbitrary amount over
+    the shared internal token would be a mint hole (GOAL_RULES §0).
+    """
     slug = str(business_slug or "").strip()
     if not slug:
         raise ValueError("missing business_slug")
-    if _use_remote_authority():
-        payload = _remote_json(
-            "POST",
-            "/v1/creative-credits/grant",
-            {
-                "business_slug": slug,
-                "credits": int(credits),
-                "idempotency_key": str(idempotency_key or "").strip(),
-                "metadata": metadata or {},
-                "stripe_ref": str(stripe_ref or "").strip() or None,
-            },
+    if _remote_enabled() and not _local_authority_enabled():
+        raise SafeboxAuthorityUnavailable(
+            "creative credit grants must be derived from a verified checkout/webhook on the safebox"
         )
-        return _balances_from_payload(payload, business_slug=slug)
     return _local_grant_credits(
         conn,
         slug,

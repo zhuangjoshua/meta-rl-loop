@@ -31,6 +31,19 @@ from dataclasses import dataclass
 from .ledger_gate import gate_fetchone
 
 
+def _remote_safebox_enabled() -> bool:
+    """True on runtime planes that must send mint/open operations to the safebox.
+
+    Keep this tiny and local to avoid making billing.py depend on safebox at import time.
+    """
+    try:
+        from . import safebox
+
+        return safebox._remote_enabled() and not safebox._local_authority_enabled()
+    except Exception:
+        return False
+
+
 def _cell(row, index: int):
     """Read a gate-result column by position, tolerating both tuple and dict row factories (the
     store lends a tuple_row connection to leaves, but some callers run under dict_row)."""
@@ -125,8 +138,16 @@ def open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 
     composes inside the provisioning transaction. Default allowance is 0 — the free /
     plan grant amount is a policy decision applied later via `grant_allowance`, not a
     number invented here."""
-    gate_fetchone(
-        conn,
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        safebox.open_billing_account(
+            conn,
+            user_id,
+            allowance_included_cents=allowance_included_cents,
+        )
+        return
+    conn.execute(
         "select safebox_billing_open_account(%s, %s)",
         (user_id, allowance_included_cents),
     )
@@ -146,15 +167,21 @@ def grant_allowance(
     Idempotent on `idempotency_key`. Returns the included amount in effect."""
     if included_cents < 0:
         raise ValueError("included_cents must be >= 0")
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        raise safebox.SafeboxAuthorityUnavailable(
+            "billing.grant_allowance is a mint operation; use a safebox-authorized "
+            "starter/subscription/webhook route instead of a caller-supplied amount"
+        )
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_billing_grant_allowance
     # (verbatim port): lock the account row, NoBillingAccount when absent, idempotent on
     # idempotency_key (replay returns the current included amount), else set the period included +
     # reset used to 0 and write the 'grant' entry.
-    row = gate_fetchone(
-        conn,
+    row = conn.execute(
         "select * from safebox_billing_grant_allowance(%s, %s, %s, %s, %s)",
         (user_id, included_cents, idempotency_key, period_start, resets_at),
-    )
+    ).fetchone()
     _raise_for_billing_refusal(row, user_id=user_id)
     return int(_cell(row, 4))  # included_cents in effect
 

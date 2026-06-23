@@ -21,8 +21,6 @@ import uuid
 from dataclasses import dataclass
 
 from . import safebox
-from .billing import grant_allowance, open_billing_account
-from .custody import open_custody_account
 from .user_api_keys import (
     generate_api_key,
     key_prefix,
@@ -92,14 +90,7 @@ def _ensure_starter_allowance(conn, user_id: str) -> int:
         ).fetchone()
         if existing_entry is not None:
             return included
-    return int(
-        grant_allowance(
-            conn,
-            user_id,
-            included_cents,
-            f"starter-allowance:{user_id}",
-        )
-    )
+    return int(safebox.grant_starter_allowance(conn, user_id))
 
 
 def _mint_api_key_record(conn, user_id: str) -> tuple[str, str]:
@@ -169,8 +160,8 @@ def provision_user_on_first_login(
             user_id, created = get_or_create_user(conn, auth0_sub, email)
             if created:
                 minted_key_id, raw = _mint_api_key_record(conn, user_id)
-                open_billing_account(conn, user_id)
-                open_custody_account(conn, user_id)
+                safebox.open_billing_account(conn, user_id)
+                safebox.open_custody_account(conn, user_id)
     except Exception:
         if minted_key_id:
             safebox.delete_user_api_key(minted_key_id)

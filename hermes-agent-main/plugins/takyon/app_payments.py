@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from plugins.takyon import app_entitlements, custody
+from plugins.takyon import app_entitlements, custody, safebox
 
 _SUBSCRIPTION_EVENT_TYPES = (
     "customer.subscription.created",
@@ -611,13 +611,13 @@ def reconcile_checkout_session(
         revenue_recorded = inserted_revenue is not None
         if amount_total > 0:
             owner_user_id = _resolve_owner(conn, business)
-            custody.open_custody_account(conn, owner_user_id)
+            safebox.open_custody_account(conn, owner_user_id)
             custody_key = (
                 f"app_revenue:{business}:{provider_event_id}:{session_id}"
                 if provider_event_id
                 else f"app_revenue_session:{business}:{session_id}"
             )
-            owed_balance_cents = custody.accrue(
+            owed_balance_cents = safebox.accrue_custody(
                 conn,
                 owner_user_id,
                 business,

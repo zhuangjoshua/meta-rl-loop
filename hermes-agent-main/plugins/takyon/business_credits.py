@@ -20,6 +20,16 @@ from dataclasses import dataclass
 from .ledger_gate import gate_fetchone
 
 
+def _remote_safebox_enabled() -> bool:
+    """True on runtime planes that must not perform credit-mint operations locally."""
+    try:
+        from . import safebox
+
+        return safebox._remote_enabled() and not safebox._local_authority_enabled()
+    except Exception:
+        return False
+
+
 class BusinessCreditsError(Exception):
     """Base for business creative-credit ledger errors."""
 
@@ -171,11 +181,12 @@ def _reserved_credits(conn, business_slug: str) -> int:
 
 def open_business_credit_account(conn, business_slug: str) -> None:
     """Idempotently open the business creative-credit account at zero."""
-    gate_fetchone(
-        conn,
-        "select safebox_credits_open_account(%s)",
-        (business_slug,),
-    )
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        safebox.open_business_credit_account(conn, business_slug)
+        return
+    conn.execute("select safebox_credits_open_account(%s)", (business_slug,))
 
 
 def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBalances:
@@ -216,15 +227,21 @@ def grant_credits(
     key = str(idempotency_key or "").strip()
     if not key:
         raise ValueError("idempotency_key is required")
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        raise safebox.SafeboxAuthorityUnavailable(
+            "business_credits.grant_credits is a mint operation; use a verified "
+            "creative-credit checkout/webhook route instead of a caller-supplied amount"
+        )
     stripe_reference = str(stripe_ref or "").strip() or None
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_credits_grant (verbatim port):
     # open+lock the account, idempotent on stripe_ref (per-business 'grant') AND idempotency_key
     # (replay returns current balances), else credit the pack and write the 'grant' entry.
-    row = gate_fetchone(
-        conn,
+    row = conn.execute(
         "select * from safebox_credits_grant(%s, %s, %s, %s::jsonb, %s)",
         (business_slug, credits, key, _json_dumps(metadata or {}), stripe_reference),
-    )
+    ).fetchone()
     return _balances_from_gate(row)
 
 

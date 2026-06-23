@@ -30,6 +30,16 @@ from .ledger_gate import gate_fetchone
 _DEFAULT_APP_FEE_BPS = 2000  # 20%, matches secrets/.env default
 
 
+def _remote_safebox_enabled() -> bool:
+    """True on runtime planes that must not perform custody mint/payout operations locally."""
+    try:
+        from . import safebox
+
+        return safebox._remote_enabled() and not safebox._local_authority_enabled()
+    except Exception:
+        return False
+
+
 def _cell(row, index: int):
     """Read a gate-result column by position, tolerating both tuple and dict row factories."""
     if isinstance(row, Mapping):
@@ -103,11 +113,12 @@ def _raise_for_custody_refusal(row, *, user_id: str | None = None) -> None:
 def open_custody_account(conn, user_id: str, *, currency: str = "usd") -> None:
     """Open the user's single custody account. Idempotent and transaction-free so it
     composes inside the provisioning transaction."""
-    gate_fetchone(
-        conn,
-        "select safebox_custody_open_account(%s, %s)",
-        (user_id, currency),
-    )
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        safebox.open_custody_account(conn, user_id, currency=currency)
+        return
+    conn.execute("select safebox_custody_open_account(%s, %s)", (user_id, currency))
 
 
 def accrue(
@@ -132,6 +143,13 @@ def accrue(
     """
     if gross_cents <= 0:
         raise ValueError("gross_cents must be > 0")
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        raise safebox.SafeboxAuthorityUnavailable(
+            "custody.accrue is a mint operation; process the signed app-payment webhook "
+            "on the safebox instead of passing caller-supplied amounts"
+        )
     bps = app_fee_bps() if fee_bps is None else max(0, min(10000, fee_bps))
     fee = (gross_cents * bps) // 10000
     withheld = max(0, int(withheld_cents or 0))
@@ -144,8 +162,7 @@ def accrue(
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_custody_accrue (verbatim port):
     # lock the account, NoCustodyAccount when absent, idempotent on idempotency_key (replay returns
     # owed), else accrue net to owed + write the 'accrual' entry. Fee/net policy math stays above.
-    row = gate_fetchone(
-        conn,
+    row = conn.execute(
         "select * from safebox_custody_accrue(%s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
         (
             user_id,
@@ -157,7 +174,7 @@ def accrue(
             stripe_ref,
             json.dumps(entry_metadata or {}, ensure_ascii=False, sort_keys=True),
         ),
-    )
+    ).fetchone()
     _raise_for_custody_refusal(row, user_id=user_id)
     return int(_cell(row, 3))  # new_owed
 
@@ -176,14 +193,20 @@ def payout(
     at the API layer; the ledger only guards owed ≥ amount."""
     if amount_cents <= 0:
         raise ValueError("amount_cents must be > 0")
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        raise safebox.SafeboxAuthorityUnavailable(
+            "custody.payout is an operator-authorized safebox operation; use the payout route "
+            "instead of a caller-supplied amount"
+        )
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_custody_payout (verbatim port):
     # lock the account, NoCustodyAccount when absent, idempotent on idempotency_key (replay returns
     # owed), InsufficientCustody when amount>owed (nothing written), else drain owed + bump paid_out.
-    row = gate_fetchone(
-        conn,
+    row = conn.execute(
         "select * from safebox_custody_payout(%s, %s, %s, %s)",
         (user_id, amount_cents, idempotency_key, stripe_ref),
-    )
+    ).fetchone()
     _raise_for_custody_refusal(row, user_id=user_id)
     return int(_cell(row, 3))  # new_owed
 

@@ -194,6 +194,22 @@ def test_billing_ops_write_under_restricted_runtime_role(pg_conn):
     assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
 
 
+def test_runtime_role_cannot_execute_billing_mint_functions(pg_conn):
+    uid = _owner(pg_conn)
+    billing.open_billing_account(pg_conn, uid)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute("select safebox_billing_open_account(%s, %s)", (uid, 0))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "select * from safebox_billing_grant_allowance(%s, %s, %s, null, null)",
+                (uid, 999999, "forge-grant"),
+            )
+    finally:
+        pg_conn.execute("reset role")
+
+
 def test_credit_ops_write_under_restricted_runtime_role(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     business_credits.grant_credits(pg_conn, slug, 50, "grant-1")
@@ -209,22 +225,42 @@ def test_credit_ops_write_under_restricted_runtime_role(pg_conn):
     assert bal.reserved_credits == 0
 
 
-def test_custody_ops_write_under_restricted_runtime_role(pg_conn):
+def test_runtime_role_cannot_execute_credit_mint_functions(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    business_credits.open_business_credit_account(pg_conn, slug)
+    pg_conn.execute("set role takyon_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute("select safebox_credits_open_account(%s)", (slug,))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "select * from safebox_credits_grant(%s, %s, %s, '{}'::jsonb, null)",
+                (slug, 100000, "forge-grant"),
+            )
+    finally:
+        pg_conn.execute("reset role")
+
+
+def test_runtime_role_cannot_execute_custody_mint_functions(pg_conn):
     uid = _owner(pg_conn)
     slug = _business(pg_conn, uid)  # custody_entries.business_slug FKs to businesses
     custody.open_custody_account(pg_conn, uid)
     pg_conn.execute("set role takyon_runtime")
     try:
-        new_owed = custody.accrue(pg_conn, uid, slug, 1000, "evt-1", fee_bps=2000)
-        assert new_owed == 800  # 20% fee
-        owed_after = custody.payout(pg_conn, uid, 300, "po-1")
-        assert owed_after == 500
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute("select safebox_custody_open_account(%s, %s)", (uid, "usd"))
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "select * from safebox_custody_accrue(%s, %s, %s, %s, %s, %s, %s, '{}'::jsonb)",
+                (uid, slug, 1000, 200, 800, "evt-forge", "cs_forge"),
+            )
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "select * from safebox_custody_payout(%s, %s, %s, %s)",
+                (uid, 300, "po-forge", "tr_forge"),
+            )
     finally:
         pg_conn.execute("reset role")
-    bal = custody.get_custody_balances(pg_conn, uid)
-    assert bal.owed_balance_cents == 500
-    assert bal.paid_out_cents == 300
-    assert custody.reconcile_custody(pg_conn, uid)["ok"] is True
 
 
 def test_runtime_role_retains_select_on_money_tables(pg_conn):

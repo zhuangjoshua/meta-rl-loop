@@ -525,7 +525,26 @@ def sync_operator_subscription_allowance(
     refresh_live: bool = True,
     subscription: dict[str, Any] | None = None,
 ) -> OperatorSubscriptionState:
-    billing.open_billing_account(conn, user_id)
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        if subscription is not None:
+            raise RuntimeError("operator subscription event processing must run on the safebox")
+        payload = safebox.sync_operator_subscription_allowance(
+            user_id,
+            refresh_live=refresh_live,
+        )
+        return OperatorSubscriptionState(
+            user_id=str(payload.get("user_id") or user_id),
+            customer_id=payload.get("customer_id"),
+            subscription_id=payload.get("subscription_id"),
+            subscription_status=str(payload.get("subscription_status") or "none"),
+            plan_name=payload.get("plan_name"),
+            weekly_allowance_cents=int(payload.get("weekly_allowance_cents") or 0),
+            allowance_period_start=payload.get("allowance_period_start"),
+            allowance_resets_at=payload.get("allowance_resets_at"),
+            synced=bool(payload.get("synced")),
+        )
+
+    safebox.open_billing_account(conn, user_id)
     row = _read_operator_billing_row(conn, user_id, for_update=False)
     customer_id = str(row[1] or "").strip() or None
     cached_subscription_id = str(row[2] or "").strip() or None
@@ -586,7 +605,7 @@ def sync_operator_subscription_allowance(
                 if int(reconcile.get("reserved_allowance_cents") or 0) <= 0:
                     period_start, resets_at = _weekly_window(now)
                     week_key = int(period_start.timestamp() // 604800)
-                    billing.grant_allowance(
+                    safebox._local_grant_allowance(
                         conn,
                         user_id,
                         fallback_allowance_cents,
@@ -617,7 +636,7 @@ def sync_operator_subscription_allowance(
         if should_clear_allowance:
             reconcile = billing.reconcile_billing(conn, user_id)
             if int(reconcile.get("reserved_allowance_cents") or 0) <= 0:
-                billing.grant_allowance(
+                safebox._local_grant_allowance(
                     conn,
                     user_id,
                     0,
@@ -686,7 +705,7 @@ def sync_operator_subscription_allowance(
         if int(reconcile.get("reserved_allowance_cents") or 0) <= 0:
             period_start, resets_at = _weekly_window(now)
             week_key = int(period_start.timestamp() // 604800)
-            billing.grant_allowance(
+            safebox._local_grant_allowance(
                 conn,
                 user_id,
                 weekly_allowance_cents,
@@ -820,7 +839,7 @@ def get_operator_payout_state(
                     )
             cached_status = status
 
-    custody.open_custody_account(conn, user_id)
+    safebox.open_custody_account(conn, user_id)
     balances = custody.get_custody_balances(conn, user_id)
     return OperatorPayoutState(
         user_id=user_id,
@@ -1179,6 +1198,118 @@ def reconcile_creative_credit_checkout_session(
     )
 
 
+def process_billing_webhook_event(conn, event: dict[str, Any]) -> dict[str, Any]:
+    """Process a signature-verified flow-A billing webhook event.
+
+    The safebox route calls this after verifying ``STRIPE_BILLING_WEBHOOK_SECRET`` locally, so
+    allowance/creative-credit mints are atomically tied to a genuine signed Stripe event rather than
+    a shared-token caller-supplied amount.
+    """
+    event_id = str(event.get("id") or "")
+    event_type = str(event.get("type") or "")
+    obj = (event.get("data") or {}).get("object") or {}
+    if event_type in {
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    }:
+        customer_id = _stripe_customer_id(obj.get("customer"))
+        user_id = _resolve_operator_user_id_from_customer(conn, customer_id or "")
+        if not user_id:
+            return {"ok": True, "ignored": "unknown_operator_customer"}
+        state = sync_operator_subscription_allowance(
+            conn,
+            user_id,
+            refresh_live=False,
+            subscription=obj if isinstance(obj, dict) else None,
+        )
+        return {
+            "ok": True,
+            "user_id": user_id,
+            "customer_id": customer_id,
+            "subscription_id": state.subscription_id,
+            "subscription_status": state.subscription_status,
+            "weekly_allowance_cents": state.weekly_allowance_cents,
+            "allowance_resets_at": state.allowance_resets_at,
+            "event_id": event_id,
+        }
+    if event_type != "checkout.session.completed":
+        return {"ok": True, "ignored": event_type or "unknown_event"}
+    session = obj if isinstance(obj, dict) else {}
+    metadata = session.get("metadata") or {}
+    if session.get("payment_status") not in ("paid", "no_payment_required"):
+        return {"ok": True, "ignored": "unpaid"}
+    purpose = str(metadata.get("purpose") or "")
+    if purpose == "operator_subscription":
+        checkout_customer_id = _stripe_customer_id(session.get("customer"))
+        user_id = str(
+            session.get("client_reference_id") or metadata.get("user_id") or ""
+        ).strip()
+        if not user_id and checkout_customer_id:
+            user_id = _resolve_operator_user_id_from_customer(conn, checkout_customer_id) or ""
+        if not user_id:
+            return {"ok": True, "ignored": "unknown_operator_customer"}
+        if checkout_customer_id:
+            safebox.open_billing_account(conn, user_id)
+            existing_customer = str(_read_operator_billing_row(conn, user_id)[1] or "").strip()
+            if existing_customer != checkout_customer_id:
+                _persist_operator_billing_identity(
+                    conn, user_id, customer_id=checkout_customer_id
+                )
+        state = sync_operator_subscription_allowance(conn, user_id, refresh_live=True)
+        return {
+            "ok": True,
+            "user_id": user_id,
+            "subscription_id": state.subscription_id,
+            "subscription_status": state.subscription_status,
+            "plan_name": state.plan_name,
+            "weekly_allowance_cents": state.weekly_allowance_cents,
+            "allowance_resets_at": state.allowance_resets_at,
+            "event_id": event_id,
+        }
+    if purpose in {"creative_credit_pack", "creative_credit_topup"}:
+        business_slug = str(
+            metadata.get("business_slug") or session.get("client_reference_id") or ""
+        ).strip()
+        pack_id = str(metadata.get("pack_id") or "").strip()
+        try:
+            credits = int(metadata.get("credits") or 0)
+        except (TypeError, ValueError):
+            credits = 0
+        try:
+            price_cents_per_credit = int(metadata.get("price_cents_per_credit") or 0)
+        except (TypeError, ValueError):
+            price_cents_per_credit = 0
+        if not business_slug or credits <= 0 or not event_id:
+            return {"ok": True, "ignored": "incomplete_session"}
+        grant_metadata = {
+            "purpose": purpose,
+            "user_id": metadata.get("user_id"),
+            "stripe_checkout_session_id": session.get("id"),
+            "amount_cents": int(session.get("amount_total") or 0),
+            "price_cents_per_credit": price_cents_per_credit,
+        }
+        if pack_id:
+            grant_metadata["pack_id"] = pack_id
+        balances = safebox.grant_credits(
+            conn,
+            business_slug,
+            credits,
+            idempotency_key=event_id,
+            metadata=grant_metadata,
+            stripe_ref=str(session.get("id") or ""),
+        )
+        return {
+            "ok": True,
+            "business_slug": business_slug,
+            "credited_credits": credits,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+            "event_id": event_id,
+        }
+    return {"ok": True, "ignored": purpose or "unhandled_purpose"}
+
+
 def _rate_limited_principal(
     principal: ResolvedPrincipal = Depends(_resolve_principal),
     conn=Depends(get_control_conn),
@@ -1481,6 +1612,12 @@ def build_control_router() -> APIRouter:
         raw = (await request.body()).decode("utf-8")
         signature = request.headers.get("stripe-signature", "")
         try:
+            return safebox.process_stripe_billing_webhook(raw, signature)
+        except safebox.StripeBillingWebhookUnconfigured:
+            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
+        except safebox.StripeBillingWebhookInvalidSignature:
+            raise HTTPException(status_code=400, detail="invalid_signature")
+        try:
             event = safebox.verify_stripe_billing_webhook(raw, signature)
         except safebox.StripeBillingWebhookUnconfigured:
             raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
@@ -1537,7 +1674,7 @@ def build_control_router() -> APIRouter:
             # Persist the checkout's Stripe customer so the refresh below can find the new
             # subscription on Stripe (the operator may not have had a cached customer yet).
             if checkout_customer_id:
-                billing.open_billing_account(conn, user_id)
+                safebox.open_billing_account(conn, user_id)
                 existing_customer = str(
                     _read_operator_billing_row(conn, user_id)[1] or ""
                 ).strip()

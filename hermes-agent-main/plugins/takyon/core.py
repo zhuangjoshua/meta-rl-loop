@@ -23574,36 +23574,36 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
         signature = args.get("stripe_signature")
         if not raw_body or not signature:
             raise TakyonError("raw_body and stripe_signature are required")
-        # Flow-B (sub-user app) webhook verification is brokered by the safebox: STRIPE_WEBHOOK_SECRET
-        # is read and the signature verified server-side (mirroring the flow-A billing webhook), so the
-        # runtime plane NEVER holds the signing secret and a runtime-plane attacker cannot forge app
-        # entitlement/subscription events. The safebox returns the PARSED event; reconciliation below is
-        # unchanged.
-        try:
-            event = safebox.verify_stripe_app_webhook(str(raw_body), str(signature))
-        except safebox.StripeAppWebhookUnconfigured as exc:
-            raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET") from exc
-        except safebox.StripeAppWebhookInvalidSignature as exc:
-            raise TakyonError("Stripe signature verification failed") from exc
-        if not isinstance(event, dict):
-            raise TakyonError("Stripe event payload is required")
-        event_id = str(event.get("id") or uuid.uuid4().hex)
-        event_type = str(event.get("type") or "")
         if _db_backend() == "postgres":
-            # Canonical Postgres reconciliation. app_payments.record_webhook_and_process owns the
-            # webhook_events dedup, the checkout/subscription dispatch, AND the net-new owner custody
-            # accrual (gross minus the STRIPE_CONNECT_APPLICATION_FEE_BPS app fee) that the legacy
-            # SQLite path below never performed — closing the flow-B hole where a sub-user payment
-            # reconciled but never showed in the owner's custody balance. Delegated over the raw psycopg
-            # connection lent by _leaf_conn, the same store->leaf pattern as seed_platform_owner: the
-            # leaf's `with conn.transaction()` is the atomic unit and _PGConn commits/closes on exit.
-            leaves = store._app_leaves()
+            # Flow-B (sub-user app) webhook verification AND money-affecting processing are brokered
+            # by the safebox: STRIPE_WEBHOOK_SECRET is read and the signature verified server-side,
+            # then entitlement/revenue/custody processing runs there in the same signed-event path.
+            # The runtime plane never holds the signing secret and never calls custody mint funcs with
+            # caller-supplied amounts.
             try:
-                with store._connect() as conn:
-                    with store._leaf_conn(conn) as raw:
-                        outcome = leaves["payments"].record_webhook_and_process(raw, event)
-            except leaves["payments"].AppPaymentError as exc:
-                raise TakyonError(str(exc)) from exc
+                outcome = safebox.process_stripe_app_webhook(str(raw_body), str(signature))
+            except safebox.StripeAppWebhookUnconfigured as exc:
+                raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET") from exc
+            except safebox.StripeAppWebhookInvalidSignature as exc:
+                raise TakyonError("Stripe signature verification failed") from exc
+            if not isinstance(outcome, dict):
+                raise TakyonError("Stripe webhook processing returned no outcome")
+            event_id = str(outcome.get("provider_event_id") or uuid.uuid4().hex)
+            event_type = str(outcome.get("type") or "")
+        else:
+            try:
+                event = safebox.verify_stripe_app_webhook(str(raw_body), str(signature))
+            except safebox.StripeAppWebhookUnconfigured as exc:
+                raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET") from exc
+            except safebox.StripeAppWebhookInvalidSignature as exc:
+                raise TakyonError("Stripe signature verification failed") from exc
+            if not isinstance(event, dict):
+                raise TakyonError("Stripe event payload is required")
+            event_id = str(event.get("id") or uuid.uuid4().hex)
+            event_type = str(event.get("type") or "")
+        if _db_backend() == "postgres":
+            # Canonical Postgres reconciliation already ran on the safebox. Keep only the derived
+            # OpenMeter projection sync on this runtime plane; it is a mirror, not money authority.
             openmeter_sync = None
             processed = outcome.get("processed") if isinstance(outcome, dict) else None
             if _openmeter_enabled() and isinstance(processed, dict):
@@ -23622,7 +23622,7 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
                                 store,
                                 target_business,
                                 app_user_id,
-                                allow_provision=(str(event.get("type") or "") == "checkout.session.completed"),
+                                allow_provision=(event_type == "checkout.session.completed"),
                             )
                     else:
                         updated = processed.get("updated")
@@ -23655,7 +23655,7 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
                             scope="access",
                             app_user_id=app_user_id,
                             allow_provision=(
-                                str(event.get("type") or "") == "checkout.session.completed"
+                                event_type == "checkout.session.completed"
                             ),
                         )
                         if queued is not None and isinstance(openmeter_sync, dict):
@@ -25658,7 +25658,7 @@ def _reserve_operator_task_budget(
     store = _store()
     with store._connect() as conn:
         with store._leaf_conn(conn) as raw:
-            billing.open_billing_account(raw, user_id)
+            safebox.open_billing_account(raw, user_id)
             try:
                 reservation = billing.reserve(
                     raw,
