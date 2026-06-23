@@ -11405,6 +11405,31 @@ def _(rid, params: dict) -> dict:
             command_result=command_result,
         )
         active_mode = "live"
+        bootstrap_job: dict[str, Any] = {}
+        if bootstrap_enabled:
+            bootstrap_job = (
+                command_result.get("bootstrap_job") or {}
+                if isinstance(command_result, dict)
+                else {}
+            )
+            if not bootstrap_job:
+                enqueue_bootstrap = getattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", None)
+                if enqueue_bootstrap is None:
+                    raise RuntimeError(
+                        f"dashboard create persisted business:{slug} but no bootstrap job was returned"
+                    )
+                bootstrap_job = enqueue_bootstrap(
+                    store,
+                    slug,
+                    goal=requested_goal,
+                    mode=active_mode,
+                    schedule=None,
+                    max_turns=int(os.getenv("TAKYON_MAX_TURNS", "30") or 30),
+                )
+            if not str(bootstrap_job.get("job_id") or "").strip():
+                raise RuntimeError(
+                    f"dashboard create persisted business:{slug} but failed to enqueue ceo_bootstrap"
+                )
         # The post-bootstrap CEO wake schedule is now owned by the durable worker job
         # (worker.ceo_bootstrap_handler → cron.ensure_ceo_wakeup), not this in-process handler.
         _takyon_invalidate_businesses_cache(session)
@@ -11416,6 +11441,16 @@ def _(rid, params: dict) -> dict:
         # these again when there is no bootstrap turn to run.
         session["takyon_pending_business_create"] = True
         session["takyon_pending_business_create_at"] = time.time()
+        if bootstrap_job:
+            session["takyon_background_run"] = {
+                "kind": "create",
+                "business": slug,
+                "status": str(bootstrap_job.get("status") or "queued"),
+                "started_at": time.time(),
+                "detail": "Queued CEO bootstrap job.",
+                "job_id": str(bootstrap_job.get("job_id") or ""),
+            }
+            _takyon_set_background_run(slug, session["takyon_background_run"])
         workspace = _takyon_workspace_payload(
             session,
             slug,
@@ -11467,23 +11502,6 @@ def _(rid, params: dict) -> dict:
         # surface refresh + cron wake (worker.ceo_bootstrap_handler), so nothing is lost by dropping the
         # in-process _finalize_bootstrap. The live-bootstrap session signal set above keeps the first
         # response's seeded ladder/scaffold live until the worker's first job-status write lands.
-        bootstrap_job = (
-            command_result.get("bootstrap_job") or {}
-            if isinstance(command_result, dict)
-            else {}
-        )
-        if bootstrap_job:
-            session["takyon_background_run"] = {
-                "kind": "create",
-                "business": slug,
-                "status": str(bootstrap_job.get("status") or "queued"),
-                "started_at": time.time(),
-                "detail": "Queued CEO bootstrap job.",
-                "job_id": str(bootstrap_job.get("job_id") or ""),
-            }
-            _takyon_set_background_run(slug, session["takyon_background_run"])
-        else:
-            session.pop("takyon_background_run", None)
         # Release the busy guard taken above for can_stream_bootstrap: there is no longer a streaming
         # turn whose lifecycle would clear it, so clear it here or the chat session stays wedged busy.
         if can_stream_bootstrap and history_lock is not None:

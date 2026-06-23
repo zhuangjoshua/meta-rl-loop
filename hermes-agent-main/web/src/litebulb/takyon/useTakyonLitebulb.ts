@@ -642,6 +642,40 @@ export function useTakyonLitebulb() {
     pastBootstrapRef.current = businessHasShipped(workspace);
   }, [workspace]);
 
+  useEffect(() => {
+    if (buildState.status !== "creating") return;
+    const businessSlug = trimText(buildState.businessSlug).toLowerCase();
+    if (!businessSlug || trimText(workspace?.business_slug).toLowerCase() !== businessSlug) return;
+    const backgroundRun = (workspace?.background_run || {}) as Record<string, unknown>;
+    const runStatus = trimText(backgroundRun.status).toLowerCase();
+    if (businessHasShipped(workspace) || runStatus === "completed" || runStatus === "done") {
+      setBuildState((state) => (
+        state.status === "creating" && trimText(state.businessSlug).toLowerCase() === businessSlug
+          ? {
+              ...state,
+              status: "ready",
+              terminal: pushUniqueLine(state.terminal, "Workspace ready."),
+            }
+          : state
+      ));
+      return;
+    }
+    if (["blocked", "failed", "error", "cancelled"].includes(runStatus)) {
+      const detail = trimText(backgroundRun.detail) || "Build job did not complete.";
+      setBuildState((state) => (
+        state.status === "creating" && trimText(state.businessSlug).toLowerCase() === businessSlug
+          ? {
+              ...state,
+              status: "error",
+              error: detail,
+              errorCode: 0,
+              terminal: pushUniqueLine(state.terminal, detail),
+            }
+          : state
+      ));
+    }
+  }, [buildState.businessSlug, buildState.status, workspace]);
+
   const isVisibleScope = useCallback((slug: string) => {
     return trimText(slug).toLowerCase() === visibleBusinessRef.current;
   }, []);
@@ -1469,6 +1503,9 @@ export function useTakyonLitebulb() {
         deliverables?: unknown[];
         background_run?: Record<string, unknown> | null;
         live_state?: Record<string, unknown> | null;
+        job_id?: string;
+        job_status?: string;
+        lifecycle_state?: string;
         streaming?: boolean;
       } | null = null;
       for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -1483,6 +1520,9 @@ export function useTakyonLitebulb() {
             deliverables?: unknown[];
             background_run?: Record<string, unknown> | null;
             live_state?: Record<string, unknown> | null;
+            job_id?: string;
+            job_status?: string;
+            lifecycle_state?: string;
             streaming?: boolean;
           }>("takyon.dashboard.create", {
             session_id: sessionId,
@@ -1541,12 +1581,19 @@ export function useTakyonLitebulb() {
         background_run: result?.background_run || null,
         live_state: result?.live_state || null,
       });
+      const lifecycleState = trimText(result?.lifecycle_state).toLowerCase();
+      const jobId = trimText(result?.job_id);
+      const jobStatus = trimText(result?.job_status).toLowerCase();
+      const buildIsReady = lifecycleState === "ready" || (!jobId && !jobStatus);
       setBuildState((state) => ({
         ...state,
-        status: "ready",
+        status: buildIsReady ? "ready" : "creating",
         businessSlug,
         businessName,
-        terminal: pushUniqueLine(state.terminal, "Workspace ready."),
+        terminal: pushUniqueLine(
+          state.terminal,
+          buildIsReady ? "Workspace ready." : `CEO bootstrap ${jobStatus || "queued"}.`,
+        ),
       }));
       void Promise.all([
         loadWorkspace(businessSlug).catch(() => undefined),

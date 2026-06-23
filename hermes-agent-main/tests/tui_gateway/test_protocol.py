@@ -780,6 +780,93 @@ def test_takyon_dashboard_create_requires_durable_business_before_streaming(serv
     assert server._sessions[sid]["running"] is False
 
 
+def test_takyon_dashboard_create_backfills_missing_bootstrap_job(server, monkeypatch):
+    sid = "takyon-session"
+    server._sessions[sid] = {
+        "takyon_current_business": "",
+        "takyon_operator_user_id": "user-1",
+        "agent_ready": threading.Event(),
+        "history_lock": threading.Lock(),
+    }
+    captured: dict[str, object] = {}
+
+    fake_cli = types.ModuleType("plugins.takyon.cli")
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            self._operator_user_id = kwargs.get("operator_user_id")
+
+    def fake_resolve_dashboard_create_identity(name, goal, slug_hint="", *, operator_user_id=None, store=None):
+        assert operator_user_id == "user-1"
+        return "Latexflow", "latexflow"
+
+    def fake_run_takyon_command(argv, *_args, **_kwargs):
+        captured["argv"] = list(argv)
+        return {"success": True, "business": "latexflow", "mode": "live"}
+
+    def fake_enqueue(store, slug, *, goal, mode, schedule, max_turns):
+        captured["enqueue"] = {
+            "operator_user_id": store._operator_user_id,
+            "slug": slug,
+            "goal": goal,
+            "mode": mode,
+            "schedule": schedule,
+            "max_turns": max_turns,
+        }
+        return {"job_id": "job-backfill", "kind": "ceo_bootstrap", "status": "queued"}
+
+    fake_cli.TakyonStore = FakeStore
+    fake_cli._resolve_dashboard_create_identity = fake_resolve_dashboard_create_identity
+    fake_cli.run_takyon_command = fake_run_takyon_command
+    fake_cli._enqueue_pg_ceo_bootstrap = fake_enqueue
+    fake_cli._operator_create_balance_preflight = lambda *_a, **_k: None
+    monkeypatch.setitem(sys.modules, "plugins.takyon.cli", fake_cli)
+    monkeypatch.setattr(
+        server,
+        "_takyon_require_durable_business",
+        lambda *_args, **_kwargs: {"business": {"slug": "latexflow", "name": "Latexflow", "mode": "live"}},
+    )
+    monkeypatch.setattr(
+        server,
+        "_takyon_workspace_payload",
+        lambda *_args, **_kwargs: {
+            "business_slug": "latexflow",
+            "current": {"slug": "latexflow", "name": "Latexflow", "mode": "live"},
+            "overview": {},
+            "outputs": [],
+            "deliverables": [],
+            "background_run": {"kind": "create", "status": "queued", "job_id": "job-backfill"},
+            "live_state": {},
+        },
+    )
+    monkeypatch.setattr(server, "_takyon_businesses_for_session", lambda *_args, **_kwargs: [])
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-backfill-1",
+        {
+            "session_id": sid,
+            "business": "latexflow",
+            "business_name": "Latexflow",
+            "goal": "Overleaf competitor",
+            "mode": "live",
+        },
+    )
+
+    result = response["result"]
+    assert result["job_id"] == "job-backfill"
+    assert result["lifecycle_state"] == "queued"
+    assert captured["enqueue"] == {
+        "operator_user_id": "user-1",
+        "slug": "latexflow",
+        "goal": "Overleaf competitor",
+        "mode": "live",
+        "schedule": None,
+        "max_turns": 30,
+    }
+    assert "--no-auto" not in captured["argv"]
+    assert server._sessions[sid]["running"] is False
+
+
 def test_takyon_dashboard_create_with_agent_enqueues_durable_job(server, monkeypatch):
     # BUG-004: even on a streaming-capable session (a live agent), the dashboard create must enqueue the
     # DURABLE ceo_bootstrap worker job and surface it as queued — NOT run the CEO turn in-process via
