@@ -2212,6 +2212,7 @@ def creative_reserve(
     reservation_key: str,
     units: int = 1,
     ttl_seconds: int | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reserve a creative action's fixed credits on the safebox and return its creative capability.
 
@@ -2234,6 +2235,8 @@ def creative_reserve(
     }
     if ttl_seconds is not None:
         body["ttl_seconds"] = int(ttl_seconds)
+    if metadata is not None:
+        body["metadata"] = dict(metadata or {})
     if _use_remote_authority():
         try:
             return _remote_json("POST", "/v1/creative/reserve", body, timeout=_CREATIVE_GATE_TIMEOUT_S)
@@ -2274,12 +2277,18 @@ def creative_commit(
     *,
     reservation_key: str,
     actual_credits: int | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> CreativeCreditBalances:
     """Commit (settle) the ONE creative-credit reservation on the safebox after the action succeeds."""
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
-    body = {"reservation_key": key, "actual_credits": (None if actual_credits is None else int(actual_credits))}
+    body = {
+        "reservation_key": key,
+        "actual_credits": (None if actual_credits is None else int(actual_credits)),
+    }
+    if metadata is not None:
+        body["metadata"] = dict(metadata or {})
     if _use_remote_authority():
         try:
             payload = _remote_json("POST", "/v1/creative/commit", body, timeout=_CREATIVE_GATE_TIMEOUT_S)
@@ -2288,15 +2297,25 @@ def creative_commit(
                 raise UnknownCreativeCreditReservation(key) from exc
             raise
         return _balances_from_payload(payload, business_slug="")
-    return _local_commit_credits(None, key, actual_credits=actual_credits, metadata={"via": "safebox_creative_gate"})
+    local_metadata = {
+        **(metadata if isinstance(metadata, dict) else {}),
+        "via": "safebox_creative_gate",
+    }
+    return _local_commit_credits(None, key, actual_credits=actual_credits, metadata=local_metadata)
 
 
-def creative_release(*, reservation_key: str) -> CreativeCreditBalances:
+def creative_release(
+    *,
+    reservation_key: str,
+    metadata: dict[str, Any] | None = None,
+) -> CreativeCreditBalances:
     """Release the ONE creative-credit reservation on the safebox after the action fails."""
     key = str(reservation_key or "").strip()
     if not key:
         raise ValueError("reservation_key is required")
     body = {"reservation_key": key}
+    if metadata is not None:
+        body["metadata"] = dict(metadata or {})
     if _use_remote_authority():
         try:
             payload = _remote_json("POST", "/v1/creative/release", body, timeout=_CREATIVE_GATE_TIMEOUT_S)
@@ -2305,7 +2324,11 @@ def creative_release(*, reservation_key: str) -> CreativeCreditBalances:
                 raise UnknownCreativeCreditReservation(key) from exc
             raise
         return _balances_from_payload(payload, business_slug="")
-    return _local_release_credits(None, key, metadata={"via": "safebox_creative_gate"})
+    local_metadata = {
+        **(metadata if isinstance(metadata, dict) else {}),
+        "via": "safebox_creative_gate",
+    }
+    return _local_release_credits(None, key, metadata=local_metadata)
 
 
 def _local_creative_reserve(body: dict[str, Any]) -> dict[str, Any]:

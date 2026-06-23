@@ -24288,6 +24288,47 @@ def _creative_credit_total_cost(action: str, *, units: int = 1) -> int:
     return _creative_credit_unit_cost(action) * max(1, int(units or 1))
 
 
+def _creative_credit_action_audience(action: Any) -> str:
+    return _CREATIVE_CREDIT_ACTION_AUDIENCES.get(str(action or "").strip(), "")
+
+
+def _creative_credit_uses_safebox_gate(action: Any) -> bool:
+    if not _creative_credit_action_audience(action):
+        return False
+    try:
+        return bool(safebox._use_remote_authority())
+    except Exception:
+        return False
+
+
+def _business_owner_user_id_for_creative(
+    store: "TakyonStore",
+    conn: sqlite3.Connection,
+    business: str,
+) -> str:
+    row = store._ensure_business(conn, business)
+    owner_user_id = str(row.get("owner_user_id") or "").strip()
+    if not owner_user_id:
+        raise TakyonError(f"business:{business} has no owner_user_id; refusing creative credit gate")
+    return owner_user_id
+
+
+def _creative_credit_balances_and_budget_snapshot(
+    store: "TakyonStore",
+    business: str,
+) -> tuple[Any, dict[str, Any]]:
+    credits_backend = _creative_credit_backend()
+    with store._connect() as conn:
+        balances = credits_backend.get_business_credit_balances(conn, business)
+        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+            store,
+            conn,
+            business,
+            balances=balances,
+        )
+    return balances, budget_snapshot
+
+
 _LOGO_IMAGE_PROVIDER = "google"
 _LOGO_IMAGE_MODEL = "gemini-2.5-flash-image"
 
@@ -25048,7 +25089,11 @@ def _reserve_creative_credits(
             "budget_bucket": resolved_bucket,
         }
     store = _store()
+    use_safebox_gate = _creative_credit_uses_safebox_gate(action)
+    owner_user_id = ""
     with store._connect() as conn:
+        if use_safebox_gate:
+            owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
         credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
         if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
@@ -25074,23 +25119,61 @@ def _reserve_creative_credits(
                     used_credits=_creative_credit_int(channel.get("used_credits")),
                     reserved_credits=_creative_credit_int(channel.get("reserved_credits")),
                 )
-        reservation = credits_backend.reserve_credits(
-            conn,
-            business,
-            requested,
-            reservation_key,
+        if not use_safebox_gate:
+            reservation = credits_backend.reserve_credits(
+                conn,
+                business,
+                requested,
+                reservation_key,
+                metadata=resolved_metadata,
+            )
+            balances = credits_backend.get_business_credit_balances(conn, business)
+            budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            )
+            return {
+                "reservation_key": reservation.key,
+                "requested_credits": reservation.reserved_credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": resolved_bucket,
+                "channel_budget": budget_snapshot["channels"].get(resolved_bucket, {}) if resolved_bucket else {},
+            }
+    audience = _creative_credit_action_audience(action)
+    try:
+        reservation_payload = safebox.creative_reserve(
+            business=business,
+            operator_user_id=owner_user_id,
+            action=audience,
+            reservation_key=reservation_key,
+            units=max(1, int(units or 1)),
             metadata=resolved_metadata,
         )
-        balances = credits_backend.get_business_credit_balances(conn, business)
-        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
-            store,
-            conn,
-            business,
-            balances=balances,
+    except safebox.CreativeGateRefused as exc:
+        detail = exc.payload if isinstance(exc.payload, Mapping) else {}
+        requested_credits = _creative_credit_int(
+            detail.get("requested_credits") if isinstance(detail, Mapping) else None
+        ) or requested
+        available_credits = _creative_credit_int(
+            detail.get("available_credits") if isinstance(detail, Mapping) else None
         )
+        if exc.status_code == 402:
+            raise credits_backend.InsufficientCreativeCredits(
+                requested_credits=requested_credits,
+                available_credits=available_credits,
+            ) from exc
+        raise TakyonError(str(exc)) from exc
+    balances, budget_snapshot = _creative_credit_balances_and_budget_snapshot(store, business)
     return {
-        "reservation_key": reservation.key,
-        "requested_credits": reservation.reserved_credits,
+        "reservation_key": str(reservation_payload.get("reservation_key") or reservation_key),
+        "requested_credits": int(
+            reservation_payload.get("reserved_credits")
+            or reservation_payload.get("credits")
+            or requested
+        ),
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
         "budget_bucket": resolved_bucket,
@@ -25118,19 +25201,33 @@ def _commit_creative_credits(
         ad_metadata=ad_metadata,
     )
     store = _store()
-    with store._connect() as conn:
-        balances = credits_backend.commit_credits(
-            conn,
-            reservation_key,
-            actual_credits=actual_credits,
-            metadata=resolved_metadata,
-        )
-        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
-            store,
-            conn,
-            str(resolved_metadata.get("business") or ""),
-            balances=balances,
-        ) if str(resolved_metadata.get("business") or "").strip() else None
+    business = str(resolved_metadata.get("business") or "").strip()
+    if _creative_credit_uses_safebox_gate(action):
+        try:
+            balances = safebox.creative_commit(
+                reservation_key=reservation_key,
+                actual_credits=actual_credits,
+                metadata=resolved_metadata,
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise TakyonError(f"unknown creative credit reservation: {reservation_key}") from exc
+        budget_snapshot = None
+        if business:
+            balances, budget_snapshot = _creative_credit_balances_and_budget_snapshot(store, business)
+    else:
+        with store._connect() as conn:
+            balances = credits_backend.commit_credits(
+                conn,
+                reservation_key,
+                actual_credits=actual_credits,
+                metadata=resolved_metadata,
+            )
+            budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            ) if business else None
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
@@ -25160,18 +25257,31 @@ def _release_creative_credits(
         ad_metadata=ad_metadata,
     )
     store = _store()
-    with store._connect() as conn:
-        balances = credits_backend.release_credits(
-            conn,
-            reservation_key,
-            metadata=resolved_metadata,
-        )
-        budget_snapshot = _creative_credit_budget_snapshot_from_conn(
-            store,
-            conn,
-            str(resolved_metadata.get("business") or ""),
-            balances=balances,
-        ) if str(resolved_metadata.get("business") or "").strip() else None
+    business = str(resolved_metadata.get("business") or "").strip()
+    if _creative_credit_uses_safebox_gate(action):
+        try:
+            balances = safebox.creative_release(
+                reservation_key=reservation_key,
+                metadata=resolved_metadata,
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise TakyonError(f"unknown creative credit reservation: {reservation_key}") from exc
+        budget_snapshot = None
+        if business:
+            balances, budget_snapshot = _creative_credit_balances_and_budget_snapshot(store, business)
+    else:
+        with store._connect() as conn:
+            balances = credits_backend.release_credits(
+                conn,
+                reservation_key,
+                metadata=resolved_metadata,
+            )
+            budget_snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            ) if business else None
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
@@ -25334,8 +25444,13 @@ def _reserve_channel_spend_credits(
         "action": _channel_spend_action(bucket),
         "budget_bucket": bucket,
     }
+    action = str(payload["action"])
     store = _store()
+    use_safebox_gate = _creative_credit_uses_safebox_gate(action)
+    owner_user_id = ""
     with store._connect() as conn:
+        if use_safebox_gate:
+            owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
         credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
         if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
@@ -25360,23 +25475,60 @@ def _reserve_channel_spend_credits(
                 used_credits=_creative_credit_int(channel_budget.get("used_credits")),
                 reserved_credits=_creative_credit_int(channel_budget.get("reserved_credits")),
             )
-        reservation = credits_backend.reserve_credits(
-            conn,
-            business,
-            requested,
-            reservation_key,
+        if not use_safebox_gate:
+            reservation = credits_backend.reserve_credits(
+                conn,
+                business,
+                requested,
+                reservation_key,
+                metadata=payload,
+            )
+            balances = credits_backend.get_business_credit_balances(conn, business)
+            snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            )
+            return {
+                "reservation_key": reservation.key,
+                "requested_credits": reservation.reserved_credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": bucket,
+                "channel_budget": snapshot["channels"].get(bucket, {}),
+            }
+    try:
+        reservation_payload = safebox.creative_reserve(
+            business=business,
+            operator_user_id=owner_user_id,
+            action=_creative_credit_action_audience(action),
+            reservation_key=reservation_key,
+            units=requested,
             metadata=payload,
         )
-        balances = credits_backend.get_business_credit_balances(conn, business)
-        snapshot = _creative_credit_budget_snapshot_from_conn(
-            store,
-            conn,
-            business,
-            balances=balances,
+    except safebox.CreativeGateRefused as exc:
+        detail = exc.payload if isinstance(exc.payload, Mapping) else {}
+        requested_credits = _creative_credit_int(
+            detail.get("requested_credits") if isinstance(detail, Mapping) else None
+        ) or requested
+        available_credits = _creative_credit_int(
+            detail.get("available_credits") if isinstance(detail, Mapping) else None
         )
+        if exc.status_code == 402:
+            raise credits_backend.InsufficientCreativeCredits(
+                requested_credits=requested_credits,
+                available_credits=available_credits,
+            ) from exc
+        raise TakyonError(str(exc)) from exc
+    balances, snapshot = _creative_credit_balances_and_budget_snapshot(store, business)
     return {
-        "reservation_key": reservation.key,
-        "requested_credits": reservation.reserved_credits,
+        "reservation_key": str(reservation_payload.get("reservation_key") or reservation_key),
+        "requested_credits": int(
+            reservation_payload.get("reserved_credits")
+            or reservation_payload.get("credits")
+            or requested
+        ),
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
         "budget_bucket": bucket,
@@ -25401,19 +25553,31 @@ def _settle_channel_spend_credits(
         "budget_bucket": bucket,
     }
     store = _store()
-    with store._connect() as conn:
-        balances = credits_backend.commit_credits(
-            conn,
-            reservation_key,
-            actual_credits=_creative_credit_int(actual_credits),
-            metadata=payload,
-        )
-        snapshot = _creative_credit_budget_snapshot_from_conn(
-            store,
-            conn,
-            business,
-            balances=balances,
-        )
+    action = str(payload["action"])
+    if _creative_credit_uses_safebox_gate(action):
+        try:
+            balances = safebox.creative_commit(
+                reservation_key=reservation_key,
+                actual_credits=_creative_credit_int(actual_credits),
+                metadata=payload,
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise TakyonError(f"unknown creative credit reservation: {reservation_key}") from exc
+        balances, snapshot = _creative_credit_balances_and_budget_snapshot(store, business)
+    else:
+        with store._connect() as conn:
+            balances = credits_backend.commit_credits(
+                conn,
+                reservation_key,
+                actual_credits=_creative_credit_int(actual_credits),
+                metadata=payload,
+            )
+            snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            )
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
@@ -25438,18 +25602,29 @@ def _release_channel_spend_credits(
         "budget_bucket": bucket,
     }
     store = _store()
-    with store._connect() as conn:
-        balances = credits_backend.release_credits(
-            conn,
-            reservation_key,
-            metadata=payload,
-        )
-        snapshot = _creative_credit_budget_snapshot_from_conn(
-            store,
-            conn,
-            business,
-            balances=balances,
-        )
+    action = str(payload["action"])
+    if _creative_credit_uses_safebox_gate(action):
+        try:
+            balances = safebox.creative_release(
+                reservation_key=reservation_key,
+                metadata=payload,
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise TakyonError(f"unknown creative credit reservation: {reservation_key}") from exc
+        balances, snapshot = _creative_credit_balances_and_budget_snapshot(store, business)
+    else:
+        with store._connect() as conn:
+            balances = credits_backend.release_credits(
+                conn,
+                reservation_key,
+                metadata=payload,
+            )
+            snapshot = _creative_credit_budget_snapshot_from_conn(
+                store,
+                conn,
+                business,
+                balances=balances,
+            )
     return {
         "balance_credits": balances.balance_credits,
         "reserved_credits": balances.reserved_credits,
@@ -27118,6 +27293,11 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
     "reddit_publish_outreach": 1,
     "meta_ad_launch": 1,
     "reddit_ad_launch": 1,
+    # Variable ad media spend is reserved through the same safebox creative gate with units equal to
+    # the requested credit/cents amount. Keep the unit price at 1 so the safebox verifies ownership and
+    # reserves the exact amount without inventing a second variable-spend route.
+    "meta_ad_media_spend": 1,
+    "reddit_ad_media_spend": 1,
 }
 _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
@@ -27133,6 +27313,19 @@ _CREATIVE_CREDIT_ACTION_DEFAULT_BUCKETS = {
     "reddit_publish_outreach": "reddit",
     "meta_ad_launch": "meta",
     "reddit_ad_launch": "reddit",
+    "meta_ad_media_spend": "meta",
+    "reddit_ad_media_spend": "reddit",
+}
+_CREATIVE_CREDIT_ACTION_AUDIENCES = {
+    "logo_generate": "creative.logo",
+    "ugc_ad_generate": "creative.ugc",
+    "static_ad_generate": "creative.static_ad",
+    "x_publish_outreach": "creative.x_publish",
+    "reddit_publish_outreach": "creative.reddit_publish",
+    "meta_ad_launch": "creative.meta_ad_launch",
+    "reddit_ad_launch": "creative.reddit_ad_launch",
+    "meta_ad_media_spend": "creative.meta_ad_media_spend",
+    "reddit_ad_media_spend": "creative.reddit_ad_media_spend",
 }
 
 

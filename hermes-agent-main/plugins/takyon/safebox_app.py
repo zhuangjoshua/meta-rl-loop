@@ -76,6 +76,12 @@ _OPERATOR_SESSION_TTL_MAX_SECONDS = 6 * 3600
 _CREATIVE_LOGO_AUDIENCE = "creative.logo"
 _CREATIVE_UGC_AUDIENCE = "creative.ugc"
 _CREATIVE_STATIC_AD_AUDIENCE = "creative.static_ad"
+_CREATIVE_X_PUBLISH_AUDIENCE = "creative.x_publish"
+_CREATIVE_REDDIT_PUBLISH_AUDIENCE = "creative.reddit_publish"
+_CREATIVE_META_AD_LAUNCH_AUDIENCE = "creative.meta_ad_launch"
+_CREATIVE_REDDIT_AD_LAUNCH_AUDIENCE = "creative.reddit_ad_launch"
+_CREATIVE_META_AD_MEDIA_SPEND_AUDIENCE = "creative.meta_ad_media_spend"
+_CREATIVE_REDDIT_AD_MEDIA_SPEND_AUDIENCE = "creative.reddit_ad_media_spend"
 
 # Creative action (capability `action`, also the mint action) -> its canonical creative-credit cost
 # action key in core._CREATIVE_CREDIT_COST_DEFAULTS/_ENVS. The fixed price the client used and the
@@ -85,6 +91,12 @@ _CREATIVE_AUDIENCE_CREDIT_ACTION = {
     _CREATIVE_LOGO_AUDIENCE: "logo_generate",
     _CREATIVE_UGC_AUDIENCE: "ugc_ad_generate",
     _CREATIVE_STATIC_AD_AUDIENCE: "static_ad_generate",
+    _CREATIVE_X_PUBLISH_AUDIENCE: "x_publish_outreach",
+    _CREATIVE_REDDIT_PUBLISH_AUDIENCE: "reddit_publish_outreach",
+    _CREATIVE_META_AD_LAUNCH_AUDIENCE: "meta_ad_launch",
+    _CREATIVE_REDDIT_AD_LAUNCH_AUDIENCE: "reddit_ad_launch",
+    _CREATIVE_META_AD_MEDIA_SPEND_AUDIENCE: "meta_ad_media_spend",
+    _CREATIVE_REDDIT_AD_MEDIA_SPEND_AUDIENCE: "reddit_ad_media_spend",
 }
 
 # Which creative audiences each gated creative PROVIDER route accepts. A logo capability may only hit
@@ -488,22 +500,31 @@ class _CreditLedgerAdapter:
     def __init__(self, *, audience: str):
         self._audience = str(audience or "")
 
-    def reserve(self, scope: "CapabilityScope", *, reservation_key: str, units: int = 1):
+    def reserve(
+        self,
+        scope: "CapabilityScope",
+        *,
+        reservation_key: str,
+        units: int = 1,
+        metadata: dict[str, Any] | None = None,
+    ):
         from . import safebox
 
         credits = _creative_credit_price(self._audience, units=units)
+        reserve_metadata = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "via": "safebox_creative_gate",
+            "audience": self._audience,
+            "action": scope.action,
+            "units": int(max(1, units or 1)),
+        }
         with _safebox_db_conn() as conn:
             reservation = safebox._local_reserve_credits(
                 conn,
                 scope.business_slug,
                 credits,
                 reservation_key,
-                metadata={
-                    "via": "safebox_creative_gate",
-                    "audience": self._audience,
-                    "action": scope.action,
-                    "units": int(max(1, units or 1)),
-                },
+                metadata=reserve_metadata,
             )
         return {
             "business_slug": scope.business_slug,
@@ -512,25 +533,46 @@ class _CreditLedgerAdapter:
             "credits": credits,
         }
 
-    def commit(self, *, reservation_key: str, actual_credits: int | None = None):
+    def commit(
+        self,
+        *,
+        reservation_key: str,
+        actual_credits: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
         from . import safebox
 
+        commit_metadata = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "via": "safebox_creative_gate",
+            "audience": self._audience,
+        }
         with _safebox_db_conn() as conn:
             return safebox._local_commit_credits(
                 conn,
                 reservation_key,
                 actual_credits=actual_credits,
-                metadata={"via": "safebox_creative_gate", "audience": self._audience},
+                metadata=commit_metadata,
             )
 
-    def release(self, *, reservation_key: str):
+    def release(
+        self,
+        *,
+        reservation_key: str,
+        metadata: dict[str, Any] | None = None,
+    ):
         from . import safebox
 
+        release_metadata = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "via": "safebox_creative_gate",
+            "audience": self._audience,
+        }
         with _safebox_db_conn() as conn:
             return safebox._local_release_credits(
                 conn,
                 reservation_key,
-                metadata={"via": "safebox_creative_gate", "audience": self._audience},
+                metadata=release_metadata,
             )
 
 
@@ -796,6 +838,7 @@ class _CreativeReserveBody(BaseModel):
     reservation_key: str
     units: int | None = None
     ttl_seconds: int | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class _CreativeFinalizeBody(BaseModel):
@@ -803,6 +846,7 @@ class _CreativeFinalizeBody(BaseModel):
     # whole reservation) keyed on the reservation_key the reserve route used.
     reservation_key: str
     actual_credits: int | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class _CreativeProviderCallBody(BaseModel):
@@ -2408,7 +2452,12 @@ def build_safebox_app() -> FastAPI:
         # credits -> 402 here, before any token mint / provider key / provider call.
         ledger = _CreditLedgerAdapter(audience=audience)
         try:
-            reservation = ledger.reserve(scope, reservation_key=reservation_key, units=units)
+            reservation = ledger.reserve(
+                scope,
+                reservation_key=reservation_key,
+                units=units,
+                metadata=body.metadata,
+            )
         except safebox.InsufficientCreativeCredits as exc:
             raise HTTPException(
                 status_code=402,
@@ -2448,7 +2497,9 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="reservation_key_required")
         try:
             balances = _CreditLedgerAdapter(audience="").commit(
-                reservation_key=reservation_key, actual_credits=body.actual_credits
+                reservation_key=reservation_key,
+                actual_credits=body.actual_credits,
+                metadata=body.metadata,
             )
         except safebox.UnknownCreativeCreditReservation as exc:
             raise HTTPException(
@@ -2473,7 +2524,10 @@ def build_safebox_app() -> FastAPI:
         if not reservation_key:
             raise HTTPException(status_code=400, detail="reservation_key_required")
         try:
-            balances = _CreditLedgerAdapter(audience="").release(reservation_key=reservation_key)
+            balances = _CreditLedgerAdapter(audience="").release(
+                reservation_key=reservation_key,
+                metadata=body.metadata,
+            )
         except safebox.UnknownCreativeCreditReservation as exc:
             raise HTTPException(
                 status_code=404,

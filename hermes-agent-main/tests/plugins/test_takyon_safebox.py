@@ -438,6 +438,81 @@ def test_remote_safebox_business_bootstrap_credit_delegates_fixed_policy(monkeyp
     ]
 
 
+def test_remote_safebox_creative_gate_metadata_passthrough(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        if path == "/v1/creative/reserve":
+            return {
+                "token": "cap-token",
+                "audience": "creative.x_publish",
+                "reservation_key": payload["reservation_key"],
+                "reserved_credits": 1,
+                "credits": 1,
+            }
+        return {
+            "business_slug": "acme",
+            "balance_credits": 2,
+            "reserved_credits": 0,
+        }
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    reserve = safebox.creative_reserve(
+        business="acme",
+        operator_user_id="user-1",
+        action="creative.x_publish",
+        reservation_key="rk-x",
+        metadata={"budget_bucket": "x"},
+    )
+    committed = safebox.creative_commit(
+        reservation_key="rk-x",
+        actual_credits=1,
+        metadata={"status": "posted"},
+    )
+    released = safebox.creative_release(
+        reservation_key="rk-y",
+        metadata={"status": "failed"},
+    )
+
+    assert reserve["token"] == "cap-token"
+    assert committed.balance_credits == 2
+    assert released.balance_credits == 2
+    assert calls == [
+        (
+            "POST",
+            "/v1/creative/reserve",
+            {
+                "business": "acme",
+                "operator_user_id": "user-1",
+                "action": "creative.x_publish",
+                "reservation_key": "rk-x",
+                "units": 1,
+                "metadata": {"budget_bucket": "x"},
+            },
+        ),
+        (
+            "POST",
+            "/v1/creative/commit",
+            {
+                "reservation_key": "rk-x",
+                "actual_credits": 1,
+                "metadata": {"status": "posted"},
+            },
+        ),
+        (
+            "POST",
+            "/v1/creative/release",
+            {
+                "reservation_key": "rk-y",
+                "metadata": {"status": "failed"},
+            },
+        ),
+    ]
+
+
 def test_remote_safebox_creative_credit_grant_refuses_arbitrary_amount(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
 

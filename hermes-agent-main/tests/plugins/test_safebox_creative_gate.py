@@ -69,8 +69,11 @@ class _FakeCreditLedger:
     def __init__(self, *, balance: int):
         self.balance = int(balance)
         self.reserved: list[tuple[str, int, str]] = []
+        self.reserve_metadata: list[dict | None] = []
         self.committed: list[str] = []
+        self.commit_metadata: list[dict | None] = []
         self.released: list[str] = []
+        self.release_metadata: list[dict | None] = []
 
     def open_business_credit_account(self, conn, business_slug):
         return None
@@ -82,14 +85,17 @@ class _FakeCreditLedger:
             )
         self.balance -= int(credits)
         self.reserved.append((str(business_slug), int(credits), str(reservation_key)))
+        self.reserve_metadata.append(dict(metadata or {}) if metadata else None)
         return CreativeCreditReservation(key=str(reservation_key), reserved_credits=int(credits))
 
     def commit_credits(self, conn, reservation_key, *, actual_credits=None, metadata=None):
         self.committed.append(str(reservation_key))
+        self.commit_metadata.append(dict(metadata or {}) if metadata else None)
         return CreativeCreditBalances(business_slug="acme", balance_credits=self.balance, reserved_credits=0)
 
     def release_credits(self, conn, reservation_key, *, metadata=None):
         self.released.append(str(reservation_key))
+        self.release_metadata.append(dict(metadata or {}) if metadata else None)
         # Refund the most-recent reserve for the key (test fake; the real ledger derives it).
         for _slug, credits, key in self.reserved:
             if key == str(reservation_key):
@@ -300,6 +306,44 @@ def test_static_ad_reserve_scales_with_units(client, ledger):
     assert ledger.reserved == [("acme", 6, "rk-static")]
 
 
+def test_worker_and_channel_spend_actions_reserve_on_safebox_gate(client, ledger):
+    ledger.balance = 100
+    resp = client.post(
+        "/v1/creative/reserve",
+        headers=_auth(),
+        json={
+            "business": "acme",
+            "operator_user_id": "owner_A",
+            "action": "creative.x_publish",
+            "reservation_key": "rk-x",
+            "metadata": {"budget_bucket": "x"},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["audience"] == safebox_app._CREATIVE_X_PUBLISH_AUDIENCE
+    assert data["credits"] == 1
+    assert ledger.reserved[-1] == ("acme", 1, "rk-x")
+    assert ledger.reserve_metadata[-1]["budget_bucket"] == "x"
+    assert ledger.reserve_metadata[-1]["audience"] == safebox_app._CREATIVE_X_PUBLISH_AUDIENCE
+
+    scope, _nonce, _exp = verify_capability(
+        data["token"],
+        signing_key=_SIGNING_KEY.encode("utf-8"),
+        expected_audience=safebox_app._CREATIVE_X_PUBLISH_AUDIENCE,
+        now=0,
+    )
+    assert scope.action == "creative.x_publish"
+    assert scope.business_slug == "acme"
+    assert scope.takyon_user_id == "owner_A"
+
+    media = _reserve(client, action="creative.meta_ad_media_spend", units=42, key="rk-media")
+    assert media.status_code == 200, media.text
+    assert media.json()["audience"] == safebox_app._CREATIVE_META_AD_MEDIA_SPEND_AUDIENCE
+    assert media.json()["credits"] == 42
+    assert ledger.reserved[-1] == ("acme", 42, "rk-media")
+
+
 def test_reserve_unmappable_action_is_400(client, ledger):
     resp = _reserve(client, action="anthropic.messages")  # a real action, but not a CREATIVE one
     assert resp.status_code == 400
@@ -405,8 +449,9 @@ def test_openai_gate_unconfigured_is_503_before_upstream(client, ledger, monkeyp
 def test_creative_gateway_handlers_use_safebox_gate_not_client_reserve():
     """The logo / UGC / static-ad handlers must reserve/commit/release THROUGH the safebox gate
     (``safebox.creative_reserve`` / ``creative_commit`` / ``creative_release``) and must NOT call the
-    old client-side ``core._reserve_creative_credits`` for these three actions. (The ad-LAUNCH handlers
-    meta_launch / reddit_launch still use the client credit path — those are gated by a separate task.)"""
+    old client-side ``core._reserve_creative_credits`` for these three provider-keyed actions. Channel
+    publish / launch helpers may still call ``core._reserve_creative_credits``, but that helper now
+    delegates to the safebox creative gate on production planes."""
     import re
     from pathlib import Path
 
