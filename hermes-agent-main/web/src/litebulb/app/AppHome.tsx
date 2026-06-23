@@ -64,7 +64,7 @@ function HomeNav({ user, account, onNav, onOpenSettings, onLogout }: {
 export function AppHome({
   companies,
   account,
-  onNav, onStart, onOpen, onNew, onLogout, onOpenSettings,
+  onNav, onStart, onOpen, onNew, onDelete, onLogout, onOpenSettings,
 }: {
   companies: LitebulbBusiness[];
   account: TakyonOperatorAccountResponse | null;
@@ -72,6 +72,7 @@ export function AppHome({
   onStart: (idea: string) => void;
   onOpen: (slug: string) => void;
   onNew: () => void;
+  onDelete: (slug: string) => void | Promise<void>;
   onLogout: () => void;
   onOpenSettings: (s: SettingsSection) => void;
 }) {
@@ -103,7 +104,7 @@ export function AppHome({
               <button className="lb-cospanel__browse" onClick={onNew}>+ New company</button>
             </div>
             <div className="lb-cospanel__body">
-              <CompaniesGrid companies={companies} onOpen={onOpen} onNew={onNew} />
+              <CompaniesGrid companies={companies} onOpen={onOpen} onNew={onNew} onDelete={onDelete} />
             </div>
           </div>
         </section>

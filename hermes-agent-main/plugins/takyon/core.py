@@ -16291,7 +16291,22 @@ class TakyonStore:
             result["published_site"] = {**published_site_summary, "removed": False}
         else:
             result["published_site"] = {**published_site_summary, "removed": False}
-        result["subuser_product_site"] = _delete_subuser_product_site(slug)
+        # Sub-user product-site cleanup SSHes operator->sub-user with a key that is intentionally NOT
+        # present on the operator host (least-privilege). It also depends on the sub-user host being
+        # reachable. Both are best-effort: product sites are served from the Cloudflare R2 edge, not
+        # this legacy per-business directory, so a left-behind dir is harmless residue. It MUST NOT
+        # abort the authoritative DB-row delete below (which runs last) — otherwise a missing key would
+        # strand the control-plane row while every other asset is already gone. Record the failure
+        # instead of raising, so the dashboard "X" delete works inline on the operator host.
+        try:
+            result["subuser_product_site"] = _delete_subuser_product_site(slug)
+        except Exception as subuser_exc:  # noqa: BLE001 - best-effort residue cleanup, never fatal
+            result["subuser_product_site"] = {
+                **subuser_product_site,
+                "removed": False,
+                "skipped": True,
+                "error": _truncate_text(str(subuser_exc), 300),
+            }
         product_service_result = {
             "service_root": {**product_service_summary, "removed": False},
             "service_file": {**product_service_file, "removed": False},

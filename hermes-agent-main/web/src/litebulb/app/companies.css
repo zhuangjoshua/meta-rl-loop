@@ -16,6 +16,28 @@
   transition: transform 0.18s var(--cds-ease-out), box-shadow 0.18s var(--cds-ease-out);
 }
 .lb-coCard:hover .lb-coCard__thumb { transform: translateY(-4px); box-shadow: var(--cds-shadow-lg); }
+
+/* Delete ("X") affordance. The wrapper is the grid item; the card button fills it and the X floats
+   over the top-right of the preview tile. Hidden until hover/focus so the grid stays calm, but always
+   keyboard-reachable (and always shown on touch devices, which have no hover). */
+.lb-coCard-wrap { position: relative; display: flex; }
+.lb-coCard-wrap > .lb-coCard { flex: 1; min-width: 0; }
+.lb-coCard-wrap.is-deleting { opacity: 0.5; pointer-events: none; }
+.lb-coCard__delete {
+  position: absolute; top: 8px; right: 8px; z-index: 2;
+  width: 26px; height: 26px; display: grid; place-items: center; padding: 0;
+  border-radius: 50%; cursor: pointer; color: #fff;
+  background: rgba(20, 19, 15, 0.62); border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: var(--cds-shadow-sm);
+  opacity: 0; transform: scale(0.85);
+  transition: opacity 0.15s var(--cds-ease-out), transform 0.15s var(--cds-ease-out), background 0.15s;
+}
+.lb-coCard-wrap:hover .lb-coCard__delete,
+.lb-coCard__delete:focus-visible { opacity: 1; transform: scale(1); }
+.lb-coCard__delete:hover { background: var(--cds-color-danger, #d4351c); border-color: rgba(255, 255, 255, 0.85); }
+.lb-coCard__delete:disabled { cursor: default; opacity: 0.6; }
+@media (hover: none) { .lb-coCard__delete { opacity: 1; transform: scale(1); } }
+
 /* Brand row: small logo + company name, left-aligned under the tile. */
 .lb-coCard__brand { display: flex; align-items: center; gap: 9px; margin-top: 14px; min-width: 0; }
 .lb-coCard__logo { flex: none; width: 22px; height: 22px; border-radius: 6px; object-fit: contain; padding: 2px; background: var(--cds-color-surface-sunken); border: 1px solid var(--cds-color-border-default); }

@@ -160,22 +160,60 @@ export function CompaniesGrid({
   companies,
   onOpen,
   onNew,
+  onDelete,
 }: {
   companies: LitebulbBusiness[];
   onOpen: (slug: string) => void;
   onNew: () => void;
+  onDelete?: (slug: string) => void | Promise<void>;
 }) {
+  // Slug currently being deleted — disables its X and dims the card so a double-click can't double-fire.
+  const [deleting, setDeleting] = useState<string>("");
+
+  const handleDelete = async (slug: string, name: string) => {
+    if (!onDelete || !slug || deleting) return;
+    const confirmed = window.confirm(
+      `Delete "${name}"?\n\nThis permanently removes the company, its product site, and all its data. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    setDeleting(slug);
+    try {
+      await onDelete(slug);
+    } finally {
+      setDeleting("");
+    }
+  };
+
   return (
     <div className="lb-pf-grid">
-      {companies.map((c, i) => (
-        <button key={c.slug || c.name || i} className="lb-coCard" onClick={() => onOpen(c.slug)}>
-          <span className="lb-coCard__thumb"><LandingThumb name={c.name} tagline={c.tagline || c.goal || c.name} slug={c.slug} /></span>
-          <span className="lb-coCard__brand">
-            <CompanyLogo slug={c.slug} name={c.name} logoPath={c.logoPath} />
-            <span className="lb-coCard__name">{c.name}</span>
-          </span>
-        </button>
-      ))}
+      {companies.map((c, i) => {
+        const isDeleting = deleting === c.slug;
+        return (
+          <div key={c.slug || c.name || i} className={`lb-coCard-wrap${isDeleting ? " is-deleting" : ""}`}>
+            <button className="lb-coCard" onClick={() => onOpen(c.slug)} disabled={isDeleting}>
+              <span className="lb-coCard__thumb"><LandingThumb name={c.name} tagline={c.tagline || c.goal || c.name} slug={c.slug} /></span>
+              <span className="lb-coCard__brand">
+                <CompanyLogo slug={c.slug} name={c.name} logoPath={c.logoPath} />
+                <span className="lb-coCard__name">{c.name}</span>
+              </span>
+            </button>
+            {onDelete && c.slug && (
+              <button
+                type="button"
+                className="lb-coCard__delete"
+                aria-label={`Delete ${c.name}`}
+                title="Delete company"
+                disabled={isDeleting}
+                onClick={(e) => { e.stopPropagation(); void handleDelete(c.slug, c.name); }}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                  <path d="M4 4l8 8M12 4l-8 8" />
+                </svg>
+              </button>
+            )}
+          </div>
+        );
+      })}
       <button className="lb-coCard lb-coCard--new" onClick={onNew}>
         <span className="lb-coCard__thumb lb-coCard__thumb--new"><span className="lb-coCard__plus">+</span></span>
         <span className="lb-coCard__brand"><span className="lb-coCard__name">New company</span></span>

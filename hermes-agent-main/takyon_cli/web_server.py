@@ -5163,6 +5163,73 @@ async def wake_takyon_business_now(request: Request, slug: str) -> dict[str, Any
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.delete("/api/takyon/businesses/{slug}")
+async def delete_takyon_business(request: Request, slug: str) -> dict[str, Any]:
+    """Operator self-service deletion of a business they own (the dashboard "X" affordance).
+
+    Reuses the canonical ``business.delete`` rail — the exact path the ``takyon delete`` CLI uses — so
+    DB rows, crons, workspace objects (R2), the public edge site, and any product-service surfaces are
+    all cleaned through one source of truth. Owner-gated: a slug not in the caller's owned set is a 404
+    (never confirm another operator's slugs). Synchronous so the card disappears as soon as it returns.
+
+    ``delete_domains`` is False: businesses route through wildcard ``*.coscale.app`` (no per-business
+    Vercel domain to remove), and the safebox does not vend ``VERCEL_TOKEN`` — attempting a domain
+    delete would raise before the DB row delete. The sub-user product-site cleanup is best-effort in the
+    handler (the operator host holds no sub-user ssh key), so a missing key never strands the row.
+    """
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    if slug not in principal.business_slugs:
+        raise HTTPException(status_code=404, detail="not_found")
+    try:
+        from uuid import uuid4
+
+        from plugins.takyon.cli import _scope_for_business
+        from plugins.takyon.core import TakyonStore, _db_backend
+        from plugins.takyon.runtime_app import RuntimeNotConfigured
+
+        if _db_backend() != "postgres":
+            raise HTTPException(status_code=503, detail="postgres_required")
+
+        try:
+            url = _request_runtime_database_url(request)
+            if not url:
+                raise RuntimeNotConfigured("database_unconfigured")
+        except RuntimeNotConfigured as exc:
+            raise HTTPException(status_code=503, detail="database_unconfigured") from exc
+
+        store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
+        result = store.commit(
+            scope=_scope_for_business(slug),
+            operations=[
+                {
+                    "action": "business.delete",
+                    "business": slug,
+                    "confirm": True,
+                    "delete_files": True,
+                    "delete_cron": True,
+                    "delete_domains": False,
+                    "subdomains": [],
+                }
+            ],
+            # Per-request key so a retry always re-runs the canonical delete rather than replaying a
+            # cached result (mirrors the wake-state route's uuid key).
+            idempotency_key=f"dashboard-delete:{slug}:{uuid4().hex}",
+            reason="operator deleted business from dashboard",
+            actor="dashboard",
+        )
+        payload = result[0] if isinstance(result, list) and result else result
+        deleted = ((payload or {}).get("database", {}) or {}).get("deleted", {})
+        deleted_rows = sum(deleted.values()) if isinstance(deleted, dict) else deleted
+        return {"success": True, "slug": slug, "deleted_rows": deleted_rows}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
+        _log.warning("dashboard business delete failed for %s: %s", slug, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/takyon/operator/meta-campaigns")
 async def get_takyon_operator_meta_campaigns(request: Request) -> dict[str, Any]:
     """Read-only Meta campaign handoff queue for the SAI operator surface."""

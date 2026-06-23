@@ -797,6 +797,21 @@ export function useTakyonLitebulb() {
     await loadHome();
   }, [loadHome]);
 
+  // Operator self-service delete (the home grid "X"). Optimistically drop the card so the grid feels
+  // instant, call the canonical delete rail, then re-sync against the server — a failed delete restores
+  // the card via loadHome(), a successful one confirms its removal.
+  const deleteBusiness = useCallback(async (slug: string) => {
+    const businessSlug = trimText(slug).toLowerCase();
+    if (!businessSlug) return;
+    setBusinesses((current) => current.filter((b) => b.slug !== businessSlug));
+    setActiveBusiness((current) => (current && current.slug === businessSlug ? null : current));
+    try {
+      await api.deleteTakyonBusiness(businessSlug);
+    } finally {
+      await loadHome();
+    }
+  }, [loadHome]);
+
   const startCreativeCreditCheckout = useCallback(async (slug: string, credits: number) => {
     const businessSlug = trimText(slug).toLowerCase();
     const creditCount = Number.isFinite(credits) ? Math.max(0, Math.round(credits)) : 0;
@@ -1812,6 +1827,7 @@ export function useTakyonLitebulb() {
     saveChannelCreditBudgets,
     setBusinessWakeState,
     wakeBusinessNow,
+    deleteBusiness,
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,

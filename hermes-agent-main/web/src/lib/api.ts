@@ -235,6 +235,13 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     }),
+  // Operator self-service deletion of a business they own. Reuses the canonical business.delete rail
+  // server-side; owner-gated (404 for a slug the caller doesn't own). Returns once the row is gone.
+  deleteTakyonBusiness: (slug: string) =>
+    fetchJSON<{ success: boolean; slug: string; deleted_rows: number }>(
+      `/api/takyon/businesses/${encodeURIComponent(slug)}`,
+      { method: "DELETE" },
+    ),
   getTakyonBusinessCreativeCreditPacks: (slug: string) =>
     fetchJSON<TakyonBusinessCreativeCreditPacksResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/packs`,

@@ -994,6 +994,51 @@ def public_site_pointer_key(slug: str) -> str:
     return f"{_safe_slug(slug)}/current"
 
 
+def public_site_object_prefix(slug: str) -> str:
+    """R2 prefix for one public product site: ``<slug>/``.
+
+    This covers both the live pointer and every historical build under the public edge bucket.
+    """
+    return f"{_safe_slug(slug)}/"
+
+
+def delete_public_site_from_r2(
+    slug: str,
+    *,
+    backend: "StorageBackend | None" = None,
+) -> dict[str, object]:
+    """Delete one public product site's Cloudflare R2 prefix.
+
+    Business deletion must not strand edge-served static output. If R2 is not provisioned this
+    reports a skipped cleanup, matching the publish mirror's optional deployment posture. If R2 is
+    provisioned and the backend errors, the exception propagates so the caller can avoid deleting the
+    control-plane row while the public site is still live.
+    """
+    safe_slug = _safe_slug(slug)
+    prefix = public_site_object_prefix(safe_slug)
+    if backend is None:
+        if not r2_configured():
+            return {
+                "slug": safe_slug,
+                "prefix": prefix,
+                "status": "unconfigured",
+                "removed": False,
+                "deleted": [],
+                "deleted_count": 0,
+                "skipped": True,
+            }
+        backend = SafeboxStorageBackend("r2") if _remote_storage_authority_enabled() else R2StorageBackend()
+    deleted = delete_prefix(backend, prefix)
+    return {
+        "slug": safe_slug,
+        "prefix": prefix,
+        "status": "removed" if deleted else "missing",
+        "removed": bool(deleted),
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+    }
+
+
 def write_public_site_to_r2(
     slug: str,
     build_id: str,

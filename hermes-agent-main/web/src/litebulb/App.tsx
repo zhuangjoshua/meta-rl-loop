@@ -77,6 +77,7 @@ function Router() {
     saveChannelCreditBudgets,
     setBusinessWakeState,
     wakeBusinessNow,
+    deleteBusiness,
     startCreativeCreditCheckout,
     startCreativeCreditPackCheckout,
     openBillingPortal,
@@ -255,6 +256,7 @@ function Router() {
             onStart={startBuild}
             onOpen={(slug) => nav(`/app/c/${slug}`)}
             onNew={() => nav("/app/new")}
+            onDelete={deleteBusiness}
             onLogout={auth.logout}
             onOpenSettings={openSettings}
           />
