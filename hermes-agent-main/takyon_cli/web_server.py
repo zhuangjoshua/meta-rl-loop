@@ -1572,6 +1572,23 @@ def _resolve_dashboard_headers_principal(headers: Any) -> Any | None:
     return _resolve_local_dashboard_principal()
 
 
+def _resolve_dashboard_ws_principal(ws: "WebSocket") -> Any | None:
+    cfg = _auth0_config()
+    principal = _resolve_dashboard_principal(
+        _session_from_cookie_header(ws.headers.get("cookie", ""), cfg) if cfg else None
+    )
+    if principal is not None:
+        return principal
+    token = str(ws.query_params.get("token", "") or "")
+    if token and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        local = _resolve_local_dashboard_principal()
+        if local is not None:
+            return local
+    if _auth0_required_for_host(ws.headers):
+        return None
+    return _resolve_local_dashboard_principal()
+
+
 def _resolve_dashboard_request_principal(request: Request) -> Any | None:
     runtime_database_url = _request_runtime_database_url(request)
     principal = _resolve_dashboard_principal(
@@ -9292,7 +9309,7 @@ async def gateway_ws(ws: WebSocket) -> None:
 
     from tui_gateway.ws import handle_ws
 
-    principal = _resolve_dashboard_headers_principal(ws.headers)
+    principal = _resolve_dashboard_ws_principal(ws)
     session_id = str(ws.query_params.get("session_id", "") or "").strip()
 
     await ws.accept()

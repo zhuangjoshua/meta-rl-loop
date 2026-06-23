@@ -3528,6 +3528,31 @@ class TestWebServerEndpoints:
         assert _post("takyon.dashboard.create").status_code == 200
         assert "_takyon_operator_user_id" not in captured["req"]["params"]
 
+    def test_dashboard_ws_principal_uses_session_token_fallback(self, monkeypatch):
+        """After the WS auth gate accepts Auth0 + dashboard token, the live WS transport resolves
+        the same server-side operator principal as HTTP requests do."""
+        import takyon_cli.web_server as web_server
+
+        class _Principal:
+            user_id = "user-real"
+
+        fake_ws = types.SimpleNamespace(
+            headers={"cookie": "auth0=valid", "host": "app.fourmanifold.com"},
+            query_params={"token": "server-token"},
+        )
+
+        monkeypatch.setattr(web_server, "_SESSION_TOKEN", "server-token")
+        monkeypatch.setattr(web_server, "_auth0_config", lambda: object())
+        monkeypatch.setattr(web_server, "_session_from_cookie_header", lambda _cookie, _cfg: {})
+        monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: None)
+        monkeypatch.setattr(web_server, "_auth0_required_for_host", lambda _headers: True)
+        monkeypatch.setattr(web_server, "_resolve_local_dashboard_principal", lambda: _Principal())
+
+        assert web_server._resolve_dashboard_ws_principal(fake_ws).user_id == "user-real"
+
+        fake_ws.query_params = {"token": "attacker-token"}
+        assert web_server._resolve_dashboard_ws_principal(fake_ws) is None
+
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
         import takyon_cli.web_server as web_server

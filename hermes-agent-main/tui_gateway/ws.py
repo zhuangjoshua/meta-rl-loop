@@ -136,12 +136,14 @@ async def handle_ws(
     if not preaccepted:
         await ws.accept()
 
+    headers = getattr(ws, "headers", {}) or {}
+
     transport = WSTransport(
         ws,
         asyncio.get_running_loop(),
         operator_principal=principal,
-        request_host=str(ws.headers.get("host", "") or ""),
-        request_origin=str(ws.headers.get("origin", "") or ""),
+        request_host=str(headers.get("host", "") or ""),
+        request_origin=str(headers.get("origin", "") or ""),
     )
 
     sid = str(session_id or "").strip()
