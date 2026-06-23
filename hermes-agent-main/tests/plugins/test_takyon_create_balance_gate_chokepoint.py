@@ -28,6 +28,7 @@ class _RecordingStore:
 
     def __init__(self, *args, **kwargs):
         self.commits: list[dict] = []
+        self.persisted_slug = "acme"
 
     def commit(self, *, scope, operations, **kwargs):
         self.commits.append({"scope": scope, "operations": operations})
@@ -36,7 +37,7 @@ class _RecordingStore:
     def read(self, *, scope, query, **kwargs):
         # _business_exists -> summary with no slug -> treated as not existing (fresh create).
         # After commit, the create branch also reads summary to confirm persistence.
-        return {"business": {"slug": "acme", "mode": "live"}}
+        return {"business": {"slug": self.persisted_slug, "mode": "live"}}
 
 
 @pytest.fixture(autouse=True)
@@ -60,13 +61,19 @@ def test_zero_balance_create_blocks_before_business_row(monkeypatch):
     store = _install_store(monkeypatch)
     called = {"preflight": 0}
 
-    def _blocking_preflight(operator_user_id):
+    def _blocking_preflight(operator_user_id, **kwargs):
         called["preflight"] += 1
+        assert kwargs == {"business_slug": "acme", "defer_settle": True}
         raise InsufficientOperatorBalance(
             spendable_cents=0, allowance_remaining_cents=0
         )
 
     monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", _blocking_preflight)
+    monkeypatch.setattr(
+        takyon_cli,
+        "_operator_create_balance_finalize",
+        lambda *a, **k: pytest.fail("unreserved create must not finalize billing"),
+    )
 
     with pytest.raises(InsufficientOperatorBalance):
         takyon_cli.run_takyon_command(
@@ -85,12 +92,20 @@ def test_funded_create_passes_gate_and_commits(monkeypatch):
     store.commit and a businesses row is written. Proves the gate does not block funded operators."""
     store = _install_store(monkeypatch)
     called = {"preflight": 0}
+    finalized: list[dict] = []
 
-    def _passing_preflight(operator_user_id):
+    def _passing_preflight(operator_user_id, **kwargs):
         called["preflight"] += 1
-        return None
+        assert operator_user_id == "op-funded"
+        assert kwargs == {"business_slug": "acme", "defer_settle": True}
+        return {"reservation_key": "create-rk", "charge_cents": 300}
 
     monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", _passing_preflight)
+    monkeypatch.setattr(
+        takyon_cli,
+        "_operator_create_balance_finalize",
+        lambda charge, *, settle: finalized.append({"charge": charge, "settle": settle}),
+    )
 
     result = takyon_cli.run_takyon_command(
         ["create", "--no-auto", "acme", "a real company"],
@@ -100,6 +115,7 @@ def test_funded_create_passes_gate_and_commits(monkeypatch):
     )
 
     assert called["preflight"] == 1
+    assert finalized == [{"charge": {"reservation_key": "create-rk", "charge_cents": 300}, "settle": True}]
     assert any(
         any((op or {}).get("action") == "business.upsert" for op in c["operations"])
         for c in store.commits
@@ -114,7 +130,7 @@ def test_preflight_runs_before_commit_for_bare_init(monkeypatch):
 
     order: list[str] = []
 
-    def _blocking_preflight(operator_user_id):
+    def _blocking_preflight(operator_user_id, **kwargs):
         order.append("preflight")
         raise InsufficientOperatorBalance(
             spendable_cents=0, allowance_remaining_cents=0
@@ -138,3 +154,34 @@ def test_preflight_runs_before_commit_for_bare_init(monkeypatch):
         )
 
     assert order == ["preflight"], "preflight must run and block before any commit"
+
+
+def test_create_refunds_deferred_charge_when_business_row_not_durable(monkeypatch):
+    """If the operator create charge reserved successfully but durable business creation fails, the
+    hold must be refunded. This is the dashboard failure shape that otherwise strands allowance and
+    leaves /building showing a raw operator-create-charge key."""
+    store = _install_store(monkeypatch)
+    store.persisted_slug = ""
+    finalized: list[dict] = []
+
+    def _passing_preflight(operator_user_id, **kwargs):
+        assert kwargs == {"business_slug": "acme", "defer_settle": True}
+        return {"reservation_key": "create-rk", "charge_cents": 300}
+
+    monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", _passing_preflight)
+    monkeypatch.setattr(
+        takyon_cli,
+        "_operator_create_balance_finalize",
+        lambda charge, *, settle: finalized.append({"charge": charge, "settle": settle}),
+    )
+
+    with pytest.raises(RuntimeError, match="business creation did not persist"):
+        takyon_cli.run_takyon_command(
+            ["create", "--no-auto", "acme", "a real company"],
+            model="",
+            max_turns=7,
+            operator_user_id="op-funded",
+        )
+
+    assert len(store.commits) == 1
+    assert finalized == [{"charge": {"reservation_key": "create-rk", "charge_cents": 300}, "settle": False}]

@@ -1202,7 +1202,8 @@ def _operator_create_balance_preflight(
     operator_user_id: str | None,
     *,
     business_slug: str | None = None,
-) -> None:
+    defer_settle: bool = False,
+) -> dict[str, int | str] | None:
     """Authoritatively gate AND charge company creation on the operator wallet (the plan-funded
     allowance). Backend source of truth — never trust the client. The CEO bootstrap of a new company
     spends real provider money on the operator billing rail, so building a company for an operator
@@ -1310,10 +1311,56 @@ def _operator_create_balance_preflight(
                 allowance_included_cents=allowance_included,
                 percent_remaining=round(percent_remaining, 1),
             ) from exc
+        if defer_settle:
+            return {
+                "reservation_key": reservation_key,
+                "charge_cents": int(res.allowance_cents),
+            }
         # Settle the full reservation at the held amount so the 3% is permanently consumed (not
         # released). Idempotent: a replayed key returns the same reservation and re-settling is a
         # no-op (first finalizer wins).
         billing.settle(conn, reservation_key, int(res.allowance_cents))
+        return {
+            "reservation_key": reservation_key,
+            "charge_cents": int(res.allowance_cents),
+        }
+    finally:
+        conn.close()
+
+
+def _operator_create_balance_finalize(
+    create_charge: dict[str, int | str] | None,
+    *,
+    settle: bool,
+) -> None:
+    """Settle or refund a deferred company-create reservation.
+
+    The create chokepoint reserves before writing the businesses row, so an unfunded operator still
+    cannot create. It settles only once that row is durably visible; if the row write itself fails,
+    the reservation is refunded so a transient create failure does not strand allowance.
+    """
+    if not create_charge:
+        return
+    reservation_key = str(create_charge.get("reservation_key") or "").strip()
+    if not reservation_key:
+        return
+
+    import psycopg
+
+    try:
+        from . import billing
+        from .runtime_app import resolve_database_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import billing
+        from plugins.takyon.runtime_app import resolve_database_url
+
+    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    try:
+        if settle:
+            charge_cents = int(create_charge.get("charge_cents") or 0)
+            billing.settle(conn, reservation_key, max(0, charge_cents))
+        else:
+            billing.refund(conn, reservation_key)
     finally:
         conn.close()
 
@@ -3779,31 +3826,53 @@ def run_takyon_command(
         # detached create, and the bare CLI create/init/build — funnels through this single
         # chokepoint before the business.upsert commit writes a businesses row. It REQUIRES the
         # operator's plan-funded allowance to be STRICTLY above 3% remaining and CONSUMES 3% of the
-        # period allowance on create, atomically through the billing rail. Fails CLOSED for an
-        # operator under the floor regardless of --test/--no-auto (a create still needs balance
-        # authority), and is idempotent on the slug so a retried create never double-charges.
+        # period allowance on create through the billing rail. The reserve happens before the
+        # business.upsert commit, but settlement is deferred until the business row is durably
+        # visible; if create fails in between, the hold is refunded so the operator is not stranded.
+        # Fails CLOSED for an operator under the floor regardless of --test/--no-auto (a create still
+        # needs balance authority), and is idempotent on the slug so a retried create never
+        # double-charges.
         # Fail-open only for identity-less / non-Postgres dev runs. The dashboard RPC's own call is
         # redundant-but-harmless. Raises InsufficientOperatorBalance (TakyonError subclass) which the
         # dashboard maps to the 4030 balance block.
-        _operator_create_balance_preflight(resolved_operator_user_id, business_slug=slug)
-        config = _read_model_config(store)
-        if auto_start and not no_auto:
-            _require_agent_model_config(config, model_override=model)
-        auto_wake = _config_bool(config.get("auto_schedule_ceo_on_create"), default=False)
-        schedule = schedule_arg or (config.get("default_ceo_schedule") or "every 6h").strip()
-        should_schedule = bool(schedule_arg) or (not no_auto and (auto_start or auto_wake))
-        upsert_op: dict[str, Any] = {"action": "business.upsert", "business": slug, "name": raw_name, "goal": goal, "mode": mode}
-        business_result = store.commit(
-            scope=_scope_for_business(slug),
-            operations=[upsert_op],
-            idempotency_key=_idempotency_key("operator-init-v6", slug, mode or "keep", goal),
-            reason="operator initialized business",
-            actor="operator",
+        create_charge = _operator_create_balance_preflight(
+            resolved_operator_user_id,
+            business_slug=slug,
+            defer_settle=True,
         )
-        active = store.read(scope=_scope_for_business(slug), query="summary")
-        business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
-        if str(business_record.get("slug") or "").strip() != slug:
-            raise RuntimeError(f"business creation did not persist for {slug}")
+        try:
+            config = _read_model_config(store)
+            if auto_start and not no_auto:
+                _require_agent_model_config(config, model_override=model)
+            auto_wake = _config_bool(config.get("auto_schedule_ceo_on_create"), default=False)
+            schedule = schedule_arg or (config.get("default_ceo_schedule") or "every 6h").strip()
+            should_schedule = bool(schedule_arg) or (not no_auto and (auto_start or auto_wake))
+            upsert_op: dict[str, Any] = {
+                "action": "business.upsert",
+                "business": slug,
+                "name": raw_name,
+                "goal": goal,
+                "mode": mode,
+            }
+            business_result = store.commit(
+                scope=_scope_for_business(slug),
+                operations=[upsert_op],
+                idempotency_key=_idempotency_key("operator-init-v6", slug, mode or "keep", goal),
+                reason="operator initialized business",
+                actor="operator",
+            )
+            active = store.read(scope=_scope_for_business(slug), query="summary")
+            business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
+            if str(business_record.get("slug") or "").strip() != slug:
+                raise RuntimeError(f"business creation did not persist for {slug}")
+            _operator_create_balance_finalize(create_charge, settle=True)
+            create_charge = None
+        except BaseException:
+            try:
+                _operator_create_balance_finalize(create_charge, settle=False)
+            except Exception:
+                pass
+            raise
         active_mode = "live"
         if auto_start:
             bootstrap_job = _enqueue_pg_ceo_bootstrap(

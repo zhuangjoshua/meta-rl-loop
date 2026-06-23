@@ -31,6 +31,18 @@ function canonicalProductHost(slug: string) {
   return clean ? `${clean}.${PRODUCT_BASE_DOMAIN}` : "";
 }
 
+function workspaceMatchesBuild(
+  workspace: TakyonBusinessWorkspaceResponse | null | undefined,
+  businessSlug: string,
+) {
+  const expected = (businessSlug || "").trim().toLowerCase();
+  if (!workspace || !expected) return false;
+  const actual = String((workspace as { business_slug?: unknown }).business_slug || "")
+    .trim()
+    .toLowerCase();
+  return actual === expected;
+}
+
 export function Building({
   idea,
   state,
@@ -55,6 +67,7 @@ export function Building({
   const done = state.status === "ready";
   const errored = state.status === "error";
   const businessName = state.businessName.trim() || "your company";
+  const scopedWorkspace = workspaceMatchesBuild(workspace, state.businessSlug) ? workspace : null;
   // Conversational progress stream — the CEO's curated, customer-safe chat_stream
   // narration (ordered oldest→newest), like a Claude/Lovable agent. No phase
   // ladder, no "What changed", no artifact list, no mid-thought planner/tool
@@ -64,7 +77,7 @@ export function Building({
   // that is fed raw message deltas (the CEO's chain-of-thought), which belong
   // strictly inside the collapsed "View build details" disclosure, never in the
   // customer-facing conversation.
-  const curatedStream = chatStreamAgentMessages(workspace)
+  const curatedStream = chatStreamAgentMessages(scopedWorkspace)
     .map((item) => sanitizeCustomerReply(item.text))
     .filter(Boolean);
   const stream = curatedStream.length
@@ -72,14 +85,14 @@ export function Building({
     : [`Reading your idea — ${idea}.`];
   // Durable end-of-turn summary mirrored on the workspace; rendered as the
   // settled closing line when present (otherwise the static ready line below).
-  const chatSummary = workspaceChatSummary(workspace).trim();
+  const chatSummary = workspaceChatSummary(scopedWorkspace).trim();
   const running = !done && !errored;
   // Live per-step worker progress for the build screen's "Working on…" column —
   // the running/queued milestones plus the running milestone's runtime children
   // from the canonical workspace mirror. Each detail is sanitized at render so no
   // tool/path noun reaches the screen; capped to the most recent few. Empty
   // before the boot payload arrives (the column simply doesn't render).
-  const workerTasks = (running ? liveWorkerTasks(workspace) : []).slice(-6);
+  const workerTasks = (running ? liveWorkerTasks(scopedWorkspace) : []).slice(-6);
   // Deterministic, timed build-phase ladder (Landing -> Logo -> Search Console
   // -> Sign-on -> Subscription/account -> Product/launch), derived from the real
   // per-tool runtime traces + persisted durations on the workspace mirror. Shows
@@ -87,7 +100,7 @@ export function Building({
   // long tail, and where sign-in/subscriptions get wired. Only renders once the
   // boot payload carries trace events (otherwise the array is all-queued with no
   // timing, and we hide it until the build actually starts moving).
-  const phases = livePhases(workspace);
+  const phases = livePhases(scopedWorkspace);
   const showPhases = phases.some((phase) => phase.status !== "queued");
   const title = state.businessName.trim();
   // Real product host, shown from the moment the slug is known (as soon as
