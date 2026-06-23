@@ -75,6 +75,12 @@ class _FakeStream:
         for chunk in self._chunks:
             yield chunk
 
+    def iter_bytes(self):
+        # The proxy uses iter_bytes() (httpx decodes any content-encoding to plain bytes) so the SSE
+        # passthrough is decodable by the SDK; with accept-encoding: identity there is nothing to decode.
+        for chunk in self._chunks:
+            yield chunk
+
 
 class _FakeClient:
     """Stand-in for httpx.Client. Records every outbound (url, headers, json) so a test can assert the

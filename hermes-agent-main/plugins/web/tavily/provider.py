@@ -41,13 +41,51 @@ from agent.web_search_provider import WebSearchProvider
 logger = logging.getLogger(__name__)
 
 
+def _use_remote_authority(safebox: Any) -> bool:
+    """True only on a runtime plane with a remote safebox configured (and not the
+    safebox host itself). Wraps ``safebox._use_remote_authority()`` so the
+    "no authority configured at all" case (local dev / hermetic tests, where it
+    raises ``SafeboxAuthorityUnavailable``) reads as False → the direct local
+    Tavily path runs. This is the same legitimate "where does it run" switch the
+    product broker uses, NOT an unsafe key fallback."""
+    try:
+        return bool(safebox._use_remote_authority())
+    except safebox.SafeboxAuthorityUnavailable:
+        return False
+
+
 def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """POST to the Tavily API and return the parsed JSON response.
 
     Mirrors :func:`tools.web_tools._tavily_request`. Raises ``ValueError``
     when ``TAVILY_API_KEY`` is unset; the caller catches and surfaces as
     a typed error response.
+
+    Secret boundary: on a runtime plane (a host with a remote safebox
+    configured — ``safebox._use_remote_authority()`` is True) the raw
+    ``TAVILY_API_KEY`` is NOT read here. Instead the call goes through the
+    safebox provider PROXY (``/v1/proxy/tavily/<op>``): the safebox resolves
+    the key locally, calls Tavily, and returns the KEY-FREE Tavily JSON (the
+    same shape the normalizers expect). The proxy fails closed
+    (``RemoteSafeboxError`` / ``SafeboxAuthorityUnavailable``) and never falls
+    back to a raw key. On the safebox host itself / local dev
+    (``not _use_remote_authority()``) — that host IS the authority — the
+    existing direct call below resolves ``TAVILY_API_KEY`` locally unchanged
+    (the proxy route itself runs there).
     """
+    op = endpoint.strip("/").lower()
+    payload = dict(payload)  # don't mutate caller's dict
+
+    from plugins.takyon import safebox
+
+    if _use_remote_authority(safebox):
+        # Runtime plane: broker the call through the safebox proxy — the raw key
+        # never reaches this process. Only search/extract have proxy routes; an
+        # unrouted op (e.g. crawl) gets a clean fail-closed proxy error rather
+        # than silently reading a raw key on the runtime plane.
+        logger.info("Tavily %s via safebox proxy", op)
+        return safebox.proxy_request("tavily", op, payload)
+
     import httpx
 
     api_key = os.getenv("TAVILY_API_KEY")
@@ -58,14 +96,13 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     base_url = os.getenv("TAVILY_BASE_URL", "https://api.tavily.com")
-    payload = dict(payload)  # don't mutate caller's dict
     payload["api_key"] = api_key
     url = f"{base_url}/{endpoint.lstrip('/')}"
     logger.info("Tavily %s request to %s", endpoint, url)
 
     # Tavily /crawl requires Bearer header auth in addition to body auth;
     # /search and /extract are body-only.
-    headers = {"Authorization": f"Bearer {api_key}"} if endpoint.strip("/") == "crawl" else {}
+    headers = {"Authorization": f"Bearer {api_key}"} if op == "crawl" else {}
 
     response = httpx.post(url, json=payload, headers=headers, timeout=60)
     response.raise_for_status()

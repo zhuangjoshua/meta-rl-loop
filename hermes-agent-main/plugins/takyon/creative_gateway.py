@@ -287,6 +287,19 @@ def _meta_campaign_create_payload(plan: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _use_remote_authority() -> bool:
+    """True only on a runtime plane with a remote safebox configured (and not the
+    safebox host itself). Wraps ``safebox._use_remote_authority()`` so the
+    "no authority configured at all" case (local dev / hermetic tests, where it
+    raises ``SafeboxAuthorityUnavailable``) reads as False → the local Gemini
+    render path runs. Same legitimate "where does it run" switch the product
+    broker uses, NOT an unsafe key fallback."""
+    try:
+        return bool(safebox._use_remote_authority())
+    except safebox.SafeboxAuthorityUnavailable:
+        return False
+
+
 def _resolve_gemini_image_key() -> str:
     """Resolve the Gemini image key from Safebox-backed env aliases.
 
@@ -406,6 +419,43 @@ def _key_white_background_to_alpha(png_bytes: bytes) -> bytes:
         return png_bytes
 
 
+def _render_logo_png(prompt: str) -> bytes:
+    """Render the brand-logo PNG, hiding the raw Gemini key from the runtime plane.
+
+    Secret boundary (mirrors the Tavily proxy cutover): on a runtime plane (a
+    host with a remote safebox configured — ``safebox._use_remote_authority()``
+    is True) the raw Gemini key is NEVER resolved here. The render is brokered
+    through the safebox provider PROXY (``/v1/proxy/gemini/image``): the safebox
+    resolves the key locally, calls Gemini, post-processes the white background
+    to alpha, and returns the KEY-FREE ``{"image_base64","format"}`` payload,
+    which this function decodes to PNG bytes. The proxy fails closed
+    (``RemoteSafeboxError`` / ``SafeboxAuthorityUnavailable``) and never falls
+    back to a raw key.
+
+    On the safebox host itself / local dev (``not _use_remote_authority()``) —
+    that host IS the authority and the proxy route runs there — the existing
+    local path resolves the key via ``_resolve_gemini_image_key`` and renders
+    with ``_gemini_generate_logo_png``. Fails closed with a clear 503 when no
+    key alias is provisioned, BEFORE any provider work. The creative-credit
+    gate around this call is unchanged (the caller still reserves before and
+    commits/releases after).
+    """
+    if _use_remote_authority():
+        result = safebox.proxy_request("gemini", "image", {"prompt": prompt})
+        image_b64 = str((result or {}).get("image_base64") or "")
+        if not image_b64:
+            raise RuntimeError("gemini image proxy returned no image data")
+        return base64.b64decode(image_b64)
+
+    api_key = _resolve_gemini_image_key()
+    if not api_key:
+        # Local/safebox authority path with no key provisioned: fail closed the
+        # same way the runtime-plane proxy does (503 gemini_image_unconfigured),
+        # before any provider work or credit reserve.
+        raise HTTPException(status_code=503, detail="gemini_image_unconfigured")
+    return _gemini_generate_logo_png(api_key=api_key, prompt=prompt)
+
+
 def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
     """Call Gemini image generation and return PNG bytes with a real alpha channel.
 
@@ -476,9 +526,13 @@ def build_creative_gateway_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="idempotency_key is required")
 
         # Fail closed BEFORE reserving credits or touching the provider when the
-        # key is not provisioned: 503 gemini_image_unconfigured.
-        api_key = _resolve_gemini_image_key()
-        if not api_key:
+        # provider is not reachable: 503 gemini_image_unconfigured. On a runtime
+        # plane (remote safebox) the raw key is NOT read here — the render goes
+        # through the safebox provider proxy (see ``_render_logo_png``), which
+        # resolves the key locally on the safebox; readiness is asserted by the
+        # proxy itself at render time and surfaced fail-closed. Only the
+        # safebox/local authority path resolves the raw key to pre-check it here.
+        if not _use_remote_authority() and not _resolve_gemini_image_key():
             raise HTTPException(status_code=503, detail="gemini_image_unconfigured")
 
         business_context = (
@@ -531,7 +585,7 @@ def build_creative_gateway_router() -> APIRouter:
         publish_skipped_reason = ""
         site_logo_url = ""
         try:
-            png_bytes = _gemini_generate_logo_png(api_key=api_key, prompt=prompt)
+            png_bytes = _render_logo_png(prompt)
             if not png_bytes:
                 raise RuntimeError("Gemini image generation returned empty image")
 
