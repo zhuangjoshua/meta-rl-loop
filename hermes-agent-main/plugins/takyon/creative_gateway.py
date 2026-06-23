@@ -423,7 +423,7 @@ def _gemini_logo_prompt(business_context: dict[str, Any]) -> str:
     return " ".join(lines)
 
 
-def _key_white_background_to_alpha(png_bytes: bytes) -> bytes:
+def _key_white_background_to_alpha(image_bytes: bytes) -> bytes:
     """Turn the solid-white logo backdrop into a REAL alpha channel.
 
     Gemini bakes an opaque white background (it ignores "transparent"), so the
@@ -434,32 +434,23 @@ def _key_white_background_to_alpha(png_bytes: bytes) -> bytes:
     of leaving a hard white halo, then crops to the alpha bounding box for tight
     framing.
 
-    FAIL-SAFE: if Pillow/numpy are unavailable or post-processing raises, the
-    ORIGINAL bytes are returned untouched — a logo with a baked white background
-    is still a usable logo, and this must never crash the already-charged render.
+    If Pillow/numpy are unavailable or post-processing fails, raise so the
+    creative reservation is released instead of committing a white-box logo.
     """
-    if not png_bytes:
-        return png_bytes
-    try:
-        from tools.lazy_deps import ensure as _lazy_ensure
+    if not image_bytes:
+        return image_bytes
 
-        _lazy_ensure("image.logo_postprocess", prompt=False)
-    except ImportError:
-        pass
-    except Exception:  # lazy_deps surfaces install hints; fall through to import
-        pass
+    from tools.lazy_deps import ensure as _lazy_ensure
 
-    try:
-        import io
+    _lazy_ensure("image.logo_postprocess", prompt=False)
 
-        import numpy as np
-        from PIL import Image
-    except Exception:
-        # Pillow/numpy not importable — return the opaque-white PNG unchanged.
-        return png_bytes
+    import io
+
+    import numpy as np
+    from PIL import Image
 
     try:
-        with Image.open(io.BytesIO(png_bytes)) as im:
+        with Image.open(io.BytesIO(image_bytes)) as im:
             rgba = im.convert("RGBA")
         arr = np.asarray(rgba).astype(np.float32)
         rgb = arr[..., :3]
@@ -481,9 +472,8 @@ def _key_white_background_to_alpha(png_bytes: bytes) -> bytes:
         buf = io.BytesIO()
         out_img.save(buf, format="PNG")
         return buf.getvalue()
-    except Exception:
-        # Any post-processing failure must not lose the rendered (charged) asset.
-        return png_bytes
+    except Exception as exc:
+        raise RuntimeError("logo alpha post-processing failed") from exc
 
 
 def _render_logo_png(prompt: str, *, capability_token: str) -> bytes:
@@ -521,7 +511,7 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
     Gemini bakes an opaque/checkerboard background even when asked for
     transparency, so the prompt requests a solid pure-white backdrop and the raw
     PNG is post-processed (``_key_white_background_to_alpha``) into real alpha
-    before returning. Post-processing fails safe to the original bytes.
+    before returning.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -545,19 +535,6 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         return buf.getvalue()
-
-    def _raw_image_to_png_bytes(raw: bytes) -> bytes:
-        if not raw:
-            return raw
-        try:
-            import io
-
-            from PIL import Image
-
-            with Image.open(io.BytesIO(raw)) as image:
-                return _image_to_png_bytes(image.convert("RGBA"))
-        except Exception:
-            return raw
 
     def _inline_data_bytes(part: Any) -> bytes:
         inline = getattr(part, "inline_data", None) or getattr(part, "inlineData", None)
@@ -593,7 +570,7 @@ def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
                 return _key_white_background_to_alpha(_image_to_png_bytes(image))
         raw = _inline_data_bytes(part)
         if raw:
-            return _key_white_background_to_alpha(_raw_image_to_png_bytes(raw))
+            return _key_white_background_to_alpha(raw)
     raise RuntimeError("Gemini image generation returned no image data")
 
 

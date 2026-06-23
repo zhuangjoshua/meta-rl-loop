@@ -89,12 +89,10 @@ fal = ["fal-client==0.13.1"]
 # when the Gemini key is provisioned and the logo authority route runs. Lazy-
 # installed via tools/lazy_deps.py (image.gemini); keep the pin in sync there.
 gemini = ["google-genai==1.21.0"]
-# Brand-logo post-processing (white-background → real alpha). Only needed when a
-# logo is actually rendered; lazy-installed via tools/lazy_deps.py
-# (image.logo_postprocess). Pillow uses an upper-bounded range per the pinning
-# policy; numpy is already pulled by the voice extra. Keep the pin in sync with
-# tools/lazy_deps.py.
-logo-postprocess = ["Pillow>=10.4,<12"]
+# Brand-logo post-processing (white-background -> real alpha). Only needed when
+# a logo is actually rendered; lazy-installed via tools/lazy_deps.py
+# (image.logo_postprocess). Keep these pins in sync with tools/lazy_deps.py.
+logo-postprocess = ["Pillow>=10.4,<12", "numpy==2.4.3"]
 # Edge TTS — default TTS provider but still optional (users can pick
 # ElevenLabs / OpenAI / MiniMax instead).
 edge-tts = ["edge-tts==7.2.7"]

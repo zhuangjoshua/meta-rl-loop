@@ -120,12 +120,10 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # `gemini` extra in pyproject.toml.
     "image.gemini": ("google-genai==1.21.0",),
     # Brand-logo post-processing — keys the solid-white Gemini background out to
-    # a real alpha channel (Pillow + numpy). numpy is already a runtime dep via
-    # the voice/stt extra; only Pillow is lazy here. Loaded only after a logo is
-    # rendered, in plugins/takyon/creative_gateway.py::_key_white_background_to_alpha,
-    # which fails safe to the opaque PNG if this group is unavailable. Keep the
-    # Pillow pin in sync with the `logo-postprocess` extra in pyproject.toml.
-    "image.logo_postprocess": ("Pillow>=10.4,<12",),
+    # a real alpha channel. Loaded only after a logo is rendered, in
+    # plugins/takyon/creative_gateway.py::_key_white_background_to_alpha. Keep
+    # these pins in sync with the `logo-postprocess` extra in pyproject.toml.
+    "image.logo_postprocess": ("Pillow>=10.4,<12", "numpy==2.4.3"),
 
     # ─── Memory providers ──────────────────────────────────────────────────
     "memory.honcho": ("honcho-ai==2.0.1",),

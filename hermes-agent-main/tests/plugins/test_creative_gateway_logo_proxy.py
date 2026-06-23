@@ -18,7 +18,6 @@ Contract:
 """
 
 import base64
-import io
 import sys
 import types
 
@@ -149,8 +148,8 @@ def test_gemini_logo_generation_uses_current_sdk_parts_shape(monkeypatch):
 
 
 def test_gemini_logo_generation_prefers_as_image_over_raw_inline(monkeypatch):
-    """When both helpers are present, use ``as_image()`` so the Safebox normalizes provider output to
-    PNG bytes instead of returning whatever inline mime type Gemini happened to send."""
+    """When both helpers are present, use ``as_image()`` so the Safebox hands the
+    postprocessor PNG bytes from the SDK image helper."""
     gw = _gw()
     png = b"\x89PNG\r\n\x1a\nPNGDATA"
     captured: dict[str, object] = {}
@@ -192,17 +191,17 @@ def test_gemini_logo_generation_prefers_as_image_over_raw_inline(monkeypatch):
     assert captured["saved_format"] == "PNG"
 
 
-def test_gemini_logo_generation_normalizes_inline_jpeg_to_png(monkeypatch):
-    """Some Gemini responses expose only raw inline bytes. Normalize those bytes to PNG before the
-    Safebox route labels the response as PNG."""
-    Image = pytest.importorskip("PIL.Image")
+def test_gemini_logo_generation_postprocesses_inline_bytes_directly(monkeypatch):
+    """Some Gemini responses expose only raw inline bytes. Those bytes go straight
+    through the alpha postprocessor, which is responsible for decoding and
+    returning final PNG bytes."""
     gw = _gw()
-    source = Image.new("RGB", (1, 1), (255, 255, 255))
-    jpeg_buf = io.BytesIO()
-    source.save(jpeg_buf, format="JPEG")
+    raw_jpeg = b"\xff\xd8raw-inline-jpeg"
+    final_png = b"\x89PNG\r\n\x1a\nALPHA"
+    seen: dict[str, bytes] = {}
 
     class _FakeInline:
-        data = base64.b64encode(jpeg_buf.getvalue()).decode("ascii")
+        data = base64.b64encode(raw_jpeg).decode("ascii")
 
     class _FakePart:
         inline_data = _FakeInline()
@@ -222,8 +221,13 @@ def test_gemini_logo_generation_normalizes_inline_jpeg_to_png(monkeypatch):
     fake_google = types.ModuleType("google")
     fake_google.genai = fake_genai
     monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setattr(gw, "_key_white_background_to_alpha", lambda data: data)
+    monkeypatch.setattr(
+        gw,
+        "_key_white_background_to_alpha",
+        lambda data: seen.setdefault("raw", data) and final_png,
+    )
 
     out = gw._gemini_generate_logo_png(api_key="gem-key", prompt="draw a lunchbox")
 
-    assert out.startswith(b"\x89PNG\r\n\x1a\n")
+    assert out == final_png
+    assert seen["raw"] == raw_jpeg
