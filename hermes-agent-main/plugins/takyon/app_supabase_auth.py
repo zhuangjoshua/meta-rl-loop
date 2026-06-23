@@ -296,7 +296,13 @@ def verify_supabase_jwt(
     project = str(project_url or _project_url() or "").strip()
     try:
         if algorithm.startswith("HS"):
-            key = secret if secret is not None else _jwt_secret()
+            # Alg-confusion fix (GOAL_RULES §0): the token header's `alg` is ATTACKER-chosen, so an HS*
+            # token must NOT be verified with a runtime-held symmetric secret — a caller who obtained
+            # SUPABASE_JWT_SECRET could forge product JWTs for any sub-user of any business
+            # (cross-business takeover). The runtime no longer resolves the ambient secret; an HS token
+            # is validated SERVER-SIDE by Supabase Auth (`/auth/v1/user`) in the branch below. A secret
+            # is honored only when a trusted caller passes it explicitly (e.g. a test).
+            key = secret if secret is not None else ""
             if key:
                 claims = _decode_hs_token(raw, secret=key, audience=audience, leeway=leeway)
                 claims = _ensure_verified_email_claims(raw, claims, project_url=project)

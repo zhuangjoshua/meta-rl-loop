@@ -125,6 +125,22 @@ def test_verifies_hs256_token_via_auth_server_when_secret_missing(monkeypatch):
     assert ident.email == "user@example.com"
 
 
+def test_ambient_jwt_secret_not_used_for_hs_verification(monkeypatch):
+    # Alg-confusion fix: an HS token must NOT be verified with the ambient SUPABASE_JWT_SECRET even when
+    # one is configured. A caller who obtained the secret must not be able to forge product JWTs — so
+    # with the ambient secret set but the server-side auth path failing, verification FAILS (it does not
+    # fall back to local symmetric verify).
+    monkeypatch.setenv("SUPABASE_JWT_SECRET", SECRET)
+    monkeypatch.setattr(sa, "_publishable_key", lambda: "sb_publishable_test")
+
+    def _boom(*a, **k):
+        raise sa.SupabaseAuthError("auth server rejected")
+
+    monkeypatch.setattr(sa, "_verified_user_via_auth_server", _boom)
+    with pytest.raises(sa.SupabaseAuthError):
+        sa.verify_supabase_jwt(_token(), project_url="https://example.supabase.co")
+
+
 def test_resolves_public_supabase_url_via_safebox_alias_lookup(monkeypatch):
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.setattr(

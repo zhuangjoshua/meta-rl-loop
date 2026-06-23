@@ -53,7 +53,10 @@ def test_env_egress_admits_un_regressed_names():
 
 def test_env_egress_denies_unknown_by_default():
     # The anti-G1 property: a name nobody allowlisted is NOT vendable (a denylist would have leaked it).
-    for k in ("SOME_NEW_SECRET", "TAKYON_SECRET_SAUCE", "ADMIN_PASSWORD", "JWT_PRIVATE_KEY", ""):
+    for k in ("SOME_NEW_SECRET", "TAKYON_SECRET_SAUCE", "ADMIN_PASSWORD", "JWT_PRIVATE_KEY", "",
+              # SUPABASE_JWT_SECRET dropped from the allowlist — product-JWT verification is now
+              # server-side (alg-confusion fix), so the symmetric secret is never fetched or vended.
+              "SUPABASE_JWT_SECRET"):
         assert core.env_egress_allowed(k) is False, k
 
 

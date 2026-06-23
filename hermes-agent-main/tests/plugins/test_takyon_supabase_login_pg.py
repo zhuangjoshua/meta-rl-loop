@@ -9,7 +9,7 @@ import jwt
 import pytest
 from psycopg.conninfo import make_conninfo
 
-from plugins.takyon import app_identity
+from plugins.takyon import app_identity, app_supabase_auth
 from plugins.takyon.control_plane import provision_user_on_first_login
 
 SECRET = "test-supabase-jwt-secret-0123456789"
@@ -61,7 +61,20 @@ def test_supabase_login_adopts_legacy_user_and_mints_real_session(pg_conn, tmp_p
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
     monkeypatch.setenv("TAKYON_DB_BACKEND", "postgres")
     monkeypatch.setenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", "1")
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", SECRET)
+    # Verification is now server-side (alg-confusion fix): the runtime no longer trusts a local
+    # symmetric SUPABASE_JWT_SECRET, so the HS test token is validated through a mocked Supabase Auth
+    # server rather than verified locally with the env secret.
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(app_supabase_auth, "_publishable_key", lambda: "sb_publishable_test")
+    monkeypatch.setattr(
+        app_supabase_auth,
+        "_verified_user_via_auth_server",
+        lambda _t, *, project_url, publishable_key: {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "email": "legacy@example.com",
+            "email_confirmed_at": "2026-06-21T00:00:00Z",
+        },
+    )
 
     payload = json.loads(
         takyon_core.handle_business_supabase_login(

@@ -1259,13 +1259,8 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
 # authority that a runtime plane still fetches today. The principle-correct end state is to move their
 # USE onto the safebox (verify/sign there, like the billing webhook) so the runtime never holds them;
 # until then they must stay on the allowlist or the runtime regresses. Tracked as the next hardening
-# step. In rough priority order:
-#   * `SUPABASE_JWT_SECRET` — HIGHEST PRIORITY. It is the SYMMETRIC HS256 product-customer JWT secret,
-#     and `app_supabase_auth.verify_supabase_jwt` selects the verification alg from the ATTACKER-supplied
-#     token header (alg-confusion): reading this secret lets a token-holder forge product JWTs for any
-#     sub-user of any business (cross-business account takeover). Fix: pin verification to the asymmetric
-#     issuer (RS256/ES256 via JWKS) and REJECT attacker `HS*`, verify server-side on the safebox, and
-#     drop this from the allowlist. Kept for now only so the legacy HS fallback path does not regress.
+# step. (SUPABASE_JWT_SECRET was the worst of these and is now FIXED — dropped above; the runtime no
+# longer verifies product JWTs with the symmetric secret, closing the alg-confusion takeover.) Remaining:
 #   * `STRIPE_WEBHOOK_SECRET` (sub-user app-webhook verifies locally — forge app entitlement events),
 #     `AUTH0_CLIENT_SECRET`/`AUTH0_SECRET` (dashboard server-side OAuth + session signing — operator
 #     impersonation), the two `*_S3_SECRET_ACCESS_KEY` (object-store), `CLOUDFLARE_API_TOKEN` (edge
@@ -1274,11 +1269,13 @@ _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
     {
         # DB
         "DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING",
-        # Supabase (public config + product-JWT verify + object store)
+        # Supabase (public config + object store). SUPABASE_JWT_SECRET is intentionally NOT here: the
+        # runtime no longer verifies product JWTs with the symmetric secret (alg-confusion fix in
+        # app_supabase_auth.verify_supabase_jwt — HS tokens are validated server-side by Supabase Auth,
+        # asymmetric via JWKS), so the secret is never fetched and never vended.
         "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "TAKYON_SUPABASE_URL",
         "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY",
         "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-        "SUPABASE_JWT_SECRET",
         "SUPABASE_S3_ACCESS_KEY_ID", "SUPABASE_S3_SECRET_ACCESS_KEY",
         "SUPABASE_S3_ENDPOINT", "SUPABASE_S3_REGION",
         # R2 object store
