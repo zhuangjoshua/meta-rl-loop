@@ -18,8 +18,10 @@ This is the exact same boundary ``app_usage._ledger_gate_scope`` introduced for 
 ``SET ROLE`` is session-scoped (works under autocommit and inside a transaction); the GUC + role are
 restored in ``finally`` so surrounding control-plane reads keep their prior authority.
 
-Fails CLOSED: if the role drop itself errors (e.g. an old DB predating migration 0038/0030), the
-error propagates rather than silently running the gate with bypass authority.
+Fails CLOSED on runtime planes: if the role drop itself errors (e.g. an old DB predating migration
+0038/0030), the error propagates rather than silently running the gate with bypass authority. On the
+dedicated Safebox authority host, the service is the trusted ledger owner and may not be grantable to
+the runtime role; in that context the same SECURITY DEFINER gate call runs without ``SET ROLE``.
 """
 
 from __future__ import annotations
@@ -32,6 +34,22 @@ import contextlib
 LEDGER_RUNTIME_ROLE = "takyon_runtime"
 
 
+def _needs_runtime_role_demotion() -> bool:
+    """Whether this process should demote ledger calls to the runtime role.
+
+    Runtime planes connect with broad owner authority until the DSN cutover lands, so they must drop to
+    ``takyon_runtime`` for money-ledger gates. The Safebox service itself is the authority boundary and
+    owns those writes; requiring it to assume a runtime-only role breaks live budget reservations when
+    the authority DB login deliberately cannot ``SET ROLE takyon_runtime``.
+    """
+    try:
+        from . import safebox
+
+        return not safebox._local_authority_enabled()
+    except Exception:
+        return True
+
+
 @contextlib.contextmanager
 def ledger_gate_scope(conn, *, role: str = LEDGER_RUNTIME_ROLE):
     """Run the wrapped ledger statement(s) under the restricted ``role`` with RLS-bypass cleared.
@@ -41,6 +59,7 @@ def ledger_gate_scope(conn, *, role: str = LEDGER_RUNTIME_ROLE):
     connection across the block (autocommit=True in tests; the store also resets explicitly)."""
     raw = getattr(conn, "_pg", conn)
     cur = raw.cursor()
+    demote = _needs_runtime_role_demotion()
     try:
         previous_bypass = ""
         try:
@@ -50,12 +69,14 @@ def ledger_gate_scope(conn, *, role: str = LEDGER_RUNTIME_ROLE):
                 previous_bypass = str(value or "")
         except Exception:  # noqa: BLE001 - a missing GUC just means "no prior bypass to restore"
             previous_bypass = ""
-        cur.execute(f"set role {role}")
+        if demote:
+            cur.execute(f"set role {role}")
         cur.execute("select set_config('takyon.rls_bypass', '0', false)")
         try:
             yield
         finally:
-            cur.execute("reset role")
+            if demote:
+                cur.execute("reset role")
             cur.execute("select set_config('takyon.rls_bypass', %s, false)", (previous_bypass,))
     finally:
         cur.close()

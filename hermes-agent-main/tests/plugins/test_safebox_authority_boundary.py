@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from plugins.takyon import core, safebox_provider_proxy
+from plugins.takyon import core, ledger_gate, safebox_provider_proxy
 from plugins.takyon.safebox_app import build_safebox_app
 
 
@@ -71,6 +71,72 @@ def test_env_egress_denies_safebox_verification_secrets():
     for k in ("STRIPE_BILLING_WEBHOOK_SECRET", "SUPABASE_SERVICE_ROLE_KEY"):
         assert core.env_egress_allowed(k) is False, k
         assert k in core.safebox_self_authority_secret_names(), k
+
+
+class _FakeGateResult:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeGateCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self._row = None
+
+    def execute(self, sql, params=None):
+        self.conn.statements.append((sql, params))
+        self._row = ("prior-bypass",) if "current_setting" in sql else None
+        return self
+
+    def fetchone(self):
+        return self._row
+
+    def close(self):
+        self.conn.closed = True
+
+
+class _FakeGateConn:
+    def __init__(self):
+        self.statements = []
+        self.closed = False
+
+    def cursor(self):
+        return _FakeGateCursor(self)
+
+    def execute(self, sql, params=None):
+        self.statements.append((sql, params))
+        return _FakeGateResult(("gate-ok",))
+
+
+def test_ledger_gate_demotes_runtime_plane_by_default(monkeypatch):
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
+    conn = _FakeGateConn()
+
+    assert ledger_gate.gate_fetchone(conn, "select * from safebox_billing_reserve(%s)", ("x",)) == (
+        "gate-ok",
+    )
+
+    sql = [s.lower() for s, _ in conn.statements]
+    assert "set role takyon_runtime" in sql
+    assert "reset role" in sql
+
+
+def test_ledger_gate_keeps_safebox_authority_connection_owner(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    conn = _FakeGateConn()
+
+    assert ledger_gate.gate_fetchone(conn, "select * from safebox_billing_reserve(%s)", ("x",)) == (
+        "gate-ok",
+    )
+
+    sql = [s.lower() for s, _ in conn.statements]
+    assert "set role takyon_runtime" not in sql
+    assert "reset role" not in sql
+    assert "select set_config('takyon.rls_bypass', '0', false)" in sql
+    assert ("select set_config('takyon.rls_bypass', %s, false)", ("prior-bypass",)) in conn.statements
 
 
 def test_env_egress_admits_un_regressed_names():
