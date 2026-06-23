@@ -1723,7 +1723,15 @@ export function useTakyonLitebulb() {
 
   const walletBalance = useMemo(() => {
     if (!account?.available) return null;
-    return Number(account.spendable_cents || 0);
+    if (typeof account.spendable_cents === "number") {
+      return Math.max(0, account.spendable_cents);
+    }
+    if (typeof account.allowance_remaining_cents === "number") {
+      return Math.max(0, account.allowance_remaining_cents);
+    }
+    const included = Number(account.allowance_included_cents || 0);
+    const used = Number(account.allowance_used_cents || 0);
+    return Math.max(0, included - used);
   }, [account]);
 
   return {

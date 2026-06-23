@@ -218,7 +218,7 @@ function Router() {
       return;
     }
     // GOAL_RULES §3 gap #2 (frontend half): never enter /building (which auto-calls createBusiness)
-    // for an operator who cannot pay. walletBalance is spendable_cents (subscription allowance remaining).
+    // for an operator who cannot pay. walletBalance is the remaining subscription allowance.
     //   * null  → account not loaded yet: defer (do NOT create); the user can retry once it loads.
     //   * <= 0  → no funds: open Plans instead of /building and show a subscribe nudge.
     // The backend preflight (takyon.dashboard.create → _operator_create_balance_preflight) is the
