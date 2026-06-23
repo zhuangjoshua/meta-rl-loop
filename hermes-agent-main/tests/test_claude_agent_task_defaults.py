@@ -1630,6 +1630,13 @@ def test_claude_agent_task_script_honors_explicit_claude_executable_env():
     assert "pathToClaudeCodeExecutable" in text
 
 
+def test_claude_agent_task_script_passes_beta_disable_to_child_env():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert "process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" in text
+    assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas" in text
+
+
 def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_once(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured_payloads: list[dict[str, object]] = []

@@ -264,6 +264,9 @@ async function main() {
   // container. In that mode ANTHROPIC_API_KEY (the capability token) is the auth and the base URL is
   // present; outside lockdown a raw key/token is still required.
   const anthropicBaseUrl = String(process.env.ANTHROPIC_BASE_URL || "").trim();
+  const disableExperimentalBetas = String(
+    process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS || "1"
+  ).trim() || "1";
   if (!anthropicApiKey && !anthropicToken) {
     throw new Error(
       "ANTHROPIC_API_KEY, ANTHROPIC_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN is required"
@@ -297,6 +300,7 @@ async function main() {
               ANTHROPIC_API_KEY: anthropicApiKey,
               ANTHROPIC_TOKEN: anthropicToken,
               CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent",
+              CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas,
               // Route the SDK at the safebox broker when the host put us in lockdown; the broker
               // verifies the capability token (passed as ANTHROPIC_API_KEY) and makes the real
               // provider call on the safebox host so no raw provider key is ever present here.
