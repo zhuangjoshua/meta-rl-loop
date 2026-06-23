@@ -4,8 +4,15 @@ This is the TRUSTED operator/platform counterpart to the metered ``/v1/providers
 internal-token only (no capability, no per-call metering), it resolves the real provider key LOCALLY on
 the safebox and forwards, so operator/platform/worker code never holds a raw key.
 
+After the creative-credit gate cutover, ONLY the Anthropic (streaming) + Tavily proxy routes live here.
+The ungated Gemini-image / OpenAI-image / FAL routes were DELETED — those paid creative providers are
+now reachable ONLY through the AUTHORITATIVE credit-gated routes
+(``/v1/providers/{gemini/logo,openai/images,fal/{path}}`` behind a creative capability minted by
+``/v1/creative/reserve``). The two route-wiring tests below pin that those ungated routes are gone and
+unreachable.
+
 These tests are hermetic — NO network, NO live providers, NO live DB. ``httpx`` and the per-provider
-key resolvers are stubbed via monkeypatch. For every route we pin the four hard invariants:
+key resolvers are stubbed via monkeypatch. For every remaining route we pin the four hard invariants:
 
   (a) a wrong/absent internal token -> 401 (before any upstream work),
   (b) an unconfigured key -> 503 BEFORE any upstream call is attempted,
@@ -16,6 +23,7 @@ key resolvers are stubbed via monkeypatch. For every route we pin the four hard 
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from starlette.testclient import TestClient
@@ -248,6 +256,54 @@ def test_anthropic_also_mounted_at_v1_messages_for_sdk(client, monkeypatch):
     _assert_no_key(resp)
 
 
+def test_anthropic_v1_messages_accepts_worker_capability_via_x_api_key(monkeypatch):
+    """The coding worker is key-free: it presents a minted CAPABILITY (audience = anthropic.messages) as
+    ANTHROPIC_API_KEY, which the SDK sends as x-api-key to /v1/messages. The proxy must authorize that
+    capability (NOT just the internal token) and forward with the real key. This is the cross-module
+    contract that makes the worker's mint-and-present path actually work against the live proxy."""
+    from plugins.takyon.core import _CLAUDE_AGENT_BROKER_ACTION
+    from plugins.takyon.safebox_app import _ACTION_AUDIENCE_DEFAULTS, _CAP_SIGNING_KEY_ENV
+    from plugins.takyon.safebox_capability import CapabilityScope, mint_capability
+
+    signing_key = b"safebox-only-signing-key"
+    monkeypatch.setenv(_CAP_SIGNING_KEY_ENV, signing_key.decode())
+    # Build the SAME credential the worker presents: a capability whose audience is derived from the
+    # worker's mint action via the action->audience map (exactly what /v1/token/mint does).
+    audience = _ACTION_AUDIENCE_DEFAULTS[_CLAUDE_AGENT_BROKER_ACTION]
+    scope = CapabilityScope(
+        takyon_user_id="user_A",
+        business_slug="acme",
+        app_user_id=None,
+        action=_CLAUDE_AGENT_BROKER_ACTION,
+        max_cost_microusd=2_000_000,
+    )
+    cap = mint_capability(
+        scope,
+        signing_key=signing_key,
+        audience=audience,
+        nonce="nonce-worker-1",
+        issued_at=int(time.time()),
+        ttl_seconds=300,
+    )
+
+    client = TestClient(safebox_app.build_safebox_app())
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_worker"})
+    # The SDK sends the capability as x-api-key (NOT the internal token).
+    resp = client.post(
+        "/v1/messages",
+        headers={"x-api-key": cap},
+        json={"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "msg_worker"
+    _assert_no_key(resp)
+    # Forwarded upstream with the REAL key while the worker's capability stays inbound-only.
+    sent = _FakeClient.sent[-1]
+    assert sent["headers"]["x-api-key"] == _REAL_KEY
+
+
 # ── Tavily ───────────────────────────────────────────────────────────────────────────────────────
 def test_tavily_wrong_token_is_401(client, monkeypatch):
     monkeypatch.setattr(safebox_provider_proxy, "_tavily_key", lambda: _REAL_KEY)
@@ -299,134 +355,38 @@ def test_tavily_unsupported_operation_is_400(client, monkeypatch):
     assert resp.json()["detail"] == "unsupported_tavily_operation"
 
 
-# ── Gemini image ─────────────────────────────────────────────────────────────────────────────────
-def test_gemini_wrong_token_is_401(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_gemini_image_key", lambda: _REAL_KEY)
-    resp = client.post(
-        "/v1/proxy/gemini/image", headers={"Authorization": "Bearer wrong"}, json={"prompt": "logo"}
-    )
-    assert resp.status_code == 401
-
-
-def test_gemini_unconfigured_is_503_before_upstream(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_gemini_image_key", lambda: "")
-    from plugins.takyon import creative_gateway
-
-    monkeypatch.setattr(
-        creative_gateway,
-        "_gemini_generate_logo_png",
-        lambda **k: pytest.fail("provider must not be called"),
-    )
-    resp = client.post("/v1/proxy/gemini/image", headers=_auth(), json={"prompt": "logo"})
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == "gemini_unconfigured"
-
-
-def test_gemini_success_is_key_free(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_gemini_image_key", lambda: _REAL_KEY)
-    captured = {}
-    from plugins.takyon import creative_gateway
-
-    def _fake_gen(*, api_key, prompt):
-        captured["api_key"] = api_key
-        captured["prompt"] = prompt
-        return b"\x89PNG\r\n\x1a\nFAKEPNGBYTES"
-
-    monkeypatch.setattr(creative_gateway, "_gemini_generate_logo_png", _fake_gen)
-    resp = client.post("/v1/proxy/gemini/image", headers=_auth(), json={"prompt": "a logo"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["format"] == "png"
-    assert data["image_base64"]  # base64 of the fake png
-    assert captured["api_key"] == _REAL_KEY  # resolved locally
-    assert captured["prompt"] == "a logo"
-    _assert_no_key(resp)
-
-
-def test_gemini_missing_prompt_is_400(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_gemini_image_key", lambda: _REAL_KEY)
-    resp = client.post("/v1/proxy/gemini/image", headers=_auth(), json={})
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "missing_prompt"
-
-
-# ── OpenAI image ─────────────────────────────────────────────────────────────────────────────────
-def test_openai_wrong_token_is_401(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_openai_key", lambda: _REAL_KEY)
-    resp = client.post(
-        "/v1/proxy/openai/images", headers={"Authorization": "Bearer wrong"}, json={"prompt": "x"}
-    )
-    assert resp.status_code == 401
-
-
-def test_openai_unconfigured_is_503_before_upstream(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_openai_key", lambda: "")
-    _patch_httpx(monkeypatch)
-    resp = client.post("/v1/proxy/openai/images", headers=_auth(), json={"prompt": "x"})
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == "openai_unconfigured"
-    assert _FakeClient.sent == []
-
-
-def test_openai_success_is_key_free_with_bearer_injected(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_openai_key", lambda: _REAL_KEY)
-    _patch_httpx(monkeypatch)
-    _FakeClient.response = _FakeResponse(200, {"data": [{"b64_json": "AAAA"}]})
-    resp = client.post(
-        "/v1/proxy/openai/images", headers=_auth(), json={"prompt": "x", "model": "gpt-image-1"}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["data"][0]["b64_json"] == "AAAA"
-    _assert_no_key(resp)
-    sent = _FakeClient.sent[-1]
-    assert sent["url"] == safebox_provider_proxy._OPENAI_IMAGES_URL
-    assert sent["headers"]["Authorization"] == f"Bearer {_REAL_KEY}"
-
-
-# ── FAL ──────────────────────────────────────────────────────────────────────────────────────────
-def test_fal_wrong_token_is_401(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_fal_key", lambda: _REAL_KEY)
-    resp = client.post(
-        "/v1/proxy/fal/fal-ai/kling-video", headers={"Authorization": "Bearer wrong"}, json={"x": 1}
-    )
-    assert resp.status_code == 401
-
-
-def test_fal_unconfigured_is_503_before_upstream(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_fal_key", lambda: "")
-    _patch_httpx(monkeypatch)
-    resp = client.post("/v1/proxy/fal/fal-ai/kling-video", headers=_auth(), json={"x": 1})
-    assert resp.status_code == 503
-    assert resp.json()["detail"] == "fal_unconfigured"
-    assert _FakeClient.sent == []
-
-
-def test_fal_success_is_key_free_with_key_header_injected(client, monkeypatch):
-    monkeypatch.setattr(safebox_provider_proxy, "_fal_key", lambda: _REAL_KEY)
-    _patch_httpx(monkeypatch)
-    _FakeClient.response = _FakeResponse(200, {"video": {"url": "https://x/v.mp4"}})
-    resp = client.post(
-        "/v1/proxy/fal/fal-ai/kling-video/v3/pro/image-to-video", headers=_auth(), json={"x": 1}
-    )
-    assert resp.status_code == 200
-    assert resp.json()["video"]["url"] == "https://x/v.mp4"
-    _assert_no_key(resp)
-    sent = _FakeClient.sent[-1]
-    # FAL forwards to https://fal.run/<path> with an "Authorization: Key <key>" header.
-    assert sent["url"] == "https://fal.run/fal-ai/kling-video/v3/pro/image-to-video"
-    assert sent["headers"]["Authorization"] == f"Key {_REAL_KEY}"
-
-
 # ── Route wiring smoke ───────────────────────────────────────────────────────────────────────────
 def test_proxy_routes_are_registered():
     app = safebox_app.build_safebox_app()
     # Proxy routes are attached directly to the app (no _IncludedRouter wrapper), so app.routes is flat.
     paths = {getattr(route, "path", None) for route in app.routes}
+    # The Anthropic (streaming) + Tavily operator/platform proxy routes stay.
     assert "/v1/proxy/anthropic/messages" in paths
     assert "/v1/messages" in paths
     assert "/v1/proxy/tavily/{operation}" in paths
-    assert "/v1/proxy/gemini/image" in paths
-    assert "/v1/proxy/openai/images" in paths
-    assert "/v1/proxy/fal/{path:path}" in paths
     # The proxy is ADDITIVE: the metered business broker route is still mounted.
     assert "/v1/providers/anthropic/messages" in paths
+
+
+def test_ungated_creative_proxy_routes_are_deleted():
+    # The creative-credit gate cutover DELETED the ungated Gemini-image / OpenAI-image / FAL proxy
+    # routes. Those paid creative providers are now reachable ONLY through the credit-gated routes
+    # (/v1/providers/{gemini/logo,openai/images,fal/{path}}) behind a creative capability minted by
+    # /v1/creative/reserve. Pin that there is NO ungated provider path for them any more.
+    app = safebox_app.build_safebox_app()
+    paths = {getattr(route, "path", None) for route in app.routes}
+    assert "/v1/proxy/gemini/image" not in paths
+    assert "/v1/proxy/openai/images" not in paths
+    assert "/v1/proxy/fal/{path:path}" not in paths
+    # The gated replacements ARE mounted.
+    assert "/v1/providers/gemini/logo" in paths
+    assert "/v1/providers/openai/images" in paths
+    assert "/v1/providers/fal/{fal_path:path}" in paths
+
+
+def test_deleted_ungated_creative_proxy_routes_are_unreachable(client):
+    # A direct POST to a deleted ungated proxy route must 404 (no handler) — even with a valid internal
+    # token. This is the runtime proof the ungated egress is gone, not just unregistered in the smoke.
+    for route in ("/v1/proxy/gemini/image", "/v1/proxy/openai/images", "/v1/proxy/fal/fal-ai/x"):
+        resp = client.post(route, headers=_auth(), json={"prompt": "x"})
+        assert resp.status_code == 404, (route, resp.status_code)

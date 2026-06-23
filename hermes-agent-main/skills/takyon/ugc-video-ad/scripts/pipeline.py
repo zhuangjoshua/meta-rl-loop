@@ -11,8 +11,13 @@ authored with references/dialogue-action-framework.md. Nothing here writes copy.
 
 Network/codec deps (httpx, fal_client, ffmpeg) are imported lazily inside the
 functions that need them so the live build can fail only when a provider-backed step is reached.
-Credentials are read from the environment / a local .env ONLY (never hardcoded):
-OPENAI_API_KEY for gpt-image-2, FAL_KEY for Kling via fal.ai.
+
+Provider credentials: on a RUNTIME plane the creative gateway injects the safebox proxy env
+(TAKYON_CREATIVE_VIA_PROXY=1 + TAKYON_SAFEBOX_URL + TAKYON_SAFEBOX_TOKEN); the OpenAI image and FAL
+Kling calls then route through the safebox PROXY and the raw OPENAI_API_KEY / FAL_KEY is NEVER read
+on that plane (see _proxy_base_and_token). In local dev (proxy env absent) the keys are read from
+the environment / a local .env ONLY (never hardcoded): OPENAI_API_KEY for gpt-image-2, FAL_KEY for
+Kling via fal.ai.
 """
 from __future__ import annotations
 
@@ -231,6 +236,93 @@ def require_env(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Safebox GATED creative-provider routing (credit-gated secret boundary).
+#
+# This script runs as a standalone subprocess (it does NOT import the `safebox`
+# module and cannot reach the DB to reserve credits or mint a token). The
+# creative-credit money gate is AUTHORITATIVE on the safebox: the gateway has
+# ALREADY reserved this UGC action's fixed credits and minted a creative
+# capability, which it injects as TAKYON_CREATIVE_CAPABILITY_TOKEN (alongside
+# TAKYON_CREATIVE_VIA_PROXY=1 + TAKYON_SAFEBOX_URL + TAKYON_SAFEBOX_TOKEN). When
+# the flag + URL + capability are present, the OpenAI image call and the FAL
+# Kling call route through the GATED provider routes (/v1/providers/openai/images,
+# /v1/providers/fal/{path}) presenting that capability in the request body; the
+# safebox VERIFIES the capability, resolves the real provider key LOCALLY, and
+# forwards, so the raw OPENAI_API_KEY / FAL_KEY is NEVER read on this plane. The
+# gated route returns the verbatim provider JSON, so the rest of this file
+# handles the SAME response shapes as the direct path.
+#
+# Fail closed: when the gate env is set, a failure surfaces — there is no raw-key
+# fallback. The direct os.environ / fal_client path runs ONLY in local dev (gate
+# env absent), where this host is its own authority.
+# ---------------------------------------------------------------------------
+_VIA_PROXY_ENV = "TAKYON_CREATIVE_VIA_PROXY"
+_SAFEBOX_URL_ENV = "TAKYON_SAFEBOX_URL"
+_SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
+_CAPABILITY_TOKEN_ENV = "TAKYON_CREATIVE_CAPABILITY_TOKEN"
+_PROXY_TIMEOUT_S = 300
+
+
+def _proxy_base_and_token() -> tuple[str, str, str] | None:
+    """Return (base_url, internal_token, capability_token) when the gated creative routes should be
+    used, else None.
+
+    Used only when the gateway-injected flag, the safebox URL, AND the creative capability are present
+    (a credit-gated render). Absent any of them -> None -> the direct provider path runs (local dev /
+    safebox host). ``internal_token`` may be "" when the safebox runs tokenless (local rig)."""
+    flag = str(os.environ.get(_VIA_PROXY_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not flag:
+        return None
+    base = str(os.environ.get(_SAFEBOX_URL_ENV) or "").strip().rstrip("/")
+    internal_token = str(os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
+    capability = str(os.environ.get(_CAPABILITY_TOKEN_ENV) or "").strip()
+    if not base or not capability:
+        # Flag set but URL/capability missing: do NOT silently fall back to a raw key on a runtime
+        # plane. Fail closed so the boundary breach is visible.
+        raise RuntimeError(
+            f"{_VIA_PROXY_ENV} is set but {_SAFEBOX_URL_ENV}/{_CAPABILITY_TOKEN_ENV} are missing; "
+            "refusing to fall back to a raw provider key on a runtime plane."
+        )
+    return base, internal_token, capability
+
+
+def _proxy_post(route: str, payload: dict) -> dict:
+    """POST a key-free GATED creative-provider request to the safebox and return the parsed JSON.
+
+    Uses stdlib urllib (this subprocess may not import the `safebox` module). The safebox internal
+    token authorizes the request (``Authorization: Bearer``); the creative CAPABILITY is presented in
+    the request body (``token``) and proves the credit reservation. Fails closed (RuntimeError) on a
+    transport or HTTP error — NEVER falls back to a raw provider key."""
+    import urllib.error
+    import urllib.request
+
+    coords = _proxy_base_and_token()
+    if coords is None:  # pragma: no cover - callers gate on this first
+        raise RuntimeError("safebox creative gate is not configured")
+    base, internal_token, capability = coords
+    url = base + route
+    # The gated provider route takes {token: <capability>, payload: <provider body>}.
+    body = {"token": capability, "payload": dict(payload or {})}
+    data = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if internal_token:
+        headers["Authorization"] = f"Bearer {internal_token}"
+    req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_S) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"safebox creative gate {route} failed: {exc.code} {detail[:300]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"safebox creative gate {route} unreachable: {exc}") from exc
+    try:
+        return json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"safebox creative gate {route} returned non-JSON: {raw[:200]}") from exc
+
+
+# ---------------------------------------------------------------------------
 # gpt-image-2 (OpenAI Images API, direct).
 # ---------------------------------------------------------------------------
 def generate_image(
@@ -242,13 +334,14 @@ def generate_image(
     model: str = "gpt-image-2",
     output_format: str = "png",
 ) -> str:
-    """Generate one reference still and write it to out_path. Returns out_path."""
+    """Generate one reference still and write it to out_path. Returns out_path.
+
+    On a runtime plane (safebox proxy env injected by the gateway) the OpenAI
+    image call routes through the safebox PROXY (no raw key on this plane); in
+    local dev it calls OpenAI directly with OPENAI_API_KEY. Both paths return the
+    same OpenAI JSON shape, so decoding is shared."""
     import base64
 
-    import httpx
-
-    api_key = require_env("OPENAI_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     body = {
         "model": model,
         "prompt": prompt,
@@ -257,6 +350,30 @@ def generate_image(
         "quality": quality,
         "output_format": output_format,
     }
+
+    if _proxy_base_and_token() is not None:
+        # Credit-gated plane: the safebox verifies the creative capability, forwards to
+        # api.openai.com/v1/images/generations, and returns the verbatim OpenAI JSON. Raw
+        # OPENAI_API_KEY is never read here.
+        payload = _proxy_post("/v1/providers/openai/images", body)
+        data = payload.get("data") or []
+        if not data:
+            raise RuntimeError(f"OpenAI image gate returned no image data. Raw: {payload}")
+        item = data[0]
+        if item.get("b64_json"):
+            img = base64.b64decode(item["b64_json"])
+        else:
+            # The proxy returns the OpenAI body verbatim; gpt-image-2 returns b64_json. A url-only
+            # item cannot be fetched key-free here, so fail closed rather than leak a fetch path.
+            raise RuntimeError(f"OpenAI image proxy item had no b64 bytes. Raw: {item}")
+        with open(out_path, "wb") as f:
+            f.write(img)
+        return out_path
+
+    import httpx
+
+    api_key = require_env("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
     with httpx.Client(timeout=300) as client:
         r = client.post(f"{base_url}/images/generations", json=body, headers=headers)
@@ -283,10 +400,31 @@ def generate_image(
 # ---------------------------------------------------------------------------
 # Kling v3 Pro image-to-video (via fal.ai).
 # ---------------------------------------------------------------------------
+def _file_to_data_uri(path: str) -> str:
+    """Encode a local image file as a base64 data URI FAL accepts as an image input.
+
+    Used on the proxy path so we never need the raw FAL key for the CDN upload
+    that ``fal_client.upload_file`` would otherwise require."""
+    import base64
+    import mimetypes
+
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    with open(path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
 def upload_image(src: str) -> str:
-    """Return a URL fal can fetch. Passes through http(s); else uploads the file."""
-    if src.startswith(("http://", "https://")):
+    """Return an image reference FAL can consume. Passes through http(s) URLs.
+
+    On a runtime plane (safebox proxy env set) a local file is encoded as a
+    base64 data URI (FAL accepts data URIs as image inputs) so we never need the
+    raw FAL key for a CDN upload. In local dev the file is uploaded via
+    fal_client with FAL_KEY."""
+    if src.startswith(("http://", "https://", "data:")):
         return src
+    if _proxy_base_and_token() is not None:
+        return _file_to_data_uri(src)
     import fal_client
 
     require_env("FAL_KEY")
@@ -304,10 +442,14 @@ def generate_clip(
     endpoint: str = KLING_ENDPOINT,
     extra_args: dict | None = None,
 ) -> str:
-    """Run one Kling i2v generation. Returns the resulting video URL."""
-    import fal_client
+    """Run one Kling i2v generation. Returns the resulting video URL.
 
-    require_env("FAL_KEY")
+    On a credit-gated plane (safebox gate env set) the call routes through the
+    GATED safebox route (POST /v1/providers/fal/<endpoint>) presenting the
+    creative capability; the safebox forwards to https://fal.run/<endpoint> with
+    the real key and returns the verbatim FAL JSON ({"video": {"url": ...}}) — the
+    SAME shape fal_client.subscribe returns. In local dev it calls
+    fal_client.subscribe directly with FAL_KEY."""
     args: dict = {
         "prompt": prompt,
         "start_image_url": image_url,
@@ -319,7 +461,17 @@ def generate_clip(
         args["end_image_url"] = end_image_url
     if extra_args:
         args.update(extra_args)
-    result = fal_client.subscribe(endpoint, arguments=args)
+
+    if _proxy_base_and_token() is not None:
+        # The gated safebox FAL route forwards to the synchronous fal.run/<path> endpoint, which
+        # returns the final result directly (no client-side queue polling). Raw FAL_KEY is never read
+        # here.
+        result = _proxy_post(f"/v1/providers/fal/{endpoint}", args)
+    else:
+        import fal_client
+
+        require_env("FAL_KEY")
+        result = fal_client.subscribe(endpoint, arguments=args)
     url = ((result or {}).get("video") or {}).get("url")
     if not url:
         raise RuntimeError(f"fal returned no video url. Raw response: {result}")

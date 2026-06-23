@@ -8,6 +8,13 @@ to let operator/platform/worker code call paid providers WITHOUT ever holding a 
 resolves the real key LOCALLY (the same resolvers the broker uses), forwards the request, and returns
 a KEY-FREE response. It is the unblocker that lets every runtime plane go keyless.
 
+Scope after the creative-credit gate cutover: only the Anthropic (streaming) and Tavily proxy routes
+live here. The ungated Gemini-image / OpenAI-image / FAL routes were DELETED — those paid creative
+providers are now reached ONLY through the AUTHORITATIVE creative-credit gate in ``safebox_app.py``
+(``/v1/creative/reserve`` mints a creative capability; the gated
+``/v1/providers/{gemini/logo,openai/images,fal/{path}}`` routes verify it, resolve the key locally, and
+forward). There is no ungated provider path for these creative providers any more.
+
 Hard invariants for every route here:
 
 - Auth: ``_require_internal_token`` (the shared ``TAKYON_SAFEBOX_TOKEN``). A wrong/absent token fails
@@ -31,10 +38,9 @@ from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 # Upstream provider hosts. Kept here (not in the business runtime) because only the safebox forwards.
+# (The OpenAI/FAL/Gemini creative-image hosts moved to safebox_app.py with the gated creative routes.)
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"  # match ai_provider.ANTHROPIC_VERSION / call_anthropic
-_OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
-_FAL_BASE_URL = "https://fal.run"
 
 # Generous upstream timeout: provider calls (Anthropic / image gen) routinely exceed the 10s env-read
 # timeout. Streaming uses no read timeout (the stream stays open for the life of the response).
@@ -61,35 +67,6 @@ def _tavily_key() -> str:
     from . import ai_provider
 
     return str(ai_provider.tavily_key() or "").strip()
-
-
-def _gemini_image_key() -> str:
-    from . import creative_gateway
-
-    return str(creative_gateway._resolve_gemini_image_key() or "").strip()
-
-
-def _openai_key() -> str:
-    """The SHARED OpenAI key, resolved LOCALLY on the safebox via the canonical alias (core
-    ``_API_ENV_ALIASES['openai']`` = ``OPENAI_API_KEY``). Mirrors the other resolvers: safebox-side
-    only, returns "" when unconfigured so the route can fail closed with a 503."""
-    from . import safebox
-
-    try:
-        return str(safebox.first_env_backed_value("OPENAI_API_KEY") or "").strip()
-    except Exception:
-        return ""
-
-
-def _fal_key() -> str:
-    """The SHARED FAL key, resolved LOCALLY on the safebox via the canonical aliases (core
-    ``_API_ENV_ALIASES['fal']`` = ``FAL_KEY`` / ``FAL_API_KEY``)."""
-    from . import safebox
-
-    try:
-        return str(safebox.first_env_backed_value("FAL_KEY", "FAL_API_KEY") or "").strip()
-    except Exception:
-        return ""
 
 
 def _sanitize_upstream_error(status_code: int, body: str) -> HTTPException:
@@ -277,85 +254,9 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
                 status_code=502, detail={"error": "provider_error", "body": str(exc)[:500]}
             ) from exc
 
-    # ── Gemini image passthrough ─────────────────────────────────────────────────────────────────
-    @router.post("/v1/proxy/gemini/image")
-    def proxy_gemini_image(
-        body: Any = Body(default=None), authorization: str | None = Header(default=None)
-    ) -> dict[str, Any]:
-        _require_internal_token(authorization)
-        import base64 as _b64
-
-        from . import creative_gateway
-
-        key = _gemini_image_key()
-        if not key:
-            raise HTTPException(status_code=503, detail="gemini_unconfigured")
-        payload = _as_json_object(body)
-        prompt = str(payload.get("prompt") or "").strip()
-        if not prompt:
-            raise HTTPException(status_code=400, detail="missing_prompt")
-        try:
-            png_bytes = creative_gateway._gemini_generate_logo_png(api_key=key, prompt=prompt)
-        except Exception as exc:  # provider/library failure — never leak the upstream/key
-            raise HTTPException(
-                status_code=502, detail={"error": "provider_error", "detail": str(exc)[:300]}
-            ) from exc
-        return {"image_base64": _b64.b64encode(png_bytes).decode("ascii"), "format": "png"}
-
-    # ── OpenAI image passthrough ─────────────────────────────────────────────────────────────────
-    @router.post("/v1/proxy/openai/images")
-    def proxy_openai_images(
-        body: Any = Body(default=None), authorization: str | None = Header(default=None)
-    ) -> dict[str, Any]:
-        _require_internal_token(authorization)
-        key = _openai_key()
-        if not key:
-            raise HTTPException(status_code=503, detail="openai_unconfigured")
-        payload = _as_json_object(body)
-        headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
-        try:
-            with httpx.Client(timeout=_UPSTREAM_TIMEOUT_S) as client:
-                resp = client.post(_OPENAI_IMAGES_URL, headers=headers, json=payload)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="provider_unreachable") from exc
-        text = resp.text
-        if resp.status_code >= 400:
-            raise _sanitize_upstream_error(resp.status_code, text)
-        import json as _json
-
-        try:
-            return _json.loads(text) if text.strip() else {}
-        except (ValueError, TypeError):
-            return {}
-
-    # ── FAL passthrough ──────────────────────────────────────────────────────────────────────────
-    @router.post("/v1/proxy/fal/{path:path}")
-    def proxy_fal(
-        path: str,
-        body: Any = Body(default=None),
-        authorization: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        _require_internal_token(authorization)
-        fal_path = str(path or "").strip().strip("/")
-        if not fal_path:
-            raise HTTPException(status_code=400, detail="missing_fal_path")
-        key = _fal_key()
-        if not key:
-            raise HTTPException(status_code=503, detail="fal_unconfigured")
-        payload = _as_json_object(body)
-        headers = {"Authorization": f"Key {key}", "content-type": "application/json"}
-        url = f"{_FAL_BASE_URL}/{fal_path}"
-        try:
-            with httpx.Client(timeout=_UPSTREAM_TIMEOUT_S) as client:
-                resp = client.post(url, headers=headers, json=payload)
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="provider_unreachable") from exc
-        text = resp.text
-        if resp.status_code >= 400:
-            raise _sanitize_upstream_error(resp.status_code, text)
-        import json as _json
-
-        try:
-            return _json.loads(text) if text.strip() else {}
-        except (ValueError, TypeError):
-            return {}
+    # NOTE: the ungated /v1/proxy/gemini/image, /v1/proxy/openai/images, and /v1/proxy/fal/{path}
+    # routes were DELETED in the creative-credit safebox-gate cutover. Those provider calls now go
+    # through the AUTHORITATIVE creative-credit gate on the safebox: the operator reserves the action's
+    # fixed credits via /v1/creative/reserve (which mints a creative capability), then presents that
+    # capability to the gated /v1/providers/{gemini/logo,openai/images,fal/{path}} routes in
+    # safebox_app.py. There is no ungated provider proxy for these creative providers any more.

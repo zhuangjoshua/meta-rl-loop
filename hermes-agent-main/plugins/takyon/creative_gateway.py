@@ -300,6 +300,73 @@ def _use_remote_authority() -> bool:
         return False
 
 
+def _creative_subprocess_env(capability_token: str) -> dict[str, str]:
+    """Build the env for a creative render subprocess (build_ad.py / batch_generate.py).
+
+    The creative-credit money gate is AUTHORITATIVE on the safebox. The subprocess cannot reach the DB
+    to reserve credits or to mint a capability, so the gateway has ALREADY reserved the action's fixed
+    credits and minted a creative capability (``capability_token``).
+
+    On a RUNTIME plane (a host with a remote safebox configured — ``_use_remote_authority()`` is True)
+    we hand the subprocess the safebox coordinates + the creative capability via
+    ``TAKYON_CREATIVE_CAPABILITY_TOKEN`` and STRIP any raw provider key, so it routes OpenAI/FAL through
+    the GATED provider routes (``/v1/providers/openai/images`` and ``/v1/providers/fal/{path}``): the
+    safebox verifies the capability, resolves the real key LOCALLY, and forwards — the raw key never
+    reaches the runtime plane. Fail closed (503) if the gate coordinates are incomplete; never a raw-key
+    subprocess on a runtime plane.
+
+    On the safebox host itself / local dev (``not _use_remote_authority()``) that host IS the authority:
+    the credit reserve already ran in-process, and the subprocess uses its existing local
+    ``os.environ`` / ``--env-file`` raw-key path unchanged (that host holds the key locally). We do NOT
+    inject the gate flag there.
+    """
+    env = dict(os.environ)
+    if not capability_token:
+        # The gate is mandatory: a missing capability means the reserve did not happen. Fail closed
+        # rather than letting the subprocess fall through to a raw key.
+        raise HTTPException(status_code=503, detail="creative_capability_unavailable")
+    if not _use_remote_authority():
+        # Safebox host / local dev: this host is its own authority and renders with its local key. The
+        # capability is still required upstream (it was minted by the in-process reserve), but the
+        # subprocess does not need the gated HTTP route here.
+        return env
+    base = str(safebox.provider_proxy_base_url() or "").strip().rstrip("/")
+    if not base:
+        # Remote authority is on but the safebox base URL for the subprocess to reach the gated routes
+        # is missing. Do NOT fall through to a raw-key subprocess on a runtime plane; fail closed so the
+        # gateway releases the reservation.
+        raise HTTPException(status_code=503, detail="creative_gate_unconfigured")
+    env[safebox._SAFEBOX_REMOTE_URL_ENV] = base
+    token = str(os.environ.get(safebox._SAFEBOX_REMOTE_TOKEN_ENV) or "").strip()
+    if token:
+        env[safebox._SAFEBOX_REMOTE_TOKEN_ENV] = token
+    env["TAKYON_CREATIVE_VIA_PROXY"] = "1"
+    env["TAKYON_CREATIVE_CAPABILITY_TOKEN"] = str(capability_token)
+    # Strip any raw provider key that may be in the runtime-plane process env so the subprocess
+    # cannot accidentally read it: the gated route is the ONLY sanctioned path on a runtime plane.
+    for raw_key_env in ("OPENAI_API_KEY", "FAL_KEY", "FAL_API_KEY"):
+        env.pop(raw_key_env, None)
+    return env
+
+
+def _resolve_business_owner_user_id(conn, business: str) -> str:
+    """Resolve the Takyon user who OWNS this business from the control plane.
+
+    A creative action launched from the (localhost-only, dashboard-authed) gateway is operator-
+    initiated for a business the operator owns, so the legitimate ``operator_user_id`` for the
+    safebox creative-credit gate (``authorize_operator_call``) IS the business owner. We resolve it
+    directly from ``businesses.owner_user_id`` via the control-plane conn the gateway already holds
+    (reusing the canonical ``safebox_authz`` reader), NOT from a stale process-global operator id.
+    Fails closed (404) if the business / owner is missing, before any reserve or provider call.
+    """
+    from .safebox_authz import AuthzError, _resolve_owner_user_id
+
+    try:
+        return _resolve_owner_user_id(conn, str(business or "").strip())
+    except AuthzError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 def _resolve_gemini_image_key() -> str:
     """Resolve the Gemini image key from Safebox-backed env aliases.
 
@@ -419,41 +486,29 @@ def _key_white_background_to_alpha(png_bytes: bytes) -> bytes:
         return png_bytes
 
 
-def _render_logo_png(prompt: str) -> bytes:
-    """Render the brand-logo PNG, hiding the raw Gemini key from the runtime plane.
+def _render_logo_png(prompt: str, *, capability_token: str) -> bytes:
+    """Render the brand-logo PNG through the AUTHORITATIVE, credit-gated safebox route.
 
-    Secret boundary (mirrors the Tavily proxy cutover): on a runtime plane (a
-    host with a remote safebox configured — ``safebox._use_remote_authority()``
-    is True) the raw Gemini key is NEVER resolved here. The render is brokered
-    through the safebox provider PROXY (``/v1/proxy/gemini/image``): the safebox
-    resolves the key locally, calls Gemini, post-processes the white background
-    to alpha, and returns the KEY-FREE ``{"image_base64","format"}`` payload,
-    which this function decodes to PNG bytes. The proxy fails closed
-    (``RemoteSafeboxError`` / ``SafeboxAuthorityUnavailable``) and never falls
-    back to a raw key.
+    The creative-credit money gate now lives on the safebox: the caller has already reserved the
+    ``logo_generate`` credits via ``safebox.creative_reserve`` and holds the returned creative
+    capability (``capability_token``). This function presents that token to the gated
+    ``/v1/providers/gemini/logo`` route; the safebox VERIFIES the capability, resolves the raw Gemini
+    key LOCALLY, renders, post-processes the white background to alpha, and returns the KEY-FREE
+    ``{"image_base64","format"}`` payload, which this function decodes to PNG bytes. The business
+    runtime never resolves a raw key and never reserves credits itself. Fails closed
+    (``RemoteSafeboxError`` / refusal) and never falls back to a raw key.
 
-    On the safebox host itself / local dev (``not _use_remote_authority()``) —
-    that host IS the authority and the proxy route runs there — the existing
-    local path resolves the key via ``_resolve_gemini_image_key`` and renders
-    with ``_gemini_generate_logo_png``. Fails closed with a clear 503 when no
-    key alias is provisioned, BEFORE any provider work. The creative-credit
-    gate around this call is unchanged (the caller still reserves before and
-    commits/releases after).
+    This is uniform across planes: on a runtime plane it is an HTTP call to the remote safebox; on the
+    safebox host / local dev ``safebox.creative_provider_call`` runs the SAME route in-process. There is
+    no separate raw-key branch any more.
     """
-    if _use_remote_authority():
-        result = safebox.proxy_request("gemini", "image", {"prompt": prompt})
-        image_b64 = str((result or {}).get("image_base64") or "")
-        if not image_b64:
-            raise RuntimeError("gemini image proxy returned no image data")
-        return base64.b64decode(image_b64)
-
-    api_key = _resolve_gemini_image_key()
-    if not api_key:
-        # Local/safebox authority path with no key provisioned: fail closed the
-        # same way the runtime-plane proxy does (503 gemini_image_unconfigured),
-        # before any provider work or credit reserve.
-        raise HTTPException(status_code=503, detail="gemini_image_unconfigured")
-    return _gemini_generate_logo_png(api_key=api_key, prompt=prompt)
+    result = safebox.creative_provider_call(
+        "gemini", "logo", {"prompt": prompt}, token=capability_token
+    )
+    image_b64 = str((result or {}).get("image_base64") or "")
+    if not image_b64:
+        raise RuntimeError("gemini image gate returned no image data")
+    return base64.b64decode(image_b64)
 
 
 def _gemini_generate_logo_png(*, api_key: str, prompt: str) -> bytes:
@@ -525,15 +580,12 @@ def build_creative_gateway_router() -> APIRouter:
         if not idempotency_key:
             raise HTTPException(status_code=400, detail="idempotency_key is required")
 
-        # Fail closed BEFORE reserving credits or touching the provider when the
-        # provider is not reachable: 503 gemini_image_unconfigured. On a runtime
-        # plane (remote safebox) the raw key is NOT read here — the render goes
-        # through the safebox provider proxy (see ``_render_logo_png``), which
-        # resolves the key locally on the safebox; readiness is asserted by the
-        # proxy itself at render time and surfaced fail-closed. Only the
-        # safebox/local authority path resolves the raw key to pre-check it here.
-        if not _use_remote_authority() and not _resolve_gemini_image_key():
-            raise HTTPException(status_code=503, detail="gemini_image_unconfigured")
+        # The creative-credit money gate is AUTHORITATIVE on the safebox now. The gateway never reserves
+        # credits itself and never reads a raw provider key: it resolves the business OWNER (the operator
+        # for this operator-initiated creative action) from the control plane, then asks the safebox to
+        # reserve the action's fixed credits and mint a creative capability. Readiness of the Gemini key
+        # is asserted by the gated provider route at render time (503 gemini_unconfigured), not here.
+        owner_user_id = _resolve_business_owner_user_id(conn, business)
 
         business_context = (
             body.get("business_context")
@@ -556,28 +608,28 @@ def build_creative_gateway_router() -> APIRouter:
         reservation_key = f"{idempotency_key}:creative-credits"
         requested_credits = core._creative_credit_total_cost("logo_generate")
         try:
-            reservation = core._reserve_creative_credits(
-                business,
-                action="logo_generate",
+            reservation = safebox.creative_reserve(
+                business=business,
+                operator_user_id=owner_user_id,
+                action="creative.logo",
                 reservation_key=reservation_key,
-                budget_bucket=budget_bucket,
-                metadata={
-                    "business": business,
-                    "action": "logo_generate",
-                    "slug": slug,
-                    "asset_path": asset_rel,
-                },
             )
-        except credits.InsufficientCreativeCredits as exc:
+        except (safebox.InsufficientCreativeCredits, safebox.CreativeGateRefused) as exc:
             balances = credits.get_business_credit_balances(conn, business)
+            payload = getattr(exc, "payload", {}) or {}
             return {
                 "success": False,
                 "status": "blocked_insufficient_creative_credits",
                 "requested_credits": requested_credits,
-                "available_credits": balances.balance_credits,
+                "available_credits": int(
+                    payload.get("available_credits", balances.balance_credits)
+                ),
                 "reserved_credits": balances.reserved_credits,
                 "error": str(exc),
             }
+        capability_token = str((reservation or {}).get("token") or "")
+        if not capability_token:
+            raise HTTPException(status_code=502, detail="creative_capability_unavailable")
 
         provider_cost_usd = core._logo_provider_cost_usd()
         finalized = False
@@ -585,7 +637,7 @@ def build_creative_gateway_router() -> APIRouter:
         publish_skipped_reason = ""
         site_logo_url = ""
         try:
-            png_bytes = _render_logo_png(prompt)
+            png_bytes = _render_logo_png(prompt, capability_token=capability_token)
             if not png_bytes:
                 raise RuntimeError("Gemini image generation returned empty image")
 
@@ -641,19 +693,7 @@ def build_creative_gateway_router() -> APIRouter:
             published_to_site = bool(publish_state["published_to_site"])
             site_logo_url = str(publish_state["site_logo_url"] or "")
             publish_skipped_reason = str(publish_state["publish_skipped_reason"] or "")
-            balances = core._commit_creative_credits(
-                reservation_key,
-                action="logo_generate",
-                budget_bucket=budget_bucket,
-                metadata={
-                    "business": business,
-                    "action": "logo_generate",
-                    "slug": slug,
-                    "provider": "google",
-                    "model": _GEMINI_IMAGE_MODEL,
-                    "provider_cost_usd": provider_cost_usd,
-                },
-            )
+            balances = safebox.creative_commit(reservation_key=reservation_key)
             finalized = True
             return {
                 "success": True,
@@ -665,9 +705,9 @@ def build_creative_gateway_router() -> APIRouter:
                 "model": _GEMINI_IMAGE_MODEL,
                 "provider_cost_usd": provider_cost_usd,
                 "credits_charged": requested_credits,
-                "balance_credits": balances["balance_credits"],
-                "reserved_credits": balances["reserved_credits"],
-                "budget_bucket": reservation.get("budget_bucket") if isinstance(reservation, dict) else "",
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": budget_bucket,
                 "published_to_site": published_to_site,
                 "site_logo_url": site_logo_url,
                 "publish_skipped_reason": publish_skipped_reason or None,
@@ -675,17 +715,7 @@ def build_creative_gateway_router() -> APIRouter:
         except Exception as exc:
             if not finalized:
                 try:
-                    core._release_creative_credits(
-                        reservation_key,
-                        action="logo_generate",
-                        budget_bucket=budget_bucket,
-                        metadata={
-                            "business": business,
-                            "action": "logo_generate",
-                            "slug": slug,
-                            "error": str(exc),
-                        },
-                    )
+                    safebox.creative_release(reservation_key=reservation_key)
                 except Exception:
                     pass
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -831,49 +861,63 @@ def build_creative_gateway_router() -> APIRouter:
         )
         if not budget_bucket:
             raise HTTPException(status_code=400, detail="budget_bucket or ad_metadata.channel is required")
+        owner_user_id = _resolve_business_owner_user_id(conn, business)
         reservation_key = f"{idempotency_key}:creative-credits"
-        try:
-            reservation = core._reserve_creative_credits(
-                business,
-                action="ugc_ad_generate",
-                reservation_key=reservation_key,
-                budget_bucket=budget_bucket,
-                metadata={
-                    "business": business,
-                    "action": "ugc_ad_generate",
-                    "slug": slug,
-                    "brief_path": brief_rel,
-                    "script_path": script_rel or None,
-                },
-                ad_metadata=ad_metadata,
-            )
-        except core.CreativeCreditBudgetExceeded as exc:
-            balances = credits.get_business_credit_balances(conn, business)
+        requested_credits = core._creative_credit_total_cost("ugc_ad_generate")
+        # Non-spending per-channel pre-check: the per-channel allocation is a finer-grained operator
+        # policy in front of the base credit balance. It moves NO money — it only reads the snapshot and
+        # refuses early when a channel's allocation is exhausted. The AUTHORITATIVE money gate (the base
+        # creative-credit balance) is reserved/committed on the safebox below; this pre-check is a fast
+        # refusal, not a second gate.
+        preflight = core._creative_credit_preflight_gate(
+            business,
+            action="ugc_ad_generate",
+            budget_bucket=budget_bucket,
+            metadata={"business": business, "action": "ugc_ad_generate", "slug": slug},
+            ad_metadata=ad_metadata,
+        )
+        if not preflight.get("success"):
             return {
                 "success": False,
-                "status": "blocked_channel_budget_exhausted",
-                "requested_credits": core._creative_credit_total_cost("ugc_ad_generate"),
-                "available_credits": balances.balance_credits,
-                "reserved_credits": balances.reserved_credits,
-                "budget_bucket": exc.bucket,
-                "channel_budget": {
-                    "allocated_credits": exc.allocated_credits,
-                    "used_credits": exc.used_credits,
-                    "reserved_credits": exc.reserved_credits,
-                    "remaining_credits": exc.remaining_credits,
-                },
-                "error": str(exc),
+                "status": preflight.get("status") or "blocked_insufficient_creative_credits",
+                "requested_credits": preflight.get("requested_credits", requested_credits),
+                "available_credits": preflight.get("available_credits"),
+                "reserved_credits": preflight.get("reserved_credits"),
+                "budget_bucket": preflight.get("budget_bucket") or budget_bucket,
+                "channel_budget": preflight.get("channel_budget"),
+                "error": preflight.get("error"),
             }
-        except credits.InsufficientCreativeCredits as exc:
+        # AUTHORITATIVE reserve on the safebox -> creative capability for the subprocess.
+        try:
+            reservation = safebox.creative_reserve(
+                business=business,
+                operator_user_id=owner_user_id,
+                action="creative.ugc",
+                reservation_key=reservation_key,
+            )
+        except (safebox.InsufficientCreativeCredits, safebox.CreativeGateRefused) as exc:
             balances = credits.get_business_credit_balances(conn, business)
+            payload_detail = getattr(exc, "payload", {}) or {}
             return {
                 "success": False,
                 "status": "blocked_insufficient_creative_credits",
-                "requested_credits": core._creative_credit_total_cost("ugc_ad_generate"),
-                "available_credits": balances.balance_credits,
+                "requested_credits": requested_credits,
+                "available_credits": int(payload_detail.get("available_credits", balances.balance_credits)),
                 "reserved_credits": balances.reserved_credits,
                 "error": str(exc),
             }
+        capability_token = str((reservation or {}).get("token") or "")
+        # Build the render-subprocess env (injects the creative capability + safebox coordinates so the
+        # subprocess hits the GATED provider routes key-free). Fails closed if the capability/coordinates
+        # are missing; release the reservation in that case so credits are not stranded.
+        try:
+            subprocess_env = _creative_subprocess_env(capability_token)
+        except Exception:
+            try:
+                safebox.creative_release(reservation_key=reservation_key)
+            except Exception:
+                pass
+            raise
 
         finalized = False
         try:
@@ -883,20 +927,10 @@ def build_creative_gateway_router() -> APIRouter:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=subprocess_env,
             )
             if run.returncode != 0:
-                balances = core._release_creative_credits(
-                    reservation_key,
-                    action="ugc_ad_generate",
-                    budget_bucket=budget_bucket,
-                    metadata={
-                        "business": business,
-                        "action": "ugc_ad_generate",
-                        "slug": slug,
-                        "error": run.stderr or run.stdout or f"exit {run.returncode}",
-                    },
-                    ad_metadata=ad_metadata,
-                )
+                balances = safebox.creative_release(reservation_key=reservation_key)
                 finalized = True
                 return {
                     "success": False,
@@ -904,52 +938,28 @@ def build_creative_gateway_router() -> APIRouter:
                     "stdout": run.stdout,
                     "stderr": run.stderr,
                     "error": run.stderr or run.stdout or f"ugc-video-ad exited {run.returncode}",
-                    "balance_credits": balances["balance_credits"],
-                    "reserved_credits": balances["reserved_credits"],
-                    "channel_budget": balances.get("channel_budget"),
+                    "balance_credits": balances.balance_credits,
+                    "reserved_credits": balances.reserved_credits,
                 }
 
             payload = core._parse_ugc_write_payload(run.stdout)
-            balances = core._commit_creative_credits(
-                reservation_key,
-                action="ugc_ad_generate",
-                budget_bucket=budget_bucket,
-                metadata={
-                    "business": business,
-                    "action": "ugc_ad_generate",
-                    "slug": slug,
-                    "provider": "openai+fal",
-                },
-                ad_metadata=ad_metadata,
-            )
+            balances = safebox.creative_commit(reservation_key=reservation_key)
             finalized = True
             return {
                 "success": True,
                 "status": "created",
                 "write_payload": payload,
-                "credits_charged": core._creative_credit_total_cost("ugc_ad_generate"),
-                "balance_credits": balances["balance_credits"],
-                "reserved_credits": balances["reserved_credits"],
-                "budget_bucket": reservation.get("budget_bucket"),
-                "channel_budget": balances.get("channel_budget"),
+                "credits_charged": requested_credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": budget_bucket,
                 "stdout": run.stdout,
                 "stderr": run.stderr,
             }
         except Exception as exc:
             if not finalized:
                 try:
-                    core._release_creative_credits(
-                        reservation_key,
-                        action="ugc_ad_generate",
-                        budget_bucket=budget_bucket,
-                        metadata={
-                            "business": business,
-                            "action": "ugc_ad_generate",
-                            "slug": slug,
-                            "error": str(exc),
-                        },
-                        ad_metadata=ad_metadata,
-                    )
+                    safebox.creative_release(reservation_key=reservation_key)
                 except Exception:
                     pass
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1015,51 +1025,60 @@ def build_creative_gateway_router() -> APIRouter:
         )
         if not budget_bucket:
             raise HTTPException(status_code=400, detail="budget_bucket or ad_metadata.channel is required")
+        owner_user_id = _resolve_business_owner_user_id(conn, business)
         reservation_key = f"{idempotency_key}:creative-credits"
         requested_credits = core._creative_credit_total_cost("static_ad_generate", units=requested)
-        try:
-            reservation = core._reserve_creative_credits(
-                business,
-                action="static_ad_generate",
-                reservation_key=reservation_key,
-                units=requested,
-                budget_bucket=budget_bucket,
-                metadata={
-                    "business": business,
-                    "action": "static_ad_generate",
-                    "slug": slug,
-                    "input_path": input_rel,
-                    "requested_creatives": requested,
-                },
-                ad_metadata=ad_metadata,
-            )
-        except core.CreativeCreditBudgetExceeded as exc:
-            balances = credits.get_business_credit_balances(conn, business)
+        # Non-spending per-channel pre-check (no money moved); the AUTHORITATIVE money gate is the
+        # safebox reserve/commit below.
+        preflight = core._creative_credit_preflight_gate(
+            business,
+            action="static_ad_generate",
+            units=requested,
+            budget_bucket=budget_bucket,
+            metadata={"business": business, "action": "static_ad_generate", "slug": slug},
+            ad_metadata=ad_metadata,
+        )
+        if not preflight.get("success"):
             return {
                 "success": False,
-                "status": "blocked_channel_budget_exhausted",
-                "requested_credits": requested_credits,
-                "available_credits": balances.balance_credits,
-                "reserved_credits": balances.reserved_credits,
-                "budget_bucket": exc.bucket,
-                "channel_budget": {
-                    "allocated_credits": exc.allocated_credits,
-                    "used_credits": exc.used_credits,
-                    "reserved_credits": exc.reserved_credits,
-                    "remaining_credits": exc.remaining_credits,
-                },
-                "error": str(exc),
+                "status": preflight.get("status") or "blocked_insufficient_creative_credits",
+                "requested_credits": preflight.get("requested_credits", requested_credits),
+                "available_credits": preflight.get("available_credits"),
+                "reserved_credits": preflight.get("reserved_credits"),
+                "budget_bucket": preflight.get("budget_bucket") or budget_bucket,
+                "channel_budget": preflight.get("channel_budget"),
+                "error": preflight.get("error"),
             }
-        except credits.InsufficientCreativeCredits as exc:
+        # AUTHORITATIVE reserve on the safebox (units scales the fixed per-creative price) -> creative
+        # capability for the subprocess.
+        try:
+            reservation = safebox.creative_reserve(
+                business=business,
+                operator_user_id=owner_user_id,
+                action="creative.static_ad",
+                reservation_key=reservation_key,
+                units=requested,
+            )
+        except (safebox.InsufficientCreativeCredits, safebox.CreativeGateRefused) as exc:
             balances = credits.get_business_credit_balances(conn, business)
+            payload_detail = getattr(exc, "payload", {}) or {}
             return {
                 "success": False,
                 "status": "blocked_insufficient_creative_credits",
                 "requested_credits": requested_credits,
-                "available_credits": balances.balance_credits,
+                "available_credits": int(payload_detail.get("available_credits", balances.balance_credits)),
                 "reserved_credits": balances.reserved_credits,
                 "error": str(exc),
             }
+        capability_token = str((reservation or {}).get("token") or "")
+        try:
+            subprocess_env = _creative_subprocess_env(capability_token)
+        except Exception:
+            try:
+                safebox.creative_release(reservation_key=reservation_key)
+            except Exception:
+                pass
+            raise
 
         finalized = False
         # Hold the business mirror lock across the ENTIRE render → manifest-read →
@@ -1092,6 +1111,7 @@ def build_creative_gateway_router() -> APIRouter:
                 capture_output=True,
                 text=True,
                 check=False,
+                env=subprocess_env,
             )
             manifest_rel = f"{publication_rel}/manifest.json"
             # Read the manifest the subprocess just wrote WITHOUT re-syncing (``sync=False``):
@@ -1122,34 +1142,16 @@ def build_creative_gateway_router() -> APIRouter:
                     raise
             if run.returncode != 0:
                 if succeeded > 0:
-                    balances = core._commit_creative_credits(
-                        reservation_key,
-                        action="static_ad_generate",
-                        actual_units=succeeded,
-                        budget_bucket=budget_bucket,
-                        metadata={
-                            "business": business,
-                            "action": "static_ad_generate",
-                            "slug": slug,
-                            "input_path": input_rel,
-                            "requested_creatives": requested,
-                            "succeeded_creatives": succeeded,
-                        },
-                        ad_metadata=ad_metadata,
+                    # Partial success: settle ONLY the succeeded creatives (the safebox refunds
+                    # reserved-actual back to balance), keyed on the fixed per-creative price.
+                    actual_credits = core._creative_credit_total_cost(
+                        "static_ad_generate", units=succeeded
+                    )
+                    balances = safebox.creative_commit(
+                        reservation_key=reservation_key, actual_credits=actual_credits
                     )
                 else:
-                    balances = core._release_creative_credits(
-                        reservation_key,
-                        action="static_ad_generate",
-                        budget_bucket=budget_bucket,
-                        metadata={
-                            "business": business,
-                            "action": "static_ad_generate",
-                            "slug": slug,
-                            "error": run.stderr or run.stdout or f"exit {run.returncode}",
-                        },
-                        ad_metadata=ad_metadata,
-                    )
+                    balances = safebox.creative_release(reservation_key=reservation_key)
                 finalized = True
                 return {
                     "success": False,
@@ -1161,31 +1163,20 @@ def build_creative_gateway_router() -> APIRouter:
                     "credits_charged": core._creative_credit_total_cost(
                         "static_ad_generate", units=succeeded
                     ),
-                    "balance_credits": balances["balance_credits"],
-                    "reserved_credits": balances["reserved_credits"],
-                    "budget_bucket": reservation.get("budget_bucket"),
-                    "channel_budget": balances.get("channel_budget"),
+                    "balance_credits": balances.balance_credits,
+                    "reserved_credits": balances.reserved_credits,
+                    "budget_bucket": budget_bucket,
                     "stdout": run.stdout,
                     "stderr": run.stderr,
                     "error": run.stderr or run.stdout or f"static ad generator exited {run.returncode}",
                 }
 
             charged_units = max(1, succeeded or requested)
-            balances = core._commit_creative_credits(
-                reservation_key,
-                action="static_ad_generate",
-                actual_units=charged_units,
-                budget_bucket=budget_bucket,
-                metadata={
-                    "business": business,
-                    "action": "static_ad_generate",
-                    "slug": slug,
-                    "input_path": input_rel,
-                    "requested_creatives": requested,
-                    "succeeded_creatives": charged_units,
-                    "provider": backend,
-                },
-                ad_metadata=ad_metadata,
+            actual_credits = core._creative_credit_total_cost(
+                "static_ad_generate", units=charged_units
+            )
+            balances = safebox.creative_commit(
+                reservation_key=reservation_key, actual_credits=actual_credits
             )
             finalized = True
             return {
@@ -1194,31 +1185,17 @@ def build_creative_gateway_router() -> APIRouter:
                 "manifest": manifest_rel if manifest_abs.is_file() else None,
                 "succeeded": succeeded or requested,
                 "failed": failed,
-                "credits_charged": core._creative_credit_total_cost(
-                    "static_ad_generate", units=charged_units
-                ),
-                "balance_credits": balances["balance_credits"],
-                "reserved_credits": balances["reserved_credits"],
-                "budget_bucket": reservation.get("budget_bucket"),
-                "channel_budget": balances.get("channel_budget"),
+                "credits_charged": actual_credits,
+                "balance_credits": balances.balance_credits,
+                "reserved_credits": balances.reserved_credits,
+                "budget_bucket": budget_bucket,
                 "stdout": run.stdout,
                 "stderr": run.stderr,
             }
         except Exception as exc:
             if not finalized:
                 try:
-                    core._release_creative_credits(
-                        reservation_key,
-                        action="static_ad_generate",
-                        budget_bucket=budget_bucket,
-                        metadata={
-                            "business": business,
-                            "action": "static_ad_generate",
-                            "slug": slug,
-                            "error": str(exc),
-                        },
-                        ad_metadata=ad_metadata,
-                    )
+                    safebox.creative_release(reservation_key=reservation_key)
                 except Exception:
                     pass
             raise HTTPException(status_code=502, detail=str(exc)) from exc

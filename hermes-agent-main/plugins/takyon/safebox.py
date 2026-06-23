@@ -1183,6 +1183,204 @@ def release_credits(
     )
 
 
+# ── Creative-credit AUTHORITATIVE gate client (logo / UGC / static-ad) ────────────────────────────
+# The creative-credit money gate for the fixed-price creative actions lives AUTHORITATIVELY on the
+# safebox: the operator reserves the action's canonical fixed credits via /v1/creative/reserve (the
+# safebox validates business ownership, resolves the canonical price, and reserves the credits ON THE
+# SAFEBOX), which hands back a creative capability. The runtime then presents that capability to the
+# gated /v1/providers/{gemini/logo,openai/images,fal/{path}} routes to call the provider key-free, and
+# commits/releases the ONE reservation when the action finishes. The business runtime NEVER reserves
+# credits itself (no double-charge) and NEVER holds a raw provider key. These helpers route
+# local-vs-remote like reserve_credits/proxy_request: remote -> the safebox HTTP routes; local (the
+# safebox host / local dev) -> the same authoritative safebox_app logic in-process.
+_CREATIVE_GATE_TIMEOUT_S = 180.0
+
+
+class CreativeGateRefused(RuntimeError):
+    """The safebox creative-credit gate refused (insufficient credits / not owner / unmappable action).
+
+    ``status_code`` mirrors the HTTP status the safebox returned (402 insufficient credits, 403 not the
+    business owner, 400 unmappable action). ``payload`` carries the structured detail (e.g.
+    ``requested_credits`` / ``available_credits`` for a 402)."""
+
+    def __init__(self, message: str, *, status_code: int, payload: dict[str, Any]):
+        super().__init__(message)
+        self.status_code = int(status_code)
+        self.payload = payload if isinstance(payload, dict) else {}
+
+
+def creative_reserve(
+    *,
+    business: str,
+    operator_user_id: str,
+    action: str,
+    reservation_key: str,
+    units: int = 1,
+    ttl_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Reserve a creative action's fixed credits on the safebox and return its creative capability.
+
+    Returns ``{"token", "audience", "reservation_key", "reserved_credits", "credits"}``. The token is
+    the creative capability the caller presents to ``creative_provider_call``. Raises
+    ``CreativeGateRefused`` (402 insufficient credits / 403 not owner / 400 bad action) BEFORE any
+    provider key is resolved or any provider is called — fail closed, never a raw-key fallback."""
+    business = str(business or "").strip()
+    operator_user_id = str(operator_user_id or "").strip()
+    action = str(action or "").strip()
+    reservation_key = str(reservation_key or "").strip()
+    if not business or not operator_user_id or not action or not reservation_key:
+        raise ValueError("creative_reserve requires business, operator_user_id, action, reservation_key")
+    body: dict[str, Any] = {
+        "business": business,
+        "operator_user_id": operator_user_id,
+        "action": action,
+        "reservation_key": reservation_key,
+        "units": int(max(1, units or 1)),
+    }
+    if ttl_seconds is not None:
+        body["ttl_seconds"] = int(ttl_seconds)
+    if _use_remote_authority():
+        try:
+            return _remote_json("POST", "/v1/creative/reserve", body, timeout=_CREATIVE_GATE_TIMEOUT_S)
+        except RemoteSafeboxError as exc:
+            raise CreativeGateRefused(
+                str(exc), status_code=exc.status_code, payload=_remote_error_detail(exc)
+            ) from exc
+    return _local_creative_reserve(body)
+
+
+def creative_provider_call(
+    provider: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    token: str,
+    timeout: float = _CREATIVE_GATE_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Call a gated creative PROVIDER route (``/v1/providers/<provider>/<path>``) presenting a creative
+    capability ``token`` and return the KEY-FREE result. The safebox verifies the capability, resolves
+    the provider key LOCALLY, and forwards. Fails closed (``RemoteSafeboxError`` / refusal) — never a raw
+    key. Used by the runtime AND by render subprocesses (which receive the token via env)."""
+    prov = str(provider or "").strip().strip("/")
+    sub = str(path or "").strip().strip("/")
+    tok = str(token or "").strip()
+    if not prov:
+        raise ValueError("provider is required")
+    if not tok:
+        raise ValueError("creative capability token is required")
+    route = f"/v1/providers/{prov}" + (f"/{sub}" if sub else "")
+    body = {"token": tok, "payload": dict(payload or {})}
+    if _use_remote_authority():
+        return _remote_json("POST", route, body, timeout=timeout)
+    return _local_creative_provider_call(prov, sub, body)
+
+
+def creative_commit(
+    *,
+    reservation_key: str,
+    actual_credits: int | None = None,
+) -> CreativeCreditBalances:
+    """Commit (settle) the ONE creative-credit reservation on the safebox after the action succeeds."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        raise ValueError("reservation_key is required")
+    body = {"reservation_key": key, "actual_credits": (None if actual_credits is None else int(actual_credits))}
+    if _use_remote_authority():
+        try:
+            payload = _remote_json("POST", "/v1/creative/commit", body, timeout=_CREATIVE_GATE_TIMEOUT_S)
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 404:
+                raise UnknownCreativeCreditReservation(key) from exc
+            raise
+        return _balances_from_payload(payload, business_slug="")
+    return _local_commit_credits(None, key, actual_credits=actual_credits, metadata={"via": "safebox_creative_gate"})
+
+
+def creative_release(*, reservation_key: str) -> CreativeCreditBalances:
+    """Release the ONE creative-credit reservation on the safebox after the action fails."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        raise ValueError("reservation_key is required")
+    body = {"reservation_key": key}
+    if _use_remote_authority():
+        try:
+            payload = _remote_json("POST", "/v1/creative/release", body, timeout=_CREATIVE_GATE_TIMEOUT_S)
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 404:
+                raise UnknownCreativeCreditReservation(key) from exc
+            raise
+        return _balances_from_payload(payload, business_slug="")
+    return _local_release_credits(None, key, metadata={"via": "safebox_creative_gate"})
+
+
+def _local_creative_reserve(body: dict[str, Any]) -> dict[str, Any]:
+    """LOCAL (safebox host / local dev) creative reserve: run the SAME authoritative logic the
+    /v1/creative/reserve route runs in-process (ownership validation + canonical price + reserve + mint)
+    via a TestClient against the safebox app, so the gate is identical on both planes and there is no
+    second code path. Maps the route's HTTP refusals to ``CreativeGateRefused`` /
+    ``InsufficientCreativeCredits``."""
+    from starlette.testclient import TestClient
+
+    from . import safebox_app
+
+    client = TestClient(safebox_app.build_safebox_app())
+    resp = client.post("/v1/creative/reserve", headers=_local_internal_headers(), json=body)
+    if resp.status_code == 200:
+        return resp.json()
+    detail = _testclient_detail(resp)
+    if resp.status_code == 402:
+        raise InsufficientCreativeCredits(
+            requested_credits=int(detail.get("requested_credits") or 0),
+            available_credits=int(detail.get("available_credits") or 0),
+        )
+    raise CreativeGateRefused(
+        str(detail.get("error") or detail or resp.text),
+        status_code=resp.status_code,
+        payload=detail,
+    )
+
+
+def _local_creative_provider_call(provider: str, sub: str, body: dict[str, Any]) -> dict[str, Any]:
+    """LOCAL creative provider call: present the creative capability to the in-process safebox app
+    (verify -> key-local -> forward). Fail-closed: a non-200 surfaces as ``RemoteSafeboxError``."""
+    from starlette.testclient import TestClient
+
+    from . import safebox_app
+
+    route = f"/v1/providers/{provider}" + (f"/{sub}" if sub else "")
+    client = TestClient(safebox_app.build_safebox_app())
+    resp = client.post(route, headers=_local_internal_headers(), json=body)
+    if resp.status_code == 200:
+        return resp.json()
+    detail = _testclient_detail(resp)
+    raise RemoteSafeboxError(
+        f"local safebox {route} failed: {detail}",
+        status_code=resp.status_code,
+        payload=detail if isinstance(detail, dict) else {"detail": detail},
+    )
+
+
+def _local_internal_headers() -> dict[str, str]:
+    """Authorization header for the in-process safebox TestClient. On the local/safebox host the internal
+    token is whatever ``TAKYON_SAFEBOX_TOKEN`` is set to (the app's ``_require_internal_token`` reads the
+    same env); when unset, the app's tokenless opt-out covers local dev / hermetic tests."""
+    token = str(os.environ.get(_SAFEBOX_REMOTE_TOKEN_ENV) or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _testclient_detail(resp) -> dict[str, Any]:
+    try:
+        data = resp.json()
+    except Exception:
+        return {"detail": resp.text}
+    if isinstance(data, dict):
+        detail = data.get("detail", data)
+        if isinstance(detail, dict):
+            return detail
+        return {"error": detail} if detail is not None else data
+    return {"detail": data}
+
+
 def read_env_backed_value(key: str) -> str:
     """Read one sensitive env-backed value from env or TAKYON_HOME/.env."""
     if _use_remote_authority():

@@ -39,6 +39,40 @@ _ANTHROPIC_AUDIENCE = "anthropic.messages"
 _TAVILY_AUDIENCE = "tavily.search"
 _GEMINI_IMAGE_AUDIENCE = "gemini.image"
 
+# ── Creative-credit audiences (logo / UGC video / static ad) ──────────────────────────────────────
+# These are the AUTHORITATIVE creative-credit gate audiences. A creative capability is minted by the
+# operator (boundary-1 ownership) against ONE creative action, and the safebox reserves the action's
+# fixed creative-credit price BEFORE it hands the operator a token. The creative provider routes
+# (/v1/providers/{gemini,openai,fal}) then accept a VERIFIED creative capability, resolve the provider
+# key LOCALLY, and forward — never returning the key. Unlike the per-CALL usage broker
+# (anthropic/tavily/gemini.image), a single creative action makes SEVERAL provider calls (UGC = 1
+# OpenAI image + N FAL clips), so the credit gate is reserved/committed ONCE per action via the
+# /v1/creative/{reserve,commit,release} routes; the provider routes verify the creative capability but
+# do NOT re-reserve (re-reserving per call would multiply-charge the fixed action price). The token is
+# therefore NOT single-use: it authorizes every provider call within ONE reserved creative action for
+# the life of its short TTL.
+_CREATIVE_LOGO_AUDIENCE = "creative.logo"
+_CREATIVE_UGC_AUDIENCE = "creative.ugc"
+_CREATIVE_STATIC_AD_AUDIENCE = "creative.static_ad"
+
+# Creative action (capability `action`, also the mint action) -> its canonical creative-credit cost
+# action key in core._CREATIVE_CREDIT_COST_DEFAULTS/_ENVS. The fixed price the client used and the
+# price the safebox reserves both resolve from that ONE canonical table (env-override-first), so there
+# is no second price table on the safebox.
+_CREATIVE_AUDIENCE_CREDIT_ACTION = {
+    _CREATIVE_LOGO_AUDIENCE: "logo_generate",
+    _CREATIVE_UGC_AUDIENCE: "ugc_ad_generate",
+    _CREATIVE_STATIC_AD_AUDIENCE: "static_ad_generate",
+}
+
+# Which creative audiences each gated creative PROVIDER route accepts. A logo capability may only hit
+# Gemini; a UGC capability may hit OpenAI (the reference image) AND FAL (the clips); a static-ad
+# capability may hit OpenAI. This binds the reserved creative action to exactly the providers that
+# action legitimately uses, so a cheap action's token cannot drive an unrelated provider.
+_CREATIVE_GEMINI_AUDIENCES = frozenset({_CREATIVE_LOGO_AUDIENCE})
+_CREATIVE_OPENAI_AUDIENCES = frozenset({_CREATIVE_UGC_AUDIENCE, _CREATIVE_STATIC_AD_AUDIENCE})
+_CREATIVE_FAL_AUDIENCES = frozenset({_CREATIVE_UGC_AUDIENCE})
+
 # Default action -> audience so a token minted for a known provider action is directly brokerable by
 # the matching provider route without the caller having to restate the audience. A caller may still
 # pass an explicit `audience` to mint for a future/custom action.
@@ -46,6 +80,9 @@ _ACTION_AUDIENCE_DEFAULTS = {
     _ANTHROPIC_AUDIENCE: _ANTHROPIC_AUDIENCE,
     _TAVILY_AUDIENCE: _TAVILY_AUDIENCE,
     _GEMINI_IMAGE_AUDIENCE: _GEMINI_IMAGE_AUDIENCE,
+    _CREATIVE_LOGO_AUDIENCE: _CREATIVE_LOGO_AUDIENCE,
+    _CREATIVE_UGC_AUDIENCE: _CREATIVE_UGC_AUDIENCE,
+    _CREATIVE_STATIC_AD_AUDIENCE: _CREATIVE_STATIC_AD_AUDIENCE,
 }
 
 # Default short TTL for minted capability tokens (seconds). The token is also single-use (nonce) and
@@ -152,6 +189,80 @@ class _UsageLedgerAdapter:
                 reservation["business_slug"],
                 reservation["reservation_key"],
                 error="broker_release",
+            )
+
+
+def _creative_credit_price(audience: str, *, units: int = 1) -> int:
+    """The fixed creative-credit price for a creative audience, resolved from the ONE canonical table
+    in ``core`` (``_CREATIVE_CREDIT_COST_DEFAULTS`` + env override ``_CREATIVE_CREDIT_COST_ENVS``). The
+    safebox imports core's resolver instead of duplicating a price table, so the price the client used
+    and the price the safebox reserves can never diverge. Unknown audience -> ValueError (fail closed)."""
+    action = _CREATIVE_AUDIENCE_CREDIT_ACTION.get(str(audience or ""))
+    if not action:
+        raise ValueError(f"no creative credit action for audience {audience!r}")
+    from . import core
+
+    return int(core._creative_credit_total_cost(action, units=max(1, int(units or 1))))
+
+
+class _CreditLedgerAdapter:
+    """Creative-credit ledger the creative gate reserves/commits/releases against, keyed on the
+    AUTHORITATIVE verified scope's ``business_slug`` and the creative action's FIXED credit price.
+
+    This mirrors ``_UsageLedgerAdapter`` but backs the creative-credit rail (``business_credits``)
+    instead of the per-call usage rail: reserve -> commit on success / release on failure. It opens the
+    safebox's own DB connection and runs the append-only credit ledger there on the safebox host, so the
+    creative-credit gate is AUTHORITATIVE on the safebox (no client may reserve/commit credits). The
+    fixed price comes from ``_creative_credit_price`` (the canonical per-action table), NOT a client
+    value, so a client cannot under-reserve. Reserve raises ``safebox.InsufficientCreativeCredits`` (the
+    route maps it to a clean 402) BEFORE any provider key is resolved or any provider is called."""
+
+    def __init__(self, *, audience: str):
+        self._audience = str(audience or "")
+
+    def reserve(self, scope: "CapabilityScope", *, reservation_key: str, units: int = 1):
+        from . import safebox
+
+        credits = _creative_credit_price(self._audience, units=units)
+        with _safebox_db_conn() as conn:
+            reservation = safebox._local_reserve_credits(
+                conn,
+                scope.business_slug,
+                credits,
+                reservation_key,
+                metadata={
+                    "via": "safebox_creative_gate",
+                    "audience": self._audience,
+                    "action": scope.action,
+                    "units": int(max(1, units or 1)),
+                },
+            )
+        return {
+            "business_slug": scope.business_slug,
+            "reservation_key": reservation.key,
+            "reserved_credits": int(reservation.reserved_credits),
+            "credits": credits,
+        }
+
+    def commit(self, *, reservation_key: str, actual_credits: int | None = None):
+        from . import safebox
+
+        with _safebox_db_conn() as conn:
+            return safebox._local_commit_credits(
+                conn,
+                reservation_key,
+                actual_credits=actual_credits,
+                metadata={"via": "safebox_creative_gate", "audience": self._audience},
+            )
+
+    def release(self, *, reservation_key: str):
+        from . import safebox
+
+        with _safebox_db_conn() as conn:
+            return safebox._local_release_credits(
+                conn,
+                reservation_key,
+                metadata={"via": "safebox_creative_gate", "audience": self._audience},
             )
 
 
@@ -275,6 +386,36 @@ class _MintTokenBody(BaseModel):
     operator_user_id: str | None = None
     audience: str | None = None
     ttl_seconds: int | None = None
+
+
+class _CreativeReserveBody(BaseModel):
+    # Operator-only creative-credit reserve. The operator MUST own the business (boundary 1). action is
+    # one of the creative audiences (creative.logo / creative.ugc / creative.static_ad); units scales
+    # the fixed per-action price (static-ad = N creatives). The safebox reserves the canonical fixed
+    # price on the business's creative-credit ledger and returns a creative capability the client
+    # presents to the gated provider routes.
+    business: str
+    operator_user_id: str
+    action: str
+    reservation_key: str
+    units: int | None = None
+    ttl_seconds: int | None = None
+
+
+class _CreativeFinalizeBody(BaseModel):
+    # Commit (settle the reserved credits, optionally refunding reserved-actual) or release (free the
+    # whole reservation) keyed on the reservation_key the reserve route used.
+    reservation_key: str
+    actual_credits: int | None = None
+
+
+class _CreativeProviderCallBody(BaseModel):
+    # A VERIFIED creative capability token (minted by /v1/creative/reserve) + the provider payload. The
+    # gate already reserved the action's fixed credits, so this route only resolves the key + forwards.
+    # ``token`` is Optional so a missing/empty token surfaces as a clean 401 ``missing_capability`` from
+    # the route's own check rather than a 422 validation error.
+    token: str | None = None
+    payload: dict[str, Any] | None = None
 
 
 def _allow_tokenless() -> bool:
@@ -467,6 +608,180 @@ def _gemini_image_estimate(payload: dict[str, Any]):
         return int((priced.amount_usd * Decimal("1000000")).to_integral_value(rounding=ROUND_CEILING))
 
     return _estimate
+
+
+# ── Creative-credit provider routes (logo / UGC / static-ad) ──────────────────────────────────────
+# Upstream provider hosts for the gated creative forwards. Kept here on the safebox (never in the
+# business runtime) because only the safebox holds the key and forwards. Mirrors the constants that
+# used to live in safebox_provider_proxy.py before the ungated routes were deleted.
+_OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
+_FAL_BASE_URL = "https://fal.run"
+_CREATIVE_UPSTREAM_TIMEOUT_S = 180.0
+
+
+def _openai_image_key() -> str:
+    """The SHARED OpenAI key, resolved LOCALLY on the safebox via the canonical alias
+    (``core._API_ENV_ALIASES['openai']`` = ``OPENAI_API_KEY``). Returns "" when unconfigured so the
+    creative route can fail closed with a clear ``openai_unconfigured`` before any upstream call."""
+    from . import safebox
+
+    try:
+        return str(safebox.first_env_backed_value("OPENAI_API_KEY") or "").strip()
+    except Exception:
+        return ""
+
+
+def _fal_key() -> str:
+    """The SHARED FAL key, resolved LOCALLY on the safebox via the canonical aliases
+    (``core._API_ENV_ALIASES['fal']`` = ``FAL_KEY`` / ``FAL_API_KEY``)."""
+    from . import safebox
+
+    try:
+        return str(safebox.first_env_backed_value("FAL_KEY", "FAL_API_KEY") or "").strip()
+    except Exception:
+        return ""
+
+
+def _forward_json_post(url: str, *, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    """POST ``payload`` to ``url`` with the LOCALLY-injected auth ``headers`` and return the parsed JSON
+    response. The provider key lives only in ``headers`` (the outbound request); it never appears in the
+    returned body. Raises ``BrokerLedgerError`` on transport/HTTP failure (the route maps it to a clean
+    502/503) and NEVER echoes the request auth header or the raw upstream body verbatim."""
+    import httpx
+
+    try:
+        with httpx.Client(timeout=_CREATIVE_UPSTREAM_TIMEOUT_S) as client:
+            resp = client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        raise BrokerLedgerError("provider_unreachable") from exc
+    text = resp.text
+    if resp.status_code >= 400:
+        # Sanitized: the truncated body is the upstream RESPONSE (no request key) — never the auth header.
+        raise BrokerLedgerError(f"provider_http_{int(resp.status_code)}")
+    try:
+        return json.loads(text) if text.strip() else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _creative_gemini_caller(payload: dict[str, Any]):
+    """Resolve the Gemini image key LOCALLY and render a logo PNG; return a KEY-FREE base64 result. The
+    creative-credit gate already reserved the action's fixed price (the reserve route), so this caller
+    does NOT meter — it only resolves the key and forwards."""
+    import base64 as _b64
+
+    from . import creative_gateway
+
+    prompt = str((payload or {}).get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("missing_prompt")
+
+    def _call(_scope: "CapabilityScope"):
+        key = creative_gateway._resolve_gemini_image_key()
+        if not key:
+            raise BrokerLedgerError("gemini_unconfigured")
+        png_bytes = creative_gateway._gemini_generate_logo_png(api_key=key, prompt=prompt)
+        return {"image_base64": _b64.b64encode(png_bytes).decode("ascii"), "format": "png"}
+
+    return _call
+
+
+def _creative_openai_images_caller(payload: dict[str, Any]):
+    """Resolve the OpenAI key LOCALLY and forward an images/generations request; return the KEY-FREE
+    upstream JSON. Key-free: the key is injected ONLY into the outbound Authorization header."""
+    body = dict(payload or {})
+
+    def _call(_scope: "CapabilityScope"):
+        key = _openai_image_key()
+        if not key:
+            raise BrokerLedgerError("openai_unconfigured")
+        headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
+        return _forward_json_post(_OPENAI_IMAGES_URL, headers=headers, payload=body)
+
+    return _call
+
+
+def _creative_fal_caller(fal_path: str):
+    """Build the FAL forwarder for a given FAL ``path`` (e.g. ``fal-ai/kling-video/...``). Resolves the
+    FAL key LOCALLY and forwards to ``https://fal.run/<path>``; returns the KEY-FREE upstream JSON."""
+    path = str(fal_path or "").strip().strip("/")
+
+    def _build(payload: dict[str, Any]):
+        body = dict(payload or {})
+
+        def _call(_scope: "CapabilityScope"):
+            if not path:
+                raise ValueError("missing_fal_path")
+            key = _fal_key()
+            if not key:
+                raise BrokerLedgerError("fal_unconfigured")
+            headers = {"Authorization": f"Key {key}", "content-type": "application/json"}
+            return _forward_json_post(f"{_FAL_BASE_URL}/{path}", headers=headers, payload=body)
+
+        return _call
+
+    return _build
+
+
+def _creative_provider_route(
+    body: "_CreativeProviderCallBody",
+    *,
+    allowed_audiences: "frozenset[str]",
+    caller_builder,
+) -> dict[str, Any]:
+    """Shared body for the gated creative PROVIDER routes (gemini/openai/fal).
+
+    The creative-credit gate is reserved ONCE per action via ``/v1/creative/reserve`` (which hands the
+    operator a creative capability). This route therefore only VERIFIES that capability (signature +
+    one of ``allowed_audiences`` + not-expired -> the AUTHORITATIVE scope), then resolves the provider
+    key LOCALLY and forwards, returning a KEY-FREE result. It does NOT reserve/commit per call (that
+    would multiply-charge the fixed action price) and the token is NOT single-use (one action makes
+    several provider calls). Fails closed: a bad/expired/wrong-audience token is 401; an unconfigured
+    key / unreachable provider is 503/502 BEFORE leaking anything."""
+    from .safebox_capability import CapabilityError, verify_capability
+
+    signing_key = _cap_signing_key()
+    if not signing_key:
+        raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
+
+    token = str(body.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="missing_capability")
+
+    now = int(time.time())
+    scope = None
+    last_exc: CapabilityError | None = None
+    for audience in allowed_audiences:
+        try:
+            scope, _nonce, _exp = verify_capability(
+                token, signing_key=signing_key, expected_audience=audience, now=now
+            )
+            break
+        except CapabilityError as exc:
+            last_exc = exc
+            scope = None
+    if scope is None:
+        raise HTTPException(
+            status_code=401, detail=f"capability_invalid: {last_exc}" if last_exc else "capability_invalid"
+        )
+
+    try:
+        provider_caller = caller_builder(body.payload or {})
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_provider_payload") from exc
+
+    try:
+        return provider_caller(scope)
+    except BrokerLedgerError as exc:
+        message = str(exc)
+        if message.endswith("_unconfigured"):
+            raise HTTPException(status_code=503, detail=message) from exc
+        raise HTTPException(status_code=502, detail="provider_error") from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid_provider_payload") from exc
+    except RuntimeError as exc:
+        # A provider/SDK failure (e.g. the Gemini SDK) — never leak the upstream body/key.
+        raise HTTPException(status_code=502, detail="provider_error") from exc
 
 
 def _broker_provider_route(
@@ -1007,6 +1322,184 @@ def build_safebox_app() -> FastAPI:
             key_resolver=_gemini_image_key_resolver,
             caller_builder=_gemini_image_provider_caller,
             estimate_builder=_gemini_image_estimate,
+        )
+
+    # ── Creative-credit gate: AUTHORITATIVE reserve/commit/release (operator-owned) ───────────────
+    # These three routes are the ONE money gate for the fixed-price creative actions (logo / UGC /
+    # static ad). The operator (boundary-1 ownership) reserves the action's canonical fixed credit
+    # price on the business's creative-credit ledger ON THE SAFEBOX; reserve hands back a creative
+    # capability the client presents to the gated provider routes. No client may reserve/commit credits
+    # itself, and the provider routes never re-charge — so there is exactly one authoritative gate per
+    # action and no double-charge.
+
+    @app.post("/v1/creative/reserve")
+    def creative_reserve(
+        body: _CreativeReserveBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import safebox
+
+        action = str(body.action or "").strip()
+        audience = _ACTION_AUDIENCE_DEFAULTS.get(action)
+        if not audience or audience not in _CREATIVE_AUDIENCE_CREDIT_ACTION:
+            raise HTTPException(status_code=400, detail="unmappable_creative_action")
+        reservation_key = str(body.reservation_key or "").strip()
+        if not reservation_key:
+            raise HTTPException(status_code=400, detail="reservation_key_required")
+        units = int(body.units or 1)
+        ttl_seconds = int(body.ttl_seconds or _CAP_TTL_SECONDS)
+        if ttl_seconds <= 0:
+            raise HTTPException(status_code=400, detail="ttl_must_be_positive")
+
+        signing_key = _cap_signing_key()
+        if not signing_key:
+            raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
+
+        # Boundary 1: validate the operator OWNS the business and derive the AUTHORITATIVE scope. The
+        # fixed credit price is the ceiling (max_cost_microusd carries the credit count for this rail).
+        try:
+            credits = _creative_credit_price(audience, units=units)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="unmappable_creative_action") from exc
+
+        from .safebox_authz import AuthzError, authorize_operator_call
+
+        try:
+            with _safebox_db_conn() as conn:
+                scope = authorize_operator_call(
+                    conn,
+                    business_slug=str(body.business or ""),
+                    operator_user_id=str(body.operator_user_id or ""),
+                    action=action,
+                    max_cost_microusd=credits,
+                )
+        except AuthzError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+        # Reserve the fixed credits on the verified business BEFORE handing back a token. Insufficient
+        # credits -> 402 here, before any token mint / provider key / provider call.
+        ledger = _CreditLedgerAdapter(audience=audience)
+        try:
+            reservation = ledger.reserve(scope, reservation_key=reservation_key, units=units)
+        except safebox.InsufficientCreativeCredits as exc:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "error": str(exc),
+                    "requested_credits": exc.requested_credits,
+                    "available_credits": exc.available_credits,
+                },
+            ) from exc
+
+        token = mint_capability(
+            scope,
+            signing_key=signing_key,
+            audience=audience,
+            nonce=str(uuid.uuid4()),
+            issued_at=int(time.time()),
+            ttl_seconds=ttl_seconds,
+        )
+        return {
+            "token": token,
+            "audience": audience,
+            "reservation_key": reservation["reservation_key"],
+            "reserved_credits": reservation["reserved_credits"],
+            "credits": reservation["credits"],
+        }
+
+    @app.post("/v1/creative/commit")
+    def creative_commit(
+        body: _CreativeFinalizeBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import safebox
+
+        reservation_key = str(body.reservation_key or "").strip()
+        if not reservation_key:
+            raise HTTPException(status_code=400, detail="reservation_key_required")
+        try:
+            balances = _CreditLedgerAdapter(audience="").commit(
+                reservation_key=reservation_key, actual_credits=body.actual_credits
+            )
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_creative_credit_reservation", "reservation_key": str(exc)},
+            ) from exc
+        return {
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
+
+    @app.post("/v1/creative/release")
+    def creative_release(
+        body: _CreativeFinalizeBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import safebox
+
+        reservation_key = str(body.reservation_key or "").strip()
+        if not reservation_key:
+            raise HTTPException(status_code=400, detail="reservation_key_required")
+        try:
+            balances = _CreditLedgerAdapter(audience="").release(reservation_key=reservation_key)
+        except safebox.UnknownCreativeCreditReservation as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_creative_credit_reservation", "reservation_key": str(exc)},
+            ) from exc
+        return {
+            "business_slug": balances.business_slug,
+            "balance_credits": balances.balance_credits,
+            "reserved_credits": balances.reserved_credits,
+        }
+
+    # ── Gated creative PROVIDER routes (verify creative capability -> key-local -> forward) ────────
+    # Each route requires a creative capability (minted by /v1/creative/reserve, audience-bound to one
+    # of allowed_audiences), resolves the provider key LOCALLY, forwards, and returns a KEY-FREE result.
+    # They do NOT reserve/commit credits (the reserve route already did, once per action) and the token
+    # is NOT single-use, so one reserved action can drive its several provider calls. These REPLACE the
+    # deleted ungated /v1/proxy/{gemini,openai,fal} routes.
+
+    @app.post("/v1/providers/gemini/logo")
+    def provider_gemini_logo(
+        body: _CreativeProviderCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        return _creative_provider_route(
+            body,
+            allowed_audiences=_CREATIVE_GEMINI_AUDIENCES,
+            caller_builder=_creative_gemini_caller,
+        )
+
+    @app.post("/v1/providers/openai/images")
+    def provider_openai_images(
+        body: _CreativeProviderCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        return _creative_provider_route(
+            body,
+            allowed_audiences=_CREATIVE_OPENAI_AUDIENCES,
+            caller_builder=_creative_openai_images_caller,
+        )
+
+    @app.post("/v1/providers/fal/{fal_path:path}")
+    def provider_fal(
+        fal_path: str,
+        body: _CreativeProviderCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        return _creative_provider_route(
+            body,
+            allowed_audiences=_CREATIVE_FAL_AUDIENCES,
+            caller_builder=_creative_fal_caller(fal_path),
         )
 
     # ── Operator/platform provider proxy (internal-token only, platform-billed, key-free) ─────────
