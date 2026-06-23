@@ -3483,7 +3483,7 @@ class TestWebServerEndpoints:
     def test_tui_rpc_discards_client_supplied_operator_identity(self, monkeypatch):
         """Identity is SERVER-ASSIGNED on the HTTP RPC ingress: a client-supplied
         _takyon_operator_user_id never survives — stripped on every method, replaced by the
-        authenticated principal on session.create, and absent entirely when no principal resolves
+        authenticated principal, and absent entirely when no principal resolves
         (the store's identity gate then denies under enforce)."""
         import takyon_cli.web_server as web_server
 
@@ -3511,21 +3511,21 @@ class TestWebServerEndpoints:
         assert _post("session.history").status_code == 200
         assert "_takyon_operator_user_id" not in captured["req"]["params"]
 
-        # session.create with an authenticated principal: server value replaces the client's.
+        # Any method with an authenticated principal: server value replaces the client's.
         class _Principal:
             user_id = "user-real"
 
         monkeypatch.setattr(
             web_server, "_resolve_dashboard_request_principal", lambda request: _Principal()
         )
-        assert _post("session.create").status_code == 200
+        assert _post("takyon.dashboard.create").status_code == 200
         assert captured["req"]["params"]["_takyon_operator_user_id"] == "user-real"
 
-        # session.create with NO principal: no identity param at all — never the client's.
+        # Any method with NO principal: no identity param at all — never the client's.
         monkeypatch.setattr(
             web_server, "_resolve_dashboard_request_principal", lambda request: None
         )
-        assert _post("session.create").status_code == 200
+        assert _post("takyon.dashboard.create").status_code == 200
         assert "_takyon_operator_user_id" not in captured["req"]["params"]
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):

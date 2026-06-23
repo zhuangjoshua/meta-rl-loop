@@ -10416,9 +10416,23 @@ def _takyon_operator_user_id(session: dict | None) -> str:
     return str((session or {}).get("takyon_operator_user_id") or "").strip()
 
 
+def _bind_takyon_operator_user_id(session: dict | None, params: dict | None = None) -> str:
+    current = _takyon_operator_user_id(session)
+    if current:
+        return current
+    if not isinstance(session, dict):
+        return ""
+    transport = current_transport() or session.get("transport") or _stdio_transport
+    resolved = _resolve_session_operator_user_id(params or {}, transport)
+    if resolved:
+        session["takyon_operator_user_id"] = resolved
+        session.pop("takyon_store", None)
+    return resolved
+
+
 def _takyon_store(session: dict | None):
     from plugins.takyon.cli import TakyonStore
-    operator_user_id = _takyon_operator_user_id(session) or None
+    operator_user_id = _bind_takyon_operator_user_id(session) or None
     if not isinstance(session, dict):
         return TakyonStore(operator_user_id=operator_user_id)
     cached = session.get("takyon_store")
@@ -11341,7 +11355,7 @@ def _(rid, params: dict) -> dict:
         TakyonStore = takyon_cli.TakyonStore
         resolve_dashboard_create_identity = takyon_cli._resolve_dashboard_create_identity
         run_takyon_command = takyon_cli.run_takyon_command
-        operator_user_id = _takyon_operator_user_id(session) or None
+        operator_user_id = _bind_takyon_operator_user_id(session, params) or None
         # GOAL_RULES §3 gap #2: zero-balance company-creation preflight. Bootstrapping a company
         # spends real operator money, so refuse BEFORE any business row, identity resolution, or
         # bootstrap work when the operator has no spendable balance. Raises
@@ -11541,7 +11555,7 @@ def _(rid, params: dict) -> dict:
 
         history = session.setdefault("takyon_shell_history", [])
         current_business = str(session.get("takyon_current_business") or "") or None
-        operator_user_id = _takyon_operator_user_id(session) or None
+        operator_user_id = _bind_takyon_operator_user_id(session, params) or None
         detached_target = _takyon_detached_shell_target(line, current_business)
         if detached_target:
             detached_kind, target_business, detached_line = detached_target

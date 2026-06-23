@@ -33,6 +33,20 @@ def test_transport_principal_beats_client_param(monkeypatch):
     assert resolved == "auth-user"
 
 
+def test_stale_session_is_lazily_bound_from_transport_principal(monkeypatch):
+    server = _server()
+    session = {
+        "takyon_store": object(),
+        "transport": types.SimpleNamespace(
+            operator_principal=types.SimpleNamespace(user_id="auth-user")
+        ),
+    }
+
+    assert server._bind_takyon_operator_user_id(session, {}) == "auth-user"
+    assert session["takyon_operator_user_id"] == "auth-user"
+    assert "takyon_store" not in session
+
+
 def test_param_then_session_env_resolution(monkeypatch):
     server = _server()
     from gateway.session_context import clear_session_vars, set_session_vars

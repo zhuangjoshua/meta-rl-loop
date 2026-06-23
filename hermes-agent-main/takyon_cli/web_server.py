@@ -9330,13 +9330,12 @@ async def tui_rpc(body: TuiRpcRequest, request: Request) -> dict:
     params["_takyon_request_origin"] = str(request.headers.get("origin", "") or "")
     # Identity is SERVER-ASSIGNED on this ingress: a client-supplied _takyon_operator_user_id is
     # always discarded (never setdefault — that let the caller pick their principal), and the
-    # authenticated dashboard principal is injected for session.create. No principal ⇒ no identity
+    # authenticated dashboard principal is injected for every TUI RPC. No principal ⇒ no identity
     # param ⇒ the store's identity gate decides (enforce: denied).
     params.pop("_takyon_operator_user_id", None)
-    if req["method"] == "session.create":
-        principal = _resolve_dashboard_request_principal(request)
-        if principal is not None:
-            params["_takyon_operator_user_id"] = str(principal.user_id)
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is not None:
+        params["_takyon_operator_user_id"] = str(principal.user_id)
     req["params"] = params
 
     from tui_gateway import server as tui_server
