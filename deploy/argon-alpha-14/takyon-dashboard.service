@@ -65,6 +65,7 @@ Environment=CLOUDFLARE_ZONE_NAME=coscale.app
 Environment=TAKYON_STORAGE_BACKEND=supabase_s3
 Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
 Environment=TAKYON_SAFEBOX_URL=http://10.116.0.2:8000
+Environment=TAKYON_PROVIDER_BROKER=1
 Environment=TAKYON_DOCKER_BROKER_URL=http://127.0.0.1:8011
 Environment=TAKYON_DOCKER_BINARY=/opt/takyon/hermes-agent-main/scripts/takyon-docker-broker.py
 Environment=TERMINAL_ENV=docker
