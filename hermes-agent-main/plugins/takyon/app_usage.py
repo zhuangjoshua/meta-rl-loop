@@ -41,6 +41,7 @@ reservation_key can never double-charge.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import dataclass
 
@@ -52,6 +53,61 @@ from dataclasses import dataclass
 # may still set as a fail-closed ceiling (e.g. 0 = refuse all product spend for an unentitled
 # business). New budgets open with NO pool cap (None), not the old $5 default.
 _NO_POOL_CAP = None
+
+
+# The restricted, NON-bypassing app-request role migration 0030 creates and migration 0037 binds:
+# after 0037 it has NO direct INSERT/UPDATE/DELETE on app_usage_events (only EXECUTE on the
+# safebox_*_usage SECURITY DEFINER gate functions). See plugins/takyon/db/migrations/0037.
+_LEDGER_APP_ROLE = "takyon_app"
+
+
+@contextlib.contextmanager
+def _ledger_gate_scope(conn):
+    """Run the one usage-ledger gate statement under the restricted ``takyon_app`` role so migration
+    0037's REVOKE actually binds the runtime.
+
+    GOAL_RULES §1/§3: the ONLY sanctioned writer of ``app_usage_events`` is the ``safebox_*_usage``
+    SECURITY DEFINER gate function. The product runtime opens its Postgres connection under the
+    privileged login owner with ``takyon.rls_bypass='1'`` (``runtime_app.control_conn``); that owner
+    is BYPASSRLS and holds implicit DML, so 0037's ``revoke insert,update,delete ... from takyon_app``
+    cannot constrain it. We drop to ``takyon_app`` (NOBYPASSRLS, no direct ledger DML) and clear the
+    bypass GUC for the duration of the single gate call, so the runtime reaches the ledger ONLY via the
+    granted-EXECUTE gate function — a forged direct write under the runtime is then DENIED by the DB.
+    ``SET ROLE`` is session-scoped (works under autocommit and inside a transaction); the GUC + role
+    are restored in ``finally`` so the surrounding control-plane reads keep their prior authority.
+
+    Fails CLOSED: if the role drop itself errors (e.g. an old DB that predates migration 0030), the
+    error propagates rather than silently running the gate with bypass authority.
+    """
+    raw = getattr(conn, "_pg", conn)
+    cur = raw.cursor()
+    try:
+        previous_bypass = ""
+        try:
+            row = cur.execute("select current_setting('takyon.rls_bypass', true)").fetchone()
+            previous_bypass = str((row or [None])[0] or "")
+        except Exception:
+            previous_bypass = ""
+        cur.execute(f"set role {_LEDGER_APP_ROLE}")
+        cur.execute("select set_config('takyon.rls_bypass', '0', false)")
+        try:
+            yield
+        finally:
+            cur.execute("reset role")
+            cur.execute(
+                "select set_config('takyon.rls_bypass', %s, false)", (previous_bypass,)
+            )
+    finally:
+        cur.close()
+
+
+def _gate_execute(conn, sql: str, params):
+    """Execute one usage-ledger gate statement under the restricted ``takyon_app`` role (see
+    :func:`_ledger_gate_scope`) and return its single row. The gate function is SECURITY DEFINER, so
+    its row ops still run with the owner's privileges; only the DIRECT table-write privilege is
+    constrained by the role drop, which is exactly the boundary 0037 introduces."""
+    with _ledger_gate_scope(conn):
+        return conn.execute(sql, params).fetchone()
 
 
 class AppUsageError(Exception):
@@ -485,14 +541,15 @@ def reserve_usage(
     # inactive→refuse, idempotent reservation_key short circuit, sub-user existence + per-subuser
     # gate, per-business pool gate, then insert the 'reserved' row. Refusals come back as a
     # discriminator and are re-raised here as the identical typed exceptions.
-    row = conn.execute(
+    row = _gate_execute(
+        conn,
         "select * from safebox_reserve_usage(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
         (
             business_slug, estimated_cost_microusd, key, app_user_id,
             user_monthly_limit_microusd, app_user_tier, purpose, route,
             provider, model, _json_dumps(metadata or {}),
         ),
-    ).fetchone()
+    )
     _raise_for_gate_refusal(row, business_slug=business_slug, app_user_id=app_user_id)
     return _event_from_gate_row(row)
 
@@ -524,14 +581,15 @@ def settle_usage(
     # Row ops in the migration-0037 SECURITY DEFINER function safebox_settle_usage (verbatim port):
     # lock the event row, unknown→refuse, finalized→no-op return, else reserved→completed recording
     # the actual with the same COALESCE-preserve + metadata-merge and NO cap re-check (money-truth).
-    row = conn.execute(
+    row = _gate_execute(
+        conn,
         "select * from safebox_settle_usage(%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
         (
             business_slug, key, actual_cost_microusd, input_tokens, output_tokens,
             provider_request_id, provider, model,
             None if metadata is None else _json_dumps(metadata),
         ),
-    ).fetchone()
+    )
     _raise_for_gate_refusal(row, business_slug=business_slug, reservation_key=key)
     settled = _event_from_gate_row(row)
     # An idempotent no-op on an already-finalized row returns BEFORE the mirror — exactly as the
@@ -599,13 +657,14 @@ def release_usage(
     # lock the event row, unknown→refuse, finalized→no-op return, else reserved→failed (error given)
     # | released (clean cancel), actual cost zeroed, error coalesced, metadata merged. The 'failed'
     # vs 'released' split on `error` is decided inside the function (error not null → failed).
-    row = conn.execute(
+    row = _gate_execute(
+        conn,
         "select * from safebox_release_usage(%s, %s, %s, %s::jsonb)",
         (
             business_slug, key, error,
             None if metadata is None else _json_dumps(metadata),
         ),
-    ).fetchone()
+    )
     _raise_for_gate_refusal(row, business_slug=business_slug, reservation_key=key)
     return _event_from_gate_row(row)
 

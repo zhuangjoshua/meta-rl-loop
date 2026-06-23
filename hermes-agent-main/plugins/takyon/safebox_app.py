@@ -598,6 +598,48 @@ def _require_internal_token(authorization: str | None = Header(default=None)) ->
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _provider_key_denylist() -> frozenset[str]:
+    """Canonical set of PAID-PROVIDER key names the /v1/env HTTP routes must REFUSE to vend
+    (GOAL_RULES §1 step 4). Sourced from ``core.provider_key_denylist`` (built from the single
+    ``core._API_ENV_ALIASES`` map minus infra providers) so there is no second hand-maintained list.
+    Imported lazily, matching the existing in-route ``from . import core`` pattern. Fails CLOSED: if
+    the canonical source can't be loaded, deny the known provider-key names below so a load error can
+    never silently re-open raw-key vending."""
+    try:
+        from . import core
+
+        return core.provider_key_denylist()
+    except Exception:
+        # Conservative fallback mirror of the canonical denylist — never widen vending on error.
+        return frozenset(
+            {
+                "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                "OPENAI_API_KEY", "OPENAI_KEY",
+                "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_KEY",
+                "TAVILY_API_KEY",
+                "GEMINI_API_KEY", "TAKYON_GEMINI_API_KEY", "GOOGLE_API_KEY",
+                "FAL_KEY", "FAL_API_KEY",
+                "REPLICATE_API_TOKEN",
+                "COMPOSIO_API_KEY",
+                "FIRECRAWL_API_KEY", "OPENROUTER_API_KEY", "PARALLEL_API_KEY", "XAI_API_KEY",
+                "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
+                "META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN", "META_CAPI_TOKEN",
+            }
+        )
+
+
+def _is_denied_provider_key(name: str) -> bool:
+    return str(name or "").strip() in _provider_key_denylist()
+
+
+def _refuse_provider_key(name: str) -> None:
+    """Reject a /v1/env read for a PAID-PROVIDER key — a runtime plane must call the safebox broker,
+    not pull the raw key over HTTP. 404 (indistinguishable from an absent key; never echoes the
+    value)."""
+    if _is_denied_provider_key(name):
+        raise HTTPException(status_code=404, detail="provider_key_not_vended")
+
+
 def _anthropic_key_resolver(_scope: CapabilityScope) -> str:
     """Resolve the SHARED Anthropic key LOCALLY on the safebox (never returned to a caller)."""
     from . import ai_provider
@@ -1108,12 +1150,20 @@ def build_safebox_app() -> FastAPI:
     @app.get("/v1/env/{key}")
     def read_env_value(key: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
         _require_internal_token(authorization)
+        # GOAL_RULES §1 step 4: a runtime plane may never pull a raw paid-provider key over HTTP. A
+        # denied key 404s (no value), exactly as if absent. Infra secrets (DB/Stripe/Auth0/…) serve.
+        _refuse_provider_key(key)
         return {"value": safebox.read_env_backed_value(key)}
 
     @app.post("/v1/env/first")
     def first_env_value(body: _FirstEnvBody, authorization: str | None = Header(default=None)) -> dict[str, str]:
         _require_internal_token(authorization)
-        return {"value": safebox.first_env_backed_value(*body.keys)}
+        # Filter denied provider-key aliases OUT of the candidate list, then resolve the first
+        # non-denied value. If the request asks ONLY for denied keys, refuse (404) rather than vend.
+        allowed = [k for k in (body.keys or []) if not _is_denied_provider_key(k)]
+        if not allowed:
+            raise HTTPException(status_code=404, detail="provider_key_not_vended")
+        return {"value": safebox.first_env_backed_value(*allowed)}
 
     @app.post("/v1/env/{key}")
     def save_env_value(key: str, body: _EnvValueBody, authorization: str | None = Header(default=None)) -> dict[str, bool]:
@@ -1129,7 +1179,14 @@ def build_safebox_app() -> FastAPI:
     @app.get("/v1/env/snapshot")
     def env_snapshot(authorization: str | None = Header(default=None)) -> dict[str, dict[str, str]]:
         _require_internal_token(authorization)
-        return {"snapshot": safebox.sensitive_env_snapshot()}
+        # Strip every denied paid-provider key out of the bulk snapshot — the runtime planes get the
+        # infra secrets they need but no raw provider key ever leaves the safebox over HTTP.
+        snapshot = {
+            name: value
+            for name, value in safebox.sensitive_env_snapshot().items()
+            if not _is_denied_provider_key(name)
+        }
+        return {"snapshot": snapshot}
 
     @app.get("/v1/env")
     def env_keys(
@@ -1137,7 +1194,14 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, list[str]]:
         _require_internal_token(authorization)
-        return {"keys": safebox.list_env_backed_keys(sensitive_only=sensitive_only != "0")}
+        # Names only (no values), but still hide the denied provider keys so a client never sees a
+        # paid-provider key advertised as vendable through this route.
+        keys = [
+            name
+            for name in safebox.list_env_backed_keys(sensitive_only=sensitive_only != "0")
+            if not _is_denied_provider_key(name)
+        ]
+        return {"keys": keys}
 
     @app.post("/v1/user-api-keys/register")
     def register_user_key(

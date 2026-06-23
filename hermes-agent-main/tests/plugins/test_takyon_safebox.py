@@ -321,32 +321,99 @@ def test_safebox_app_fails_closed_when_token_is_unconfigured(tmp_path, monkeypat
     )
     assert any_bearer.status_code == 401
 
-    # Local test rigs may opt out EXPLICITLY (hermetic pytest envs scrub *_TOKEN vars).
+    # Local test rigs may opt out EXPLICITLY (hermetic pytest envs scrub *_TOKEN vars). Once auth is
+    # bypassed, an INFRA secret still serves over /v1/env (a provider key would 404 — see the
+    # provider-denylist test below).
     monkeypatch.setenv("TAKYON_SAFEBOX_ALLOW_TOKENLESS", "1")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    allowed = client.get("/v1/env/OPENAI_API_KEY")
+    monkeypatch.setenv("DATABASE_URL", "postgres://infra-serves")
+    allowed = client.get("/v1/env/DATABASE_URL")
     assert allowed.status_code == 200
+    assert allowed.json() == {"value": "postgres://infra-serves"}
 
 
 def test_safebox_app_requires_internal_token_and_round_trips_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
 
     client = TestClient(build_safebox_app())
 
-    unauthorized = client.get("/v1/env/OPENAI_API_KEY")
+    unauthorized = client.get("/v1/env/DATABASE_URL")
     assert unauthorized.status_code == 401
 
+    # Round-trip an INFRA secret (not a paid-provider key): write then read it back over /v1/env.
+    # The runtime planes still need DB/Stripe/Auth0/… delivered this way.
     headers = {"Authorization": "Bearer shared-token"}
-    saved = client.post("/v1/env/OPENAI_API_KEY", json={"value": "sk-live"}, headers=headers)
+    saved = client.post("/v1/env/DATABASE_URL", json={"value": "postgres://round-trip"}, headers=headers)
     assert saved.status_code == 200
     assert saved.json() == {"ok": True}
 
-    read_back = client.get("/v1/env/OPENAI_API_KEY", headers=headers)
+    read_back = client.get("/v1/env/DATABASE_URL", headers=headers)
     assert read_back.status_code == 200
-    assert read_back.json() == {"value": "sk-live"}
+    assert read_back.json() == {"value": "postgres://round-trip"}
+
+
+def test_v1_env_routes_refuse_provider_keys_but_serve_infra(tmp_path, monkeypatch):
+    """GOAL_RULES §1 step 4: the /v1/env HTTP routes must REFUSE to vend any paid-provider key (a
+    runtime plane must call the safebox broker instead), while still serving infra secrets. The
+    safebox's OWN local resolution (for the proxy/broker) is unaffected — covered by the
+    read_env_backed_value unit tests above."""
+    from plugins.takyon import core
+
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    headers = {"Authorization": "Bearer shared-token"}
+
+    client = TestClient(build_safebox_app())
+
+    # Every denied provider key 404s over HTTP (no value), even though it is resolvable locally.
+    for provider_key in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                         "OPENAI_API_KEY", "TAVILY_API_KEY", "GEMINI_API_KEY",
+                         "TAKYON_GEMINI_API_KEY", "FAL_KEY", "COMPOSIO_API_KEY"):
+        monkeypatch.setenv(provider_key, "leaked-secret-should-not-vend")
+        resp = client.get(f"/v1/env/{provider_key}", headers=headers)
+        assert resp.status_code == 404, provider_key
+        assert "leaked-secret-should-not-vend" not in resp.text
+
+    # An INFRA secret still serves.
+    monkeypatch.setenv("DATABASE_URL", "postgres://infra")
+    infra = client.get("/v1/env/DATABASE_URL", headers=headers)
+    assert infra.status_code == 200
+    assert infra.json() == {"value": "postgres://infra"}
+
+    # /v1/env/first filters denied aliases out, then resolves the first non-denied value. The denied
+    # ANTHROPIC_API_KEY (first in the list) is skipped; the infra POSTGRES_URL alias resolves.
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+    monkeypatch.setenv("POSTGRES_URL", "postgres://pg-alias")
+    first_mixed = client.post(
+        "/v1/env/first",
+        json={"keys": ["ANTHROPIC_API_KEY", "POSTGRES_URL"]},
+        headers=headers,
+    )
+    assert first_mixed.status_code == 200
+    assert first_mixed.json() == {"value": "postgres://pg-alias"}
+
+    # first asking ONLY for denied keys refuses.
+    first_denied = client.post(
+        "/v1/env/first",
+        json={"keys": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]},
+        headers=headers,
+    )
+    assert first_denied.status_code == 404
+
+    # NOTE: GET /v1/env/snapshot is shadowed by the earlier /v1/env/{key} route (a PRE-EXISTING
+    # route-ordering bug, key='snapshot'), so it is unreachable as a GET and is not asserted here.
+    # The snapshot handler still applies the denylist filter (defense in depth) for if/when that
+    # ordering is fixed. The /v1/env name-listing route IS reachable and filters denied names:
+    listed = client.get("/v1/env", headers=headers).json()["keys"]
+    assert "ANTHROPIC_API_KEY" not in listed
+    assert "OPENAI_API_KEY" not in listed
+
+    # The denylist is the single canonical source.
+    assert "ANTHROPIC_API_KEY" in core.provider_key_denylist()
+    assert "DATABASE_URL" not in core.provider_key_denylist()
 
 
 def test_safebox_app_requires_internal_token_and_reads_creative_credit_balance(monkeypatch):

@@ -193,3 +193,52 @@ def test_non_anthropic_modes_do_not_use_the_broker_runtime(monkeypatch):
     )
     runtime = _resolve_runtime_for_request(context, {"model": "gpt-4o"})
     assert runtime["api_key"] == "local-key"
+
+
+def test_runtime_plane_resolves_anthropic_keyfree_without_probing_v1_env(monkeypatch):
+    """GOAL_RULES §1 step 4a: on a RUNTIME plane (operator/sub-user, remote safebox configured),
+    resolve_runtime_provider must build a CONSTRUCTIBLE anthropic runtime with NO raw provider key —
+    and must NOT issue the boot-time GET /v1/env/ANTHROPIC_* probe. The operator gateway discards this
+    api_key for its placeholder and re-resolves each call key-free, so a key here is pure leak."""
+    import takyon_cli.runtime_provider as rp
+    from plugins.takyon import core as takyon_core
+    from plugins.takyon import safebox
+
+    # Runtime plane: a remote safebox is configured and this host is NOT the safebox itself, so the
+    # broker lockdown defaults ON.
+    monkeypatch.setattr(safebox, "_local_authority_enabled", lambda: False)
+    monkeypatch.setattr(takyon_core, "_claude_agent_broker_lockdown_enabled", lambda: True)
+
+    # Make a config that selects native anthropic at api.anthropic.com.
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {"provider": "anthropic"})
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(rp, "resolve_requested_provider", lambda requested: "anthropic")
+    monkeypatch.setattr(rp, "_resolve_named_custom_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", lambda **k: None)
+    monkeypatch.setattr(rp, "load_pool", lambda provider: None)
+
+    # Any raw-key resolution would be a /v1/env probe — fail the test if it is reached.
+    def _no_probe(*a, **k):
+        raise AssertionError("resolve_runtime_provider must not resolve a raw anthropic key on a runtime plane")
+
+    monkeypatch.setattr(rp, "get_env_value", _no_probe)
+    import agent.anthropic_adapter as aad
+    monkeypatch.setattr(aad, "resolve_anthropic_token", _no_probe)
+
+    runtime = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert runtime["provider"] == "anthropic"
+    assert runtime["api_mode"] == "anthropic_messages"
+    assert runtime["api_key"] == ""  # key-free: nothing resolved on the plane
+    assert runtime["source"] == "safebox-broker-keyfree"
+
+
+def test_safebox_host_still_resolves_anthropic_key_locally(monkeypatch):
+    """The key-free guard must NOT fire on the safebox host (role=safebox): the safebox resolves its
+    own provider keys locally for the proxy/broker."""
+    import takyon_cli.runtime_provider as rp
+    from plugins.takyon import safebox
+
+    # On the safebox host the local authority is enabled — the keyfree-plane guard returns False.
+    monkeypatch.setattr(safebox, "_local_authority_enabled", lambda: True)
+    assert rp._anthropic_broker_keyfree_plane() is False

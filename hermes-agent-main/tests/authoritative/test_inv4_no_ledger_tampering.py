@@ -53,6 +53,7 @@ aspirational target — invariant 4 describes guards that exist in the current s
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 import os
 import pathlib
@@ -453,3 +454,93 @@ def test_pg_business_credits_commit_replay_is_a_noop(pg_conn):
     # 6 reserved, 4 spent -> 2 refunded; balance 10-6+2 = 6, and replay does not refund again.
     assert first.balance_credits == 6
     assert replay.balance_credits == 6
+
+
+# --------------------------------------------------------------------------------------
+# GOAL_RULES §1/§3 cutover step 5 — the usage ledger is reachable ONLY via the
+# safebox_*_usage SECURITY DEFINER gate functions, never by direct DML, under the
+# NON-bypassing `takyon_app` runtime role (migration 0037's REVOKE actually binds).
+# --------------------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def _takyon_app_conn(pg_conn):
+    """A second connection to the SAME throwaway DB, scoped to the restricted `takyon_app` role
+    (NOBYPASSRLS, no direct app_usage_events DML after migration 0037). Mirrors the runtime's
+    ledger-write scope so the boundary can be proven the way production enforces it."""
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    dsn = make_conninfo(os.environ["TAKYON_TEST_PG_DSN"], dbname=pg_conn.info.dbname)
+    conn = psycopg.connect(dsn, autocommit=True)
+    try:
+        conn.execute("set role takyon_app")
+        conn.execute("select set_config('takyon.rls_bypass', '0', false)")
+        yield conn
+    finally:
+        conn.close()
+
+
+@_PG
+def test_pg_usage_ledger_direct_dml_is_denied_under_takyon_app(pg_conn):
+    """Direct INSERT/UPDATE/DELETE on app_usage_events is DENIED for the runtime `takyon_app` role —
+    the gate functions are the ONLY sanctioned writer (migration 0037 boundary)."""
+    import psycopg.errors
+
+    slug = _business(pg_conn)  # privileged setup on the superuser conn
+    with _takyon_app_conn(pg_conn) as app_conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app_conn.execute(
+                "insert into app_usage_events "
+                "(business_slug, reservation_key, status, estimated_cost_microusd) "
+                "values (%s, %s, 'reserved', 1)",
+                (slug, "forged-rk"),
+            )
+
+
+@_PG
+def test_pg_usage_gate_functions_work_under_takyon_app(pg_conn):
+    """The reserve/settle SECURITY DEFINER gate functions DO run under `takyon_app` (granted EXECUTE)
+    and write the ledger with the owner's privilege — the intended path is open while direct DML is
+    closed."""
+    slug = _business(pg_conn)  # privileged setup on the superuser conn
+    rk = "gate-rk-1"
+    with _takyon_app_conn(pg_conn) as app_conn:
+        reserved = app_conn.execute(
+            "select status, estimated_cost_microusd from safebox_reserve_usage("
+            "%s, %s, %s, null, null, null, 'product_usage', 'app', null, null, '{}'::jsonb)",
+            (slug, 10_000, rk),
+        ).fetchone()
+        assert reserved[0] == "reserved"
+        assert reserved[1] == 10_000
+        settled = app_conn.execute(
+            "select status, actual_cost_microusd from safebox_settle_usage("
+            "%s, %s, %s, null, null, null, null, null, null)",
+            (slug, rk, 7_000),
+        ).fetchone()
+        assert settled[0] == "completed"
+        assert settled[1] == 7_000
+    # The row is visible on the superuser conn — the gate wrote it.
+    n = pg_conn.execute(
+        "select count(*) from app_usage_events where business_slug = %s and reservation_key = %s",
+        (slug, rk),
+    ).fetchone()[0]
+    assert n == 1
+
+
+@_PG
+def test_pg_usage_reserve_settle_release_via_app_layer_under_takyon_app(pg_conn):
+    """The real app_usage.reserve/settle/release (which internally drop to `takyon_app` for the gate
+    call via _ledger_gate_scope) still work end-to-end on the runtime connection — the product
+    /generate + /search reserve→settle→release path is intact."""
+    slug = _business(pg_conn)
+    r1 = app_usage.reserve_usage(pg_conn, slug, estimated_cost_microusd=5_000, reservation_key="ap-rk-1")
+    assert r1.status == "reserved"
+    s1 = app_usage.settle_usage(pg_conn, slug, "ap-rk-1", actual_cost_microusd=4_200)
+    assert s1.status == "completed"
+    assert s1.actual_cost_microusd == 4_200
+
+    # release path on a fresh reservation
+    app_usage.reserve_usage(pg_conn, slug, estimated_cost_microusd=5_000, reservation_key="ap-rk-2")
+    rel = app_usage.release_usage(pg_conn, slug, "ap-rk-2", error="provider_error")
+    assert rel.status == "failed"
+    assert rel.actual_cost_microusd == 0

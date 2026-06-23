@@ -1182,6 +1182,51 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "xai": ("XAI_API_KEY",),
 }
 
+# Provider-name buckets within _API_ENV_ALIASES that are INFRASTRUCTURE secrets, NOT paid-provider
+# keys. The safebox MUST keep vending these over /v1/env so the runtime planes can open Postgres,
+# verify Stripe/billing webhooks, deploy, send transactional email, and register search-console
+# ownership. Everything else in _API_ENV_ALIASES is a PAID-PROVIDER credential whose raw value the
+# runtime planes must never fetch (GOAL_RULES §1 step 4) — those go through the safebox broker.
+_INFRA_API_ALIAS_PROVIDERS: frozenset[str] = frozenset(
+    {
+        "database",               # DATABASE_URL / POSTGRES_* — the control-plane connection
+        "stripe",                 # STRIPE_SECRET_KEY — payment/webhook reconciliation rail
+        "vercel",                 # VERCEL_TOKEN — frontdoor deploy, not a model provider
+        "postmark",               # POSTMARK_* — transactional email infra
+        "google_search_console",  # TAKYON_GSC_SERVICE_ACCOUNT_KEY — site-ownership registration infra
+    }
+)
+# Extra paid-provider alias spellings the deployed units UnsetEnvironment= that are not yet keys in
+# _API_ENV_ALIASES (kept here so the single denylist below is exhaustive without duplicating a second
+# alias map). Mirrors the secret-boundary intent of GOAL_RULES §1.
+_EXTRA_PROVIDER_KEY_ALIASES: tuple[str, ...] = (
+    "OPENAI_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_KEY",
+    "REPLICATE_API_TOKEN",
+)
+
+
+def provider_key_denylist() -> frozenset[str]:
+    """The canonical set of PAID-PROVIDER env-key names the safebox /v1/env HTTP routes must REFUSE to
+    vend (GOAL_RULES §1 step 4): a runtime plane (operator/sub-user/worker) holding the shared
+    TAKYON_SAFEBOX_TOKEN must never be able to fetch a raw model/image/video/search/social key over
+    HTTP — those resolve only inside the safebox's own authority routes (the broker), never on a
+    client plane.
+
+    Built from the SINGLE canonical alias source ``_API_ENV_ALIASES`` (minus the infra providers in
+    ``_INFRA_API_ALIAS_PROVIDERS``), unioned with the extra deployed-unit spellings, so adding a new
+    paid provider to the alias map automatically extends the denylist with no second list to maintain.
+    Infra secrets (DATABASE_URL/POSTGRES_*, STRIPE_*, AUTH0_*, SUPABASE_*, VERCEL_*, CLOUDFLARE_*,
+    POSTMARK*, UMAMI_*, search-console, …) are deliberately NOT denied — the runtime needs them."""
+    denied: set[str] = set(_EXTRA_PROVIDER_KEY_ALIASES)
+    for provider, aliases in _API_ENV_ALIASES.items():
+        if provider in _INFRA_API_ALIAS_PROVIDERS:
+            continue
+        denied.update(aliases)
+    return frozenset(denied)
+
+
 _JOB_API_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "ai_gateway_setup": ("llm",),
     "ceo_wakeup": ("llm",),

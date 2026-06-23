@@ -34,6 +34,28 @@ from takyon_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname
 
 
+def _anthropic_broker_keyfree_plane() -> bool:
+    """Whether THIS plane resolves Anthropic key-free through the safebox proxy (GOAL_RULES §1 step 4).
+
+    True only on a RUNTIME plane (operator/sub-user) where the broker lockdown is engaged — i.e. a
+    remote safebox is configured and this host is NOT the safebox itself. On such a plane the raw
+    provider key must never land in process memory: the CEO/worker constructs with a placeholder and
+    every Anthropic call routes through the safebox proxy with a minted ``operator.session`` token. On
+    the safebox host (role=safebox) this is False, so the safebox's OWN local key resolution for its
+    proxy/broker is untouched. Fails SAFE to False (keep the legacy direct-key path) if the lockdown
+    helper is unavailable, so this never blocks a plane that genuinely needs a direct key."""
+    try:
+        from plugins.takyon import core as takyon_core
+        from plugins.takyon import safebox as takyon_safebox
+
+        # The safebox host resolves its own keys locally for the proxy — never go key-free there.
+        if takyon_safebox._local_authority_enabled():
+            return False
+        return bool(takyon_core._claude_agent_broker_lockdown_enabled())
+    except Exception:
+        return False
+
+
 def _normalize_custom_provider_name(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
 
@@ -1356,6 +1378,33 @@ def resolve_runtime_provider(
         if cfg_provider == "anthropic":
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
         base_url = cfg_base_url or "https://api.anthropic.com"
+
+        # Key-hiding on a runtime plane (GOAL_RULES §1 cutover step 4): when the operator/worker
+        # plane runs key-free against the safebox proxy (broker lockdown — default ON whenever a
+        # remote safebox is configured), the agent must CONSTRUCT with NO raw provider key on the
+        # plane. The per-CALL Anthropic path already routes through the safebox proxy with a minted
+        # ``operator.session`` token (operator_gateway._resolve_anthropic_broker_runtime), and the
+        # operator-gateway agent is built with a placeholder key — so the boot-time runtime that
+        # ``worker._handle_ceo_wake`` / the CLI feed into ``build_operator_gateway_agent`` only needs
+        # to be constructible; its ``api_key`` is DISCARDED for the placeholder. Resolving a real key
+        # here would issue a needless ``GET /v1/env/ANTHROPIC_API_KEY`` to the safebox per restart —
+        # the exact residual raw-key leak step 4 removes. So return a KEY-FREE runtime: no
+        # ``resolve_anthropic_token``/``get_env_value`` probe, no raw key ever on this plane. Azure
+        # endpoints have no safebox proxy route and are excluded (they keep the direct-key path).
+        _is_azure_base = "azure.com" in base_url.lower() or (
+            cfg_base_url and "azure.com" in cfg_base_url.lower()
+        )
+        if not _is_azure_base and _anthropic_broker_keyfree_plane():
+            return {
+                "provider": "anthropic",
+                "api_mode": "anthropic_messages",
+                "base_url": base_url,
+                # No raw key is resolved on a runtime plane: the operator gateway swaps this for its
+                # placeholder and re-resolves each call key-free via the safebox proxy + session token.
+                "api_key": "",
+                "source": "safebox-broker-keyfree",
+                "requested_provider": requested_provider,
+            }
 
         # For Microsoft Foundry endpoints, use ANTHROPIC_API_KEY directly —
         # Claude Code OAuth tokens (sk-ant-oat01) are not accepted by Azure.
