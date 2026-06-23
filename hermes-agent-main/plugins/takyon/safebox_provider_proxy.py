@@ -126,6 +126,11 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
             "x-api-key": key,
             "anthropic-version": _ANTHROPIC_VERSION,
             "content-type": "application/json",
+            # Force an UNCOMPRESSED upstream response: httpx auto-adds accept-encoding: gzip, which makes
+            # Anthropic gzip the SSE stream. If we then proxy the raw (compressed) bytes as
+            # text/event-stream without a content-encoding header, the Anthropic SDK can't decode them.
+            # identity = plain SSE bytes we can pass through verbatim and the SDK reads directly.
+            "accept-encoding": "identity",
         }
         wants_stream = bool(payload.get("stream") is True)
 
@@ -148,7 +153,10 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
                                 f'"error": "provider_error"}}\n\n'
                             ).encode("utf-8")
                             return
-                        for chunk in upstream.iter_raw():
+                        # iter_bytes() decodes any transfer/content encoding to plain bytes (with the
+                        # identity request above there is nothing to decode, but this is robust to any
+                        # intermediary that compresses anyway).
+                        for chunk in upstream.iter_bytes():
                             if chunk:
                                 yield chunk
                 finally:
