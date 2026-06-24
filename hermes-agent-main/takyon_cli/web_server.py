@@ -4901,7 +4901,14 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
         store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
         conn = store._connect()
         try:
-            business_credits.open_business_credit_account(conn, slug)
+            # This is a READ-ONLY snapshot for the dashboard, so it must never depend on a
+            # WRITE. On safebox-remote planes `open_business_credit_account` POSTs to the
+            # safebox authority (/v1/creative-credits/accounts/open); when that write is
+            # transiently unreachable the whole read failed and the UI showed
+            # "Creative credits unavailable" even though the balance is perfectly readable
+            # through the GET path. `get_business_credit_balances` already returns a
+            # zero-balance for a never-opened account, and the snapshot (given `balances=`)
+            # never re-opens — so a pure read needs no account-open side effect at all.
             balances = business_credits.get_business_credit_balances(conn, slug)
             snapshot = _creative_credit_budget_snapshot_from_conn(
                 store,

@@ -24707,10 +24707,21 @@ def _read_creative_credit_channel_budget_config(
     total_capacity_credits: int = 0,
 ) -> dict[str, dict[str, Any]]:
     default_config = _creative_credit_default_channel_budget_config(total_capacity_credits)
-    config_abs = store._resolve_business_file(business, _creative_credit_budget_relpath())
-    if not config_abs.is_file():
+    # Reading one small JSON config must NOT trigger a full workspace object-store sync
+    # (sync=False). A sync re-materializes the whole business tree, and a single asset file
+    # left root-owned by an earlier privileged write (see prod-verify ownership note) would
+    # then raise PermissionError here and blank the entire credits tile. A pure read of the
+    # channel-budget config is self-contained and resilient with sync disabled; any read
+    # failure already degrades to the default config below.
+    try:
+        config_abs = store._resolve_business_file(
+            business, _creative_credit_budget_relpath(), sync=False
+        )
+    except Exception:
         return default_config
     try:
+        if not config_abs.is_file():
+            return default_config
         raw = json.loads(config_abs.read_text(encoding="utf-8"))
     except Exception:
         return default_config

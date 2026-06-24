@@ -1236,7 +1236,19 @@ export function useTakyonLitebulb() {
   const ensureSession = useCallback(async (slug: string) => {
     const businessSlug = trimText(slug).toLowerCase();
     const gateway = ensureGateway();
-    await gateway.connect();
+    // A WebSocket connect failure must NOT abort session setup or sending. The live WS is an
+    // optimization for streaming deltas; every JSON-RPC method (session.create / .resume /
+    // .history / prompt.submit) transparently falls back to the HTTP `/api/tui/rpc` route when
+    // the socket isn't open (see GatewayClient.request). Previously a transient WS 401/403
+    // (the documented Cloudflare-proxied /api/ws + Auth0-cookie upgrade race) threw out of
+    // `connect()` here, which propagated up through sendPrompt and meant prompt.submit was
+    // NEVER attempted — the turn silently never reached the backend. Swallow the connect error
+    // so the rest of the turn proceeds over HTTP RPC and still streams via the history poll.
+    try {
+      await gateway.connect();
+    } catch {
+      /* WS unavailable — continue over HTTP RPC fallback */
+    }
     if (!isVisibleScope(businessSlug)) return "";
     const applyHistory = (history: HistoryPayload) => {
       if (!isVisibleScope(businessSlug)) {
@@ -1497,15 +1509,29 @@ export function useTakyonLitebulb() {
         }
       }
     } catch (error) {
-      clearStoredPendingTurn(activeBusiness.slug);
-      setChatMessages((messages) => {
-        const next = messages.filter((message) => message.id !== pendingTurn.id);
-        chatMessagesRef.current = next;
-        return next;
-      });
+      // APPEND-ONLY: the operator's just-sent bubble must NEVER be rolled back on a
+      // transient failure. Removing it here (the old behavior) was exactly the "I type a
+      // message, it appears, then vanishes" bug — and because the stored pending turn was
+      // also cleared, the turn never reached the backend at all (no `conversation turn` in
+      // agent.log). The user message lives only in chatMessages, so it stays on screen; the
+      // pending turn stays in storage so the live history poll's `replayPendingTurn` resubmits
+      // it once the gateway/session recovers (e.g. the WS dropped to a 401 and the next attempt
+      // goes over the HTTP RPC fallback). We keep the optimistic bubble and the pending turn
+      // for every error class — transient (busy / missing-session) AND hard — and only surface
+      // a visible, non-destructive agent line for a genuinely hard, non-retryable failure.
       discardAssistantMessage();
-      if (!isBusyError(error) && !isMissingSessionError(error)) {
-        completeAssistantText(error instanceof Error ? error.message : "Failed to send message.");
+      const transient = isBusyError(error) || isMissingSessionError(error);
+      if (!transient) {
+        // Hard failure: leave the user bubble in place and add a calm agent line so the
+        // operator sees the turn didn't go through, instead of a silent disappearance. The
+        // pending turn is retained so a recovering session can still replay it.
+        const raw = error instanceof Error ? error.message : "";
+        const friendly =
+          /unauthorized|forbidden|token|disconnected|connection|websocket|network|timed out/i.test(raw)
+            ? "I couldn't reach the live channel just now — your message is saved and I'll pick it up as soon as the connection is back."
+            : "Something interrupted sending that — your message is saved and I'll retry it.";
+        ensureAssistantMessage();
+        completeAssistantText(friendly);
       }
       endChatTurn();
       setSubmitting(false);
