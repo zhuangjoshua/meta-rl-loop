@@ -8738,6 +8738,49 @@ def _env_requirement_value(name: str) -> str:
     return str(value).strip()
 
 
+def _safebox_remote_authority_reachable() -> bool:
+    """True on a runtime plane (operator/sub-user/worker) that brokers through a remote safebox.
+
+    Mirrors the Tavily readiness idiom (``plugins/web/tavily/provider.py::_use_remote_authority``):
+    wraps ``safebox._use_remote_authority()`` so the "no authority configured at all" case
+    (local dev / hermetic tests, where it raises ``SafeboxAuthorityUnavailable``) reads as
+    False — i.e. only the local-env path can satisfy the requirement there. This is the same
+    legitimate "where does it run" switch the provider brokers use, NOT an unsafe key fallback.
+    """
+    try:
+        return bool(safebox._use_remote_authority())
+    except safebox.SafeboxAuthorityUnavailable:
+        return False
+    except Exception:
+        return False
+
+
+def _requirement_satisfied_by_safebox_broker(alias_names: tuple[str, ...]) -> bool:
+    """True when the safebox broker supplies this paid-provider requirement on a runtime plane.
+
+    Post-safebox-cutover, paid-provider keys (COMPOSIO_API_KEY for X/twitter/reddit/reddit_ads/meta,
+    GEMINI/FAL/etc.) are on ``provider_key_denylist()`` — the safebox REFUSES to egress them over
+    /v1/env, so a runtime plane's ``_env_requirement_value`` returns "" even though the actual call
+    path already brokers fine (``composio_distribution._request`` -> ``safebox.composio_forward()``;
+    ``_meta_graph`` -> ``safebox.meta_graph_forward()``). The old raw-env readiness gate therefore
+    fails CLOSED and the CEO bails before ever reaching the working broker.
+
+    A requirement is broker-satisfiable iff (a) EVERY alias spelling is a denylisted paid-provider
+    key the safebox holds (so the broker — not local env — is the canonical supplier), and
+    (b) the remote safebox authority is reachable. Infra keys (DATABASE_URL/STRIPE_*/VERCEL/...) are
+    deliberately NOT denylisted and are vended over /v1/env, so they keep resolving through the
+    local-env path and are never short-circuited here. This does NOT weaken gating for keys the
+    safebox does not hold, and adds nothing to any /v1/env egress allowlist.
+    """
+    names = tuple(str(name or "").strip() for name in alias_names if str(name or "").strip())
+    if not names:
+        return False
+    denied = provider_key_denylist()
+    if not all(name in denied for name in names):
+        return False
+    return _safebox_remote_authority_reachable()
+
+
 def _missing_env_for_requirement(requirement: str) -> list[str]:
     key = str(requirement or "").strip()
     if not key:
@@ -8746,7 +8789,15 @@ def _missing_env_for_requirement(requirement: str) -> list[str]:
     if alias:
         if key.lower() == "anthropic" and _anthropic_safebox_broker_configured():
             return []
-        return [] if any(_env_requirement_value(name) for name in alias) else ["/".join(alias)]
+        if any(_env_requirement_value(name) for name in alias):
+            return []
+        # On a runtime plane the safebox holds these paid-provider keys and brokers the call; the raw
+        # key is intentionally absent from local env. Treat the requirement as satisfied so the gate
+        # does not pre-empt the working broker. Fails closed only when NEITHER local env NOR a
+        # reachable safebox authority can supply it.
+        if _requirement_satisfied_by_safebox_broker(alias):
+            return []
+        return ["/".join(alias)]
     return [] if _env_requirement_value(key) else [key]
 
 
