@@ -4530,6 +4530,7 @@ def _run_prompt_submit(
         reservation_key = ""
         reserved_cents = 0
         turn_cost_before_usd = 0.0
+        turn_cost_after_usd = 0.0
         billing_warning = ""
         resolved_operator_user_id = ""
         try:
