@@ -68,6 +68,24 @@ def _request(
     params: Mapping[str, Any] | Iterable[tuple[str, Any]] | None = None,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
+    if safebox._use_remote_authority():
+        # COMPOSIO_API_KEY is a provider secret the safebox holds and refuses to egress over
+        # /v1/env, so a runtime plane cannot resolve it (os.environ is empty there). Broker the WHOLE
+        # call through the safebox: it resolves the key LOCALLY and forwards to Composio, returning
+        # the key-free JSON. Mirrors the creative provider routes — and because every channel
+        # (twitter/reddit/reddit_ads/metaads) AND the connected-account lookup funnel through
+        # _request, this single seam fixes them all.
+        norm_params = None
+        if params is not None:
+            pairs = list(params.items()) if isinstance(params, Mapping) else list(params)
+            norm_params = [[str(k), v] for k, v in pairs]
+        return safebox.composio_forward(
+            method=method,
+            path=path,
+            json_body=(dict(json_body) if json_body is not None else None),
+            params=norm_params,
+            timeout=timeout,
+        )
     httpx = _load_httpx()
     url = path if path.startswith("http://") or path.startswith("https://") else f"{_base_url()}/{path.lstrip('/')}"
     try:

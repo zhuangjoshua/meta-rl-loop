@@ -601,6 +601,14 @@ class _FirstEnvBody(BaseModel):
     keys: list[str]
 
 
+class _ComposioForwardBody(BaseModel):
+    method: str = "GET"
+    path: str = ""
+    json_body: dict[str, Any] | None = None
+    params: list[Any] | None = None
+    timeout: float = 60.0
+
+
 class _RegisterUserKeyBody(BaseModel):
     user_id: str
     raw_key: str
@@ -1978,6 +1986,37 @@ def build_safebox_app() -> FastAPI:
         try:
             return safebox.storage_put(provider, body.key, data, digest=body.digest)
         except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/providers/composio/forward")
+    def provider_composio_forward(
+        body: _ComposioForwardBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # COMPOSIO_API_KEY is a provider secret held here and denied /v1/env egress; runtime planes
+        # broker their Composio calls through this route. On the safebox host _use_remote_authority()
+        # is False, so composio_distribution._request resolves the key LOCALLY and calls Composio
+        # directly, returning the key-free upstream JSON. Gated by the internal token (transport
+        # reachability); the per-action money gate lives upstream in the distribution skill/tool.
+        _require_internal_token(authorization)
+        from . import composio_distribution as _cd
+
+        params = None
+        if body.params:
+            params = [
+                (str(p[0]), p[1])
+                for p in body.params
+                if isinstance(p, (list, tuple)) and len(p) == 2
+            ]
+        try:
+            return _cd._request(
+                body.method,
+                body.path,
+                json_body=body.json_body,
+                params=params,
+                timeout=body.timeout,
+            )
+        except _cd.ComposioDistributionError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/v1/storage/get")

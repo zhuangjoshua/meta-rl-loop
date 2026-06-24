@@ -2491,6 +2491,34 @@ def read_env_backed_value(key: str) -> str:
     return str(load_env().get(name) or "").strip()
 
 
+def composio_forward(
+    *,
+    method: str,
+    path: str,
+    json_body: dict | None = None,
+    params: list | None = None,
+    timeout: float = 60.0,
+) -> dict:
+    """Broker one Composio distribution HTTP call through the safebox.
+
+    COMPOSIO_API_KEY is a provider secret the safebox holds and refuses to egress over /v1/env, so a
+    runtime plane can't call Composio itself. This forwards the call to the safebox
+    ``/v1/providers/composio/forward`` route, which resolves the key LOCALLY and returns the key-free
+    upstream JSON. Used by ``composio_distribution._request`` for every channel
+    (twitter/reddit/reddit_ads/metaads) and the connected-account lookup."""
+    payload: dict = {"method": method, "path": path, "timeout": float(timeout)}
+    if json_body is not None:
+        payload["json_body"] = json_body
+    if params is not None:
+        payload["params"] = params
+    return _remote_json(
+        "POST",
+        "/v1/providers/composio/forward",
+        payload,
+        timeout=max(15.0, float(timeout) + 10.0),
+    )
+
+
 def first_env_backed_value(*keys: str) -> str:
     """Return the first non-empty env-backed value across explicit aliases.
 
