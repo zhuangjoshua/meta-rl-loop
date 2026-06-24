@@ -69,6 +69,7 @@ function Router() {
     sessionRunning,
     billingBusy,
     subscribeBusy,
+    subscribeError,
     resetBuildState,
     openBusiness,
     sendPrompt,
@@ -327,7 +328,7 @@ function Router() {
           account={account}
           businesses={businesses}
           portalBusy={billingBusy}
-          nudge={billingNudge}
+          nudge={subscribeError || billingNudge}
           subscribeBusy={subscribeBusy}
           onTheme={setTheme}
           onOpenPortal={openBillingPortal}

@@ -587,6 +587,24 @@ function humanizeCreateError(error: unknown, code: number): string {
   return cleaned;
 }
 
+function humanizeSubscribeError(error: unknown): string {
+  // fetchJSON throws Error("<status>: <body>") where body is usually {"detail":"..."}.
+  const raw = error instanceof Error ? error.message : "";
+  if (/operator_email_unavailable/i.test(raw)) {
+    return "We need a billing email on your account first. Sign out and back in, then try again.";
+  }
+  if (/operator_subscription_unconfigured|billing_portal_unconfigured/i.test(raw)) {
+    return "Subscriptions aren’t available right now. Please try again shortly.";
+  }
+  if (/unknown_operator_plan/i.test(raw)) {
+    return "That plan is no longer available. Refresh and pick another.";
+  }
+  if (/^\s*401\b/.test(raw) || /operator_principal_unavailable|auth0_login_required/i.test(raw)) {
+    return "Your session expired. Please sign in again and retry.";
+  }
+  return "Checkout could not start. Please try again.";
+}
+
 function createEmptyLiveChatSignals(): LiveChatSignals {
   return {
     statusItems: [],
@@ -613,6 +631,7 @@ export function useTakyonLitebulb() {
   const [sessionRunning, setSessionRunning] = useState(false);
   const [billingBusy, setBillingBusy] = useState(false);
   const [subscribeBusy, setSubscribeBusy] = useState<string | null>(null);
+  const [subscribeError, setSubscribeError] = useState<string>("");
 
   const gatewayRef = useRef<GatewayClient | null>(null);
   const sessionIdRef = useRef("");
@@ -1706,10 +1725,11 @@ export function useTakyonLitebulb() {
     }
   }, [billingBusy]);
 
-  const subscribeToPlan = useCallback(async (planId: string) => {
+  const subscribeToPlan = useCallback(async (planId: string): Promise<string> => {
     const id = trimText(planId);
-    if (subscribeBusy || !id) return;
+    if (subscribeBusy || !id) return "";
     setSubscribeBusy(id);
+    setSubscribeError("");
     try {
       const result = await api.createTakyonOperatorSubscriptionCheckout(
         id,
@@ -1718,7 +1738,16 @@ export function useTakyonLitebulb() {
       const target = trimText(result.checkout_url);
       if (target) {
         window.location.assign(target);
+        return "";
       }
+      // Endpoint succeeded but returned no URL — surface honestly instead of a dead click.
+      const message = "Checkout could not start. Please try again.";
+      setSubscribeError(message);
+      return message;
+    } catch (error) {
+      const message = humanizeSubscribeError(error);
+      setSubscribeError(message);
+      return message;
     } finally {
       setSubscribeBusy(null);
     }
@@ -1884,6 +1913,7 @@ export function useTakyonLitebulb() {
     sessionRunning,
     billingBusy,
     subscribeBusy,
+    subscribeError,
     loadHome,
     openBusiness,
     sendPrompt,
