@@ -4358,8 +4358,9 @@ def _read_takyon_business_workspace_uncached(
 
 
 def _apply_display_metrics_activity(operator_user_id: str, business: str, payload: dict[str, Any]) -> None:
-    """When display mode is on for a business, surface an always-running scheduled-wake
-    task + running status in the cockpit. Gated and fail-soft: a no-op when the flag is off."""
+    """When display mode is on, REPLACE the cockpit task list with a curated, believable set of
+    agent tasks — two running (market research + a scheduled wake) plus a few recently completed —
+    which also hides the openmeter-sync and build noise. Gated and fail-soft: a no-op when off."""
     try:
         from plugins.takyon.core import TakyonStore
         from plugins.takyon import display_metrics as _display_metrics
@@ -4369,27 +4370,42 @@ def _apply_display_metrics_activity(operator_user_id: str, business: str, payloa
             return
         import datetime as _dt
 
-        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
-        wake = {
-            "id": "wake:scheduled",
-            "source": "wake",
-            "label": "Scheduled wake",
-            "status": "running",
-            "detail": "Reviewing traction, refreshing strategy.",
-            "tone": "active",
-            "updated_at": now_iso,
-        }
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _card(cid: str, category: str, label: str, status: str, detail: str, mins_ago: int) -> dict[str, Any]:
+            return {
+                "id": cid,
+                "source": category.lower(),
+                "category": category,
+                "label": label,
+                "status": status,
+                "detail": detail,
+                "tone": _takyon_status_tone(status),
+                "updated_at": (now - _dt.timedelta(minutes=mins_ago)).isoformat(),
+            }
+
+        tasks = [
+            _card("disp:market", "RESEARCH", "Researching the market", "running",
+                  "Scanning competitors and demand signals.", 0),
+            _card("disp:wake", "OPS", "Running scheduled wake", "running",
+                  "Reviewing traction and planning the next moves.", 1),
+            _card("disp:x", "GROWTH", "Published an X post", "completed",
+                  "Shared a product update with the audience.", 47),
+            _card("disp:product", "PRODUCT", "Polished the product page", "completed",
+                  "Refined the copy and pricing section.", 126),
+            _card("disp:metrics", "OPS", "Reviewed weekly metrics", "completed",
+                  "Summarized growth, retention, and revenue.", 305),
+        ]
         running_action = {
-            "source": "wake",
-            "label": "Running scheduled wake",
+            "source": "research",
+            "label": "Researching the market",
             "status": "running",
-            "detail": "Reviewing traction and planning the next moves.",
+            "detail": "Scanning competitors and demand signals.",
             "blocker": "",
         }
         overview = payload.get("overview")
         if isinstance(overview, dict):
-            existing = overview.get("tasks") if isinstance(overview.get("tasks"), list) else []
-            overview["tasks"] = [wake] + existing
+            overview["tasks"] = list(tasks)
             overview["current_action"] = running_action
             cards = overview.get("status_cards")
             if isinstance(cards, list) and cards and isinstance(cards[0], dict):
@@ -4401,8 +4417,7 @@ def _apply_display_metrics_activity(operator_user_id: str, business: str, payloa
             live["status"] = "running"
             live["label"] = running_action["label"]
             live["detail"] = running_action["detail"]
-            ltasks = live.get("tasks") if isinstance(live.get("tasks"), list) else []
-            live["tasks"] = [wake] + ltasks
+            live["tasks"] = list(tasks)
     except Exception:
         pass
 
