@@ -26746,6 +26746,15 @@ def _inject_search_console_meta_tag(site_root: Path, verification_token: str) ->
     token = str(verification_token or "").strip()
     if not token:
         return False
+    # Google's siteVerification getToken (META method) returns a FULL meta tag, and the scaffold
+    # already bakes one. Extract the bare content value so we never wrap a tag inside a tag — a
+    # nested ``content="<meta ... />"`` is invalid HTML and fails the Vite build (parse5
+    # missing-whitespace-between-attributes). Mirrors _resolve_gsc_verification_meta_tag /
+    # _await_search_console_token_live, and lets the idempotency check below match the baked tag.
+    _m = re.search(r'content="([^"]+)"', token)
+    token = (_m.group(1) if _m else token).strip()
+    if not token:
+        return False
     index_path = site_root / "index.html"
     try:
         if not index_path.is_file():
