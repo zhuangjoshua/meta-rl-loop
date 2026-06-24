@@ -609,6 +609,14 @@ class _ComposioForwardBody(BaseModel):
     timeout: float = 60.0
 
 
+class _MetaGraphBody(BaseModel):
+    method: str
+    path: str
+    params: dict[str, Any] = {}
+    host: str = "graph.facebook.com"
+    timeout: float = 60.0
+
+
 class _RegisterUserKeyBody(BaseModel):
     user_id: str
     raw_key: str
@@ -2017,6 +2025,52 @@ def build_safebox_app() -> FastAPI:
                 timeout=body.timeout,
             )
         except _cd.ComposioDistributionError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/providers/meta/config")
+    def provider_meta_config(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # The Meta system-user token is a provider secret held here and DENIED /v1/env egress, so a
+        # runtime plane cannot resolve it. This returns the NON-SECRET Meta config (graph version,
+        # ad account id, page id, composio_* hints) plus a has_token bool; the token VALUE is redacted
+        # ("") and never leaves the safebox. On the safebox host _use_remote_authority() is False, so
+        # core._meta_config resolves the token LOCALLY and succeeds. Gated by the internal token
+        # (transport reachability); the per-action money gate lives upstream in the meta-ads handlers.
+        _require_internal_token(authorization)
+        from . import core as _core
+
+        try:
+            cfg = dict(_core._meta_config(require_token=True))
+        except _core.TakyonError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        cfg["has_token"] = bool(cfg.get("token"))
+        cfg["token"] = ""
+        return cfg
+
+    @app.post("/v1/providers/meta/graph")
+    def provider_meta_graph(
+        body: _MetaGraphBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Broker one Meta Graph API call: the runtime plane forwards method/path/params here and the
+        # safebox re-resolves the real system-user token LOCALLY before calling Graph, returning the
+        # key-free upstream JSON. The token never leaves the safebox. Gated by the internal token; the
+        # per-action money gate lives upstream in the meta-ads handlers.
+        _require_internal_token(authorization)
+        from . import core as _core
+
+        try:
+            cfg = _core._meta_config(require_token=True)
+            return _core._meta_graph(
+                body.method,
+                body.path,
+                dict(body.params or {}),
+                cfg,
+                host=body.host,
+                timeout=int(body.timeout),
+            )
+        except _core.TakyonError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/v1/storage/get")

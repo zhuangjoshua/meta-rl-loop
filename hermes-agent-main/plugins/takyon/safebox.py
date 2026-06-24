@@ -2519,6 +2519,47 @@ def composio_forward(
     )
 
 
+def meta_config() -> dict:
+    """Fetch the NON-SECRET Meta Ads config from the safebox.
+
+    The Meta system-user token is a provider secret the safebox holds and refuses to egress over
+    /v1/env, so a runtime plane cannot resolve it. This returns the brokered config (graph version,
+    ad account id, page id, composio_* hints) plus a ``has_token`` bool; the token VALUE is redacted to
+    "" by the safebox route and never reaches this process. Used by ``core._meta_config`` on runtime
+    planes; the actual Graph call is brokered through ``meta_graph_forward``."""
+    payload = _remote_json("POST", "/v1/providers/meta/config", {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def meta_graph_forward(
+    *,
+    method: str,
+    path: str,
+    params: dict | None = None,
+    host: str = "graph.facebook.com",
+    timeout: float = 60.0,
+) -> dict:
+    """Broker one Meta Graph API call through the safebox.
+
+    Forwards method/path/params to the safebox ``/v1/providers/meta/graph`` route, which re-resolves
+    the real Meta system-user token LOCALLY and returns the key-free upstream JSON. The token never
+    leaves the safebox. Used by ``core._meta_graph`` on runtime planes."""
+    payload: dict = {
+        "method": str(method or "GET"),
+        "path": str(path or ""),
+        "params": dict(params or {}),
+        "host": str(host or "graph.facebook.com"),
+        "timeout": float(timeout),
+    }
+    result = _remote_json(
+        "POST",
+        "/v1/providers/meta/graph",
+        payload,
+        timeout=max(20.0, float(timeout) + 10.0),
+    )
+    return result if isinstance(result, dict) else {}
+
+
 def first_env_backed_value(*keys: str) -> str:
     """Return the first non-empty env-backed value across explicit aliases.
 

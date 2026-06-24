@@ -27419,7 +27419,33 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
     Composio remains a compatibility fallback for old deployments, but the
     primary production rail is the non-expiring Meta system-user token stored in
     Safebox (`META_SYSTEM_USER_ACCESS_TOKEN` / `META_ACCESS_TOKEN`).
+
+    On a runtime plane (operator/dashboard/sub-user) the Meta secrets are DENIED /v1/env egress, so
+    this process cannot resolve the token (or the ad account / page id) itself. In that case we broker
+    the NON-SECRET config from the safebox: the returned cfg carries version/ad_account_id/page_id plus
+    ``has_token`` but its ``token`` stays "" here — the brokered ``_meta_graph`` re-resolves the real
+    token on the safebox. The local path below is unchanged for the safebox host / local dev.
     """
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        remote = safebox.meta_config()
+        version = str(remote.get("version") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
+        if not version:
+            version = _META_DEFAULT_GRAPH_VERSION
+        elif not version.startswith("v"):
+            version = f"v{version}"
+        return {
+            # The token NEVER reaches the runtime plane: _meta_graph brokers the Graph call and the
+            # safebox supplies the real token there. has_token reflects that a token exists on the
+            # safebox so callers can reason about readiness without holding the secret.
+            "token": "",
+            "has_token": bool(remote.get("has_token")),
+            "version": version,
+            "ad_account_id": str(remote.get("ad_account_id") or "").strip(),
+            "page_id": str(remote.get("page_id") or "").strip(),
+            "composio_connected_account_id": str(remote.get("composio_connected_account_id") or "").strip(),
+            "composio_user_id": str(remote.get("composio_user_id") or "").strip() or "takyon_prod_operator",
+            "composio_alias": str(remote.get("composio_alias") or "").strip() or "takyon-prod-meta-ads",
+        }
     load_takyon_env()
     version = (_meta_env_value("META_GRAPH_VERSION") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
     if not version:
@@ -27511,7 +27537,21 @@ def _meta_graph(
     Legacy Composio proxying remains only as a fallback when no Meta token is
     configured. The direct path keeps Open Graph authority tied to the durable
     system-user token instead of a brittle third-party mirror.
+
+    On a runtime plane (operator/dashboard/sub-user) the Meta token is DENIED /v1/env egress, so
+    ``cfg["token"]`` is empty here. Broker the WHOLE Graph call through the safebox: it re-resolves the
+    real system-user token LOCALLY, calls Graph, and returns the key-free upstream JSON. The token
+    never reaches this process. The direct httpx / Composio paths below run only on the safebox host /
+    local dev (local authority), where the token resolves locally.
     """
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        return safebox.meta_graph_forward(
+            method=method,
+            path=path,
+            params=params,
+            host=host,
+            timeout=float(timeout),
+        )
     token = str(cfg.get("token") or "").strip()
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     rel = path.lstrip("/")
