@@ -907,6 +907,7 @@ export interface TakyonBusinessTractionResponse {
     pageviews?: number;
     visits?: number;
   };
+  display?: boolean;
 }
 
 export interface MetaActionResponse {

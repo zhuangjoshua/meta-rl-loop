@@ -4337,7 +4337,10 @@ def _read_takyon_business_workspace_uncached(
         output_limit=max(1, min(int(limit or 50), 100)),
         view=str(view or "full").strip().lower() or "full",
     )
-    return payload if isinstance(payload, dict) else {
+    if isinstance(payload, dict):
+        _apply_display_metrics_activity(operator_user_id, business, payload)
+        return payload
+    return {
         "business_slug": business,
         "current": {},
         "overview": {},
@@ -4352,6 +4355,56 @@ def _read_takyon_business_workspace_uncached(
             "tasks": [],
         },
     }
+
+
+def _apply_display_metrics_activity(operator_user_id: str, business: str, payload: dict[str, Any]) -> None:
+    """When display mode is on for a business, surface an always-running scheduled-wake
+    task + running status in the cockpit. Gated and fail-soft: a no-op when the flag is off."""
+    try:
+        from plugins.takyon.core import TakyonStore
+        from plugins.takyon import display_metrics as _display_metrics
+
+        store = TakyonStore(operator_user_id=operator_user_id)
+        if not _display_metrics.enabled(store, business):
+            return
+        import datetime as _dt
+
+        now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        wake = {
+            "id": "wake:scheduled",
+            "source": "wake",
+            "label": "Scheduled wake",
+            "status": "running",
+            "detail": "Reviewing traction, refreshing strategy.",
+            "tone": "active",
+            "updated_at": now_iso,
+        }
+        running_action = {
+            "source": "wake",
+            "label": "Running scheduled wake",
+            "status": "running",
+            "detail": "Reviewing traction and planning the next moves.",
+            "blocker": "",
+        }
+        overview = payload.get("overview")
+        if isinstance(overview, dict):
+            existing = overview.get("tasks") if isinstance(overview.get("tasks"), list) else []
+            overview["tasks"] = [wake] + existing
+            overview["current_action"] = running_action
+            cards = overview.get("status_cards")
+            if isinstance(cards, list) and cards and isinstance(cards[0], dict):
+                cards[0]["status"] = "running"
+                cards[0]["detail"] = running_action["label"]
+                cards[0]["tone"] = "active"
+        live = payload.get("live_state")
+        if isinstance(live, dict):
+            live["status"] = "running"
+            live["label"] = running_action["label"]
+            live["detail"] = running_action["detail"]
+            ltasks = live.get("tasks") if isinstance(live.get("tasks"), list) else []
+            live["tasks"] = [wake] + ltasks
+    except Exception:
+        pass
 
 
 def _read_takyon_business_traction(

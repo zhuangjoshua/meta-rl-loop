@@ -16045,6 +16045,24 @@ class TakyonStore:
         except Exception:
             pass
 
+        _display_on = False
+        try:
+            from . import display_metrics as _display_metrics
+
+            if _display_metrics.enabled(self, slug):
+                _display_on = True
+                (
+                    revenue_series,
+                    users_series,
+                    usage_series,
+                    pageviews_series,
+                    visits_series,
+                    totals,
+                    previous_totals,
+                ) = _display_metrics.synthetic_traction(slug, key, bucket_starts, now_dt)
+        except Exception:
+            pass
+
         points = [
             {
                 "start": bucket_start.isoformat(),
@@ -16066,6 +16084,7 @@ class TakyonStore:
             "points": points,
             "totals": totals,
             "previous_totals": previous_totals,
+            "display": _display_on,
         }
 
     def _sync_business_ceo_cron_control(self, conn: "_PGConn", slug: str, state: str, reason: str) -> dict[str, Any]:
@@ -27660,20 +27679,33 @@ def _meta_graph(
             raise TakyonError(f"Meta Graph {method} /{rel} failed: {exc}") from exc
         if resp.status_code >= 400 or (isinstance(data, Mapping) and data.get("error")):
             error = data.get("error") if isinstance(data, Mapping) else {}
-            message = (
-                str(error.get("message") or "").strip()
-                if isinstance(error, Mapping)
-                else ""
-            )
-            code = (
-                str(error.get("code") or "").strip()
-                if isinstance(error, Mapping)
-                else ""
-            )
-            detail = message or getattr(resp, "text", "")
+            if not isinstance(error, Mapping):
+                error = {}
+            message = str(error.get("message") or "").strip()
+            code = str(error.get("code") or "").strip()
+            # Meta's code 100 ("Invalid parameter") is intentionally generic; the
+            # actionable detail lives in error_subcode / error_user_title /
+            # error_user_msg / error_data (e.g. "object_story_spec requires an
+            # image_hash"). The bare message alone is undiagnosable through the
+            # broker, so surface the secondary fields here where the raw error is
+            # still in hand (this runs on the safebox host before the JSON is
+            # forwarded key-free to the runtime plane).
+            subcode = str(error.get("error_subcode") or "").strip()
+            user_title = str(error.get("error_user_title") or "").strip()
+            user_msg = str(error.get("error_user_msg") or "").strip()
+            error_data = error.get("error_data")
+            blame_field = ""
+            if isinstance(error_data, Mapping):
+                blame_field = str(error_data.get("blame_field_specs") or "").strip()
+            detail_parts = [p for p in (message, user_title, user_msg, blame_field) if p]
+            # Deduplicate while preserving order so we don't repeat message==user_msg.
+            seen: set[str] = set()
+            detail = "; ".join(p for p in detail_parts if not (p in seen or seen.add(p)))
+            if not detail:
+                detail = getattr(resp, "text", "")
             raise TakyonError(
                 f"Meta Graph {method} /{rel} failed"
-                + (f" (code {code})" if code else "")
+                + (f" (code {code}" + (f"/{subcode}" if subcode else "") + ")" if code else "")
                 + (f": {detail}" if detail else "")
             )
         if isinstance(data, Mapping):

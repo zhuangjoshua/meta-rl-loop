@@ -309,6 +309,10 @@ function Traction({
 }) {
   const [metric, setMetric] = useState<Metric>("revenue");
   const points = traction?.points || [];
+  const displayMode = Boolean(traction?.display);
+  useEffect(() => {
+    if (displayMode && range !== "M") onRangeChange("M");
+  }, [displayMode, range, onRangeChange]);
   const values = seriesForMetric(points, metric);
   const totals = traction?.totals || { revenue_cents: 0, users: 0, usage_events: 0, pageviews: 0, visits: 0 };
   const previous = traction?.previous_totals || { revenue_cents: 0, users: 0, usage_events: 0, pageviews: 0, visits: 0 };
@@ -336,7 +340,7 @@ function Traction({
       </div>
       <Chart values={values} up={up} />
       <div className="lb-seg lb-trac__ranges">
-        {(["D", "W", "M", "Y"] as const).map((item) => (
+        {(displayMode ? (["M"] as const) : (["D", "W", "M", "Y"] as const)).map((item) => (
           <button key={item} className={range === item ? "is-on" : ""} type="button" onClick={() => onRangeChange(item)}>
             {item}
           </button>
