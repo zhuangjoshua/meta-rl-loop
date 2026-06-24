@@ -29,6 +29,35 @@ const S = (p: { d: string; w?: number; fill?: string }) => (
   </svg>
 );
 
+// Append-only agent transcript: merge each poll's chat_stream into a per-instance
+// accumulator so a transient short/empty server snapshot never removes a turn that
+// is already on screen. Product is keyed by business, so this resets per business.
+// Bubble identity is the stable `ceo-turn:<posted_at>` id (text updates in place).
+function useAccumulatedAgentStream(
+  workspace: TakyonBusinessWorkspaceResponse | null,
+): ChatStreamMessage[] {
+  const [stream, setStream] = useState<ChatStreamMessage[]>(() => chatStreamAgentMessages(workspace));
+  const byKey = useRef<Map<string, ChatStreamMessage>>(new Map());
+  const order = useRef<string[]>([]);
+  useEffect(() => {
+    let changed = false;
+    for (const msg of chatStreamAgentMessages(workspace)) {
+      const key = msg.id || msg.text;
+      const prev = byKey.current.get(key);
+      if (!prev) {
+        order.current.push(key);
+        byKey.current.set(key, msg);
+        changed = true;
+      } else if (prev.text !== msg.text) {
+        byKey.current.set(key, msg);
+        changed = true;
+      }
+    }
+    if (changed) setStream(order.current.map((key) => byKey.current.get(key)!));
+  }, [workspace]);
+  return stream;
+}
+
 const Icon = {
   caret: <S d="M4 6l4 4 4-4" w={12} />,
   user: <S d="M5.4 6a2.6 2.6 0 105.2 0 2.6 2.6 0 00-5.2 0zM3 13.5c0-2.6 2.2-4 5-4s5 1.4 5 4" />,
@@ -436,7 +465,12 @@ function AgentChat({
   // turnInFlight goes false and the dots clear. The Stop button stays gated on
   // `running` only, so it can never show with nothing to stop.
   const turnInFlight = running || (chatRunning && !showSummary && !summaryText);
-  const showThinking = turnInFlight && !tailIsAgentText;
+  // Live "working" indicator: show whenever a turn is GENUINELY in flight — the
+  // interactive `running` signal OR the backend `chatRunning` flag (which is gated
+  // on a genuinely-live background_run, so it cannot spin forever after the run
+  // settles). It now stays visible even when a narration bubble is the tail, so the
+  // gap BETWEEN bootstrap turns reads as "still working", never frozen/dead.
+  const showThinking = isRunning;
   // On a cold reload of a SETTLED business with no chat_stream yet, surface the
   // durable live_state one-liner as a single plain assistant bubble so the chat is
   // never blank. NEVER while a turn is in flight: the live_state one-liner is a
@@ -706,7 +740,12 @@ export function Product({
   // The curated, customer-safe CEO narration. These (not the raw history/delta
   // assistant messages) are the ONLY agent bubbles in the transcript, so no
   // mid-thought planner/reasoning text can ever render as conversation.
-  const agentStream = chatStreamAgentMessages(workspace);
+  // ACCUMULATED (append-only): each poll's chat_stream is MERGED into a per-business
+  // transcript, never replaced. A transient short/empty chat_stream poll (seen during
+  // bootstrap, when the server snapshot momentarily rebuilds) can no longer wipe turns
+  // that were already on screen — so the conversation grows like a real agent instead
+  // of flashing one turn and blanking to "…" before the next.
+  const agentStream = useAccumulatedAgentStream(workspace);
   const chatSummary = workspaceChatSummary(workspace);
   const chatRunning = workspaceChatRunning(workspace);
   // TRUE in-flight running signal for the stop affordance and the thinking dots:
