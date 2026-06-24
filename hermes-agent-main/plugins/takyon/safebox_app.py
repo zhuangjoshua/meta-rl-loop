@@ -1234,7 +1234,17 @@ def _gemini_image_estimate(payload: dict[str, Any]):
 # used to live in safebox_provider_proxy.py before the ungated routes were deleted.
 _OPENAI_IMAGES_URL = "https://api.openai.com/v1/images/generations"
 _FAL_BASE_URL = "https://fal.run"
+# Long-running FAL models (Kling video i2v) routinely generate for >3 min, which exceeds the
+# synchronous fal.run gateway/timeout and 502s. Those models MUST go through the FAL queue API
+# (submit -> poll status -> fetch result): each HTTP hop stays short while the generation runs
+# server-side. See _forward_fal_queue / _creative_fal_caller.
+_FAL_QUEUE_BASE_URL = "https://queue.fal.run"
 _CREATIVE_UPSTREAM_TIMEOUT_S = 180.0
+# Max wall-clock the safebox waits for a queued FAL render to COMPLETE, and the poll cadence. The
+# total budget stays below the runtime subprocess's proxy timeout (pipeline.py _PROXY_TIMEOUT_S) so
+# the subprocess hears a clean result/refusal rather than its own transport timeout.
+_FAL_QUEUE_TOTAL_BUDGET_S = 840.0
+_FAL_QUEUE_POLL_INTERVAL_S = 4.0
 
 
 def _openai_image_key() -> str:
@@ -1280,6 +1290,64 @@ def _forward_json_post(url: str, *, headers: dict[str, str], payload: dict[str, 
         return json.loads(text) if text.strip() else {}
     except (ValueError, TypeError):
         return {}
+
+
+def _forward_fal_queue(path: str, *, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    """Submit a FAL request to the QUEUE API and block until it completes, returning the KEY-FREE
+    result JSON.
+
+    Long-running models (Kling video i2v) exceed the synchronous ``fal.run`` gateway, so we submit to
+    ``queue.fal.run/<path>``, poll the returned ``status_url`` until terminal, then GET the
+    ``response_url``. Every individual HTTP hop is short (well under ``_CREATIVE_UPSTREAM_TIMEOUT_S``);
+    the wait is the bounded poll loop. The provider key lives only in ``headers`` and never appears in
+    the returned body. Same failure contract as ``_forward_json_post``: ``BrokerLedgerError`` on
+    transport/HTTP/queue failure (the route maps it to a clean 502/503)."""
+    import time
+
+    import httpx
+
+    submit_url = f"{_FAL_QUEUE_BASE_URL}/{path}"
+    try:
+        with httpx.Client(timeout=_CREATIVE_UPSTREAM_TIMEOUT_S) as client:
+            resp = client.post(submit_url, headers=headers, json=payload)
+            if resp.status_code >= 400:
+                raise BrokerLedgerError(f"provider_http_{int(resp.status_code)}")
+            submit = json.loads(resp.text) if resp.text.strip() else {}
+            status_url = str(submit.get("status_url") or "").strip()
+            response_url = str(submit.get("response_url") or "").strip()
+            if not response_url:
+                # A submit with neither a response_url nor a status_url is not a queue response we can
+                # follow — surface it rather than hang.
+                raise BrokerLedgerError("provider_queue_no_response_url")
+
+            deadline = time.monotonic() + _FAL_QUEUE_TOTAL_BUDGET_S
+            while True:
+                if time.monotonic() > deadline:
+                    raise BrokerLedgerError("provider_queue_timeout")
+                time.sleep(_FAL_QUEUE_POLL_INTERVAL_S)
+                poll = client.get(status_url or response_url, headers=headers)
+                if poll.status_code >= 400:
+                    raise BrokerLedgerError(f"provider_http_{int(poll.status_code)}")
+                state = json.loads(poll.text) if poll.text.strip() else {}
+                if not status_url:
+                    # No status_url to track: a 200 on the response_url itself means the result is ready.
+                    return state
+                status = str(state.get("status") or "").upper()
+                if status in {"COMPLETED", "OK", "SUCCESS"}:
+                    break
+                if status in {"FAILED", "ERROR", "CANCELED", "CANCELLED"}:
+                    raise BrokerLedgerError("provider_queue_failed")
+                # IN_QUEUE / IN_PROGRESS -> keep polling.
+
+            result = client.get(response_url, headers=headers)
+            if result.status_code >= 400:
+                raise BrokerLedgerError(f"provider_http_{int(result.status_code)}")
+            try:
+                return json.loads(result.text) if result.text.strip() else {}
+            except (ValueError, TypeError):
+                return {}
+    except httpx.HTTPError as exc:
+        raise BrokerLedgerError("provider_unreachable") from exc
 
 
 def _creative_gemini_caller(payload: dict[str, Any]):
@@ -1336,7 +1404,10 @@ def _creative_fal_caller(fal_path: str):
             if not key:
                 raise BrokerLedgerError("fal_unconfigured")
             headers = {"Authorization": f"Key {key}", "content-type": "application/json"}
-            return _forward_json_post(f"{_FAL_BASE_URL}/{path}", headers=headers, payload=body)
+            # Route through the FAL QUEUE API: Kling video renders run for minutes and 502 on the
+            # synchronous fal.run endpoint. _forward_fal_queue submits, polls, and fetches the result
+            # with short per-hop HTTP calls, returning the same KEY-FREE provider JSON.
+            return _forward_fal_queue(path, headers=headers, payload=body)
 
         return _call
 

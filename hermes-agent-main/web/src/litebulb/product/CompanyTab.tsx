@@ -1365,15 +1365,6 @@ function TweetCard({
   );
 }
 
-function VideoCard({ title, detail }: { title: string; detail: string }) {
-  return (
-    <figure className="lb-vid">
-      <span className="lb-vid__thumb" style={{ background: "linear-gradient(150deg, hsl(190 70% 55%), hsl(230 65% 38%))" }}><span className="lb-vid__play">{I.play}</span></span>
-      <figcaption>{title}<span className="lb-vid__stats">{detail}</span></figcaption>
-    </figure>
-  );
-}
-
 function AdCard({ title, detail }: { title: string; detail: string }) {
   return (
     <article className="lb-ad">
@@ -1397,6 +1388,7 @@ function MailRow({ title, detail }: { title: string; detail: string }) {
 function Distribution({ business, workspace }: { business: LitebulbBusiness; workspace: TakyonBusinessWorkspaceResponse | null }) {
   const [tab, setTab] = useState<DistTab>("x");
   const [openAd, setOpenAd] = useState<Record<string, unknown> | null>(null);
+  const [openVideo, setOpenVideo] = useState<Record<string, unknown> | null>(null);
   const overview = asRecord(workspace?.overview);
   const posts = asList(overview.posts);
   const outputs = asList(workspace?.outputs);
@@ -1406,8 +1398,22 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
     const source = asText(item.source).toLowerCase();
     return source === "x" || source.startsWith("x-") || source.includes("twitter");
   });
-  // Video tab is videos only — generated image/ad creatives now live under Ads.
-  const videoItems = outputs.filter((item) => asText(item.kind).toLowerCase() === "video");
+  // Video tab: real, playable UGC videos (e.g. product/ugc-ads/<slug>/ad.mp4). Source from
+  // media + outputs and dedup by path — media is derived from outputs, but the union keeps this
+  // correct even if one list lags a redeploy. Match by kind OR video suffix. Each item carries a
+  // `path`, so MediaThumb builds the authenticated /asset URL and the modal streams the real
+  // <video> — exactly how the Ads tab and Media gallery already play their assets.
+  const videoSeen = new Set<string>();
+  const videoItems = [...asList(workspace?.media), ...outputs].filter((item) => {
+    const p = asText(item.path);
+    if (!p) return false;
+    const isVid =
+      asText(item.kind).toLowerCase() === "video" ||
+      VIDEO_OUTPUT_SUFFIXES.has(outputSuffix(p));
+    if (!isVid || videoSeen.has(p)) return false;
+    videoSeen.add(p);
+    return true;
+  });
   // Generated ad-image creatives (static-ads) belong under Ads next to the campaigns
   // that spend on them, not buried in the generic Media gallery. The path fallback keeps
   // this correct even if the backend media_role payload hasn't redeployed yet.
@@ -1456,8 +1462,19 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
 
       {tab === "video" && (
         <div className="lb-vids">
-          {videoItems.slice(0, 6).map((item, index) => <VideoCard key={asText(item.id) || index} title={asText(item.title) || asText(item.path) || "Creative asset"} detail={asText(item.detail) || "Generated media asset"} />)}
-          {!videoItems.length && <div className="lb-empty">No video or creative assets recorded yet.</div>}
+          {videoItems.length > 0 && (
+            <div className="lb-media__grid lb-vids__creatives">
+              {videoItems.slice(0, 6).map((item, index) => (
+                <MediaThumb
+                  key={asText(item.id) || asText(item.path) || index}
+                  item={item}
+                  slug={business.slug}
+                  onOpen={() => setOpenVideo(item)}
+                />
+              ))}
+            </div>
+          )}
+          {!videoItems.length && <div className="lb-empty">No video assets recorded yet.</div>}
         </div>
       )}
 
@@ -1504,6 +1521,19 @@ function Distribution({ business, workspace }: { business: LitebulbBusiness; wor
           <div className="lb-media__view">
             <img className="lb-media__full" src={adSrc} alt={asText(openAd.title) || "Ad creative"} />
             <a className="lb-media__open" href={adSrc} target="_blank" rel="noopener noreferrer">Open original {I.ext}</a>
+          </div>
+        </Modal>
+      );
+    })()}
+    {openVideo && (() => {
+      const vPath = asText(openVideo.path);
+      const vSrc = vPath ? buildAssetUrl(business.slug, vPath) : "";
+      if (!vSrc) return null;
+      return (
+        <Modal title={asText(openVideo.title) || vPath.split("/").pop() || "UGC video"} sub={vPath} wide onClose={() => setOpenVideo(null)}>
+          <div className="lb-media__view">
+            <video className="lb-media__player" src={vSrc} controls autoPlay preload="metadata" playsInline />
+            <a className="lb-media__open" href={vSrc} target="_blank" rel="noopener noreferrer">Open original {I.ext}</a>
           </div>
         </Modal>
       );

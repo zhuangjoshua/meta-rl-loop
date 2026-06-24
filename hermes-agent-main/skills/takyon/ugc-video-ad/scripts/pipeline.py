@@ -260,7 +260,10 @@ _VIA_PROXY_ENV = "TAKYON_CREATIVE_VIA_PROXY"
 _SAFEBOX_URL_ENV = "TAKYON_SAFEBOX_URL"
 _SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 _CAPABILITY_TOKEN_ENV = "TAKYON_CREATIVE_CAPABILITY_TOKEN"
-_PROXY_TIMEOUT_S = 300
+# The safebox routes long FAL renders (Kling video) through the FAL queue API and holds this
+# connection open while it polls for completion, so this must outlast a full render (the safebox's
+# own poll budget is bounded below this). 300s was too short for Kling i2v and surfaced as a 502.
+_PROXY_TIMEOUT_S = 960
 
 
 def _proxy_base_and_token() -> tuple[str, str, str] | None:
