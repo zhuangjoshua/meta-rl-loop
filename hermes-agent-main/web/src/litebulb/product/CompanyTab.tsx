@@ -310,9 +310,17 @@ function Traction({
   const [metric, setMetric] = useState<Metric>("revenue");
   const points = traction?.points || [];
   const displayMode = Boolean(traction?.display);
+  const visibleMetrics = displayMode
+    ? METRICS.filter((item) => item.key === "revenue" || item.key === "users" || item.key === "pageviews")
+    : METRICS;
   useEffect(() => {
     if (displayMode && range !== "M") onRangeChange("M");
   }, [displayMode, range, onRangeChange]);
+  useEffect(() => {
+    if (displayMode && metric !== "revenue" && metric !== "users" && metric !== "pageviews") {
+      setMetric("revenue");
+    }
+  }, [displayMode, metric]);
   const values = seriesForMetric(points, metric);
   const totals = traction?.totals || { revenue_cents: 0, users: 0, usage_events: 0, pageviews: 0, visits: 0 };
   const previous = traction?.previous_totals || { revenue_cents: 0, users: 0, usage_events: 0, pageviews: 0, visits: 0 };
@@ -326,7 +334,7 @@ function Traction({
     <section className="lb-card lb-trac">
       <div className="lb-trac__top">
         <div className="lb-seg lb-trac__metrics">
-          {METRICS.map((item) => (
+          {visibleMetrics.map((item) => (
             <button key={item.key} className={metric === item.key ? "is-on" : ""} type="button" onClick={() => setMetric(item.key)}>
               {item.label}
             </button>
@@ -339,13 +347,15 @@ function Traction({
         {up ? "▲" : "▼"} {Math.abs(delta).toFixed(1)}% <span>· {RANGE_LABEL[range]}</span>
       </div>
       <Chart values={values} up={up} />
-      <div className="lb-seg lb-trac__ranges">
-        {(displayMode ? (["M"] as const) : (["D", "W", "M", "Y"] as const)).map((item) => (
-          <button key={item} className={range === item ? "is-on" : ""} type="button" onClick={() => onRangeChange(item)}>
-            {item}
-          </button>
-        ))}
-      </div>
+      {!displayMode && (
+        <div className="lb-seg lb-trac__ranges">
+          {(["D", "W", "M", "Y"] as const).map((item) => (
+            <button key={item} className={range === item ? "is-on" : ""} type="button" onClick={() => onRangeChange(item)}>
+              {item}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
