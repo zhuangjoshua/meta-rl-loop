@@ -270,7 +270,23 @@ def resolve_auth0_principal(
     key_id: str = "dashboard-session",
     session_token: str | None = None,
 ) -> ResolvedPrincipal | None:
-    """Resolve an Auth0-backed dashboard identity to the canonical principal shape."""
+    """Resolve an Auth0-backed dashboard identity to the canonical principal shape.
+
+    Returning users resolve READ-ONLY — provisioning is first-login only. First-login
+    provisioning touches `billing_accounts` and mints keys, privileges the dashboard
+    runtime DB role does not hold; running it on EVERY login made identity binding
+    fragile (a single provisioning hiccup raised, returned None, and unbound the whole
+    session so every business tool refused). Look the user up by `auth0_sub` first and,
+    when present, resolve directly; only fall through to JIT provisioning for a genuinely
+    new user."""
+    existing = conn.execute(
+        "select id from users where auth0_sub = %s",
+        (auth0_sub,),
+    ).fetchone()
+    if existing is not None:
+        principal = resolve_user_principal(conn, str(existing[0]), key_id=key_id)
+        if principal is not None:
+            return principal
     user_id, _created, _raw_key = provision_user_on_first_login(
         conn,
         auth0_sub,
