@@ -64,7 +64,7 @@ def _is_internal_host(hostname: str) -> bool:
         return False  # transient/invalid DNS is not itself an internal host; literal checks above hold
     return False
 _SERVICE_EMAIL_SUFFIX = ".takyon.invalid"
-_ACTION_REQUEST_BODY_LIMIT = 64 * 1024
+_ACTION_REQUEST_BODY_LIMIT = 8 * 1024 * 1024  # raised from 64KB to allow image-bearing action payloads (identify-rock, solve-homework)
 _ACTION_STDOUT_LIMIT = 256 * 1024
 _ACTION_STDERR_LIMIT = 16 * 1024
 _ACTION_MIN_INTERVAL_SECONDS = 15 * 60
@@ -1248,7 +1248,14 @@ def invoke_action(
     session_token = str(principal.get("session_token") or "").strip()
     if not session_token:
         raise AppActionError("session_token is required")
-    base = resolve_rails_base(bound_origin=bound_origin)
+    # Pin the action hairpin (ctx.saveRecord / listRecords / generate) to the business's OWN
+    # published origin, not the request-derived inbound origin. A product reached via a non-product
+    # or legacy host (e.g. app.fourmanifold.com or a now-dark *.fourmanifold.com) would otherwise
+    # make the hairpin POST to that dead host and 404 (non_json_response:404), breaking every save.
+    # The surface contract carries the canonical product URL; resolve_rails_base/_parse_rails_base
+    # still validate scheme+host and enforce the internal-host SSRF denylist on it.
+    _surface_origin = str(surface.get("public_url") or surface.get("publish_target") or "").strip()
+    base = resolve_rails_base(bound_origin=(_surface_origin or bound_origin))
     actions_dir = site_root / "actions"
     action_path = actions_dir / f"{action_name}.ts"
     if not action_path.exists():
