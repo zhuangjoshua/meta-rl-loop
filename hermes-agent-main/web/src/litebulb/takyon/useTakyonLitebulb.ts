@@ -626,6 +626,13 @@ export function useTakyonLitebulb() {
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const sessionRunningRef = useRef(false);
   const liveChatTurnRef = useRef(false);
+  // Wall-clock ms until which a fresh history poll must NOT resurrect the
+  // "running" state. Set when the operator hits Stop (session.interrupt): the
+  // server can keep reporting running:true for a tick or two while it aborts, and
+  // without this grace window the next 2500ms poll flips sessionRunning back on,
+  // making Stop look like it did nothing. While inside the window we treat the
+  // turn as not-running so the Stop button clears and stays cleared.
+  const interruptGraceUntilRef = useRef(0);
   const liveChatSignalsRef = useRef<LiveChatSignals>(createEmptyLiveChatSignals());
   // Whether the active business is already past its first bootstrap (shipped a
   // product / has prior history). Kept in a ref so the live-chat card derivation
@@ -1114,6 +1121,8 @@ export function useTakyonLitebulb() {
   useEffect(() => {
     const gateway = ensureGateway();
     const offStart = gateway.on("message.start", () => {
+      // A new turn is genuinely starting — any prior interrupt grace is moot.
+      interruptGraceUntilRef.current = 0;
       liveChatTurnRef.current = true;
       sessionRunningRef.current = true;
       setSessionRunning(true);
@@ -1408,6 +1417,12 @@ export function useTakyonLitebulb() {
     const sessionId = trimText(sessionIdRef.current);
     const businessSlug = trimText(sessionBusinessRef.current).toLowerCase();
     if (!sessionId) return false;
+    // Open the interrupt grace window immediately (before the await) so an
+    // in-flight history poll that lands during the abort cannot flip running
+    // back on. Cleared naturally once the server stops reporting running.
+    if (!preservePendingTurn) {
+      interruptGraceUntilRef.current = Date.now() + 6000;
+    }
     try {
       await ensureGateway().request("session.interrupt", {
         session_id: sessionId,
@@ -1421,6 +1436,9 @@ export function useTakyonLitebulb() {
       }
       return true;
     } catch {
+      // Interrupt request failed — drop the grace window so a genuinely-running
+      // turn is not hidden by a stale guard.
+      if (!preservePendingTurn) interruptGraceUntilRef.current = 0;
       return false;
     }
   }, [endChatTurn, ensureGateway]);
@@ -1434,6 +1452,9 @@ export function useTakyonLitebulb() {
       createdAt: Date.now(),
       userCountBefore: chatMessagesRef.current.filter((message) => message.who === "user").length,
     };
+    // A fresh operator turn — clear any lingering interrupt grace so this turn's
+    // running state is honored immediately.
+    interruptGraceUntilRef.current = 0;
     setSubmitting(true);
     beginChatTurn();
     writeStoredPendingTurn(activeBusiness.slug, pendingTurn);
@@ -1716,7 +1737,17 @@ export function useTakyonLitebulb() {
           }
           const pendingTurnMissing = Boolean(pendingTurn && !pendingTurnInHistory);
           const mappedHistory = mapHistoryMessages(history);
-          const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;
+          // Honor the interrupt grace window: just after the operator hit Stop,
+          // the server can still report running:true for a tick while it aborts.
+          // Suppress that so the Stop button does not resurrect. Once the server
+          // itself reports not-running, the abort has landed and we close the
+          // window so normal running detection resumes.
+          const inInterruptGrace = Date.now() < interruptGraceUntilRef.current;
+          if (inInterruptGrace && !history.running) {
+            interruptGraceUntilRef.current = 0;
+          }
+          const rawPending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;
+          const pending = inInterruptGrace ? false : rawPending;
           setChatMessages((messages) => {
             // Robustness guard: never blank the log while a turn is still live
             // on the client (a streaming working message, or an in-flight
@@ -1728,10 +1759,18 @@ export function useTakyonLitebulb() {
             );
             const clientTurnLive =
               sessionRunningRef.current || liveChatTurnRef.current || hasLiveWorkingMessage;
-            // Only blank the transcript when the authoritative server history
-            // has reset to empty AND nothing is live on either side.
+            // APPEND-ONLY transcript: a transient empty history snapshot (common
+            // during a bootstrap/resume race, where the server momentarily
+            // returns running:false with messages:[]) must NEVER wipe a transcript
+            // that already has the operator's own messages on screen. Previously
+            // this wiped to [] whenever the turn had settled, which is exactly the
+            // "I send a message and it disappears" bug: the user bubble lives only
+            // in chatMessages, so blanking it deleted the just-sent message. We
+            // only clear when the LOCAL transcript is itself already empty (there
+            // is nothing to preserve) — otherwise we keep what is on screen and let
+            // the merge below append any new history.
             if (!pending && !pendingTurnMissing && mappedHistory.length === 0) {
-              if (clientTurnLive) return messages;
+              if (clientTurnLive || messages.length > 0) return messages;
               chatMessagesRef.current = [];
               return [];
             }

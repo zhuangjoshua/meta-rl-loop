@@ -151,6 +151,10 @@
 .lb-msg--agent .lb-msg__bubble { background: var(--cds-color-surface-sunken); border: 1px solid var(--cds-color-border-default); border-top-left-radius: 3px; }
 .lb-msg--user .lb-msg__bubble { background: var(--cds-color-brand-primary); color: #fff; border-top-right-radius: 3px; }
 .lb-msg__md { display: flex; flex-direction: column; gap: 0.75em; }
+/* Plain-text fallback when markdown rendering of a message throws — keep the
+   reply readable (and the page alive) instead of white-screening. */
+.lb-msg__md--raw { white-space: pre-wrap; word-break: break-word; }
+.lb-chat--errored { display: flex; flex-direction: column; min-height: 0; }
 .lb-msg__md > * { margin: 0; }
 .lb-msg__md p,
 .lb-msg__md li { white-space: pre-wrap; }
@@ -380,3 +384,9 @@
    bubble then takes its place (mirrors Claude: thinking -> reply). */
 .lb-msg__bubble--think { display: inline-flex; align-items: center; min-height: 20px; }
 .lb-msg__bubble--think .lb-typing { color: var(--cds-color-text-soft); }
+
+/* Live streamed reply: the CEO's answer types out token-by-token (like a real
+   agent) with a blinking caret, instead of a finished bubble popping in. */
+.lb-msg__bubble--stream > :last-child { display: inline; }
+.lb-stream-caret { display: inline-block; width: 2px; height: 1em; margin-left: 1px; vertical-align: -2px; background: var(--cds-color-text-soft); animation: lb-caret-blink 1s steps(2, start) infinite; }
+@keyframes lb-caret-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -173,19 +173,97 @@ const MENU_SETTINGS: Record<string, SettingsSection> = {
   "Profile settings": "profile",
 };
 
+// Render a single agent reply as markdown, but NEVER let a malformed token
+// (a half-streamed GFM table, stray HTML, an unbalanced fence) throw during
+// render and white-out the whole cockpit. A local boundary around the markdown
+// renderer falls back to the raw text as plain, pre-wrapped content so the
+// bubble — and the rest of the page — stay alive.
+class MarkdownBoundary extends Component<
+  { text: string; children: ReactNode },
+  { failed: boolean }
+> {
+  state: { failed: boolean } = { failed: false };
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+  componentDidCatch(error: Error) {
+    // Recoverable: the message still renders as plain text. Log for diagnosis.
+    console.error("[cockpit-chat] markdown render failed, falling back to text", error);
+  }
+  componentDidUpdate(prev: { text: string }) {
+    // A fresh delta/new bubble text should get another render attempt rather
+    // than staying permanently in the plain-text fallback.
+    if (this.state.failed && prev.text !== this.props.text) {
+      this.setState({ failed: false });
+    }
+  }
+  render() {
+    if (this.state.failed) {
+      return <div className="lb-msg__md lb-msg__md--raw">{this.props.text}</div>;
+    }
+    return this.props.children;
+  }
+}
+
 function AgentMessageMarkdown({ text }: { text: string }) {
+  const safe = typeof text === "string" ? text : String(text ?? "");
   return (
     <div className="lb-msg__md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        components={{
-          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
-        }}
-      >
-        {text}
-      </ReactMarkdown>
+      <MarkdownBoundary text={safe}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+          components={{
+            a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+          }}
+        >
+          {safe}
+        </ReactMarkdown>
+      </MarkdownBoundary>
     </div>
   );
+}
+
+// A page-level boundary for the entire chat panel. If anything in the chat
+// subtree throws (an unexpected event payload shape, a render edge case), this
+// catches it and shows a small inline fallback INSTEAD of unmounting the whole
+// cockpit to a blank white screen. The product preview / company tab beside the
+// chat keep working. A remount key (driven by business slug) lets a fresh
+// business / re-open recover cleanly.
+class ChatErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("[cockpit-chat] chat panel crashed (contained)", error, info?.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <aside className="lb-chat lb-chat--errored">
+          <div className="lb-chat__log">
+            <div className="lb-msg lb-msg--agent">
+              <div className="lb-msg__bubble">
+                <AgentMessageMarkdown text="Something in the chat view hit a snag and recovered. Your business is still running — reload the page to restore the live conversation." />
+              </div>
+            </div>
+            <button
+              type="button"
+              className="lb-chat__send"
+              onClick={() => window.location.reload()}
+              style={{ alignSelf: "flex-start", width: "auto", padding: "0 12px" }}
+            >
+              Reload
+            </button>
+          </div>
+        </aside>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 // A standalone agent row that contains ONLY the animated thinking dots — its own
@@ -445,8 +523,22 @@ function AgentChat({
   //     prompt with no curated reply yet) also shows dots, but yields the moment
   //     a fresh agent bubble lands at the tail so the streamed reply isn't
   //     shadowed by a duplicate indicator.
+  // The LIVE streamed reply for an operator-sent turn: the gateway streams the
+  // CEO's answer token-by-token into a `working` agent message on `messages`
+  // (appendAssistantText). Render THAT as it grows so the reply types out like a
+  // real agent instead of "dots then a finished bubble pops in". It is shown only
+  // while in-flight; the moment the turn settles, the durable curated bubble
+  // (agentStream) owns it. Dedup by cleaned text so the live draft and the curated
+  // copy never double-render during the hand-off.
+  const draftMsg = [...messages].reverse().find(
+    (message) => message.who === "agent" && Boolean(message.working) && Boolean(message.text.trim()),
+  );
+  const draftText = draftMsg ? sanitizeCustomerReply(draftMsg.text) : "";
+  const draftAlreadyCurated =
+    Boolean(draftText) && agentEntries.some((entry) => entry.text.trim() === draftText.trim());
+  const streamingBubble = draftText && !draftAlreadyCurated ? { id: draftMsg!.id, text: draftText } : null;
   const lastBubble = bubbles[bubbles.length - 1];
-  const tailIsAgentText = lastBubble?.who === "agent";
+  const tailIsAgentText = lastBubble?.who === "agent" || Boolean(streamingBubble);
   const isRunning = chatRunning || running;
   // The durable end-of-turn summary. The chat_stream's last message already
   // carries it, so we only surface a standalone summary bubble when it is not
@@ -469,8 +561,10 @@ function AgentChat({
   // interactive `running` signal OR the backend `chatRunning` flag (which is gated
   // on a genuinely-live background_run, so it cannot spin forever after the run
   // settles). It now stays visible even when a narration bubble is the tail, so the
-  // gap BETWEEN bootstrap turns reads as "still working", never frozen/dead.
-  const showThinking = isRunning;
+  // gap BETWEEN bootstrap turns reads as "still working", never frozen/dead. When
+  // the reply is actively streaming (streamingBubble), the growing text IS the live
+  // indicator, so the dots yield to it rather than stacking under the words.
+  const showThinking = isRunning && !streamingBubble;
   // On a cold reload of a SETTLED business with no chat_stream yet, surface the
   // durable live_state one-liner as a single plain assistant bubble so the chat is
   // never blank. NEVER while a turn is in flight: the live_state one-liner is a
@@ -483,7 +577,7 @@ function AgentChat({
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [bubbles.length, showThinking, showSummary, showLiveStateLine]);
+  }, [bubbles.length, showThinking, showSummary, showLiveStateLine, streamingBubble?.text.length]);
 
   return (
     <aside className="lb-chat">
@@ -525,6 +619,14 @@ function AgentChat({
           <div className="lb-msg lb-msg--agent">
             <div className="lb-msg__bubble">
               <AgentMessageMarkdown text={liveStateLine!} />
+            </div>
+          </div>
+        )}
+        {streamingBubble && (
+          <div key={streamingBubble.id} className="lb-msg lb-msg--agent">
+            <div className="lb-msg__bubble lb-msg__bubble--stream">
+              <AgentMessageMarkdown text={streamingBubble.text} />
+              <span className="lb-stream-caret" aria-hidden="true" />
             </div>
           </div>
         )}
@@ -774,21 +876,23 @@ export function Product({
 
       <div className="lb-workspace">
         <div className={`lb-chat-dock${chatOpen ? "" : " is-closed"}`}>
-          <AgentChat
-            business={business}
-            messages={chatMessages}
-            agentStream={agentStream}
-            chatSummary={chatSummary || undefined}
-            chatRunning={chatRunning}
-            liveStateLine={liveStateLine || undefined}
-            tab={tab}
-            running={running}
-            sending={sending}
-            onTab={setTab}
-            onClose={() => setChatOpen(false)}
-            onSend={onSendPrompt}
-            onStop={onStopPrompt}
-          />
+          <ChatErrorBoundary key={business.slug}>
+            <AgentChat
+              business={business}
+              messages={chatMessages}
+              agentStream={agentStream}
+              chatSummary={chatSummary || undefined}
+              chatRunning={chatRunning}
+              liveStateLine={liveStateLine || undefined}
+              tab={tab}
+              running={running}
+              sending={sending}
+              onTab={setTab}
+              onClose={() => setChatOpen(false)}
+              onSend={onSendPrompt}
+              onStop={onStopPrompt}
+            />
+          </ChatErrorBoundary>
         </div>
 
         <div className={`lb-main${tab === "product" ? " lb-main--preview" : ""}`}>
