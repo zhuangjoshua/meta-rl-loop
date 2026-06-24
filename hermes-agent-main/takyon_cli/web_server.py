@@ -4963,7 +4963,7 @@ async def set_takyon_business_creative_credit_budgets(request: Request, slug: st
             _creative_credit_budget_relpath,
             _creative_credit_budget_snapshot_from_conn,
             _db_backend,
-            _validate_creative_credit_channel_allocations,
+            _normalize_creative_credit_channel_budget_config,
         )
         from plugins.takyon.runtime_app import RuntimeNotConfigured
 
@@ -4987,7 +4987,7 @@ async def set_takyon_business_creative_credit_budgets(request: Request, slug: st
                 slug,
                 balances=balances,
             )
-        allocations = _validate_creative_credit_channel_allocations(
+        allocations = _normalize_creative_credit_channel_budget_config(
             raw_allocations,
             snapshot=snapshot,
         )
