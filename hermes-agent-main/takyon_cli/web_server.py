@@ -1447,7 +1447,10 @@ def _provision_dashboard_user_if_postgres(
         import psycopg
 
         from plugins.takyon.control_plane import provision_user_on_first_login
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon.runtime_app import (
+            RuntimeNotConfigured,
+            configure_takyon_pg_session,
+        )
 
         try:
             url = _resolve_runtime_database_url()
@@ -1463,6 +1466,11 @@ def _provision_dashboard_user_if_postgres(
         email = str(user.get("email") or "") or None
         conn = psycopg.connect(url, autocommit=True)
         try:
+            # Internal-authority RLS GUC (mirrors every store connection). Without it the first-login
+            # INSERT into `users` fails the RLS WITH CHECK and the brand-new operator is never
+            # provisioned, so their later dashboard turns resolve no principal and the build refuses
+            # with "operator identity required".
+            configure_takyon_pg_session(conn)
             user_id, created, raw_key = provision_user_on_first_login(
                 conn,
                 sub,
@@ -1503,7 +1511,10 @@ def _resolve_dashboard_principal(
         import psycopg
 
         from plugins.takyon.control_plane import resolve_auth0_principal
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon.runtime_app import (
+            RuntimeNotConfigured,
+            configure_takyon_pg_session,
+        )
 
         try:
             url = runtime_database_url or _resolve_runtime_database_url()
@@ -1511,6 +1522,15 @@ def _resolve_dashboard_principal(
             return None
         conn = psycopg.connect(url, autocommit=True)
         try:
+            # Internal-authority RLS GUC, exactly as every store connection runs on open. Without it
+            # this bare dashboard connection runs as the non-bypassing runtime role, so the
+            # first-login JIT INSERT into `users` fails the RLS WITH CHECK ("new row violates
+            # row-level security policy for table users"). That failure raised, was swallowed below,
+            # returned None, and unbound the whole dashboard session — the upstream cause of the
+            # build-time "operator identity required: no operator user is bound to this session".
+            # Returning users still resolve READ-ONLY in resolve_auth0_principal; this only unblocks
+            # the genuine first-login provisioning insert.
+            configure_takyon_pg_session(conn)
             return resolve_auth0_principal(
                 conn,
                 str(user.get("sub") or ""),
@@ -1537,7 +1557,10 @@ def _resolve_local_dashboard_principal(*, runtime_database_url: str | None = Non
             resolve_platform_owner_id,
             resolve_user_principal,
         )
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon.runtime_app import (
+            RuntimeNotConfigured,
+            configure_takyon_pg_session,
+        )
 
         try:
             url = runtime_database_url or _resolve_runtime_database_url()
@@ -1545,6 +1568,9 @@ def _resolve_local_dashboard_principal(*, runtime_database_url: str | None = Non
             return None
         conn = psycopg.connect(url, autocommit=True)
         try:
+            # Same internal-authority RLS GUC as every store connection (see
+            # _resolve_dashboard_principal) so a first-call platform-owner provision can insert.
+            configure_takyon_pg_session(conn)
             owner_user_id = resolve_platform_owner_id(conn)
             if not owner_user_id:
                 return None

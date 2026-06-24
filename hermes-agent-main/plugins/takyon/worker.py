@@ -1052,12 +1052,54 @@ def _run_ceo_turn(
 
 
 def _business_owner_user_id(slug: str) -> str:
-    from .core import TakyonStore
+    """Resolve the durable owner of ``business:<slug>`` for a worker job that must bind the operator
+    identity of the user who created it.
 
-    store = TakyonStore()
-    with store._connect() as conn:
-        business = store._ensure_business(conn, slug)
-    return str(business.get("owner_user_id") or "").strip()
+    Every worker handler (ceo_bootstrap, ceo_wake, deferred operator tools) binds the session to this
+    user id; an EMPTY or unreadable value here is the upstream cause of the two create-time failures
+    we have to keep out: a build session that binds an empty user then raises
+    "operator identity required: no operator user is bound to this session", and a session that binds
+    a non-empty user against a row that is not yet visible then raises "business:<slug> does not
+    exist". Both reduce to: the businesses row must be durably visible AND carry a real owner before
+    the job binds identity.
+
+    Dashboard create commits the businesses row (with owner = the Auth0 principal) and reads it back
+    BEFORE it enqueues the bootstrap job, so by the time a worker claims the job the row is committed.
+    But create and the worker run on separate Postgres connections, and a job can be claimed within
+    milliseconds of the enqueue commit. To make this robust against that brief read-after-write lag,
+    poll a fresh short-lived connection a few times before giving up — then FAIL LOUDLY with the exact
+    slug rather than returning "" (which would silently unbind the whole build session). A loud raise
+    here turns into a retryable job failure (jobs.run_one) instead of a confusing tool-level identity
+    error mid-build."""
+    from .core import TakyonError, TakyonStore
+
+    last_exc: Exception | None = None
+    owner = ""
+    # Bounded read-after-write retry: ~0.1s + 0.2s + 0.4s + 0.8s ≈ 1.5s total before failing, which
+    # comfortably covers cross-connection commit visibility without stalling a healthy job.
+    for attempt in range(5):
+        try:
+            store = TakyonStore()
+            with store._connect() as conn:
+                business = store._ensure_business(conn, slug)
+            owner = str(business.get("owner_user_id") or "").strip()
+            if owner:
+                return owner
+            # Row exists but has no owner — never bind an empty operator (that is exactly the
+            # "operator identity required" failure). Treat as a transient miss and retry; if it is
+            # still empty after the window, fall through to the loud raise below.
+            last_exc = TakyonError(f"business:{slug} has no owner_user_id yet")
+        except TakyonError as exc:
+            # _ensure_business raises "business not found: <slug>" when the row is not yet visible to
+            # this fresh connection. That is the durability race — retry within the window.
+            last_exc = exc
+        if attempt < 4:
+            time.sleep(0.1 * (2**attempt))
+
+    raise TakyonError(
+        f"cannot bind operator identity for business:{slug}: owner_user_id is unresolved after "
+        f"read-after-write retries ({last_exc})"
+    )
 
 
 def ceo_wake_handler(job: Job) -> JobRunResult:

@@ -1086,3 +1086,79 @@ def test_run_worker_loop_uses_multiple_threads_when_configured(monkeypatch):
     assert drained == 0
     assert len({item[0] for item in seen}) == 2
     assert sum(1 for _worker_id, dispatch in seen if dispatch) == 1
+
+
+# ---------------------------------------------------------------------------
+# _business_owner_user_id — the single chokepoint every worker handler uses to
+# bind operator identity for a create-time business. It must (1) return the
+# durable owner, (2) tolerate brief cross-connection read-after-write lag with a
+# bounded retry, and (3) FAIL LOUDLY (never return "") when the owner cannot be
+# resolved — an empty bind is the upstream cause of the build-time
+# "operator identity required" / "business:<slug> does not exist" failures.
+# Pure unit (no PG): the store is faked.
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_owner_store(monkeypatch, attempts: list):
+    """attempts: list of callables; each call to _ensure_business pops the next.
+    A callable returns the business dict or raises."""
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeStore:
+        def _connect(self):
+            return _FakeConn()
+
+        def _ensure_business(self, conn, slug):
+            return attempts.pop(0)(slug)
+
+    monkeypatch.setattr(core, "TakyonStore", lambda *a, **k: _FakeStore())
+    # Never actually sleep in the retry window.
+    monkeypatch.setattr(worker.time, "sleep", lambda *_a, **_k: None)
+
+
+def test_business_owner_user_id_returns_durable_owner(monkeypatch):
+    _install_fake_owner_store(
+        monkeypatch,
+        [lambda slug: {"owner_user_id": "user-123"}],
+    )
+    assert worker._business_owner_user_id("acme") == "user-123"
+
+
+def test_business_owner_user_id_retries_past_read_after_write_lag(monkeypatch):
+    # First read: row not yet visible (the durability race). Second: owner present.
+    def _missing(slug):
+        raise core.TakyonError(f"business not found: {slug}")
+
+    _install_fake_owner_store(
+        monkeypatch,
+        [_missing, lambda slug: {"owner_user_id": "user-xyz"}],
+    )
+    assert worker._business_owner_user_id("acme") == "user-xyz"
+
+
+def test_business_owner_user_id_fails_loud_on_empty_owner(monkeypatch):
+    # Row exists every attempt but carries no owner — must raise, never bind "".
+    _install_fake_owner_store(
+        monkeypatch,
+        [lambda slug: {"owner_user_id": ""} for _ in range(5)],
+    )
+    with pytest.raises(core.TakyonError) as exc:
+        worker._business_owner_user_id("acme")
+    assert "acme" in str(exc.value)
+    assert "operator identity" in str(exc.value).lower() or "owner_user_id" in str(exc.value)
+
+
+def test_business_owner_user_id_fails_loud_when_row_never_appears(monkeypatch):
+    def _missing(slug):
+        raise core.TakyonError(f"business not found: {slug}")
+
+    _install_fake_owner_store(monkeypatch, [_missing for _ in range(5)])
+    with pytest.raises(core.TakyonError) as exc:
+        worker._business_owner_user_id("acme")
+    assert "acme" in str(exc.value)

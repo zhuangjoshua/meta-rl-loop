@@ -3517,6 +3517,8 @@ def run_takyon_command(
     operator_user_id: str | None = None,
 ) -> Any:
     load_takyon_env()
+    from .core import operator_identity_mode
+
     resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
     store = TakyonStore(operator_user_id=resolved_operator_user_id)
 
@@ -3809,6 +3811,20 @@ def run_takyon_command(
             usage=f'usage: takyon {command} [--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
+        # Fail closed on operator identity at the create chokepoint. On a plane that declares
+        # per-session identity (the dashboard plane — operator_identity_mode() == "enforce"), a create
+        # MUST carry the authenticated Auth0 principal as the owner. If it does not resolve, refusing
+        # here is the upstream fix for both create-time identity failures: without it the
+        # business.upsert below silently falls back to the platform owner (control_plane), so the row
+        # gets an owner the dashboard user can never see, and the ceo_bootstrap worker then binds that
+        # foreign/absent owner — surfacing downstream as "operator identity required" / a build that
+        # operates a business the creator does not own. The legacy single-operator/dev planes
+        # (operator_identity_mode() == "") keep their historical platform-owner fallback.
+        if auto_start and not resolved_operator_user_id and operator_identity_mode():
+            raise SystemExit(
+                "cannot create business: no operator identity is bound to this session. "
+                "The dashboard create must carry the authenticated operator; re-authenticate and retry."
+            )
         if _business_exists(store, slug):
             # Creating a fresh business must never reuse an existing one, but a slug
             # collision (e.g. the same idea created twice) should NOT strand the operator.
