@@ -351,6 +351,95 @@ def test_run_one_heartbeats_while_handler_is_running(pg_conn, monkeypatch):
     assert heartbeat_calls and heartbeat_calls[0][1] == "w1"
 
 
+def test_run_one_heartbeat_failure_does_not_requeue_a_finished_job(pg_conn, monkeypatch):
+    """The regression: a long build (bootstrap Docker→R2) outruns the stale window, the heartbeat
+    raises JobNotRunning mid-handler, and the WHOLE finished build was requeued + re-run from scratch
+    (handler_error). A heartbeat failure is a liveness signal, never a correctness gate: the handler
+    is still running and its side effects are landing, so the job must settle + complete, NOT requeue.
+    """
+    slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
+    jobs.enqueue(
+        pg_conn, slug, "ceo_bootstrap", idempotency_key="j",
+        payload={"estimate_cents": 500}, max_attempts=2,
+    )
+    release = threading.Event()
+    heartbeat_calls: list[str] = []
+
+    def _failing_heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+        # First heartbeat fails like a lost claim; let the handler finish so we exercise the
+        # finished-but-heartbeat-failed path, not the handler-error path.
+        heartbeat_calls.append(job_id)
+        release.set()
+        raise jobs.JobNotRunning(job_id)
+
+    monkeypatch.setattr(jobs, "heartbeat", _failing_heartbeat)
+
+    class _SlowHandler:
+        def __call__(self, job: jobs.Job) -> jobs.JobRunResult:
+            release.wait(2.0)  # outlive at least one heartbeat tick so the failing heartbeat fires
+            return jobs.JobRunResult(result={"built": job.business_slug}, actual_cost_cents=300)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_bootstrap": _SlowHandler()},
+        heartbeat_interval_seconds=0.05,
+    )
+    assert heartbeat_calls, "the failing heartbeat must have fired mid-handler"
+    # The finished build COMPLETES — it is NOT requeued/failed by a heartbeat hiccup.
+    assert outcome is not None and outcome.status == "completed"
+    job = jobs.get_job(pg_conn, outcome.job_id)
+    assert job.status == "completed"
+    assert job.attempts == 1  # ran exactly once; no re-run of the full build
+    assert job.result == {"built": slug}
+    # The true cost settled; no reservation leaks.
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.reserved_cents == 0
+    assert bal.allowance_used_cents == 300
+
+
+def test_run_one_lost_claim_on_successful_finish_completes_without_requeue(pg_conn):
+    """If the claim is lost WHILE a successful build runs (requeue_stale + a sibling re-claim that then
+    finalizes the row first), the terminal complete() sees a non-'running' row and raises JobNotRunning.
+    That is NOT a failure to surface: the work is done and its side effects already landed — re-running
+    it would only rebuild a published product. run_one reports completion and never requeues."""
+    slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
+    jobs.enqueue(
+        pg_conn, slug, "ceo_bootstrap", idempotency_key="j",
+        payload={"estimate_cents": 500}, max_attempts=2,
+    )
+
+    class _ReclaimingHandler:
+        """Simulate the lost-claim race: while 'running', the reaper requeues this job, a sibling
+        re-claims AND finalizes it, so by the time run_one finalizes the original attempt the row is
+        already terminal (no longer 'running')."""
+
+        def __call__(self, job: jobs.Job) -> jobs.JobRunResult:
+            # Make the claim look stale, reaper requeues it, sibling re-claims (attempts -> 2) and
+            # completes the row before this (original) attempt returns.
+            _go_stale(pg_conn, job.id)
+            assert jobs.requeue_stale(pg_conn, older_than_seconds=900) == 1
+            reclaimed = jobs.claim_one(pg_conn, worker_id="sibling")
+            assert reclaimed is not None and reclaimed.id == job.id
+            jobs.complete(pg_conn, job.id, result={"by": "sibling"})
+            return jobs.JobRunResult(result={"built": job.business_slug}, actual_cost_cents=300)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_bootstrap": _ReclaimingHandler()},
+        heartbeat_interval_seconds=0,  # no heartbeat loop: isolate the terminal lost-claim path
+    )
+    # The original attempt finished its build; it reports completion rather than requeuing/crashing.
+    assert outcome is not None and outcome.status == "completed"
+    # The row is terminal (completed by whichever attempt finalized first) — NOT requeued. The original
+    # attempt's own hold was released so nothing leaks from it.
+    job = jobs.get_job(pg_conn, outcome.job_id)
+    assert job.status == "completed"
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.reserved_cents == 0  # original attempt's hold refunded on the lost-claim finalize
+
+
 # ── crash recovery ─────────────────────────────────────────────────────────────────────────────────
 
 

@@ -31,12 +31,15 @@ budget, lifecycle — is real and tested on real Postgres; only the leaf side ef
 from __future__ import annotations
 
 import json
+import logging
 import concurrent.futures
 import contextvars
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from . import billing
+
+_log = logging.getLogger("takyon.jobs")
 
 # A handler runs one job's actual work and returns its result + the TRUE cost to settle. A handler
 # that spends nothing returns actual_cost_cents=0 (then no settle/refund moves money). Raising signals
@@ -418,7 +421,27 @@ def run_one(
                 if done:
                     run_result = future.result()
                     break
-                heartbeat(conn, job.id, worker_id=worker_id)
+                # The heartbeat is a LIVENESS signal, never a correctness gate. A long build
+                # (bootstrap Docker→R2 + claude-agent-task) can run past the stale threshold and lose
+                # its claim to requeue_stale + a sibling re-claim; a transient DB blip can likewise
+                # make one refresh fail. NEITHER means the work failed — the handler thread is still
+                # running and its durable side effects (published site, receipts) are landing. If we
+                # let a heartbeat exception escape here it is caught below as a "handler error" and the
+                # ENTIRE 5-minute build is requeued and re-run from scratch, starving the single build
+                # lane (observed on businesses "simple"/"simple-meal-planning": JobNotRunning at
+                # jobs.py heartbeat → fail() → requeue → attempt 2 rebuilds everything). So swallow a
+                # heartbeat failure: keep waiting for the handler, and let the TERMINAL transition be
+                # the single authority on the outcome.
+                try:
+                    heartbeat(conn, job.id, worker_id=worker_id)
+                except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
+                    _log.warning(
+                        "jobs: heartbeat could not refresh claim for job %s (kind=%s, non-fatal; "
+                        "handler still running): %s",
+                        job.id,
+                        job.kind,
+                        hb_exc,
+                    )
         assert run_result is not None
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         if estimate_cents > 0:
@@ -428,11 +451,36 @@ def run_one(
             job.id, job.kind, status, reserved_cents=reserved, reason="handler_error"
         )
 
+    # The handler SUCCEEDED. Settle + complete are the terminal authority. But the claim may have been
+    # lost while the long build ran (requeue_stale + sibling re-claim) — then this row is no longer
+    # 'running'/ours, so settle()/complete() raise JobNotRunning. That is NOT a failure to surface: the
+    # work is done and its side effects already landed; re-running it would only re-build a published
+    # product. Treat a lost claim on a successful finish as a benign "already finalized elsewhere":
+    # release our own hold so no reservation leaks, log it, and report completion. A genuine bug (double
+    # complete of a truly-terminal row) is the same harmless idempotent no-op here.
     actual = 0
-    if estimate_cents > 0:
-        actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
-        billing.settle(conn, reservation_key, actual)
-    complete(conn, job.id, result=run_result.result)
+    try:
+        if estimate_cents > 0:
+            actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
+            billing.settle(conn, reservation_key, actual)
+        complete(conn, job.id, result=run_result.result)
+    except JobNotRunning:
+        # Our claim was reclaimed mid-build (the build outran the stale window). Don't requeue a
+        # finished, side-effect-complete job. Release our hold idempotently so the refund isn't lost.
+        if estimate_cents > 0:
+            try:
+                billing.refund(conn, reservation_key)
+            except Exception:  # noqa: BLE001 — best-effort; the sibling attempt reconciles the hold too
+                pass
+        _log.warning(
+            "jobs: job %s (kind=%s) finished but its claim was lost before finalize; reporting "
+            "completion without requeue (side effects already landed)",
+            job.id,
+            job.kind,
+        )
+        return JobOutcome(
+            job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=0
+        )
     return JobOutcome(
         job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=actual
     )
