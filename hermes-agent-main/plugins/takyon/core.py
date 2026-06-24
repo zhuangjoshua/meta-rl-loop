@@ -31963,7 +31963,7 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
     idempotency_key = str(args.get("idempotency_key") or "").strip()
     if not idempotency_key:
         raise TakyonError("idempotency_key is required")
-    workspace_raw = str(args.get("workspace") or ".").strip() or "."
+    workspace_raw = str(args.get("workspace") or "product/site").strip() or "product/site"
     workspace_rel = _canonical_business_output_relpath(workspace_raw, field="workspace")
     load_takyon_env()
     _require_api_access({"action": "agent.record", "business": business, "requires_api": ["anthropic"]})
@@ -32254,7 +32254,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
 
-        workspace_raw = str(args.get("workspace") or ".").strip() or "."
+        workspace_raw = str(args.get("workspace") or "product/site").strip() or "product/site"
         workspace_rel = _canonical_business_output_relpath(workspace_raw, field="workspace")
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
@@ -34929,7 +34929,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "Run a scoped Claude Agent SDK task for a business.",
             {
                 "business": _BUSINESS_PROP,
-                "workspace": {"type": "string", "description": "Business-relative workspace directory; default '.'"},
+                "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
                 "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus the shared style packs (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-vibrant, claude-design-doodle) when you want Claude to choose one coherent visual direction from the brief. When omitted, the runtime does not inject design guidance automatically."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},

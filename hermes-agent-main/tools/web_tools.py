@@ -169,7 +169,7 @@ def _get_backend() -> str:
     backend_candidates = (
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL") or _is_tool_gateway_ready()),
         ("parallel", _has_env("PARALLEL_API_KEY")),
-        ("tavily", _has_env("TAVILY_API_KEY")),
+        ("tavily", _is_backend_available("tavily")),
         ("exa", _has_env("EXA_API_KEY")),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
@@ -233,7 +233,13 @@ def _is_backend_available(backend: str) -> bool:
     if backend == "firecrawl":
         return check_firecrawl_api_key()
     if backend == "tavily":
-        return _has_env("TAVILY_API_KEY")
+        if _has_env("TAVILY_API_KEY"):
+            return True
+        try:
+            from plugins.takyon import safebox
+            return bool(safebox._use_remote_authority())
+        except Exception:
+            return False
     if backend == "searxng":
         return _has_env("SEARXNG_URL")
     if backend == "brave-free":

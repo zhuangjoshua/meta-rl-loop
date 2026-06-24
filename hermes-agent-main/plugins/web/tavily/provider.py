@@ -187,8 +187,15 @@ class TavilyWebSearchProvider(WebSearchProvider):
         return "Tavily"
 
     def is_available(self) -> bool:
-        """Return True when ``TAVILY_API_KEY`` is set to a non-empty value."""
-        return bool(os.getenv("TAVILY_API_KEY", "").strip())
+        """Available when the local key is set OR the safebox proxy can broker the
+        call (runtime plane: the raw key lives on the safebox, not in os.environ)."""
+        if bool(os.getenv("TAVILY_API_KEY", "").strip()):
+            return True
+        try:
+            from plugins.takyon import safebox
+            return _use_remote_authority(safebox)
+        except Exception:
+            return False
 
     def supports_search(self) -> bool:
         return True
