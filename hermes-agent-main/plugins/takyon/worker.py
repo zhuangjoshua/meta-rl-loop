@@ -1302,12 +1302,34 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         if tokens:
             clear_session_vars(tokens)
 
-    surface_refresh = _refresh_business_surface_after_bootstrap(
-        slug,
-        job_id=str(job.id),
-        operator_user_id=owner_user_id,
-    )
+    # ── Post-turn finalization (NON-FATAL by contract) ──────────────────────────────────────────
+    # The CEO bootstrap turn has already returned. Everything below is bookkeeping: a final trusted
+    # product-surface refresh, the wake-cron schedule, and receipt events. NONE of it may raise out
+    # of the handler, because run_one re-runs the ENTIRE 5-minute build on any handler exception
+    # (reason=handler_error → fail()→requeue). A fully-built, published bootstrap that hiccups here
+    # (a transient DB blip, a lost job claim raising JobNotRunning, a surface re-refresh wobble) must
+    # NOT be thrown back on the queue to rebuild from scratch and starve the single build lane.
+    #
+    # Root cause this guards: a clean turn (finish_reason=stop, under the iteration cap) built the
+    # whole product and PUBLISHED the site, then a post-turn step raised and run_one requeued it —
+    # observed on business "simple": turn ended 04:31:42, requeued 04:31:49 (reason=handler_error,
+    # error == the bare job id == JobNotRunning), attempt 2 re-ran the full 287s Docker build and
+    # blocked a fresh business behind it. The done-gate below makes "turn completed OR site
+    # published" terminal; only a genuine pre-publish iteration-cap exhaustion may requeue.
+    surface_refresh: dict[str, Any] | None = None
     publish_status = "unknown"
+    try:
+        surface_refresh = _refresh_business_surface_after_bootstrap(
+            slug,
+            job_id=str(job.id),
+            operator_user_id=owner_user_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - post-turn refresh must never requeue a finished build
+        _log.warning(
+            "worker: bootstrap post-turn surface refresh failed for business:%s (non-fatal): %s",
+            slug,
+            exc,
+        )
     if surface_refresh:
         publish = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
         publish_status = str(publish.get("status") or surface_refresh.get("status") or "").strip() or "unknown"
@@ -1333,12 +1355,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             command=command,
         )
 
-    # Iteration-budget exhaustion is a real failure ONLY if the product never reached its
-    # done-gate. The surface contract defines done as published_or_exact_blocker: if the site
-    # published, the bootstrap met its goal — let run_one settle + complete it, cap or not (this
-    # is the fix for capped-but-live bootstraps being false-failed and re-run). If it capped
-    # BEFORE publishing, that's a genuine incomplete — raise so run_one requeues for continuation.
-    if not turn_completed and publish_status != "published":
+    # The done-gate. A bootstrap is DONE the moment its CEO turn finished cleanly (turn_completed)
+    # OR its product site published — either way the build reached its goal and must settle+complete,
+    # never requeue. Iteration-budget exhaustion is a real incomplete ONLY when the turn capped out
+    # AND the site never published: that genuine pre-publish cap raises so run_one requeues for
+    # continuation. Everything else here is non-fatal bookkeeping (the try/except wraps above/below).
+    bootstrap_done = bool(turn_completed) or publish_status == "published"
+    if not bootstrap_done:
         raise RuntimeError(
             f"bootstrap for business:{slug} exhausted its iteration budget before publishing "
             f"(surface status={publish_status})"
@@ -1346,28 +1369,35 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
 
     wake_result: dict[str, object] | None = None
     if schedule:
-        wake_result = store.commit(
-            scope=f"business:{slug}",
-            operations=[
-                {
-                    "action": "cron.ensure_ceo_wakeup",
-                    "business": slug,
-                    "schedule": schedule,
-                    "defer_first_run": True,
-                }
-            ],
-            idempotency_key=f"{job.id}:bootstrap-wake:{schedule}",
-            reason="bootstrap completed and enabled CEO wake loop",
-            actor="worker",
-        )
-        _record_runtime_event(
-            slug,
-            kind="ceo_bootstrap",
-            status="output",
-            detail=f"wake schedule -> business:{slug} {schedule}",
-            line=f"wake schedule -> business:{slug} {schedule}",
-            command=command,
-        )
+        try:
+            wake_result = store.commit(
+                scope=f"business:{slug}",
+                operations=[
+                    {
+                        "action": "cron.ensure_ceo_wakeup",
+                        "business": slug,
+                        "schedule": schedule,
+                        "defer_first_run": True,
+                    }
+                ],
+                idempotency_key=f"{job.id}:bootstrap-wake:{schedule}",
+                reason="bootstrap completed and enabled CEO wake loop",
+                actor="worker",
+            )
+            _record_runtime_event(
+                slug,
+                kind="ceo_bootstrap",
+                status="output",
+                detail=f"wake schedule -> business:{slug} {schedule}",
+                line=f"wake schedule -> business:{slug} {schedule}",
+                command=command,
+            )
+        except Exception as exc:  # noqa: BLE001 - wake scheduling must never requeue a finished build
+            _log.warning(
+                "worker: bootstrap wake-cron schedule failed for business:%s (non-fatal): %s",
+                slug,
+                exc,
+            )
 
     cents = max(0, int(round(cost_usd * 100)))
     _record_runtime_event(

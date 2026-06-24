@@ -1162,3 +1162,187 @@ def test_business_owner_user_id_fails_loud_when_row_never_appears(monkeypatch):
     with pytest.raises(core.TakyonError) as exc:
         worker._business_owner_user_id("acme")
     assert "acme" in str(exc.value)
+
+
+# ── ceo_bootstrap_handler done-gate: a completed/published bootstrap must NOT requeue ──────────────
+#
+# Regression guard for the build-loop bug: a CEO bootstrap turn that finished cleanly and published
+# the product site was requeued by a raising POST-TURN step (observed on business "simple": the turn
+# ended at finish_reason=stop, then the handler raised JobNotRunning and run_one re-ran the whole
+# 5-minute Docker build, starving the single build lane). The handler must treat "turn completed OR
+# site published" as DONE and make every post-turn step (surface refresh, wake-cron commit, receipt
+# events) non-fatal, so a finished build settles+completes instead of looping.
+
+
+class _BootstrapStubStore:
+    """Minimal TakyonStore stand-in for ceo_bootstrap_handler unit tests."""
+
+    def __init__(self) -> None:
+        self.commits: list[dict[str, Any]] = []
+
+    def read(self, *_, **__) -> dict[str, Any]:
+        return {"business": {"name": "Acme", "goal": "do the thing"}}
+
+    def commit(self, **kwargs) -> dict[str, Any]:
+        self.commits.append(kwargs)
+        return {"ok": True}
+
+
+def _install_bootstrap_handler_stubs(
+    monkeypatch,
+    *,
+    turn_completed: bool,
+    surface_refresh: Any,
+    run_turn=None,
+):
+    """Patch every heavy collaborator of ceo_bootstrap_handler so it runs in-process without a DB,
+    workspace, agent, or network. Returns the dict capturing what the handler did."""
+    import contextlib
+
+    from plugins.takyon import cli as takyon_cli
+    import gateway.session_context as session_context
+
+    captured: dict[str, Any] = {"events": [], "refresh_calls": 0}
+    store = _BootstrapStubStore()
+
+    monkeypatch.setattr(core, "TakyonStore", lambda *a, **k: store)
+
+    @contextlib.contextmanager
+    def _fake_bound_op(*_a, **_k):
+        yield
+
+    monkeypatch.setattr(core, "_bound_operator_task_context", _fake_bound_op)
+
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield "/tmp/fake-workspace"
+
+    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(
+        takyon_cli,
+        "_ceo_bootstrap_turn_config",
+        lambda *a, **k: {
+            "user_prompt": "Bootstrap business now.",
+            "ephemeral_system_prompt": "CEO prompt",
+            "enabled_toolsets": ["takyon", "web", "skills"],
+        },
+    )
+    monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
+    monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+
+    def _default_turn(*, slug, **_kw):
+        return "Bootstrap complete. Live at https://acme.coscale.app/", 1.0, "exact", turn_completed
+
+    monkeypatch.setattr(worker, "_run_ceo_turn", run_turn or _default_turn)
+
+    def _fake_refresh(slug, *, job_id, operator_user_id=None):
+        captured["refresh_calls"] += 1
+        if isinstance(surface_refresh, BaseException):
+            raise surface_refresh
+        if callable(surface_refresh):
+            return surface_refresh()
+        return surface_refresh
+
+    monkeypatch.setattr(worker, "_refresh_business_surface_after_bootstrap", _fake_refresh)
+
+    def _capture_event(slug, *, kind, status, **_kw):
+        captured["events"].append((status, kind))
+
+    monkeypatch.setattr(worker, "_record_runtime_event", _capture_event)
+    captured["store"] = store
+    return captured
+
+
+def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatch):
+    # Clean turn (turn_completed=True) + a published surface refresh: the handler returns a
+    # JobRunResult (run_one will settle+complete it). It must NOT raise, so the build never requeues.
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+    )
+    job = SimpleNamespace(
+        id="job-abc-123",
+        business_slug="acme",
+        payload={"schedule": "every 6h"},
+    )
+
+    result = worker.ceo_bootstrap_handler(job)
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert result.result["business_slug"] == "acme"
+    assert result.actual_cost_cents == 100  # $1.00 → 100c
+    # Wake schedule was committed and the final "completed" receipt event fired.
+    assert captured["store"].commits, "wake-cron schedule should have been committed"
+    assert ("completed", "ceo_bootstrap") in captured["events"]
+
+
+def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch):
+    # Turn hit the iteration cap (turn_completed=False) but the site PUBLISHED → done-gate is met by
+    # publication. Must complete, not requeue (this is the capped-but-live case).
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+    )
+    job = SimpleNamespace(id="job-abc-456", business_slug="acme", payload={})
+
+    result = worker.ceo_bootstrap_handler(job)
+    assert isinstance(result, jobs.JobRunResult)
+
+
+def test_bootstrap_post_turn_surface_refresh_exception_does_not_requeue(monkeypatch):
+    # The post-turn surface refresh RAISES (e.g. a lost job claim → JobNotRunning, or a transient DB
+    # blip). The turn completed cleanly, so the build is done: the handler must swallow the post-turn
+    # exception and still return a JobRunResult. A raise here would re-run the whole build.
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        surface_refresh=jobs.JobNotRunning("job-abc-789"),  # str(exc) == the bare job id, as observed
+    )
+    job = SimpleNamespace(id="job-abc-789", business_slug="acme", payload={"schedule": "every 6h"})
+
+    result = worker.ceo_bootstrap_handler(job)
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert captured["refresh_calls"] == 1
+    assert ("completed", "ceo_bootstrap") in captured["events"]
+
+
+def test_bootstrap_post_turn_wake_commit_exception_does_not_requeue(monkeypatch):
+    # The wake-cron store.commit RAISES after a clean, published turn. Non-fatal: the handler must
+    # still complete (wake scheduling is bookkeeping; a finished published build is done).
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        surface_refresh={"publish": {"status": "published"}},
+    )
+
+    def _boom(**_kw):
+        raise RuntimeError("transient wake-cron commit failure")
+
+    captured["store"].commit = _boom  # type: ignore[method-assign]
+    job = SimpleNamespace(id="job-abc-999", business_slug="acme", payload={"schedule": "every 6h"})
+
+    result = worker.ceo_bootstrap_handler(job)
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert ("completed", "ceo_bootstrap") in captured["events"]
+
+
+def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
+    # The ONLY genuine requeue: the turn capped out (turn_completed=False) AND the site never
+    # published. That is a real incomplete — the handler must raise so run_one requeues for
+    # continuation. (Guards against the done-gate going too far and never retrying real failures.)
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "build_failed", "blocker": "vite build error"}},
+    )
+    job = SimpleNamespace(id="job-abc-000", business_slug="acme", payload={})
+
+    with pytest.raises(RuntimeError) as exc:
+        worker.ceo_bootstrap_handler(job)
+    assert "iteration budget" in str(exc.value)
+    assert "acme" in str(exc.value)
