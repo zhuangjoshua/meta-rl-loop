@@ -22,12 +22,12 @@ from typing import Any
 # paying subscriber, so users = revenue/price exactly. pageviews/visits/usage are the larger
 # site-traffic / activity numbers derived from the user (subscriber) count.
 _PINNED: dict[str, dict[str, Any]] = {
-    # users * price = revenue: cyclewise 90*$7.99=$719.10; glp 68*$9=$612; latexflow 45*$12=$540;
-    # rockid 54*$7.99=$431.46; homework 29*$12=$348.
-    "cyclewise": dict(revenue=71910, users=90, usage=1350, pageviews=4500, visits=1730, launch_days=34, delta=0.34),
-    "glp-1-tracker": dict(revenue=61200, users=68, usage=1020, pageviews=3400, visits=1310, launch_days=36, delta=0.29),
+    # users * price = revenue: cyclewise 20*$7.99=$159.80; glp 8*$9=$72; latexflow 45*$12=$540;
+    # rockid 6*$7.99=$47.94; homework 29*$12=$348.
+    "cyclewise": dict(revenue=15980, users=20, usage=300, pageviews=1000, visits=385, launch_days=34, delta=0.34),
+    "glp-1-tracker": dict(revenue=7200, users=8, usage=120, pageviews=400, visits=154, launch_days=36, delta=0.29),
     "latexflow": dict(revenue=54000, users=45, usage=680, pageviews=2250, visits=865, launch_days=37, delta=0.26),
-    "rockid": dict(revenue=43146, users=54, usage=810, pageviews=2700, visits=1040, launch_days=33, delta=0.31),
+    "rockid": dict(revenue=4794, users=6, usage=90, pageviews=300, visits=115, launch_days=33, delta=0.31),
     "homework-solver": dict(revenue=34800, users=29, usage=440, pageviews=1450, visits=560, launch_days=31, delta=0.22),
 }
 
