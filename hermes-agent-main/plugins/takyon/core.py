@@ -14128,13 +14128,36 @@ class TakyonStore:
                 self._workspace_sync_cache.add(normalized)
                 self._workspace_revision_cache[normalized] = 0
                 return
-            storage.materialize_workspace_revision(
-                backend,
-                normalized,
-                head_revision,
-                root,
-                delete_local=True,
-            )
+            try:
+                storage.materialize_workspace_revision(
+                    backend,
+                    normalized,
+                    head_revision,
+                    root,
+                    delete_local=True,
+                )
+            except storage.ObjectNotFound as exc:
+                # Orphaned/corrupt workspace head: the DB head pointer references a manifest or CAS
+                # blob whose durable bytes are missing from the backend (a rare cache-mirror race can
+                # leave a dangling head). The workspace data is unrecoverable, but this MUST NOT strand
+                # every operation on the business — above all ``business.delete``, whose whole purpose
+                # is to remove the business, and ordinary reads, which can fall back to an empty,
+                # rebuildable workspace. Degrade to an empty-but-present cache root and continue
+                # instead of aborting the caller. Observed in prod: ``business.delete`` (and the
+                # dashboard "X") 500ing with
+                # ``ObjectNotFound('<slug>/__takyon/workspace/manifests/<n>.json')`` for older
+                # businesses whose head manifest object had gone missing from R2.
+                logging.getLogger("takyon.workspace").warning(
+                    "workspace materialize skipped for %s@%s: missing durable object (%s); treating "
+                    "workspace as empty so reads and delete are not stranded",
+                    normalized,
+                    head_revision,
+                    exc,
+                )
+                root.mkdir(parents=True, exist_ok=True)
+                self._workspace_sync_cache.add(normalized)
+                self._workspace_revision_cache[normalized] = head_revision
+                return
             self._workspace_sync_cache.add(normalized)
             self._workspace_revision_cache[normalized] = head_revision
 
