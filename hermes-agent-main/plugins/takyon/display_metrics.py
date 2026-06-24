@@ -18,12 +18,16 @@ from typing import Any
 
 # Pinned monthly targets for the five showcase businesses (revenue in cents).
 # Any other slug is seed-derived in :func:`_targets` so the feature generalizes.
+# Funnel reads sensibly next to revenue: subscribers = revenue/price, total users ~= subs / ~28%
+# signup->paid conversion (so ARPU across all users stays believable), with traffic/usage to match.
 _PINNED: dict[str, dict[str, Any]] = {
-    "cyclewise": dict(revenue=71910, users=1125, usage=3600, pageviews=24400, visits=9400, launch_days=34, delta=0.34),
-    "glp-1-tracker": dict(revenue=61200, users=850, usage=2700, pageviews=18400, visits=7100, launch_days=36, delta=0.29),
-    "latexflow": dict(revenue=54000, users=560, usage=1800, pageviews=12200, visits=4700, launch_days=37, delta=0.26),
-    "rockid": dict(revenue=43146, users=675, usage=2150, pageviews=14600, visits=5600, launch_days=33, delta=0.31),
-    "homework-solver": dict(revenue=34800, users=360, usage=1150, pageviews=7850, visits=3000, launch_days=31, delta=0.22),
+    # cyclewise $7.99 -> ~90 paid of 320 users; glp $9 -> ~68 of 240; latexflow $12 -> ~45 of 165;
+    # rockid $7.99 -> ~54 of 190; homework $12 -> ~29 of 105.
+    "cyclewise": dict(revenue=71910, users=320, usage=1350, pageviews=4900, visits=1950, launch_days=34, delta=0.34),
+    "glp-1-tracker": dict(revenue=61200, users=240, usage=1020, pageviews=3700, visits=1480, launch_days=36, delta=0.29),
+    "latexflow": dict(revenue=54000, users=165, usage=720, pageviews=2550, visits=1020, launch_days=37, delta=0.26),
+    "rockid": dict(revenue=43146, users=190, usage=820, pageviews=2900, visits=1160, launch_days=33, delta=0.31),
+    "homework-solver": dict(revenue=34800, users=105, usage=470, pageviews=1680, visits=670, launch_days=31, delta=0.22),
 }
 
 _METRICS = ("revenue", "users", "usage", "pageviews", "visits")
@@ -50,10 +54,11 @@ def _targets(slug: Any) -> dict[str, Any]:
         return dict(_PINNED[s])
     seed = _seed(slug)
     revenue = 30000 + round((((seed >> 4) % 10000) / 10000.0) * 44000)  # $300..$740 in cents
-    rd = revenue / 100.0
-    users = max(40, round(rd * (1.3 + _frac(seed, 16) * 0.9)))
-    usage = round(users * (2.4 + _frac(seed, 24)))
-    visits = round(users * (7.0 + _frac(seed, 32) * 5.0))
+    est_subs = max(20, round(revenue / 950.0))                          # ~$9.50 avg sub price
+    conversion = 0.24 + _frac(seed, 16) * 0.12                          # 24%..36% signup -> paid
+    users = max(60, round(est_subs / conversion))                       # users ~ 2.8-4.2x subs
+    usage = round(est_subs * (12.0 + _frac(seed, 24) * 8.0))            # ~12-20 AI calls / sub / mo
+    visits = round(users * (5.5 + _frac(seed, 32) * 3.0))              # users x 5.5-8.5 monthly visits
     pageviews = round(visits * (2.3 + _frac(seed, 40) * 0.8))
     launch_days = 30 + (seed % 12)
     delta = round(0.18 + ((seed >> 48) % 22) / 100.0, 2)
