@@ -9793,6 +9793,26 @@ _TAKYON_BARE_KIND_TITLES = {
 # name (BUG-005).
 _TAKYON_GENERAL_BUSINESS_TITLE = "Working on the company"
 
+# CEO-loop / runner identifiers that name the PROCESS doing the work, not the work
+# itself. A card title must name the actual task in business terms, so these are
+# mapped to recognizable business-language titles. "CEO turn" is also caught by the
+# tool-shaped gate below; it is listed here so the whole runner family lives in one
+# place and every loop label ("CEO bootstrap", "CEO wake", "Background run", …) is
+# neutralized rather than only "CEO turn".
+_TAKYON_RUNNER_TITLE_MAP = {
+    "ceo bootstrap": "Setting up the company",
+    "ceo wake": "Working on the company",
+    "ceo wake loop": "Checking in on the company",
+    "ceo turn": "Working on the company",
+    "ceo run": "Working on the company",
+    "ceo or worker run": "Working on the company",
+    "ceo loop": "Working on the company",
+    "ceo live trace": "Working on the company",
+    "background run": "Working on the company",
+    "background work": "Working on the company",
+    "work request": "Working on the company",
+}
+
 
 def _takyon_label_is_tool_shaped(text: str) -> bool:
     """True when `text` still reads like a raw tool / runtime identifier.
@@ -9833,6 +9853,13 @@ def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
     text = str(label or "").strip()
     if not text:
         text = "Recorded work"
+    # Process-name gate: a label that is exactly a CEO-loop / runner identifier
+    # ("CEO bootstrap", "CEO wake", "CEO run", "Background run", "Work request", …)
+    # names the runner, not the task. Map it to a recognizable business-language
+    # title so the card title describes the work, not the engine doing it.
+    runner_title = _TAKYON_RUNNER_TITLE_MAP.get(text.lower())
+    if runner_title:
+        return runner_title
     # BUG-005 fail-closed gate (raw form): a label that is itself a tool-shaped
     # identifier ("web_extract", "business_upsert_business") or the bare "CEO turn"
     # loop label becomes a general business-language title before any cleanup, so
@@ -9880,24 +9907,146 @@ def _takyon_task_intent_title(label: str, detail: str, source: str) -> str:
     return text[:120]
 
 
-def _takyon_task_description(label: str, detail: str, category: str) -> str:
-    """One-sentence description for the card (spec criterion #5: non-empty)."""
-    base = str(detail or "").strip()
+# A step/sub-line must read as plain language — never a raw log line, file path,
+# artifact filename, or content hash (TASK: task abstraction, current-step level).
+# These match the noise TOKENS to drop from a detail line; real links are kept
+# (the card carries a separate `open_url` for clickables).
+_TAKYON_DETAIL_URL_TOKEN = re.compile(r"^(?:https?://|www\.)", re.I)
+_TAKYON_DETAIL_PATH_TOKEN = re.compile(
+    r"^(?:"
+    r"\.?/[\w@./-]+"                          # /abs/path or ./rel/path
+    r"|[\w@.-]+(?:/[\w@.-]+){2,}"             # a/b/c — three+ segments (deep path)
+    r"|[\w@.-]+/[\w@.-]*\.[A-Za-z0-9]{1,5}"   # dir/file.ext (e.g. research/market.md)
+    r")[/]?[.,;:)]?$"
+)
+_TAKYON_DETAIL_FILE_TOKEN = re.compile(
+    r"^[\w-]+\.(?:json|md|txt|log|png|jpe?g|svg|gif|webp|html?|ya?ml|csv|tsv|tsx?|jsx?|py|lock|map)"
+    r"[.,;:)]?$",
+    re.I,
+)
+# Content hash / long opaque id (≥8 hex chars with at least one digit), e.g. the
+# "<hash>.json" receipt name or a bare commit/blob id.
+_TAKYON_DETAIL_HASH_TOKEN = re.compile(r"^(?=[0-9a-f]*[0-9])[0-9a-f]{8,}[.,;:)]?$", re.I)
+
+
+def _takyon_strip_detail_noise(text: str) -> str:
+    """Customer-clean a step/sub-line: drop file paths, artifact filenames, and
+    content hashes while keeping the plain-language prose. Real http(s) links are
+    preserved. Returns "" only when nothing readable remains."""
+    s = _takyon_clean_runtime_line(text)
+    if not s:
+        return ""
+    kept: list[str] = []
+    for tok in s.split(" "):
+        if not tok:
+            continue
+        if _TAKYON_DETAIL_URL_TOKEN.match(tok):
+            kept.append(tok)
+            continue
+        if (
+            _TAKYON_DETAIL_PATH_TOKEN.match(tok)
+            or _TAKYON_DETAIL_FILE_TOKEN.match(tok)
+            or _TAKYON_DETAIL_HASH_TOKEN.match(tok)
+        ):
+            continue
+        kept.append(tok)
+    out = " ".join(kept)
+    out = re.sub(r"\s+([.,;:!?])", r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,;:-")
+    # No case rewriting: on an already-clean line the stripper is a no-op, so a
+    # raw status/detail that carries no path/hash passes through verbatim.
+    return out[:240]
+
+
+# Trailing status words a detail line may tack onto a title ("<title> is completed.").
+# Stripped only to TEST whether a line is a title echo / runner-name line — never
+# to rewrite an otherwise-real sentence.
+_TAKYON_STEP_STATUS_SUFFIX = re.compile(
+    r"\s*(?:\bis\b\s+)?(?:completed?|done|finished|succeeded|running|in[ -]?progress|"
+    r"underway|queued|pending|scheduled|blocked|failed|errored|needs?\s+attention|"
+    r"needs?\s+review)\.?\s*$",
+    re.I,
+)
+
+
+def _takyon_detail_is_title_echo(detail: str, title: str) -> bool:
+    """True when the step line merely restates the card title (± a status word),
+    e.g. detail "X Publish Outreach is completed." under title "X Publish Outreach"."""
+    d = _TAKYON_STEP_STATUS_SUFFIX.sub("", str(detail or "").strip()).strip().rstrip(".").lower()
+    t = str(title or "").strip().rstrip(".").lower()
+    return bool(d) and bool(t) and d == t
+
+
+def _takyon_detail_is_process_line(detail: str) -> bool:
+    """True when the step line names the internal runner/process rather than the
+    work itself ("CEO bootstrap is running.", "Background run", "CEO live trace")."""
+    d = _TAKYON_STEP_STATUS_SUFFIX.sub("", str(detail or "").strip()).strip().rstrip(".").lower()
+    if not d:
+        return False
+    if d in _TAKYON_RUNNER_TITLE_MAP:
+        return True
+    return d in {
+        "ceo",
+        "bootstrap",
+        "background",
+        "work request",
+        "ceo live trace",
+        "ceo run",
+        "ceo loop",
+    }
+
+
+def _takyon_task_step_fallback(category: str, status: str) -> str:
+    """Plain-language step/sub-line when the raw detail carries no usable signal
+    (empty, a title echo, or a runner-name process line). Status- and category-
+    aware so it reads as the current action / result, never a title echo."""
+    cat = (category or "PRODUCT").upper()
+    st = (status or "").lower()
+    if st == "queued":
+        return "Queued and waiting to run."
+    if st == "blocked":
+        return "Blocked, waiting on a dependency."
+    if st == "failed":
+        return "Hit a snag — needs another pass."
+    if st == "needs_review":
+        return "Waiting for your review."
+    if st == "completed":
+        return {
+            "RESEARCH": "Research wrapped up.",
+            "PRODUCT": "Product work finished.",
+            "LAUNCH": "Launch step finished.",
+            "GROWTH": "Growth step finished.",
+            "OPS": "Maintenance task finished.",
+        }.get(cat, "Work finished.")
+    return {
+        "RESEARCH": "Researching the next move.",
+        "PRODUCT": "Building the product.",
+        "LAUNCH": "Taking it to market.",
+        "GROWTH": "Growing demand and distribution.",
+        "OPS": "Keeping the company running.",
+    }.get(cat, "Working on the company.")
+
+
+def _takyon_task_description(detail: str, title: str, category: str, status: str) -> str:
+    """Plain-language step/sub-line for a card (spec criterion #5: non-empty).
+
+    Abstracts the activity signal the app already has: takes the raw detail, strips
+    raw logs / file paths / hashes / metric blobs (`_takyon_strip_detail_noise`),
+    keeps one sentence, and refuses a line that merely echoes the title or names the
+    internal runner. When nothing usable remains, falls back to a status- and
+    category-aware phrase that reads as the current action / result — never a title
+    echo and never "<title> completed"."""
+    base = _takyon_strip_detail_noise(detail)
     if base:
-        # Keep it to a single sentence-ish line.
-        first = re.split(r"(?<=[.!?])\s+", base, maxsplit=1)[0].strip()
-        if first:
-            return first[:240]
-    # Fall back to an intent-shaped sentence from the title + category.
-    title = str(label or "this work").strip() or "this work"
-    lane = {
-        "RESEARCH": "Research toward the next company move",
-        "PRODUCT": "Building the product",
-        "LAUNCH": "Taking the company to market",
-        "GROWTH": "Growing demand and distribution",
-        "OPS": "Keeping the company running",
-    }.get(category, "Company work")
-    return f"{lane}: {title}."[:240]
+        first = re.split(r"(?<=[.!?])\s+", base, maxsplit=1)[0].strip()[:240]
+        if (
+            first
+            and first.lower() not in _TAKYON_GENERIC_PROGRESS_DETAILS
+            and not _takyon_detail_is_title_echo(first, title)
+            and not _takyon_detail_is_process_line(first)
+        ):
+            return first
+    return _takyon_task_step_fallback(category, status)
 
 
 # Generic placeholder details that carry no real progress signal. A worker
@@ -9923,13 +10072,14 @@ _TAKYON_GENERIC_PROGRESS_DETAILS = frozenset(
 def _takyon_clean_worker_progress_detail(detail: str) -> str:
     """Customer-clean a worker progress line for the running card's detail.
 
-    Fail-closed: strips ANSI / arrow noise via _takyon_clean_runtime_line, then
-    drops the line entirely (returns "") if it carries a raw internal
-    worker/tool identifier ("Claude agent task", "Delegated worker",
-    "business_claude_agent_task", …) or is a bare generic placeholder. The
-    caller keeps the existing label when this returns "" (TASK 17 fail-open).
+    Fail-closed: strips ANSI / arrow noise and any file path / artifact filename /
+    content hash via _takyon_strip_detail_noise, then drops the line entirely
+    (returns "") if it carries a raw internal worker/tool identifier ("Claude agent
+    task", "Delegated worker", "business_claude_agent_task", …) or is a bare generic
+    placeholder. The caller keeps the existing label when this returns "" (TASK 17
+    fail-open).
     """
-    text = _takyon_clean_runtime_line(detail)
+    text = _takyon_strip_detail_noise(detail)
     if not text:
         return ""
     lowered = text.lower()
@@ -10273,7 +10423,27 @@ def _takyon_live_state_payload(
         # label != title, so an un-gated label re-leaks exactly what the title gate strips. Route it
         # through the same fail-closed gate so neither title NOR the surfaced label can leak.
         display_label = _takyon_task_intent_title(label, detail, source)
-        description = as_text(task.get("description")) or _takyon_task_description(label, detail, category)
+        # Step / sub-line: abstract the explicit description (or raw detail) into a
+        # plain-language line — no raw logs, file paths, hashes, title echoes, or
+        # runner names. Routed through the same cleaner so an explicit (CEO/job)
+        # description with a receipt path is cleaned too, not just the fallback.
+        description = _takyon_task_description(
+            as_text(task.get("description")) or as_text(task.get("detail")),
+            title,
+            category,
+            status,
+        )
+        # The surfaced `detail` is what the collapsed RUNNING card shows when no
+        # nested worker step has landed yet, so it must read clean as well. Strip
+        # raw noise; fall back to the abstracted description on an empty / echoed /
+        # runner-name line so neither field can leak plumbing.
+        display_detail = _takyon_strip_detail_noise(as_text(task.get("detail")))
+        if (
+            not display_detail
+            or _takyon_detail_is_title_echo(display_detail, title)
+            or _takyon_detail_is_process_line(display_detail)
+        ):
+            display_detail = description
         # Spec criterion #6: raw low-level events carry a parent task_id so the
         # frontend can nest them under an intent-level task instead of flat rows.
         parent_task_id = as_text(task.get("task_id") or task.get("parent_task_id"))
@@ -10295,7 +10465,7 @@ def _takyon_live_state_payload(
             "category": category,
             "status": status,
             "status_label": _TAKYON_TASK_STATUS_LABELS.get(status, status.capitalize()),
-            "detail": detail,
+            "detail": display_detail,
             "steps": steps,
             "outputs": outputs,
             "updated_at": updated_at,
@@ -10322,7 +10492,12 @@ def _takyon_live_state_payload(
     if bootstrap_is_live and run_status == "idle":
         run_status = "running"
         run_label_text = "CEO bootstrap"
-    run_detail = as_text(run.get("detail")) or (
+    # A raw runner-name detail ("CEO bootstrap is running.") is a process line, not a
+    # step — drop it so the synthesized plain-language copy below wins.
+    raw_run_detail = as_text(run.get("detail"))
+    if _takyon_detail_is_process_line(raw_run_detail):
+        raw_run_detail = ""
+    run_detail = raw_run_detail or (
         "Setting up the business and starting the first workstream." if run_status == "queued" and run_label_text == "CEO bootstrap"
         else "Working through the business workstreams now." if run_status == "running" and run_label_text == "CEO bootstrap"
         else "Queued and waiting to run." if run_status == "queued"
@@ -10362,12 +10537,23 @@ def _takyon_live_state_payload(
     # Raw labels that are CEO-loop plumbing, not a real business milestone. A
     # bootstrap/wake/turn job row must NOT count as a "real intent" or it would
     # suppress the scaffold on the exact fresh-bootstrap turn it is meant for.
+    # canonical_task now surfaces the de-identified DISPLAY label, so the runner
+    # rows arrive here as their mapped business-language titles ("Setting up the
+    # company", "Working on the company", …) rather than the raw "CEO bootstrap".
+    # Key the scaffold suppression on those mapped titles so a runner row still
+    # never counts as a real intent; the raw forms are kept too for defense.
     _SCAFFOLD_PLUMBING_LABELS = {
         "",
         "Recorded work",
+        "Setting up the company",
+        "Working on the company",
+        "Working on the product",
+        "Checking in on the company",
         "CEO bootstrap",
         "CEO wake",
+        "CEO wake loop",
         "CEO turn",
+        "CEO run",
         "Work request",
         "Background run",
     }
