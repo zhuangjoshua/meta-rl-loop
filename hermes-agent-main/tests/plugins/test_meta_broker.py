@@ -253,6 +253,13 @@ def test_reddit_spend_schedule_keeps_five_dollar_live_floor(monkeypatch):
         )
 
 
+def test_meta_media_spend_uses_remaining_after_setup_charge():
+    assert core._ad_channel_live_media_spend_credits("meta", 100) == 100
+
+    with pytest.raises(core.TakyonError, match="no remaining credits"):
+        core._ad_channel_live_media_spend_credits("meta", 0)
+
+
 # ── /v1/providers/meta/config route token redaction ──────────────────────────────────────────────
 
 
