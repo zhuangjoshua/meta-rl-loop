@@ -1010,6 +1010,23 @@ const WORK_STEP_PLUMBING_LABELS = new Set([
  * agent's raw turn context. The CEO's raw thinking is not in these traces, so it
  * cannot leak; each surfaced label/detail is still re-sanitized for defense.
  */
+
+// Fail-closed clean for a work-step label/detail. sanitizeCustomerReply strips
+// status-log/plumbing PROSE, but a trace detail can still carry a bare tool/skill
+// IDENTIFIER shape (business_sync_ads, takyon:tool:foo, foo::bar) that prose
+// sanitization does not target. Mirror the backend's
+// _takyon_clean_worker_progress_detail guard: drop the line entirely when it
+// carries such an identifier so no raw tool noun reaches the screen. Returns ""
+// when the line should be dropped.
+function cleanWorkStepText(value: string): string {
+  const text = sanitizeCustomerReply(value);
+  if (!text) return "";
+  const lowered = text.toLowerCase();
+  // A raw tool/skill identifier shape is plumbing — never surface it.
+  if (/\b[a-z]+_[a-z_]+\b|takyon:|(?:^|\s)tool:|::/.test(lowered)) return "";
+  return text;
+}
+
 export function liveWorkSteps(workspace: WorkspaceLike): LiveWorkStep[] {
   const steps: LiveWorkStep[] = [];
   for (const row of traceRowArray(workspace)) {
@@ -1024,9 +1041,14 @@ export function liveWorkSteps(workspace: WorkspaceLike): LiveWorkStep[] {
     const rawLabel = row.label;
     if (!rawLabel) continue;
     if (WORK_STEP_PLUMBING_LABELS.has(rawLabel.toLowerCase())) continue;
-    const label = sanitizeCustomerReply(rawLabel);
+    // The label is the de-identified intent label (already cleaned upstream by
+    // the gateway's _takyon_trace_tool_shape); keep prose, but if it still reads
+    // as a raw tool identifier drop the whole step rather than surface plumbing.
+    const label = cleanWorkStepText(rawLabel);
     if (!label) continue;
-    let detail = sanitizeCustomerReply(row.detail);
+    // The detail is a best-effort sub-line; drop it (keep the labelled step) when
+    // it would echo the label or carry a raw tool/path/skill identifier.
+    let detail = cleanWorkStepText(row.detail);
     if (detail && detail.trim().toLowerCase() === label.trim().toLowerCase()) {
       detail = "";
     }
