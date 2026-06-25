@@ -25649,11 +25649,16 @@ def _derive_ad_spend_schedule(
     }
 
 
-def _ad_channel_live_media_spend_credits(channel: str, remaining_channel_credits: Any) -> int:
-    media_spend_credits = _creative_credit_int(remaining_channel_credits)
+def _ad_channel_live_media_spend_credits(
+    channel: str,
+    remaining_channel_credits: Any,
+    *,
+    setup_credits: int = 0,
+) -> int:
+    media_spend_credits = max(0, _creative_credit_int(remaining_channel_credits) - _creative_credit_int(setup_credits))
     if media_spend_credits <= 0:
         raise TakyonError(
-            f"{channel} channel has no remaining credits for live media spend; "
+            f"{channel} channel credits are fully consumed by setup or other reservations; "
             f"allocate more {channel} credits before launching a live campaign"
         )
     return media_spend_credits
@@ -28407,7 +28412,11 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 else {}
             )
             remaining_channel_credits = _creative_credit_int(meta_budget.get("remaining_credits"))
-            media_spend_credits = _ad_channel_live_media_spend_credits("meta", remaining_channel_credits)
+            media_spend_credits = _ad_channel_live_media_spend_credits(
+                "meta",
+                remaining_channel_credits,
+                setup_credits=_creative_credit_total_cost("meta_ad_launch"),
+            )
             campaign_args = launch_args.get("campaign") if isinstance(launch_args.get("campaign"), dict) else {}
             adset_args = launch_args.get("adset") if isinstance(launch_args.get("adset"), dict) else {}
             spend_schedule = _derive_ad_spend_schedule(
@@ -28576,7 +28585,11 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 else {}
             )
             remaining_channel_credits = _creative_credit_int(meta_budget.get("remaining_credits"))
-            media_spend_credits = _ad_channel_live_media_spend_credits("meta", remaining_channel_credits)
+            media_spend_credits = _ad_channel_live_media_spend_credits(
+                "meta",
+                remaining_channel_credits,
+                setup_credits=_creative_credit_total_cost("meta_ad_launch"),
+            )
             media_reservation = _reserve_channel_spend_credits(
                 business,
                 channel="meta",
