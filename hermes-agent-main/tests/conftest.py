@@ -266,6 +266,11 @@ _TAKYON_BEHAVIORAL_VARS = frozenset({
     "TAKYON_EXEC_ASK",
     "TAKYON_HOME_MODE",
     "TAKYON_AGENT_USE_LEGACY_SESSION_KEYS",
+    # Operator usage-gate dogfooding switch: if a dev/CI shell exported this truthy it would
+    # leak the softened (ungated) billing.reserve path into every test and silently flip the
+    # operator-gate regressions (jobs budget_exhausted, web_spend SpendBlocked, provider-proxy
+    # 402, billing over-allowance) green. Unset it so gating tests always exercise the gate.
+    "TAKYON_OPERATOR_USAGE_GATE_DISABLED",
     # Kanban path/board pins must never leak from a developer shell or
     # dispatched worker into tests; otherwise tests can write fake tasks to
     # the real ~/.takyon/kanban.db instead of the per-test TAKYON_HOME.

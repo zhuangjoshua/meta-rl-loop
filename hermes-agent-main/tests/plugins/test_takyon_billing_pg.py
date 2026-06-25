@@ -130,6 +130,44 @@ def test_reserve_insufficient_raises_with_figures(pg_conn):
     assert bal.allowance_remaining_cents == 100
 
 
+def test_dogfood_switch_ungates_reserve_but_keeps_ledger_truthful(pg_conn, monkeypatch):
+    # Pre-release dogfooding switch: with TAKYON_OPERATOR_USAGE_GATE_DISABLED set, an over-allowance
+    # reserve must NOT raise (the operator agent is no longer throttled), yet the ledger stays
+    # truthful — it holds exactly what the allowance still covers (clamped, never oversold), so a
+    # following settle/refund is well-defined, balances never go negative, and reconcile still passes.
+    monkeypatch.setenv("TAKYON_OPERATOR_USAGE_GATE_DISABLED", "1")
+    uid = _user(pg_conn)
+    billing.grant_allowance(pg_conn, uid, 1000, "g")
+    # 1500 > 1000 available: the gate would normally refuse. Ungated, it clamps the hold to 1000.
+    resv = billing.reserve(pg_conn, uid, 1500, "r1")
+    assert resv.allowance_cents == 1000  # held what the allowance covered — no oversell
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.allowance_used_cents == 1000
+    assert bal.allowance_remaining_cents == 0  # floored at zero, never negative
+    assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
+    # A further over-budget reserve (allowance already drained) holds a zero anchor and still runs —
+    # settle/refund remain well-defined, so the agent path is never blocked.
+    resv2 = billing.reserve(pg_conn, uid, 700, "r2")
+    assert resv2.allowance_cents == 0
+    billing.settle(pg_conn, "r2", 0)
+    billing.settle(pg_conn, "r1", 1000)
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.allowance_used_cents == 1000
+    assert bal.reserved_cents == 0
+    assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
+
+
+def test_dogfood_switch_off_by_default_still_gates(pg_conn, monkeypatch):
+    # Default posture (env unset) is unchanged: the gate still fails closed on an exhausted allowance.
+    monkeypatch.delenv("TAKYON_OPERATOR_USAGE_GATE_DISABLED", raising=False)
+    uid = _user(pg_conn)
+    billing.grant_allowance(pg_conn, uid, 1000, "g")
+    with pytest.raises(InsufficientBalance):
+        billing.reserve(pg_conn, uid, 1500, "r1")
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.allowance_used_cents == 0  # nothing written — gate intact when the switch is off
+
+
 def test_settle_actual_under_reserved_releases_difference(pg_conn):
     uid = _user(pg_conn)
     billing.grant_allowance(pg_conn, uid, 1000, "g")

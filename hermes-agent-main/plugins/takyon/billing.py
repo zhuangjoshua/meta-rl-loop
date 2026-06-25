@@ -25,10 +25,32 @@ per op (works whether the connection is autocommit or not), imports no psycopg.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .ledger_gate import gate_fetchone
+
+
+_OPERATOR_USAGE_GATE_DISABLED_ENV = "TAKYON_OPERATOR_USAGE_GATE_DISABLED"
+
+
+def _operator_usage_gate_disabled() -> bool:
+    """Dogfooding switch (DEFAULT OFF — the gate stays ON unless this is set truthy).
+
+    While we dogfood before release the operator (Takyon-user → platform) usage gate is intentionally
+    NOT allowed to throttle the operator's own agent: when set, an exhausted weekly allowance stops
+    being a *refusal* so the CEO/agent jobs, the metered provider proxy, operator web egress, and
+    nested coding tasks all keep running. This does NOT remove the ledger — reserve → settle still
+    records every hold, so the wallet display, Stripe top-ups, creative credits, and the per-business
+    /subuser usage rail are all unaffected; only the cumulative-allowance refusal is neutralized.
+    Re-enable usage gating for release simply by clearing this env var.
+
+    Env-driven (not config.yaml) on purpose: billing.py is the dependency-light ledger rail that runs
+    in BOTH the runtime worker and the safebox authority process, and an env flag is the single switch
+    readable identically in both."""
+    value = str(os.environ.get(_OPERATOR_USAGE_GATE_DISABLED_ENV, "") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _remote_safebox_enabled() -> bool:
@@ -210,6 +232,30 @@ def reserve(
         "select * from safebox_billing_reserve(%s, %s, %s, %s, %s)",
         (user_id, estimate_cents, rk, business_slug, job_id),
     )
+    # Operator usage gate (Takyon-user → platform). During pre-release dogfooding it is intentionally
+    # DISABLED (see `_operator_usage_gate_disabled`): the operator's own agent must not be throttled
+    # when its weekly allowance is exhausted. We do NOT bypass the ledger — reserve → settle still
+    # records every hold — we ONLY stop the gate from *refusing*. On an insufficient-balance refusal,
+    # re-hold what the allowance can still cover (clamped to the available cents the gate just
+    # reported); the SQL function accepts that, so a real reserve row is written, settle/refund stay
+    # well-defined, and balances never go negative or oversell (used stays ≤ included, so reconcile
+    # never drifts). A concurrent drain that makes even the clamped hold refuse falls back to a zero
+    # anchor, which the gate always accepts — so the operator agent is never blocked. Only
+    # `insufficient_balance` is softened here; `no_billing_account` / `unknown_reservation` remain
+    # hard integrity refusals. Re-enable the gate for release by clearing the env var.
+    if _operator_usage_gate_disabled() and _cell(row, 0) == "insufficient_balance":
+        available = max(0, int(_cell(row, 2)))
+        row = gate_fetchone(
+            conn,
+            "select * from safebox_billing_reserve(%s, %s, %s, %s, %s)",
+            (user_id, available, rk, business_slug, job_id),
+        )
+        if _cell(row, 0) == "insufficient_balance":  # raced to empty — a zero anchor always clears
+            row = gate_fetchone(
+                conn,
+                "select * from safebox_billing_reserve(%s, %s, %s, %s, %s)",
+                (user_id, 0, rk, business_slug, job_id),
+            )
     _raise_for_billing_refusal(row, user_id=user_id)
     return Reservation(key=rk, allowance_cents=int(_cell(row, 3)))  # allowance_cents held
 
