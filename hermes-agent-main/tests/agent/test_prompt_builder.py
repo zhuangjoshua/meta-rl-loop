@@ -1161,6 +1161,135 @@ class TestBuildSkillsSystemPromptConditional:
 
 
 # =========================================================================
+# Takyon CEO skill visibility (real bundled skill + real tool registration)
+# =========================================================================
+
+
+class TestTakyonMetaAdsV2CeoVisibility:
+    """The takyon-meta-ads-v2 skill must reach the CEO's skills index.
+
+    Spec 0004: when the operator says "use the meta-ads-v2 skill", the CEO can
+    only route to it if the skill survives the skills-index visibility gate. The
+    skill declares ``requires_toolsets: [takyon, takyon-authority]`` plus eight
+    ``requires_tools``; if any required tool is renamed / de-registered / moved
+    out of a CEO-enabled toolset, ``_skill_should_show`` silently drops the skill
+    and the CEO falls back to an unrelated canned reply — with no error anywhere.
+
+    This binds three real sources of truth together so that silent drop becomes a
+    loud test failure: the bundled SKILL.md frontmatter, the live Takyon tool→
+    toolset registration, and the toolset list the CEO operator turn enables.
+    """
+
+    # The toolsets the CEO operator/bootstrap turn enables — mirrors
+    # plugins/takyon/cli.py (operator turn) and plugins/takyon/worker.py
+    # (bootstrap). If this set changes, confirm gated Takyon skills still survive.
+    CEO_ENABLED_TOOLSETS = {"takyon", "takyon-authority", "web", "skills", "todo"}
+
+    @pytest.fixture(autouse=True)
+    def _clear_skills_cache(self):
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+        yield
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+
+    def _ceo_visible_tools_and_toolsets(self):
+        """Derive the (valid_tool_names, available_toolsets) the CEO skills index
+        is built against, exactly as agent/system_prompt.py does: a tool is
+        visible only when its registered toolset is one the CEO enables, and the
+        available-toolset set is the toolsets those visible tools carry."""
+        from plugins.takyon.core import TAKYON_TOOL_DEFINITIONS, takyon_toolset_name
+
+        toolset_by_tool = {
+            tool["name"]: takyon_toolset_name(tool["name"])
+            for tool in TAKYON_TOOL_DEFINITIONS
+        }
+        valid_tools = {
+            name
+            for name, toolset in toolset_by_tool.items()
+            if toolset in self.CEO_ENABLED_TOOLSETS
+        }
+        available_toolsets = {
+            toolset_by_tool[name] for name in valid_tools
+        }
+        return valid_tools, available_toolsets, set(toolset_by_tool)
+
+    def _meta_skill_conditions(self):
+        from pathlib import Path
+        from agent.skill_utils import extract_skill_conditions, parse_frontmatter
+
+        skill_path = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "takyon-meta-ads-v2"
+            / "SKILL.md"
+        )
+        frontmatter, _ = parse_frontmatter(skill_path.read_text(encoding="utf-8"))
+        return extract_skill_conditions(frontmatter)
+
+    def test_required_tools_and_toolsets_are_reachable_by_the_ceo(self):
+        conditions = self._meta_skill_conditions()
+        valid_tools, available_toolsets, registered = (
+            self._ceo_visible_tools_and_toolsets()
+        )
+
+        # Guard against a vacuous test if the skill ever drops its gating.
+        assert conditions["requires_tools"], "meta-ads-v2 must declare requires_tools"
+        assert conditions["requires_toolsets"], (
+            "meta-ads-v2 must declare requires_toolsets"
+        )
+
+        for toolset in conditions["requires_toolsets"]:
+            assert toolset in self.CEO_ENABLED_TOOLSETS, (
+                f"requires_toolset {toolset!r} is not enabled on the CEO turn"
+            )
+            assert toolset in available_toolsets, (
+                f"requires_toolset {toolset!r} is enabled but no CEO-visible "
+                f"Takyon tool carries it"
+            )
+
+        for tool in conditions["requires_tools"]:
+            assert tool in registered, (
+                f"requires_tool {tool!r} is not a registered Takyon tool"
+            )
+            assert tool in valid_tools, (
+                f"requires_tool {tool!r} is registered but unreachable by the CEO "
+                f"(its toolset is not in {sorted(self.CEO_ENABLED_TOOLSETS)})"
+            )
+
+    def test_skill_survives_should_show_gate(self):
+        conditions = self._meta_skill_conditions()
+        valid_tools, available_toolsets, _ = self._ceo_visible_tools_and_toolsets()
+        assert _skill_should_show(conditions, valid_tools, available_toolsets) is True
+
+    def test_skill_appears_in_built_index_for_the_ceo(self, monkeypatch, tmp_path):
+        """End-to-end through build_skills_system_prompt against a TAKYON_HOME that
+        contains the real bundled skill — the index the CEO is actually given must
+        list takyon-meta-ads-v2 and render its routing block."""
+        import shutil
+        from pathlib import Path
+
+        repo_skill = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "takyon"
+            / "takyon-meta-ads-v2"
+        )
+        dest = tmp_path / "skills" / "takyon" / "takyon-meta-ads-v2"
+        dest.parent.mkdir(parents=True)
+        shutil.copytree(repo_skill, dest)
+        monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+        valid_tools, available_toolsets, _ = self._ceo_visible_tools_and_toolsets()
+        result = build_skills_system_prompt(
+            available_tools=valid_tools,
+            available_toolsets=available_toolsets,
+        )
+        assert "takyon-meta-ads-v2" in result
+        assert "takyon-meta-ads-v2 owns" in result
+
+
+# =========================================================================
 # Tool-use enforcement guidance
 # =========================================================================
 
