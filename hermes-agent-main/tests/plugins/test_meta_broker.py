@@ -9,6 +9,8 @@ runtime plane (operator/dashboard/sub-user) cannot resolve them. ``core._meta_co
 """
 from __future__ import annotations
 
+import base64
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -137,6 +139,118 @@ def test_meta_graph_direct_when_local_on_safebox_host(monkeypatch):
         "GET", "me", {"fields": "id"}, {"token": "local-token", "version": "v21.0"}
     )
     assert out == {"id": "me-direct"}
+
+
+# ── media upload helpers under brokered system-token mode ────────────────────────────────────────
+
+
+def test_meta_image_upload_brokers_bytes_when_remote(monkeypatch, tmp_path):
+    captured = {}
+    image_path = tmp_path / "creative.png"
+    image_path.write_bytes(b"fake image bytes")
+
+    monkeypatch.setattr(core.safebox, "_remote_enabled", lambda: True)
+    monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: False)
+    monkeypatch.setattr(core.composio_distribution, "upload_file_descriptor", _boom)
+    monkeypatch.setattr(core.composio_distribution, "metaads_execute_tool", _boom)
+
+    def fake_graph_forward(*, method, path, params=None, host="graph.facebook.com", timeout=60.0):
+        captured["call"] = (method, path, params, host, timeout)
+        return {"images": {"creative.png": {"hash": "hash-123", "url": "https://example.com/creative.png"}}}
+
+    monkeypatch.setattr(core.safebox, "meta_graph_forward", fake_graph_forward)
+
+    result = core._meta_upload_adimage(
+        image_path,
+        {"token": "", "version": "v23.0", "ad_account_id": "act_123"},
+    )
+
+    assert result == {"hash": "hash-123", "url": "https://example.com/creative.png"}
+    method, path, params, host, timeout = captured["call"]
+    assert method == "POST"
+    assert path == "act_123/adimages"
+    assert params["name"] == "creative.png"
+    assert params["bytes"] == base64.b64encode(b"fake image bytes").decode("ascii")
+    assert host == "graph.facebook.com"
+    assert timeout == 180.0
+
+
+def test_meta_video_upload_brokers_signed_file_url_when_remote(monkeypatch, tmp_path):
+    captured = {}
+    video_path = tmp_path / "ad.mp4"
+    video_path.write_bytes(b"fake video bytes")
+
+    monkeypatch.setattr(core.safebox, "_remote_enabled", lambda: True)
+    monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: False)
+    monkeypatch.setattr(core.composio_distribution, "metaads_proxy_request", _boom)
+    monkeypatch.setattr(
+        core,
+        "_business_file_presigned_get_url",
+        lambda business, rel, **_kwargs: f"https://assets.example/{business}/{rel}",
+    )
+
+    def fake_graph_forward(*, method, path, params=None, host="graph.facebook.com", timeout=60.0):
+        captured["call"] = (method, path, params, host, timeout)
+        return {"id": "video-123"}
+
+    monkeypatch.setattr(core.safebox, "meta_graph_forward", fake_graph_forward)
+
+    result = core._meta_upload_advideo(
+        video_path,
+        {"token": "", "version": "v23.0", "ad_account_id": "123"},
+        name="Demo video",
+        business="homework-one",
+        video_rel="product/ugc-ads/demo/ad.mp4",
+    )
+
+    assert result == "video-123"
+    method, path, params, host, timeout = captured["call"]
+    assert method == "POST"
+    assert path == "act_123/advideos"
+    assert params == {
+        "name": "Demo video",
+        "file_url": "https://assets.example/homework-one/product/ugc-ads/demo/ad.mp4",
+    }
+    assert host == "graph-video.facebook.com"
+    assert timeout == 180.0
+
+
+# ── live budget floor ───────────────────────────────────────────────────────────────────────────
+
+
+def test_meta_spend_schedule_allows_one_dollar_live_floor(monkeypatch):
+    monkeypatch.delenv("TAKYON_META_MIN_LIVE_BUDGET_USD", raising=False)
+
+    schedule = core._derive_ad_spend_schedule(
+        channel="meta",
+        reserved_credits=100,
+        requested_daily_budget_usd=1.0,
+    )
+
+    assert schedule["daily_budget_cents"] == 100
+    assert schedule["total_budget_cents"] == 100
+
+
+def test_meta_spend_schedule_rejects_below_one_dollar_live_floor(monkeypatch):
+    monkeypatch.delenv("TAKYON_META_MIN_LIVE_BUDGET_USD", raising=False)
+
+    with pytest.raises(core.TakyonError, match="at least 1.00 USD"):
+        core._derive_ad_spend_schedule(
+            channel="meta",
+            reserved_credits=99,
+            requested_daily_budget_usd=0.99,
+        )
+
+
+def test_reddit_spend_schedule_keeps_five_dollar_live_floor(monkeypatch):
+    monkeypatch.delenv("TAKYON_REDDIT_MIN_LIVE_BUDGET_USD", raising=False)
+
+    with pytest.raises(core.TakyonError, match="at least 5.00 USD"):
+        core._derive_ad_spend_schedule(
+            channel="reddit",
+            reserved_credits=499,
+            requested_daily_budget_usd=4.99,
+        )
 
 
 # ── /v1/providers/meta/config route token redaction ──────────────────────────────────────────────

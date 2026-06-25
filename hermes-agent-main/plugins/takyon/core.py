@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import base64
 import contextvars
 import errno
 try:
@@ -27510,7 +27511,7 @@ def _surface_meta_pixel_enabled(surface: Mapping[str, Any] | None) -> bool:
 
 _META_DEFAULT_GRAPH_VERSION = "v23.0"
 _META_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
-_META_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
+_META_MIN_LIVE_BUDGET_USD_DEFAULT = 1.0
 _REDDIT_ADS_API_BASE = "https://ads-api.reddit.com/api/v3"
 _REDDIT_MAX_DAILY_BUDGET_USD_DEFAULT = 50.0
 _REDDIT_MIN_LIVE_BUDGET_USD_DEFAULT = 5.0
@@ -27826,7 +27827,8 @@ def _meta_upload_advideo(
     """Upload a local mp4 to Meta using a short-lived signed file URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
     token = str(cfg.get("token") or "").strip()
-    if token:
+    brokered_system_token = safebox._remote_enabled() and not safebox._local_authority_enabled()
+    if token or brokered_system_token:
         if not business or not video_rel:
             raise TakyonError("Meta video upload requires the business slug and ad_video_path")
         signed_url = _business_file_presigned_get_url(business, video_rel)
@@ -27868,10 +27870,43 @@ def _meta_upload_advideo(
     return video_id
 
 
+def _meta_adimage_upload_result(data: Mapping[str, Any], image_name: str) -> dict[str, Any]:
+    result = dict(data) if isinstance(data, Mapping) else {}
+    images = result.get("images") if isinstance(result.get("images"), Mapping) else {}
+    first = next(iter(images.values()), {}) if images else {}
+    if isinstance(first, Mapping):
+        image_hash = str(first.get("hash") or result.get("hash") or "").strip()
+        image_url = str(first.get("url") or result.get("url") or "").strip()
+    else:
+        image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
+        image_url = str(result.get("url") or result.get("image_url") or "").strip()
+    if not image_hash:
+        raise TakyonError(f"Meta image upload returned no image hash for {image_name}")
+    return {"hash": image_hash, "url": image_url or None}
+
+
 def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any]:
     """Upload a local image to Meta and return the image hash and URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
     token = str(cfg.get("token") or "").strip()
+    brokered_system_token = safebox._remote_enabled() and not safebox._local_authority_enabled()
+    if brokered_system_token and not token:
+        try:
+            image_bytes = image_path.read_bytes()
+        except OSError as exc:
+            raise TakyonError(f"Meta image upload could not read {image_path.name}: {exc}") from exc
+        result = _meta_graph(
+            "POST",
+            f"{acct}/adimages",
+            {
+                "name": image_path.name,
+                "bytes": base64.b64encode(image_bytes).decode("ascii"),
+            },
+            cfg,
+            timeout=180,
+        )
+        return _meta_adimage_upload_result(result, image_path.name)
+
     if token:
         try:
             import httpx
@@ -27893,18 +27928,7 @@ def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any
             error = data.get("error") if isinstance(data, Mapping) else {}
             message = str(error.get("message") or "").strip() if isinstance(error, Mapping) else ""
             raise TakyonError(f"Meta image upload failed: {message or getattr(resp, 'text', '')}")
-        result = dict(data) if isinstance(data, Mapping) else {}
-        images = result.get("images") if isinstance(result.get("images"), Mapping) else {}
-        first = next(iter(images.values()), {}) if images else {}
-        if isinstance(first, Mapping):
-            image_hash = str(first.get("hash") or result.get("hash") or "").strip()
-            image_url = str(first.get("url") or result.get("url") or "").strip()
-        else:
-            image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
-            image_url = str(result.get("url") or result.get("image_url") or "").strip()
-        if not image_hash:
-            raise TakyonError(f"Meta image upload returned no image hash for {image_path.name}")
-        return {"hash": image_hash, "url": image_url or None}
+        return _meta_adimage_upload_result(data if isinstance(data, Mapping) else {}, image_path.name)
 
     connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
     if not connected_account_id:
