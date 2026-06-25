@@ -6367,6 +6367,20 @@ def test_workspace_payload_promotes_deliverables_and_preview_metadata(monkeypatc
         "_takyon_historical_outputs_payload",
         lambda store, slug, limit=50: [
             {
+                "id": "out:strategy",
+                "title": "strategy.md",
+                "detail": "Research artifact",
+                "path": "research/strategy.md",
+                "kind": "file",
+                "at": 20,
+                "preview_content": "# Demo Go-To-Market Strategy\n\nWin the early adopters first.",
+                "preview_truncated": False,
+                "preview_size": 56,
+            },
+            # Website source (the page is built from this) must NOT be promoted as
+            # an operator deliverable — the live site is the deliverable, its
+            # markup source is scaffolding.
+            {
                 "id": "out:site",
                 "title": "index.html",
                 "detail": "Website surface",
@@ -6384,13 +6398,82 @@ def test_workspace_payload_promotes_deliverables_and_preview_metadata(monkeypatc
 
     payload = server._takyon_workspace_payload({"takyon_operator_user_id": "demo"}, "demo")
 
+    # Website source is hidden; only the real research deliverable surfaces.
     assert [item["path"] for item in payload["deliverables"]] == [
         "research/strategy.md",
-        "product/site/index.html",
     ]
+    # The surfaced document is named for what it IS (from its content), not its
+    # raw filename "strategy.md".
+    assert payload["deliverables"][0]["title"] == "Demo Go-To-Market Strategy"
     assert payload["overview"]["product"]["preview_available"] is True
     assert payload["overview"]["product"]["preview_path"] == "product/site"
     assert payload["overview"]["product"]["preview_status"] == "ready"
+
+
+def test_hide_operator_output_drops_internal_source_and_raw_data():
+    # Generated shell-record summaries — internal, not deliverables.
+    assert server._takyon_hide_operator_output("product/surface.md") is True
+    assert server._takyon_hide_operator_output("distribution/surface.md") is True
+    # Website source (the running site is the deliverable, not its source).
+    assert server._takyon_hide_operator_output("product/site/index.html") is True
+    assert server._takyon_hide_operator_output("product/site/styles/tokens.css") is True
+    # Raw line-delimited data dumps are input to the work, not readable output.
+    assert server._takyon_hide_operator_output("research/sources.jsonl") is True
+    # Design-token scaffolding wherever it sits.
+    assert server._takyon_hide_operator_output("brand/tokens.css") is True
+    # Real deliverables are kept regardless of extension/location.
+    assert server._takyon_hide_operator_output("research/market.md") is False
+    assert server._takyon_hide_operator_output("distribution/voice/x.md") is False
+    assert (
+        server._takyon_hide_operator_output(
+            "distribution/local-published/x/20260624T113725Z-2069746702882381875.md"
+        )
+        is False
+    )
+
+
+def test_deliverable_display_title_prefers_content_over_filename():
+    # Markdown heading wins.
+    assert (
+        server._takyon_deliverable_display_title(
+            {
+                "path": "distribution/voice/x.md",
+                "title": "x.md",
+                "preview_content": "# Acme — X Voice\nChannel: X / Twitter",
+            }
+        )
+        == "Acme — X Voice"
+    )
+    # First real line wins when there is no heading; a machine filename is ignored.
+    assert (
+        server._takyon_deliverable_display_title(
+            {
+                "path": "distribution/local-published/x/20260624T113725Z-2069746702882381875.md",
+                "title": "20260624T113725Z-2069746702882381875.md",
+                "preview_content": "Acme launch post\n\nYou're spending too much.",
+            }
+        )
+        == "Acme launch post"
+    )
+    # Raw JSON content has no human title -> fall back to a humanized filename,
+    # never the raw filename.
+    assert (
+        server._takyon_deliverable_display_title(
+            {
+                "path": "research/market.md",
+                "title": "market.md",
+                "preview_content": "",
+            }
+        )
+        == "Market"
+    )
+    # An already-human title is left alone.
+    assert (
+        server._takyon_deliverable_display_title(
+            {"path": "research/market.md", "title": "Market Research", "preview_content": ""}
+        )
+        == "Market Research"
+    )
 
 
 def test_live_state_payload_marks_failed_when_only_stale_running_tasks_remain():

@@ -8555,6 +8555,8 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
         return "receipt", "Creative asset receipt"
     if path.startswith("distribution/outreach-drafts"):
         return "file", "Outreach draft only"
+    if path.startswith("distribution/voice/"):
+        return "file", "Channel voice guide"
     if "ugc" in path.lower() and suffix in {".md", ".txt"}:
         return "file", "Creative brief draft only"
     if path.startswith("metrics/receipts/") or top == "receipts":
@@ -8562,7 +8564,7 @@ def _takyon_output_detail(path: str) -> tuple[str, str]:
     if top in {"reports", "outputs"}:
         return "report", "Historical output"
     if path.startswith(("distribution/local-published/", "outreach/local-published/")):
-        return "file", "Local published outreach"
+        return "file", "Published post"
     if top == "app":
         return "file", "App runtime artifact"
     if top == "brain":
@@ -8640,6 +8642,41 @@ _TAKYON_HIDDEN_OUTPUT_DIR_SEGMENTS = {
     ".turbo",
     ".vite",
 }
+# Generated internal shell-record summaries — mirrors of the surface contract /
+# runtime-rail state. They describe how the app is wired ("Generated summary of
+# the current product source, runtime rails, and publication state"), not a
+# deliverable the operator opens, reads, or hands off. Hide from Documents.
+_TAKYON_HIDDEN_OUTPUT_RELPATHS = {
+    "product/surface.md",
+    "distribution/surface.md",
+}
+# Source files the live website is BUILT FROM (markup, stylesheets, design
+# tokens, templates). The running site is the deliverable; its source is
+# scaffolding. Scoped to a `site` location so a genuine HTML/CSS deliverable
+# living elsewhere is never caught by extension alone.
+_TAKYON_WEBSITE_SOURCE_SUFFIXES = {
+    ".html",
+    ".htm",
+    ".css",
+    ".scss",
+    ".sass",
+    ".less",
+    ".map",
+}
+# Design-token / template source files that read as build scaffolding wherever
+# they sit (not just under site/).
+_TAKYON_SOURCE_SCAFFOLD_BASENAMES = {
+    "tokens.css",
+    "tokens.json",
+    "theme.css",
+    "design-tokens.json",
+}
+# Line-delimited / streamed data dumps (scrapes, exports, citation logs). By
+# format these are machine input to the work, never a readable output.
+_TAKYON_RAW_DATA_SUFFIXES = {
+    ".jsonl",
+    ".ndjson",
+}
 
 
 def _takyon_hide_operator_output(path: Any) -> bool:
@@ -8647,16 +8684,33 @@ def _takyon_hide_operator_output(path: Any) -> bool:
     if not rel:
         return False
     p = Path(rel)
+    rel_norm = rel.replace("\\", "/").lstrip("./")
+    parts_lower = [seg.lower() for seg in p.parts]
+    suffix_lower = p.suffix.lower()
     # Raw source modules remain available through explicit file reads, but they
     # should not be promoted as operator-facing deliverables/documents.
-    if p.suffix.lower() in _TAKYON_HIDDEN_OUTPUT_SUFFIXES:
+    if suffix_lower in _TAKYON_HIDDEN_OUTPUT_SUFFIXES:
         return True
     if p.name.lower() in _TAKYON_HIDDEN_OUTPUT_BASENAMES:
         return True
     # Lock files (*.lock) are internal toolchain noise.
-    if p.suffix.lower() == ".lock":
+    if suffix_lower == ".lock":
         return True
-    if any(seg.lower() in _TAKYON_HIDDEN_OUTPUT_DIR_SEGMENTS for seg in p.parts):
+    if any(seg in _TAKYON_HIDDEN_OUTPUT_DIR_SEGMENTS for seg in parts_lower):
+        return True
+    # Generated shell-record summaries (product/distribution surface mirrors).
+    if rel_norm in _TAKYON_HIDDEN_OUTPUT_RELPATHS:
+        return True
+    # Website source: the page is built from these; the live site is the
+    # deliverable, not its markup/stylesheet/token source. Suffix is checked only
+    # inside a site/ location so non-site HTML/CSS deliverables are untouched.
+    if "site" in parts_lower and suffix_lower in _TAKYON_WEBSITE_SOURCE_SUFFIXES:
+        return True
+    # Design-token / template scaffolding even outside a site/ dir.
+    if p.name.lower() in _TAKYON_SOURCE_SCAFFOLD_BASENAMES:
+        return True
+    # Raw line-delimited data dumps (input to the work, not a readable output).
+    if suffix_lower in _TAKYON_RAW_DATA_SUFFIXES:
         return True
     return False
 
@@ -8838,6 +8892,117 @@ def _takyon_preview_path(path: Any) -> str:
     return text
 
 
+# Machine names like 20260624T113725Z-2069746702882381875.md — a timestamp + id,
+# never a human name.
+_TAKYON_MACHINE_NAME_RE = re.compile(r"^\d{8}t\d{6}z", re.I)
+# Short channel/acronym tokens that should stay upper-cased when humanizing.
+_TAKYON_TITLE_ACRONYMS = {
+    "x",
+    "ai",
+    "seo",
+    "ugc",
+    "faq",
+    "api",
+    "glp",
+    "crm",
+    "saas",
+    "b2b",
+    "b2c",
+    "ios",
+}
+
+
+def _takyon_clean_title_line(line: str) -> str:
+    # Strip markdown so a heading/first line reads as a plain business name.
+    line = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", line)  # links / images
+    line = re.sub(r"[*_`>#]+", "", line)
+    line = re.sub(r"\s+", " ", line).strip(" \t-—:")
+    if len(line) > 80:
+        line = line[:77].rstrip() + "…"
+    return line
+
+
+def _takyon_title_from_content(text: str) -> str:
+    """Derive a human title from a document's own content (first heading / first
+    real line), so a deliverable is named for what it IS, not its filename.
+    Returns "" when the content has no readable title (e.g. raw JSON/data)."""
+    if not text:
+        return ""
+    seen_lines = 0
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line in {"---", "```"}:  # frontmatter / code fence
+            continue
+        first = line[0]
+        if first == "#":  # markdown heading — best signal
+            cleaned = _takyon_clean_title_line(line)
+            if cleaned:
+                return cleaned
+            continue
+        if first in "{[":  # JSON / data dump — no human title
+            return ""
+        if first in "-*>|":  # list bullet, blockquote, table — skip a few
+            seen_lines += 1
+            if seen_lines > 4:
+                break
+            continue
+        cleaned = _takyon_clean_title_line(line)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _takyon_humanize_filename_title(path: str) -> str:
+    """Last-resort name when no content is available: turn the filename stem into
+    a readable phrase (drop timestamp/id noise, split separators, title-case)."""
+    name = Path(path).name if path else ""
+    stem = Path(path).stem if path else ""
+    # Drop leading timestamp and trailing long numeric ids.
+    stem = re.sub(r"^\d{8}t\d{6}z[-_]?", "", stem, flags=re.I)
+    stem = re.sub(r"[-_]\d{6,}$", "", stem)
+    stem = stem.replace("-", " ").replace("_", " ").strip()
+    if not stem:
+        return name or "Document"
+    words = []
+    for word in stem.split():
+        if word.lower() in _TAKYON_TITLE_ACRONYMS:
+            words.append(word.upper())
+        else:
+            words.append(word[:1].upper() + word[1:])
+    return " ".join(words)
+
+
+def _takyon_title_is_rawish(title: str, path: str) -> bool:
+    """True when the current title is really just the filename / a machine id and
+    should be replaced with a content-derived name."""
+    title = (title or "").strip()
+    if not title:
+        return True
+    name = Path(path).name if path else ""
+    stem = Path(path).stem if path else ""
+    if title in {name, stem}:
+        return True
+    if _TAKYON_MACHINE_NAME_RE.match(title):
+        return True
+    return False
+
+
+def _takyon_deliverable_display_title(item: dict[str, Any]) -> str:
+    """Resolve the operator-facing name for a deliverable: keep an existing human
+    title, otherwise derive one from the document's content, otherwise humanize
+    the filename. Never surfaces a raw filename when content is available."""
+    path = str(item.get("path") or "").strip()
+    title = str(item.get("title") or "").strip()
+    if not _takyon_title_is_rawish(title, path):
+        return title
+    derived = _takyon_title_from_content(str(item.get("preview_content") or ""))
+    if not derived:
+        derived = _takyon_humanize_filename_title(path)
+    return derived or title or "Document"
+
+
 def _takyon_workspace_deliverables_payload(
     overview: dict[str, Any] | None,
     outputs: list[dict[str, Any]] | None,
@@ -8922,6 +9087,11 @@ def _takyon_workspace_deliverables_payload(
 
     deliverables = list(merged.values())
     deliverables.sort(key=lambda item: read_at(item.get("at")), reverse=True)
+    # Name each surfaced document for what it IS (content-derived), not its raw
+    # filename. Done as a final pass so it runs after merge/sort and sees each
+    # item's own preview_content.
+    for item in deliverables:
+        item["title"] = _takyon_deliverable_display_title(item)
     return deliverables[: max(1, min(int(limit or 60), 120))]
 
 
