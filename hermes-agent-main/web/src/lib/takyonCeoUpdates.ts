@@ -590,6 +590,8 @@ const TASK_ERROR_USAGE_LIMIT_COPY =
 const TASK_ERROR_RATE_LIMIT_COPY =
   "Working through a busy moment — this will retry automatically.";
 const TASK_ERROR_GENERIC_COPY = "That step hit a snag and will retry.";
+// Network / socket failures are genuinely transient — retry is the right story.
+const TASK_ERROR_TIMEOUT_COPY = "That step took too long to respond and will retry.";
 
 // Markers that prove a string is a raw provider/runtime error rather than warm
 // human copy. Matching ANY of these flips the string into "rewrite" mode.
@@ -610,10 +612,80 @@ const RAW_PROVIDER_ERROR_MARKERS: RegExp[] = [
   /^\s*(?:error|exception|traceback)\b\s*[:(-]/i,
   // An HTTP status surfaced inline ("HTTP 429", "status 503").
   /\b(?:http\s*)?(?:status\s*)?\b[45]\d{2}\b\s*(?:-|—|:|error|too many|service)/i,
+  // OAuth / connection / permission failure from a channel integration — a
+  // blocked account ("Meta OAuth failed with invalid permissions"), not a
+  // transient API error. Caught so it becomes a clean "reconnect <channel>" line.
+  /\boauth\b/i,
+  /\b40[13]\b/,
+  /\bunauthorized\b/i,
+  /\bforbidden\b/i,
+  /\baccess denied\b/i,
+  /\bpermission denied\b/i,
+  /\binvalid[_\s-]?(?:permission|permissions|scope|grant|token|credential|credentials)\b/i,
+  /\btoken (?:expired|invalid|revoked)\b/i,
+  /\bnot connected\b/i,
+  /\bconnection (?:not found|failed|refused|reset)\b/i,
+  // Missing provider key / unconfigured capability — needs a one-time setup
+  // ("GEMINI_API_KEY required", "gemini_image_unconfigured"), not a retry.
+  /\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)*_KEY\b/,
+  /_unconfigured\b/i,
+  /\bnot configured\b/i,
+  /\bcredentials?\s+(?:required|missing|invalid|not\s+found)\b/i,
+  // Network / timeout — transient, retryable.
+  /\btimed out\b/i,
+  /\btimeout\b/i,
+  /\betimedout\b/i,
+  /\beconn(?:reset|refused)\b/i,
+  /\benotfound\b/i,
 ];
 
 function looksLikeRawProviderError(text: string): boolean {
   return RAW_PROVIDER_ERROR_MARKERS.some((pattern) => pattern.test(text));
+}
+
+// --- Blocked-integration copy (the "sharp teammate" line, not a raw log) -----
+//
+// A connection/permission/missing-key failure is NOT a transient retry — it is
+// a BLOCKER the operator has to clear (reconnect an account, finish a setup).
+// These helpers turn the raw error into one calm line that KEEPS the important
+// context: WHICH channel or capability is blocked (so the line stays concrete,
+// never the vague "there was an issue with setup"). They are only consulted
+// after the text is already classified as a raw error, so warm prose is never
+// relabeled. Idempotent: their own output matches no raw-error marker.
+
+// Warm name for the channel a raw OAuth/permission error came from ("" if none).
+function detectBlockedChannel(lower: string): string {
+  if (/\b(?:meta|facebook|instagram|fb ads|fb oauth)\b/.test(lower)) return "Meta";
+  // X is matched only via named patterns ("x account", "x api", "twitter"…),
+  // never a bare letter "x", so warm prose can't be relabeled.
+  if (/\btwitter\b|\btweet|x\.com|x_v\d|\bx (?:ads|api|oauth|account|channel|post|posting|platform|scope)\b/.test(lower)) {
+    return "X";
+  }
+  if (/\breddit\b/.test(lower)) return "Reddit";
+  if (/\b(?:search console|google|gsc)\b/.test(lower)) return "Google";
+  if (/\bstripe\b/.test(lower)) return "Stripe";
+  return "";
+}
+
+// Warm name for the paid capability a missing-key/unconfigured error blocks.
+function detectBlockedCapability(lower: string): string {
+  if (/gemini|gpt[-_ ]?image|\bimage\b|\blogo\b|\bfal\b|\bugc\b|\bvideo\b/.test(lower)) {
+    return "Image generation";
+  }
+  if (/tavily|web[-_ ]?search|web[-_ ]?extract|web research/.test(lower)) return "Web research";
+  return "";
+}
+
+function connectionBlockedCopy(channel: string): string {
+  return channel
+    ? `${channel} isn't connected correctly yet — reconnect it to continue.`
+    : "A connected account needs reconnecting before this step can continue.";
+}
+
+function providerUnconfiguredCopy(capability: string): string {
+  return capability
+    ? `${capability} isn't set up yet, so this step is on hold.`
+    : "This step needs a connection that isn't set up yet.";
 }
 
 /**
@@ -633,6 +705,12 @@ function looksLikeRawProviderError(text: string): boolean {
  *
  *   sanitizeTaskErrorText("Error code: 503 - {'type': 'error'}")
  *     === "That step hit a snag and will retry."
+ *
+ *   sanitizeTaskErrorText("Meta OAuth failed with invalid permissions")
+ *     === "Meta isn't connected correctly yet — reconnect it to continue."
+ *
+ *   sanitizeTaskErrorText("GEMINI_API_KEY required")
+ *     === "Image generation isn't set up yet, so this step is on hold."
  *
  *   sanitizeTaskErrorText("Researching the market") === "Researching the market"  // untouched
  */
@@ -655,6 +733,41 @@ export function sanitizeTaskErrorText(text: string): string {
   // Rate limit / 429 → busy-moment retry copy.
   if (/rate[_\s-]?limit/.test(lower) || /\b429\b/.test(lower) || /too many requests/.test(lower)) {
     return TASK_ERROR_RATE_LIMIT_COPY;
+  }
+  // Network / timeout → genuinely transient. Checked before the connection class
+  // so a dropped/slow socket ("connection reset", "timed out") is not mistaken
+  // for a credential problem.
+  if (
+    /\b(?:timed out|timeout|etimedout|econnreset|econnrefused|enotfound)\b/.test(lower)
+    || /\bconnection (?:reset|refused)\b/.test(lower)
+  ) {
+    return TASK_ERROR_TIMEOUT_COPY;
+  }
+  // Channel not connected / OAuth / permission denied → a blocker the operator
+  // must clear, never an auto-retry. Name the channel so it stays concrete.
+  if (
+    /\boauth\b/.test(lower)
+    || /\b40[13]\b/.test(lower)
+    || /\bunauthorized\b/.test(lower)
+    || /\bforbidden\b/.test(lower)
+    || /\baccess denied\b/.test(lower)
+    || /\bpermission denied\b/.test(lower)
+    || /\binvalid[_\s-]?(?:permission|permissions|scope|grant|token|credential|credentials)\b/.test(lower)
+    || /\btoken (?:expired|invalid|revoked)\b/.test(lower)
+    || /\bnot connected\b/.test(lower)
+    || /\bconnection not found\b/.test(lower)
+  ) {
+    return connectionBlockedCopy(detectBlockedChannel(lower));
+  }
+  // Missing provider key / unconfigured capability → needs a one-time setup,
+  // not a retry. Name the capability when the raw error reveals it.
+  if (
+    /\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)*_KEY\b/.test(raw)
+    || /_unconfigured\b/.test(lower)
+    || /\bnot configured\b/.test(lower)
+    || /\bcredentials?\s+(?:required|missing|invalid|not\s+found)\b/.test(lower)
+  ) {
+    return providerUnconfiguredCopy(detectBlockedCapability(lower));
   }
   // Any other 4xx/5xx / provider dict / generic raw error → generic retry copy.
   return TASK_ERROR_GENERIC_COPY;

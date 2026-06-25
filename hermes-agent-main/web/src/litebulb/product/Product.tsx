@@ -1,4 +1,14 @@
-import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import {
+  Component,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ErrorInfo,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -90,6 +100,37 @@ function canonicalProductHost(slug: string) {
 // Strip scheme/trailing slash so the address bar reads as a clean host+path.
 function addressBarText(url: string) {
   return (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
+
+// Chat dock horizontal resize: a per-browser persisted width, clamped to a usable
+// range (never narrower than the composer, never wider than 60% of the viewport).
+// Presentation-only — the dock width is local UI state, it never touches workspace
+// data or the agent turn.
+const CHAT_WIDTH_KEY = "lb-chat-width";
+const CHAT_MIN_WIDTH = 280;
+const CHAT_MAX_WIDTH = 760;
+const CHAT_DEFAULT_WIDTH = 340;
+function clampChatWidth(px: number): number {
+  const viewportCap =
+    typeof window !== "undefined" ? Math.round(window.innerWidth * 0.6) : CHAT_MAX_WIDTH;
+  const max = Math.max(CHAT_MIN_WIDTH, Math.min(CHAT_MAX_WIDTH, viewportCap));
+  return Math.max(CHAT_MIN_WIDTH, Math.min(Math.round(px), max));
+}
+function readStoredChatWidth(): number {
+  if (typeof window === "undefined") return CHAT_DEFAULT_WIDTH;
+  try {
+    const raw = Number(window.localStorage.getItem(CHAT_WIDTH_KEY));
+    return Number.isFinite(raw) && raw > 0 ? clampChatWidth(raw) : CHAT_DEFAULT_WIDTH;
+  } catch {
+    return CHAT_DEFAULT_WIDTH;
+  }
+}
+function persistChatWidth(px: number): void {
+  try {
+    window.localStorage.setItem(CHAT_WIDTH_KEY, String(px));
+  } catch {
+    /* private mode / storage disabled — width simply isn't remembered */
+  }
 }
 
 function workspaceBusinessName(
@@ -832,6 +873,57 @@ export function Product({
 }) {
   const [tab, setTab] = useState<TabKey>("company");
   const [chatOpen, setChatOpen] = useState(true);
+  // Horizontally resizable chat dock. `chatWidth` drives a CSS custom property on
+  // the dock; the drag is pointer-based and disables the dock's width transition
+  // while in flight (via `chatResizing`) so it tracks the cursor 1:1.
+  const [chatWidth, setChatWidth] = useState<number>(readStoredChatWidth);
+  const [chatResizing, setChatResizing] = useState(false);
+
+  // Re-clamp if the viewport shrinks so the dock can never exceed the 60% cap.
+  useEffect(() => {
+    const onResize = () => setChatWidth((w) => clampChatWidth(w));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const startChatResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return; // primary button only
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = chatWidth; // current width from this render's closure
+    let latest = startWidth; // tracks the live width without a render-synced ref
+    setChatResizing(true);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    const onMove = (moveEvent: PointerEvent) => {
+      latest = clampChatWidth(startWidth + (moveEvent.clientX - startX));
+      setChatWidth(latest);
+    };
+    const onUp = () => {
+      setChatResizing(false);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      persistChatWidth(latest);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  // Keyboard a11y: arrow keys nudge the divider (Shift = larger step).
+  const nudgeChatResize = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    const delta = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
+    if (!delta) return;
+    event.preventDefault();
+    setChatWidth((w) => {
+      const next = clampChatWidth(w + delta);
+      persistChatWidth(next);
+      return next;
+    });
+  };
+
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
@@ -875,7 +967,10 @@ export function Product({
       />
 
       <div className="lb-workspace">
-        <div className={`lb-chat-dock${chatOpen ? "" : " is-closed"}`}>
+        <div
+          className={`lb-chat-dock${chatOpen ? "" : " is-closed"}${chatResizing ? " is-resizing" : ""}`}
+          style={{ "--lb-chat-w": `${chatWidth}px` } as CSSProperties}
+        >
           <ChatErrorBoundary key={business.slug}>
             <AgentChat
               business={business}
@@ -894,6 +989,22 @@ export function Product({
             />
           </ChatErrorBoundary>
         </div>
+
+        {chatOpen && (
+          <div
+            className={`lb-chat-resize${chatResizing ? " is-active" : ""}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize chat panel"
+            aria-valuemin={CHAT_MIN_WIDTH}
+            aria-valuemax={CHAT_MAX_WIDTH}
+            aria-valuenow={chatWidth}
+            tabIndex={0}
+            title="Drag to resize chat"
+            onPointerDown={startChatResize}
+            onKeyDown={nudgeChatResize}
+          />
+        )}
 
         <div className={`lb-main${tab === "product" ? " lb-main--preview" : ""}`}>
           {tab === "product" ? (

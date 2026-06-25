@@ -110,7 +110,9 @@
 .lb-workspace { flex: 1; min-height: 0; display: flex; position: relative; }
 .lb-chat-dock {
   flex: none;
-  width: clamp(312px, 23vw, 360px);
+  /* width is operator-resizable via the --lb-chat-w custom property (set in
+     Product.tsx); falls back to the original responsive clamp when unset */
+  width: var(--lb-chat-w, clamp(312px, 23vw, 360px));
   display: flex; flex-direction: column;
   border-right: 1px solid var(--cds-color-border-divider);
   background: var(--cds-color-surface-card);
@@ -118,6 +120,33 @@
   transition: width 0.28s var(--cds-ease-in-out);
 }
 .lb-chat-dock.is-closed { width: 0; border-right: 0; }
+/* while dragging the divider, track the cursor 1:1 (no easing lag) */
+.lb-chat-dock.is-resizing { transition: none; }
+
+/* drag gutter between the chat dock and the main pane — horizontal resize */
+.lb-chat-resize {
+  flex: none;
+  width: 8px;
+  margin: 0 -4px; /* straddle the dock's border so the hit area sits on the seam */
+  align-self: stretch;
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.lb-chat-resize::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 4px; width: 2px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background var(--cds-duration-base);
+}
+.lb-chat-resize:hover::before,
+.lb-chat-resize:focus-visible::before,
+.lb-chat-resize.is-active::before { background: var(--cds-color-border-focus); }
+.lb-chat-resize:focus-visible { outline: none; }
 .lb-main { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; container-type: inline-size; }
 .lb-main--preview { display: flex; flex-direction: column; overflow: hidden; padding: clamp(14px, 1.5vw, 26px) var(--lb-gutter); }
 
@@ -135,7 +164,8 @@
 .lb-chat-handle:hover { color: var(--cds-color-text-default); border-color: var(--cds-color-border-focus); }
 
 /* chat fills the dock (the dock provides the frame) */
-.lb-chat { display: flex; flex-direction: column; height: 100%; min-height: 0; width: 100%; min-width: clamp(312px, 23vw, 360px); background: var(--cds-color-surface-card); overflow: hidden; }
+/* fills the dock; min-width: 0 lets it follow the (resizable) dock width */
+.lb-chat { display: flex; flex-direction: column; height: 100%; min-height: 0; width: 100%; min-width: 0; background: var(--cds-color-surface-card); overflow: hidden; }
 .lb-chat__collapse { flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: var(--cds-radius-md); border: 1px solid var(--cds-color-border-default); background: var(--cds-color-surface-card); color: var(--cds-color-text-soft); cursor: pointer; }
 .lb-chat__collapse:hover { color: var(--cds-color-text-default); border-color: var(--cds-color-border-strong); }
 .lb-iconbtn.is-on { background: var(--cds-color-surface-sunken); color: var(--cds-color-text-default); border-color: var(--cds-color-border-strong); }
@@ -373,9 +403,12 @@
 
 @media (max-width: 860px) {
   .lb-crumb, .lb-topbar__name, .lb-wstat { display: none; }
-  /* chat overlays instead of squeezing the main pane on small screens */
+  /* chat overlays instead of squeezing the main pane on small screens; the
+     explicit width here overrides the --lb-chat-w custom property, and the drag
+     gutter is hidden since the dock floats above the main pane */
   .lb-chat-dock { position: absolute; z-index: 4; height: 100%; width: min(360px, 86vw); box-shadow: var(--cds-shadow-overlay); }
   .lb-chat-dock.is-closed { width: 0; box-shadow: none; }
+  .lb-chat-resize { display: none; }
 }
 
 /* Standalone thinking row: the animated dots live in their OWN agent bubble with
