@@ -429,7 +429,16 @@ function titleWithoutLeadingCategory(title: string, category: string): string {
   const firstNorm = firstWord.toLowerCase().replace(/[^a-z]/g, "");
   if (firstNorm && firstNorm === label.toLowerCase()) {
     const rest = t.slice(firstWord.length).trim();
-    return rest || t;
+    // Only drop the leading word when it is a redundant category LABEL — i.e. the
+    // remainder still reads as a noun phrase (starts with a capital/number, e.g.
+    // "Research Reading Tracker Market" -> "Reading Tracker Market"). When the
+    // category word is the VERB of a verb-led title ("Research the market and
+    // shape the brief", "Launch the offer page"), the remainder starts with a
+    // lowercase function word ("the"/"a"/"and"/…) and stripping mangles the
+    // sentence — so keep the full title in that case.
+    if (rest && /^[A-Z0-9]/.test(rest)) {
+      return rest;
+    }
   }
   return t;
 }
