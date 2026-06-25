@@ -1283,9 +1283,33 @@ export function useTakyonLitebulb() {
       }
       const pendingTurnMissing = Boolean(pendingTurn && !pendingTurnInHistory);
       const pending = Boolean(history.running) || historyHasPendingReply(history) || pendingTurnMissing;
-      const nextMessages = pendingTurnMissing
-        ? mergeHistoryMessages(mapHistoryMessages(history), [pendingTurnMessage(pendingTurn!)])
-        : mapHistoryMessages(history);
+      const mappedHistory = mapHistoryMessages(history);
+      // Same append-only guard the live poll uses (refresh handler below): a transient
+      // empty/short history snapshot must NEVER wipe a populated transcript. This path
+      // (open/resume/create) previously did an unconditional REPLACE, which is exactly
+      // the "my messages disappear" bug: after a dashboard restart, session.history
+      // returns 4001, loadHistory surfaces it as { messages: [] }, and the REPLACE
+      // deleted the operator's blue bubbles (they live only in chatMessages). On a
+      // genuine business switch openBusiness has already reset chatMessagesRef to [],
+      // so merging from prev cannot bleed another business's bubbles. Merge instead;
+      // only settle to the snapshot when the local transcript is itself empty.
+      const prev = chatMessagesRef.current;
+      const hasLiveWorkingMessage = prev.some(
+        (message) => message.who === "agent" && message.working,
+      );
+      const clientTurnLive =
+        sessionRunningRef.current || liveChatTurnRef.current || hasLiveWorkingMessage;
+      const keepCurrent =
+        !pending &&
+        !pendingTurnMissing &&
+        mappedHistory.length === 0 &&
+        (clientTurnLive || prev.length > 0);
+      const mergedHistory = mergeHistoryMessages(prev, mappedHistory);
+      const nextMessages = keepCurrent
+        ? prev
+        : pendingTurnMissing
+          ? mergeHistoryMessages(mergedHistory, [pendingTurnMessage(pendingTurn!)])
+          : mergedHistory;
       chatMessagesRef.current = nextMessages;
       liveChatTurnRef.current = pending;
       sessionRunningRef.current = pending;

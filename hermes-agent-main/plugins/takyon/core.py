@@ -16360,6 +16360,10 @@ class TakyonStore:
             "cron": cron_preview,
             "domains": {"provider": "vercel", "candidates": domains, "results": []},
             "database": {"candidates": db_counts, "deleted": {}},
+            # Honesty signal — only meaningful after a confirmed delete (set below). Default clean so
+            # the key shape is stable across dry-run/confirm and CLI/dashboard consumers.
+            "still_serving": False,
+            "still_serving_reasons": [],
         }
         if not confirm:
             result["next_step"] = "rerun with confirm=true or --confirm to permanently delete"
@@ -16429,6 +16433,28 @@ class TakyonStore:
         result["product_service"] = product_service_result
         if delete_files:
             self._delete_business_workspace_remote(slug)
+
+        # Truthfulness gate: a "deleted" business must not still be reachable on the internet. The
+        # public site is served from the Cloudflare R2 edge (<slug>.coscale.app), so if the R2 prefix
+        # cleanup did not actually clear it the customer site is still live. The legacy per-business
+        # systemd service + Caddy route are a second (legacy) origin path; a blocker there also leaves
+        # the slug reachable. Surface a single honest signal so the CLI summary and the dashboard "X"
+        # never report a clean delete while something is still serving. This is computed BEFORE the
+        # control-plane row delete so the operator sees the real end state, not an optimistic one.
+        edge_still_present = bool(result["public_edge_site"].get("still_present"))
+        service_origin_blocked = bool(service_blocker or caddy_blocker)
+        still_serving_reasons: list[str] = []
+        if edge_still_present:
+            still_serving_reasons.append(
+                f"public edge site still has "
+                f"{result['public_edge_site'].get('residual_count', 0)} object(s) in R2"
+            )
+        if service_blocker:
+            still_serving_reasons.append(f"product service file: {service_blocker}")
+        if caddy_blocker:
+            still_serving_reasons.append(f"product caddy route: {caddy_blocker}")
+        result["still_serving"] = edge_still_present or service_origin_blocked
+        result["still_serving_reasons"] = still_serving_reasons
 
         deleted = self._delete_business_db_rows(conn, slug, db_counts=db_counts)
         result["database"] = {"candidates": db_counts, "deleted": deleted}
@@ -18996,6 +19022,50 @@ class TakyonStore:
                 event_type="business.operator_update",
                 payload=event_payload,
             )
+            # Also surface this curated progress post as a chat bubble. The CEO is told
+            # (ceo.md + the bootstrap instruction) that business_post_operator_update is
+            # its customer-facing progress channel, but the chat stream is built only
+            # from business.ceo_turn events — and the interim tap that writes those fires
+            # ONLY on a mid-loop assistant message with visible text (run_agent.py
+            # _emit_interim_assistant_message). A long bootstrap/wake that works through
+            # tool batches with no preamble prose therefore shows NOTHING until the
+            # terminal summary (symptom: "no progress until it's done"). Mirroring each
+            # operator_update into a business.ceo_turn makes the CEO's already-instructed
+            # mid-run posts render as streamed progress on EVERY runner path (worker
+            # bootstrap/wake AND the isolated interactive turn), independent of assistant
+            # prose. Deduped against the most recent ceo_turn so an identical line is not
+            # double-posted; best-effort so it never fails the operator_update write.
+            chat_body = (
+                f"{headline}\n\n{update_summary}" if update_summary else headline
+            ).strip()[:4000]
+            if chat_body:
+                try:
+                    recent_row = conn.execute(
+                        "SELECT * FROM events WHERE business_slug = ? "
+                        "AND event_type = 'business.ceo_turn' "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (slug,),
+                    ).fetchone()
+                    last_text = ""
+                    if recent_row is not None:
+                        last_payload = self._row_to_dict(recent_row).get("payload")
+                        if isinstance(last_payload, str):
+                            try:
+                                last_payload = json.loads(last_payload)
+                            except Exception:
+                                last_payload = {}
+                        if isinstance(last_payload, dict):
+                            last_text = str(last_payload.get("text") or "").strip()
+                    if last_text != chat_body:
+                        self._record_event(
+                            conn,
+                            scope=target_scope,
+                            business_slug=slug,
+                            event_type="business.ceo_turn",
+                            payload={"text": chat_body},
+                        )
+                except Exception:
+                    pass
             return {
                 "action": action,
                 "business": slug,
@@ -19036,7 +19106,11 @@ class TakyonStore:
 
         candidates: dict[str, list[str]] = {}
         queries = {
-            "events": f"SELECT id FROM events WHERE created_at < ?{where_scope} ORDER BY created_at ASC LIMIT ?",
+            # business.ceo_turn (the operator CEO-chat transcript) and business.operator_update
+            # (the milestone/progress feed) are durable chat history surfaced in the dashboard —
+            # not ephemeral telemetry. Excluding them keeps routine age-GC from silently deleting
+            # the operator's CEO chat bubbles while their own (session-DB) messages survive.
+            "events": f"SELECT id FROM events WHERE created_at < ? AND event_type NOT IN ('business.ceo_turn', 'business.operator_update'){where_scope} ORDER BY created_at ASC LIMIT ?",
             "agent_runs": f"SELECT id FROM agent_runs WHERE created_at < ?{where_scope} ORDER BY created_at ASC LIMIT ?",
             self._work_requests_table(): (
                 f"SELECT id FROM {self._work_requests_table()} WHERE created_at < ? AND status IN "

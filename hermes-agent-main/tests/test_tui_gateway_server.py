@@ -911,6 +911,60 @@ def test_session_request_reattaches_current_transport_on_reconnect():
         server._sessions.pop("sid", None)
 
 
+def test_session_history_rehydrates_from_db_when_session_evicted(monkeypatch):
+    # Operator chat continuity (I1/I2): after a dashboard restart/deploy the in-memory
+    # _sessions dict is empty, but the transcript is still in the session DB. session.history
+    # must rehydrate from the DB (mirroring session.resume) instead of returning 4001 — a bare
+    # 4001 is what the litebulb client renders as an empty history, which its applyHistory then
+    # uses to REPLACE (wipe) the operator's blue bubbles. Regression guard for that fix.
+    persisted = [
+        {"role": "user", "content": "hello from before the restart"},
+        {"role": "assistant", "content": "i still remember our conversation"},
+    ]
+
+    class _FakeDB:
+        def get_session(self, target):
+            return {"id": "durable-sid"} if target == "durable-sid" else None
+
+        def get_session_by_title(self, target):
+            return None
+
+        def get_messages_as_conversation(self, session_id, include_ancestors=False):
+            assert include_ancestors is True
+            assert session_id == "durable-sid"
+            return list(persisted)
+
+    monkeypatch.setattr(server, "_get_db", lambda: _FakeDB())
+    server._sessions.pop("durable-sid", None)  # the eviction: not in memory
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.history", "params": {"session_id": "durable-sid"}}
+    )
+    assert "result" in resp, resp
+    assert resp["result"]["count"] == 2
+    assert "before the restart" in json.dumps(resp["result"]["messages"])
+
+
+def test_session_history_still_errors_when_absent_from_both_memory_and_db(monkeypatch):
+    # The rehydration fallback must not paper over a genuinely unknown session: when the DB
+    # has no record either, session.history still returns the 4001 error (unchanged behavior).
+    class _EmptyDB:
+        def get_session(self, target):
+            return None
+
+        def get_session_by_title(self, target):
+            return None
+
+    monkeypatch.setattr(server, "_get_db", lambda: _EmptyDB())
+    server._sessions.pop("ghost-sid", None)
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.history", "params": {"session_id": "ghost-sid"}}
+    )
+    assert "error" in resp
+    assert resp["error"]["code"] == 4001
+
+
 def test_on_tool_complete_extracts_file_activity_from_commit_results(monkeypatch):
     events: list[tuple[str, str, dict]] = []
     session = _session()

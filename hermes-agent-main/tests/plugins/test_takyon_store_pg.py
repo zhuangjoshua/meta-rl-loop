@@ -986,3 +986,85 @@ def test_seed_platform_owner_rejects_stale_sqlite_backend_env(tmp_path, monkeypa
     store = takyon_core.TakyonStore(root=tmp_path)
     with pytest.raises(RuntimeError, match="legacy Takyon SQLite backend has been removed"):
         store.seed_platform_owner()
+
+
+def test_operator_update_post_mirrors_into_ceo_turn_chat(pg_store, pg_store_dsn):
+    # Operator chat progress visibility (I3): the CEO is instructed that
+    # business_post_operator_update is its customer-facing progress channel, but the dashboard
+    # chat stream is built from business.ceo_turn events — and the interim tap that writes those
+    # fires only on a mid-loop assistant message with visible text. A long bootstrap/wake that
+    # works through tool batches with no preamble prose would otherwise show NOTHING until the
+    # terminal summary. operator_update.post mirrors each post into a business.ceo_turn so the
+    # already-instructed mid-run posts render as streamed progress on every runner path. Deduped
+    # against the most recent ceo_turn so an identical line is not double-posted.
+    import json
+
+    _seed_owned_business(pg_store_dsn, "narrco", mode="test")
+
+    def post(headline, summary, key):
+        return pg_store.commit(
+            scope="business:narrco",
+            operations=[{
+                "action": "operator_update.post", "business": "narrco",
+                "headline": headline, "summary": summary,
+                "milestones": [{"title": "M", "description": "d", "category": "RESEARCH", "status": "running"}],
+            }],
+            idempotency_key=key, reason="post", actor="test",
+        )
+
+    def texts():
+        out = []
+        for e in pg_store.read_ceo_turn_events("narrco", limit=20):
+            p = e["payload"]
+            if isinstance(p, str):
+                p = json.loads(p)
+            out.append(p.get("text"))
+        return out
+
+    post("Researching the market", "Pulling competitor data.", "n-u1")
+    assert texts() == ["Researching the market\n\nPulling competitor data."]
+    # identical post is deduped — no second bubble
+    post("Researching the market", "Pulling competitor data.", "n-u2")
+    assert len(texts()) == 1
+    # a distinct post adds a new bubble
+    post("Building the product", "Scaffolding the app.", "n-u3")
+    assert len(texts()) == 2
+
+
+def test_maintenance_gc_preserves_operator_chat_history(pg_store, pg_store_dsn):
+    # Operator chat continuity (I1/I2): business.ceo_turn (the CEO chat transcript) and
+    # business.operator_update (the milestone feed) are durable dashboard history, not ephemeral
+    # telemetry. Routine age-GC of the events table must NOT delete them while plain events prune.
+    _seed_owned_business(pg_store_dsn, "gckeep", mode="test")
+    pg_store.commit(
+        scope="business:gckeep",
+        operations=[{
+            "action": "operator_update.post", "business": "gckeep",
+            "headline": "Phase one", "summary": "Doing research.",
+            "milestones": [{"title": "R", "description": "x", "category": "RESEARCH", "status": "running"}],
+        }],
+        idempotency_key="gk-u1", reason="post", actor="test",
+    )
+    pg_store.commit(
+        scope="business:gckeep",
+        operations=[{"action": "event.record", "event_type": "note", "payload": {"x": 1}}],
+        idempotency_key="gk-note", reason="note", actor="test",
+    )
+    # backdate every gckeep event past the GC cutoff (created_at is a text/ISO column on PG)
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        conn.execute(
+            "update events set created_at = %s where business_slug = %s",
+            ("2000-01-01T00:00:00+00:00", "gckeep"),
+        )
+    pg_store.commit(
+        scope="global",
+        operations=[{"action": "maintenance.gc", "confirm": True, "older_than_days": 7}],
+        idempotency_key="gk-gc", reason="gc", actor="test",
+    )
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        kinds = dict(conn.execute(
+            "select event_type, count(*) from events where business_slug = 'gckeep' group by event_type"
+        ).fetchall())
+    assert kinds.get("note", 0) == 0  # plain telemetry event was pruned (gc deletion ran)
+    assert kinds.get("business.ceo_turn", 0) >= 1  # CEO chat history preserved
+    assert kinds.get("business.operator_update", 0) >= 1  # milestone feed preserved

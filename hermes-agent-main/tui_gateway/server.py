@@ -3649,6 +3649,32 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
+        # The in-memory session is gone (e.g. a dashboard restart/deploy emptied the
+        # process-global _sessions dict). Rehydrate the persisted transcript from the DB
+        # by session_id/title — mirroring session.resume — instead of returning 4001.
+        # A bare 4001 is what the litebulb client renders as an empty history, which its
+        # applyHistory then uses to REPLACE (wipe) the operator's blue bubbles. This
+        # makes operator chat history survive a restart even before the client re-resumes.
+        db = _get_db()
+        target = str(params.get("session_id") or "").strip()
+        if db is not None and target:
+            try:
+                found = db.get_session(target) or db.get_session_by_title(target)
+                if found:
+                    resolved = str(found.get("id") or target)
+                    rehydrated = db.get_messages_as_conversation(
+                        resolved, include_ancestors=True
+                    )
+                    return _ok(
+                        rid,
+                        {
+                            "count": len(rehydrated),
+                            "messages": _history_to_messages(rehydrated),
+                            "running": False,
+                        },
+                    )
+            except Exception:
+                pass
         return err
     history = list(session.get("history", []))
     history_memory_only = bool(session.get("history_memory_only"))
