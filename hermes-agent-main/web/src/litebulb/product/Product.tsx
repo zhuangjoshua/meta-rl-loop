@@ -19,11 +19,13 @@ import type {
 } from "@/lib/api";
 import {
   chatStreamAgentMessages,
+  liveWorkSteps,
   sanitizeCustomerReply,
   sanitizeTaskErrorText,
   workspaceChatRunning,
   workspaceChatSummary,
   type ChatStreamMessage,
+  type LiveWorkStep,
 } from "@/lib/takyonCeoUpdates";
 import { Tabs, Textarea } from "../composer-ui/lib";
 import type { Theme } from "../App";
@@ -66,6 +68,55 @@ function useAccumulatedAgentStream(
     if (changed) setStream(order.current.map((key) => byKey.current.get(key)!));
   }, [workspace]);
   return stream;
+}
+
+// Append-only live work view: merge each poll's liveWorkSteps into a per-business
+// accumulator so a transient short/empty trace snapshot never removes a step that
+// is already on screen. The view GROWS as the CEO works (a chat turn or a wake)
+// and a step's status updates in place (running -> completed) — it never
+// truncates or gets replaced mid-turn. `running` (the live in-flight signal)
+// drives the reset: when a turn settles AND the server reports no live steps, the
+// accumulator clears so the NEXT turn starts fresh rather than re-showing the last
+// turn's steps. Keyed by business via the caller's remount; mirrors
+// useAccumulatedAgentStream.
+function useAccumulatedWorkSteps(
+  workspace: TakyonBusinessWorkspaceResponse | null,
+  active: boolean,
+): LiveWorkStep[] {
+  const [steps, setSteps] = useState<LiveWorkStep[]>([]);
+  const byKey = useRef<Map<string, LiveWorkStep>>(new Map());
+  const order = useRef<string[]>([]);
+  // Was the turn active on the previous poll? Used to clear the accumulator
+  // exactly once, on the running->idle edge with no live steps, so a settled
+  // turn's steps don't bleed into the next one.
+  const wasActive = useRef(false);
+  useEffect(() => {
+    const live = liveWorkSteps(workspace);
+    if (!active && wasActive.current && live.length === 0) {
+      // Turn just settled and nothing live remains — reset for the next turn.
+      byKey.current.clear();
+      order.current = [];
+      if (steps.length) setSteps([]);
+      wasActive.current = false;
+      return;
+    }
+    if (active) wasActive.current = true;
+    let changed = false;
+    for (const step of live) {
+      const key = step.id;
+      const prev = byKey.current.get(key);
+      if (!prev) {
+        order.current.push(key);
+        byKey.current.set(key, step);
+        changed = true;
+      } else if (prev.status !== step.status || prev.label !== step.label || prev.detail !== step.detail) {
+        byKey.current.set(key, step);
+        changed = true;
+      }
+    }
+    if (changed) setSteps(order.current.map((key) => byKey.current.get(key)!));
+  }, [workspace, active, steps.length]);
+  return steps;
 }
 
 const Icon = {
@@ -322,6 +373,44 @@ function ThinkingRow() {
   );
 }
 
+// The GROWING live work view shown while the CEO is actively working a turn or a
+// wake — the same liveness the bootstrap build screen shows, surfaced in the
+// post-bootstrap cockpit. Each row is one de-identified step (a tool/agent
+// action) the CEO is taking, newest last; the list GROWS append-only as the turn
+// runs and a row flips running -> completed in place. This is the WORK view, NOT
+// a customer chat bubble: it has its own compact treatment (a "Working…" header +
+// step rows with a running/done dot), and every label/detail was already
+// de-identified by liveWorkSteps so no raw tool/path noun — and never the CEO's
+// raw thinking — reaches the screen. The trailing typing dots make movement
+// visible even between discrete steps so a long step never reads as frozen.
+function LiveWorkView({ steps }: { steps: LiveWorkStep[] }) {
+  // Keep the view legible: show the most recent steps (the list still grows, we
+  // just window the tail so a very long turn doesn't push the composer offscreen).
+  const visible = steps.slice(-8);
+  return (
+    <div className="lb-msg lb-msg--agent">
+      <div className="lb-work" aria-label="What the CEO is doing now" aria-live="polite">
+        <div className="lb-work__head">
+          <span className="lb-work__dot lb-work__dot--live" aria-hidden="true" />
+          <span className="lb-work__title">Working…</span>
+          <span className="lb-typing lb-work__typing" aria-hidden="true"><i /><i /><i /></span>
+        </div>
+        <ul className="lb-work__list">
+          {visible.map((step) => (
+            <li key={step.id} className={`lb-work__row lb-work__row--${step.status}`}>
+              <span className={`lb-work__row-dot lb-work__row-dot--${step.status}`} aria-hidden="true" />
+              <span className="lb-work__row-label">{step.label}</span>
+              {step.detail && step.detail !== step.label ? (
+                <span className="lb-work__row-detail">{step.detail}</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 function ProfileMenu({ onClose, onSelect }: { onClose: () => void; onSelect: (label: string) => void }) {
   return (
     <>
@@ -445,6 +534,7 @@ function AgentChat({
   business,
   messages,
   agentStream,
+  workSteps,
   chatSummary,
   chatRunning,
   liveStateLine,
@@ -465,6 +555,11 @@ function AgentChat({
   // The curated CEO narration parsed from workspace.chat_stream (ordered
   // oldest→newest). These are the ONLY agent bubbles rendered.
   agentStream: ChatStreamMessage[];
+  // The append-only GROWING live work view (de-identified per-step trace) shown
+  // while a turn or wake is in flight — the cockpit's equivalent of the bootstrap
+  // build screen's live "Working on…" view. This is the WORK view, never a
+  // customer chat bubble.
+  workSteps: LiveWorkStep[];
   // Durable end-of-turn summary mirrored from workspace.chat_summary. The
   // chat_stream's last message usually already carries it; this is a fallback.
   chatSummary?: string;
@@ -605,7 +700,16 @@ function AgentChat({
   // gap BETWEEN bootstrap turns reads as "still working", never frozen/dead. When
   // the reply is actively streaming (streamingBubble), the growing text IS the live
   // indicator, so the dots yield to it rather than stacking under the words.
-  const showThinking = isRunning && !streamingBubble;
+  //
+  // Live work view: while a turn/wake is genuinely in flight and the final reply
+  // is NOT yet streaming, show the GROWING per-step work view (the de-identified
+  // trace stream) so a long multi-step turn — and a wake — reads as live, growing
+  // work instead of a frozen "working…" line. The work view carries its own typing
+  // dots, so it IS the movement indicator; the bare ThinkingRow shows only before
+  // any step has landed yet (so there is never a dead "working…" with nothing
+  // below it). Both yield to the streaming reply when it starts.
+  const showWorkView = isRunning && !streamingBubble && workSteps.length > 0;
+  const showThinking = isRunning && !streamingBubble && !showWorkView;
   // On a cold reload of a SETTLED business with no chat_stream yet, surface the
   // durable live_state one-liner as a single plain assistant bubble so the chat is
   // never blank. NEVER while a turn is in flight: the live_state one-liner is a
@@ -618,7 +722,15 @@ function AgentChat({
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [bubbles.length, showThinking, showSummary, showLiveStateLine, streamingBubble?.text.length]);
+  }, [
+    bubbles.length,
+    showThinking,
+    showSummary,
+    showLiveStateLine,
+    streamingBubble?.text.length,
+    showWorkView,
+    workSteps.length,
+  ]);
 
   return (
     <aside className="lb-chat">
@@ -671,6 +783,7 @@ function AgentChat({
             </div>
           </div>
         )}
+        {showWorkView && <LiveWorkView steps={workSteps} />}
         {showThinking && <ThinkingRow />}
         <div ref={endRef} />
       </div>
@@ -948,6 +1061,16 @@ export function Product({
   // live_state mirror, which can stay "running" after the turn ended — that is
   // exactly what kept the dots floating when nothing was actually running.
   const running = sending || sessionRunning;
+  // A turn/wake is "in flight" for the live work view when the operator's own
+  // turn is running (`running`) OR the backend mirror reports a genuinely-live
+  // background run (`chatRunning`, gated on a real live background_run so it can't
+  // spin forever). chatRunning is what makes a WAKE — which the operator did not
+  // submit — surface its growing work view; `running` covers a chat turn.
+  const workActive = running || chatRunning;
+  // Append-only GROWING live work view (the de-identified per-step trace stream),
+  // accumulated across polls so it never truncates mid-turn and reset cleanly when
+  // the turn settles. Same liveness as the bootstrap build screen, for the cockpit.
+  const workSteps = useAccumulatedWorkSteps(workspace, workActive);
 
   useEffect(() => {
     setTab("company");
@@ -976,6 +1099,7 @@ export function Product({
               business={business}
               messages={chatMessages}
               agentStream={agentStream}
+              workSteps={workSteps}
               chatSummary={chatSummary || undefined}
               chatRunning={chatRunning}
               liveStateLine={liveStateLine || undefined}

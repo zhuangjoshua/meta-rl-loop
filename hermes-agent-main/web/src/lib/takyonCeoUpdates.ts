@@ -926,6 +926,116 @@ export function liveWorkerTasks(workspace: WorkspaceLike): LiveWorkerTask[] {
   return result;
 }
 
+// --- Live work view (cockpit: chat turn + wake) ----------------------------
+//
+// A growing, append-only list of WHAT THE CEO IS DOING during a live turn — the
+// same liveness the bootstrap build screen shows, but for the post-bootstrap
+// cockpit during a chat turn AND a wake. Every rail (bootstrap / wake / chat
+// turn) records the SAME per-tool runtime traces (dashboard.run.trace events ->
+// overview.trace, fallback live_state.trace), each carrying a label, a detail,
+// and a running/completed status, upserted one row per tool by entry_key. We
+// read THAT canonical trace array (the same source livePhases reads — no new ad
+// hoc event type) and turn it into one work-step line per tool, newest last.
+//
+// This is the WORK / DEBUG view, NOT a customer chat bubble: each line is still
+// run through the de-identifier (sanitizeCustomerReply) so a raw tool/path/skill
+// noun never reaches the screen, and the CEO's raw chain-of-thought (which lives
+// only in the agent's messages, never in these traces) can never leak here.
+
+export type LiveWorkStep = {
+  id: string;
+  // Warm, customer-safe label for the step (already de-identified upstream by the
+  // gateway's _takyon_trace_tool_shape; re-cleaned here for defense).
+  label: string;
+  // Optional de-identified sub-line (the cleaned tool preview/summary). Empty
+  // when it would echo the label or carry plumbing.
+  detail: string;
+  status: "running" | "completed";
+};
+
+type RawTraceRow = {
+  entryKey: string;
+  label: string;
+  detail: string;
+  status: string;
+  updatedAt: string;
+};
+
+function traceRowArray(workspace: WorkspaceLike): RawTraceRow[] {
+  if (!workspace) return [];
+  const overview = asRecord(workspace.overview);
+  const raw = Array.isArray(overview.trace)
+    ? overview.trace
+    : Array.isArray(asRecord(workspace.live_state).trace)
+      ? (asRecord(workspace.live_state).trace as unknown[])
+      : [];
+  const rows: RawTraceRow[] = [];
+  for (const entry of raw) {
+    const record = asRecord(entry);
+    rows.push({
+      entryKey: String(record.entry_key ?? record.id ?? "").trim(),
+      label: String(record.label ?? "").trim(),
+      detail: String(record.detail ?? record.summary ?? "").trim(),
+      status: String(record.status ?? "").trim().toLowerCase(),
+      updatedAt: String(record.updated_at ?? "").trim(),
+    });
+  }
+  return rows;
+}
+
+// Turn-level / runner plumbing labels that are NOT a discrete "step" the operator
+// should watch grow (the turn row itself, raw runner names). The growing work
+// view is the per-tool/agent step stream that sits UNDER the turn.
+const WORK_STEP_PLUMBING_LABELS = new Set([
+  "ceo turn",
+  "ceo wake",
+  "ceo wake loop",
+  "ceo bootstrap",
+  "ceo run",
+  "ceo live trace",
+  "background run",
+  "background work",
+]);
+
+/**
+ * The growing live work view for the cockpit during a chat turn or a wake: one
+ * de-identified step line per tool/agent action the CEO is taking, in
+ * chronological order (newest last), derived from the canonical runtime trace
+ * array. A tool's start row and completed row share an entry_key, so the trace
+ * array already collapses them to one evolving row (running -> completed) — this
+ * keeps the view append-only (the line count grows, a row updates in place) and
+ * never truncates mid-turn.
+ *
+ * Presentation-only — derived from the workspace mirror's trace events, never the
+ * agent's raw turn context. The CEO's raw thinking is not in these traces, so it
+ * cannot leak; each surfaced label/detail is still re-sanitized for defense.
+ */
+export function liveWorkSteps(workspace: WorkspaceLike): LiveWorkStep[] {
+  const steps: LiveWorkStep[] = [];
+  for (const row of traceRowArray(workspace)) {
+    // The work view shows in-flight + done steps only. A tool's evolving row is
+    // either running or completed; treat anything else (queued/failed/blocked/
+    // empty) as not-yet-a-visible-step and skip it — failures surface through the
+    // chat/summary copy, not as a green-checked work line.
+    const isCompleted = row.status === "completed" || row.status === "complete";
+    const isRunning = row.status === "running";
+    if (!isCompleted && !isRunning) continue;
+    const status: LiveWorkStep["status"] = isCompleted ? "completed" : "running";
+    const rawLabel = row.label;
+    if (!rawLabel) continue;
+    if (WORK_STEP_PLUMBING_LABELS.has(rawLabel.toLowerCase())) continue;
+    const label = sanitizeCustomerReply(rawLabel);
+    if (!label) continue;
+    let detail = sanitizeCustomerReply(row.detail);
+    if (detail && detail.trim().toLowerCase() === label.trim().toLowerCase()) {
+      detail = "";
+    }
+    const id = row.entryKey || `${label}:${row.updatedAt}`;
+    steps.push({ id, label, detail, status });
+  }
+  return steps;
+}
+
 // --- Build-phase ladder ----------------------------------------------------
 //
 // The bootstrap turn runs a FIXED, ordered phase sequence

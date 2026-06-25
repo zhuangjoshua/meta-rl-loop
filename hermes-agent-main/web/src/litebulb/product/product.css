@@ -423,3 +423,44 @@
 .lb-msg__bubble--stream > :last-child { display: inline; }
 .lb-stream-caret { display: inline-block; width: 2px; height: 1em; margin-left: 1px; vertical-align: -2px; background: var(--cds-color-text-soft); animation: lb-caret-blink 1s steps(2, start) infinite; }
 @keyframes lb-caret-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+/* Live work view: the GROWING, append-only list of what the CEO is doing during
+   a chat turn or a wake — the cockpit equivalent of the bootstrap build screen's
+   live "Working on…" view. Deliberately NOT styled as a chat bubble: a soft,
+   bordered work card so the operator reads it as live progress (the work/debug
+   view), distinct from the customer-facing reply bubbles. */
+.lb-work {
+  width: 100%;
+  border: 1px solid var(--cds-color-border-default);
+  border-radius: var(--cds-radius-md);
+  background: var(--cds-color-surface-sunken, var(--cds-color-surface-card));
+  padding: var(--cds-space-3) var(--cds-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--cds-space-2);
+}
+.lb-work__head { display: flex; align-items: center; gap: var(--cds-space-2); }
+.lb-work__title {
+  font-size: var(--cds-text-sm);
+  font-weight: var(--cds-weight-semibold);
+  color: var(--cds-color-text-soft);
+  letter-spacing: 0.01em;
+}
+.lb-work__dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+.lb-work__dot--live { background: var(--cds-color-success); animation: lb-ping 1.6s infinite; }
+.lb-work__typing { margin-left: auto; color: var(--cds-color-text-soft); }
+.lb-work__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--cds-space-1); }
+.lb-work__row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--cds-space-2);
+  font-size: var(--cds-text-sm);
+  line-height: var(--cds-leading-snug);
+  color: var(--cds-color-text-default);
+}
+.lb-work__row-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; transform: translateY(-1px); }
+.lb-work__row-dot--running { background: var(--cds-color-success); animation: lb-ping 1.6s infinite; }
+.lb-work__row-dot--completed { background: var(--cds-color-text-soft); opacity: 0.55; }
+.lb-work__row--completed .lb-work__row-label { color: var(--cds-color-text-soft); }
+.lb-work__row-label { font-weight: var(--cds-weight-medium); }
+.lb-work__row-detail { color: var(--cds-color-text-soft); font-size: var(--cds-text-xs); }
