@@ -8763,7 +8763,7 @@ def _requirement_satisfied_by_safebox_broker(alias_names: tuple[str, ...]) -> bo
     GEMINI/FAL/etc.) are on ``provider_key_denylist()`` — the safebox REFUSES to egress them over
     /v1/env, so a runtime plane's ``_env_requirement_value`` returns "" even though the actual call
     path already brokers fine (``composio_distribution._request`` -> ``safebox.composio_forward()``;
-    ``_meta_graph`` -> ``safebox.meta_graph_forward()``). The old raw-env readiness gate therefore
+    Meta Ads also uses that Composio broker/MCP rail). The old raw-env readiness gate therefore
     fails CLOSED and the CEO bails before ever reaching the working broker.
 
     A requirement is broker-satisfiable iff (a) EVERY alias spelling is a denylisted paid-provider
@@ -27608,17 +27608,12 @@ def _meta_env_value(*env_keys: str, allow_env_fallback: bool = True) -> str:
 
 
 def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
-    """Resolve Meta Ads config from the Safebox-backed Meta token first.
+    """Resolve Meta Ads config for the Meta Ads MCP/Composio rail.
 
-    Composio remains a compatibility fallback for old deployments, but the
-    primary production rail is the non-expiring Meta system-user token stored in
-    Safebox (`META_SYSTEM_USER_ACCESS_TOKEN` / `META_ACCESS_TOKEN`).
-
-    On a runtime plane (operator/dashboard/sub-user) the Meta secrets are DENIED /v1/env egress, so
-    this process cannot resolve the token (or the ad account / page id) itself. In that case we broker
-    the NON-SECRET config from the safebox: the returned cfg carries version/ad_account_id/page_id plus
-    ``has_token`` but its ``token`` stays "" here — the brokered ``_meta_graph`` re-resolves the real
-    token on the safebox. The local path below is unchanged for the safebox host / local dev.
+    Production launches must use the business-owned Composio Meta Ads connection, not the
+    fourmanifold-server Meta developer app token. The safebox still provides non-secret graph/page
+    config and may hold the legacy system token for diagnostics, but live launch actions require an
+    active Composio connected account before any ad objects are created.
     """
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
         remote = safebox.meta_config()
@@ -27627,16 +27622,24 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
             version = _META_DEFAULT_GRAPH_VERSION
         elif not version.startswith("v"):
             version = f"v{version}"
+        connected_account_id = str(remote.get("composio_connected_account_id") or "").strip()
+        if require_token and not connected_account_id:
+            try:
+                connected_account_id = composio_distribution.resolve_metaads_connected_account_id()
+            except Exception as exc:
+                raise TakyonError(
+                    "Meta action requires an active Composio Meta Ads MCP connection; "
+                    f"the legacy Meta app token path is disabled for launch: {exc}"
+                ) from exc
         return {
-            # The token NEVER reaches the runtime plane: _meta_graph brokers the Graph call and the
-            # safebox supplies the real token there. has_token reflects that a token exists on the
-            # safebox so callers can reason about readiness without holding the secret.
+            # The token value never reaches the runtime plane. The live action rail below uses the
+            # connected account id, which resolves through the safebox-brokered Composio transport.
             "token": "",
             "has_token": bool(remote.get("has_token")),
             "version": version,
             "ad_account_id": str(remote.get("ad_account_id") or "").strip(),
             "page_id": str(remote.get("page_id") or "").strip(),
-            "composio_connected_account_id": str(remote.get("composio_connected_account_id") or "").strip(),
+            "composio_connected_account_id": connected_account_id,
             "composio_user_id": str(remote.get("composio_user_id") or "").strip() or "takyon_prod_operator",
             "composio_alias": str(remote.get("composio_alias") or "").strip() or "takyon-prod-meta-ads",
         }
@@ -27664,13 +27667,13 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
         ),
         "composio_alias": _meta_env_value("COMPOSIO_METAADS_ALIAS") or "takyon-prod-meta-ads",
     }
-    if require_token and not cfg["token"]:
+    if require_token:
         try:
             cfg["composio_connected_account_id"] = composio_distribution.resolve_metaads_connected_account_id()
         except Exception as exc:
             raise TakyonError(
-                "Meta action requires META_SYSTEM_USER_ACCESS_TOKEN or META_ACCESS_TOKEN "
-                f"in Safebox (or a legacy Composio Meta Ads connection): {exc}"
+                "Meta action requires an active Composio Meta Ads MCP connection; "
+                f"the legacy Meta app token path is disabled for launch: {exc}"
             ) from exc
     return cfg
 
@@ -27726,30 +27729,42 @@ def _meta_graph(
     host: str = "graph.facebook.com",
     timeout: int = 60,
 ) -> dict[str, Any]:
-    """Call the Meta Graph API with the Safebox-backed system token.
-
-    Legacy Composio proxying remains only as a fallback when no Meta token is
-    configured. The direct path keeps Open Graph authority tied to the durable
-    system-user token instead of a brittle third-party mirror.
-
-    On a runtime plane (operator/dashboard/sub-user) the Meta token is DENIED /v1/env egress, so
-    ``cfg["token"]`` is empty here. Broker the WHOLE Graph call through the safebox: it re-resolves the
-    real system-user token LOCALLY, calls Graph, and returns the key-free upstream JSON. The token
-    never reaches this process. The direct httpx / Composio paths below run only on the safebox host /
-    local dev (local authority), where the token resolves locally.
-    """
-    if safebox._remote_enabled() and not safebox._local_authority_enabled():
-        return safebox.meta_graph_forward(
-            method=method,
-            path=path,
-            params=params,
-            host=host,
-            timeout=float(timeout),
-        )
-    token = str(cfg.get("token") or "").strip()
+    """Call Meta Graph through the Meta Ads MCP/Composio connection by default."""
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     rel = path.lstrip("/")
     method = method.upper()
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if connected_account_id:
+        try:
+            payload = composio_distribution.metaads_proxy_request(
+                method=method,
+                endpoint=f"https://{host}/{cfg['version']}/{rel}",
+                connected_account_id=connected_account_id,
+                body=clean if method != "GET" else None,
+                parameters=[
+                    {"name": key, "value": str(value), "type": "query"}
+                    for key, value in clean.items()
+                ]
+                if method == "GET"
+                else None,
+                timeout=float(timeout),
+            )
+        except Exception as exc:
+            raise TakyonError(f"Meta Graph {method} /{rel} failed via Composio MCP: {exc}") from exc
+        result = _composio_tool_unwrap(payload)
+        if isinstance(result, Mapping):
+            return dict(result)
+        if isinstance(result, list):
+            return {"data": result}
+        return {}
+
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        raise TakyonError(
+            "Meta Graph launch calls require an active Composio Meta Ads MCP connection; "
+            "the brokered Meta developer-app token path is disabled"
+        )
+
+    token = str(cfg.get("token") or "").strip()
     if token:
         try:
             import httpx
@@ -27804,31 +27819,7 @@ def _meta_graph(
             return {"data": data}
         return {}
 
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if not connected_account_id:
-        raise TakyonError("Meta action requires a Meta system-user token or active Composio Meta Ads connection")
-    try:
-        payload = composio_distribution.metaads_proxy_request(
-            method=method,
-            endpoint=f"https://{host}/{cfg['version']}/{rel}",
-            connected_account_id=connected_account_id,
-            body=clean if method != "GET" else None,
-            parameters=[
-                {"name": key, "value": str(value), "type": "query"}
-                for key, value in clean.items()
-            ]
-            if method == "GET"
-            else None,
-            timeout=float(timeout),
-        )
-    except Exception as exc:
-        raise TakyonError(f"Meta Graph {method} /{rel} failed via Composio: {exc}") from exc
-    result = _composio_tool_unwrap(payload)
-    if isinstance(result, Mapping):
-        return dict(result)
-    if isinstance(result, list):
-        return {"data": result}
-    return {}
+    raise TakyonError("Meta action requires an active Composio Meta Ads MCP connection")
 
 
 def _meta_upload_advideo(
@@ -27841,9 +27832,34 @@ def _meta_upload_advideo(
 ) -> str:
     """Upload a local mp4 to Meta using a short-lived signed file URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if connected_account_id:
+        if not business or not video_rel:
+            raise TakyonError("Meta Composio video upload requires the business slug and ad_video_path")
+        signed_url = _business_file_presigned_get_url(business, video_rel)
+        try:
+            payload = composio_distribution.metaads_proxy_request(
+                method="POST",
+                endpoint=f"https://graph-video.facebook.com/{cfg['version']}/{acct}/advideos",
+                connected_account_id=connected_account_id,
+                body={
+                    "name": name,
+                    "file_url": signed_url,
+                },
+                timeout=180.0,
+            )
+        except Exception as exc:
+            raise TakyonError(f"Meta video upload failed via Composio MCP: {exc}") from exc
+        video_id = str(_composio_tool_mapping(payload).get("id") or "").strip()
+        if not video_id:
+            raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
+        return video_id
+
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        raise TakyonError("Meta video upload requires an active Composio Meta Ads MCP connection")
+
     token = str(cfg.get("token") or "").strip()
-    brokered_system_token = safebox._remote_enabled() and not safebox._local_authority_enabled()
-    if token or brokered_system_token:
+    if token:
         if not business or not video_rel:
             raise TakyonError("Meta video upload requires the business slug and ad_video_path")
         signed_url = _business_file_presigned_get_url(business, video_rel)
@@ -27860,29 +27876,7 @@ def _meta_upload_advideo(
             raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
         return video_id
 
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if not connected_account_id:
-        raise TakyonError("Meta action requires an active Composio Meta Ads connection")
-    if not business or not video_rel:
-        raise TakyonError("Meta Composio video upload requires the business slug and ad_video_path")
-    signed_url = _business_file_presigned_get_url(business, video_rel)
-    try:
-        payload = composio_distribution.metaads_proxy_request(
-            method="POST",
-            endpoint=f"https://graph-video.facebook.com/{cfg['version']}/{acct}/advideos",
-            connected_account_id=connected_account_id,
-            body={
-                "name": name,
-                "file_url": signed_url,
-            },
-            timeout=180.0,
-        )
-    except Exception as exc:
-        raise TakyonError(f"Meta video upload failed via Composio: {exc}") from exc
-    video_id = str(_composio_tool_mapping(payload).get("id") or "").strip()
-    if not video_id:
-        raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
-    return video_id
+    raise TakyonError("Meta action requires an active Composio Meta Ads MCP connection")
 
 
 def _meta_adimage_upload_result(data: Mapping[str, Any], image_name: str) -> dict[str, Any]:
@@ -27903,25 +27897,47 @@ def _meta_adimage_upload_result(data: Mapping[str, Any], image_name: str) -> dic
 def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any]:
     """Upload a local image to Meta and return the image hash and URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
-    token = str(cfg.get("token") or "").strip()
-    brokered_system_token = safebox._remote_enabled() and not safebox._local_authority_enabled()
-    if brokered_system_token and not token:
+    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
+    if connected_account_id:
         try:
-            image_bytes = image_path.read_bytes()
-        except OSError as exc:
-            raise TakyonError(f"Meta image upload could not read {image_path.name}: {exc}") from exc
-        result = _meta_graph(
-            "POST",
-            f"{acct}/adimages",
-            {
-                "name": image_path.name,
-                "bytes": base64.b64encode(image_bytes).decode("ascii"),
-            },
-            cfg,
-            timeout=180,
-        )
-        return _meta_adimage_upload_result(result, image_path.name)
+            descriptor = composio_distribution.upload_file_descriptor(
+                toolkit_slug="metaads",
+                tool_slug="METAADS_UPLOAD_AD_IMAGE",
+                file_path=image_path,
+                timeout=180.0,
+            )
+            payload = composio_distribution.metaads_execute_tool(
+                "METAADS_UPLOAD_AD_IMAGE",
+                arguments={
+                    "ad_account_id": acct,
+                    "name": image_path.name,
+                    "image": descriptor,
+                },
+                connected_account_id=connected_account_id,
+                timeout=180.0,
+            )
+        except Exception as exc:
+            raise TakyonError(f"Meta image upload failed via Composio MCP: {exc}") from exc
+        result = _composio_tool_mapping(payload)
+        image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
+        image_url = str(result.get("url") or result.get("image_url") or "").strip()
+        images = result.get("images") if isinstance(result, dict) else None
+        if (not image_hash or not image_url) and isinstance(images, Mapping) and images:
+            first = next(iter(images.values()))
+            if isinstance(first, Mapping):
+                image_hash = image_hash or str(first.get("hash") or "").strip()
+                image_url = image_url or str(first.get("url") or "").strip()
+        if not image_hash:
+            raise TakyonError(f"Meta image upload returned no image hash for {image_path.name}")
+        return {
+            "hash": image_hash,
+            "url": image_url or None,
+        }
 
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        raise TakyonError("Meta image upload requires an active Composio Meta Ads MCP connection")
+
+    token = str(cfg.get("token") or "").strip()
     if token:
         try:
             import httpx
@@ -27945,43 +27961,7 @@ def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any
             raise TakyonError(f"Meta image upload failed: {message or getattr(resp, 'text', '')}")
         return _meta_adimage_upload_result(data if isinstance(data, Mapping) else {}, image_path.name)
 
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if not connected_account_id:
-        raise TakyonError("Meta action requires an active Composio Meta Ads connection")
-    try:
-        descriptor = composio_distribution.upload_file_descriptor(
-            toolkit_slug="metaads",
-            tool_slug="METAADS_UPLOAD_AD_IMAGE",
-            file_path=image_path,
-            timeout=180.0,
-        )
-        payload = composio_distribution.metaads_execute_tool(
-            "METAADS_UPLOAD_AD_IMAGE",
-            arguments={
-                "ad_account_id": acct,
-                "name": image_path.name,
-                "image": descriptor,
-            },
-            connected_account_id=connected_account_id,
-            timeout=180.0,
-        )
-    except Exception as exc:
-        raise TakyonError(f"Meta image upload failed via Composio: {exc}") from exc
-    result = _composio_tool_mapping(payload)
-    image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
-    image_url = str(result.get("url") or result.get("image_url") or "").strip()
-    images = result.get("images") if isinstance(result, dict) else None
-    if (not image_hash or not image_url) and isinstance(images, Mapping) and images:
-        first = next(iter(images.values()))
-        if isinstance(first, Mapping):
-            image_hash = image_hash or str(first.get("hash") or "").strip()
-            image_url = image_url or str(first.get("url") or "").strip()
-    if not image_hash:
-        raise TakyonError(f"Meta image upload returned no image hash for {image_path.name}")
-    return {
-        "hash": image_hash,
-        "url": image_url or None,
-    }
+    raise TakyonError("Meta action requires an active Composio Meta Ads MCP connection")
 
 
 def _meta_video_thumbnail(video_id: str, cfg: dict[str, Any]) -> str | None:

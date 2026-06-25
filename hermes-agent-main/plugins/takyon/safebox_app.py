@@ -2105,9 +2105,10 @@ def build_safebox_app() -> FastAPI:
         # The Meta system-user token is a provider secret held here and DENIED /v1/env egress, so a
         # runtime plane cannot resolve it. This returns the NON-SECRET Meta config (graph version,
         # ad account id, page id, composio_* hints) plus a has_token bool; the token VALUE is redacted
-        # ("") and never leaves the safebox. On the safebox host _use_remote_authority() is False, so
-        # core._meta_config resolves the token LOCALLY and succeeds. Gated by the internal token
-        # (transport reachability); the per-action money gate lives upstream in the meta-ads handlers.
+        # ("") and never leaves the safebox. Live launches must still resolve the Composio Meta Ads
+        # MCP connected account; this route supplies only non-secret readiness/config hints.
+        # Gated by the internal token (transport reachability); the per-action money gate lives
+        # upstream in the meta-ads handlers.
         _require_internal_token(authorization)
         from . import core as _core
 
@@ -2124,10 +2125,8 @@ def build_safebox_app() -> FastAPI:
         body: _MetaGraphBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        # Broker one Meta Graph API call: the runtime plane forwards method/path/params here and the
-        # safebox re-resolves the real system-user token LOCALLY before calling Graph, returning the
-        # key-free upstream JSON. The token never leaves the safebox. Gated by the internal token; the
-        # per-action money gate lives upstream in the meta-ads handlers.
+        # Legacy compatibility route. Production launch calls now go through Composio Meta Ads MCP;
+        # this remains internal-only for diagnostics/old callers and still never egresses the token.
         _require_internal_token(authorization)
         from . import core as _core
 

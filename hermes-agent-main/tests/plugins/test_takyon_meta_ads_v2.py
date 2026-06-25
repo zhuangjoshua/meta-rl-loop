@@ -60,8 +60,8 @@ def test_evaluate_defaults_window_last_7d():
     assert gw.call_args.args[1]["window"] == "last_7d"
 
 
-# --- config: Safebox-backed Meta system token is the primary auth rail --------
-def test_meta_config_prefers_safebox_system_user_token(monkeypatch):
+# --- config: Composio Meta Ads MCP is the primary launch rail ----------------
+def test_meta_config_requires_composio_mcp_connection(monkeypatch):
     from plugins.takyon import core
 
     values = {
@@ -77,18 +77,59 @@ def test_meta_config_prefers_safebox_system_user_token(monkeypatch):
         return ""
 
     monkeypatch.setattr(core.safebox, "first_env_backed_value", first_env_backed_value)
-
-    def should_not_need_composio():
-        raise AssertionError("Composio should not be consulted when the Meta system token exists")
-
-    monkeypatch.setattr(core.composio_distribution, "resolve_metaads_connected_account_id", should_not_need_composio)
+    monkeypatch.setattr(
+        core.composio_distribution,
+        "resolve_metaads_connected_account_id",
+        lambda: "conn_metaads_123",
+    )
 
     cfg = core._meta_config(require_token=True)
 
     assert cfg["token"] == "system-token"
     assert cfg["version"] == "v23.0"
     assert cfg["ad_account_id"] == "1300104788312342"
-    assert cfg["composio_connected_account_id"] == ""
+    assert cfg["composio_connected_account_id"] == "conn_metaads_123"
+
+
+def test_meta_graph_prefers_composio_mcp_over_direct_token(monkeypatch):
+    from plugins.takyon import core
+
+    captured = {}
+
+    def request(*_args, **_kwargs):
+        raise AssertionError("direct Meta token HTTP path must not be used when MCP is configured")
+
+    def proxy_request(*, method, endpoint, connected_account_id=None, body=None, parameters=None, timeout=120.0):
+        captured.update(
+            {
+                "method": method,
+                "endpoint": endpoint,
+                "connected_account_id": connected_account_id,
+                "body": body,
+                "parameters": parameters,
+                "timeout": timeout,
+            }
+        )
+        return {"data": {"id": "campaign_123"}}
+
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(request=request))
+    monkeypatch.setattr(core.composio_distribution, "metaads_proxy_request", proxy_request)
+
+    result = core._meta_graph(
+        "POST",
+        "act_123/campaigns",
+        {"name": "Demo campaign"},
+        {
+            "token": "system-token",
+            "version": "v23.0",
+            "composio_connected_account_id": "conn_metaads_123",
+        },
+    )
+
+    assert result == {"id": "campaign_123"}
+    assert captured["endpoint"] == "https://graph.facebook.com/v23.0/act_123/campaigns"
+    assert captured["connected_account_id"] == "conn_metaads_123"
+    assert captured["body"] == {"name": "Demo campaign"}
 
 
 def test_meta_graph_direct_token_adds_access_token(monkeypatch):

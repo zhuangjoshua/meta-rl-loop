@@ -2526,7 +2526,7 @@ def meta_config() -> dict:
     /v1/env, so a runtime plane cannot resolve it. This returns the brokered config (graph version,
     ad account id, page id, composio_* hints) plus a ``has_token`` bool; the token VALUE is redacted to
     "" by the safebox route and never reaches this process. Used by ``core._meta_config`` on runtime
-    planes; the actual Graph call is brokered through ``meta_graph_forward``."""
+    planes; production launch Graph calls use the Composio Meta Ads MCP/connected-account rail."""
     payload = _remote_json("POST", "/v1/providers/meta/config", {})
     return payload if isinstance(payload, dict) else {}
 
@@ -2539,11 +2539,12 @@ def meta_graph_forward(
     host: str = "graph.facebook.com",
     timeout: float = 60.0,
 ) -> dict:
-    """Broker one Meta Graph API call through the safebox.
+    """Broker one legacy Meta Graph API call through the safebox.
 
     Forwards method/path/params to the safebox ``/v1/providers/meta/graph`` route, which re-resolves
     the real Meta system-user token LOCALLY and returns the key-free upstream JSON. The token never
-    leaves the safebox. Used by ``core._meta_graph`` on runtime planes."""
+    leaves the safebox. Retained for diagnostics/compatibility; production launch calls use the
+    Composio Meta Ads MCP connection before this legacy path can run."""
     payload: dict = {
         "method": str(method or "GET"),
         "path": str(path or ""),
