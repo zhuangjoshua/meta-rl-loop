@@ -9,7 +9,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, distribution, outreach, campaigns]
-    related_skills: [takyon-market-research, takyon-build-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, takyon-reddit, ugc-video-ad, takyon-meta-ads-v2, takyon-reddit-ads, takyon-static-ad-creative-generator]
+    related_skills: [takyon-market-research, takyon-product, takyon-business-metrics, takyon-conversation-followup, takyon-x, takyon-reddit, ugc-video-ad, takyon-meta-ads-v2, takyon-reddit-ads, takyon-static-ad-creative-generator]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_create_workspace, business_publish_test_outreach, business_enqueue_job]
     routing:
@@ -48,7 +48,7 @@ Use this skill for cross-channel distribution campaign work: campaign planning, 
 - Use when the business needs a visible campaign workspace, lane plan, or campaign update that spans more than one post or reply.
 - Do not use this skill for channel-native X drafting or X thread handling; use `takyon-x`.
 - Do not use this skill for live paid Meta or Reddit ad execution; hand that move to `takyon-meta-ads-v2` or `takyon-reddit-ads`.
-- Do not use for product-surface changes that belong in `takyon-build-product`.
+- Do not use for product-surface changes that belong in `takyon-product`.
 
 ## Quick Reference
 

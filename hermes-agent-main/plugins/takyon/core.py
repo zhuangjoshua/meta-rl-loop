@@ -9554,7 +9554,7 @@ def _scaffold_theme_unfinished_blocker(refresh: dict[str, Any]) -> str:
     """Do-not-publish gate: a build that still ships the scaffold's placeholder theme is unfinished.
 
     The byte-identical ``tokens.css`` marker is detected during inventory as an advisory, and the
-    build-product skill already calls it a do-not-publish signal. So a successful build that still
+    takyon-product skill already calls it a do-not-publish signal. So a successful build that still
     carries it must block publish (and drive the one local-repair retry) instead of shipping an
     unthemed product. Returns the exact blocker text, or ``""`` when no placeholder marker is present.
     """
@@ -14337,7 +14337,7 @@ class TakyonStore:
             # a clean merge keeps the merged content as the local override (re-applied on top of head
             # below). Binary files and real line-overlap conflicts fall through to the hard-fail. This
             # is the git-style merge that lets concurrent edits coexist, eliminating the index.html
-            # multi-writer wedge for every flow (bootstrap, product-workflow, iterate).
+            # multi-writer wedge for every flow (bootstrap, product build, iterate).
             if substantive_conflicts:
                 merged_resolved: list[str] = []
                 for rel in substantive_conflicts:
@@ -19218,7 +19218,7 @@ class TakyonStore:
             "If unresolved inbound exists, inspect the actual conversation threads before deciding whether to reply or post. "
             "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle broader non-X discussion-thread work in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "If the next move is X-native, use takyon-x; for a top-level X post, read current research/ state and use it to choose the audience, promise, objection, and hook. "
-            "Advance product maturity when product work is in focus: read the current product state (product/surface.md, business_read_business). If /app is still only the create-time auth + subscription landing shell with no real in-app workflow or action files, the highest-impact product move is to load takyon-product-workflow and build the real gated MVP under /app, then use takyon-iterate-product for surgical follow-ups once a real workflow exists. Treat the landing+shell as a starting point, not a finished product. "
+            "Advance product maturity when product work is in focus: read the current product state (product/surface.md, business_read_business). If /app is still only the create-time auth + subscription landing shell with no real in-app workflow or action files, the highest-impact product move is to load takyon-product and build the real gated MVP under /app; once a real workflow exists, takyon-product also owns surgical follow-up iterations. Treat the landing+shell as a starting point, not a finished product. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -23208,7 +23208,7 @@ def handle_business_invoke_app_action(args: dict, **_: Any) -> str:
         ).strip().lower()
         if active_task_kind == "ceo_bootstrap":
             raise TakyonError(
-                "app action invocation is unavailable during ceo_bootstrap; finish bootstrap and continue into takyon-product-workflow first"
+                "app action invocation is unavailable during ceo_bootstrap; finish bootstrap, then continue with takyon-product to build the gated /app workflow first"
             )
         store = _store()
         business = _resolved_business_slug(args, required=True)
@@ -32804,38 +32804,81 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     detail=started_line,
                     line=started_line,
                 )
-                if docker_isolated_worker:
-                    run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
-                        payload=attempt_payload,
-                        workspace_path=workspace_path,
-                        timeout_ms=timeout_ms,
-                        business=business,
-                        operator_user_id=operator_user_id,
-                    )
-                    proc = _run_claude_agent_task_process(
-                        run_cmd=run_cmd,
-                        payload=docker_payload,
-                        cwd=worker_cwd,
-                        timeout_ms=timeout_ms,
-                        env=worker_env,
-                        business=business,
-                        workspace_rel=workspace_rel,
-                    )
-                else:
-                    # Non-docker host subprocess: same broker-lockdown contract as the docker lane —
-                    # ANTHROPIC_BASE_URL = safebox proxy ROOT + a minted operator.session token (real
-                    # owner), NO raw provider key. Fails closed if the safebox is unreachable / refuses
-                    # the mint (there is no raw-key fallback to inject here anymore).
-                    proc = _run_claude_agent_task_process(
-                        run_cmd=[node, str(script)],
-                        payload=attempt_payload,
-                        cwd=str(_repo_root()),
-                        timeout_ms=timeout_ms,
-                        env=_claude_agent_non_docker_worker_env(business, operator_user_id),
-                        business=business,
-                        workspace_rel=workspace_rel,
-                    )
                 worker_invoked = True
+                try:
+                    if docker_isolated_worker:
+                        run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
+                            payload=attempt_payload,
+                            workspace_path=workspace_path,
+                            timeout_ms=timeout_ms,
+                            business=business,
+                            operator_user_id=operator_user_id,
+                        )
+                        proc = _run_claude_agent_task_process(
+                            run_cmd=run_cmd,
+                            payload=docker_payload,
+                            cwd=worker_cwd,
+                            timeout_ms=timeout_ms,
+                            env=worker_env,
+                            business=business,
+                            workspace_rel=workspace_rel,
+                        )
+                    else:
+                        # Non-docker host subprocess: same broker-lockdown contract as the docker lane —
+                        # ANTHROPIC_BASE_URL = safebox proxy ROOT + a minted operator.session token (real
+                        # owner), NO raw provider key. Fails closed if the safebox is unreachable / refuses
+                        # the mint (there is no raw-key fallback to inject here anymore).
+                        proc = _run_claude_agent_task_process(
+                            run_cmd=[node, str(script)],
+                            payload=attempt_payload,
+                            cwd=str(_repo_root()),
+                            timeout_ms=timeout_ms,
+                            env=_claude_agent_non_docker_worker_env(business, operator_user_id),
+                            business=business,
+                            workspace_rel=workspace_rel,
+                        )
+                except subprocess.TimeoutExpired:
+                    # Wall-clock wedge: the worker subprocess ran past timeoutMs+30s and
+                    # _run_claude_agent_task_process killed it and re-raised. Do NOT let this escape the
+                    # loop and discard the scratch — the SDK runs in permissionMode "acceptEdits", so any
+                    # files the worker already wrote are durably on disk in the mounted scratch workspace.
+                    # Preserve them: sync scratch->canonical (best-effort, fail-soft), then mark the result
+                    # BLOCKED + timed_out and break so the existing anti-re-delegation guard (ceo.md rule
+                    # #8) drives a hand-patch / continue-from-partial instead of a cold re-delegation. On
+                    # this path active_store is still the scratch-mounted store (the readback reassignment
+                    # only happens on the success path), so the sync persists the partial scratch. The
+                    # partial is preserved but NOT published: success is False, so the refresh/publish
+                    # block is skipped and the tsc/build gate still guards any later publish.
+                    worker_actual_cents = None  # don't carry a prior attempt's parsed cost into the estimate settle
+                    try:
+                        partial_sync_status = active_store._sync_business_workspace_remote(business)
+                    except Exception:
+                        partial_sync_status = "partial_sync_failed"
+                    sdk_result = {
+                        "success": False,
+                        "blocked": True,
+                        "timed_out": True,
+                        "worker_timeout_ms": int(timeout_ms),
+                        "partial_workspace_sync_status": partial_sync_status,
+                        "error": _truncate_text(
+                            f"Claude worker timed out after {int(timeout_ms)}ms. Partial workspace edits "
+                            f"are preserved in canonical source (sync {partial_sync_status}); do NOT cold "
+                            "re-delegate from scratch — inspect the preserved partial and continue from it.",
+                            8000,
+                        ),
+                    }
+                    timeout_line = (
+                        f"Claude worker timed out for {workspace_rel}; partial edits preserved "
+                        f"(sync {partial_sync_status})."
+                    )
+                    _record_claude_agent_runtime_event(
+                        business=business,
+                        workspace_rel=workspace_rel,
+                        status="blocked",
+                        detail=timeout_line,
+                        line=timeout_line,
+                    )
+                    break
                 stdout = proc.stdout.strip()
                 stderr = proc.stderr.strip()
                 try:
@@ -33194,6 +33237,8 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "actual_cost_cents": worker_actual_cents,
             "workspace_sync_status": sdk_result.get("workspace_sync_status"),
             "workspace_durability": sdk_result.get("workspace_durability"),
+            "timed_out": bool(sdk_result.get("timed_out")),
+            "partial_workspace_sync_status": sdk_result.get("partial_workspace_sync_status"),
             "error": sdk_result.get("error"),
             "worker_returncode": sdk_result.get("worker_returncode"),
             "worker_stderr": sdk_result.get("worker_stderr"),
@@ -33219,19 +33264,6 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             )
             return tool_error(error_text, **result_payload)
         return tool_result(result_payload)
-    except subprocess.TimeoutExpired as exc:
-        try:
-            operator_budget = _finalize_operator_task_budget(
-                operator_user_id=operator_user_id,
-                reservation_key=str(operator_budget.get("reservation_key") or ""),
-                reserved_cents=int(operator_budget.get("reserved_cents") or 0),
-                consume_reserved=True,
-                actual_cents=worker_actual_cents,
-            )
-        except Exception:
-            operator_budget = {}
-        _record_worker_failure(f"Claude Agent SDK task timed out: {exc}")
-        return tool_error(f"Claude Agent SDK task timed out: {exc}", success=False)
     except Exception as exc:
         if operator_budget and operator_budget.get("reservation_key"):
             try:

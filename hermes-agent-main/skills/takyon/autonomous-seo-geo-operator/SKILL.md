@@ -19,7 +19,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, seo, geo, aeo, ai-search, schema, json-ld, metadata, internal-linking, llms-txt, sitemap, robots, content, bofu]
-    related_skills: [takyon-build-product, takyon-business-metrics, takyon-market-research]
+    related_skills: [takyon-product, takyon-business-metrics, takyon-market-research]
     requires_toolsets: [takyon]
     requires_tools:
       [

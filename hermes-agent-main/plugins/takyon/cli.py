@@ -32,7 +32,8 @@ from .core import (
 _CEO_PROMPT_PATH = Path(__file__).parent / "prompts" / "ceo.md"
 _TAKYON_SKILL_ALIASES = {
     "market-research": "takyon-market-research",
-    "build-product": "takyon-build-product",
+    "build-product": "takyon-product",
+    "product": "takyon-product",
     "app-runtime": "takyon-app-runtime",
     "distribution": "takyon-distribution",
     "business-pulse": "takyon-business-metrics",
@@ -533,11 +534,16 @@ def _format_operation_result(item: Any) -> str:
         domain_results = domains.get("results") or []
         domain_text = ", ".join(f"{row.get('domain')}:{row.get('status')}" for row in domain_results) or "none"
         removed_cron = [row for row in cron.get("removed") or [] if row.get("removed")]
-        return (
+        summary = (
             f"deleted business:{business or item.get('business')}; "
             f"filesystem -> {filesystem.get('path')} removed={filesystem.get('removed')}; "
             f"cron removed={len(removed_cron)}; domains {domain_text}"
         )
+        # Never claim a clean delete while the site is still reachable (R2 edge or legacy origin).
+        if item.get("still_serving"):
+            reasons = ", ".join(str(r) for r in (item.get("still_serving_reasons") or [])) or "unknown"
+            summary += f"; WARNING still serving ({reasons})"
+        return summary
     if action == "control.set":
         cron = item.get("cron")
         cron_text = f"; cron {cron}" if cron else ""
@@ -1704,7 +1710,7 @@ def _business_bootstrap_instruction(
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
         "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
-        "When the landing page and /app access shell are up and unblocked, name the next move explicitly: continue into takyon-product-workflow to build the real /app MVP (the gated in-app workflow), since the landing + access shell is a starting point, not the finished product. Describe this in warm customer-facing business language, not internal skill or tool names.",
+        "When the landing page and /app access shell are up and unblocked, close by naming the next business move in warm, customer-facing language: the landing + access shell is a real starting point, and the next step is to build out the real in-app product experience customers get after they sign in. Do NOT name any internal skill or tool; describe the work, not the runtime.",
     ]
     return "\n".join(lines)
 

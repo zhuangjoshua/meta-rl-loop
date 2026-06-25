@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import types
 from pathlib import Path
 
@@ -1766,3 +1767,142 @@ def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_o
     agent_record = next(op for op in operations if op.get("action") == "agent.record")
     assert "surface_contract_retries" not in agent_record["result"]
     assert "surface_contract_update" not in agent_record["result"]
+
+
+def _patch_non_docker_product_site(monkeypatch, store, *, session_slug="latexflow"):
+    """Shared monkeypatch set for a non-docker product/site worker run."""
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: session_slug)
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
+
+
+def test_claude_agent_task_timeout_preserves_partial_and_blocks(tmp_path, monkeypatch):
+    """A wall-clock TimeoutExpired from the worker subprocess must NOT escape and discard the scratch:
+    the partial edits are synced to canonical and the result is blocked+timed_out (rides the existing
+    anti-re-delegation guard) instead of a cold failure."""
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        # The worker wrote a partial edit before wedging past the wall-clock ceiling.
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>partial</h1>\n", encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
+
+    _patch_non_docker_product_site(monkeypatch, _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "settled_estimate"},
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-timeout-preserve",
+                "install": False,
+                "refresh_surface": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["timed_out"] is True
+    assert result["partial_workspace_sync_status"] == "synced"
+    assert "timed out" in (result["error"] or "")
+    # The partial edit survives in the synced canonical workspace (not discarded).
+    assert (tmp_path / "businesses" / "latexflow" / "product" / "site" / "index.html").exists()
+
+
+def test_claude_agent_task_timeout_settles_estimate_not_double_charge(tmp_path, monkeypatch):
+    """On timeout the operator budget is finalized exactly once at the reserved estimate (actual_cents
+    is None — the worker spend is unmeasurable), never a fabricated double charge."""
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    finalize_calls: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
+
+    def fake_finalize(**kwargs):
+        finalize_calls.append(dict(kwargs))
+        return {"reservation_key": "r1", "reserved_cents": 800, "status": "settled_estimate"}
+
+    # Global (non-business) session => the operator-budget rail is live (not the in-session no-op), and
+    # no session-binding guard fires. The mocked reserve returns a real reservation so finalize runs.
+    _patch_non_docker_product_site(monkeypatch, _FakeStore(tmp_path), session_slug=None)
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(takyon_core, "_finalize_operator_task_budget", fake_finalize)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-timeout-billing",
+                "install": False,
+                "refresh_surface": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["timed_out"] is True
+    assert len(finalize_calls) == 1
+    assert finalize_calls[-1]["consume_reserved"] is True
+    assert finalize_calls[-1]["actual_cents"] is None
+
+
+def test_claude_agent_task_timeout_does_not_publish_partial(tmp_path, monkeypatch):
+    """A timed-out partial build must never publish: success is False so the refresh/publish block is
+    skipped and surface_refresh stays None."""
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>partial</h1>\n", encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
+
+    def boom_refresh(**kwargs):
+        raise AssertionError("publish must not run on a timed-out partial build")
+
+    _patch_non_docker_product_site(monkeypatch, _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "settled_estimate"},
+    )
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", boom_refresh)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-timeout-no-publish",
+                "install": False,
+                "refresh_surface": True,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["timed_out"] is True
+    assert result["surface_refresh"] is None

@@ -9,7 +9,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, business, market-research, icp, pricing, demand]
-    related_skills: [takyon-build-product, takyon-business-metrics, takyon-distribution]
+    related_skills: [takyon-product, takyon-business-metrics, takyon-distribution]
     requires_toolsets: [takyon]
     requires_tools: [business_read_business, business_write_file]
     routing:

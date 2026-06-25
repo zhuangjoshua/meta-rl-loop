@@ -9,7 +9,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, metrics, wake, business, conversations]
-    related_skills: [takyon-market-research, takyon-distribution, takyon-build-product, takyon-conversation-followup]
+    related_skills: [takyon-market-research, takyon-distribution, takyon-product, takyon-conversation-followup]
     requires_toolsets: [takyon]
     requires_tools: [business_calculate_pulse, business_read_business, business_write_file, business_read_app_analytics]
     routing:

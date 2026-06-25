@@ -10,7 +10,7 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, brand, logo, identity, creative, image-generation, gemini, nano-banana]
-    related_skills: [takyon-static-ad-creative-generator, takyon-build-product]
+    related_skills: [takyon-static-ad-creative-generator, takyon-product]
     requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_read_file, business_list_files, business_generate_logo]
     routing:

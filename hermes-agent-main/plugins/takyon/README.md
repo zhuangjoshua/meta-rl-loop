@@ -80,7 +80,7 @@ Takyon leaf workflows are normal Hermes skills, not plugin-only Takyon skills:
 
 ```text
 skills/takyon/takyon-market-research/
-skills/takyon/takyon-build-product/
+skills/takyon/takyon-product/
 skills/takyon/takyon-app-runtime/
 skills/takyon/takyon-distribution/
 skills/takyon/takyon-x/
@@ -111,7 +111,7 @@ metadata:
   hermes:
     category: research
     tags: [takyon, market-research]
-    related_skills: [takyon-build-product]
+    related_skills: [takyon-product]
     requires_toolsets: []
     requires_tools: []
   takyon:

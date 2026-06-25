@@ -27,7 +27,7 @@ Observed key names are present locally as of 2026-05-25; values are intentionall
 ## Active Takyon Skill Surface
 
 - `takyon-market-research`
-- `takyon-build-product`
+- `takyon-product`
 - `takyon-app-runtime`
 - `takyon-distribution`
 - `takyon-business-metrics`
