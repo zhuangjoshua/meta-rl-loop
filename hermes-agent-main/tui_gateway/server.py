@@ -8650,19 +8650,6 @@ _TAKYON_HIDDEN_OUTPUT_RELPATHS = {
     "product/surface.md",
     "distribution/surface.md",
 }
-# Source files the live website is BUILT FROM (markup, stylesheets, design
-# tokens, templates). The running site is the deliverable; its source is
-# scaffolding. Scoped to a `site` location so a genuine HTML/CSS deliverable
-# living elsewhere is never caught by extension alone.
-_TAKYON_WEBSITE_SOURCE_SUFFIXES = {
-    ".html",
-    ".htm",
-    ".css",
-    ".scss",
-    ".sass",
-    ".less",
-    ".map",
-}
 # Design-token / template source files that read as build scaffolding wherever
 # they sit (not just under site/).
 _TAKYON_SOURCE_SCAFFOLD_BASENAMES = {
@@ -8701,10 +8688,12 @@ def _takyon_hide_operator_output(path: Any) -> bool:
     # Generated shell-record summaries (product/distribution surface mirrors).
     if rel_norm in _TAKYON_HIDDEN_OUTPUT_RELPATHS:
         return True
-    # Website source: the page is built from these; the live site is the
-    # deliverable, not its markup/stylesheet/token source. Suffix is checked only
-    # inside a site/ location so non-site HTML/CSS deliverables are untouched.
-    if "site" in parts_lower and suffix_lower in _TAKYON_WEBSITE_SOURCE_SUFFIXES:
+    # Built site tree: everything under a site/ directory (markup, styles, design
+    # tokens, manifests, robots.txt, sitemaps, readme, llms.txt, ...) is SOURCE the
+    # live site is produced from. The running site is the deliverable, not its
+    # source, so hide the whole tree from Documents — except media (og/social
+    # images), which the Media panel still surfaces via this same gate.
+    if "site" in parts_lower and suffix_lower not in _TAKYON_MEDIA_SUFFIXES:
         return True
     # Design-token / template scaffolding even outside a site/ dir.
     if p.name.lower() in _TAKYON_SOURCE_SCAFFOLD_BASENAMES:
@@ -8918,7 +8907,13 @@ def _takyon_clean_title_line(line: str) -> str:
     line = re.sub(r"[*_`>#]+", "", line)
     line = re.sub(r"\s+", " ", line).strip(" \t-—:")
     if len(line) > 80:
-        line = line[:77].rstrip() + "…"
+        cut = line[:77]
+        # Prefer breaking on a word boundary so a long first line (e.g. a published
+        # post's opening sentence) isn't truncated mid-word.
+        space = cut.rfind(" ")
+        if space >= 40:
+            cut = cut[:space]
+        line = cut.rstrip(" ,;:—-") + "…"
     return line
 
 
