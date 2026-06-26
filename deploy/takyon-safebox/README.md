@@ -50,7 +50,7 @@ ssh root@67.205.158.170 'env DOPPLER_PROJECT=takyon DOPPLER_CONFIG=prd bash -s -
   < deploy/shared/migrate-safebox-env-key-to-doppler.sh
 
 # Doppler
-TAKYON_MANAGED_SECRET_COMMAND='doppler --config-dir /opt/takyon/.doppler secrets get {key} --plain --raw --project takyon --config prd'
+TAKYON_MANAGED_SECRET_COMMAND='doppler --config-dir /opt/takyon/.doppler --scope /opt/takyon secrets get {key} --plain --raw --project takyon --config prd'
 
 # Infisical
 TAKYON_MANAGED_SECRET_COMMAND='infisical secrets get {key} --plain --projectId <project-id> --env prod'

@@ -8,9 +8,10 @@ Usage:
     bash deploy/shared/migrate-safebox-env-key-to-doppler.sh STRIPE_SECRET_KEY
 
 Run this on the Safebox host after `doppler login` has been completed for the
-service config dir. It migrates exactly one key at a time from the Safebox env
-files to Doppler, verifies the value without printing it, removes the plaintext
-env entry, updates TAKYON_MANAGED_SECRET_KEYS, and restarts takyon-safebox.
+service config dir and scope. It migrates exactly one key at a time from the
+Safebox env files to Doppler, verifies the value without printing it, removes
+the plaintext env entry, updates TAKYON_MANAGED_SECRET_KEYS, and restarts
+takyon-safebox.
 
 This helper refuses to migrate Safebox self-authority secrets such as
 TAKYON_SAFEBOX_TOKEN and TAKYON_CAP_SIGNING_KEY.
@@ -26,6 +27,7 @@ KEY_NAME="$1"
 PROJECT="${DOPPLER_PROJECT:-takyon}"
 CONFIG="${DOPPLER_CONFIG:-prd}"
 DOPPLER_CONFIG_DIR="${DOPPLER_CONFIG_DIR:-/opt/takyon/.doppler}"
+DOPPLER_SCOPE="${DOPPLER_SCOPE:-/opt/takyon}"
 SAFEBOX_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 PYTHON_BIN="${TAKYON_SAFEBOX_PYTHON:-$SAFEBOX_RUNTIME/.venv/bin/python}"
 ENV_FILES="${TAKYON_SAFEBOX_ENV_FILES:-/opt/takyon/.takyon/.env /opt/takyon/secrets/.env}"
@@ -55,7 +57,7 @@ if ! command -v doppler >/dev/null 2>&1; then
   exit 1
 fi
 
-"$PYTHON_BIN" - "$KEY_NAME" "$PROJECT" "$CONFIG" "$DOPPLER_CONFIG_DIR" "$CONTROL_ENV_FILE" "$ENV_FILES" <<'PY'
+"$PYTHON_BIN" - "$KEY_NAME" "$PROJECT" "$CONFIG" "$DOPPLER_CONFIG_DIR" "$DOPPLER_SCOPE" "$CONTROL_ENV_FILE" "$ENV_FILES" <<'PY'
 from __future__ import annotations
 
 import hashlib
@@ -71,7 +73,7 @@ except Exception:  # pragma: no cover - deploy-host dependency guard
     dotenv_values = None
 
 
-key, project, config, doppler_config_dir, control_env_file, env_files_raw = sys.argv[1:7]
+key, project, config, doppler_config_dir, doppler_scope, control_env_file, env_files_raw = sys.argv[1:8]
 env_files = [Path(item) for item in env_files_raw.split() if item.strip()]
 control_path = Path(control_env_file)
 name_pattern = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -138,7 +140,7 @@ for path in env_files:
 managed_keys.add(key)
 
 command = (
-    f"doppler --config-dir {doppler_config_dir} secrets get {{key}} "
+    f"doppler --config-dir {doppler_config_dir} --scope {doppler_scope} secrets get {{key}} "
     f"--plain --raw --project {project} --config {config}"
 )
 
@@ -147,6 +149,8 @@ set_result = subprocess.run(
         "doppler",
         "--config-dir",
         doppler_config_dir,
+        "--scope",
+        doppler_scope,
         "secrets",
         "set",
         key,
@@ -168,6 +172,8 @@ get_result = subprocess.run(
         "doppler",
         "--config-dir",
         doppler_config_dir,
+        "--scope",
+        doppler_scope,
         "secrets",
         "get",
         key,
