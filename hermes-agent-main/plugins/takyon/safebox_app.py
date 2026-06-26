@@ -625,6 +625,29 @@ class _MetaGraphBody(BaseModel):
     timeout: float = 60.0
 
 
+class _MetaGraphUploadVideoBody(BaseModel):
+    ad_account_id: str
+    name: str = ""
+    data_b64: str
+    poll: bool = True
+    timeout: float = 180.0
+
+
+class _MetaGraphUploadImageBody(BaseModel):
+    ad_account_id: str
+    name: str = ""
+    data_b64: str
+    timeout: float = 180.0
+
+
+class _MetaEnsureCustomConversionBody(BaseModel):
+    ad_account_id: str
+    name: str
+    rule: str
+    custom_event_type: str
+    timeout: float = 60.0
+
+
 class _MetaMCPCallBody(BaseModel):
     tool_name: str
     arguments: dict[str, Any] = {}
@@ -2233,6 +2256,7 @@ def build_safebox_app() -> FastAPI:
             "version": version,
             "ad_account_id": str(safebox.first_env_backed_value("META_AD_ACCOUNT_ID") or "").strip(),
             "page_id": str(safebox.first_env_backed_value("META_PAGE_ID") or "").strip(),
+            "instagram_user_id": str(safebox.first_env_backed_value("META_INSTAGRAM_ID") or "").strip(),
             "composio_connected_account_id": "",
             "composio_user_id": "",
             "composio_alias": "",
@@ -2301,6 +2325,106 @@ def build_safebox_app() -> FastAPI:
                 version=version,
                 host=body.host,
                 timeout=float(body.timeout),
+            )
+        except _meta_graph.MetaGraphError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/providers/meta/graph/upload-video")
+    def provider_meta_graph_upload_video(
+        body: _MetaGraphUploadVideoBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import meta_graph as _meta_graph
+
+        version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+        if not version:
+            version = "v23.0"
+        elif not version.startswith("v"):
+            version = f"v{version}"
+        token = str(
+            safebox.first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN") or ""
+        ).strip()
+        if not token:
+            raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
+        try:
+            raw = base64.b64decode(str(body.data_b64 or ""), validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid_base64") from exc
+        try:
+            video_id = _meta_graph.upload_video(
+                token,
+                str(body.ad_account_id or ""),
+                raw,
+                name=str(body.name or ""),
+                version=version,
+                poll=bool(body.poll),
+                timeout=float(body.timeout),
+            )
+            return {"video_id": video_id}
+        except _meta_graph.MetaGraphError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/providers/meta/graph/upload-image")
+    def provider_meta_graph_upload_image(
+        body: _MetaGraphUploadImageBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import meta_graph as _meta_graph
+
+        version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+        if not version:
+            version = "v23.0"
+        elif not version.startswith("v"):
+            version = f"v{version}"
+        token = str(
+            safebox.first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN") or ""
+        ).strip()
+        if not token:
+            raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
+        try:
+            raw = base64.b64decode(str(body.data_b64 or ""), validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid_base64") from exc
+        try:
+            return _meta_graph.upload_image(
+                token,
+                str(body.ad_account_id or ""),
+                raw,
+                name=str(body.name or ""),
+                version=version,
+                timeout=float(body.timeout),
+            )
+        except _meta_graph.MetaGraphError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/providers/meta/graph/ensure-custom-conversion")
+    def provider_meta_graph_ensure_custom_conversion(
+        body: _MetaEnsureCustomConversionBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import meta_graph as _meta_graph
+
+        version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+        if not version:
+            version = "v23.0"
+        elif not version.startswith("v"):
+            version = f"v{version}"
+        token = str(
+            safebox.first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN") or ""
+        ).strip()
+        if not token:
+            raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
+        try:
+            return _meta_graph.ensure_custom_conversion(
+                token,
+                str(body.ad_account_id or ""),
+                name=str(body.name or ""),
+                rule=str(body.rule or ""),
+                custom_event_type=str(body.custom_event_type or ""),
+                version=version,
             )
         except _meta_graph.MetaGraphError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc

@@ -86,7 +86,9 @@ class _FakeStore:
 class _FakeSafebox:
     """Records every resolution and returns canned token values."""
 
-    def __init__(self):
+    def __init__(self, graph_rec: "_GraphRecorder", mcp_rec: "_MCPRecorder"):
+        self.graph_rec = graph_rec
+        self.mcp_rec = mcp_rec
         self.values: dict[str, str] = {}
         self.calls: list[tuple[str, ...]] = []
 
@@ -97,18 +99,95 @@ class _FakeSafebox:
                 return self.values[key]
         return ""
 
+    def meta_config(self) -> dict:
+        return {
+            "token": "",
+            "has_token": True,
+            "has_mcp_oauth_token": True,
+            "mcp_endpoint": "https://mcp.facebook.com/ads",
+            "version": "v21.0",
+            "ad_account_id": self.values.get("META_AD_ACCOUNT_ID", ""),
+            "page_id": self.values.get("META_PAGE_ID", ""),
+            "instagram_user_id": self.values.get("META_INSTAGRAM_ID", ""),
+        }
 
-def _build_fake_core(tmp_path: Path) -> types.ModuleType:
+    def meta_graph_upload_video(self, *, ad_account_id: str, video_bytes: bytes, name: str, poll=True, timeout=180.0) -> str:
+        self.graph_rec.uploads_video.append(
+            {
+                "token": "",
+                "ad_account_id": ad_account_id,
+                "path": f"act_{str(ad_account_id).replace('act_', '')}/advideos",
+                "bytes": video_bytes,
+                "name": name,
+            }
+        )
+        return "video-1"
+
+    def meta_graph_upload_image(self, *, ad_account_id: str, image_bytes: bytes, name: str, timeout=180.0) -> dict:
+        self.graph_rec.uploads_image.append(
+            {
+                "token": "",
+                "ad_account_id": ad_account_id,
+                "path": f"act_{str(ad_account_id).replace('act_', '')}/adimages",
+                "bytes": image_bytes,
+                "name": name,
+            }
+        )
+        return {"hash": "image-hash-1", "url": "https://scontent.example/img.png"}
+
+    def meta_mcp_call(self, *, tool_name: str, arguments=None, timeout=60.0) -> dict:
+        self.mcp_rec.calls.append(
+            {"tool": tool_name, "arguments": dict(arguments or {}), "token": "", "endpoint": None}
+        )
+        payload = self.mcp_rec.responses.get(tool_name, {"id": f"{tool_name}-id"})
+        return {
+            "content": [{"type": "text", "text": json.dumps(payload)}],
+            "structuredContent": payload,
+            **payload,
+        }
+
+    def meta_graph_forward(self, *, method: str, path: str, params=None, host="graph.facebook.com", timeout=60.0) -> dict:
+        clean_params = dict(params or {})
+        self.graph_rec.graph_calls.append(
+            {"method": method, "path": path, "params": clean_params, "token": "", "version": "v21.0", "host": host}
+        )
+        clean_method = str(method or "").upper()
+        if clean_method == "GET":
+            return {"data": []}
+        if "daily_budget" in clean_params:
+            self.graph_rec.budget_calls.append({"token": "", "object_id": path, "daily_budget_cents": clean_params.get("daily_budget")})
+            return {"success": True, "id": path, "daily_budget": clean_params.get("daily_budget")}
+        if "status" in clean_params:
+            self.graph_rec.status_calls.append({"token": "", "object_id": path, "status": clean_params.get("status")})
+            return {"success": True, "id": path, "status": clean_params.get("status")}
+        return {"success": True}
+
+    def meta_graph_ensure_custom_conversion(self, *, ad_account_id: str, name: str, rule: str, custom_event_type: str, timeout=60.0) -> dict:
+        self.graph_rec.custom_conversions.append(
+            {
+                "token": "",
+                "ad_account_id": ad_account_id,
+                "name": name,
+                "rule": rule,
+                "custom_event_type": custom_event_type,
+            }
+        )
+        return {"id": "custom-conv-1", "name": name, "custom_event_type": custom_event_type}
+
+
+def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCPRecorder") -> types.ModuleType:
     """Construct a fake ``plugins.takyon.core`` module the handler can call."""
 
     mod = types.ModuleType("plugins.takyon.core")
 
     store = _FakeStore(tmp_path)
-    safebox = _FakeSafebox()
+    safebox = _FakeSafebox(graph_rec, mcp_rec)
 
     # Token aliases the proven flow relies on.
     safebox.values["META_SYSTEM_USER_ACCESS_TOKEN"] = "sut-graph-token"
     safebox.values["META_MCP_OAUTH_TOKEN"] = "mcp-oauth-token"
+    safebox.values["META_AD_ACCOUNT_ID"] = "123456"
+    safebox.values["META_PAGE_ID"] = "654321"
 
     # Per-business mode registry. Default is "test" so an un-registered business never
     # accidentally makes external calls.
@@ -466,7 +545,7 @@ def harness(tmp_path, monkeypatch):
     graph_rec = _GraphRecorder()
     mcp_rec = _MCPRecorder()
 
-    fake_core = _build_fake_core(tmp_path)
+    fake_core = _build_fake_core(tmp_path, graph_rec, mcp_rec)
     fake_graph = _build_fake_meta_graph(graph_rec)
     fake_mcp = _build_fake_meta_mcp(mcp_rec)
 
@@ -556,21 +635,21 @@ def test_launch_video_happy_path_uploads_then_creates_paused(harness):
 
     assert result["success"] is True
     assert result["status"] == "created_paused"
-    # Video uploaded via the Graph leg with the system-user token, bytes-first.
+    # Video uploaded through the Safebox Graph broker, bytes-first.
     assert len(harness.graph.uploads_video) == 1
     upload = harness.graph.uploads_video[0]
-    assert upload["token"] == "sut-graph-token"
+    assert upload["token"] == ""
     assert upload["path"].endswith("/advideos")
     assert upload["bytes"] == b"fake-mp4-bytes"
     # A video creative also needs a thumbnail image (Meta requires an image_hash/url
     # alongside the video_id), so exactly one image upload happens — the thumbnail.
     assert len(harness.graph.uploads_image) == 1
     thumb = harness.graph.uploads_image[0]
-    assert thumb["token"] == "sut-graph-token"
+    assert thumb["token"] == ""
     assert thumb["path"].endswith("/adimages")
     assert thumb["bytes"] == b"fake-thumb-bytes"
 
-    # Then the four MCP object creates, in order, with the MCP token.
+    # Then the four MCP object creates, in order, through the Safebox MCP broker.
     tools = _mcp_tools(harness)
     assert tools == [
         "ads_create_creative",
@@ -579,7 +658,7 @@ def test_launch_video_happy_path_uploads_then_creates_paused(harness):
         "ads_create_ad",
     ]
     for call in harness.mcp.calls:
-        assert call["token"] == "mcp-oauth-token"
+        assert call["token"] == ""
 
     # Creative carries the uploaded video id (not an image hash).
     creative_args = harness.mcp.calls[0]["arguments"]
@@ -621,10 +700,10 @@ def test_launch_image_happy_path_uploads_adimage_then_creates(harness):
 
     assert result["success"] is True
     assert result["status"] == "created_paused"
-    # Image uploaded to /adimages with the system-user token; no video upload.
+    # Image uploaded to /adimages through the Safebox broker; no video upload.
     assert len(harness.graph.uploads_image) == 1
     img = harness.graph.uploads_image[0]
-    assert img["token"] == "sut-graph-token"
+    assert img["token"] == ""
     assert img["path"].endswith("/adimages")
     assert img["bytes"] == b"fake-png-bytes"
     assert not harness.graph.uploads_video
@@ -674,7 +753,7 @@ def test_launch_live_mode_activates_three_objects(harness):
     activated_ids = [c["object_id"] for c in active]
     assert activated_ids == ["campaign-1", "adset-1", "ad-1"]
     for call in active:
-        assert call["token"] == "sut-graph-token"
+        assert call["token"] == ""
 
     receipt = harness.read_business_file(
         "clipbook", "distribution/meta-ads/demo-meta/receipt.json"
@@ -771,7 +850,7 @@ def test_control_set_budget_updates_daily_budget(harness):
     call = harness.graph.budget_calls[0]
     assert call["object_id"] == "adset-1"
     assert call["daily_budget_cents"] == 1200  # $12.00 in cents
-    assert call["token"] == "sut-graph-token"
+    assert call["token"] == ""
 
     action = harness.read_business_file(
         "clipbook", "distribution/meta-ads/demo-meta/actions/clipbook-meta-budget-v1.json"

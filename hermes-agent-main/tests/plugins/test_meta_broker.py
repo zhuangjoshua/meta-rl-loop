@@ -52,6 +52,7 @@ def test_meta_config_route_redacts_token(client, monkeypatch):
         "META_MCP_OAUTH_TOKEN": "real-mcp-token-that-must-not-egress",
         "META_AD_ACCOUNT_ID": "act_1300104788312342",
         "META_PAGE_ID": "page_123",
+        "META_INSTAGRAM_ID": "ig_456",
     }
 
     monkeypatch.setattr(
@@ -69,6 +70,7 @@ def test_meta_config_route_redacts_token(client, monkeypatch):
     assert data["version"] == "v21.0"
     assert data["ad_account_id"] == "act_1300104788312342"
     assert data["page_id"] == "page_123"
+    assert data["instagram_user_id"] == "ig_456"
     assert data["has_mcp_oauth_token"] is True
     assert data["mcp_endpoint"] == "https://mcp.facebook.com/ads"
 
@@ -163,9 +165,141 @@ def test_meta_graph_route_requires_system_user_token(client, monkeypatch):
     assert "META_SYSTEM_USER_ACCESS_TOKEN" in resp.text
 
 
+def test_meta_graph_upload_image_route_brokers_bytes_without_egressing_token(client, monkeypatch):
+    values = {
+        "META_GRAPH_VERSION": "v21.0",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "local-graph-token",
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
+    )
+
+    def fake_upload_image(token, ad_account_id, image_bytes, *, name, version="v21.0", timeout=180.0):
+        captured["call"] = (token, ad_account_id, image_bytes, name, version, timeout)
+        return {"hash": "image-hash-1", "url": "https://cdn.example/img.png"}
+
+    monkeypatch.setattr(meta_graph, "upload_image", fake_upload_image)
+
+    resp = client.post(
+        "/v1/providers/meta/graph/upload-image",
+        headers=_auth(),
+        json={
+            "ad_account_id": "act_123",
+            "name": "demo-image",
+            "data_b64": "ZmFrZS1pbWFnZS1ieXRlcw==",
+            "timeout": 22,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["hash"] == "image-hash-1"
+    assert captured["call"] == (
+        "local-graph-token",
+        "act_123",
+        b"fake-image-bytes",
+        "demo-image",
+        "v21.0",
+        22.0,
+    )
+
+
+def test_meta_graph_upload_video_route_brokers_bytes_without_egressing_token(client, monkeypatch):
+    values = {
+        "META_GRAPH_VERSION": "v21.0",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "local-graph-token",
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
+    )
+
+    def fake_upload_video(token, ad_account_id, video_bytes, *, name, version="v21.0", poll=True, timeout=180.0):
+        captured["call"] = (token, ad_account_id, video_bytes, name, version, poll, timeout)
+        return "video-123"
+
+    monkeypatch.setattr(meta_graph, "upload_video", fake_upload_video)
+
+    resp = client.post(
+        "/v1/providers/meta/graph/upload-video",
+        headers=_auth(),
+        json={
+            "ad_account_id": "act_123",
+            "name": "demo-video",
+            "data_b64": "ZmFrZS12aWRlby1ieXRlcw==",
+            "poll": False,
+            "timeout": 33,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"video_id": "video-123"}
+    assert captured["call"] == (
+        "local-graph-token",
+        "act_123",
+        b"fake-video-bytes",
+        "demo-video",
+        "v21.0",
+        False,
+        33.0,
+    )
+
+
+def test_meta_graph_ensure_custom_conversion_route_brokers_key_free_result(client, monkeypatch):
+    values = {
+        "META_GRAPH_VERSION": "v21.0",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "local-graph-token",
+    }
+    captured = {}
+
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
+    )
+
+    def fake_ensure(token, ad_account_id, *, name, rule, custom_event_type, version="v21.0"):
+        captured["call"] = (token, ad_account_id, name, rule, custom_event_type, version)
+        return {"id": "cc-123", "existed": True}
+
+    monkeypatch.setattr(meta_graph, "ensure_custom_conversion", fake_ensure)
+
+    resp = client.post(
+        "/v1/providers/meta/graph/ensure-custom-conversion",
+        headers=_auth(),
+        json={
+            "ad_account_id": "act_123",
+            "name": "demo-cc",
+            "rule": "{\"url\":{\"i_contains\":\"demo\"}}",
+            "custom_event_type": "LEAD",
+            "timeout": 18,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"id": "cc-123", "existed": True}
+    assert captured["call"] == (
+        "local-graph-token",
+        "act_123",
+        "demo-cc",
+        "{\"url\":{\"i_contains\":\"demo\"}}",
+        "LEAD",
+        "v21.0",
+    )
+
+
 def test_meta_graph_route_is_registered(client):
     paths = {route.path for route in safebox_app.build_safebox_app().routes}
     assert "/v1/providers/meta/config" in paths
     assert "/v1/providers/meta/mcp/call" in paths
     assert "/v1/providers/meta/mcp/tools" in paths
     assert "/v1/providers/meta/graph" in paths
+    assert "/v1/providers/meta/graph/upload-image" in paths
+    assert "/v1/providers/meta/graph/upload-video" in paths
+    assert "/v1/providers/meta/graph/ensure-custom-conversion" in paths

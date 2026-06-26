@@ -2632,8 +2632,27 @@ def meta_config() -> dict:
     ad account id, page id, MCP endpoint/readiness) plus a ``has_token`` bool; the token VALUE is redacted to
     "" by the safebox route and never reaches this process. Used by ``core._meta_config`` on runtime
     planes; production launch/control/read calls use the official Meta Ads MCP broker."""
-    payload = _remote_json("POST", "/v1/providers/meta/config", {})
-    return payload if isinstance(payload, dict) else {}
+    if _use_remote_authority():
+        payload = _remote_json("POST", "/v1/providers/meta/config", {})
+        return payload if isinstance(payload, dict) else {}
+
+    from . import meta_mcp
+
+    token = _local_meta_graph_token()
+    mcp_token = _local_meta_mcp_token()
+    return {
+        "token": "",
+        "has_token": bool(token),
+        "has_mcp_oauth_token": bool(mcp_token),
+        "mcp_endpoint": _local_meta_mcp_endpoint(),
+        "version": _local_meta_graph_version(),
+        "ad_account_id": str(first_env_backed_value("META_AD_ACCOUNT_ID") or "").strip(),
+        "page_id": str(first_env_backed_value("META_PAGE_ID") or "").strip(),
+        "instagram_user_id": str(first_env_backed_value("META_INSTAGRAM_ID") or "").strip(),
+        "composio_connected_account_id": "",
+        "composio_user_id": "",
+        "composio_alias": "",
+    }
 
 
 def meta_graph_forward(
@@ -2657,13 +2676,177 @@ def meta_graph_forward(
         "host": str(host or "graph.facebook.com"),
         "timeout": float(timeout),
     }
-    result = _remote_json(
-        "POST",
-        "/v1/providers/meta/graph",
-        payload,
-        timeout=max(20.0, float(timeout) + 10.0),
+    if _use_remote_authority():
+        result = _remote_json(
+            "POST",
+            "/v1/providers/meta/graph",
+            payload,
+            timeout=max(20.0, float(timeout) + 10.0),
+        )
+        return result if isinstance(result, dict) else {}
+
+    from . import meta_graph
+
+    token = _local_meta_graph_token()
+    if not token:
+        raise RemoteSafeboxError(
+            "Meta system-user token is not configured on the safebox",
+            status_code=428,
+            payload={"detail": "meta_system_user_token_required"},
+        )
+    return meta_graph._graph(
+        str(method or "GET"),
+        str(path or "").lstrip("/"),
+        dict(params or {}),
+        token=token,
+        version=_local_meta_graph_version(),
+        host=str(host or "graph.facebook.com"),
+        timeout=float(timeout),
     )
-    return result if isinstance(result, dict) else {}
+
+
+def meta_graph_upload_video(
+    *,
+    ad_account_id: str,
+    video_bytes: bytes,
+    name: str,
+    poll: bool = True,
+    timeout: float = 180.0,
+) -> str:
+    """Upload raw video bytes to Meta through the safebox-held system-user token."""
+    payload = {
+        "ad_account_id": str(ad_account_id or ""),
+        "name": str(name or ""),
+        "data_b64": base64.b64encode(bytes(video_bytes or b"")).decode("ascii"),
+        "poll": bool(poll),
+        "timeout": float(timeout),
+    }
+    if _use_remote_authority():
+        result = _remote_json(
+            "POST",
+            "/v1/providers/meta/graph/upload-video",
+            payload,
+            timeout=max(20.0, float(timeout) + 10.0),
+        )
+        if isinstance(result, dict):
+            return str(result.get("video_id") or result.get("id") or "").strip()
+        return ""
+
+    from . import meta_graph
+
+    token = _local_meta_graph_token()
+    if not token:
+        raise RemoteSafeboxError(
+            "Meta system-user token is not configured on the safebox",
+            status_code=428,
+            payload={"detail": "meta_system_user_token_required"},
+        )
+    return meta_graph.upload_video(
+        token,
+        str(ad_account_id or ""),
+        bytes(video_bytes or b""),
+        name=str(name or ""),
+        version=_local_meta_graph_version(),
+        poll=bool(poll),
+        timeout=float(timeout),
+    )
+
+
+def meta_graph_upload_image(
+    *,
+    ad_account_id: str,
+    image_bytes: bytes,
+    name: str,
+    timeout: float = 180.0,
+) -> dict[str, Any]:
+    """Upload raw image bytes to Meta through the safebox-held system-user token."""
+    payload = {
+        "ad_account_id": str(ad_account_id or ""),
+        "name": str(name or ""),
+        "data_b64": base64.b64encode(bytes(image_bytes or b"")).decode("ascii"),
+        "timeout": float(timeout),
+    }
+    if _use_remote_authority():
+        result = _remote_json(
+            "POST",
+            "/v1/providers/meta/graph/upload-image",
+            payload,
+            timeout=max(20.0, float(timeout) + 10.0),
+        )
+        return result if isinstance(result, dict) else {}
+
+    from . import meta_graph
+
+    token = _local_meta_graph_token()
+    if not token:
+        raise RemoteSafeboxError(
+            "Meta system-user token is not configured on the safebox",
+            status_code=428,
+            payload={"detail": "meta_system_user_token_required"},
+        )
+    return meta_graph.upload_image(
+        token,
+        str(ad_account_id or ""),
+        bytes(image_bytes or b""),
+        name=str(name or ""),
+        version=_local_meta_graph_version(),
+        timeout=float(timeout),
+    )
+
+
+def meta_graph_ensure_custom_conversion(
+    *,
+    ad_account_id: str,
+    name: str,
+    rule: str,
+    custom_event_type: str,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """Ensure a per-business custom conversion through the safebox-held system-user token."""
+    payload = {
+        "ad_account_id": str(ad_account_id or ""),
+        "name": str(name or ""),
+        "rule": str(rule or ""),
+        "custom_event_type": str(custom_event_type or ""),
+        "timeout": float(timeout),
+    }
+    if _use_remote_authority():
+        result = _remote_json(
+            "POST",
+            "/v1/providers/meta/graph/ensure-custom-conversion",
+            payload,
+            timeout=max(20.0, float(timeout) + 10.0),
+        )
+        return result if isinstance(result, dict) else {}
+
+    from . import meta_graph
+
+    token = _local_meta_graph_token()
+    if not token:
+        raise RemoteSafeboxError(
+            "Meta system-user token is not configured on the safebox",
+            status_code=428,
+            payload={"detail": "meta_system_user_token_required"},
+        )
+    return meta_graph.ensure_custom_conversion(
+        token,
+        str(ad_account_id or ""),
+        name=str(name or ""),
+        rule=str(rule or ""),
+        custom_event_type=str(custom_event_type or ""),
+        version=_local_meta_graph_version(),
+    )
+
+
+def _local_meta_graph_version() -> str:
+    version = str(first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+    if not version:
+        return "v23.0"
+    return version if version.startswith("v") else f"v{version}"
+
+
+def _local_meta_graph_token() -> str:
+    return str(first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN") or "").strip()
 
 
 def _local_meta_mcp_endpoint() -> str:

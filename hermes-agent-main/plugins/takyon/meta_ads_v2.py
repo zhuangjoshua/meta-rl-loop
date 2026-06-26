@@ -3,9 +3,9 @@
 This module declares the 6 guarded ``business_meta_*`` tools the takyon-meta-ads-v2 skill drives
 (the 7th tool the skill uses, ``business_read_business``, is pre-existing in ``core``).
 It is a thin authority-side orchestrator: it never resolves a secret from ``os.environ`` and never
-hardcodes a token, ad-account id, or page id. All tokens are resolved at call time through the
-Safebox broker (``core.safebox.first_env_backed_value``), and all external work is split across two
-disjoint credentials, each doing what the other cannot:
+hardcodes a token, ad-account id, or page id. All secret/config access goes through the Safebox
+broker helpers, and all external work is split across two disjoint credentials, each doing what the
+other cannot:
 
   * SYSTEM-USER token (alias ``META_SYSTEM_USER_ACCESS_TOKEN``) — the Graph Marketing API leg
     (``meta_graph``). Uploads the generated creative bytes (video/image) and runs lifecycle
@@ -36,7 +36,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import core, meta_graph, meta_mcp
+from . import core, meta_graph
 
 
 # ── Defaults / constants ──────────────────────────────────────────────────────────────────────────
@@ -72,43 +72,38 @@ def _arg(args: Mapping[str, Any], *names: str, default: Any = "") -> Any:
     return default
 
 
-def _resolve_config_value(args: Mapping[str, Any], arg_names: tuple[str, ...], env_keys: tuple[str, ...]) -> str:
-    """Resolve a non-secret config id: explicit arg wins, else the Safebox-broker value for env_keys.
+def _meta_config() -> Mapping[str, Any]:
+    try:
+        cfg = core.safebox.meta_config()
+    except Exception:
+        cfg = {}
+    return cfg if isinstance(cfg, Mapping) else {}
 
-    ``META_AD_ACCOUNT_ID`` / ``META_PAGE_ID`` / ``META_INSTAGRAM_ID`` are configuration, not secrets,
-    but they are still resolved through the Safebox broker so nothing is read from ``os.environ`` here.
-    """
+
+def _resolve_config_value(args: Mapping[str, Any], arg_names: tuple[str, ...], env_keys: tuple[str, ...]) -> str:
+    """Resolve config via explicit args first, else the Safebox Meta config broker."""
     explicit = str(_arg(args, *arg_names) or "").strip()
     if explicit:
         return explicit
-    return str(core.safebox.first_env_backed_value(*env_keys) or "").strip()
-
-
-def _resolve_system_user_token() -> str:
-    token = str(core.safebox.first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN") or "").strip()
-    if not token:
-        raise core.TakyonError(
-            "META_SYSTEM_USER_ACCESS_TOKEN is not configured (Safebox); the Graph upload/lifecycle leg "
-            "cannot run"
-        )
-    return token
-
-
-def _resolve_mcp_token() -> str:
-    token = str(core.safebox.first_env_backed_value(*meta_mcp.META_MCP_TOKEN_ALIASES) or "").strip()
-    if not token:
-        raise core.TakyonError(
-            "META_MCP_OAUTH_TOKEN is not configured (Safebox); the Meta Ads MCP leg cannot create ad "
-            "objects (token is ~60-day, re-mint with implementation/meta_oauth.py)"
-        )
-    return token
-
-
-def _resolve_mcp_endpoint() -> str:
-    endpoint = str(
-        core.safebox.first_env_backed_value(*meta_mcp.META_MCP_ENDPOINT_ALIASES) or ""
-    ).strip()
-    return endpoint or meta_mcp.DEFAULT_META_MCP_ENDPOINT
+    field_map = {
+        "META_AD_ACCOUNT_ID": "ad_account_id",
+        "META_PAGE_ID": "page_id",
+        "META_INSTAGRAM_ID": "instagram_user_id",
+        "META_MCP_ENDPOINT": "mcp_endpoint",
+        "META_ADS_MCP_ENDPOINT": "mcp_endpoint",
+    }
+    cfg = _meta_config()
+    for key in env_keys:
+        field = field_map.get(str(key or "").strip())
+        if not field:
+            continue
+        value = str(cfg.get(field) or "").strip()
+        if value:
+            return value
+    try:
+        return str(core.safebox.first_env_backed_value(*env_keys) or "").strip()
+    except Exception:
+        return ""
 
 
 def _numeric_account_id(ad_account_id: str) -> str:
@@ -421,22 +416,18 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             )
         raw = asset_abs.read_bytes()
 
-        # ── Resolve tokens (system-user for Graph, MCP for ad objects) ──
-        system_user_token = _resolve_system_user_token()
-        mcp_token = _resolve_mcp_token()
-        mcp_endpoint = _resolve_mcp_endpoint()
         numeric_account = _numeric_account_id(ad_account_id)
 
         creative_media: dict[str, Any] = {}
 
-        # ── 3. Upload the creative bytes to Meta with the SYSTEM-USER token (Graph) ──
+        # ── 3. Upload the creative bytes to Meta through the Safebox-held SYSTEM-USER token ──
         if asset_kind == "video":
-            video_id = meta_graph.upload_video(
-                system_user_token,
-                ad_account_id,
-                raw,
+            video_id = str(core.safebox.meta_graph_upload_video(
+                ad_account_id=ad_account_id,
+                video_bytes=raw,
                 name=f"{slug}-video",
             )
+            ).strip()
             created_ids["video_id"] = video_id
             # Video creatives also require a thumbnail image_hash/url.
             thumb_bytes = _stage_thumbnail_bytes(store, business, args, slug)
@@ -445,10 +436,9 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                     "video creative requires a thumbnail; provide thumbnail_path or "
                     f"product/ugc-ads/{slug}/thumbnail.png"
                 )
-            thumb = meta_graph.upload_image(
-                system_user_token,
-                ad_account_id,
-                thumb_bytes,
+            thumb = core.safebox.meta_graph_upload_image(
+                ad_account_id=ad_account_id,
+                image_bytes=thumb_bytes,
                 name=f"{slug}-thumb",
             )
             creative_media["video_id"] = video_id
@@ -458,10 +448,9 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 creative_media["image_url"] = thumb["url"]
             created_ids["thumbnail_hash"] = str(thumb.get("hash") or "")
         else:
-            image = meta_graph.upload_image(
-                system_user_token,
-                ad_account_id,
-                raw,
+            image = core.safebox.meta_graph_upload_image(
+                ad_account_id=ad_account_id,
+                image_bytes=raw,
                 name=f"{slug}-image",
             )
             if image.get("hash"):
@@ -473,13 +462,11 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             else:
                 raise core.TakyonError("image upload returned neither a hash nor a url")
 
-        # ── 4. Create the ad objects with the MCP token (creative → campaign → ad set → ad) ──
+        # ── 4. Create the ad objects with the official MCP broker (creative → campaign → ad set → ad) ──
         def _mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            return meta_mcp.call_tool(
-                tool_name,
-                arguments,
-                token=mcp_token,
-                endpoint=mcp_endpoint,
+            return core.safebox.meta_mcp_call(
+                tool_name=tool_name,
+                arguments=arguments,
             )
 
         creative_args = {
@@ -546,10 +533,10 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         status = "created_paused"
         activated = False
         if mode == "live":
-            # campaign → ad set → ad, all via the Graph system-user token.
-            meta_graph.set_status(system_user_token, campaign_id, "ACTIVE")
-            meta_graph.set_status(system_user_token, adset_id, "ACTIVE")
-            meta_graph.set_status(system_user_token, ad_id, "ACTIVE")
+            # campaign → ad set → ad, all via the Safebox-held Graph system-user token.
+            core.safebox.meta_graph_forward(method="POST", path=campaign_id, params={"status": "ACTIVE"})
+            core.safebox.meta_graph_forward(method="POST", path=adset_id, params={"status": "ACTIVE"})
+            core.safebox.meta_graph_forward(method="POST", path=ad_id, params={"status": "ACTIVE"})
             status = "activated"
             activated = True
 
@@ -686,18 +673,29 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
                 "value": action,
             })
 
-        token = _resolve_system_user_token()
         if operation == "set_budget":
             daily_budget_cents = _budget_cents(
                 _arg(args, "daily_budget_usd", "daily_budget", default=_DEFAULT_DAILY_BUDGET_USD)
             )
-            result = meta_graph.update_daily_budget(token, object_id, daily_budget_cents)
+            result = core.safebox.meta_graph_forward(
+                method="POST",
+                path=object_id,
+                params={"daily_budget": daily_budget_cents},
+            )
             applied = {"daily_budget_cents": daily_budget_cents}
         elif operation == "pause":
-            result = meta_graph.set_status(token, object_id, "PAUSED")
+            result = core.safebox.meta_graph_forward(
+                method="POST",
+                path=object_id,
+                params={"status": "PAUSED"},
+            )
             applied = {"status": "PAUSED"}
         else:  # activate
-            result = meta_graph.set_status(token, object_id, "ACTIVE")
+            result = core.safebox.meta_graph_forward(
+                method="POST",
+                path=object_id,
+                params={"status": "ACTIVE"},
+            )
             applied = {"status": "ACTIVE"}
 
         action = {
@@ -780,7 +778,6 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
                 "value": sync,
             })
 
-        token = _resolve_system_user_token()
         fields = "impressions,reach,clicks,spend,cpc,cpm,ctr,frequency,actions,date_start,date_stop"
         if object_id:
             path = f"{object_id}/insights"
@@ -792,7 +789,7 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
             path = f"{meta_graph.account_path(ad_account_id)}/insights"
             params = {"level": level, "fields": fields, "date_preset": date_preset}
 
-        resp = meta_graph._graph("GET", path, params, token=token)
+        resp = core.safebox.meta_graph_forward(method="GET", path=path, params=params)
         rows = resp.get("data") if isinstance(resp, Mapping) else None
         rows = rows if isinstance(rows, list) else []
 
@@ -1069,18 +1066,15 @@ def handle_business_meta_pixel_verify(args: dict, **_: Any) -> str:
                 "value": verify,
             })
 
-        token = _resolve_system_user_token()
-
         # Proof B (Meta side): the per-business custom conversion is registered.
         custom_conversion_ok = False
         last_event = None
         if ad_account_id:
             try:
-                resp = meta_graph._graph(
-                    "GET",
-                    f"{meta_graph.account_path(ad_account_id)}/customconversions",
-                    {"fields": "id,name,custom_event_type,rule,last_fired_time"},
-                    token=token,
+                resp = core.safebox.meta_graph_forward(
+                    method="GET",
+                    path=f"{meta_graph.account_path(ad_account_id)}/customconversions",
+                    params={"fields": "id,name,custom_event_type,rule,last_fired_time"},
                 )
                 conversions = resp.get("data") if isinstance(resp, Mapping) else None
                 conversions = conversions if isinstance(conversions, list) else []
@@ -1194,10 +1188,8 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
                 "value": ensure,
             })
 
-        token = _resolve_system_user_token()
-        result = meta_graph.ensure_custom_conversion(
-            token,
-            ad_account_id,
+        result = core.safebox.meta_graph_ensure_custom_conversion(
+            ad_account_id=ad_account_id,
             name=name,
             rule=rule,
             custom_event_type=custom_event_type,
