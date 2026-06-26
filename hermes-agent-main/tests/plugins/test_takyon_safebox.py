@@ -38,6 +38,74 @@ def test_read_env_backed_value_falls_back_to_takyon_env(monkeypatch):
     assert safebox.read_env_backed_value("STRIPE_SECRET_KEY") == "sk_disk_fallback"
 
 
+def test_read_env_backed_value_uses_managed_secret_command_for_manifested_key(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_KEYS", "STRIPE_SECRET_KEY")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_COMMAND", "secretctl read {key}")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_CACHE_SECONDS", "0")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_plaintext_should_not_win")
+    monkeypatch.setattr(
+        safebox,
+        "load_env",
+        lambda: {"STRIPE_SECRET_KEY": "sk_disk_should_not_win"},
+    )
+    safebox._MANAGED_SECRET_CACHE.clear()
+    seen = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "sk_managed\n"
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return Completed()
+
+    monkeypatch.setattr(safebox.subprocess, "run", fake_run)
+
+    assert safebox.read_env_backed_value("STRIPE_SECRET_KEY") == "sk_managed"
+    assert seen["argv"] == ["secretctl", "read", "STRIPE_SECRET_KEY"]
+    assert seen["kwargs"]["check"] is False
+    assert seen["kwargs"]["capture_output"] is True
+    assert seen["kwargs"]["text"] is True
+
+
+def test_read_env_backed_value_keeps_env_fallback_for_unmanifested_key(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_KEYS", "OPENAI_API_KEY")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_COMMAND", "secretctl read {key}")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_process")
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
+
+    def fake_run(*_args, **_kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("managed command should not run for unmanifested keys")
+
+    monkeypatch.setattr(safebox.subprocess, "run", fake_run)
+
+    assert safebox.read_env_backed_value("STRIPE_SECRET_KEY") == "sk_process"
+
+
+def test_save_env_backed_value_refuses_manager_owned_key(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_KEYS", "STRIPE_SECRET_KEY")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_COMMAND", "secretctl read {key}")
+
+    with pytest.raises(safebox.ManagedSecretLookupError, match="managed secret store"):
+        safebox.save_env_backed_value("STRIPE_SECRET_KEY", "sk_should_not_write_env")
+
+
+def test_list_env_backed_keys_includes_managed_manifest(monkeypatch):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_KEYS", "STRIPE_SECRET_KEY, OPENAI_API_KEY")
+    monkeypatch.setenv("TAKYON_MANAGED_SECRET_COMMAND", "secretctl read {key}")
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
+
+    keys = safebox.list_env_backed_keys(sensitive_only=False)
+
+    assert "STRIPE_SECRET_KEY" in keys
+    assert "OPENAI_API_KEY" in keys
+
+
 def test_first_env_backed_value_returns_first_populated_alias(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.delenv("DATABASE_URL", raising=False)

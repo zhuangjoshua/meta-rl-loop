@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import threading
 import urllib.error
 import urllib.parse
@@ -96,6 +98,13 @@ _SAFEBOX_REMOTE_URL_ENV = "TAKYON_SAFEBOX_URL"
 _SAFEBOX_REMOTE_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
 _HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _SAFEBOX_HOST_ROLE = "safebox"
+_MANAGED_SECRET_COMMAND_ENV = "TAKYON_MANAGED_SECRET_COMMAND"
+_MANAGED_SECRET_KEYS_ENV = "TAKYON_MANAGED_SECRET_KEYS"
+_MANAGED_SECRET_TIMEOUT_ENV = "TAKYON_MANAGED_SECRET_TIMEOUT_SECONDS"
+_MANAGED_SECRET_CACHE_ENV = "TAKYON_MANAGED_SECRET_CACHE_SECONDS"
+_MANAGED_SECRET_CACHE_DEFAULT_SECONDS = 60.0
+_MANAGED_SECRET_MUTEX = threading.RLock()
+_MANAGED_SECRET_CACHE: dict[str, tuple[float, str]] = {}
 
 
 class RemoteSafeboxError(RuntimeError):
@@ -109,6 +118,10 @@ class RemoteSafeboxError(RuntimeError):
 
 class SafeboxAuthorityUnavailable(RuntimeError):
     """No remote Safebox is configured and this process is not the Safebox host."""
+
+
+class ManagedSecretLookupError(RuntimeError):
+    """The configured managed-secret command failed for a safebox-owned key."""
 
 
 class StripeBillingWebhookUnconfigured(RuntimeError):
@@ -228,6 +241,105 @@ def _remote_json(
             status_code=504,
             payload={"detail": "safebox_unreachable"},
         ) from exc
+
+
+def _managed_secret_command() -> str:
+    return str(os.environ.get(_MANAGED_SECRET_COMMAND_ENV) or "").strip()
+
+
+def _managed_secret_keys() -> set[str]:
+    raw = str(os.environ.get(_MANAGED_SECRET_KEYS_ENV) or "").strip()
+    keys: set[str] = set()
+    for item in raw.replace(",", " ").split():
+        name = str(item or "").strip()
+        if not name:
+            continue
+        _validate_env_key(name)
+        if is_sensitive_env_key(name):
+            keys.add(name)
+    return keys
+
+
+def _managed_secret_applies(name: str) -> bool:
+    if not _managed_secret_command():
+        return False
+    manifest = _managed_secret_keys()
+    # Empty manifest means "the command is authoritative for every sensitive key". For gradual
+    # cutovers, set TAKYON_MANAGED_SECRET_KEYS so only migrated keys stop falling back to .env.
+    return not manifest or name in manifest
+
+
+def _managed_secret_timeout_seconds() -> float:
+    raw = str(os.environ.get(_MANAGED_SECRET_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return 8.0
+    try:
+        return max(1.0, min(60.0, float(raw)))
+    except ValueError:
+        return 8.0
+
+
+def _managed_secret_cache_seconds() -> float:
+    raw = str(os.environ.get(_MANAGED_SECRET_CACHE_ENV) or "").strip()
+    if not raw:
+        return _MANAGED_SECRET_CACHE_DEFAULT_SECONDS
+    try:
+        return max(0.0, min(3600.0, float(raw)))
+    except ValueError:
+        return _MANAGED_SECRET_CACHE_DEFAULT_SECONDS
+
+
+def _managed_secret_argv(name: str) -> list[str]:
+    try:
+        parts = shlex.split(_managed_secret_command())
+    except ValueError as exc:
+        raise ManagedSecretLookupError("managed secret command is not valid shell-style syntax") from exc
+    if not parts:
+        return []
+    replaced = False
+    argv: list[str] = []
+    for part in parts:
+        if "{key}" in part:
+            argv.append(part.replace("{key}", name))
+            replaced = True
+        else:
+            argv.append(part)
+    if not replaced:
+        argv.append(name)
+    return argv
+
+
+def _read_managed_secret(name: str) -> str:
+    ttl = _managed_secret_cache_seconds()
+    now = time.monotonic()
+    if ttl > 0:
+        with _MANAGED_SECRET_MUTEX:
+            cached = _MANAGED_SECRET_CACHE.get(name)
+            if cached and now - cached[0] <= ttl:
+                return cached[1]
+
+    argv = _managed_secret_argv(name)
+    if not argv:
+        return ""
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_managed_secret_timeout_seconds(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ManagedSecretLookupError(f"managed secret lookup failed for {name}") from exc
+    if completed.returncode != 0:
+        raise ManagedSecretLookupError(
+            f"managed secret lookup failed for {name} (exit {completed.returncode})"
+        )
+    value = str(completed.stdout or "").strip()
+    if ttl > 0 and value:
+        with _MANAGED_SECRET_MUTEX:
+            _MANAGED_SECRET_CACHE[name] = (time.monotonic(), value)
+    return value
 
 
 def _public_config_value(name: str) -> str:
@@ -2485,6 +2597,8 @@ def read_env_backed_value(key: str) -> str:
         )
         return str(payload.get("value") or "").strip()
     name = _require_sensitive(key)
+    if _managed_secret_applies(name):
+        return _read_managed_secret(name).strip()
     value = os.environ.get(name)
     if value is not None:
         return value.strip()
@@ -3032,10 +3146,14 @@ def save_env_backed_value(key: str, value: str) -> None:
             {"value": value},
         )
         return
+    name = _require_sensitive(key)
+    if _managed_secret_applies(name):
+        raise ManagedSecretLookupError(
+            f"{name} is owned by {_MANAGED_SECRET_COMMAND_ENV}; update it in the managed secret store"
+        )
     if is_managed():
         managed_error(f"set {key}")
         return
-    name = _require_sensitive(key)
     _save_env_value_direct(name, _normalize_env_value_for_storage(name, value))
 
 
@@ -3047,10 +3165,14 @@ def remove_env_backed_value(key: str) -> bool:
             f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
         )
         return bool(payload.get("removed"))
+    name = _require_sensitive(key)
+    if _managed_secret_applies(name):
+        raise ManagedSecretLookupError(
+            f"{name} is owned by {_MANAGED_SECRET_COMMAND_ENV}; remove it in the managed secret store"
+        )
     if is_managed():
         managed_error(f"remove {key}")
         return False
-    name = _require_sensitive(key)
     return _remove_env_value_direct(name)
 
 
@@ -3074,6 +3196,13 @@ def sensitive_env_snapshot() -> Dict[str, str]:
     for key, value in os.environ.items():
         if is_sensitive_env_key(key):
             snapshot[key] = str(value or "").strip()
+    for key in _managed_secret_keys():
+        try:
+            value = read_env_backed_value(key)
+        except (KeyError, ManagedSecretLookupError):
+            continue
+        if value:
+            snapshot[key] = value
     return snapshot
 
 
@@ -3089,4 +3218,6 @@ def list_env_backed_keys(*, sensitive_only: bool = True) -> list[str]:
     merged = {key: value for key, value in load_env().items()}
     for key, value in os.environ.items():
         merged[key] = value
+    for key in _managed_secret_keys():
+        merged[key] = "<managed>"
     return sorted(str(key or "").strip() for key in merged.keys() if str(key or "").strip())
