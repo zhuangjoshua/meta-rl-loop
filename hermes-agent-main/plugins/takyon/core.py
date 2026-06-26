@@ -28002,7 +28002,86 @@ def _meta_video_thumbnail(video_id: str, cfg: dict[str, Any]) -> str | None:
     return uri or None
 
 
+def _meta_launch_requested_mode(args: Mapping[str, Any]) -> str:
+    """Normalize the external v2 launch contract into the older internal modes."""
+    if args.get("preflight") is not None and _boolish(args.get("preflight"), default=False):
+        return "preflight"
+    raw = str(args.get("mode") or "").strip().lower()
+    if not raw or raw == "live":
+        return "launch"
+    return raw
+
+
+def _meta_normalize_launch_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Accept the drop-in Meta v2 flat schema while preserving legacy nested args."""
+    try:
+        normalized = json.loads(json.dumps(dict(args or {})))
+    except Exception:
+        normalized = dict(args or {})
+
+    campaign = dict(normalized.get("campaign") if isinstance(normalized.get("campaign"), Mapping) else {})
+    adset = dict(normalized.get("adset") if isinstance(normalized.get("adset"), Mapping) else {})
+    ad = dict(normalized.get("ad") if isinstance(normalized.get("ad"), Mapping) else {})
+    copy_bundle = dict(normalized.get("copy") if isinstance(normalized.get("copy"), Mapping) else {})
+    schedule = dict(normalized.get("schedule") if isinstance(normalized.get("schedule"), Mapping) else {})
+
+    def copy_if_missing(target: dict[str, Any], target_key: str, value: Any) -> None:
+        if value not in (None, "") and target.get(target_key) in (None, ""):
+            target[target_key] = value
+
+    copy_if_missing(campaign, "name", normalized.get("campaign_name") or normalized.get("name"))
+    copy_if_missing(campaign, "objective", normalized.get("objective"))
+    copy_if_missing(campaign, "start_time", schedule.get("campaign_start_time") or schedule.get("start_time"))
+    copy_if_missing(campaign, "end_time", schedule.get("campaign_end_time") or schedule.get("end_time"))
+
+    copy_if_missing(adset, "name", normalized.get("adset_name"))
+    copy_if_missing(adset, "optimization_goal", normalized.get("optimization_goal"))
+    copy_if_missing(adset, "billing_event", normalized.get("billing_event"))
+    copy_if_missing(adset, "destination_type", normalized.get("destination_type"))
+    copy_if_missing(adset, "bid_strategy", normalized.get("bid_strategy"))
+    if isinstance(normalized.get("targeting"), Mapping) and not isinstance(adset.get("targeting"), Mapping):
+        adset["targeting"] = normalized.get("targeting")
+    copy_if_missing(adset, "start_time", schedule.get("adset_start_time") or schedule.get("start_time"))
+    copy_if_missing(adset, "end_time", schedule.get("adset_end_time") or schedule.get("end_time"))
+
+    if normalized.get("budget_amount_cents") not in (None, "") and adset.get("daily_budget_usd") in (None, "") and adset.get("daily_budget") in (None, ""):
+        try:
+            budget_cents = int(normalized.get("budget_amount_cents"))
+        except (TypeError, ValueError):
+            raise TakyonError("budget_amount_cents must be an integer number of cents")
+        if budget_cents <= 0:
+            raise TakyonError("budget_amount_cents must be positive")
+        normalized["budget_amount_cents"] = budget_cents
+        if str(normalized.get("budget_kind") or "daily").strip().lower() == "daily":
+            adset["daily_budget_usd"] = round(budget_cents / 100.0, 2)
+    copy_if_missing(adset, "daily_budget_usd", normalized.get("daily_budget_usd"))
+
+    copy_if_missing(ad, "name", normalized.get("ad_name"))
+    copy_if_missing(ad, "message", copy_bundle.get("message") or normalized.get("message"))
+    copy_if_missing(ad, "headline", copy_bundle.get("headline") or normalized.get("headline"))
+    copy_if_missing(ad, "description", copy_bundle.get("description") or normalized.get("description"))
+    copy_if_missing(ad, "link", normalized.get("link"))
+    copy_if_missing(ad, "page_id", normalized.get("page_id"))
+    copy_if_missing(ad, "instagram_user_id", normalized.get("instagram_user_id"))
+    copy_if_missing(ad, "image_url", normalized.get("image_url"))
+    copy_if_missing(ad, "video_id", normalized.get("video_id"))
+    copy_if_missing(
+        ad,
+        "call_to_action",
+        copy_bundle.get("call_to_action_type")
+        or copy_bundle.get("call_to_action")
+        or normalized.get("call_to_action_type")
+        or normalized.get("call_to_action"),
+    )
+
+    normalized["campaign"] = campaign
+    normalized["adset"] = adset
+    normalized["ad"] = ad
+    return normalized
+
+
 def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    args = _meta_normalize_launch_args(args)
     asset_kind = str(args.get("asset_kind") or "").strip().lower() or "video"
     if asset_kind not in {"video", "image"}:
         raise TakyonError("asset_kind must be 'video' or 'image'")
@@ -28055,6 +28134,16 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
         raise TakyonError(f"ad.call_to_action '{cta}' is not a recognized Meta CTA type")
 
     targeting = adset.get("targeting") if isinstance(adset.get("targeting"), dict) else {"geo_locations": {"countries": ["US"]}}
+    budget_mode = str(args.get("budget_mode") or campaign.get("budget_mode") or adset.get("budget_mode") or "CBO").strip().upper()
+    if budget_mode not in {"CBO", "ABO"}:
+        raise TakyonError("budget_mode must be CBO or ABO")
+    budget_kind = str(args.get("budget_kind") or campaign.get("budget_kind") or adset.get("budget_kind") or "daily").strip().lower()
+    if budget_kind not in {"daily", "lifetime"}:
+        raise TakyonError("budget_kind must be daily or lifetime")
+    if budget_kind == "lifetime" and not (
+        str(campaign.get("end_time") or "").strip() or str(adset.get("end_time") or "").strip()
+    ):
+        raise TakyonError("budget_kind='lifetime' requires schedule.end_time")
 
     return {
         "slug": slug,
@@ -28066,9 +28155,13 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
         "campaign_name": str(campaign.get("name") or f"{slug} campaign").strip(),
         "campaign_start_time": str(campaign.get("start_time") or "").strip() or None,
         "campaign_end_time": str(campaign.get("end_time") or "").strip() or None,
+        "budget_mode": budget_mode,
+        "budget_kind": budget_kind,
+        "bid_strategy": str(adset.get("bid_strategy") or campaign.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP").strip().upper(),
         "adset_name": str(adset.get("name") or f"{slug} ad set").strip(),
         "optimization_goal": str(adset.get("optimization_goal") or "LINK_CLICKS").strip().upper(),
         "billing_event": str(adset.get("billing_event") or "IMPRESSIONS").strip().upper(),
+        "destination_type": str(adset.get("destination_type") or "WEBSITE").strip().upper(),
         "daily_budget_usd": round(daily_budget_usd, 2),
         "daily_budget_cents": int(round(daily_budget_usd * 100)),
         "adset_start_time": str(adset.get("start_time") or "").strip() or None,
@@ -28155,6 +28248,9 @@ def _meta_plan_payload(plan: Mapping[str, Any], *, launch_mode: str) -> dict[str
         "campaign": {
             "name": plan.get("campaign_name"),
             "objective": plan.get("objective"),
+            "budget_mode": plan.get("budget_mode"),
+            "budget_kind": plan.get("budget_kind"),
+            "bid_strategy": plan.get("bid_strategy"),
             "start_time": plan.get("campaign_start_time"),
             "end_time": plan.get("campaign_end_time"),
         },
@@ -28164,6 +28260,7 @@ def _meta_plan_payload(plan: Mapping[str, Any], *, launch_mode: str) -> dict[str
             "daily_budget_cents": plan.get("daily_budget_cents"),
             "optimization_goal": plan.get("optimization_goal"),
             "billing_event": plan.get("billing_event"),
+            "destination_type": plan.get("destination_type"),
             "start_time": plan.get("adset_start_time"),
             "end_time": plan.get("adset_end_time"),
             "targeting": plan.get("targeting"),
@@ -28388,18 +28485,22 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
-        mode = str(args.get("mode") or "launch").strip().lower()
+        requested_mode = _meta_launch_requested_mode(args)
+        force_test_mode = requested_mode == "test"
+        mode = "launch" if force_test_mode else requested_mode
 
         with store._connect() as conn:
             business_row = store._ensure_business(conn, business)
             business_mode = _effective_business_mode(business_row.get("mode"))
+        if force_test_mode:
+            business_mode = "test"
 
         # ── read-only preflight: verify token + list ad accounts, create nothing ──
         if mode == "preflight":
             try:
                 result = _call_creative_runtime_gateway(
                     "meta-launch",
-                    {"business": business, "mode": "preflight"},
+                    {"business": business, "mode": "preflight", "preflight": True},
                 )
             except Exception as exc:
                 return tool_error(str(exc), success=False)
@@ -28408,12 +28509,12 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             return tool_result(result)
 
         if mode not in {"launch", "manual_handoff"}:
-            raise TakyonError("mode must be one of: preflight, launch, manual_handoff")
+            raise TakyonError("mode must be one of: test, live, preflight, launch, manual_handoff")
 
         launch_mode = "manual_handoff" if mode == "manual_handoff" else "auto_post"
         cfg = _meta_config(require_token=(mode == "preflight" or (mode == "launch" and business_mode != "test")))
 
-        launch_args = json.loads(json.dumps(args))
+        launch_args = _meta_normalize_launch_args(args)
         spend_schedule: dict[str, Any] | None = None
         if mode == "launch" and business_mode != "test":
             budget_snapshot = _creative_credit_budget_snapshot(business)
@@ -28501,6 +28602,11 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "ad_image_path": plan.get("ad_image_path"),
             "objective": plan["objective"],
             "daily_budget_usd": plan["daily_budget_usd"],
+            "daily_budget_cents": plan.get("daily_budget_cents"),
+            "budget_mode": plan.get("budget_mode"),
+            "budget_kind": plan.get("budget_kind"),
+            "bid_strategy": plan.get("bid_strategy"),
+            "destination_type": plan.get("destination_type"),
             "activation_requested": bool(plan.get("activate")),
             "start_at": plan.get("adset_start_time") or plan.get("campaign_start_time"),
             "end_at": plan.get("adset_end_time") or plan.get("campaign_end_time"),
@@ -34825,22 +34931,24 @@ TAKYON_TOOL_DEFINITIONS = [
     {
         "name": "business_meta_ad_launch",
         "description": (
-            "Launch or preflight a Meta (Facebook/Instagram) ad from a UGC video or static image. "
-            "mode=preflight verifies the access token and lists ad accounts (read-only, creates nothing). "
-            "mode=launch reserves credits, creates an AdCreative + Campaign + AdSet + Ad, and activates unless explicitly paused; "
-            "mode=manual_handoff writes the full launch packet locally and stops before any Meta API post. "
-            "Live spend stays bounded by the reserved channel-credit cap."
+            "Preflight or launch/stage a bounded Meta campaign (Campaign->AdSet->Ad) from a chosen "
+            "image/video asset via the official Meta Ads MCP. Defaults to Traffic->Website clicks, "
+            "CBO, and paused unless activate=true."
         ),
         "handler": handle_business_meta_ad_launch,
         "schema": _schema(
             "business_meta_ad_launch",
-            "Preflight or create a bounded Meta ad from a UGC video or static image.",
+            "Preflight or launch a bounded Meta ad from a chosen image/video asset.",
             {
                 "business": _BUSINESS_PROP,
+                "preflight": {
+                    "type": "boolean",
+                    "description": "Read-only MCP connection/account/page check; creates no Meta objects.",
+                },
                 "mode": {
                     "type": "string",
-                    "enum": ["preflight", "launch", "manual_handoff"],
-                    "description": "preflight = read-only token/account check; launch = reserve credits, create provider objects, and activate unless explicitly paused; manual_handoff = write the launch packet locally and stop before posting. Default launch.",
+                    "enum": ["test", "live"],
+                    "description": "test suppresses external calls to a local receipt; live uses the official MCP path. Omit for live.",
                 },
                 "asset_kind": {
                     "type": "string",
@@ -34859,22 +34967,27 @@ TAKYON_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "Publication slug under distribution/meta-ads/<slug>/; defaults from the campaign name or asset folder.",
                 },
-                "ad_account_id": {
-                    "type": "string",
-                    "description": "Override META_AD_ACCOUNT_ID (with or without the act_ prefix).",
+                "copy": {"type": "object", "description": "{message, headline, description, call_to_action_type}."},
+                "objective": {"type": "string", "description": "Meta Outcome objective; default OUTCOME_TRAFFIC."},
+                "optimization_goal": {"type": "string", "description": "Default LINK_CLICKS for Traffic."},
+                "billing_event": {"type": "string", "description": "Default IMPRESSIONS."},
+                "budget_mode": {"type": "string", "enum": ["CBO", "ABO"], "description": "Default CBO."},
+                "budget_kind": {"type": "string", "enum": ["daily", "lifetime"], "description": "Default daily."},
+                "budget_amount_cents": {"type": "integer", "description": "Budget in account minor units; daily by default."},
+                "targeting": {"type": "object", "description": "Meta targeting JSON; default geo-only US broad targeting."},
+                "destination_type": {"type": "string", "description": "Default WEBSITE."},
+                "link": {"type": "string", "description": "Destination URL."},
+                "page_id": {"type": "string", "description": "Override META_PAGE_ID for the creative page."},
+                "instagram_user_id": {"type": "string"},
+                "schedule": {"type": "object", "description": "{start_time, end_time} plus optional campaign/adset-specific keys."},
+                "activate": {
+                    "type": "boolean",
+                    "description": "Whether to activate after creating objects. Default false: staged paused.",
                 },
-                "campaign": {
-                    "type": "object",
-                    "description": "{name, objective}; objective is a Meta Outcome objective (default OUTCOME_TRAFFIC).",
-                },
-                "adset": {
-                    "type": "object",
-                    "description": "{name, daily_budget_usd, optimization_goal, billing_event, targeting}; daily_budget_usd is capped by TAKYON_META_MAX_DAILY_BUDGET_USD.",
-                },
-                "ad": {
-                    "type": "object",
-                    "description": "{name, message, link (required), call_to_action, page_id, image_url}; image_url is an optional video thumbnail fallback or static creative URL hint.",
-                },
+                "ad_account_id": {"type": "string", "description": "Repo compatibility override for META_AD_ACCOUNT_ID."},
+                "campaign": {"type": "object", "description": "Repo compatibility nested campaign object."},
+                "adset": {"type": "object", "description": "Repo compatibility nested ad set object."},
+                "ad": {"type": "object", "description": "Repo compatibility nested ad object."},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,

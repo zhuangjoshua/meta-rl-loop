@@ -139,6 +139,85 @@ def test_meta_launch_plan_defaults_to_paused_for_v2():
     assert plan["activate"] is False
 
 
+def test_meta_launch_plan_accepts_drop_in_flat_v2_fields():
+    from plugins.takyon import core
+
+    plan = core._meta_launch_plan(
+        {
+            "business": "clipbook",
+            "mode": "live",
+            "asset_kind": "image",
+            "ad_image_path": "product/static-ads/demo/creative.png",
+            "slug": "demo-meta",
+            "copy": {
+                "message": "Try Clipbook",
+                "headline": "Clean homework help",
+                "description": "Instant walkthroughs",
+                "call_to_action_type": "LEARN_MORE",
+            },
+            "objective": "OUTCOME_TRAFFIC",
+            "optimization_goal": "LINK_CLICKS",
+            "billing_event": "IMPRESSIONS",
+            "budget_mode": "CBO",
+            "budget_kind": "daily",
+            "budget_amount_cents": 100,
+            "targeting": {"geo_locations": {"countries": ["US"]}},
+            "destination_type": "WEBSITE",
+            "link": "https://example.com/clipbook",
+            "page_id": "page_123",
+            "idempotency_key": "demo",
+        },
+        {"ad_account_id": "act_123", "page_id": "page_123"},
+    )
+
+    assert plan["budget_mode"] == "CBO"
+    assert plan["budget_kind"] == "daily"
+    assert plan["daily_budget_cents"] == 100
+    assert plan["destination_type"] == "WEBSITE"
+    assert plan["message"] == "Try Clipbook"
+    assert plan["headline"] == "Clean homework help"
+    assert plan["call_to_action"] == "LEARN_MORE"
+    assert plan["activate"] is False
+
+
+def test_meta_launch_requested_mode_matches_drop_in_contract():
+    from plugins.takyon import core
+
+    assert core._meta_launch_requested_mode({"preflight": True}) == "preflight"
+    assert core._meta_launch_requested_mode({"mode": "test"}) == "test"
+    assert core._meta_launch_requested_mode({"mode": "live"}) == "launch"
+
+
+def test_meta_mcp_create_args_uses_default_cbo_budget():
+    from plugins.takyon import creative_gateway
+
+    plan = {
+        "campaign_name": "Demo Campaign",
+        "objective": "OUTCOME_TRAFFIC",
+        "budget_mode": "CBO",
+        "budget_kind": "daily",
+        "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+        "daily_budget_cents": 100,
+        "adset_name": "Demo Ad Set",
+        "billing_event": "IMPRESSIONS",
+        "optimization_goal": "LINK_CLICKS",
+        "destination_type": "WEBSITE",
+        "targeting": {"geo_locations": {"countries": ["US"]}},
+        "ad_name": "Demo Ad",
+        "page_id": "page_123",
+        "link": "https://example.com",
+        "message": "Try it",
+        "call_to_action": "LEARN_MORE",
+    }
+
+    args = creative_gateway._meta_mcp_create_args(plan, ad_account_id="act_123")
+
+    assert args["campaign"]["campaign_daily_budget"] == 100
+    assert args["campaign"]["bid_strategy"] == "LOWEST_COST_WITHOUT_CAP"
+    assert "daily_budget" not in args["adset"]
+    assert args["adset"]["destination_type"] == "WEBSITE"
+
+
 def test_meta_graph_direct_token_adds_access_token(monkeypatch):
     from plugins.takyon import core
 

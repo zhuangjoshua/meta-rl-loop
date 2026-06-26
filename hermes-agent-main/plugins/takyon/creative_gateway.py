@@ -179,6 +179,9 @@ def _meta_mcp_create_args(
     image_url: str = "",
     video_id: str = "",
 ) -> dict[str, dict[str, Any]]:
+    budget_mode = str(plan.get("budget_mode") or "CBO").strip().upper()
+    budget_kind = str(plan.get("budget_kind") or "daily").strip().lower()
+    budget_cents = int(plan["daily_budget_cents"])
     campaign: dict[str, Any] = {
         "ad_account_id": ad_account_id,
         "name": plan["campaign_name"],
@@ -186,9 +189,10 @@ def _meta_mcp_create_args(
         "buying_type": "AUCTION",
         "status": "PAUSED",
         "special_ad_categories": [],
-        "campaign_daily_budget": plan["daily_budget_cents"],
-        "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+        "bid_strategy": plan.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP",
     }
+    if budget_mode == "CBO":
+        campaign["campaign_lifetime_budget" if budget_kind == "lifetime" else "campaign_daily_budget"] = budget_cents
     if plan.get("campaign_start_time"):
         campaign["campaign_start_time"] = plan.get("campaign_start_time")
     if plan.get("campaign_end_time"):
@@ -201,9 +205,12 @@ def _meta_mcp_create_args(
         "status": "PAUSED",
         "billing_event": plan["billing_event"],
         "optimization_goal": plan["optimization_goal"],
-        "destination_type": "WEBSITE",
+        "destination_type": plan.get("destination_type") or "WEBSITE",
         "targeting": plan["targeting"],
     }
+    if budget_mode == "ABO":
+        adset["lifetime_budget" if budget_kind == "lifetime" else "daily_budget"] = budget_cents
+        adset["bid_strategy"] = plan.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP"
     if plan.get("adset_start_time"):
         adset["start_time"] = plan.get("adset_start_time")
     if plan.get("adset_end_time"):

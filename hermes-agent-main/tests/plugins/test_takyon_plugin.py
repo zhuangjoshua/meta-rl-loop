@@ -6488,7 +6488,7 @@ def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, mo
 
     result = json.loads(
         handle_business_meta_ad_launch(
-            {"business": "clipbook", "mode": "preflight", "idempotency_key": "clipbook-meta-preflight"}
+            {"business": "clipbook", "preflight": True, "idempotency_key": "clipbook-meta-preflight"}
         )
     )
 
@@ -6529,6 +6529,31 @@ def test_business_meta_ad_launch_test_mode_supports_image_asset(tmp_path, monkey
     )
     assert receipt["asset_kind"] == "image"
     assert receipt["ad_image_path"] == "product/static-ads/demo-image/creative.png"
+
+
+def test_business_meta_ad_launch_mode_test_suppresses_even_for_live_business(tmp_path, monkeypatch):
+    _meta_test_business(tmp_path, monkeypatch, mode="live")
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                mode="test",
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image-test-mode",
+                idempotency_key="clipbook-meta-image-test-mode",
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "test"
+    assert result["status"] == "suppressed_test_mode"
+    assert result["external_side_effects"] == "suppressed"
 
 
 def test_business_meta_ad_launch_manual_handoff_writes_packet_without_meta_call(tmp_path, monkeypatch):
