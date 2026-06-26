@@ -11,6 +11,7 @@ legacy secret never leaves the safebox.
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from plugins.takyon import composio_distribution, core, creative_gateway, safebox_app
@@ -240,6 +241,39 @@ def test_meta_mcp_create_args_use_public_image_url_not_upload_hash():
     assert "image_hash" not in args["creative"]
     assert args["creative"]["call_to_action_type"] == "LEARN_MORE"
     assert args["ad"]["status"] == "PAUSED"
+
+
+def test_meta_launch_preflight_missing_oauth_returns_structured_block(monkeypatch):
+    app = FastAPI()
+    app.include_router(creative_gateway.build_creative_gateway_router())
+    app.dependency_overrides[creative_gateway._require_internal_session] = lambda: None
+    app.dependency_overrides[creative_gateway.get_control_conn] = lambda: object()
+
+    monkeypatch.setattr(
+        core,
+        "_meta_config",
+        lambda *, require_token=True: (_ for _ in ()).throw(
+            core.TakyonError(
+                "Meta v2 action requires official Meta Ads MCP OAuth. Configure "
+                "META_MCP_OAUTH_TOKEN on the safebox; Composio Meta Ads is not a valid v2 launch fallback."
+            )
+        ),
+    )
+
+    resp = TestClient(app).post(
+        "/internal/creative-gateway/meta-launch",
+        json={"business": "homework-solver", "mode": "preflight", "preflight": True},
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["success"] is False
+    assert data["read_only"] is True
+    assert data["status"] == "blocked_meta_mcp_oauth_required"
+    assert data["provider"] == "official_meta_mcp"
+    assert data["credits_charged"] == 0
+    assert data["ids"] is None
+    assert "META_MCP_OAUTH_TOKEN" in data["error"]
 
 
 # ── legacy media upload helpers (not the Meta v2 launch transport) ───────────────────────────────

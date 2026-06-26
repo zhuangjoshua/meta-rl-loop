@@ -1366,11 +1366,24 @@ def build_creative_gateway_router() -> APIRouter:
     ) -> dict[str, Any]:
         body = body or {}
         core = _core()
-        credits = core._creative_credit_backend()
-        store = core._store()
         business = core._resolved_business_slug(body, required=True)
         mode = str(body.get("mode") or "launch").strip().lower()
-        cfg = core._meta_config(require_token=True)
+        try:
+            cfg = core._meta_config(require_token=True)
+        except Exception as exc:
+            return {
+                "success": False,
+                "mode": mode,
+                "read_only": mode == "preflight",
+                "business": business,
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": "https://mcp.facebook.com/ads",
+                "status": "blocked_meta_mcp_oauth_required",
+                "paused": True,
+                "ids": None,
+                "error": str(exc),
+                "credits_charged": 0,
+            }
         if mode == "preflight":
             accounts = _meta_mcp_call("ads_get_ad_accounts", {}, timeout=60.0)
             acct = core._meta_account_path(str(cfg.get("ad_account_id") or "")) if cfg.get("ad_account_id") else ""
@@ -1394,6 +1407,8 @@ def build_creative_gateway_router() -> APIRouter:
                 "default_page_id": cfg.get("page_id") or None,
             }
 
+        credits = core._creative_credit_backend()
+        store = core._store()
         idempotency_key = str(body.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise HTTPException(status_code=400, detail="idempotency_key is required")
