@@ -988,13 +988,14 @@ def _parse_business_start_args(
     *,
     usage: str,
     auto_default: bool = False,
-) -> tuple[str, str, str, str | None, str | None, bool, bool]:
+) -> tuple[str, str, str, str | None, str | None, bool, bool, bool]:
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
     explicit_name: str | None = None
     auto_start = auto_default
     no_auto = False
+    follow = False
     clean: list[str] = []
     index = 0
     while index < len(tokens):
@@ -1009,6 +1010,8 @@ def _parse_business_start_args(
         elif token in {"--no-auto", "--manual"}:
             auto_start = False
             no_auto = True
+        elif token in {"--follow", "-f"}:
+            follow = True
         elif token == "--schedule":
             index += 1
             if index >= len(tokens):
@@ -1032,7 +1035,7 @@ def _parse_business_start_args(
     raw_name = explicit_name or slug_token
     slug = _slugify(slug_token)
     goal = " ".join(clean[1:]).strip()
-    return slug, raw_name, goal, mode, schedule, auto_start, no_auto
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
 
 
 def _parse_business_delete_args(argv: list[str]) -> dict[str, Any]:
@@ -1858,6 +1861,156 @@ def _enqueue_pg_ceo_bootstrap(
         "status": str(job.status),
         "created": True,
         "schedule": schedule or "",
+    }
+
+
+def _agent_log_path() -> Path | None:
+    """Profile-safe path to the live runtime agent.log, or None when it does not exist."""
+    base: Path | None = None
+    try:
+        from takyon_constants import get_takyon_home
+
+        base = Path(get_takyon_home())
+    except Exception:  # noqa: BLE001 - fall back to the env the launcher always exports
+        home = os.environ.get("TAKYON_HOME")
+        base = Path(home) if home else None
+    if base is None:
+        return None
+    candidate = base / "logs" / "agent.log"
+    return candidate if candidate.exists() else None
+
+
+def _follow_bootstrap_job(
+    store: TakyonStore,
+    slug: str,
+    job_id: str,
+    *,
+    poll_seconds: float = 2.0,
+    max_seconds: float = 1800.0,
+) -> dict[str, Any]:
+    """Stream a create-time ``ceo_bootstrap`` run live to stdout for ``takyon create --follow``.
+
+    Tails three read-only feeds until the job is terminal: the business CEO-turn chat mirror
+    (the same narration the dashboard renders), new ``agent.log`` lines (full runtime
+    visibility on-box), and the job status transitions. This is PURE OBSERVATION — it never
+    claims, runs, or mutates the job (the worker service owns execution), so it changes no
+    creation/billing/identity authority and detaching (Ctrl-C) leaves the build running.
+    """
+    import time
+
+    try:
+        from . import jobs
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import jobs
+
+    terminal = {"completed", "blocked", "failed"}
+
+    seen_events: set[str] = set()
+    # Prime with already-recorded turns so --follow shows only narration produced from now on.
+    try:
+        for event in store.read_ceo_turn_events(slug, limit=200):
+            eid = str(event.get("id") or "")
+            if eid:
+                seen_events.add(eid)
+    except Exception:  # noqa: BLE001 - best-effort priming
+        pass
+
+    log_path = _agent_log_path()
+    log_offset = 0
+    if log_path is not None:
+        try:
+            log_offset = log_path.stat().st_size  # only surface lines written after we attach
+        except OSError:
+            log_path = None
+
+    def _drain_new_chat() -> None:
+        try:
+            events = store.read_ceo_turn_events(slug, limit=50)
+        except Exception:  # noqa: BLE001 - chat mirror is display-only
+            return
+        for event in reversed(events):  # read_ceo_turn_events is newest-first
+            eid = str(event.get("id") or "")
+            if not eid or eid in seen_events:
+                continue
+            seen_events.add(eid)
+            payload = event.get("payload")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            text = str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
+            if text:
+                print(f"\n— CEO —\n{text}\n", flush=True)
+
+    def _drain_new_logs() -> None:
+        nonlocal log_offset, log_path
+        if log_path is None:
+            return
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(log_offset)
+                chunk = handle.read()
+                log_offset = handle.tell()
+        except OSError:
+            log_path = None
+            return
+        for line in chunk.splitlines():
+            if line.strip():
+                print(f"  · {line}", flush=True)
+
+    print(
+        f"[bootstrap] following job {job_id} for business:{slug} "
+        "(Ctrl-C to detach; the build keeps running)",
+        flush=True,
+    )
+    last_status = ""
+    started = time.monotonic()
+    queued_warned = False
+    record = None
+    try:
+        while True:
+            _drain_new_logs()
+            _drain_new_chat()
+            try:
+                with store._connect() as conn:
+                    with store._leaf_conn(conn) as raw:
+                        record = jobs.get_job(raw, job_id)
+            except Exception as exc:  # noqa: BLE001 - follow is best-effort observation
+                print(f"[bootstrap] status read failed: {exc}", flush=True)
+                record = None
+            status = str((record.status if record else "") or "queued")
+            if status != last_status:
+                print(f"[bootstrap] {last_status or 'queued'} -> {status}", flush=True)
+                last_status = status
+            if status in terminal:
+                break
+            elapsed = time.monotonic() - started
+            if status == "queued" and not queued_warned and elapsed > 30:
+                print(
+                    "[bootstrap] still queued after 30s — confirm a worker is draining the "
+                    "queue (e.g. `systemctl is-active takyon-worker.service`)",
+                    flush=True,
+                )
+                queued_warned = True
+            if elapsed > max_seconds:
+                print(
+                    f"[bootstrap] detaching after {int(max_seconds)}s; job still {status}. "
+                    "Re-attach with `takyon logs -f`.",
+                    flush=True,
+                )
+                break
+            time.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        print("\n[bootstrap] detached (the build keeps running on the worker).", flush=True)
+    # Final sweep for trailing narration / log lines written just before the terminal status.
+    _drain_new_logs()
+    _drain_new_chat()
+    return {
+        "job_id": str(job_id),
+        "status": last_status or "queued",
+        "result": (record.result if record else None),
+        "error": (record.error if record else None),
     }
 
 
@@ -3002,9 +3155,9 @@ def _handle_shell_line(
         if len(tokens) < 2:
             raise SystemExit('usage: /create [--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
         command_argv = ["create", *tokens[1:]]
-        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto = _parse_business_start_args(
+        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--live] [--no-auto] [--schedule "every 6h"] <business> [goal]',
+            usage='usage: /create [--live] [--no-auto] [--follow] [--schedule "every 6h"] <business> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -3812,9 +3965,9 @@ def run_takyon_command(
 
     if command in {"init", "create", "build"}:
         auto_default = command in {"create", "build"}
-        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto = _parse_business_start_args(
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--live] [--no-auto] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         # Fail closed on operator identity at the create chokepoint. On a plane that declares
@@ -3913,6 +4066,15 @@ def run_takyon_command(
                 slug,
                 operator_user_id=resolved_operator_user_id,
             )
+            # `--follow`: read-only live tail of the create-time bootstrap (CEO chat mirror +
+            # agent.log + job status) until the worker-run job is terminal. Pure observation —
+            # it never claims or runs the job, so it changes no creation/billing/identity
+            # authority and the build keeps running if the operator detaches.
+            follow_result = None
+            if follow and str(bootstrap_job.get("job_id") or "").strip():
+                follow_result = _follow_bootstrap_job(
+                    store, slug, str(bootstrap_job["job_id"]).strip()
+                )
             return {
                 "success": True,
                 "business": slug,
@@ -3921,6 +4083,7 @@ def run_takyon_command(
                 "init": business_result,
                 "bootstrap_job": bootstrap_job,
                 "starter_credit_seed": starter_credit_seed,
+                **({"follow": follow_result} if follow_result is not None else {}),
             }
         starter_credit_seed = _try_seed_business_free_credits(
             slug,
