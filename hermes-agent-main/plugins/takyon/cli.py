@@ -1213,128 +1213,32 @@ def _operator_create_balance_preflight(
     business_slug: str | None = None,
     defer_settle: bool = False,
 ) -> dict[str, int | str] | None:
-    """Authoritatively gate AND charge company creation on the operator wallet (the plan-funded
-    allowance). Backend source of truth — never trust the client. The CEO bootstrap of a new company
-    spends real provider money on the operator billing rail, so building a company for an operator
-    who cannot pay is an ungated-spend hole. This is the single create chokepoint both the shell
-    /create and the dashboard create RPC funnel through.
+    """Create-time operator wallet chokepoint — NEUTRALIZED for the dogfooding ungate.
 
-    Rules (atomic, fail-closed):
-    - REQUIRE ``allowance_percent_remaining > 3`` — the SAME percent the dashboard surfaces
-      (``remaining / included * 100``, web_server.py operator-account payload). At or below 3% ⇒
-      refuse with ``InsufficientOperatorBalance`` (mapped to the 4030 balance block).
-    - DECREMENT 3% of the period allowance (``included * 3 / 100`` cents) on create by consuming it
-      through the billing rail (reserve → settle), so the wallet authoritatively drops by 3% per
-      created company. Idempotent on the business slug so a retried create never double-charges.
-
-    Fail-OPEN only for genuinely identity-less / non-Postgres dev runs, exactly like
-    ``_operator_budget_reserve``: with no resolved operator identity or no Postgres control plane
-    there is no billing account to read and local development must not be blocked. On the Postgres
-    plane WITH a resolved operator, a missing billing account or a zero/empty allowance is treated as
-    unfunded, so it fails CLOSED — assume the caller may be trying to create without paying (§3)."""
+    This used to authoritatively gate company creation on ``allowance_percent_remaining > 3`` and
+    decrement 3% of the operator plan allowance per create. That plan coupling is intentionally
+    removed (see body): a Takyon user may now create any number of businesses regardless of plan
+    balance. The real money chokepoint stays the per-turn runtime usage gate (``billing.reserve``),
+    and the subuser/product rails are untouched. The function and its signature are retained as the
+    single shell-/create- and dashboard-create funnel so the gate can be reinstated in one place."""
     from .core import _db_backend
 
     user_id = _resolved_operator_user_id(operator_user_id)
     if not user_id or _db_backend() != "postgres":
         return  # no billing plane to gate on (dev / identity-less) — do not block local creation
 
-    import psycopg
-
-    try:
-        from . import billing
-        from .runtime_app import resolve_database_url
-    except ImportError:  # pragma: no cover - alternate load path as a top-level package
-        from plugins.takyon import billing
-        from plugins.takyon.runtime_app import resolve_database_url
-
-    conn = psycopg.connect(resolve_database_url(), autocommit=True)
-    try:
-        try:
-            balances = billing.get_billing_balances(conn, user_id)
-        except billing.NoBillingAccount as exc:
-            # On the Postgres plane a resolved operator with NO billing account has no funding ⇒
-            # fail closed. § 3 (assume evil): never build a company for an operator with no
-            # provable balance.
-            raise InsufficientOperatorBalance(
-                spendable_cents=0,
-                allowance_remaining_cents=0,
-                allowance_included_cents=0,
-                percent_remaining=0.0,
-            ) from exc
-        allowance_included = max(0, int(balances.allowance_included_cents))
-        allowance_remaining = max(0, int(balances.allowance_remaining_cents))
-        # A zero/empty period allowance can never clear the >3% floor — fail closed without a
-        # division-by-zero. percent_remaining is the dashboard-surfaced figure.
-        percent_remaining = (
-            (allowance_remaining / allowance_included) * 100.0
-            if allowance_included > 0
-            else 0.0
-        )
-        # Require STRICTLY more than 3% remaining. Compare on cents (remaining*100 > 3*included)
-        # to avoid float rounding at the boundary.
-        if allowance_included <= 0 or (
-            allowance_remaining * 100 <= _CREATE_ALLOWANCE_GATE_PERCENT * allowance_included
-        ):
-            raise InsufficientOperatorBalance(
-                spendable_cents=allowance_remaining,
-                allowance_remaining_cents=allowance_remaining,
-                allowance_included_cents=allowance_included,
-                percent_remaining=round(percent_remaining, 1),
-            )
-        # Two callers funnel here for one create: the dashboard create RPC runs a slug-LESS pre-check
-        # (operator known, slug not resolved yet), then the create chokepoint inside run_takyon_command
-        # runs the REAL gate WITH the resolved slug. Only the slug-bearing call performs the
-        # authoritative DECREMENT; the slug-less pre-check stays a read-only gate (no side effect) so
-        # it cannot double-charge. Both still fail closed on the >3% floor above.
-        if not str(business_slug or "").strip():
-            return
-        # Authoritative decrement: consume 3% of the period allowance on create. Round so a tiny
-        # allowance still charges at least 1c (never a free create once past the gate).
-        charge_cents = max(
-            1, (allowance_included * _CREATE_ALLOWANCE_GATE_PERCENT + 99) // 100
-        )
-        # Idempotent per create: keyed on the resolved slug so a retried create reuses the same
-        # reservation and never double-charges. reserve → settle drives allowance_used up by
-        # charge_cents.
-        reservation_key = _idempotency_key(
-            "operator-create-charge", str(business_slug).strip(), str(_CREATE_ALLOWANCE_GATE_PERCENT)
-        )
-        try:
-            # This charge is OPERATOR-scoped (the operator's plan allowance), and it runs at the
-            # create chokepoint BEFORE the businesses row is committed, so it must NOT tag the
-            # reservation with the new slug — billing_entries.business_slug carries an FK to
-            # businesses(slug), and that row does not exist yet. The slug is already baked into the
-            # idempotency key for create-specific replay safety.
-            res = billing.reserve(
-                conn,
-                user_id,
-                charge_cents,
-                reservation_key,
-                business_slug=None,
-            )
-        except billing.InsufficientBalance as exc:
-            # Race: allowance fell below the charge between the read and the reserve. Fail closed.
-            raise InsufficientOperatorBalance(
-                spendable_cents=allowance_remaining,
-                allowance_remaining_cents=allowance_remaining,
-                allowance_included_cents=allowance_included,
-                percent_remaining=round(percent_remaining, 1),
-            ) from exc
-        if defer_settle:
-            return {
-                "reservation_key": reservation_key,
-                "charge_cents": int(res.allowance_cents),
-            }
-        # Settle the full reservation at the held amount so the 3% is permanently consumed (not
-        # released). Idempotent: a replayed key returns the same reservation and re-settling is a
-        # no-op (first finalizer wins).
-        billing.settle(conn, reservation_key, int(res.allowance_cents))
-        return {
-            "reservation_key": reservation_key,
-            "charge_cents": int(res.allowance_cents),
-        }
-    finally:
-        conn.close()
+    # Operator-plane create gate REMOVED (dogfooding ungate). Company creation is intentionally
+    # NOT gated on, and NOT charged against, the operator subscription plan: a Takyon user may
+    # create any number of businesses regardless of plan balance, including a $0 wallet. The real
+    # per-turn money chokepoint remains the runtime usage gate (billing.reserve), so severing the
+    # create coupling does not open an unbounded-spend hole at the spend point. Subuser/product
+    # rails (app_usage, product entitlements, product checkout, Stripe) are untouched — only the
+    # operator create→plan coupling is cut, and the bootstrap starter seed is correspondingly
+    # decoupled in safebox._local_grant_business_bootstrap_credits. To restore plan-gated creation,
+    # reinstate the >3% allowance refusal + 3% per-create charge here (git history) and re-add the
+    # settled-charge check in safebox. business_slug/defer_settle are retained for the stable
+    # chokepoint signature; finalize() no-ops on the None return.
+    return None
 
 
 def _operator_create_balance_finalize(

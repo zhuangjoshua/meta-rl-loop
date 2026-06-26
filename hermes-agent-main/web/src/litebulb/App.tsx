@@ -58,7 +58,6 @@ function Router() {
     businesses,
     account,
     activeBusiness,
-    walletBalance,
     workspace,
     creativeCredits,
     traction,
@@ -147,22 +146,14 @@ function Router() {
       return;
     }
     if (buildState.status !== "idle") return;
-    // GOAL_RULES §3 gap #2: defense in depth — even if /building is reached directly, never call
-    // createBusiness until the account balance has loaded AND is positive. A null balance (account
-    // not yet loaded) must NOT silently create; bounce to billing instead of spending.
-    if (walletBalance === null) return;
-    if (walletBalance <= 0) {
-      setBillingNudge("Subscribe to a plan to create a company.");
-      setSettings("plans");
-      nav("/");
-      return;
-    }
+    // Operator create is ungated from the plan (dogfooding): no wallet-balance precondition. The
+    // per-turn runtime usage gate remains the spend chokepoint; subuser/product rails stay gated.
     void createBusiness(pendingIdea);
     // Clear the auto-create trigger the instant we initiate, so a RELOAD of /building (which resets
-    // the in-memory buildState to "idle") cannot re-fire createBusiness and mint+bill a SECOND
-    // company. The build screen reads its idea from buildState.goal (set by createBusiness) below.
+    // the in-memory buildState to "idle") cannot re-fire createBusiness and mint a SECOND company.
+    // The build screen reads its idea from buildState.goal (set by createBusiness) below.
     setPendingIdea("");
-  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState, setPendingIdea, walletBalance]);
+  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState, setPendingIdea]);
 
   useEffect(() => {
     if (path !== "/building") return;
@@ -219,22 +210,9 @@ function Router() {
       setAuthModal("signup");
       return;
     }
-    // GOAL_RULES §3 gap #2 (frontend half): never enter /building (which auto-calls createBusiness)
-    // for an operator who cannot pay. walletBalance is the remaining subscription allowance.
-    //   * null  → account not loaded yet: defer (do NOT create); the user can retry once it loads.
-    //   * <= 0  → no funds: open Plans instead of /building and show a subscribe nudge.
-    // The backend preflight (takyon.dashboard.create → _operator_create_balance_preflight) is the
-    // authoritative gate; this is the UX guard so no /building screen is shown for a zero balance.
-    if (walletBalance === null) {
-      setBillingNudge("Loading your balance… try again in a moment.");
-      setSettings("billing");
-      return;
-    }
-    if (walletBalance <= 0) {
-      setBillingNudge("Subscribe to a plan to create a company.");
-      setSettings("plans");
-      return;
-    }
+    // Operator create is ungated from the plan (dogfooding): no wallet-balance precondition here, so
+    // /building proceeds regardless of the operator's plan/allowance. The per-turn runtime usage
+    // gate remains the real spend chokepoint; subuser/product rails stay gated.
     nav("/building");
   };
 

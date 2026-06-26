@@ -185,3 +185,29 @@ def test_create_refunds_deferred_charge_when_business_row_not_durable(monkeypatc
 
     assert len(store.commits) == 1
     assert finalized == [{"charge": {"reservation_key": "create-rk", "charge_cents": 300}, "settle": False}]
+
+
+def test_real_preflight_is_ungated_and_never_connects(monkeypatch):
+    """The REAL ``_operator_create_balance_preflight`` (unpatched) is ungated from the operator plan:
+    on the Postgres plane WITH a resolved operator it returns None and NEVER opens a DB connection —
+    so it cannot read a balance, refuse, or charge. This is the regression guard for the dogfooding
+    ungate; the old gate connected, read the allowance, raised below 3%, and reserved a 3% charge.
+    A future re-introduction of a charge/gate would re-add the connection and trip this test."""
+    import psycopg
+
+    from plugins.takyon import core
+
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(takyon_cli, "_resolved_operator_user_id", lambda *_a, **_k: "op-1")
+
+    def _no_connect(*_a, **_k):
+        raise AssertionError("ungated create preflight must not open a DB connection (no gate/charge)")
+
+    monkeypatch.setattr(psycopg, "connect", _no_connect)
+
+    # Both call shapes the chokepoint uses: the slug-less pre-check and the slug-bearing create.
+    assert takyon_cli._operator_create_balance_preflight("op-1") is None
+    assert (
+        takyon_cli._operator_create_balance_preflight("op-1", business_slug="acme", defer_settle=True)
+        is None
+    )

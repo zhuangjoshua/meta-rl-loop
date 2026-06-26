@@ -247,9 +247,12 @@ def test_business_bootstrap_credits_route_uses_fixed_policy(client, monkeypatch)
     assert calls == [{"business_slug": "climblog", "operator_user_id": "user_A"}]
 
 
-def test_business_bootstrap_credits_route_refuses_unverified_create_charge(client, monkeypatch):
+def test_business_bootstrap_credits_route_refuses_owner_mismatch(client, monkeypatch):
+    # The seed grant is ungated from any paid create charge (operator create is ungated), but it
+    # still enforces business-owner isolation. A PermissionError from the local grant must surface as
+    # a 403 with its detail intact — this is the route's error-mapping contract.
     def _grant(_conn, business_slug, operator_user_id):
-        raise PermissionError("business_bootstrap_credit_requires_create_charge")
+        raise PermissionError("business_bootstrap_credit_owner_mismatch")
 
     monkeypatch.setattr(safebox_app.safebox, "_local_grant_business_bootstrap_credits", _grant)
 
@@ -260,7 +263,7 @@ def test_business_bootstrap_credits_route_refuses_unverified_create_charge(clien
     )
 
     assert resp.status_code == 403
-    assert resp.json()["detail"] == "business_bootstrap_credit_requires_create_charge"
+    assert resp.json()["detail"] == "business_bootstrap_credit_owner_mismatch"
 
 
 def test_starter_allowance_requires_verified_auth0_session(client, monkeypatch):

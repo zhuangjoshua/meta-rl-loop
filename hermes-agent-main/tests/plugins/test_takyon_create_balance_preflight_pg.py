@@ -1,13 +1,15 @@
-"""Company-creation balance preflight — GOAL_RULES §3 gap #2 (zero-balance create block).
+"""Company-creation balance preflight — operator create is UNGATED from the plan (dogfooding).
 
-Drives the authoritative server-side gate ``plugins.takyon.cli._operator_create_balance_preflight``
-against real Postgres. This is the gate the ``takyon.dashboard.create`` gateway method calls BEFORE
-any business row or bootstrap spend, so an operator with no spendable balance cannot have a company
-page built (which would spend real provider money on the operator billing rail).
+The create chokepoint ``plugins.takyon.cli._operator_create_balance_preflight`` used to gate company
+creation on ``allowance_percent_remaining > 3`` and decrement 3% of the operator plan allowance per
+create. That plan coupling was deliberately removed: a Takyon user may create any number of
+businesses regardless of plan balance, including a fully drained or never-funded wallet. The real
+money chokepoint is the per-turn runtime usage gate (``billing.reserve``), not company creation, and
+the subuser/product rails are untouched.
 
-Spendable balance == allowance remaining (the same quantity the dashboard surfaces as
-``account.spendable_cents``; the operator money rail is allowance-only). The preflight fails OPEN
-only for identity-less / non-Postgres dev.
+These tests pin the NEW contract: the preflight never refuses on balance and never charges the
+operator wallet on create. The dev fail-opens (identity-less / non-Postgres) still short-circuit
+before touching the DB.
 
 Skips unless psycopg is importable and TAKYON_TEST_PG_DSN is set (see tests/conftest.py).
 """
@@ -23,7 +25,6 @@ psycopg = pytest.importorskip("psycopg")
 
 from plugins.takyon import billing, cli  # noqa: E402
 from plugins.takyon import runtime_app  # noqa: E402
-from plugins.takyon.cli import InsufficientOperatorBalance  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 
 
@@ -48,63 +49,47 @@ def _preflight_pointed_at(pg_conn, monkeypatch):
     yield
 
 
-def test_zero_balance_operator_is_blocked(pg_conn, monkeypatch):
-    """An operator whose spendable balance is drained to zero (starter allowance reset to 0) MUST be
-    refused company creation with InsufficientOperatorBalance.
-
-    NOTE: provisioning grants a $1 starter allowance, so zero-balance is the *post-exhaustion* state
-    — modelled here by resetting the included allowance to 0."""
+def test_zero_balance_operator_is_allowed(pg_conn, monkeypatch):
+    """An operator whose spendable allowance is drained to zero may STILL create a company: the
+    ungated preflight returns without raising. (Previously this raised InsufficientOperatorBalance.)"""
     uid = _provision_operator(pg_conn)
     billing.grant_allowance(pg_conn, uid, 0, f"drain:{uid}")  # exhaust the starter allowance
     bal = billing.get_billing_balances(pg_conn, uid)
-    assert bal.allowance_remaining_cents == 0  # truly empty (allowance is the only money rail)
+    assert bal.allowance_remaining_cents == 0
     with _preflight_pointed_at(pg_conn, monkeypatch):
-        with pytest.raises(InsufficientOperatorBalance) as exc:
-            cli._operator_create_balance_preflight(uid)
-    assert exc.value.spendable_cents == 0
-    assert "insufficient_balance" in str(exc.value)
+        assert cli._operator_create_balance_preflight(uid) is None  # must NOT raise
+        # ...and a slug-bearing create call must not charge either.
+        assert (
+            cli._operator_create_balance_preflight(uid, business_slug="acme", defer_settle=True)
+            is None
+        )
+    bal_after = billing.get_billing_balances(pg_conn, uid)
+    assert bal_after.allowance_remaining_cents == 0  # no negative, no charge applied
 
 
-def test_fresh_operator_starter_allowance_is_allowed(pg_conn, monkeypatch):
-    """A freshly provisioned operator carries the $1 starter allowance (spendable > 0), so the
-    preflight lets them create their first company. Proves the gate blocks only a genuinely empty
-    wallet, not every new operator."""
-    uid = _provision_operator(pg_conn)
-    bal = billing.get_billing_balances(pg_conn, uid)
-    assert bal.allowance_remaining_cents > 0  # starter allowance present
-    with _preflight_pointed_at(pg_conn, monkeypatch):
-        cli._operator_create_balance_preflight(uid)  # must NOT raise
-
-
-def test_operator_with_allowance_is_allowed(pg_conn, monkeypatch):
-    """An operator with a positive subscription allowance has spendable > 0 → creation passes the
-    preflight (no exception)."""
+def test_funded_operator_is_allowed_and_not_charged(pg_conn, monkeypatch):
+    """A funded operator passes the preflight (no raise) AND is NOT decremented: company creation no
+    longer consumes the operator plan allowance, so business count is decoupled from plan size."""
     uid = _provision_operator(pg_conn)
     billing.grant_allowance(pg_conn, uid, 5000, f"grant:{uid}")  # $50 allowance
+    before = billing.get_billing_balances(pg_conn, uid).allowance_remaining_cents
+    assert before == 5000
     with _preflight_pointed_at(pg_conn, monkeypatch):
-        cli._operator_create_balance_preflight(uid)  # must NOT raise
+        # The real create chokepoint calls the slug-bearing, deferred-settle form.
+        assert (
+            cli._operator_create_balance_preflight(uid, business_slug="acme", defer_settle=True)
+            is None
+        )
+    after = billing.get_billing_balances(pg_conn, uid).allowance_remaining_cents
+    assert after == 5000, "ungated create must not decrement the operator allowance"
 
 
-def test_operator_refunded_allowance_after_drain_is_allowed(pg_conn, monkeypatch):
-    """Spendable tracks the CURRENT allowance, not a one-time starter grant: an operator whose
-    starter allowance was drained to zero, then re-funded via a fresh ``grant_allowance``, can create
-    again (proves the gate re-reads allowance_remaining each time, the sole operator money rail)."""
-    uid = _provision_operator(pg_conn)
-    billing.grant_allowance(pg_conn, uid, 0, f"drain:{uid}")  # zero out the starter allowance
-    billing.grant_allowance(pg_conn, uid, 1500, f"refund:{uid}")  # $15 fresh allowance period
-    bal = billing.get_billing_balances(pg_conn, uid)
-    assert bal.allowance_remaining_cents == 1500
-    with _preflight_pointed_at(pg_conn, monkeypatch):
-        cli._operator_create_balance_preflight(uid)  # must NOT raise
-
-
-def test_missing_billing_account_fails_closed(pg_conn, monkeypatch):
-    """§3 (assume evil): a resolved operator on the Postgres plane with NO billing account row has no
-    provable funding, so the preflight fails CLOSED (blocks), it does not silently allow."""
+def test_missing_billing_account_is_allowed(pg_conn, monkeypatch):
+    """A resolved operator with NO billing account row may still create: the ungated preflight does
+    not read or require a billing account. (Previously this failed CLOSED.)"""
     ghost_uid = str(uuid.uuid4())  # valid uuid, never provisioned → no billing_accounts row
     with _preflight_pointed_at(pg_conn, monkeypatch):
-        with pytest.raises(InsufficientOperatorBalance):
-            cli._operator_create_balance_preflight(ghost_uid)
+        assert cli._operator_create_balance_preflight(ghost_uid) is None  # must NOT raise
 
 
 def test_no_operator_identity_fails_open_for_dev(pg_conn, monkeypatch):

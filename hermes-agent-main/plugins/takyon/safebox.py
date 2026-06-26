@@ -984,8 +984,9 @@ def _safebox_idempotency_key(prefix: str, *parts: Any, max_length: int = 180) ->
 
 
 def _business_create_charge_reservation_key(business_slug: str) -> str:
-    # Mirrors plugins.takyon.cli._operator_create_balance_preflight. Keep the literal percent string
-    # stable so the safebox can verify that the bootstrap starter grant is tied to the paid create gate.
+    # Mirrors the historical plugins.takyon.cli._operator_create_balance_preflight reservation key.
+    # The paid-create-charge verification was removed with the operator create ungate; this key is
+    # now retained only for grant-metadata traceability (create_charge_reservation_key).
     return _safebox_idempotency_key("operator-create-charge", str(business_slug or "").strip(), "3")
 
 
@@ -1175,23 +1176,13 @@ def _local_grant_business_bootstrap_credits(
         owner_user_id = str(row[0] if not isinstance(row, dict) else row.get("owner_user_id") or "").strip()
         if owner_user_id != user_ref:
             raise PermissionError("business_bootstrap_credit_owner_mismatch")
-        charged = credit_conn.execute(
-            """
-            select coalesce(sum(amount_cents), 0) as charged_cents
-              from billing_entries
-             where user_id = %s
-               and reservation_key = %s
-               and kind = 'settle'
-            """,
-            (user_ref, reservation_key),
-        ).fetchone()
-        charged_cents = int(
-            charged[0]
-            if charged is not None and not isinstance(charged, dict)
-            else (charged or {}).get("charged_cents") or 0
-        )
-        if charged_cents <= 0:
-            raise PermissionError("business_bootstrap_credit_requires_create_charge")
+        # Operator-plane dogfooding: the bootstrap starter seed (logo + X) is granted to the
+        # verified business owner UNCONDITIONALLY. It previously required a settled operator create
+        # charge (the 3% plan decrement), but operator company creation is now ungated from the plan
+        # (see cli._operator_create_balance_preflight), so the seed no longer depends on a paid
+        # create. Owner verification (above) and slug idempotency (the seed key below) still apply,
+        # and the subuser/product credit rails are unaffected. To re-couple the seed to a paid
+        # create, restore the settled-charge check here (git history) alongside the create gate.
         return _local_grant_credits(
             credit_conn,
             slug,
@@ -1559,8 +1550,8 @@ def grant_business_bootstrap_credits(
     """Grant the fixed create-time starter credits through safebox provisioning policy.
 
     Remote planes cannot call ``grant_credits`` with arbitrary amounts. This path mints only the
-    fixed bootstrap starter pack, and the safebox verifies the business owner plus the paid create
-    charge before writing the grant.
+    fixed bootstrap starter pack, and the safebox verifies the business owner before writing the
+    grant. (The paid-create-charge requirement was removed with the operator create ungate.)
     """
     slug = str(business_slug or "").strip()
     user_ref = str(operator_user_id or "").strip()
