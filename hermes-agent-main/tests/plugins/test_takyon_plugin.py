@@ -6268,9 +6268,8 @@ def _meta_launch_args(**overrides):
     return args
 
 
-def _set_meta_composio_env(monkeypatch) -> None:
-    monkeypatch.setenv("COMPOSIO_API_KEY", "composio-test-key")
-    monkeypatch.setenv("COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID", "metaads-test-account")
+def _set_meta_mcp_env(monkeypatch) -> None:
+    monkeypatch.setenv("META_MCP_OAUTH_TOKEN", "official-meta-mcp-test-token")
 
 
 def _write_meta_launch_receipt(tmp_path, *, business="clipbook", slug="demo-meta", mode="live"):
@@ -6415,8 +6414,8 @@ def test_business_meta_ad_launch_rejects_over_cap_budget(tmp_path, monkeypatch):
     assert not (tmp_path / "businesses" / "clipbook" / "distribution" / "meta-ads").exists()
 
 
-def test_business_meta_ad_launch_defaults_to_activation_when_live(tmp_path, monkeypatch):
-    _set_meta_composio_env(monkeypatch)
+def test_business_meta_ad_launch_defaults_to_paused_when_live(tmp_path, monkeypatch):
+    _set_meta_mcp_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6448,25 +6447,15 @@ def test_business_meta_ad_launch_defaults_to_activation_when_live(tmp_path, monk
                 "balance_credits": 2999,
                 "reserved_credits": 2999,
             }
-        assert endpoint == "meta-control"
-        return {
-            "success": True,
-            "status": "activated",
-            "graph_version": "v23.0",
-            "applied": [
-                {"object": "campaign", "id": "campaign-1", "status": "ACTIVE"},
-                {"object": "adset", "id": "adset-1", "status": "ACTIVE"},
-                {"object": "ad", "id": "ad-1", "status": "ACTIVE"},
-            ],
-        }
+        raise AssertionError(f"unexpected Meta gateway endpoint: {endpoint}")
 
     monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
 
     result = json.loads(handle_business_meta_ad_launch(_meta_launch_args()))
 
     assert result["success"] is True
-    assert result["status"] == "activated"
-    assert result["paused"] is False
+    assert result["status"] == "created_paused"
+    assert result["paused"] is True
     assert result["value"]["reserved_credits"] == 2999
     assert result["value"]["total_budget_usd"] == 29.99
 
@@ -6485,10 +6474,7 @@ def test_business_meta_ad_launch_blocks_missing_video(tmp_path, monkeypatch):
 
 def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, monkeypatch):
     for var in (
-        "COMPOSIO_API_KEY",
-        "COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID",
-        "COMPOSIO_METAADS_USER_ID",
-        "COMPOSIO_USER_ID",
+        "META_MCP_OAUTH_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
     _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6496,7 +6482,7 @@ def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, mo
         takyon_core,
         "_call_creative_runtime_gateway",
         lambda endpoint, payload: (_ for _ in ()).throw(
-            TakyonError("Meta action requires a Composio Meta Ads connection: missing COMPOSIO_API_KEY")
+            TakyonError("Meta v2 action requires official Meta Ads MCP OAuth: missing META_MCP_OAUTH_TOKEN")
         ),
     )
 
@@ -6507,8 +6493,8 @@ def test_business_meta_ad_launch_preflight_surfaces_authority_error(tmp_path, mo
     )
 
     assert result["success"] is False
-    assert "Composio Meta Ads connection" in result["error"]
-    assert "COMPOSIO_API_KEY" in result["error"]
+    assert "Meta Ads MCP OAuth" in result["error"]
+    assert "META_MCP_OAUTH_TOKEN" in result["error"]
 
 
 def test_business_meta_ad_launch_test_mode_supports_image_asset(tmp_path, monkeypatch):
@@ -6583,7 +6569,7 @@ def test_business_meta_ad_launch_manual_handoff_writes_packet_without_meta_call(
 
 
 def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, monkeypatch):
-    _set_meta_composio_env(monkeypatch)
+    _set_meta_mcp_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6607,7 +6593,7 @@ def test_business_meta_ad_launch_live_image_blocks_without_credits(tmp_path, mon
 
 
 def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatch):
-    _set_meta_composio_env(monkeypatch)
+    _set_meta_mcp_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6642,16 +6628,7 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
                 "reserved_credits": 2999,
             }
             if endpoint == "meta-launch"
-            else {
-                "success": True,
-                "status": "activated",
-                "graph_version": "v23.0",
-                "applied": [
-                    {"object": "campaign", "id": "campaign-1", "status": "ACTIVE"},
-                    {"object": "adset", "id": "adset-1", "status": "ACTIVE"},
-                    {"object": "ad", "id": "ad-1", "status": "ACTIVE"},
-                ],
-            }
+            else (_ for _ in ()).throw(AssertionError(f"unexpected Meta gateway endpoint: {endpoint}"))
         ),
     )
 
@@ -6667,12 +6644,12 @@ def test_business_meta_ad_launch_live_image_charges_credits(tmp_path, monkeypatc
     )
 
     assert result["success"] is True
-    assert result["status"] == "activated"
+    assert result["status"] == "created_paused"
     assert result["balance_credits"] == 2999
 
 
 def test_business_meta_ad_launch_derives_bounded_budget_when_omitted(tmp_path, monkeypatch):
-    _set_meta_composio_env(monkeypatch)
+    _set_meta_mcp_env(monkeypatch)
     monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
     monkeypatch.setenv("META_PAGE_ID", "654321")
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
@@ -6818,7 +6795,7 @@ def test_business_meta_ad_control_test_mode_suppresses_and_is_idempotent(tmp_pat
 
 
 def test_business_meta_ad_control_live_activate_records_event(tmp_path, monkeypatch):
-    _set_meta_composio_env(monkeypatch)
+    _set_meta_mcp_env(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
     _seed_live_ad_spend_policy(
@@ -6911,7 +6888,7 @@ def test_business_meta_ad_control_rejects_over_cap_budget(tmp_path, monkeypatch)
 
 
 def test_business_meta_ad_insights_sync_live_writes_snapshot(tmp_path, monkeypatch):
-    _set_meta_composio_env(monkeypatch)
+    _set_meta_mcp_env(monkeypatch)
     store = _meta_test_business(tmp_path, monkeypatch, mode="live")
     _write_meta_launch_receipt(tmp_path)
     _seed_live_ad_spend_policy(

@@ -2543,8 +2543,8 @@ def meta_graph_forward(
 
     Forwards method/path/params to the safebox ``/v1/providers/meta/graph`` route, which re-resolves
     the real Meta system-user token LOCALLY and returns the key-free upstream JSON. The token never
-    leaves the safebox. Retained for diagnostics/compatibility; production launch calls use the
-    Composio Meta Ads MCP connection before this legacy path can run."""
+    leaves the safebox. Retained for diagnostics/compatibility; production v2 launch/control/read
+    calls use the official Meta MCP broker instead."""
     payload: dict = {
         "method": str(method or "GET"),
         "path": str(path or ""),
@@ -2559,6 +2559,93 @@ def meta_graph_forward(
         timeout=max(20.0, float(timeout) + 10.0),
     )
     return result if isinstance(result, dict) else {}
+
+
+def _local_meta_mcp_endpoint() -> str:
+    try:
+        from . import meta_mcp
+
+        endpoint = first_env_backed_value(*meta_mcp.META_MCP_ENDPOINT_ALIASES)
+        return str(endpoint or meta_mcp.DEFAULT_META_MCP_ENDPOINT).strip()
+    except Exception:
+        return "https://mcp.facebook.com/ads"
+
+
+def _local_meta_mcp_token() -> str:
+    from . import meta_mcp
+
+    return str(first_env_backed_value(*meta_mcp.META_MCP_TOKEN_ALIASES) or "").strip()
+
+
+def meta_mcp_call(
+    *,
+    tool_name: str,
+    arguments: dict | None = None,
+    timeout: float = 60.0,
+) -> dict:
+    """Broker one official Meta Ads MCP tool call through the safebox.
+
+    META_MCP_OAUTH_TOKEN is a provider credential and is denied /v1/env egress,
+    so runtime planes call this key-free broker. On the safebox host the OAuth
+    token is resolved locally and sent only to Meta's official MCP endpoint.
+    """
+    payload = {
+        "tool_name": str(tool_name or ""),
+        "arguments": dict(arguments or {}),
+        "timeout": float(timeout),
+    }
+    if _use_remote_authority():
+        result = _remote_json(
+            "POST",
+            "/v1/providers/meta/mcp/call",
+            payload,
+            timeout=max(20.0, float(timeout) + 10.0),
+        )
+        return result if isinstance(result, dict) else {}
+
+    from . import meta_mcp
+
+    token = _local_meta_mcp_token()
+    if not token:
+        raise RemoteSafeboxError(
+            "Meta MCP OAuth is not configured on the safebox",
+            status_code=428,
+            payload={"detail": "meta_mcp_oauth_required"},
+        )
+    return meta_mcp.call_tool(
+        str(tool_name or ""),
+        dict(arguments or {}),
+        token=token,
+        endpoint=_local_meta_mcp_endpoint(),
+        timeout=float(timeout),
+    )
+
+
+def meta_mcp_list_tools(*, timeout: float = 60.0) -> dict:
+    """List official Meta Ads MCP tools through the safebox-held OAuth token."""
+    if _use_remote_authority():
+        result = _remote_json(
+            "POST",
+            "/v1/providers/meta/mcp/tools",
+            {"timeout": float(timeout)},
+            timeout=max(20.0, float(timeout) + 10.0),
+        )
+        return result if isinstance(result, dict) else {}
+
+    from . import meta_mcp
+
+    token = _local_meta_mcp_token()
+    if not token:
+        raise RemoteSafeboxError(
+            "Meta MCP OAuth is not configured on the safebox",
+            status_code=428,
+            payload={"detail": "meta_mcp_oauth_required"},
+        )
+    return meta_mcp.list_tools(
+        token=token,
+        endpoint=_local_meta_mcp_endpoint(),
+        timeout=float(timeout),
+    )
 
 
 def first_env_backed_value(*keys: str) -> str:

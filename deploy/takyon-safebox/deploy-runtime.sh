@@ -82,13 +82,21 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from tools.lazy_deps import ensure
 
-# Logo rendering runs inside Safebox and needs the real provider SDK plus
-# alpha post-processing stack present before the service starts.
+# Logo rendering and official Meta MCP calls run inside Safebox and need their provider/client
+# SDKs present before the service starts.
 ensure('image.gemini', prompt=False)
 ensure('image.logo_postprocess', prompt=False)
 
 import numpy  # noqa: F401
 from PIL import Image  # noqa: F401
+try:
+    import mcp  # noqa: F401
+except Exception:
+    import subprocess
+    import sys
+
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'mcp==1.26.0'])
+    import mcp  # noqa: F401
 PY
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload

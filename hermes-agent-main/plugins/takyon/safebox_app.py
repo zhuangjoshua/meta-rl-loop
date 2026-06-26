@@ -617,6 +617,16 @@ class _MetaGraphBody(BaseModel):
     timeout: float = 60.0
 
 
+class _MetaMCPCallBody(BaseModel):
+    tool_name: str
+    arguments: dict[str, Any] = {}
+    timeout: float = 60.0
+
+
+class _MetaMCPToolsBody(BaseModel):
+    timeout: float = 60.0
+
+
 class _RegisterUserKeyBody(BaseModel):
     user_id: str
     raw_key: str
@@ -928,6 +938,7 @@ def _provider_key_denylist() -> frozenset[str]:
                 "COMPOSIO_API_KEY",
                 "FIRECRAWL_API_KEY", "OPENROUTER_API_KEY", "PARALLEL_API_KEY", "XAI_API_KEY",
                 "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD",
+                "META_MCP_OAUTH_TOKEN",
                 "META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN", "META_CAPI_TOKEN",
             }
         )
@@ -2102,23 +2113,56 @@ def build_safebox_app() -> FastAPI:
     def provider_meta_config(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        # The Meta system-user token is a provider secret held here and DENIED /v1/env egress, so a
-        # runtime plane cannot resolve it. This returns the NON-SECRET Meta config (graph version,
-        # ad account id, page id, composio_* hints) plus a has_token bool; the token VALUE is redacted
-        # ("") and never leaves the safebox. Live launches must still resolve the Composio Meta Ads
-        # MCP connected account; this route supplies only non-secret readiness/config hints.
+        # The official Meta MCP OAuth token and legacy system-user token are provider secrets held
+        # here and DENIED /v1/env egress, so a runtime plane cannot resolve them. This returns only
+        # NON-SECRET readiness/config hints. Live v2 launches use the /meta/mcp/* broker routes.
         # Gated by the internal token (transport reachability); the per-action money gate lives
         # upstream in the meta-ads handlers.
         _require_internal_token(authorization)
         from . import core as _core
 
         try:
-            cfg = dict(_core._meta_config(require_token=True))
+            cfg = dict(_core._meta_config(require_token=False))
         except _core.TakyonError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         cfg["has_token"] = bool(cfg.get("token"))
         cfg["token"] = ""
+        cfg["has_mcp_oauth_token"] = bool(cfg.get("has_mcp_oauth_token"))
         return cfg
+
+    @app.post("/v1/providers/meta/mcp/tools")
+    def provider_meta_mcp_tools(
+        body: _MetaMCPToolsBody | None = None,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Official Meta Ads MCP tool discovery. The OAuth token is resolved locally by safebox.py and
+        # never leaves this host; callers receive only the key-free MCP tool schemas.
+        _require_internal_token(authorization)
+        try:
+            return safebox.meta_mcp_list_tools(timeout=(body.timeout if body else 60.0))
+        except safebox.RemoteSafeboxError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.payload.get("detail") or str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/providers/meta/mcp/call")
+    def provider_meta_mcp_call(
+        body: _MetaMCPCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Official Meta Ads MCP action broker. This is the v2 launch/control/read transport; it does
+        # not use the legacy Meta developer app, and it does not use Composio.
+        _require_internal_token(authorization)
+        try:
+            return safebox.meta_mcp_call(
+                tool_name=body.tool_name,
+                arguments=dict(body.arguments or {}),
+                timeout=body.timeout,
+            )
+        except safebox.RemoteSafeboxError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.payload.get("detail") or str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/v1/providers/meta/graph")
     def provider_meta_graph(
@@ -2131,7 +2175,7 @@ def build_safebox_app() -> FastAPI:
         from . import core as _core
 
         try:
-            cfg = _core._meta_config(require_token=True)
+            cfg = _core._meta_config(require_token=False)
             return _core._meta_graph(
                 body.method,
                 body.path,

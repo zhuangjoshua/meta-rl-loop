@@ -23,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 
@@ -118,6 +118,122 @@ def _meta_write_receipt(core: Any, business_root: Path, rel: str, payload: dict[
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
     )
     return receipt_rel
+
+
+def _meta_mcp_call(tool_name: str, arguments: Mapping[str, Any] | None = None, *, timeout: float = 60.0) -> dict[str, Any]:
+    try:
+        result = safebox.meta_mcp_call(
+            tool_name=str(tool_name or ""),
+            arguments=dict(arguments or {}),
+            timeout=float(timeout),
+        )
+    except Exception as exc:
+        raise RuntimeError(str(exc)) from exc
+    return result if isinstance(result, dict) else {"result": result}
+
+
+def _meta_mcp_unwrap(value: Any) -> Any:
+    if isinstance(value, Mapping) and set(value.keys()) == {"result"}:
+        return value.get("result")
+    return value
+
+
+def _meta_mcp_find_key(value: Any, keys: tuple[str, ...]) -> str:
+    if isinstance(value, Mapping):
+        for key in keys:
+            raw = value.get(key)
+            if raw not in (None, ""):
+                return str(raw).strip()
+        for child in value.values():
+            found = _meta_mcp_find_key(child, keys)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _meta_mcp_find_key(child, keys)
+            if found:
+                return found
+    return ""
+
+
+def _meta_mcp_items(value: Any) -> list[Any]:
+    unwrapped = _meta_mcp_unwrap(value)
+    if isinstance(unwrapped, list):
+        return unwrapped
+    if isinstance(unwrapped, Mapping):
+        for key in ("data", "items", "accounts", "pages", "results"):
+            item = unwrapped.get(key)
+            if isinstance(item, list):
+                return item
+        return [dict(unwrapped)]
+    return []
+
+
+def _meta_mcp_create_args(
+    plan: Mapping[str, Any],
+    *,
+    ad_account_id: str,
+    creative_id: str = "",
+    campaign_id: str = "",
+    adset_id: str = "",
+    image_url: str = "",
+    video_id: str = "",
+) -> dict[str, dict[str, Any]]:
+    campaign: dict[str, Any] = {
+        "ad_account_id": ad_account_id,
+        "name": plan["campaign_name"],
+        "objective": plan["objective"],
+        "buying_type": "AUCTION",
+        "status": "PAUSED",
+        "special_ad_categories": [],
+        "campaign_daily_budget": plan["daily_budget_cents"],
+        "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+    }
+    if plan.get("campaign_start_time"):
+        campaign["campaign_start_time"] = plan.get("campaign_start_time")
+    if plan.get("campaign_end_time"):
+        campaign["campaign_stop_time"] = plan.get("campaign_end_time")
+
+    adset: dict[str, Any] = {
+        "ad_account_id": ad_account_id,
+        "name": plan["adset_name"],
+        "campaign_id": campaign_id,
+        "status": "PAUSED",
+        "billing_event": plan["billing_event"],
+        "optimization_goal": plan["optimization_goal"],
+        "destination_type": "WEBSITE",
+        "targeting": plan["targeting"],
+    }
+    if plan.get("adset_start_time"):
+        adset["start_time"] = plan.get("adset_start_time")
+    if plan.get("adset_end_time"):
+        adset["end_time"] = plan.get("adset_end_time")
+
+    creative: dict[str, Any] = {
+        "ad_account_id": ad_account_id,
+        "name": f"{plan['ad_name']} creative",
+        "page_id": plan["page_id"],
+        "link_url": plan["link"],
+        "message": plan["message"],
+        "call_to_action_type": plan["call_to_action"],
+    }
+    if plan.get("headline"):
+        creative["headline"] = plan.get("headline")
+    if plan.get("description"):
+        creative["description"] = plan.get("description")
+    if image_url:
+        creative["image_url"] = image_url
+    if video_id:
+        creative["video_id"] = video_id
+
+    ad: dict[str, Any] = {
+        "ad_account_id": ad_account_id,
+        "name": plan["ad_name"],
+        "adset_id": adset_id,
+        "creative_id": creative_id,
+        "status": "PAUSED",
+    }
+    return {"campaign": campaign, "adset": adset, "creative": creative, "ad": ad}
 
 
 def _meta_public_url(core: Any, business: str, surface: dict[str, Any] | None = None) -> str:
@@ -1249,21 +1365,24 @@ def build_creative_gateway_router() -> APIRouter:
         mode = str(body.get("mode") or "launch").strip().lower()
         cfg = core._meta_config(require_token=True)
         if mode == "preflight":
-            identity = core._meta_graph("GET", "me", {"fields": "id,name"}, cfg)
-            accounts = core._meta_graph(
-                "GET",
-                "me/adaccounts",
-                {"fields": "id,account_id,name,account_status,currency,is_prepay_account"},
-                cfg,
-            )
+            accounts = _meta_mcp_call("ads_get_ad_accounts", {}, timeout=60.0)
+            acct = core._meta_account_path(str(cfg.get("ad_account_id") or "")) if cfg.get("ad_account_id") else ""
+            pages = None
+            if acct:
+                pages = _meta_mcp_call(
+                    "ads_get_ad_account_pages",
+                    {"ad_account_id": acct},
+                    timeout=60.0,
+                )
             return {
                 "success": True,
                 "mode": "preflight",
                 "read_only": True,
                 "business": business,
-                "graph_version": cfg["version"],
-                "identity": identity,
-                "ad_accounts": accounts.get("data") if isinstance(accounts, dict) else None,
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": cfg.get("mcp_endpoint"),
+                "ad_accounts": _meta_mcp_items(accounts),
+                "ad_account_pages": _meta_mcp_items(pages) if pages is not None else None,
                 "default_ad_account_id": cfg.get("ad_account_id") or None,
                 "default_page_id": cfg.get("page_id") or None,
             }
@@ -1290,6 +1409,36 @@ def build_creative_gateway_router() -> APIRouter:
 
         cfg["ad_account_id"] = plan["ad_account_id"]
         acct = core._meta_account_path(plan["ad_account_id"])
+        image_url = str(plan.get("image_url") or "").strip()
+        video_id = str(plan.get("video_id") or "").strip()
+        if plan["asset_kind"] == "video":
+            if not video_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Meta v2 video launch requires ad.video_id from the advideos shim; "
+                        "the old Composio video upload path is disabled"
+                    ),
+                )
+            if not image_url:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Meta v2 video launch requires ad.image_url or ad.thumbnail_url for the video creative",
+                )
+        elif not image_url:
+            try:
+                staged = core._stage_business_public_asset(
+                    store,
+                    business,
+                    source_path=str(plan["ad_image_path"] or ""),
+                    asset_slug=f"{plan['slug']}-meta-image",
+                    verify_public_url=True,
+                )
+                image_url = str(staged.get("public_url") or "").strip()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if not image_url:
+                raise HTTPException(status_code=400, detail="failed to stage static ad image as a public URL")
         reservation_key = f"{idempotency_key}:creative-credits"
         requested_credits = core._creative_credit_total_cost("meta_ad_launch")
         reservation: dict[str, Any] | None = None
@@ -1332,91 +1481,52 @@ def build_creative_gateway_router() -> APIRouter:
         finalized = False
         try:
             if plan["asset_kind"] == "video":
-                created["video_id"] = core._meta_upload_advideo(
-                    video_abs,
-                    cfg,
-                    name=plan["ad_name"],
-                    business=business,
-                    video_rel=plan["ad_video_path"],
-                )
-                image_url = plan["image_url"] or core._meta_video_thumbnail(created["video_id"], cfg)
-                if not image_url:
-                    raise RuntimeError(
-                        "Meta requires a thumbnail for a video creative but none was ready yet; "
-                        "pass ad.image_url or retry shortly after the video finishes processing"
-                    )
-                story_spec = {
-                    "page_id": plan["page_id"],
-                    "video_data": {
-                        "video_id": created["video_id"],
-                        "message": plan["message"],
-                        "image_url": image_url,
-                        "call_to_action": {
-                            "type": plan["call_to_action"],
-                            "value": {"link": plan["link"]},
-                        },
-                    },
-                }
+                created["video_id"] = video_id
             else:
-                uploaded = core._meta_upload_adimage(image_abs, cfg)
-                created["image_hash"] = uploaded["hash"]
-                image_url = plan["image_url"] or uploaded.get("url")
-                story_spec = {
-                    "page_id": plan["page_id"],
-                    "link_data": {
-                        "link": plan["link"],
-                        "message": plan["message"],
-                        "image_hash": uploaded["hash"],
-                        "call_to_action": {
-                            "type": plan["call_to_action"],
-                            "value": {"link": plan["link"]},
-                        },
-                    },
-                }
+                created["image_url"] = image_url
 
-            creative = core._meta_graph("POST", f"{acct}/adcreatives", {
-                "name": f"{plan['ad_name']} creative",
-                "object_story_spec": json.dumps(story_spec),
-            }, cfg)
-            created["creative_id"] = str(creative.get("id") or "").strip()
-            if not created["creative_id"]:
-                raise RuntimeError(f"Meta creative create returned no id: {creative}")
-
-            campaign = core._meta_graph(
-                "POST",
-                f"{acct}/campaigns",
-                _meta_campaign_create_payload(plan),
-                cfg,
+            args = _meta_mcp_create_args(
+                plan,
+                ad_account_id=acct,
+                image_url=image_url,
+                video_id=video_id,
             )
-            created["campaign_id"] = str(campaign.get("id") or "").strip()
+            creative = _meta_mcp_call("ads_create_creative", args["creative"], timeout=90.0)
+            created["creative_id"] = _meta_mcp_find_key(creative, ("creative_id", "id"))
+            if not created["creative_id"]:
+                raise RuntimeError(f"Meta MCP ads_create_creative returned no id: {creative}")
+
+            campaign = _meta_mcp_call("ads_create_campaign", args["campaign"], timeout=90.0)
+            created["campaign_id"] = _meta_mcp_find_key(campaign, ("campaign_id", "id"))
             if not created["campaign_id"]:
-                raise RuntimeError(f"Meta campaign create returned no id: {campaign}")
+                raise RuntimeError(f"Meta MCP ads_create_campaign returned no id: {campaign}")
 
-            adset = core._meta_graph("POST", f"{acct}/adsets", {
-                "name": plan["adset_name"],
-                "campaign_id": created["campaign_id"],
-                "status": "PAUSED",
-                "daily_budget": plan["daily_budget_cents"],
-                "billing_event": plan["billing_event"],
-                "optimization_goal": plan["optimization_goal"],
-                "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
-                "start_time": plan.get("adset_start_time"),
-                "end_time": plan.get("adset_end_time"),
-                "targeting": json.dumps(plan["targeting"]),
-            }, cfg)
-            created["adset_id"] = str(adset.get("id") or "").strip()
+            args = _meta_mcp_create_args(
+                plan,
+                ad_account_id=acct,
+                campaign_id=created["campaign_id"],
+                creative_id=created["creative_id"],
+                image_url=image_url,
+                video_id=video_id,
+            )
+            adset = _meta_mcp_call("ads_create_ad_set", args["adset"], timeout=90.0)
+            created["adset_id"] = _meta_mcp_find_key(adset, ("adset_id", "ad_set_id", "id"))
             if not created["adset_id"]:
-                raise RuntimeError(f"Meta ad set create returned no id: {adset}")
+                raise RuntimeError(f"Meta MCP ads_create_ad_set returned no id: {adset}")
 
-            ad = core._meta_graph("POST", f"{acct}/ads", {
-                "name": plan["ad_name"],
-                "adset_id": created["adset_id"],
-                "status": "PAUSED",
-                "creative": json.dumps({"creative_id": created["creative_id"]}),
-            }, cfg)
-            created["ad_id"] = str(ad.get("id") or "").strip()
+            args = _meta_mcp_create_args(
+                plan,
+                ad_account_id=acct,
+                campaign_id=created["campaign_id"],
+                creative_id=created["creative_id"],
+                adset_id=created["adset_id"],
+                image_url=image_url,
+                video_id=video_id,
+            )
+            ad = _meta_mcp_call("ads_create_ad", args["ad"], timeout=90.0)
+            created["ad_id"] = _meta_mcp_find_key(ad, ("ad_id", "id"))
             if not created["ad_id"]:
-                raise RuntimeError(f"Meta ad create returned no id: {ad}")
+                raise RuntimeError(f"Meta MCP ads_create_ad returned no id: {ad}")
 
             balances = core._commit_creative_credits(
                 reservation_key,
@@ -1427,7 +1537,7 @@ def build_creative_gateway_router() -> APIRouter:
                     "action": "meta_ad_launch",
                     "slug": plan["slug"],
                     "asset_kind": plan["asset_kind"],
-                    "provider": "meta",
+                    "provider": "official_meta_mcp",
                     "ids": created,
                 },
             )
@@ -1438,7 +1548,8 @@ def build_creative_gateway_router() -> APIRouter:
                 "paused": True,
                 "ids": created,
                 "thumbnail_url": image_url,
-                "graph_version": cfg["version"],
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": cfg.get("mcp_endpoint"),
                 "ad_account_id": acct,
                 "page_id": plan["page_id"],
                 "credits_charged": requested_credits,
@@ -1534,24 +1645,28 @@ def build_creative_gateway_router() -> APIRouter:
             except core.TakyonError as exc:
                 raise HTTPException(status_code=403, detail=str(exc))
             try:
-                core._meta_graph(
-                    "POST",
-                    ids["adset_id"],
-                    {"daily_budget": daily_budget_cents},
-                    cfg,
+                _meta_mcp_call(
+                    "ads_update_entity",
+                    {
+                        "entity_id": ids["adset_id"],
+                        "daily_budget": daily_budget_cents,
+                    },
+                    timeout=60.0,
                 )
             except Exception as exc:
                 return {
                     "success": False,
                     "status": "failed",
-                    "graph_version": cfg["version"],
+                    "provider": "official_meta_mcp",
+                    "mcp_endpoint": cfg.get("mcp_endpoint"),
                     "error": str(exc),
                     "ids": ids,
                 }
             return {
                 "success": True,
                 "status": "budget_updated",
-                "graph_version": cfg["version"],
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": cfg.get("mcp_endpoint"),
                 "ids": ids,
                 "daily_budget_cents": daily_budget_cents,
                 "daily_budget_usd": body.get("daily_budget_usd"),
@@ -1569,12 +1684,24 @@ def build_creative_gateway_router() -> APIRouter:
         applied: list[dict[str, Any]] = []
         try:
             for kind, object_id in ordered_ids:
-                core._meta_graph("POST", object_id, {"status": target_status}, cfg)
+                if operation == "activate":
+                    _meta_mcp_call(
+                        "ads_activate_entity",
+                        {"entity_id": object_id},
+                        timeout=60.0,
+                    )
+                else:
+                    _meta_mcp_call(
+                        "ads_update_entity",
+                        {"entity_id": object_id, "status": target_status},
+                        timeout=60.0,
+                    )
                 applied.append({"object": kind, "id": object_id, "status": target_status})
             return {
                 "success": True,
                 "status": "activated" if operation == "activate" else "paused",
-                "graph_version": cfg["version"],
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": cfg.get("mcp_endpoint"),
                 "ids": ids,
                 "applied": applied,
             }
@@ -1582,7 +1709,8 @@ def build_creative_gateway_router() -> APIRouter:
             return {
                 "success": False,
                 "status": "partial_failed" if applied else "failed",
-                "graph_version": cfg["version"],
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": cfg.get("mcp_endpoint"),
                 "ids": ids,
                 "applied": applied or None,
                 "error": str(exc),
@@ -1604,49 +1732,55 @@ def build_creative_gateway_router() -> APIRouter:
         if not object_id:
             raise HTTPException(status_code=400, detail=f"{level}_id is required")
 
+        fields = [
+            "account_currency",
+            "campaign_id",
+            "campaign_name",
+            "adset_id",
+            "adset_name",
+            "ad_id",
+            "ad_name",
+            "date_start",
+            "date_stop",
+            "impressions",
+            "reach",
+            "clicks",
+            "spend",
+            "cpc",
+            "cpm",
+            "ctr",
+        ]
         params: dict[str, Any] = {
-            "fields": ",".join([
-                "account_currency",
-                "campaign_id",
-                "campaign_name",
-                "adset_id",
-                "adset_name",
-                "ad_id",
-                "ad_name",
-                "date_start",
-                "date_stop",
-                "impressions",
-                "reach",
-                "clicks",
-                "spend",
-                "cpc",
-                "cpm",
-                "ctr",
-            ]),
+            "ad_account_id": core._meta_account_path(str(cfg.get("ad_account_id") or "")) if cfg.get("ad_account_id") else "",
+            "level": level,
+            "entity_ids": [object_id],
+            "fields": fields,
         }
         time_range = body.get("time_range") if isinstance(body.get("time_range"), dict) else None
         if time_range:
-            params["time_range"] = json.dumps(time_range)
+            params["time_range"] = time_range
         else:
             params["date_preset"] = str(body.get("date_preset") or "today").strip().lower() or "today"
 
         try:
-            result = core._meta_graph("GET", f"{object_id}/insights", params, cfg)
+            result = _meta_mcp_call("ads_get_ad_entities", params, timeout=60.0)
         except Exception as exc:
             return {
                 "success": False,
                 "status": "failed",
-                "graph_version": cfg["version"],
+                "provider": "official_meta_mcp",
+                "mcp_endpoint": cfg.get("mcp_endpoint"),
                 "level": level,
                 "object_id": object_id,
                 "error": str(exc),
             }
 
-        rows = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), list) else []
+        rows = _meta_mcp_items(result)
         return {
             "success": True,
             "status": "synced",
-            "graph_version": cfg["version"],
+            "provider": "official_meta_mcp",
+            "mcp_endpoint": cfg.get("mcp_endpoint"),
             "level": level,
             "object_id": object_id,
             "rows": rows,
@@ -1680,24 +1814,25 @@ def build_creative_gateway_router() -> APIRouter:
             "last_30d": "last_30d",
         }.get(window, "last_7d")
         params = {
-            "fields": ",".join(
-                [
-                    "account_currency",
-                    "date_start",
-                    "date_stop",
-                    "impressions",
-                    "reach",
-                    "clicks",
-                    "spend",
-                    "cpc",
-                    "cpm",
-                    "ctr",
-                ]
-            ),
+            "ad_account_id": core._meta_account_path(str(cfg.get("ad_account_id") or "")) if cfg.get("ad_account_id") else "",
+            "level": level,
+            "entity_ids": [object_id],
+            "fields": [
+                "account_currency",
+                "date_start",
+                "date_stop",
+                "impressions",
+                "reach",
+                "clicks",
+                "spend",
+                "cpc",
+                "cpm",
+                "ctr",
+            ],
             "date_preset": date_preset,
         }
         try:
-            result = core._meta_graph("GET", f"{object_id}/insights", params, cfg)
+            result = _meta_mcp_call("ads_get_ad_entities", params, timeout=60.0)
         except Exception as exc:
             return {
                 "success": False,
@@ -1708,7 +1843,7 @@ def build_creative_gateway_router() -> APIRouter:
                 "window": window,
                 "error": str(exc),
             }
-        rows = result.get("data") if isinstance(result, dict) and isinstance(result.get("data"), list) else []
+        rows = _meta_mcp_items(result)
         totals = core._meta_aggregate_insights_rows(rows)
         targets = body.get("targets") if isinstance(body.get("targets"), dict) else {}
         target_cpc_cents = _meta_int(targets.get("cpc_cents"))
@@ -1757,7 +1892,8 @@ def build_creative_gateway_router() -> APIRouter:
             "reasons": reasons,
             "metrics": totals,
             "targets": targets,
-            "graph_version": cfg["version"],
+            "provider": "official_meta_mcp",
+            "mcp_endpoint": cfg.get("mcp_endpoint"),
             "created_at": now,
         }
         business_root = store._business_root(business)

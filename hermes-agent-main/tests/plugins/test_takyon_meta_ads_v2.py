@@ -1,16 +1,17 @@
 """
 Focused tests for the Meta Ads v2 net-new tools (evaluate + insights dedup).
 
-Per skills/takyon HANDOFF: stdlib + pytest + unittest.mock only; no live network. The
-v2 launch/control tests from the drop-in are deferred to the launch/control MCP swap —
-the existing v1 handlers still own those tool names and use a different internal path
-(Composio/Graph), so they cannot be tested against the v2 gateway shape yet.
+Per skills/takyon HANDOFF: stdlib + pytest + unittest.mock only; no live network. Launch/control
+transport is now covered by the Safebox official-MCP seam tests; this file keeps focused v2
+dedup/evaluate/config regressions.
 """
 
 from unittest.mock import patch
 import json
 import sys
 import types
+
+import pytest
 
 
 # --- insights: append-only, dedup by (level, object_id, date) ----------------
@@ -60,13 +61,45 @@ def test_evaluate_defaults_window_last_7d():
     assert gw.call_args.args[1]["window"] == "last_7d"
 
 
-# --- config: Composio Meta Ads MCP is the primary launch rail ----------------
-def test_meta_config_requires_composio_mcp_connection(monkeypatch):
+# --- config: official Meta Ads MCP is the primary v2 launch rail -------------
+def test_meta_config_requires_official_meta_mcp_oauth(monkeypatch):
+    from plugins.takyon import core
+
+    values = {
+        "META_MCP_OAUTH_TOKEN": "official-meta-mcp-oauth",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "system-token",
+        "META_GRAPH_VERSION": "23.0",
+        "META_AD_ACCOUNT_ID": "1300104788312342",
+    }
+
+    def first_env_backed_value(*keys):
+        for key in keys:
+            if key in values:
+                return values[key]
+        return ""
+
+    monkeypatch.setattr(core.safebox, "first_env_backed_value", first_env_backed_value)
+    monkeypatch.setattr(
+        core.composio_distribution,
+        "resolve_metaads_connected_account_id",
+        lambda: (_ for _ in ()).throw(AssertionError("Composio must not satisfy Meta v2 config")),
+    )
+
+    cfg = core._meta_config(require_token=True)
+
+    assert cfg["token"] == "system-token"
+    assert cfg["has_mcp_oauth_token"] is True
+    assert cfg["mcp_endpoint"] == "https://mcp.facebook.com/ads"
+    assert cfg["version"] == "v23.0"
+    assert cfg["ad_account_id"] == "1300104788312342"
+    assert cfg["composio_connected_account_id"] == ""
+
+
+def test_meta_config_rejects_composio_without_official_mcp_oauth(monkeypatch):
     from plugins.takyon import core
 
     values = {
         "META_SYSTEM_USER_ACCESS_TOKEN": "system-token",
-        "META_GRAPH_VERSION": "23.0",
         "META_AD_ACCOUNT_ID": "1300104788312342",
     }
 
@@ -83,53 +116,27 @@ def test_meta_config_requires_composio_mcp_connection(monkeypatch):
         lambda: "conn_metaads_123",
     )
 
-    cfg = core._meta_config(require_token=True)
-
-    assert cfg["token"] == "system-token"
-    assert cfg["version"] == "v23.0"
-    assert cfg["ad_account_id"] == "1300104788312342"
-    assert cfg["composio_connected_account_id"] == "conn_metaads_123"
+    with pytest.raises(core.TakyonError, match="META_MCP_OAUTH_TOKEN"):
+        core._meta_config(require_token=True)
 
 
-def test_meta_graph_prefers_composio_mcp_over_direct_token(monkeypatch):
+def test_meta_launch_plan_defaults_to_paused_for_v2():
     from plugins.takyon import core
 
-    captured = {}
-
-    def request(*_args, **_kwargs):
-        raise AssertionError("direct Meta token HTTP path must not be used when MCP is configured")
-
-    def proxy_request(*, method, endpoint, connected_account_id=None, body=None, parameters=None, timeout=120.0):
-        captured.update(
-            {
-                "method": method,
-                "endpoint": endpoint,
-                "connected_account_id": connected_account_id,
-                "body": body,
-                "parameters": parameters,
-                "timeout": timeout,
-            }
-        )
-        return {"data": {"id": "campaign_123"}}
-
-    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(request=request))
-    monkeypatch.setattr(core.composio_distribution, "metaads_proxy_request", proxy_request)
-
-    result = core._meta_graph(
-        "POST",
-        "act_123/campaigns",
-        {"name": "Demo campaign"},
+    plan = core._meta_launch_plan(
         {
-            "token": "system-token",
-            "version": "v23.0",
-            "composio_connected_account_id": "conn_metaads_123",
+            "business": "clipbook",
+            "asset_kind": "image",
+            "ad_image_path": "product/static-ads/demo/creative.png",
+            "campaign": {"name": "Demo Campaign"},
+            "adset": {"daily_budget_usd": 1.0},
+            "ad": {"link": "https://example.com", "page_id": "page_123"},
+            "idempotency_key": "demo",
         },
+        {"ad_account_id": "act_123", "page_id": "page_123"},
     )
 
-    assert result == {"id": "campaign_123"}
-    assert captured["endpoint"] == "https://graph.facebook.com/v23.0/act_123/campaigns"
-    assert captured["connected_account_id"] == "conn_metaads_123"
-    assert captured["body"] == {"name": "Demo campaign"}
+    assert plan["activate"] is False
 
 
 def test_meta_graph_direct_token_adds_access_token(monkeypatch):

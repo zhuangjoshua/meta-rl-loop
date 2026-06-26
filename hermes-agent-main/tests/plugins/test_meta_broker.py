@@ -1,18 +1,19 @@
-"""Regression tests for the Meta Ads MCP/Safebox seam.
+"""Regression tests for the official Meta Ads MCP/Safebox seam.
 
 The legacy Meta system-user token (META_SYSTEM_USER_ACCESS_TOKEN / META_ACCESS_TOKEN) is still a
-provider secret the safebox holds and DENIES /v1/env egress, but production launches must use the
-business-owned Composio Meta Ads connected account. ``core._meta_config`` may broker non-secret config
-from the safebox, while live Graph/ad-object calls go through the Composio MCP/proxy transport instead
-of the fourmanifold-server Meta developer app. The ``/v1/providers/meta/config`` route must still
-REDACT any token it sees so the legacy secret never leaves the safebox.
+provider secret the safebox holds and DENIES /v1/env egress, but production v2 launches must use
+Meta's official remote MCP server through a safebox-held META_MCP_OAUTH_TOKEN. ``core._meta_config``
+brokers only non-secret readiness/config hints; live launch calls go through the
+``/v1/providers/meta/mcp/*`` broker routes, not Composio and not the fourmanifold-server Meta
+developer app. The ``/v1/providers/meta/config`` route must still REDACT any token it sees so the
+legacy secret never leaves the safebox.
 """
 from __future__ import annotations
 
 import pytest
 from starlette.testclient import TestClient
 
-from plugins.takyon import composio_distribution, core, safebox_app
+from plugins.takyon import composio_distribution, core, creative_gateway, safebox_app
 
 _TOKEN = "secret-internal-token"
 
@@ -37,6 +38,8 @@ def test_meta_config_brokers_through_safebox_when_remote(monkeypatch):
             "version": "v21.0",
             "ad_account_id": "act_1300104788312342",
             "page_id": "page_123",
+            "has_mcp_oauth_token": True,
+            "mcp_endpoint": "https://mcp.facebook.com/ads",
             "composio_connected_account_id": "",
             "composio_user_id": "takyon_prod_operator",
             "composio_alias": "takyon-prod-meta-ads",
@@ -46,7 +49,7 @@ def test_meta_config_brokers_through_safebox_when_remote(monkeypatch):
     monkeypatch.setattr(
         core.composio_distribution,
         "resolve_metaads_connected_account_id",
-        lambda: "conn_metaads_123",
+        lambda: (_ for _ in ()).throw(AssertionError("Composio must not satisfy Meta v2 config")),
     )
 
     cfg = core._meta_config(require_token=True)
@@ -57,22 +60,25 @@ def test_meta_config_brokers_through_safebox_when_remote(monkeypatch):
     assert cfg["version"] == "v21.0"
     assert cfg["ad_account_id"] == "act_1300104788312342"
     assert cfg["page_id"] == "page_123"
-    assert cfg["composio_connected_account_id"] == "conn_metaads_123"
+    assert cfg["has_mcp_oauth_token"] is True
+    assert cfg["mcp_endpoint"] == "https://mcp.facebook.com/ads"
+    assert cfg["composio_connected_account_id"] == ""
 
 
-def test_meta_config_requires_mcp_connection_when_local_on_safebox_host(monkeypatch):
+def test_meta_config_requires_official_mcp_oauth_when_local_on_safebox_host(monkeypatch):
     monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: True)
     monkeypatch.setattr(core.safebox, "_remote_enabled", lambda: False)
-    # On the safebox host the config may see the legacy token, but launch still requires MCP.
+    # On the safebox host the config may see the legacy token, but v2 launch still requires official MCP.
     monkeypatch.setattr(core.safebox, "meta_config", _boom)
     monkeypatch.setattr(core, "load_takyon_env", lambda: None)
     monkeypatch.setattr(
         core.composio_distribution,
         "resolve_metaads_connected_account_id",
-        lambda: "conn_local_metaads",
+        lambda: (_ for _ in ()).throw(AssertionError("Composio must not satisfy Meta v2 config")),
     )
 
     values = {
+        "META_MCP_OAUTH_TOKEN": "official-meta-mcp-token",
         "META_GRAPH_VERSION": "v21.0",
         "META_SYSTEM_USER_ACCESS_TOKEN": "local-system-user-token",
         "META_AD_ACCOUNT_ID": "act_local",
@@ -89,9 +95,10 @@ def test_meta_config_requires_mcp_connection_when_local_on_safebox_host(monkeypa
 
     cfg = core._meta_config(require_token=True)
     assert cfg["token"] == "local-system-user-token"
+    assert cfg["has_mcp_oauth_token"] is True
     assert cfg["ad_account_id"] == "act_local"
     assert cfg["page_id"] == "page_local"
-    assert cfg["composio_connected_account_id"] == "conn_local_metaads"
+    assert cfg["composio_connected_account_id"] == ""
 
 
 # ── core._meta_graph brokering ───────────────────────────────────────────────────────────────────
@@ -133,7 +140,7 @@ def test_meta_graph_requires_mcp_connection_when_remote(monkeypatch):
     monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: False)
     monkeypatch.setattr(core.safebox, "meta_graph_forward", _boom)
 
-    with pytest.raises(core.TakyonError, match="Composio Meta Ads MCP connection"):
+    with pytest.raises(core.TakyonError, match="official Meta MCP broker"):
         core._meta_graph("POST", "act_123/campaigns", {"name": "demo"}, {"token": "", "version": "v21.0"})
 
 
@@ -195,7 +202,47 @@ def test_meta_graph_direct_when_local_on_safebox_host(monkeypatch):
     assert out == {"id": "me-direct"}
 
 
-# ── media upload helpers through the MCP/Composio rail ───────────────────────────────────────────
+# ── official MCP launch payload helpers ──────────────────────────────────────────────────────────
+
+
+def test_meta_mcp_create_args_use_public_image_url_not_upload_hash():
+    plan = {
+        "campaign_name": "Homework Solver Traffic",
+        "objective": "OUTCOME_TRAFFIC",
+        "daily_budget_cents": 100,
+        "campaign_start_time": None,
+        "campaign_end_time": None,
+        "adset_name": "Homework Solver Ad Set",
+        "billing_event": "IMPRESSIONS",
+        "optimization_goal": "LINK_CLICKS",
+        "adset_start_time": None,
+        "adset_end_time": None,
+        "targeting": {"geo_locations": {"countries": ["US"]}},
+        "ad_name": "Homework Solver Ad",
+        "page_id": "1181033165085863",
+        "link": "https://homework-solver.coscale.app/",
+        "message": "Get homework help faster.",
+        "headline": "Homework help",
+        "description": "Study smarter.",
+        "call_to_action": "LEARN_MORE",
+    }
+
+    args = creative_gateway._meta_mcp_create_args(
+        plan,
+        ad_account_id="act_1300104788312342",
+        image_url="https://homework-solver.coscale.app/_takyon/assets/ad/creative.png",
+    )
+
+    assert args["campaign"]["campaign_daily_budget"] == 100
+    assert args["campaign"]["status"] == "PAUSED"
+    assert args["adset"]["destination_type"] == "WEBSITE"
+    assert args["creative"]["image_url"].startswith("https://homework-solver.coscale.app/")
+    assert "image_hash" not in args["creative"]
+    assert args["creative"]["call_to_action_type"] == "LEARN_MORE"
+    assert args["ad"]["status"] == "PAUSED"
+
+
+# ── legacy media upload helpers (not the Meta v2 launch transport) ───────────────────────────────
 
 
 def test_meta_image_upload_uses_composio_mcp_when_remote(monkeypatch, tmp_path):
@@ -359,6 +406,8 @@ def test_meta_config_route_redacts_token(client, monkeypatch):
             "version": "v21.0",
             "ad_account_id": "act_1300104788312342",
             "page_id": "page_123",
+            "has_mcp_oauth_token": True,
+            "mcp_endpoint": "https://mcp.facebook.com/ads",
             "composio_connected_account_id": "",
             "composio_user_id": "takyon_prod_operator",
             "composio_alias": "takyon-prod-meta-ads",
@@ -376,6 +425,8 @@ def test_meta_config_route_redacts_token(client, monkeypatch):
     assert data["version"] == "v21.0"
     assert data["ad_account_id"] == "act_1300104788312342"
     assert data["page_id"] == "page_123"
+    assert data["has_mcp_oauth_token"] is True
+    assert data["mcp_endpoint"] == "https://mcp.facebook.com/ads"
 
 
 def test_meta_config_route_requires_internal_token(client):
@@ -384,7 +435,37 @@ def test_meta_config_route_requires_internal_token(client):
     assert resp.status_code == 401
 
 
+def test_meta_mcp_call_route_brokers_key_free_tool_result(client, monkeypatch):
+    captured = {}
+
+    def fake_meta_mcp_call(*, tool_name, arguments=None, timeout=60.0):
+        captured["call"] = (tool_name, arguments, timeout)
+        return {"id": "campaign-123"}
+
+    monkeypatch.setattr(safebox_app.safebox, "meta_mcp_call", fake_meta_mcp_call)
+
+    resp = client.post(
+        "/v1/providers/meta/mcp/call",
+        headers=_auth(),
+        json={
+            "tool_name": "ads_create_campaign",
+            "arguments": {"ad_account_id": "act_123", "name": "Demo"},
+            "timeout": 12.0,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"id": "campaign-123"}
+    assert captured["call"] == (
+        "ads_create_campaign",
+        {"ad_account_id": "act_123", "name": "Demo"},
+        12.0,
+    )
+
+
 def test_meta_graph_route_is_registered(client):
     paths = {route.path for route in safebox_app.build_safebox_app().routes}
     assert "/v1/providers/meta/config" in paths
+    assert "/v1/providers/meta/mcp/call" in paths
+    assert "/v1/providers/meta/mcp/tools" in paths
     assert "/v1/providers/meta/graph" in paths

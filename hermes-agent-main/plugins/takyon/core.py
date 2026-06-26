@@ -1156,12 +1156,14 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "google_search_console": ("TAKYON_GSC_SERVICE_ACCOUNT_KEY",),
     "llm": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"),
     "meta": (
+        "META_MCP_OAUTH_TOKEN",
         "META_SYSTEM_USER_ACCESS_TOKEN",
         "META_ACCESS_TOKEN",
         "META_CAPI_TOKEN",
         "COMPOSIO_API_KEY",
     ),
     "metaads": (
+        "META_MCP_OAUTH_TOKEN",
         "META_SYSTEM_USER_ACCESS_TOKEN",
         "META_ACCESS_TOKEN",
         "META_CAPI_TOKEN",
@@ -25574,6 +25576,15 @@ def _ad_launch_activate_intent(args: Mapping[str, Any]) -> bool:
     return True
 
 
+def _meta_ad_launch_activate_intent(args: Mapping[str, Any]) -> bool:
+    if args.get("activate") is not None:
+        return _boolish(args.get("activate"), default=False)
+    status = str(args.get("status") or "").strip().upper()
+    if status:
+        return status == "ACTIVE"
+    return False
+
+
 def _derive_ad_spend_schedule(
     *,
     channel: str,
@@ -27608,12 +27619,12 @@ def _meta_env_value(*env_keys: str, allow_env_fallback: bool = True) -> str:
 
 
 def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
-    """Resolve Meta Ads config for the Meta Ads MCP/Composio rail.
+    """Resolve Meta Ads v2 config for the official Meta Ads MCP rail.
 
-    Production launches must use the business-owned Composio Meta Ads connection, not the
-    fourmanifold-server Meta developer app token. The safebox still provides non-secret graph/page
-    config and may hold the legacy system token for diagnostics, but live launch actions require an
-    active Composio connected account before any ad objects are created.
+    Production v2 launch/control calls use Meta's official remote MCP server
+    (mcp.facebook.com/ads) with an OAuth token held by the safebox. The legacy
+    system-user Graph token is retained only for compatibility shims such as
+    advideos/pixel diagnostics; it is never the launch transport.
     """
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
         remote = safebox.meta_config()
@@ -27622,26 +27633,25 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
             version = _META_DEFAULT_GRAPH_VERSION
         elif not version.startswith("v"):
             version = f"v{version}"
-        connected_account_id = str(remote.get("composio_connected_account_id") or "").strip()
-        if require_token and not connected_account_id:
-            try:
-                connected_account_id = composio_distribution.resolve_metaads_connected_account_id()
-            except Exception as exc:
-                raise TakyonError(
-                    "Meta action requires an active Composio Meta Ads MCP connection; "
-                    f"the legacy Meta app token path is disabled for launch: {exc}"
-                ) from exc
+        has_mcp_oauth_token = bool(remote.get("has_mcp_oauth_token"))
+        if require_token and not has_mcp_oauth_token:
+            raise TakyonError(
+                "Meta v2 action requires official Meta Ads MCP OAuth. Configure "
+                "META_MCP_OAUTH_TOKEN on the safebox; Composio Meta Ads is not a valid v2 launch fallback."
+            )
         return {
-            # The token value never reaches the runtime plane. The live action rail below uses the
-            # connected account id, which resolves through the safebox-brokered Composio transport.
+            # Token values never reach the runtime plane. The official MCP token is used only by the
+            # safebox /v1/providers/meta/mcp/* broker routes.
             "token": "",
             "has_token": bool(remote.get("has_token")),
+            "has_mcp_oauth_token": has_mcp_oauth_token,
+            "mcp_endpoint": str(remote.get("mcp_endpoint") or "https://mcp.facebook.com/ads").strip(),
             "version": version,
             "ad_account_id": str(remote.get("ad_account_id") or "").strip(),
             "page_id": str(remote.get("page_id") or "").strip(),
-            "composio_connected_account_id": connected_account_id,
-            "composio_user_id": str(remote.get("composio_user_id") or "").strip() or "takyon_prod_operator",
-            "composio_alias": str(remote.get("composio_alias") or "").strip() or "takyon-prod-meta-ads",
+            "composio_connected_account_id": "",
+            "composio_user_id": "",
+            "composio_alias": "",
         }
     load_takyon_env()
     version = (_meta_env_value("META_GRAPH_VERSION") or _META_DEFAULT_GRAPH_VERSION).strip().lstrip("/")
@@ -27654,27 +27664,31 @@ def _meta_config(*, require_token: bool = True) -> dict[str, Any]:
         "META_ACCESS_TOKEN",
         allow_env_fallback=False,
     )
+    mcp_oauth_token = _meta_env_value(
+        "META_MCP_OAUTH_TOKEN",
+        allow_env_fallback=False,
+    )
+    mcp_endpoint = (
+        _meta_env_value("META_MCP_ENDPOINT", "META_ADS_MCP_ENDPOINT")
+        or "https://mcp.facebook.com/ads"
+    )
     cfg = {
         "token": token,
+        "has_token": bool(token),
+        "has_mcp_oauth_token": bool(mcp_oauth_token),
+        "mcp_endpoint": mcp_endpoint,
         "version": version,
         "ad_account_id": _meta_env_value("META_AD_ACCOUNT_ID"),
         "page_id": _meta_env_value("META_PAGE_ID"),
         "composio_connected_account_id": "",
-        "composio_user_id": (
-            _meta_env_value("COMPOSIO_METAADS_USER_ID")
-            or _meta_env_value("COMPOSIO_USER_ID")
-            or "takyon_prod_operator"
-        ),
-        "composio_alias": _meta_env_value("COMPOSIO_METAADS_ALIAS") or "takyon-prod-meta-ads",
+        "composio_user_id": "",
+        "composio_alias": "",
     }
-    if require_token:
-        try:
-            cfg["composio_connected_account_id"] = composio_distribution.resolve_metaads_connected_account_id()
-        except Exception as exc:
-            raise TakyonError(
-                "Meta action requires an active Composio Meta Ads MCP connection; "
-                f"the legacy Meta app token path is disabled for launch: {exc}"
-            ) from exc
+    if require_token and not mcp_oauth_token:
+        raise TakyonError(
+            "Meta v2 action requires official Meta Ads MCP OAuth. Configure "
+            "META_MCP_OAUTH_TOKEN on the safebox; Composio Meta Ads is not a valid v2 launch fallback."
+        )
     return cfg
 
 
@@ -27729,7 +27743,12 @@ def _meta_graph(
     host: str = "graph.facebook.com",
     timeout: int = 60,
 ) -> dict[str, Any]:
-    """Call Meta Graph through the Meta Ads MCP/Composio connection by default."""
+    """Call legacy Meta Graph for diagnostics/compatibility shims.
+
+    Meta Ads v2 launch/control/read operations use the official MCP broker,
+    not this helper. This function remains for pixel/custom-conversion and
+    video-upload gaps where the v2 implementation explicitly needs Graph.
+    """
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     rel = path.lstrip("/")
     method = method.upper()
@@ -27760,8 +27779,8 @@ def _meta_graph(
 
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
         raise TakyonError(
-            "Meta Graph launch calls require an active Composio Meta Ads MCP connection; "
-            "the brokered Meta developer-app token path is disabled"
+            "Meta Graph calls are legacy diagnostics/shims on runtime planes; "
+            "Meta v2 launch/control/read calls must use the official Meta MCP broker"
         )
 
     token = str(cfg.get("token") or "").strip()
@@ -27819,7 +27838,7 @@ def _meta_graph(
             return {"data": data}
         return {}
 
-    raise TakyonError("Meta action requires an active Composio Meta Ads MCP connection")
+    raise TakyonError("Meta Graph action requires a legacy Meta system-user token on the safebox host")
 
 
 def _meta_upload_advideo(
@@ -27856,7 +27875,10 @@ def _meta_upload_advideo(
         return video_id
 
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
-        raise TakyonError("Meta video upload requires an active Composio Meta Ads MCP connection")
+        raise TakyonError(
+            "Meta video upload is a legacy Graph shim and cannot run on a runtime plane; "
+            "Meta v2 launch requires a pre-uploaded ad.video_id or a safebox-owned advideos shim"
+        )
 
     token = str(cfg.get("token") or "").strip()
     if token:
@@ -27876,7 +27898,7 @@ def _meta_upload_advideo(
             raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
         return video_id
 
-    raise TakyonError("Meta action requires an active Composio Meta Ads MCP connection")
+    raise TakyonError("Meta video upload requires a legacy Meta system-user token on the safebox host")
 
 
 def _meta_adimage_upload_result(data: Mapping[str, Any], image_name: str) -> dict[str, Any]:
@@ -27935,7 +27957,10 @@ def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any
         }
 
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
-        raise TakyonError("Meta image upload requires an active Composio Meta Ads MCP connection")
+        raise TakyonError(
+            "Meta image upload is disabled for Meta v2 launch on runtime planes; "
+            "stage the image as a public URL and use official MCP ads_create_creative"
+        )
 
     token = str(cfg.get("token") or "").strip()
     if token:
@@ -27961,7 +27986,7 @@ def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any
             raise TakyonError(f"Meta image upload failed: {message or getattr(resp, 'text', '')}")
         return _meta_adimage_upload_result(data if isinstance(data, Mapping) else {}, image_path.name)
 
-    raise TakyonError("Meta action requires an active Composio Meta Ads MCP connection")
+    raise TakyonError("Meta image upload requires a legacy Meta system-user token on the safebox host")
 
 
 def _meta_video_thumbnail(video_id: str, cfg: dict[str, Any]) -> str | None:
@@ -28033,7 +28058,7 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
 
     return {
         "slug": slug,
-        "activate": _ad_launch_activate_intent(args),
+        "activate": _meta_ad_launch_activate_intent(args),
         "asset_kind": asset_kind,
         "ad_video_path": ad_video_path,
         "ad_image_path": ad_image_path or None,
@@ -28051,11 +28076,14 @@ def _meta_launch_plan(args: dict[str, Any], cfg: dict[str, Any]) -> dict[str, An
         "targeting": targeting,
         "ad_name": str(ad.get("name") or f"{slug} ad").strip(),
         "message": str(ad.get("message") or "").strip(),
+        "headline": str(ad.get("headline") or "").strip(),
+        "description": str(ad.get("description") or "").strip(),
         "link": link,
         "call_to_action": cta,
         "page_id": str(ad.get("page_id") or cfg.get("page_id") or "").strip(),
         "ad_account_id": str(args.get("ad_account_id") or cfg.get("ad_account_id") or "").strip(),
         "image_url": (str(ad.get("image_url") or ad.get("thumbnail_url") or "").strip() or None),
+        "video_id": (str(ad.get("video_id") or "").strip() or None),
     }
 
 
@@ -28143,11 +28171,14 @@ def _meta_plan_payload(plan: Mapping[str, Any], *, launch_mode: str) -> dict[str
         "ad": {
             "name": plan.get("ad_name"),
             "message": plan.get("message"),
+            "headline": plan.get("headline"),
+            "description": plan.get("description"),
             "link": plan.get("link"),
             "tracked_link": tracked_link,
             "call_to_action": plan.get("call_to_action"),
             "page_id": plan.get("page_id"),
             "image_url": plan.get("image_url"),
+            "video_id": plan.get("video_id"),
         },
     }
 
@@ -28417,7 +28448,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "start_time": _datetime_to_iso(spend_schedule["start_at"]),
                 "end_time": _datetime_to_iso(spend_schedule["end_at"]),
             }
-            launch_args["activate"] = _ad_launch_activate_intent(args)
+            launch_args["activate"] = _meta_ad_launch_activate_intent(args)
 
         plan = _meta_launch_plan(launch_args, cfg)
         slug = plan["slug"]
