@@ -28675,6 +28675,49 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             })
 
         ids = gateway_result.get("ids") or {}
+        missing_ids = [
+            key
+            for key in ("creative_id", "campaign_id", "adset_id", "ad_id")
+            if not str(ids.get(key) or "").strip()
+        ]
+        if missing_ids:
+            _release_channel_spend_credits(
+                media_reservation_key,
+                business=business,
+                channel="meta",
+                metadata={
+                    "slug": slug,
+                    "status": "partial_failed_missing_provider_ids",
+                    "missing_ids": missing_ids,
+                },
+            )
+            receipt = {
+                **base_receipt,
+                "success": False,
+                "mode": "live",
+                "status": "partial_failed_missing_provider_ids",
+                "ids": ids,
+                "error": f"Meta launch gateway returned success without required ids: {', '.join(missing_ids)}",
+                "credits_charged": gateway_result.get("credits_charged"),
+                "balance_credits": gateway_result.get("balance_credits"),
+                "reserved_credits": gateway_result.get("reserved_credits"),
+                "channel_budget": gateway_result.get("channel_budget"),
+            }
+            _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+            return tool_result({
+                "success": False,
+                "action": "business_meta_ad_launch",
+                "business": business,
+                "slug": slug,
+                "mode": "live",
+                "status": receipt["status"],
+                "paused": True,
+                "receipt": receipt_rel,
+                "balance_credits": receipt.get("balance_credits"),
+                "reserved_credits": receipt.get("reserved_credits"),
+                "error": receipt["error"],
+                "value": receipt,
+            })
         try:
             policy = _upsert_ad_spend_policy(
                 business,

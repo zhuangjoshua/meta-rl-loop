@@ -1379,6 +1379,8 @@ def build_creative_gateway_router() -> APIRouter:
                 "object_story_spec": json.dumps(story_spec),
             }, cfg)
             created["creative_id"] = str(creative.get("id") or "").strip()
+            if not created["creative_id"]:
+                raise RuntimeError(f"Meta creative create returned no id: {creative}")
 
             campaign = core._meta_graph(
                 "POST",
@@ -1387,6 +1389,8 @@ def build_creative_gateway_router() -> APIRouter:
                 cfg,
             )
             created["campaign_id"] = str(campaign.get("id") or "").strip()
+            if not created["campaign_id"]:
+                raise RuntimeError(f"Meta campaign create returned no id: {campaign}")
 
             adset = core._meta_graph("POST", f"{acct}/adsets", {
                 "name": plan["adset_name"],
@@ -1401,6 +1405,8 @@ def build_creative_gateway_router() -> APIRouter:
                 "targeting": json.dumps(plan["targeting"]),
             }, cfg)
             created["adset_id"] = str(adset.get("id") or "").strip()
+            if not created["adset_id"]:
+                raise RuntimeError(f"Meta ad set create returned no id: {adset}")
 
             ad = core._meta_graph("POST", f"{acct}/ads", {
                 "name": plan["ad_name"],
@@ -1409,6 +1415,8 @@ def build_creative_gateway_router() -> APIRouter:
                 "creative": json.dumps({"creative_id": created["creative_id"]}),
             }, cfg)
             created["ad_id"] = str(ad.get("id") or "").strip()
+            if not created["ad_id"]:
+                raise RuntimeError(f"Meta ad create returned no id: {ad}")
 
             balances = core._commit_creative_credits(
                 reservation_key,

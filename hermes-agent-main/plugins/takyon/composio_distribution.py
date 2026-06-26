@@ -240,6 +240,48 @@ def resolve_metaads_connected_account_id() -> str:
     )
 
 
+def _composio_error_message(tool_slug: str, response: Mapping[str, Any]) -> str:
+    """Extract the human-readable provider error from a ``successful:false`` Composio response.
+
+    The v3.1 execute envelope carries the upstream failure in ``error`` (a string) and/or
+    ``data.message`` (the provider's own text, e.g. Twitter's "duplicate content" / "Unauthorized").
+    Fall back through every place the message can live so the surfaced error is the real provider
+    cause, never the bare tool slug or an empty string."""
+    error = response.get("error")
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    if isinstance(error, Mapping):
+        msg = str(error.get("message") or "").strip()
+        if msg:
+            return msg
+    data = response.get("data")
+    if isinstance(data, Mapping):
+        msg = str(data.get("message") or data.get("error") or "").strip()
+        status_code = data.get("status_code")
+        if msg:
+            return f"{msg} (status {status_code})" if status_code else msg
+    return f"{tool_slug} failed without an error message"
+
+
+def _proxy_error_message(tool_slug: str, response: Mapping[str, Any]) -> str:
+    data = response.get("data")
+    if isinstance(data, Mapping):
+        error = data.get("error")
+        if isinstance(error, Mapping):
+            message = str(error.get("message") or "").strip()
+            code = str(error.get("code") or "").strip()
+            error_type = str(error.get("type") or "").strip()
+            if message:
+                details = ", ".join(part for part in (error_type, f"code {code}" if code else "") if part)
+                return f"{message} ({details})" if details else message
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        message = str(data.get("message") or "").strip()
+        if message:
+            return message
+    return _composio_error_message(tool_slug, response)
+
+
 def execute_tool(
     tool_slug: str,
     *,
@@ -255,12 +297,24 @@ def execute_tool(
         payload["user_id"] = str(user_id).strip()
     if arguments is not None:
         payload["arguments"] = dict(arguments)
-    return _request(
+    response = _request(
         "POST",
         f"tools/execute/{tool_slug}",
         json_body=payload,
         timeout=timeout,
     )
+    # Composio returns HTTP 200 with ``successful:false`` for upstream provider rejections
+    # (e.g. Twitter "duplicate content", "Unauthorized", rate limits). Without this guard the
+    # caller sees a no-id success envelope, mis-treats it as a posted tweet, and commits a
+    # credit against a tweet that never shipped. Fail closed and surface the real provider error.
+    if isinstance(response, Mapping) and response.get("successful") is False:
+        message = _composio_error_message(tool_slug, response)
+        log_id = str(response.get("log_id") or "").strip()
+        raise ComposioDistributionError(
+            f"Composio {tool_slug} returned successful=false: {message}"
+            + (f" [log_id={log_id}]" if log_id else "")
+        )
+    return response
 
 
 def upload_file_descriptor(
@@ -411,9 +465,23 @@ def metaads_proxy_request(
         payload["parameters"] = list(parameters)
     if binary_body is not None:
         payload["binary_body"] = dict(binary_body)
-    return _request(
+    response = _request(
         "POST",
         "tools/execute/proxy",
         json_body=payload,
         timeout=timeout,
     )
+    if isinstance(response, Mapping):
+        status = response.get("status")
+        try:
+            status_int = int(status)
+        except (TypeError, ValueError):
+            status_int = 0
+        if response.get("successful") is False or status_int >= 400:
+            message = _proxy_error_message("METAADS_PROXY", response)
+            log_id = str(response.get("log_id") or "").strip()
+            raise ComposioDistributionError(
+                f"Composio METAADS_PROXY returned an error: {message}"
+                + (f" [log_id={log_id}]" if log_id else "")
+            )
+    return response

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
-from plugins.takyon import core, safebox_app
+from plugins.takyon import composio_distribution, core, safebox_app
 
 _TOKEN = "secret-internal-token"
 
@@ -135,6 +135,36 @@ def test_meta_graph_requires_mcp_connection_when_remote(monkeypatch):
 
     with pytest.raises(core.TakyonError, match="Composio Meta Ads MCP connection"):
         core._meta_graph("POST", "act_123/campaigns", {"name": "demo"}, {"token": "", "version": "v21.0"})
+
+
+def test_metaads_proxy_request_raises_graph_error(monkeypatch):
+    def fake_request(method, path, *, json_body=None, timeout=60.0, **_kwargs):
+        assert method == "POST"
+        assert path == "tools/execute/proxy"
+        assert json_body["connected_account_id"] == "conn_metaads_123"
+        return {
+            "status": 400,
+            "data": {
+                "error": {
+                    "message": "Ads creative post was created by an app that is in development mode.",
+                    "type": "OAuthException",
+                    "code": 1885316,
+                }
+            },
+        }
+
+    monkeypatch.setattr(composio_distribution, "_request", fake_request)
+
+    with pytest.raises(
+        composio_distribution.ComposioDistributionError,
+        match="development mode",
+    ):
+        composio_distribution.metaads_proxy_request(
+            method="POST",
+            endpoint="https://graph.facebook.com/v23.0/act_123/adcreatives",
+            connected_account_id="conn_metaads_123",
+            body={"name": "Demo creative"},
+        )
 
 
 def test_meta_graph_direct_when_local_on_safebox_host(monkeypatch):
