@@ -74,8 +74,6 @@ from plugins.takyon.core import (
     app_media_get_bytes,
     handle_business_list_app_connections,
     handle_business_list_app_directory_entries,
-    handle_business_meta_ad_bind_manual_launch,
-    handle_business_meta_ad_insights_sync,
     handle_business_read_app_account,
     handle_business_read_app_session,
     handle_business_read_app_directory_entry,
@@ -90,6 +88,7 @@ from plugins.takyon.core import (
     handle_business_upsert_app_profile,
     _is_reserved_public_subdomain,
 )
+from plugins.takyon.meta_ads_v2 import handle_business_meta_ad_insights_sync
 from plugins.takyon import safebox as takyon_safebox
 
 TAKYON_APP_SESSION_COOKIE = APP_SESSION_COOKIE
@@ -5552,39 +5551,6 @@ async def start_takyon_business_outreach_channel(
                 "idempotency_key": str(body.get("idempotency_key") or f"dashboard-outreach-start-{uuid.uuid4().hex}"),
                 "reason": f"start {spec['label']} outreach lane from dashboard panel",
                 "actor": "dashboard",
-            }
-        )
-    )
-    return _takyon_app_json(status, payload)
-
-
-@app.post("/api/takyon/businesses/{slug}/meta-campaigns/{campaign_slug}/bind-manual-launch")
-async def bind_takyon_business_meta_manual_launch(
-    request: Request,
-    slug: str,
-    campaign_slug: str,
-) -> JSONResponse:
-    principal = _resolve_dashboard_request_principal(request)
-    if principal is None:
-        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    business = str(slug or "").strip()
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
-        raise HTTPException(status_code=404, detail="business not found")
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    status, payload = _takyon_app_tool(
-        handle_business_meta_ad_bind_manual_launch(
-            {
-                **body,
-                "business": business,
-                "slug": str(campaign_slug or "").strip(),
-                "idempotency_key": str(body.get("idempotency_key") or f"dashboard-manual-bind-{uuid.uuid4().hex}"),
-                "actor": "dashboard",
-                "reason": "bind manual meta launch from campaign ops",
             }
         )
     )

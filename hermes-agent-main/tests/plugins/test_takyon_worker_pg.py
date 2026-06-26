@@ -1387,12 +1387,6 @@ def test_channel_tracked_link_tags_without_clobbering_and_meta_delegates():
     )
     assert "utm_source=newsletter" in preset
     assert "utm_source=x" not in preset
-    # Meta delegates to the shared helper and preserves its source/medium contract.
-    meta = core._meta_tracked_link("https://acme.example.com/", campaign_key="camp", creative_key="cr")
-    assert "utm_source=meta" in meta
-    assert "utm_medium=paid_social" in meta
-    assert "utm_campaign=camp" in meta
-    assert "utm_content=cr" in meta
 
 
 def test_compose_x_link_reply_formats_and_truncates():

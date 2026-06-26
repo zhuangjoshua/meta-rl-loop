@@ -2210,16 +2210,33 @@ def build_safebox_app() -> FastAPI:
         # Gated by the internal token (transport reachability); the per-action money gate lives
         # upstream in the meta-ads handlers.
         _require_internal_token(authorization)
-        from . import core as _core
+        from . import meta_mcp as _meta_mcp
 
-        try:
-            cfg = dict(_core._meta_config(require_token=False))
-        except _core.TakyonError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        cfg["has_token"] = bool(cfg.get("token"))
-        cfg["token"] = ""
-        cfg["has_mcp_oauth_token"] = bool(cfg.get("has_mcp_oauth_token"))
-        return cfg
+        version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+        if not version:
+            version = "v23.0"
+        elif not version.startswith("v"):
+            version = f"v{version}"
+        token = str(
+            safebox.first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN") or ""
+        ).strip()
+        mcp_token = str(safebox.first_env_backed_value(*_meta_mcp.META_MCP_TOKEN_ALIASES) or "").strip()
+        endpoint = str(
+            safebox.first_env_backed_value(*_meta_mcp.META_MCP_ENDPOINT_ALIASES)
+            or _meta_mcp.DEFAULT_META_MCP_ENDPOINT
+        ).strip() or _meta_mcp.DEFAULT_META_MCP_ENDPOINT
+        return {
+            "token": "",
+            "has_token": bool(token),
+            "has_mcp_oauth_token": bool(mcp_token),
+            "mcp_endpoint": endpoint,
+            "version": version,
+            "ad_account_id": str(safebox.first_env_backed_value("META_AD_ACCOUNT_ID") or "").strip(),
+            "page_id": str(safebox.first_env_backed_value("META_PAGE_ID") or "").strip(),
+            "composio_connected_account_id": "",
+            "composio_user_id": "",
+            "composio_alias": "",
+        }
 
     @app.post("/v1/providers/meta/mcp/tools")
     def provider_meta_mcp_tools(
@@ -2263,19 +2280,29 @@ def build_safebox_app() -> FastAPI:
         # Legacy compatibility route. Production launch/control/read calls use official Meta MCP;
         # this remains internal-only for Graph shims/diagnostics and still never egresses the token.
         _require_internal_token(authorization)
-        from . import core as _core
+        from . import meta_graph as _meta_graph
 
+        version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
+        if not version:
+            version = "v23.0"
+        elif not version.startswith("v"):
+            version = f"v{version}"
+        token = str(
+            safebox.first_env_backed_value("META_SYSTEM_USER_ACCESS_TOKEN", "META_ACCESS_TOKEN") or ""
+        ).strip()
+        if not token:
+            raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
         try:
-            cfg = _core._meta_config(require_token=False)
-            return _core._meta_graph(
+            return _meta_graph._graph(
                 body.method,
-                body.path,
+                str(body.path or "").lstrip("/"),
                 dict(body.params or {}),
-                cfg,
+                token=token,
+                version=version,
                 host=body.host,
-                timeout=int(body.timeout),
+                timeout=float(body.timeout),
             )
-        except _core.TakyonError as exc:
+        except _meta_graph.MetaGraphError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.post("/v1/storage/get")

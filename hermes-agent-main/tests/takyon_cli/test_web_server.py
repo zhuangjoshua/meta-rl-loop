@@ -369,23 +369,6 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     assert ai_gateway.get_gateway_conn in overrides
 
 
-def test_meta_campaign_payload_explicitly_disables_adset_budget_sharing():
-    import plugins.takyon.creative_gateway as creative_gateway
-
-    payload = creative_gateway._meta_campaign_create_payload(
-        {
-            "campaign_name": "Meta Smoke",
-            "objective": "OUTCOME_TRAFFIC",
-        }
-    )
-
-    assert payload["name"] == "Meta Smoke"
-    assert payload["objective"] == "OUTCOME_TRAFFIC"
-    assert payload["status"] == "PAUSED"
-    assert payload["special_ad_categories"] == "[]"
-    assert payload["is_adset_budget_sharing_enabled"] is False
-
-
 def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
     from starlette.testclient import TestClient
 
