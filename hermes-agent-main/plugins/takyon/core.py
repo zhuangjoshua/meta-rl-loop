@@ -6527,6 +6527,7 @@ def _materialize_subuser_app_scaffold(
 # scaffold on every materialize, exactly like the `_takyon/` kit. They are additive/backward-
 # compatible by policy (new exports, never breaking the API the worker screens import).
 _APPKIT_OWNED_SRC_FILES = (
+    "src/main.tsx",
     "src/lib/takyon.ts",
     "src/lib/hooks.ts",
     "src/lib/product-auth.tsx",

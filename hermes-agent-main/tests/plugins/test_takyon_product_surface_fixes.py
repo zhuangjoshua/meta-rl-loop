@@ -16,7 +16,7 @@ def test_appkit_owned_src_rematerialized_on_rebuild():
     assert "def _rematerialize_appkit_owned_src(" in _CORE_SRC
     # ...and that it is actually invoked from the kit materializer (runs on every refresh build).
     assert "_rematerialize_appkit_owned_src(workspace_root" in _CORE_SRC
-    for rail in ("src/lib/hooks.ts", "src/lib/takyon.ts", "src/screens/app-layout.tsx"):
+    for rail in ("src/main.tsx", "src/lib/hooks.ts", "src/lib/takyon.ts", "src/screens/app-layout.tsx"):
         assert rail in _CORE_SRC, f"{rail} missing from _APPKIT_OWNED_SRC_FILES"
 
 
