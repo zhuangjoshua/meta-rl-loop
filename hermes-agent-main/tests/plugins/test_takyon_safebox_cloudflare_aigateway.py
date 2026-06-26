@@ -60,6 +60,7 @@ def test_product_anthropic_uses_cloudflare_gateway_metadata(monkeypatch):
     assert captured["headers"]["cf-aig-authorization"] == "Bearer cf-run-token"
     assert captured["headers"]["x-api-key"] == "anthropic-key"
     assert captured["headers"]["cf-aig-collect-log-payload"] == "false"
+    assert captured["headers"]["user-agent"] == "Takyon-Safebox/1.0"
     metadata = json.loads(captured["headers"]["cf-aig-metadata"])
     assert metadata == {
         "app_user_id": "app-user-1",

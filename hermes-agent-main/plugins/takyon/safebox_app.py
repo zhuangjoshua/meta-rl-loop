@@ -1133,6 +1133,7 @@ def _cloudflare_aig_anthropic_messages(
             "cf-aig-authorization": f"Bearer {token}",
             "cf-aig-metadata": _cloudflare_aig_metadata(scope, provider="anthropic", model=model),
             "cf-aig-collect-log-payload": "false",
+            "User-Agent": "Takyon-Safebox/1.0",
         },
         method="POST",
     )
