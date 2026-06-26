@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from plugins.takyon.core import (
     WORKER_CAPABILITY_CONTRACT,
     _bounded_product_inventory,
@@ -547,6 +549,71 @@ def test_starter_seeds_vite_when_lane_absent(tmp_path):
 
     assert (tmp_path / "vite.config.ts").is_file()
     assert not (tmp_path / "next.config.js").exists()
+
+
+def test_product_build_normalizer_restores_scaffold_owned_config(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    package = {
+        "name": "plantmeter-587969",
+        "private": True,
+        "version": "0.1.0",
+        "type": "module",
+        "scripts": {"dev": "vite", "build": "tsc && vite build"},
+        "dependencies": {
+            "react": "^18.3.1",
+            "react-dom": "^18.3.1",
+            "react-router-dom": "^6.26.2",
+        },
+        "devDependencies": {
+            "@vitejs/plugin-react": "^4.3.1",
+            "typescript": "^5.5.3",
+            "vite": "^5.4.2",
+        },
+    }
+    (tmp_path / "package.json").write_text(
+        json.dumps(package, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text(
+        json.dumps({"compilerOptions": {"moduleResolution": "bundler"}, "include": ["src"]}) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "vite.config.js").write_text("export default { build: { outDir: 'dist' } };\n", encoding="utf-8")
+    (tmp_path / "vite.config.ts").write_text(
+        "import { defineConfig } from 'vite';\nexport default defineConfig({});\n",
+        encoding="utf-8",
+    )
+
+    result = takyon_core._normalize_supported_product_build_shape(
+        tmp_path,
+        scripts=package["scripts"],
+        deps={**package["dependencies"], **package["devDependencies"]},
+    )
+
+    assert not result.get("blocked")
+    assert {repair["path"] for repair in result["repairs"]} >= {
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+        "vite.config.ts",
+        "vite.config.js",
+    }
+    normalized_package = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
+    assert normalized_package["name"] == "plantmeter-587969"
+    assert normalized_package["scripts"]["build"] == "vite build"
+    assert normalized_package["scripts"]["typecheck"] == "tsc --noEmit"
+    assert normalized_package["dependencies"]["@supabase/supabase-js"] == "2.108.2"
+    assert not (tmp_path / "vite.config.js").exists()
+    assert '"@takyon/*": ["./_takyon/*"]' in (tmp_path / "tsconfig.json").read_text(encoding="utf-8")
+    assert '"@takyon": new URL("./_takyon", import.meta.url).pathname' in (
+        tmp_path / "vite.config.ts"
+    ).read_text(encoding="utf-8")
+    scaffold_lock = (
+        takyon_core._subuser_app_scaffold_source_dir() / "package-lock.json"
+    ).read_bytes()
+    assert (tmp_path / "package-lock.json").read_bytes() == scaffold_lock
 
 
 def test_frontend_stack_creation_default():

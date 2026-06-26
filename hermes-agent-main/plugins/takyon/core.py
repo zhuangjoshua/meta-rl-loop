@@ -10426,6 +10426,148 @@ def _normalize_next_config_typescript(root: Path) -> dict[str, Any]:
     }
 
 
+_SCAFFOLD_BUILD_CONFIG_FILES = (
+    "package-lock.json",
+    "tsconfig.json",
+    "vite.config.ts",
+    "postcss.config.js",
+    "tailwind.config.js",
+)
+_SCAFFOLD_BUILD_CONFIG_CONFLICTS = (
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+)
+
+
+def _scaffold_package_json_for_workspace(root: Path) -> tuple[dict[str, Any] | None, str]:
+    scaffold_package = _subuser_app_scaffold_source_dir() / "package.json"
+    try:
+        package_data = json.loads(scaffold_package.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, f"bundled scaffold package.json is unreadable: {exc}"
+    if not isinstance(package_data, dict):
+        return None, "bundled scaffold package.json is not an object"
+
+    current_package = root / "package.json"
+    try:
+        current = json.loads(current_package.read_text(encoding="utf-8"))
+    except Exception:
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+
+    normalized = dict(package_data)
+    for key in ("name", "version", "private"):
+        value = current.get(key)
+        if isinstance(value, (str, int, float, bool)) and value != "":
+            normalized[key] = value
+    normalized["type"] = "module"
+    return normalized, ""
+
+
+def _normalize_scaffold_build_config(root: Path) -> dict[str, Any]:
+    """Restore scaffold-owned build config before a product refresh runs.
+
+    Worker-owned product UI lives in ``src/screens`` / ``src/components``. The Vite/TS/package
+    config is platform-owned because it carries the ``@takyon`` alias, pinned dependency closure,
+    and runtime kit imports. Repairing it here lets a generated app recover from a worker that
+    overwrote the scaffold config without turning the public product into a hand-patched one-off.
+    """
+    scaffold = _subuser_app_scaffold_source_dir()
+    if not scaffold.exists():
+        return {
+            "repairs": [],
+            "warnings": [],
+            "blocked": True,
+            "error": "bundled Vite scaffold is missing; cannot normalize product build config",
+        }
+
+    repairs: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    package_data, package_error = _scaffold_package_json_for_workspace(root)
+    if package_data is None:
+        return {
+            "repairs": [],
+            "warnings": [],
+            "blocked": True,
+            "error": package_error,
+        }
+    package_text = json.dumps(package_data, ensure_ascii=False, indent=2) + "\n"
+    package_path = root / "package.json"
+    try:
+        existing_package_text = package_path.read_text(encoding="utf-8") if package_path.is_file() else ""
+    except OSError:
+        existing_package_text = ""
+    if existing_package_text != package_text:
+        _atomic_write_text(package_path, package_text)
+        repairs.append(
+            {
+                "kind": "scaffold_build_config_restore",
+                "path": "package.json",
+                "message": "Restored the pinned scaffold package scripts and dependency closure.",
+            }
+        )
+
+    for rel in _SCAFFOLD_BUILD_CONFIG_FILES:
+        source = scaffold / rel
+        if not source.is_file():
+            warnings.append(f"bundled scaffold config missing: {rel}")
+            continue
+        destination = root / rel
+        try:
+            source_bytes = source.read_bytes()
+            existing_bytes = destination.read_bytes() if destination.is_file() else b""
+        except OSError as exc:
+            return {
+                "repairs": repairs,
+                "warnings": warnings,
+                "blocked": True,
+                "error": f"could not read scaffold build config {rel}: {exc}",
+            }
+        if existing_bytes == source_bytes:
+            continue
+        _atomic_write_bytes(destination, source_bytes)
+        repairs.append(
+            {
+                "kind": "scaffold_build_config_restore",
+                "path": rel,
+                "message": f"Restored pinned scaffold build config {rel}.",
+            }
+        )
+
+    for rel in _SCAFFOLD_BUILD_CONFIG_CONFLICTS:
+        path = root / rel
+        if not path.exists() and not path.is_symlink():
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError as exc:
+            return {
+                "repairs": repairs,
+                "warnings": warnings,
+                "blocked": True,
+                "error": f"could not remove conflicting build config {rel}: {exc}",
+            }
+        repairs.append(
+            {
+                "kind": "scaffold_build_config_conflict_remove",
+                "path": rel,
+                "message": f"Removed conflicting build config {rel}; the pinned scaffold config is authoritative.",
+            }
+        )
+
+    return {"repairs": repairs, "warnings": warnings}
+
+
 def _normalize_supported_product_build_shape(
     root: Path,
     *,
@@ -10449,7 +10591,7 @@ def _normalize_supported_product_build_shape(
                 "Vite scaffold and publish the built dist/index.html output."
             ),
         }
-    return {"repairs": [], "warnings": []}
+    return _normalize_scaffold_build_config(root)
 
 
 def _surface_refresh_exact_blocker(
@@ -11116,6 +11258,28 @@ def _refresh_product_surface_path(
             ),
         })
         return result
+    normalization = _normalize_supported_product_build_shape(
+        root,
+        scripts=scripts,
+        deps=deps,
+    )
+    result["repairs"] = list(normalization.get("repairs") or [])
+    result["warnings"].extend(str(item).strip() for item in (normalization.get("warnings") or []) if str(item).strip())
+    if normalization.get("blocked"):
+        result.update({
+            "status": "blocked",
+            "error": str(normalization.get("error") or "unsupported build shape requires manual repair"),
+        })
+        return result
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except Exception as exc:
+        result.update({"status": "failed", "error": f"package.json is not valid JSON after normalization: {exc}"})
+        return result
+    scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+    dependencies = package_data.get("dependencies") if isinstance(package_data.get("dependencies"), dict) else {}
+    dev_dependencies = package_data.get("devDependencies") if isinstance(package_data.get("devDependencies"), dict) else {}
+    deps = {**dependencies, **dev_dependencies}
     is_vite = "vite" in deps or any((root / name).exists() for name in ("vite.config.js", "vite.config.ts"))
     if not is_vite:
         result.update({
@@ -11151,19 +11315,6 @@ def _refresh_product_surface_path(
             "error": "javascript package manager is unavailable for dependency installation",
             "missing_capabilities": [package_manager_name],
             "remediation": "Install or enable the declared package manager, or allow Takyon runtime installs so it can provision a local JavaScript runtime/package manager.",
-        })
-        return result
-    normalization = _normalize_supported_product_build_shape(
-        root,
-        scripts=scripts,
-        deps=deps,
-    )
-    result["repairs"] = list(normalization.get("repairs") or [])
-    result["warnings"].extend(str(item).strip() for item in (normalization.get("warnings") or []) if str(item).strip())
-    if normalization.get("blocked"):
-        result.update({
-            "status": "blocked",
-            "error": str(normalization.get("error") or "unsupported build shape requires manual repair"),
         })
         return result
     inventory = _product_inventory(business_root, source_rel, surface=surface)
