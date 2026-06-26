@@ -3,12 +3,11 @@
 GOAL_RULES.md §3 invariant 7:
 
     "Auth/session/key integrity fail-closed — hashed key verifiers (single active
-    key/user), JWTs require exp+sub+audience, sessions/magic-links hashed +
-    single-use."
+    key/user), JWTs require exp+sub+audience, sessions hashed and revocable."
 
 This module asserts that invariant against the REAL Takyon source — assume every
 caller (operator AND sub-user) is EVIL and trying to forge an identity, replay a
-one-time secret, or hold two live credentials at once.
+session, or hold two live credentials at once.
 
 Three credential rails are covered:
 
@@ -32,12 +31,11 @@ Three credential rails are covered:
        tests/plugins/test_takyon_supabase_auth.py), so no live Supabase or secret
        is needed.
 
-  3. Sub-user magic links + sessions
+  3. Sub-user sessions
      - `plugins.takyon.app_identity._hash_token` — SHA-256 of the raw token is the
-       only at-rest form (links AND sessions).
-     - `plugins.takyon.app_identity.verify_magic_link` — single-use redemption via
-       `update ... where used_at is null ... returning`; a reused link is refused
-       (PG-gated).
+       only at-rest form for app sessions.
+     - `plugins.takyon.app_identity.start_session` — mints a raw session token exactly once
+       and stores only its hash.
      - `plugins.takyon.app_identity.validate_session` — sessions resolve only by
        their hash, while unrevoked + unexpired + active.
 
@@ -46,8 +44,8 @@ tests/conftest.py cover the source/unit assertions with NO credential or network
 The handful of DB-truth checks use the repo's `pg_conn` fixture and are skipped
 unless TAKYON_TEST_PG_DSN is set.
 
-GREEN here = the invariant holds (forged/expired/wrong-aud/reused/duplicate ⇒
-refused). RED would mean a money/identity hole opened (a forged or replayed
+GREEN here = the invariant holds (forged/expired/wrong-aud/revoked/duplicate ⇒
+refused). RED would mean a money/identity hole opened (a forged or revoked
 credential was accepted, or two active keys coexist) — a regression that VOIDs
 the cycle. This invariant is NOT aspirational: current code is expected GREEN.
 """
@@ -374,11 +372,11 @@ def test_jwt_hs256_bad_secret_refused():
 
 
 # =========================================================================== #
-# Rail 3 — magic links + sessions: hashed at rest, single-use
+# Rail 3 — sessions: hashed at rest, fail-closed
 # =========================================================================== #
 
 
-def test_token_hash_is_sha256_only_form_for_links_and_sessions():
+def test_token_hash_is_sha256_only_form_for_sessions():
     import hashlib
 
     raw = "some-raw-opaque-token-value"
@@ -387,24 +385,16 @@ def test_token_hash_is_sha256_only_form_for_links_and_sessions():
     assert h != raw and len(h) == 64
 
 
-def test_magic_link_is_single_use_in_source():
-    """The redemption is an atomic `update ... where used_at is null ... returning`
-    so a replayed link can never win a second time."""
-    src = inspect.getsource(app_identity.verify_magic_link)
-    assert "update app_magic_links set used_at = now()" in src
-    assert "used_at is null" in src
-    assert "expires_at > now()" in src
-    # Only the hash of the presented token is matched — the raw token is never
-    # compared or stored.
-    assert "_hash_token(token)" in src
-    assert "InvalidMagicLink" in src
+def test_session_mint_stores_hash_not_raw_in_source():
+    src = inspect.getsource(app_identity.start_session)
+    assert "_hash_token(raw_session)" in src
+    # The raw session token is returned to the caller exactly once, not persisted in clear.
+    assert "return session, raw_session" in src
 
 
-def test_magic_link_mint_stores_hash_not_raw_in_source():
-    src = inspect.getsource(app_identity.create_magic_link)
-    assert "_hash_token(raw)" in src
-    # The raw token is returned to the caller exactly once, not persisted in clear.
-    assert "return link, raw" in src
+def test_magic_link_helpers_are_removed_from_identity_leaf():
+    assert not hasattr(app_identity, "create_magic_link")
+    assert not hasattr(app_identity, "verify_magic_link")
 
 
 def test_session_validation_keys_off_hash_and_is_fail_closed_in_source():
@@ -450,9 +440,8 @@ def test_pg_user_api_keys_partial_unique_blocks_second_active_row(pg_conn):
         _add("tk_bbbb2222")
 
 
-def test_pg_magic_link_single_use_reused_link_refused(pg_conn):
-    """End-to-end single-use: first verify succeeds, a replay of the same raw token
-    is refused with InvalidMagicLink. Needs the Postgres rig."""
+def test_pg_session_token_hash_at_rest_and_revoke_fail_closed(pg_conn):
+    """End-to-end session proof: raw token is not stored, validates while live, then revoke refuses it."""
     # Owner + business so the FK from app_users -> businesses(slug) holds.
     uid = pg_conn.execute(
         "insert into users (auth0_sub, email) values (%s, %s) returning id",
@@ -464,14 +453,10 @@ def test_pg_magic_link_single_use_reused_link_refused(pg_conn):
         (slug, "Acme", uid),
     )
 
-    _link, raw = app_identity.create_magic_link(pg_conn, slug, "user@example.com")
-
-    session, raw_session = app_identity.verify_magic_link(pg_conn, slug, raw)
+    user = app_identity.upsert_app_user(pg_conn, slug, "user@example.com")
+    session, raw_session = app_identity.start_session(pg_conn, slug, user.id)
     assert session.business_slug == slug
-
-    # Replay the very same magic-link token => refused.
-    with pytest.raises(app_identity.InvalidMagicLink):
-        app_identity.verify_magic_link(pg_conn, slug, raw)
+    assert app_identity.validate_session(pg_conn, slug, raw_session).id == user.id
 
     # The freshly-minted session is hashed at rest, never stored raw.
     stored_hash = pg_conn.execute(
@@ -479,6 +464,9 @@ def test_pg_magic_link_single_use_reused_link_refused(pg_conn):
     ).fetchone()[0]
     assert stored_hash == app_identity._hash_token(raw_session)
     assert stored_hash != raw_session
+
+    assert app_identity.revoke_session(pg_conn, slug, raw_session) is True
+    assert app_identity.validate_session(pg_conn, slug, raw_session) is None
 
     # And it validates only via its hash, returning the owning sub-user.
     who = app_identity.validate_session(pg_conn, slug, raw_session)

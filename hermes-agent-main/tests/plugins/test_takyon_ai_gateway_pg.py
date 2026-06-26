@@ -88,19 +88,19 @@ def _provision_session_user(
         included_ai_budget_microusd=included_ai_budget_microusd,
         metadata=_DEFAULT_PLAN_METADATA if metadata is None else metadata,
     )
-    link, raw_magic = app_identity.create_magic_link(conn, business_slug, email)
-    session_user, session_token = app_identity.verify_magic_link(conn, business_slug, raw_magic)
+    session_user = app_identity.upsert_app_user(conn, business_slug, email)
+    _session, session_token = app_identity.start_session(conn, business_slug, session_user.id)
     app_entitlements.grant_entitlement(
         conn,
         business_slug,
-        app_user_id=session_user.app_user_id,
+        app_user_id=session_user.id,
         tier=tier,
         status="active",
         source="stripe",
         plan_key=plan_key,
         stripe_subscription_id=f"sub_{plan_key}",
     )
-    user = app_identity.get_app_user(conn, business_slug, app_user_id=session_user.app_user_id)
+    user = app_identity.get_app_user(conn, business_slug, app_user_id=session_user.id)
     assert user is not None
     return user, session_token
 
@@ -295,8 +295,8 @@ def test_gateway_blocks_when_provider_unconfigured(gateway_client, pg_conn):
 
 def test_gateway_requires_paid_entitlement(gateway_client, pg_conn):
     slug, raw = _provision_business(pg_conn)
-    link, raw_magic = app_identity.create_magic_link(pg_conn, slug, "no-plan@example.com")
-    _session_user, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    session_user = app_identity.upsert_app_user(pg_conn, slug, "no-plan@example.com")
+    _session, session_token = app_identity.start_session(pg_conn, slug, session_user.id)
     client = gateway_client(_canned_caller)
 
     resp = client.post(

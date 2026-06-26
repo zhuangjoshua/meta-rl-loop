@@ -111,8 +111,6 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_upsert_app_customer",
         "business_upsert_app_profile",
         "business_grant_app_entitlement",
-        "business_request_app_magic_link",
-        "business_verify_app_magic_link",
         "business_supabase_login",
         "business_read_app_account",
         "business_read_app_profile",
@@ -308,16 +306,13 @@ _PUBLIC_ASSET_MEDIA_TYPES: dict[str, str] = {
 PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
     "auth": {
         "owner_skill": "takyon-app-runtime",
-        "tools": ["business_supabase_login", "business_request_app_magic_link", "business_verify_app_magic_link", "business_read_app_account"],
+        "tools": ["business_supabase_login", "business_read_app_account"],
         "endpoints": [
             ("POST", "auth/session"),
-            ("POST", "auth/request"),
-            ("GET", "auth/verify"),
             ("GET", "session"),
         ],
         "worker_contract": [
-            "Sign sub-users in through Supabase Auth (Google + email): the browser completes the Supabase OAuth flow, then POST auth/session with the Supabase access_token to mint the Takyon app session. Do not build browser-only auth state.",
-            "POST auth/request + GET auth/verify (magic-link) remain as a legacy fallback until the Supabase cutover is verified live; prefer auth/session.",
+            "Sign sub-users in through Supabase Auth (Google + email): the browser completes the Supabase OAuth flow, then POST auth/session with the Supabase access_token to mint the Takyon app session. Do not build browser-only auth state or magic-link fallbacks.",
             "If auth is declared, use the canonical auth helpers directly; only block sign-in when the auth rail is explicitly marked blocked/broken or a real auth request fails.",
         ],
     },
@@ -422,7 +417,7 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
         "worker_contract": [
             "Product email is server-side only: schedule-triggered actions send via POST email/send using their service session; customer sessions cannot send email and the endpoint refuses them truthfully.",
             "Recipients are app users by id and content comes from real product state; never fake a send — the receipt under metrics/receipts/app-email/ and the email_send usage event are the proof.",
-            "Auth/magic-link email belongs to the platform, not the product; the email rail is for product re-engagement and transactional notices with an explicit purpose, and test mode suppresses real sends with receipts.",
+            "Sign-in email belongs to Supabase Auth, not the product email rail; the email rail is for product re-engagement and transactional notices with an explicit purpose, and test mode suppresses real sends with receipts.",
         ],
     },
     "connections": {
@@ -4315,13 +4310,8 @@ def _subuser_app_starter_context_js(*, title_literal: str) -> str:
             }
 
             export async function starterRequestAuth(payload = {}) {
-              if (railCallable("auth")) {
-                return starterRuntime.requestAuth(payload);
-              }
-              return starterJsonRequest(starterRuntime.routeUrl("auth/request"), {
-                method: "POST",
-                body: JSON.stringify(payload),
-              });
+              void payload;
+              throw new Error("Supabase Auth is the only supported product sign-in path. Use the seeded ProductAuthProvider flow and POST auth/session with a Supabase access token.");
             }
 
             export async function starterSession() {
@@ -4598,11 +4588,11 @@ def _subuser_app_starter_primitives_js() -> str:
               const [message, setMessage] = useState("");
               const [error, setError] = useState("");
               const [pending, setPending] = useState(false);
-              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Send magic link";
+              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Continue with Supabase";
               const resolvedTitle =
                 title || (intent === "subscribe" ? "Sign in to continue to subscription." : "Sign in to continue.");
               const resolvedCopy =
-                copy || "Use your email to continue. We'll send you a secure sign-in link.";
+                copy || "Use the Supabase sign-in flow configured for this product.";
               const resolvedKicker = kicker || (intent === "subscribe" ? "Continue" : "Sign in");
 
               async function handleSubmit(event) {
@@ -4611,20 +4601,11 @@ def _subuser_app_starter_primitives_js() -> str:
                 setMessage("");
                 setError("");
                 try {
-                  const payload = await starterRequestAuth({
-                    email,
-                    origin: window.location.origin,
-                    product_name: starterBusinessName,
-                    app_slug: starterSurfaceContext.business,
-                  });
-                  setMessage(
-                    payload?.success === false
-                      ? "Could not start sign-in."
-                      : "Check your inbox for the magic link."
-                  );
+                  await starterRequestAuth({ email });
+                  setMessage("Continue in the Supabase sign-in window.");
                   if (onComplete) onComplete();
                 } catch (requestError) {
-                  setError(String(requestError?.message || requestError || "Unable to send magic link."));
+                  setError(String(requestError?.message || requestError || "Unable to start Supabase sign-in."));
                 } finally {
                   setPending(false);
                 }
@@ -5427,11 +5408,11 @@ def _subuser_app_starter_pages_js() -> str:
               const [message, setMessage] = useState("");
               const [error, setError] = useState("");
               const [pending, setPending] = useState(false);
-              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Send magic link";
+              const actionLabel = intent === "subscribe" ? "Continue to subscribe" : "Continue with Supabase";
               const resolvedTitle =
                 title || (intent === "subscribe" ? "Sign in to continue to checkout." : "Sign in to continue.");
               const resolvedCopy =
-                copy || "Use your email to continue. We'll send you a secure sign-in link.";
+                copy || "Use the Supabase sign-in flow configured for this product.";
               const resolvedKicker =
                 kicker || (intent === "subscribe" ? "Continue" : "Sign in");
 
@@ -5441,20 +5422,11 @@ def _subuser_app_starter_pages_js() -> str:
                 setMessage("");
                 setError("");
                 try {
-                  const payload = await starterRequestAuth({
-                    email,
-                    origin: window.location.origin,
-                    product_name: starterBusinessName,
-                    app_slug: starterSurfaceContext.business,
-                  });
-                  setMessage(
-                    payload?.success === false
-                      ? "Could not start sign-in."
-                      : "Check your inbox for the magic link."
-                  );
+                  await starterRequestAuth({ email });
+                  setMessage("Continue in the Supabase sign-in window.");
                   if (onComplete) onComplete();
                 } catch (requestError) {
-                  setError(String(requestError?.message || requestError || "Unable to send magic link."));
+                  setError(String(requestError?.message || requestError || "Unable to start Supabase sign-in."));
                 } finally {
                   setPending(false);
                 }
@@ -9168,7 +9140,7 @@ _FORBIDDEN_PRODUCT_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
 _RUNTIME_BASE_PREFIX = r"/api/takyon/apps/[^'\"`\s)]+/"
 _PRODUCT_RUNTIME_INTEGRATION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("runtime_api", re.compile(r"/api/takyon/apps/|\bcreateSubuserRuntimeClient\s*\(|_takyon/runtime-client", re.IGNORECASE)),
-    ("auth", re.compile(_RUNTIME_BASE_PREFIX + r"auth/(?:request|verify)\b|\.\s*requestAuth\s*\(", re.IGNORECASE)),
+    ("auth", re.compile(_RUNTIME_BASE_PREFIX + r"auth/session\b|\.\s*loginWithSupabase\s*\(", re.IGNORECASE)),
     ("session", re.compile(_RUNTIME_BASE_PREFIX + r"session\b|\.\s*session\s*\(", re.IGNORECASE)),
     ("account", re.compile(_RUNTIME_BASE_PREFIX + r"account\b|\.\s*account\s*\(", re.IGNORECASE)),
     ("profile", re.compile(_RUNTIME_BASE_PREFIX + r"profile\b|\.\s*profile\s*\(|\.\s*updateProfile\s*\(", re.IGNORECASE)),
@@ -13734,21 +13706,6 @@ class TakyonStore:
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
               FOREIGN KEY (business_slug, source_app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE,
               FOREIGN KEY (business_slug, target_app_user_id) REFERENCES app_users(business_slug, id) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS app_magic_links (
-              id TEXT PRIMARY KEY,
-              business_slug TEXT NOT NULL,
-              app_user_id TEXT,
-              email TEXT NOT NULL,
-              token_hash TEXT NOT NULL UNIQUE,
-              purpose TEXT NOT NULL DEFAULT 'login',
-              expires_at TEXT NOT NULL,
-              used_at TEXT,
-              provider_message_id TEXT,
-              metadata_json TEXT,
-              created_at TEXT NOT NULL,
-              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE,
-              FOREIGN KEY (app_user_id) REFERENCES app_users(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS app_sessions (
               id TEXT PRIMARY KEY,
@@ -19519,12 +19476,12 @@ def _queue_openmeter_sync_job(
     }
     idem = f"openmeter.sync:{business}:{scope}:{target}:{uuid.uuid4().hex}"
     # The OpenMeter access projection is a downstream usage mirror, never a login/session gate. This
-    # retry-enqueue runs inside session-minting paths (magic-link verify, OAuth/Supabase login,
+    # retry-enqueue runs inside session-minting paths (Supabase login,
     # checkout), so it must FAIL SOFT: a queue error must never abort verification or roll back a
     # freshly minted session. Two prior failure modes are guarded here:
     #   * jobs.enqueue reads rows positionally (row[0]…), so it must run under ``_leaf_conn`` (tuple_row).
     #     Passing the dict_row ``_PGConn`` wrapper made ``_row_to_job`` raise ``KeyError: 0`` whose
-    #     str() is the bare '0' the red-team saw escape the magic-link handler.
+    #     str() is the bare '0' the red-team saw escape an auth handler.
     #   * any other enqueue/DB error is logged and swallowed; the caller still returns its sync result.
     try:
         with store._connect() as conn:
@@ -19564,8 +19521,7 @@ def _openmeter_access_projection_failsoft(
     business: str,
     app_user_id: str,
 ) -> dict[str, Any] | None:
-    """Fail-soft OpenMeter access-projection sync for session-minting paths (magic-link verify,
-    OAuth/Supabase login).
+    """Fail-soft OpenMeter access-projection sync for session-minting paths (Supabase login).
 
     The access projection is a DOWNSTREAM USAGE MIRROR, never a login/session gate. A red-team proved
     that an OpenMeter ``POST /api/customers -> 404`` raised here, and the retry-enqueue fallback then
@@ -20103,26 +20059,6 @@ def _subscription_entitlement_status(status: str) -> str:
     if status in {"canceled", "cancelled"}:
         return "cancelled"
     return "past_due"
-
-
-def _postmark_magic_link(email: str, product_name: str, link: str) -> str | None:
-    try:
-        body = safebox.send_postmark_email(
-            to_email=email,
-            subject=f"Sign in to {product_name}",
-            text_body=(
-                f"Use this secure link to sign in to {product_name}:\n\n{link}\n\n"
-                "This link expires in 15 minutes and can be used once."
-            ),
-            html_body=(
-                f'<p>Use this secure link to sign in to {product_name}:</p>'
-                f'<p><a href="{link}">Sign in to {product_name}</a></p>'
-                "<p>This link expires in 15 minutes and can be used once.</p>"
-            ),
-        )
-        return body.get("message_id")
-    except Exception as exc:
-        raise TakyonError(f"Postmark magic link failed: {exc}") from exc
 
 
 def _ensure_stripe_price(conn: sqlite3.Connection, slug: str, plan: dict[str, Any], business_name: str) -> dict[str, Any]:
@@ -21439,257 +21375,6 @@ def handle_business_grant_app_entitlement(args: dict, **_: Any) -> str:
     return _commit_tool(args, operation)
 
 
-def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
-    store = _store()
-    try:
-        business = _slugify(str(args.get("business") or ""))
-        email = _normalize_email(str(args.get("email") or ""))
-        if _is_service_email(email):
-            return tool_result({
-                "success": True,
-                "business": business,
-                "email": email,
-                "magic_link_id": "",
-                "token": "",
-                "verify_url": "",
-                "expires_at": "",
-                "email_sent": False,
-                "email_requested": bool(args.get("send_email")),
-                "provider_message_id": None,
-                "external_side_effects": "none",
-            })
-        # SECURITY (account-takeover): the emailed verify-link host MUST be the business's
-        # SERVER-AUTHORITATIVE product URL, never a client-supplied `origin`. /auth/request is
-        # unauthenticated, so trusting a client `origin` let an attacker point a real login token
-        # at their own host (POST /auth/request {email: victim, origin: https://evil}) — a
-        # one-click account takeover. Derive the host the same way checkout derives success/cancel
-        # URLs (never from a client origin), and ignore any client-supplied origin for the link host.
-        link_base = _product_publish_target(business).rstrip("/")
-        app_slug = _file_slug(str(args.get("app_slug") or business), business)
-        send_email = bool(args.get("send_email"))
-        with store._connect() as conn:
-            business_row = store._ensure_business(conn, business)
-            _enforce_business_work_focus(
-                {"action": "app.customer.upsert", "business": business},
-                str(business_row.get("work_focus") or "all"),
-            )
-            test_mode = _effective_business_mode(business_row.get("mode")) == "test"
-            now = _now()
-            link_id = ""
-            expires_at = ""
-            if isinstance(conn, _PGConn):
-                leaves = store._app_leaves()
-                with store._leaf_conn(conn) as leaf:
-                    link_record, token = leaves["identity"].create_magic_link(
-                        leaf,
-                        business,
-                        email,
-                        purpose=str(args.get("purpose") or "login"),
-                        name=args.get("name"),
-                    )
-                    app_user = leaves["identity"].get_app_user(
-                        leaf,
-                        business,
-                        app_user_id=link_record.app_user_id,
-                    )
-                    leaves["profiles"].ensure_profile(
-                        leaf,
-                        business,
-                        app_user_id=link_record.app_user_id,
-                        display_name=None if app_user is None else app_user.name,
-                    )
-                if app_user is None:
-                    raise TakyonError("app user is not active")
-                if str(app_user.status or "active") != "active":
-                    raise TakyonError("app user is not active")
-                user = {
-                    "id": app_user.id,
-                    "email": app_user.email,
-                    "status": app_user.status,
-                }
-                link_id = link_record.id
-                expires_at = str(link_record.expires_at)
-            else:
-                user_id = uuid.uuid4().hex
-                conn.execute(
-                    "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', 'unentitled', ?, ?, ?) "
-                    "ON CONFLICT(business_slug, email) DO UPDATE SET "
-                    "name = COALESCE(excluded.name, app_users.name), "
-                    "updated_at = excluded.updated_at",
-                    (user_id, business, email, args.get("name"), _json_dumps({"source": "magic_link"}), now, now),
-                )
-                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, email)).fetchone())
-                if str(user.get("status") or "active") != "active":
-                    raise TakyonError("app user is not active")
-                _ensure_sqlite_app_profile(
-                    conn,
-                    business,
-                    str(user["id"]),
-                    display_name=user.get("name"),
-                )
-                token = _random_token()
-            link = f"{link_base}/api/takyon/apps/{app_slug}/auth/verify?token={urllib.parse.quote(token)}" if link_base else ""
-            provider_message_id = None
-            email_sent = False
-            if send_email:
-                if test_mode:
-                    provider_message_id = f"test-mode-suppressed:{uuid.uuid4().hex}"
-                else:
-                    product_name = str(args.get("product_name") or business)
-                    provider_message_id = _postmark_magic_link(email, product_name, link or token)
-                    email_sent = True
-            link_metadata = {
-                "app_slug": app_slug,
-                "email_requested": send_email,
-                "email_sent": email_sent,
-                "external_side_effects": "suppressed" if test_mode and send_email else "none" if not send_email else "sent",
-            }
-            if isinstance(conn, _PGConn):
-                with store._leaf_conn(conn) as leaf:
-                    leaf.execute(
-                        "update app_magic_links set provider_message_id = %s, metadata = %s::jsonb where business_slug = %s and id = %s",
-                        (provider_message_id, _json_dumps(link_metadata), business, link_id),
-                    )
-            else:
-                link_id = uuid.uuid4().hex
-                expires_at = _future(minutes=15)
-                conn.execute(
-                    "INSERT INTO app_magic_links (id, business_slug, app_user_id, email, token_hash, purpose, expires_at, provider_message_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (link_id, business, user["id"], email, _hash_token(token), str(args.get("purpose") or "login"), expires_at, provider_message_id, _json_dumps(link_metadata), now),
-                )
-            if test_mode and send_email:
-                receipt_rel = f"metrics/receipts/app-magic-link/{link_id}.json"
-                _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
-                    "id": link_id,
-                    "business": business,
-                    "mode": "test",
-                    "email": email,
-                    "provider": "postmark",
-                    "external_side_effects": "suppressed",
-                    "sent": False,
-                    "created_at": now,
-                }) + "\n")
-            store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.magic_link.request", payload={"email": email, "sent": email_sent, "requested_send": send_email, "provider_message_id": provider_message_id, "external_side_effects": "suppressed" if test_mode and send_email else "sent" if email_sent else "none"})
-            store._rewrite_app_files(conn, business)
-        return tool_result({"success": True, "business": business, "mode": "test" if test_mode else "live", "email": email, "magic_link_id": link_id, "token": token, "verify_url": link, "expires_at": expires_at, "email_sent": email_sent, "email_requested": send_email, "provider_message_id": provider_message_id, "external_side_effects": "suppressed" if test_mode and send_email else "sent" if email_sent else "none"})
-    except Exception as exc:
-        return tool_error(str(exc), success=False)
-
-
-def handle_business_verify_app_magic_link(args: dict, **_: Any) -> str:
-    store = _store()
-    try:
-        business = _slugify(str(args.get("business") or ""))
-        token = str(args.get("token") or "").strip()
-        if not token:
-            raise TakyonError("token is required")
-        with store._connect() as conn:
-            business_row = store._ensure_business(conn, business)
-            _enforce_business_work_focus(
-                {"action": "app.customer.upsert", "business": business},
-                str(business_row.get("work_focus") or "all"),
-            )
-            if isinstance(conn, _PGConn):
-                openmeter_sync = None
-                link_target = store._row_to_dict(conn.execute(
-                    "SELECT u.id, u.email, u.status FROM app_magic_links l "
-                    "JOIN app_users u ON u.business_slug = l.business_slug AND u.id = l.app_user_id "
-                    "WHERE l.business_slug = ? AND l.token_hash = ? AND l.used_at IS NULL AND l.expires_at > ? LIMIT 1",
-                    (business, _hash_token(token), _now()),
-                ).fetchone())
-                if not link_target:
-                    raise TakyonError("magic link is invalid, expired, or already used")
-                if _app_user_is_service_identity(link_target):
-                    raise TakyonError("magic link is invalid, expired, or already used")
-                leaves = store._app_leaves()
-                with store._leaf_conn(conn) as leaf:
-                    session, session_token = leaves["identity"].verify_magic_link(leaf, business, token)
-                    user_record = leaves["identity"].get_app_user(
-                        leaf,
-                        business,
-                        app_user_id=session.app_user_id,
-                    )
-                    if user_record is None:
-                        raise TakyonError("magic link user is missing")
-                    leaves["entitlements"].resolve_user_tier(leaf, business, user_record.id)
-                    refreshed = leaves["identity"].get_app_user(
-                        leaf,
-                        business,
-                        app_user_id=user_record.id,
-                    )
-                    leaves["profiles"].ensure_profile(
-                        leaf,
-                        business,
-                        app_user_id=user_record.id,
-                        display_name=user_record.name,
-                    )
-                if _openmeter_enabled():
-                    # The OpenMeter access projection is a downstream usage mirror, NOT a login gate.
-                    # It must never abort magic-link verification or roll back the freshly minted
-                    # session: an OpenMeter 404/outage (or any sync/enqueue error) is logged and
-                    # swallowed here so a valid token still mints a session when OpenMeter is down.
-                    openmeter_sync = _openmeter_access_projection_failsoft(
-                        store, business, user_record.id
-                    )
-                    try:
-                        with store._leaf_conn(conn) as leaf:
-                            refreshed = leaves["identity"].get_app_user(
-                                leaf,
-                                business,
-                                app_user_id=user_record.id,
-                            )
-                    except Exception:
-                        pass
-                if refreshed is None:
-                    raise TakyonError("magic link user is missing")
-                user = {
-                    "id": refreshed.id,
-                    "email": refreshed.email,
-                    "status": refreshed.status,
-                }
-                tier = refreshed.tier
-                session_id = session.id
-                expires_at = str(session.expires_at)
-            else:
-                link = store._row_to_dict(conn.execute(
-                    "SELECT * FROM app_magic_links WHERE business_slug = ? AND token_hash = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
-                    (business, _hash_token(token), _now()),
-                ).fetchone())
-                if not link:
-                    raise TakyonError("magic link is invalid, expired, or already used")
-                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, link["app_user_id"])).fetchone())
-                if not user:
-                    raise TakyonError("magic link user is missing")
-                if _app_user_is_service_identity(user):
-                    raise TakyonError("magic link is invalid, expired, or already used")
-                if str(user.get("status") or "active") != "active":
-                    raise TakyonError("app user is not active")
-                now = _now()
-                conn.execute("UPDATE app_magic_links SET used_at = ? WHERE id = ?", (now, link["id"]))
-                session_token = _random_token()
-                session_id = uuid.uuid4().hex
-                conn.execute(
-                    "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (session_id, business, user["id"], _hash_token(session_token), _future(days=30), now),
-                )
-                tier = store._sync_user_tier(conn, business, user["id"])
-                _ensure_sqlite_app_profile(
-                    conn,
-                    business,
-                    str(user["id"]),
-                    display_name=user.get("name"),
-                )
-                expires_at = _future(days=30)
-            store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.magic_link.verify", payload={"app_user_id": user["id"], "session_id": session_id})
-            store._rewrite_app_files(conn, business)
-        payload = {"success": True, "business": business, "app_user_id": user["id"], "email": user["email"], "tier": tier, "session_id": session_id, "session_token": session_token, "expires_at": expires_at}
-        if 'openmeter_sync' in locals() and openmeter_sync is not None:
-            payload["openmeter_sync"] = openmeter_sync
-        return tool_result(payload)
-    except Exception as exc:
-        return tool_error(str(exc), success=False)
-
-
 def handle_business_read_app_session(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -21786,12 +21471,10 @@ def handle_business_delete_app_session(args: dict, **_: Any) -> str:
 
 
 def handle_business_supabase_login(args: dict, **_: Any) -> str:
-    """Sub-app login via Supabase Auth (AUTH0.md §7) — the Supabase replacement for
-    ``business_verify_app_magic_link``. Verify the Supabase access token server-side, upsert the
-    sub-user by ``supabase_user_id`` (adopting a legacy email row on first Google login), mint the
-    SAME 30-day ``app_session`` magic-link mints, and leave unpaid users unentitled until a real
-    paid entitlement exists. ``validate_session`` and everything downstream are unchanged — only
-    the credential differs.
+    """Sub-app login via Supabase Auth. Verify the Supabase access token server-side, upsert the
+    sub-user by ``supabase_user_id`` (adopting a pre-existing email-only row on first Google login),
+    mint the 30-day ``app_session``, and leave unpaid users unentitled until a real paid entitlement
+    exists. ``validate_session`` and everything downstream are unchanged.
     Requires the Postgres runtime plus Supabase project config readable through Safebox
     (``SUPABASE_URL`` and a public/browser key; ``SUPABASE_JWT_SECRET`` is legacy fallback only)."""
     store = _store()
@@ -34326,18 +34009,6 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Grant a product customer a paid entitlement. Unpaid users should have no entitlement row; any entitlement requires Stripe/webhook evidence.",
         "handler": handle_business_grant_app_entitlement,
         "schema": _schema("business_grant_app_entitlement", "Grant product app entitlement.", {"business": _BUSINESS_PROP, "app_user_id": {"type": "string"}, "email": {"type": "string"}, "tier": {"type": "string"}, "status": {"type": "string"}, "source": {"type": "string"}, "plan_key": {"type": "string"}, "current_period_end": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "tier", "idempotency_key"]),
-    },
-    {
-        "name": "business_request_app_magic_link",
-        "description": "Create a one-use product customer magic-link token and optionally send it via Postmark.",
-        "handler": handle_business_request_app_magic_link,
-        "schema": _schema("business_request_app_magic_link", "Request product app magic link.", {"business": _BUSINESS_PROP, "email": {"type": "string"}, "name": {"type": "string"}, "origin": {"type": "string"}, "app_slug": {"type": "string"}, "product_name": {"type": "string"}, "send_email": {"type": "boolean"}, "purpose": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "email"]),
-    },
-    {
-        "name": "business_verify_app_magic_link",
-        "description": "Consume a product customer magic link and create a 30-day app session token.",
-        "handler": handle_business_verify_app_magic_link,
-        "schema": _schema("business_verify_app_magic_link", "Verify product app magic link.", {"business": _BUSINESS_PROP, "token": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "token"]),
     },
     {
         "name": "business_supabase_login",

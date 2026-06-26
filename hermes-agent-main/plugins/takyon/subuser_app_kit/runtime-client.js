@@ -170,18 +170,13 @@ export function createSubuserRuntimeClient(context = {}) {
     isRailCallable(rail) {
       return ALLOW_CALL_STATES.has(railStateFor(rail));
     },
-    buildVerifyUrl({ token, redirect } = {}) {
-      const url = new URL(routeUrl("auth/verify"), location.origin || "http://localhost");
-      if (token) url.searchParams.set("token", token);
-      if (redirect) url.searchParams.set("redirect", redirect);
-      return url.toString();
-    },
-    async requestAuth(payload = {}) {
+    buildVerifyUrl() {
       ensureRail("auth");
-      return jsonRequest(routeUrl("auth/request"), {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
+      throw new Error("Supabase Auth is the only supported product sign-in path. Magic-link verification URLs are disabled.");
+    },
+    async requestAuth() {
+      ensureRail("auth");
+      throw new Error("Supabase Auth is the only supported product sign-in path. Use loginWithSupabase(accessToken).");
     },
     async loginWithSupabase(accessToken, extra = {}) {
       // Supabase Auth (Google/email) sign-in: complete the Supabase OAuth flow in the browser,

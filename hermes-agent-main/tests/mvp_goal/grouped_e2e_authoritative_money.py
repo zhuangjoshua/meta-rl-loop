@@ -10,8 +10,8 @@ A. Product-AI spend via the REAL HTTP gateway mount (`build_runtime_app` -> POST
    real engine on real Postgres.
      (1) sub-user with NO active subscription -> MUST be refused 402 subscription_required, NO free
          budget, ledger untouched.
-     (2) sub-user WITH a paid subscription (included_ai_budget_microusd = N) -> per-user budget == N;
-         spend allowed cumulatively up to N, then the next call refused 402
+     (2) sub-user WITH a paid subscription whose weekly pro-rated included AI budget is N -> per-user
+         window budget == N; spend allowed cumulatively up to N, then the next call refused 402
          app_user_budget_exceeded; per-business pool imposes NO separate $5 cap (default budget opens
          with hard_limit NULL).
      (3) exact-cost settle (no markup): settled actual == provider-reported token cost, no scaling.
@@ -44,7 +44,7 @@ from psycopg.conninfo import make_conninfo
 from fastapi.testclient import TestClient
 
 from plugins.takyon import app_actions, app_entitlements, app_identity, app_usage
-from plugins.takyon.ai_gateway import get_provider_caller, _user_monthly_budget_microusd
+from plugins.takyon.ai_gateway import get_provider_caller, _user_weekly_budget_microusd
 from plugins.takyon.app_gateway_keys import mint_gateway_key
 from plugins.takyon.app_usage import list_usage_events, get_usage_summary, get_app_budget
 from plugins.takyon.control_plane import ensure_platform_owner, provision_user_on_first_login
@@ -52,7 +52,13 @@ from plugins.takyon.runtime_app import build_runtime_app
 from plugins.takyon import core as takyon_core
 from plugins.takyon.db.runner import run_migrations
 
-ADMIN_DSN = os.environ["TAKYON_TEST_PG_DSN"]
+ADMIN_DSN = os.environ.get("TAKYON_TEST_PG_DSN")
+if not ADMIN_DSN:
+    if "pytest" in sys.modules:
+        import pytest
+
+        pytest.skip("TAKYON_TEST_PG_DSN not set; grouped Postgres E2E skipped", allow_module_level=True)
+    raise SystemExit("TAKYON_TEST_PG_DSN is required")
 GENERATE_BODY = {"messages": [{"role": "user", "content": "Hello gateway"}], "max_tokens": 32}
 
 evidence: list[str] = []
@@ -94,7 +100,7 @@ def provision_business(conn) -> tuple[str, str]:
 
 
 def seed_paid_session_user(conn, slug, *, included_ai_budget_microusd, tier="paid", email=None):
-    """A magic-link sub-user with an ACTIVE paid entitlement on a plan whose
+    """A sub-user with an ACTIVE paid entitlement on a plan whose
     included_ai_budget_microusd == the per-user AI budget (the `y` term). Exact repo pattern."""
     email = email or f"cust-{uuid.uuid4().hex[:6]}@example.com"
     plan_key = f"{tier}-plan-{uuid.uuid4().hex[:4]}"
@@ -103,22 +109,22 @@ def seed_paid_session_user(conn, slug, *, included_ai_budget_microusd, tier="pai
         conn, slug, plan_key, tier=tier, price_cents=price_cents,
         included_ai_budget_microusd=included_ai_budget_microusd,
     )
-    _link, raw_magic = app_identity.create_magic_link(conn, slug, email)
-    session_user, session_token = app_identity.verify_magic_link(conn, slug, raw_magic)
+    session_user = app_identity.upsert_app_user(conn, slug, email)
+    _session, session_token = app_identity.start_session(conn, slug, session_user.id)
     app_entitlements.grant_entitlement(
-        conn, slug, app_user_id=session_user.app_user_id, tier=tier, status="active",
+        conn, slug, app_user_id=session_user.id, tier=tier, status="active",
         source="stripe", plan_key=plan_key, stripe_subscription_id=f"sub_{plan_key}",
     )
-    user = app_identity.get_app_user(conn, slug, app_user_id=session_user.app_user_id)
+    user = app_identity.get_app_user(conn, slug, app_user_id=session_user.id)
     return user, session_token, plan_key
 
 
 def seed_unentitled_session_user(conn, slug, *, email=None):
-    """A magic-link sub-user with NO entitlement / no plan — the freeloader."""
+    """A sub-user with NO entitlement / no plan."""
     email = email or f"noplan-{uuid.uuid4().hex[:6]}@example.com"
-    _link, raw_magic = app_identity.create_magic_link(conn, slug, email)
-    session_user, session_token = app_identity.verify_magic_link(conn, slug, raw_magic)
-    user = app_identity.get_app_user(conn, slug, app_user_id=session_user.app_user_id)
+    session_user = app_identity.upsert_app_user(conn, slug, email)
+    _session, session_token = app_identity.start_session(conn, slug, session_user.id)
+    user = app_identity.get_app_user(conn, slug, app_user_id=session_user.id)
     return user, session_token
 
 
@@ -182,19 +188,22 @@ def run_gateway_group():
             )
             results["no_sub_refused"] = no_sub_refused
 
-            # (2) PAID subscription with included_ai_budget_microusd = N. One canned call costs
+            # (2) PAID subscription whose weekly pro-rated allowance is N. One canned call costs
             # sonnet 3/15 microusd-per-token => 3*100 + 15*20 = 600 microusd. Pick N = exactly 2
             # calls' worth so the 1st & 2nd succeed and the 3rd is refused at the per-USER gate.
             per_call = 600
             N = per_call * 2  # 1200 microusd
-            user, st1, plan_key = seed_paid_session_user(conn, slug, included_ai_budget_microusd=N)
+            monthly_included = (N * 30 // 7) + 1
+            user, st1, plan_key = seed_paid_session_user(
+                conn, slug, included_ai_budget_microusd=monthly_included
+            )
 
             plan = app_entitlements.get_plan_policy(conn, slug, plan_key)
-            derived = _user_monthly_budget_microusd(plan)
+            derived = _user_weekly_budget_microusd(plan)
             log(f"[A2] plan {plan_key}: included_ai_budget_microusd={plan.included_ai_budget_microusd} "
-                f"-> _user_monthly_budget_microusd={derived} (expect == N={N})")
+                f"-> _user_weekly_budget_microusd={derived} (expect == N={N})")
             budget_equals_included = (
-                int(plan.included_ai_budget_microusd) == N and derived == N
+                int(plan.included_ai_budget_microusd) == monthly_included and derived == N
             )
 
             # spend allowed up to N: 2 successful settles of 600 each.

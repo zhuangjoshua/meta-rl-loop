@@ -6,9 +6,8 @@
 -- (business_slug, supabase_user_id) for Supabase-authed sub-users; email stays a mutable
 -- attribute and the existing unique (business_slug, email) is unchanged.
 --
--- ADDITIVE on purpose: app_magic_links is left in place so the working magic-link path keeps
--- functioning until the Supabase path is verified live; dropping it is a deliberate follow-up,
--- not bundled into the column add (never destroy working auth before its replacement is proven).
+-- This migration was additive on purpose: the legacy app_magic_links table stayed in place while the
+-- Supabase path was verified. 0042_drop_app_magic_links.sql removes it after the runtime cutover.
 --
 -- No FK to auth.users here: that table lives in Supabase's `auth` schema, which is absent on the
 -- throwaway test Postgres, so a hard FK would make migrations unrunnable off-project. The FK is

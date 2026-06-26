@@ -2326,8 +2326,8 @@ def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeyp
     try:
         client = TestClient(web_server.app)
         canonical = client.post(
-            "/api/takyon/apps/mathflow/auth/request",
-            json={"email": "a@b.com"},
+            "/api/takyon/apps/mathflow/auth/session",
+            json={"access_token": "supabase-token"},
             headers={"Host": "mathflow.coscale.app"},
         )
         wrong_slug = client.get(
@@ -2335,13 +2335,13 @@ def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeyp
             headers={"Host": "mathflow.coscale.app"},
         )
         bare = client.post(
-            "/auth/request",
+            "/auth/session",
             json={"prompt": "hi"},
             headers={"Host": "mathflow.coscale.app"},
         )
         dash = client.post(
-            "/auth/request",
-            json={"email": "a@b.com"},
+            "/auth/session",
+            json={"access_token": "supabase-token"},
             headers={"Host": "localhost:9119"},
         )
     finally:
@@ -2349,10 +2349,10 @@ def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeyp
             del web_server.app.state.bound_host
 
     assert canonical.status_code == 200
-    assert canonical.json() == {"ok": True, "business": "mathflow", "route": "auth/request"}
+    assert canonical.json() == {"ok": True, "business": "mathflow", "route": "auth/session"}
     assert wrong_slug.status_code == 404
     assert bare.status_code == 405
-    assert ("POST", "mathflow", "auth/request") in calls
+    assert ("POST", "mathflow", "auth/session") in calls
     assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
 
 

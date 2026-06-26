@@ -7,6 +7,7 @@ import os
 import stat
 import tempfile
 import types
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -57,10 +58,9 @@ from plugins.takyon.core import (
     handle_business_read_app_account,
     handle_business_read_app_record,
     handle_business_list_app_records,
-    handle_business_request_app_magic_link,
+    handle_business_upsert_app_customer,
     handle_business_record_stripe_webhook,
     handle_business_delete_app_record,
-    handle_business_verify_app_magic_link,
     handle_business_static_ad_generate,
     handle_business_generate_logo,
     handle_business_ugc_ad_generate,
@@ -135,6 +135,43 @@ def _isolated_takyon_pg_env(monkeypatch, tmp_path, pg_store_dsn):
 
 def _commit(store: TakyonStore, scope: str, operations: list[dict], key: str):
     return store.commit(scope=scope, operations=operations, idempotency_key=key, reason="test", actor="test")
+
+
+def _sqlite_app_session(store: TakyonStore, business: str, email: str, *, name: str = "Test User") -> tuple[dict[str, Any], str]:
+    """Test setup for local SQLite stores: Supabase login is PG-only, so seed a real app session row."""
+    now = datetime.now(timezone.utc).isoformat()
+    user_id = uuid.uuid4().hex
+    token = takyon_core._random_token()
+    session_id = uuid.uuid4().hex
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO app_users (id, business_slug, email, name, status, tier, metadata_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'active', 'unentitled', ?, ?, ?) "
+            "ON CONFLICT(business_slug, email) DO UPDATE SET "
+            "name = COALESCE(excluded.name, app_users.name), updated_at = excluded.updated_at",
+            (user_id, business, email, name, json.dumps({"source": "test_session"}), now, now),
+        )
+        user = dict(
+            conn.execute(
+                "SELECT * FROM app_users WHERE business_slug = ? AND email = ?",
+                (business, email),
+            ).fetchone()
+        )
+        conn.execute(
+            "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                business,
+                user["id"],
+                takyon_core._hash_token(token),
+                (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+                now,
+            ),
+        )
+        store._sync_user_tier(conn, business, str(user["id"]))
+        store._rewrite_app_files(conn, business)
+    return user, token
 
 
 def test_plugin_registers_tools_and_commands():
@@ -1237,7 +1274,7 @@ def test_static_app_surface_with_real_app_route_passes(tmp_path, monkeypatch):
         fetch('/api/takyon/apps/briefpilot/session');
         document.getElementById('signin').addEventListener('submit', function (event) {
           event.preventDefault();
-          fetch('/api/takyon/apps/briefpilot/auth/request', { method: 'POST' });
+          fetch('/api/takyon/apps/briefpilot/auth/session', { method: 'POST' });
         });
         document.getElementById('workspace').addEventListener('submit', function (event) {
           event.preventDefault();
@@ -1363,7 +1400,7 @@ def test_next_app_surface_with_src_app_routes_passes(tmp_path, monkeypatch):
         """
         export async function pingRuntime() {
           await fetch('/api/takyon/apps/noteleaf/session');
-          await fetch('/api/takyon/apps/noteleaf/auth/request', { method: 'POST' });
+          await fetch('/api/takyon/apps/noteleaf/auth/session', { method: 'POST' });
           await fetch('/api/takyon/apps/noteleaf/generate', { method: 'POST' });
         }
         """,
@@ -2051,7 +2088,7 @@ def test_bootstrap_access_shell_surface_passes_without_generate_workflow(tmp_pat
           fetch('/api/takyon/apps/coachyard/account');
           document.getElementById('signin').addEventListener('submit', function (event) {
             event.preventDefault();
-            fetch('/api/takyon/apps/coachyard/auth/request', { method: 'POST' });
+            fetch('/api/takyon/apps/coachyard/auth/session', { method: 'POST' });
           });
           document.getElementById('subscribe').addEventListener('submit', function (event) {
             event.preventDefault();
@@ -2781,7 +2818,7 @@ def test_claude_agent_task_injects_runtime_ui_contract_for_product_work(tmp_path
     assert "Canonical tools: business_read_app_account" in instruction
     assert "Canonical tools: business_list_app_records, business_read_app_record, business_upsert_app_record, business_delete_app_record" in instruction
     assert "Canonical tools: business_create_app_checkout, business_record_stripe_webhook" in instruction
-    assert "Reachable runtime endpoints: POST /auth/request on product hosts or POST /api/takyon/apps/latexflow/auth/request off-host" in instruction
+    assert "Reachable runtime endpoints: POST /auth/session on product hosts or POST /api/takyon/apps/latexflow/auth/session off-host" in instruction
     assert "Reachable runtime endpoints: GET /account on product hosts or GET /api/takyon/apps/latexflow/account off-host" in instruction
     assert "Reachable runtime endpoints: GET /records on product hosts or GET /api/takyon/apps/latexflow/records off-host; POST /records on product hosts or POST /api/takyon/apps/latexflow/records off-host; GET /records/<type>/<id> on product hosts or GET /api/takyon/apps/latexflow/records/<type>/<id> off-host; POST /records/<type>/<id> on product hosts or POST /api/takyon/apps/latexflow/records/<type>/<id> off-host; DELETE /records/<type>/<id> on product hosts or DELETE /api/takyon/apps/latexflow/records/<type>/<id> off-host" in instruction
     assert "Reachable runtime endpoints: POST /checkout on product hosts or POST /api/takyon/apps/latexflow/checkout off-host" in instruction
@@ -3927,11 +3964,10 @@ def test_work_focus_blocks_direct_product_app_handlers(tmp_path, monkeypatch):
     )
 
     result = json.loads(
-        handle_business_request_app_magic_link(
+        handle_business_upsert_app_customer(
             {
                 "business": "latexflow",
                 "email": "customer@example.com",
-                "origin": "https://example.com",
             }
         )
     )
@@ -3940,7 +3976,7 @@ def test_work_focus_blocks_direct_product_app_handlers(tmp_path, monkeypatch):
     assert "marketing-only" in result["error"]
 
 
-def test_pg_magic_link_verify_creates_session_and_free_entitlement(tmp_path, monkeypatch):
+def test_sqlite_seeded_app_session_reads_unentitled_account(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -3950,36 +3986,16 @@ def test_pg_magic_link_verify_creates_session_and_free_entitlement(tmp_path, mon
         "init-authrail",
     )
 
-    request = json.loads(
-        handle_business_request_app_magic_link(
-            {
-                "business": "authrail",
-                "email": "tester@example.com",
-                "name": "Test User",
-                "origin": "https://authrail.example.com",
-                "send_email": False,
-            }
-        )
-    )
-    verify = json.loads(
-        handle_business_verify_app_magic_link(
-            {
-                "business": "authrail",
-                "token": request["token"],
-            }
-        )
-    )
+    _user, session_token = _sqlite_app_session(store, "authrail", "tester@example.com")
     account = json.loads(
         handle_business_read_app_account(
             {
                 "business": "authrail",
-                "session_token": verify["session_token"],
+                "session_token": session_token,
             }
         )
     )
 
-    assert verify["success"] is True
-    assert verify["session_token"]
     assert account["success"] is True
     assert account["user"]["email"] == "tester@example.com"
     assert account["user"]["tier"] == "unentitled"
@@ -4205,30 +4221,12 @@ def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
         "init-paidacct-plan",
     )
 
-    request = json.loads(
-        handle_business_request_app_magic_link(
-            {
-                "business": "paidacct",
-                "email": "paid@example.com",
-                "name": "Paid User",
-                "origin": "https://paidacct.example.com",
-                "send_email": False,
-            }
-        )
-    )
-    verify = json.loads(
-        handle_business_verify_app_magic_link(
-            {
-                "business": "paidacct",
-                "token": request["token"],
-            }
-        )
-    )
+    _user, session_token = _sqlite_app_session(store, "paidacct", "paid@example.com", name="Paid User")
     account_before = json.loads(
         handle_business_read_app_account(
             {
                 "business": "paidacct",
-                "session_token": verify["session_token"],
+                "session_token": session_token,
             }
         )
     )
@@ -4281,7 +4279,7 @@ def test_pg_checkout_webhook_updates_account_to_paid(tmp_path, monkeypatch):
         handle_business_read_app_account(
             {
                 "business": "paidacct",
-                "session_token": verify["session_token"],
+                "session_token": session_token,
             }
         )
     )
@@ -4312,30 +4310,12 @@ def test_pg_account_read_recovers_paid_checkout_without_webhook(tmp_path, monkey
         "init-recoveracct",
     )
 
-    request = json.loads(
-        handle_business_request_app_magic_link(
-            {
-                "business": "recoveracct",
-                "email": "recover@example.com",
-                "name": "Recover User",
-                "origin": "https://recoveracct.example.com",
-                "send_email": False,
-            }
-        )
-    )
-    verify = json.loads(
-        handle_business_verify_app_magic_link(
-            {
-                "business": "recoveracct",
-                "token": request["token"],
-            }
-        )
-    )
+    _user, session_token = _sqlite_app_session(store, "recoveracct", "recover@example.com", name="Recover User")
     account_before = json.loads(
         handle_business_read_app_account(
             {
                 "business": "recoveracct",
-                "session_token": verify["session_token"],
+                "session_token": session_token,
             }
         )
     )
@@ -4397,7 +4377,7 @@ def test_pg_account_read_recovers_paid_checkout_without_webhook(tmp_path, monkey
         handle_business_read_app_account(
             {
                 "business": "recoveracct",
-                "session_token": verify["session_token"],
+                "session_token": session_token,
             }
         )
     )

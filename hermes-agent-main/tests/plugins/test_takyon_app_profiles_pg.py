@@ -102,8 +102,7 @@ def test_ensure_profile_creates_standard_one_to_one_row(pg_conn):
 def test_get_profile_resolves_from_session_token(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     user = app_identity.upsert_app_user(pg_conn, slug, "session@example.com")
-    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, "session@example.com")
-    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    _, session_token = app_identity.start_session(pg_conn, slug, user.id)
     app_profiles.upsert_profile(pg_conn, slug, app_user_id=user.id, display_name="Session User")
 
     resolved = app_profiles.get_profile(pg_conn, slug, session_token=session_token)
@@ -118,8 +117,7 @@ def test_profile_rejects_session_token_with_app_user_override(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     alice = app_identity.upsert_app_user(pg_conn, slug, "alice@example.com")
     bob = app_identity.upsert_app_user(pg_conn, slug, "bob@example.com")
-    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
-    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    _, session_token = app_identity.start_session(pg_conn, slug, alice.id)
 
     with pytest.raises(ValueError, match="session_token is authoritative"):
         app_profiles.upsert_profile(
@@ -135,8 +133,7 @@ def test_record_save_rejects_session_token_with_app_user_override(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     alice = app_identity.upsert_app_user(pg_conn, slug, "alice-records@example.com")
     bob = app_identity.upsert_app_user(pg_conn, slug, "bob-records@example.com")
-    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
-    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    _, session_token = app_identity.start_session(pg_conn, slug, alice.id)
 
     with pytest.raises(ValueError, match="session_token is authoritative"):
         app_records.save_record(
@@ -153,8 +150,7 @@ def test_directory_write_rejects_session_token_with_app_user_override(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     alice = app_identity.upsert_app_user(pg_conn, slug, "alice-directory@example.com")
     bob = app_identity.upsert_app_user(pg_conn, slug, "bob-directory@example.com")
-    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
-    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    _, session_token = app_identity.start_session(pg_conn, slug, alice.id)
 
     with pytest.raises(ValueError, match="session_token is authoritative"):
         app_directory.upsert_entry(
@@ -171,8 +167,7 @@ def test_connection_action_rejects_session_token_with_app_user_override(pg_conn)
     alice = app_identity.upsert_app_user(pg_conn, slug, "alice-connections@example.com")
     bob = app_identity.upsert_app_user(pg_conn, slug, "bob-connections@example.com")
     target = app_identity.upsert_app_user(pg_conn, slug, "target-connections@example.com")
-    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
-    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+    _, session_token = app_identity.start_session(pg_conn, slug, alice.id)
 
     with pytest.raises(ValueError, match="session_token is authoritative"):
         app_connections.set_connection(

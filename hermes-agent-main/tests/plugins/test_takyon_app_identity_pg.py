@@ -1,13 +1,7 @@
-"""Postgres integration tests for product sub-user identity — Phase 5 (increment a).
+"""Postgres integration tests for product sub-user identity.
 
-Phase 5 acceptance (this slice): a business's customers (product sub-users) get
-magic-link auth and bearer sessions on Postgres, fully scoped by business_slug. The
-sharp correctness details pinned here:
-  * a magic link is SINGLE-USE even under concurrency — the redemption is one atomic
-    `update ... where used_at is null returning`, so two simultaneous clicks yield
-    exactly one session (the SQLite read-then-write version could double-redeem);
-  * verify is ATOMIC — if the resolved sub-user is inactive the whole redemption rolls
-    back, so the link survives for a later (reactivated) attempt;
+Product sub-users are scoped by business_slug and authenticate through Supabase before
+Takyon mints an app session. The sharp correctness details pinned here:
   * sessions are business-scoped — a token minted under one business never validates
     under another;
   * raw tokens are never stored, only their SHA-256 hash.
@@ -19,11 +13,7 @@ TAKYON_TEST_PG_DSN is set.
 
 from __future__ import annotations
 
-import hashlib
-import os
-import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -33,7 +23,6 @@ from plugins.takyon import app_identity  # noqa: E402
 from plugins.takyon.app_identity import (  # noqa: E402
     InactiveAppUser,
     InvalidEmail,
-    InvalidMagicLink,
 )
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 
@@ -56,11 +45,10 @@ def _business(conn, owner_id, name="Acme") -> str:
     return slug
 
 
-def _new_conn(pg_conn):
-    """A fresh autocommit connection to the SAME throwaway DB — for real concurrency."""
-    return psycopg.connect(
-        os.environ["TAKYON_TEST_PG_DSN"], dbname=pg_conn.info.dbname, autocommit=True
-    )
+def _session_for_email(conn, slug: str, email: str):
+    user = app_identity.upsert_app_user(conn, slug, email)
+    session, token = app_identity.start_session(conn, slug, user.id)
+    return user, session, token
 
 
 # ── upsert_app_user ─────────────────────────────────────────────────────────────
@@ -130,120 +118,33 @@ def test_same_email_is_a_distinct_user_per_business(pg_conn):
     assert a.id != b.id  # the same person is two separate customers across businesses
 
 
-# ── create_magic_link ───────────────────────────────────────────────────────────
+# ── start_session ───────────────────────────────────────────────────────────────
 
 
-def test_create_magic_link_provisions_user_and_stores_only_the_hash(pg_conn):
+def test_start_session_opens_session_that_validates_to_the_user(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    link, raw = app_identity.create_magic_link(pg_conn, slug, "frank@example.com")
-    # the sub-user was upserted as a side of minting the link
-    assert app_identity.get_app_user(pg_conn, slug, email="frank@example.com") is not None
-    assert link.app_user_id
-    # the raw token is never persisted — only its SHA-256 hash is
-    stored = pg_conn.execute(
-        "select token_hash from app_magic_links where id = %s", (link.id,)
-    ).fetchone()[0]
-    assert stored != raw
-    assert stored == hashlib.sha256(raw.encode()).hexdigest()
-
-
-def test_create_magic_link_rejects_nonpositive_ttl(pg_conn):
-    slug = _business(pg_conn, _owner(pg_conn))
-    with pytest.raises(ValueError):
-        app_identity.create_magic_link(pg_conn, slug, "x@example.com", ttl_minutes=0)
-
-
-# ── verify_magic_link ───────────────────────────────────────────────────────────
-
-
-def test_verify_opens_session_that_validates_to_the_user(pg_conn):
-    slug = _business(pg_conn, _owner(pg_conn))
-    link, raw = app_identity.create_magic_link(pg_conn, slug, "grace@example.com")
-    session, session_token = app_identity.verify_magic_link(pg_conn, slug, raw)
-    assert session.app_user_id == link.app_user_id
+    user = app_identity.upsert_app_user(pg_conn, slug, "grace@example.com")
+    session, session_token = app_identity.start_session(pg_conn, slug, user.id)
+    assert session.app_user_id == user.id
     who = app_identity.validate_session(pg_conn, slug, session_token)
     assert who is not None
     assert who.email == "grace@example.com"
-    assert who.id == link.app_user_id
+    assert who.id == user.id
 
 
-def test_verify_is_single_use(pg_conn):
+def test_start_session_rejects_nonpositive_ttl(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, raw = app_identity.create_magic_link(pg_conn, slug, "heidi@example.com")
-    app_identity.verify_magic_link(pg_conn, slug, raw)  # first redemption wins
-    with pytest.raises(InvalidMagicLink):
-        app_identity.verify_magic_link(pg_conn, slug, raw)  # second is rejected
+    user = app_identity.upsert_app_user(pg_conn, slug, "ttl@example.com")
+    with pytest.raises(ValueError):
+        app_identity.start_session(pg_conn, slug, user.id, session_ttl_days=0)
 
 
-def test_verify_rejects_expired_link(pg_conn):
-    slug = _business(pg_conn, _owner(pg_conn))
-    link, raw = app_identity.create_magic_link(pg_conn, slug, "ivan@example.com")
-    pg_conn.execute(
-        "update app_magic_links set expires_at = now() - interval '1 minute' where id = %s",
-        (link.id,),
-    )
-    with pytest.raises(InvalidMagicLink):
-        app_identity.verify_magic_link(pg_conn, slug, raw)
-
-
-def test_verify_rejects_unknown_and_empty_tokens(pg_conn):
-    slug = _business(pg_conn, _owner(pg_conn))
-    with pytest.raises(InvalidMagicLink):
-        app_identity.verify_magic_link(pg_conn, slug, "not-a-real-token")
-    with pytest.raises(InvalidMagicLink):
-        app_identity.verify_magic_link(pg_conn, slug, "   ")
-
-
-def test_verify_inactive_user_rolls_back_so_link_survives(pg_conn):
-    slug = _business(pg_conn, _owner(pg_conn))
-    link, raw = app_identity.create_magic_link(pg_conn, slug, "judy@example.com")
-    pg_conn.execute(
-        "update app_users set status = 'suspended' where id = %s", (link.app_user_id,)
-    )
-    with pytest.raises(InactiveAppUser):
-        app_identity.verify_magic_link(pg_conn, slug, raw)
-    # verify is atomic: the failed redemption rolled back, so the link was NOT consumed.
-    pg_conn.execute(
-        "update app_users set status = 'active' where id = %s", (link.app_user_id,)
-    )
-    session, token = app_identity.verify_magic_link(pg_conn, slug, raw)
-    assert app_identity.validate_session(pg_conn, slug, token) is not None
-
-
-def test_create_magic_link_rejects_inactive_user(pg_conn):
+def test_start_session_rejects_inactive_user(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     user = app_identity.upsert_app_user(pg_conn, slug, "inactive@example.com")
     app_identity.set_app_user_status(pg_conn, slug, user.id, "suspended")
     with pytest.raises(InactiveAppUser):
-        app_identity.create_magic_link(pg_conn, slug, "inactive@example.com")
-
-
-def test_concurrent_verify_redeems_exactly_once(pg_conn):
-    slug = _business(pg_conn, _owner(pg_conn))
-    _, raw = app_identity.create_magic_link(pg_conn, slug, "mallory@example.com")
-    n = 20
-    barrier = threading.Barrier(n)
-
-    def worker(_):
-        conn = _new_conn(pg_conn)
-        try:
-            barrier.wait()
-            app_identity.verify_magic_link(conn, slug, raw)
-            return "ok"
-        except InvalidMagicLink:
-            return "rejected"
-        finally:
-            conn.close()
-
-    with ThreadPoolExecutor(max_workers=n) as ex:
-        results = list(ex.map(worker, range(n)))
-
-    assert results.count("ok") == 1  # exactly one redemption wins
-    assert results.count("rejected") == n - 1  # no other outcome (no errors)
-    sessions = pg_conn.execute(
-        "select count(*) from app_sessions where business_slug = %s", (slug,)
-    ).fetchone()[0]
-    assert sessions == 1  # and exactly one session row was created
+        app_identity.start_session(pg_conn, slug, user.id)
 
 
 # ── validate_session / revoke_session ───────────────────────────────────────────
@@ -251,25 +152,22 @@ def test_concurrent_verify_redeems_exactly_once(pg_conn):
 
 def test_validate_rejects_revoked_session(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, raw = app_identity.create_magic_link(pg_conn, slug, "nina@example.com")
-    _, token = app_identity.verify_magic_link(pg_conn, slug, raw)
+    _, _, token = _session_for_email(pg_conn, slug, "nina@example.com")
     assert app_identity.revoke_session(pg_conn, slug, token) is True
     assert app_identity.validate_session(pg_conn, slug, token) is None
 
 
 def test_set_status_revokes_live_sessions(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, raw = app_identity.create_magic_link(pg_conn, slug, "kill@example.com")
-    session, token = app_identity.verify_magic_link(pg_conn, slug, raw)
-    updated = app_identity.set_app_user_status(pg_conn, slug, session.app_user_id, "closed")
+    user, _, token = _session_for_email(pg_conn, slug, "kill@example.com")
+    updated = app_identity.set_app_user_status(pg_conn, slug, user.id, "closed")
     assert updated.status == "closed"
     assert app_identity.validate_session(pg_conn, slug, token) is None
 
 
 def test_validate_rejects_expired_session(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, raw = app_identity.create_magic_link(pg_conn, slug, "olga@example.com")
-    session, token = app_identity.verify_magic_link(pg_conn, slug, raw)
+    _, session, token = _session_for_email(pg_conn, slug, "olga@example.com")
     pg_conn.execute(
         "update app_sessions set expires_at = now() - interval '1 second' where id = %s",
         (session.id,),
@@ -281,8 +179,7 @@ def test_session_is_business_scoped(pg_conn):
     owner = _owner(pg_conn)
     slug_a = _business(pg_conn, owner, "A")
     slug_b = _business(pg_conn, owner, "B")
-    _, raw = app_identity.create_magic_link(pg_conn, slug_a, "peter@example.com")
-    _, token = app_identity.verify_magic_link(pg_conn, slug_a, raw)
+    _, _, token = _session_for_email(pg_conn, slug_a, "peter@example.com")
     assert app_identity.validate_session(pg_conn, slug_a, token) is not None
     # the same token must NOT validate under a different business
     assert app_identity.validate_session(pg_conn, slug_b, token) is None
@@ -290,8 +187,7 @@ def test_session_is_business_scoped(pg_conn):
 
 def test_revoke_is_idempotent(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
-    _, raw = app_identity.create_magic_link(pg_conn, slug, "quinn@example.com")
-    _, token = app_identity.verify_magic_link(pg_conn, slug, raw)
+    _, _, token = _session_for_email(pg_conn, slug, "quinn@example.com")
     assert app_identity.revoke_session(pg_conn, slug, token) is True
     assert app_identity.revoke_session(pg_conn, slug, token) is False  # nothing live left
 

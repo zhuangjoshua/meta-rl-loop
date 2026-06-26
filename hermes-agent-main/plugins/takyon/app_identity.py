@@ -1,19 +1,15 @@
-"""Product sub-user identity + magic-link auth + sessions — Phase 5 of mediationplan.md.
+"""Product sub-user identity + sessions.
 
 These are the customers OF a business the Takyon user runs (product sub-users), NOT
 the top-level Takyon operator — that identity lives in `control_plane.py` /
 `user_api_keys.py`. Everything here is scoped by `business_slug`: a sub-user belongs to
 exactly one business, an email is unique only within that business, and a session is
-only valid for the business it was minted in. This is the Postgres port of the SQLite
-trunk's app_users / app_magic_links / app_sessions (core.py).
+only valid for the business it was minted in. Supabase Auth verifies the customer; this
+module owns the guarded state change that binds that verified identity to an `app_user`
+and mints/validates/revokes the Takyon app session.
 
-Auth is magic-link only. Raw tokens are never stored — only their SHA-256 hex hash
-(identical to the SQLite `_hash_token`, so a ported app keeps working). A magic link is
-single-use and short-lived; a session is a 30-day bearer token. This module owns only
-the guarded STATE change (mint a link, redeem it for a session, validate/revoke a
-session) — email DELIVERY is a side effect owned by the layer above (the HTTP/tool
-surface decides live-send vs. test-mode suppression and records `provider_message_id`),
-exactly as the billing layer keeps allowance accounting separate from the Stripe call.
+Raw session tokens are never stored — only their SHA-256 hex hash (identical to the
+SQLite `_hash_token`, so a ported app keeps working). A session is a 30-day bearer token.
 
 House style (matches billing.py / custody.py / policy.py): pure leaf, takes a psycopg
 connection, imports no psycopg, opens its own `conn.transaction()` per mutating op, and
@@ -28,7 +24,6 @@ import re
 import secrets
 from dataclasses import dataclass
 
-_DEFAULT_MAGIC_LINK_TTL_MINUTES = 15
 _DEFAULT_SESSION_TTL_DAYS = 30
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _VALID_APP_USER_STATUSES = {"active", "suspended", "closed"}
@@ -41,10 +36,6 @@ class AppIdentityError(Exception):
 
 class InvalidEmail(AppIdentityError):
     """The supplied email is missing or malformed."""
-
-
-class InvalidMagicLink(AppIdentityError):
-    """The magic link is unknown, expired, or already redeemed."""
 
 
 class InactiveAppUser(AppIdentityError):
@@ -64,19 +55,6 @@ class AppUser:
     name: str | None
     status: str
     tier: str
-
-
-@dataclass(frozen=True)
-class MagicLink:
-    """A minted login link. The raw token is returned ALONGSIDE this record exactly
-    once (never stored in clear) and is not a field here."""
-
-    id: str
-    business_slug: str
-    app_user_id: str
-    email: str
-    purpose: str
-    expires_at: object
 
 
 @dataclass(frozen=True)
@@ -200,108 +178,6 @@ def get_app_user(
     return None if row is None else _app_user_from_row(row)
 
 
-def create_magic_link(
-    conn,
-    business_slug: str,
-    email: str,
-    *,
-    purpose: str = "login",
-    name: str | None = None,
-    ttl_minutes: int = _DEFAULT_MAGIC_LINK_TTL_MINUTES,
-) -> tuple[MagicLink, str]:
-    """Ensure the sub-user exists and mint a single-use login token for them, all in
-    one transaction. Returns (MagicLink, raw_token); the raw token is returned exactly
-    once and only its hash is stored. The expiry is computed from the server clock
-    (`now() + ttl_minutes`) so it never depends on a caller's wall clock. This mints
-    only — sending the email is the caller's concern."""
-    if not isinstance(ttl_minutes, int) or ttl_minutes <= 0:
-        raise ValueError("ttl_minutes must be a positive integer")
-    if not purpose:
-        raise ValueError("purpose must be a non-empty string")
-    raw = _random_token()
-    with conn.transaction():
-        user = conn.execute(
-            "insert into app_users (business_slug, email, name, status, tier) values (%s, %s, %s, 'active', %s) "
-            "on conflict (business_slug, email) do update set "
-            " name = coalesce(excluded.name, app_users.name), "
-            " updated_at = now() "
-            "returning id, email, status",
-            (business_slug, _normalize_email(email), name, UNENTITLED_TIER),
-        ).fetchone()
-        app_user_id, normalized_email, status = str(user[0]), str(user[1]), str(user[2])
-        if status != "active":
-            raise InactiveAppUser(app_user_id)
-        row = conn.execute(
-            "insert into app_magic_links "
-            "(business_slug, app_user_id, email, token_hash, purpose, expires_at) "
-            "values (%s, %s, %s, %s, %s, now() + make_interval(mins => %s)) "
-            "returning id, expires_at",
-            (business_slug, app_user_id, normalized_email, _hash_token(raw), purpose, ttl_minutes),
-        ).fetchone()
-    link = MagicLink(
-        id=str(row[0]),
-        business_slug=business_slug,
-        app_user_id=app_user_id,
-        email=normalized_email,
-        purpose=purpose,
-        expires_at=row[1],
-    )
-    return link, raw
-
-
-def verify_magic_link(
-    conn,
-    business_slug: str,
-    raw_token: str,
-    *,
-    session_ttl_days: int = _DEFAULT_SESSION_TTL_DAYS,
-) -> tuple[AppSession, str]:
-    """Redeem a magic link and open a session. Returns (AppSession, raw_session_token).
-
-    Single-use is enforced atomically: the redemption is an
-    `update ... where used_at is null and expires_at > now() returning` so two
-    concurrent verifications can't both win the same link (it stamps used_at and tells
-    us the owning user in one statement — closing the read-then-write race the SQLite
-    version had). Raises InvalidMagicLink if the token is unknown/expired/already used,
-    and InactiveAppUser if the resolved sub-user is suspended/closed."""
-    if not isinstance(session_ttl_days, int) or session_ttl_days <= 0:
-        raise ValueError("session_ttl_days must be a positive integer")
-    token = str(raw_token or "").strip()
-    if not token:
-        raise InvalidMagicLink("token is required")
-    raw_session = _random_token()
-    with conn.transaction():
-        redeemed = conn.execute(
-            "update app_magic_links set used_at = now() "
-            "where business_slug = %s and token_hash = %s "
-            "  and used_at is null and expires_at > now() "
-            "returning app_user_id",
-            (business_slug, _hash_token(token)),
-        ).fetchone()
-        if redeemed is None:
-            raise InvalidMagicLink("magic link is invalid, expired, or already used")
-        app_user_id = str(redeemed[0])
-        status_row = conn.execute(
-            "select status from app_users where business_slug = %s and id = %s",
-            (business_slug, app_user_id),
-        ).fetchone()
-        if status_row is None or str(status_row[0]) != "active":
-            raise InactiveAppUser(app_user_id)
-        row = conn.execute(
-            "insert into app_sessions (business_slug, app_user_id, token_hash, expires_at) "
-            "values (%s, %s, %s, now() + make_interval(days => %s)) "
-            "returning id, expires_at",
-            (business_slug, app_user_id, _hash_token(raw_session), session_ttl_days),
-        ).fetchone()
-    session = AppSession(
-        id=str(row[0]),
-        business_slug=business_slug,
-        app_user_id=app_user_id,
-        expires_at=row[1],
-    )
-    return session, raw_session
-
-
 def start_session(
     conn,
     business_slug: str,
@@ -311,9 +187,7 @@ def start_session(
 ) -> tuple[AppSession, str]:
     """Mint a 30-day bearer session for an already-resolved sub-user. Returns
     (AppSession, raw_session_token); only the hash is stored. Refuses a suspended/closed user
-    (InactiveAppUser). This is the session-minting half of ``verify_magic_link``, factored out so
-    the Supabase login path mints an IDENTICAL session — `validate_session` and everything downstream
-    cannot tell, nor need to, how the user authenticated."""
+    (InactiveAppUser). The Supabase login path calls this after verifying the access token."""
     if not isinstance(session_ttl_days, int) or session_ttl_days <= 0:
         raise ValueError("session_ttl_days must be a positive integer")
     raw_session = _random_token()
@@ -350,11 +224,11 @@ def upsert_app_user_by_supabase_id(
     """Upsert a sub-user for a VERIFIED Supabase identity (AUTH0.md §7).
 
     Resolution order: (1) an existing row already bound to this ``supabase_user_id``; else (2) a
-    legacy email-only row for (business, email) with no supabase id is ADOPTED — its
-    ``supabase_user_id`` is set — so a customer who pre-existed via magic-link keeps the same
-    identity, entitlements, and usage history on their first Google login; else (3) a brand-new
-    ``active`` sub-user. A suspended/closed user is never reactivated here, and the caller (the
-    login route) only mints a session via ``start_session``, which refuses non-active users.
+    pre-existing email-only row for (business, email) with no supabase id is ADOPTED — its
+    ``supabase_user_id`` is set — so a customer keeps the same identity, entitlements, and usage
+    history on their first Supabase login; else (3) a brand-new ``active`` sub-user. A suspended/closed
+    user is never reactivated here, and the caller only mints a session via ``start_session``, which
+    refuses non-active users.
 
     The caller MUST have verified the Supabase token first (``app_supabase_auth.verify_supabase_jwt``)
     — this never trusts a raw subject/email straight off the wire."""

@@ -83,13 +83,11 @@ from plugins.takyon.core import (
     handle_business_read_app_record,
     handle_business_record_app_usage,
     handle_business_record_stripe_webhook,
-    handle_business_request_app_magic_link,
     handle_business_list_app_records,
     handle_business_upsert_app_directory_entry,
     handle_business_upsert_app_record,
     handle_business_supabase_login,
     handle_business_upsert_app_profile,
-    handle_business_verify_app_magic_link,
     _is_reserved_public_subdomain,
 )
 from plugins.takyon import safebox as takyon_safebox
@@ -2502,18 +2500,6 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
             {"success": False, "error": "owner_token_rejected_on_app_plane"},
         )
     parts = _takyon_app_route_parts(route)
-    if parts == ["auth", "verify"]:
-        status, payload = _takyon_app_tool(handle_business_verify_app_magic_link({
-            "business": business,
-            "token": request.query_params.get("token") or "",
-        }))
-        if status != int(HTTPStatus.OK):
-            return _takyon_app_json(status, payload)
-        redirect = _same_origin_path(request.query_params.get("redirect") or "/?signed_in=1")
-        response = RedirectResponse(redirect, status_code=int(HTTPStatus.FOUND))
-        _takyon_app_set_session_cookie(response, request, str(payload["session_token"]))
-        return response
-
     if parts == ["session"]:
         token = _takyon_app_session_token(request)
         if not token:
@@ -2715,8 +2701,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
     if parts == ["auth", "session"]:
         # Supabase Auth (Google/email) sign-in: the browser completes the Supabase OAuth flow and
         # POSTs the Supabase access_token here; the runtime verifies it server-side and returns the
-        # Takyon app session_token (the credential the client then presents). The Supabase
-        # replacement for the magic-link request+verify pair.
+        # Takyon app session_token (the credential the client then presents).
         status, payload = _takyon_app_tool(handle_business_supabase_login({
             "business": business,
             "access_token": body.get("access_token") or body.get("accessToken"),
@@ -2728,30 +2713,6 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             if session_token:
                 _takyon_app_set_session_cookie(response, request, session_token)
         return response
-
-    if parts == ["auth", "request"]:
-        status, payload = _takyon_app_tool(handle_business_request_app_magic_link({
-            "business": business,
-            "email": body.get("email"),
-            "name": body.get("name"),
-            "origin": _takyon_app_origin(request, body),
-            "app_slug": body.get("app_slug") or business,
-            "product_name": body.get("product_name") or business,
-            "send_email": bool(body.get("send_email", True)),
-        }))
-        # SECURITY (account-takeover): /auth/request is unauthenticated. The single-use magic-link
-        # token (and the verify_url that embeds it as a ?token= query param) is a redeemable login
-        # credential. In LIVE mode it must NEVER be returned to the caller — not even when the caller
-        # asks for it via return_token — because anyone who can POST /auth/request could otherwise
-        # harvest a redeemable token for any email. The raw token only leaves the server over the
-        # email channel in live mode. Only non-live/test mode may surface the token/verify_url for
-        # automated testing (and only when explicitly requested via return_token).
-        live_mode = str((payload or {}).get("mode") or "live").strip().lower() != "test"
-        surface_token = (not live_mode) and (body.get("return_token") is True)
-        if not surface_token:
-            payload.pop("token", None)
-            payload.pop("verify_url", None)
-        return _takyon_app_json(status, payload)
 
     if parts == ["checkout"]:
         token = _takyon_app_session_token(request)

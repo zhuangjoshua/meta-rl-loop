@@ -24,8 +24,7 @@ provides_tools:
   - business_upsert_app_customer
   - business_upsert_app_profile
   - business_grant_app_entitlement
-  - business_request_app_magic_link
-  - business_verify_app_magic_link
+  - business_supabase_login
   - business_read_app_account
   - business_read_app_profile
   - business_create_app_checkout
