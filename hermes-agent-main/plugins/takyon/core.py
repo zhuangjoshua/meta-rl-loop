@@ -26117,6 +26117,30 @@ def _read_existing_receipt(path: Path, idempotency_key: str) -> dict[str, Any] |
     return None
 
 
+_META_LAUNCH_REQUIRED_IDS = ("creative_id", "campaign_id", "adset_id", "ad_id")
+
+
+def _meta_launch_missing_provider_ids(receipt: Mapping[str, Any]) -> list[str]:
+    if not isinstance(receipt, Mapping):
+        return list(_META_LAUNCH_REQUIRED_IDS)
+    if str(receipt.get("mode") or "").strip().lower() != "live":
+        return []
+    if str(receipt.get("launch_mode") or "").strip().lower() == "manual_handoff":
+        return []
+    status = str(receipt.get("status") or "").strip().lower()
+    ids = receipt.get("ids") if isinstance(receipt.get("ids"), Mapping) else {}
+    provider_attempted = bool(ids) or status in {
+        "created_paused",
+        "activated",
+        "blocked_activation_failed",
+        "partial_failed",
+        "partial_failed_missing_provider_ids",
+    }
+    if not provider_attempted:
+        return []
+    return [key for key in _META_LAUNCH_REQUIRED_IDS if not str(ids.get(key) or "").strip()]
+
+
 def _count_static_specs(path: Path) -> int:
     if path.is_dir():
         total = 0
@@ -28445,29 +28469,61 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         cfg = _meta_config(require_token=(mode == "preflight" or (mode == "launch" and business_mode != "test")))
 
         launch_args = _meta_normalize_launch_args(args)
+        retry_incomplete_requested = _boolish(
+            args.get("retry_incomplete")
+            if args.get("retry_incomplete") is not None
+            else args.get("repair_incomplete"),
+            default=False,
+        )
+        early_repair_receipt: dict[str, Any] | None = None
+        if retry_incomplete_requested and idempotency_key and str(launch_args.get("slug") or "").strip():
+            early_slug = _file_slug(str(launch_args.get("slug") or ""), "meta-ad")
+            early_receipt_abs = store._resolve_business_file(
+                business,
+                f"distribution/meta-ads/{early_slug}/receipt.json",
+            )
+            early_prior = _read_existing_receipt(early_receipt_abs, idempotency_key)
+            if early_prior is not None and _meta_launch_missing_provider_ids(early_prior):
+                early_repair_receipt = early_prior
         spend_schedule: dict[str, Any] | None = None
         if mode == "launch" and business_mode != "test":
-            budget_snapshot = _creative_credit_budget_snapshot(business)
-            meta_budget = (
-                budget_snapshot.get("channels", {}).get("meta", {})
-                if isinstance(budget_snapshot.get("channels"), Mapping)
-                else {}
-            )
-            remaining_channel_credits = _creative_credit_int(meta_budget.get("remaining_credits"))
-            media_spend_credits = _ad_channel_live_media_spend_credits(
-                "meta",
-                remaining_channel_credits,
-                setup_credits=_creative_credit_total_cost("meta_ad_launch"),
-            )
             campaign_args = launch_args.get("campaign") if isinstance(launch_args.get("campaign"), dict) else {}
             adset_args = launch_args.get("adset") if isinstance(launch_args.get("adset"), dict) else {}
-            spend_schedule = _derive_ad_spend_schedule(
-                channel="meta",
-                reserved_credits=media_spend_credits,
-                requested_daily_budget_usd=adset_args.get("daily_budget_usd", adset_args.get("daily_budget")),
-                requested_start_at=adset_args.get("start_time") or campaign_args.get("start_time"),
-                requested_end_at=adset_args.get("end_time") or campaign_args.get("end_time"),
-            )
+            if early_repair_receipt is not None:
+                start_at = _parse_iso_datetime(str(early_repair_receipt.get("start_at") or ""))
+                end_at = _parse_iso_datetime(str(early_repair_receipt.get("end_at") or ""))
+                daily_budget_cents = _creative_credit_int(early_repair_receipt.get("daily_budget_cents"))
+                if not daily_budget_cents:
+                    daily_budget_cents = int(round(float(early_repair_receipt.get("daily_budget_usd") or 1.0) * 100))
+                total_budget_cents = int(round(float(early_repair_receipt.get("total_budget_usd") or daily_budget_cents / 100.0) * 100))
+                spend_schedule = {
+                    "start_at": start_at or datetime.now(timezone.utc),
+                    "end_at": end_at or (datetime.now(timezone.utc) + timedelta(days=1)),
+                    "daily_budget_cents": daily_budget_cents,
+                    "daily_budget_usd": round(daily_budget_cents / 100.0, 2),
+                    "total_budget_cents": total_budget_cents,
+                    "total_budget_usd": round(total_budget_cents / 100.0, 2),
+                }
+            else:
+                budget_snapshot = _creative_credit_budget_snapshot(business)
+                meta_budget = (
+                    budget_snapshot.get("channels", {}).get("meta", {})
+                    if isinstance(budget_snapshot.get("channels"), Mapping)
+                    else {}
+                )
+                remaining_channel_credits = _creative_credit_int(meta_budget.get("remaining_credits"))
+                media_spend_credits = _ad_channel_live_media_spend_credits(
+                    "meta",
+                    remaining_channel_credits,
+                    setup_credits=_creative_credit_total_cost("meta_ad_launch"),
+                )
+                spend_schedule = _derive_ad_spend_schedule(
+                    channel="meta",
+                    reserved_credits=media_spend_credits,
+                    requested_daily_budget_usd=adset_args.get("daily_budget_usd", adset_args.get("daily_budget")),
+                    requested_start_at=adset_args.get("start_time") or campaign_args.get("start_time"),
+                    requested_end_at=adset_args.get("end_time") or campaign_args.get("end_time"),
+                )
             launch_args["campaign"] = {
                 **campaign_args,
                 "start_time": _datetime_to_iso(spend_schedule["start_at"]),
@@ -28504,20 +28560,45 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         plan_abs = store._resolve_business_file(business, plan_rel)
         receipt_rel = f"{pub_rel}/receipt.json"
         receipt_abs = store._resolve_business_file(business, receipt_rel)
+        repair_ids: dict[str, Any] = {}
+        repair_receipt: dict[str, Any] | None = None
 
         prior = _read_existing_receipt(receipt_abs, idempotency_key)
         if prior is not None:
-            return tool_result({
-                "success": bool(prior.get("success", True)),
-                "action": "business_meta_ad_launch",
-                "business": business,
-                "slug": slug,
-                "idempotent": True,
-                "status": prior.get("status"),
-                "paused": bool(prior.get("paused", True)),
-                "receipt": receipt_rel,
-                "value": prior,
-            })
+            missing_ids = _meta_launch_missing_provider_ids(prior)
+            if missing_ids and retry_incomplete_requested:
+                repair_ids = dict(prior.get("ids") if isinstance(prior.get("ids"), Mapping) else {})
+                repair_receipt = prior
+            elif missing_ids:
+                return tool_result({
+                    "success": False,
+                    "action": "business_meta_ad_launch",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": "partial_failed_missing_provider_ids",
+                    "paused": True,
+                    "receipt": receipt_rel,
+                    "ids": prior.get("ids") if isinstance(prior.get("ids"), Mapping) else {},
+                    "missing_ids": missing_ids,
+                    "error": (
+                        "Existing Meta launch receipt is incomplete and cannot be treated as done: "
+                        + ", ".join(missing_ids)
+                    ),
+                    "value": prior,
+                })
+            else:
+                return tool_result({
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_meta_ad_launch",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "paused": bool(prior.get("paused", True)),
+                    "receipt": receipt_rel,
+                    "value": prior,
+                })
 
         _atomic_write_text(plan_abs, json.dumps(plan_payload, ensure_ascii=False, indent=2) + "\n")
 
@@ -28625,30 +28706,48 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         # ── live mode: reserve campaign spend, create provider objects, then optionally activate ──
         media_reservation_key = f"{idempotency_key}:meta-media-spend"
         try:
-            budget_snapshot = _creative_credit_budget_snapshot(business)
-            meta_budget = (
-                budget_snapshot.get("channels", {}).get("meta", {})
-                if isinstance(budget_snapshot.get("channels"), Mapping)
-                else {}
+            prior_reserved_credits = _creative_credit_int(
+                repair_receipt.get("reserved_credits") if isinstance(repair_receipt, Mapping) else None
             )
-            remaining_channel_credits = _creative_credit_int(meta_budget.get("remaining_credits"))
-            media_spend_credits = _ad_channel_live_media_spend_credits(
-                "meta",
-                remaining_channel_credits,
-                setup_credits=_creative_credit_total_cost("meta_ad_launch"),
-            )
-            media_reservation = _reserve_channel_spend_credits(
-                business,
-                channel="meta",
-                requested_credits=media_spend_credits,
-                reservation_key=media_reservation_key,
-                metadata={
-                    "slug": slug,
-                    "receipt_path": receipt_rel,
-                    "plan_path": plan_rel,
-                    "activation_requested": bool(plan.get("activate")),
-                },
-            )
+            if repair_receipt is not None and prior_reserved_credits > 0:
+                media_reservation = {
+                    "reservation_key": media_reservation_key,
+                    "requested_credits": prior_reserved_credits,
+                    "balance_credits": _creative_credit_int(repair_receipt.get("balance_credits")),
+                    "reserved_credits": prior_reserved_credits,
+                    "budget_bucket": "meta",
+                    "channel_budget": (
+                        dict(repair_receipt.get("channel_budget"))
+                        if isinstance(repair_receipt.get("channel_budget"), Mapping)
+                        else {}
+                    ),
+                }
+            else:
+                budget_snapshot = _creative_credit_budget_snapshot(business)
+                meta_budget = (
+                    budget_snapshot.get("channels", {}).get("meta", {})
+                    if isinstance(budget_snapshot.get("channels"), Mapping)
+                    else {}
+                )
+                remaining_channel_credits = _creative_credit_int(meta_budget.get("remaining_credits"))
+                media_spend_credits = _ad_channel_live_media_spend_credits(
+                    "meta",
+                    remaining_channel_credits,
+                    setup_credits=_creative_credit_total_cost("meta_ad_launch"),
+                )
+                media_reservation = _reserve_channel_spend_credits(
+                    business,
+                    channel="meta",
+                    requested_credits=media_spend_credits,
+                    reservation_key=media_reservation_key,
+                    metadata={
+                        "slug": slug,
+                        "receipt_path": receipt_rel,
+                        "plan_path": plan_rel,
+                        "activation_requested": bool(plan.get("activate")),
+                        "repair_incomplete": bool(repair_receipt),
+                    },
+                )
         except Exception as exc:
             receipt = {
                 **base_receipt,
@@ -28674,7 +28773,12 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         try:
             gateway_result = _call_creative_runtime_gateway(
                 "meta-launch",
-                {**launch_args, "business": business, "idempotency_key": idempotency_key},
+                {
+                    **launch_args,
+                    "business": business,
+                    "idempotency_key": idempotency_key,
+                    "repair_ids": repair_ids,
+                },
             )
         except Exception as exc:
             _release_channel_spend_credits(

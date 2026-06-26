@@ -6460,6 +6460,160 @@ def test_business_meta_ad_launch_defaults_to_paused_when_live(tmp_path, monkeypa
     assert result["value"]["total_budget_usd"] == 29.99
 
 
+def test_business_meta_ad_launch_rejects_incomplete_live_receipt_as_done(tmp_path, monkeypatch):
+    _set_meta_mcp_env(monkeypatch)
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
+    monkeypatch.setenv("META_PAGE_ID", "654321")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-meta-incomplete-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 3000, "reddit": 0},
+        key="clipbook-meta-incomplete-budget",
+    )
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
+    receipt_abs = (
+        tmp_path
+        / "businesses"
+        / "clipbook"
+        / "distribution"
+        / "meta-ads"
+        / "demo-image-live"
+        / "receipt.json"
+    )
+    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
+    receipt_abs.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "mode": "live",
+                "launch_mode": "auto_post",
+                "status": "created_paused",
+                "paused": True,
+                "idempotency_key": "clipbook-meta-demo-v1",
+                "ids": {
+                    "creative_id": "",
+                    "campaign_id": "old-campaign",
+                    "adset_id": "",
+                    "ad_id": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_call_creative_runtime_gateway",
+        lambda endpoint, payload: (_ for _ in ()).throw(AssertionError("gateway must not be called")),
+    )
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image-live",
+            )
+        )
+    )
+
+    assert result["success"] is False
+    assert result["idempotent"] is True
+    assert result["status"] == "partial_failed_missing_provider_ids"
+    assert result["ids"]["campaign_id"] == "old-campaign"
+    assert result["missing_ids"] == ["creative_id", "adset_id", "ad_id"]
+    assert "cannot be treated as done" in result["error"]
+
+
+def test_business_meta_ad_launch_repair_incomplete_receipt_reuses_existing_ids(tmp_path, monkeypatch):
+    _set_meta_mcp_env(monkeypatch)
+    monkeypatch.setenv("META_AD_ACCOUNT_ID", "123456")
+    monkeypatch.setenv("META_PAGE_ID", "654321")
+    store = _meta_test_business(tmp_path, monkeypatch, mode="live")
+    _grant_creative_credits(store, "clipbook", 3000, "clipbook-meta-repair-grant")
+    _set_channel_credit_budgets(
+        "clipbook",
+        {"x": 0, "meta": 3000, "reddit": 0},
+        key="clipbook-meta-repair-budget",
+    )
+    image_dir = tmp_path / "businesses" / "clipbook" / "product" / "static-ads" / "demo-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "creative.png").write_bytes(b"fake png bytes")
+    receipt_abs = (
+        tmp_path
+        / "businesses"
+        / "clipbook"
+        / "distribution"
+        / "meta-ads"
+        / "demo-image-live"
+        / "receipt.json"
+    )
+    receipt_abs.parent.mkdir(parents=True, exist_ok=True)
+    receipt_abs.write_text(
+        json.dumps(
+            {
+                "success": True,
+                "mode": "live",
+                "launch_mode": "auto_post",
+                "status": "created_paused",
+                "paused": True,
+                "idempotency_key": "clipbook-meta-demo-v1",
+                "ids": {
+                    "creative_id": "",
+                    "campaign_id": "old-campaign",
+                    "adset_id": "",
+                    "ad_id": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_gateway(endpoint, payload):
+        captured["endpoint"] = endpoint
+        captured["payload"] = payload
+        return {
+            "success": True,
+            "status": "created_paused",
+            "ad_account_id": "act_123456",
+            "graph_version": "v23.0",
+            "ids": {
+                "creative_id": "creative-2",
+                "campaign_id": "old-campaign",
+                "adset_id": "adset-2",
+                "ad_id": "ad-2",
+            },
+            "thumbnail_url": "https://example.com/image.png",
+            "credits_charged": 1,
+            "balance_credits": 2999,
+            "reserved_credits": 2999,
+        }
+
+    monkeypatch.setattr(takyon_core, "_call_creative_runtime_gateway", fake_gateway)
+
+    result = json.loads(
+        handle_business_meta_ad_launch(
+            _meta_launch_args(
+                asset_kind="image",
+                ad_video_path="",
+                ad_image_path="product/static-ads/demo-image/creative.png",
+                slug="demo-image-live",
+                retry_incomplete=True,
+            )
+        )
+    )
+
+    assert result["success"] is True
+    assert captured["endpoint"] == "meta-launch"
+    assert captured["payload"]["repair_ids"]["campaign_id"] == "old-campaign"
+    assert result["ids"]["campaign_id"] == "old-campaign"
+    assert result["ids"]["adset_id"] == "adset-2"
+
+
 def test_business_meta_ad_launch_blocks_missing_video(tmp_path, monkeypatch):
     _meta_test_business(tmp_path, monkeypatch)
     # No ad.mp4 written: the plan validates but the video file is absent.

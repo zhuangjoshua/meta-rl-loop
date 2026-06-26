@@ -222,6 +222,138 @@ def test_meta_mcp_create_args_use_public_image_url_not_upload_hash():
     assert args["ad"]["status"] == "PAUSED"
 
 
+def test_meta_launch_missing_provider_ids_flags_stale_live_receipt():
+    receipt = {
+        "success": True,
+        "mode": "live",
+        "launch_mode": "auto_post",
+        "status": "created_paused",
+        "ids": {
+            "image_hash": "hash-only",
+            "campaign_id": "6992099099828",
+            "creative_id": "",
+            "adset_id": "",
+            "ad_id": "",
+        },
+    }
+
+    assert core._meta_launch_missing_provider_ids(receipt) == ["creative_id", "adset_id", "ad_id"]
+
+
+def test_meta_launch_missing_provider_ids_ignores_test_and_manual_receipts():
+    complete_missing = {"ids": {"campaign_id": "campaign-only"}}
+
+    assert core._meta_launch_missing_provider_ids({"mode": "test", **complete_missing}) == []
+    assert core._meta_launch_missing_provider_ids(
+        {"mode": "live", "launch_mode": "manual_handoff", **complete_missing}
+    ) == []
+
+
+def test_meta_launch_repair_ids_skip_existing_campaign(monkeypatch, tmp_path):
+    app = FastAPI()
+    app.include_router(creative_gateway.build_creative_gateway_router())
+    app.dependency_overrides[creative_gateway._require_internal_session] = lambda: None
+    app.dependency_overrides[creative_gateway.get_control_conn] = lambda: object()
+
+    business_root = tmp_path / "businesses" / "homework-solver"
+    image_path = business_root / "product" / "static-ads" / "homework-solver" / "relatability-02.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake png bytes")
+
+    class FakeStore:
+        def _resolve_business_file(self, business, rel):
+            assert business == "homework-solver"
+            return business_root / rel
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        core,
+        "_meta_config",
+        lambda *, require_token=True: {
+            "ad_account_id": "1300104788312342",
+            "page_id": "1181033165085863",
+            "mcp_endpoint": "https://mcp.facebook.com/ads",
+        },
+    )
+    monkeypatch.setattr(core, "_store", lambda: FakeStore())
+    monkeypatch.setattr(
+        core,
+        "_creative_credit_total_cost",
+        lambda action: 1 if action == "meta_ad_launch" else 0,
+    )
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *a, **k: {"budget_bucket": "meta"},
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *a, **k: {
+            "balance_credits": 10,
+            "reserved_credits": 0,
+            "channel_budget": {},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_stage_business_public_asset",
+        lambda *a, **k: {"public_url": "https://homework-solver.coscale.app/_takyon/assets/ad.png"},
+    )
+
+    def fake_mcp(tool, payload, timeout=60.0):
+        calls.append(tool)
+        if tool == "ads_create_creative":
+            return {"id": "creative-2"}
+        if tool == "ads_create_campaign":
+            raise AssertionError("existing campaign must be reused during repair")
+        if tool == "ads_create_ad_set":
+            assert payload["campaign_id"] == "6992099099828"
+            return {"id": "adset-2"}
+        if tool == "ads_create_ad":
+            assert payload["adset_id"] == "adset-2"
+            assert payload["creative_id"] == "creative-2"
+            return {"id": "ad-2"}
+        raise AssertionError(f"unexpected MCP tool: {tool}")
+
+    monkeypatch.setattr(creative_gateway, "_meta_mcp_call", fake_mcp)
+
+    resp = TestClient(app).post(
+        "/internal/creative-gateway/meta-launch",
+        json={
+            "business": "homework-solver",
+            "idempotency_key": "repair-homework-meta",
+            "asset_kind": "image",
+            "ad_image_path": "product/static-ads/homework-solver/relatability-02.png",
+            "slug": "homework-solver-traffic-v1",
+            "campaign": {"name": "Homework Solver Traffic", "objective": "OUTCOME_TRAFFIC"},
+            "adset": {
+                "name": "Students 13-24 US Broad",
+                "daily_budget_usd": 1.0,
+                "optimization_goal": "LINK_CLICKS",
+                "targeting": {"age_min": 13, "age_max": 24, "geo_locations": {"countries": ["US"]}},
+            },
+            "ad": {
+                "name": "Homework Solver Ad",
+                "message": "No one to ask at midnight?",
+                "link": "https://homework-solver.coscale.app/",
+                "page_id": "1181033165085863",
+            },
+            "repair_ids": {"campaign_id": "6992099099828"},
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["success"] is True
+    assert data["ids"]["campaign_id"] == "6992099099828"
+    assert data["ids"]["creative_id"] == "creative-2"
+    assert data["ids"]["adset_id"] == "adset-2"
+    assert data["ids"]["ad_id"] == "ad-2"
+    assert calls == ["ads_create_creative", "ads_create_ad_set", "ads_create_ad"]
+
+
 def test_meta_launch_preflight_missing_oauth_returns_structured_block(monkeypatch):
     app = FastAPI()
     app.include_router(creative_gateway.build_creative_gateway_router())

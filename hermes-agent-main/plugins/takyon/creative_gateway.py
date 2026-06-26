@@ -1500,6 +1500,11 @@ def build_creative_gateway_router() -> APIRouter:
             }
 
         created: dict[str, Any] = {}
+        repair_ids = body.get("repair_ids") if isinstance(body.get("repair_ids"), Mapping) else {}
+        existing_creative_id = str(repair_ids.get("creative_id") or "").strip()
+        existing_campaign_id = str(repair_ids.get("campaign_id") or "").strip()
+        existing_adset_id = str(repair_ids.get("adset_id") or "").strip()
+        existing_ad_id = str(repair_ids.get("ad_id") or "").strip()
         finalized = False
         try:
             if plan["asset_kind"] == "video":
@@ -1513,13 +1518,19 @@ def build_creative_gateway_router() -> APIRouter:
                 image_url=image_url,
                 video_id=video_id,
             )
-            creative = _meta_mcp_call("ads_create_creative", args["creative"], timeout=90.0)
-            created["creative_id"] = _meta_mcp_find_key(creative, ("creative_id", "id"))
+            if existing_creative_id:
+                created["creative_id"] = existing_creative_id
+            else:
+                creative = _meta_mcp_call("ads_create_creative", args["creative"], timeout=90.0)
+                created["creative_id"] = _meta_mcp_find_key(creative, ("creative_id", "id"))
             if not created["creative_id"]:
                 raise RuntimeError(f"Meta MCP ads_create_creative returned no id: {creative}")
 
-            campaign = _meta_mcp_call("ads_create_campaign", args["campaign"], timeout=90.0)
-            created["campaign_id"] = _meta_mcp_find_key(campaign, ("campaign_id", "id"))
+            if existing_campaign_id:
+                created["campaign_id"] = existing_campaign_id
+            else:
+                campaign = _meta_mcp_call("ads_create_campaign", args["campaign"], timeout=90.0)
+                created["campaign_id"] = _meta_mcp_find_key(campaign, ("campaign_id", "id"))
             if not created["campaign_id"]:
                 raise RuntimeError(f"Meta MCP ads_create_campaign returned no id: {campaign}")
 
@@ -1531,8 +1542,11 @@ def build_creative_gateway_router() -> APIRouter:
                 image_url=image_url,
                 video_id=video_id,
             )
-            adset = _meta_mcp_call("ads_create_ad_set", args["adset"], timeout=90.0)
-            created["adset_id"] = _meta_mcp_find_key(adset, ("adset_id", "ad_set_id", "id"))
+            if existing_adset_id:
+                created["adset_id"] = existing_adset_id
+            else:
+                adset = _meta_mcp_call("ads_create_ad_set", args["adset"], timeout=90.0)
+                created["adset_id"] = _meta_mcp_find_key(adset, ("adset_id", "ad_set_id", "id"))
             if not created["adset_id"]:
                 raise RuntimeError(f"Meta MCP ads_create_ad_set returned no id: {adset}")
 
@@ -1545,8 +1559,11 @@ def build_creative_gateway_router() -> APIRouter:
                 image_url=image_url,
                 video_id=video_id,
             )
-            ad = _meta_mcp_call("ads_create_ad", args["ad"], timeout=90.0)
-            created["ad_id"] = _meta_mcp_find_key(ad, ("ad_id", "id"))
+            if existing_ad_id:
+                created["ad_id"] = existing_ad_id
+            else:
+                ad = _meta_mcp_call("ads_create_ad", args["ad"], timeout=90.0)
+                created["ad_id"] = _meta_mcp_find_key(ad, ("ad_id", "id"))
             if not created["ad_id"]:
                 raise RuntimeError(f"Meta MCP ads_create_ad returned no id: {ad}")
 
