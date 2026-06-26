@@ -2716,12 +2716,14 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
 
     if parts == ["checkout"]:
         token = _takyon_app_session_token(request)
-        account: dict[str, Any] = {}
-        if token:
-            _account_status, account = _takyon_app_tool(handle_business_read_app_account({
-                "business": business,
-                "session_token": token,
-            }))
+        if not token:
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        account_status, account = _takyon_app_tool(handle_business_read_app_account({
+            "business": business,
+            "session_token": token,
+        }))
+        if account_status != int(HTTPStatus.OK):
+            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
         status, payload = _takyon_app_tool(handle_business_create_app_checkout({
             "business": business,
             "plan_key": body.get("plan_key") or body.get("planKey") or body.get("price_key") or body.get("priceKey"),

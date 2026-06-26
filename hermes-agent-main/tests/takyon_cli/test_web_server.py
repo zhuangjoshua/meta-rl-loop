@@ -2396,6 +2396,110 @@ def test_app_checkout_get_renders_test_receipt_page(tmp_path, monkeypatch):
     assert 'href="/app?checkout=success"' in response.text
 
 
+def test_app_checkout_post_requires_valid_session_before_creating_intent(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    def fail_checkout_handler(_args):
+        raise AssertionError("checkout intent must not be created without a valid app session")
+
+    monkeypatch.setattr(web_server, "handle_business_create_app_checkout", fail_checkout_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/checkout",
+            json={"plan_key": "monthly"},
+            headers={"Host": "mathflow.coscale.app"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 401
+    assert response.json() == {"success": False, "error": "missing app session"}
+
+
+def test_app_checkout_post_rejects_stale_session_before_creating_intent(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "handle_business_read_app_account",
+        lambda _args: json.dumps({"success": False, "error": "app account not found"}),
+    )
+
+    def fail_checkout_handler(_args):
+        raise AssertionError("checkout intent must not be created for a stale app session")
+
+    monkeypatch.setattr(web_server, "handle_business_create_app_checkout", fail_checkout_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/checkout",
+            json={"plan_key": "monthly"},
+            headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=stale"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 401
+    assert response.json() == {"success": False, "error": "missing app session"}
+
+
+def test_app_checkout_post_uses_session_account_identity(monkeypatch):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        web_server,
+        "handle_business_read_app_account",
+        lambda args: json.dumps(
+            {
+                "success": True,
+                "business": args["business"],
+                "user": {"id": "real_user", "email": "real@example.com"},
+            }
+        ),
+    )
+
+    def fake_checkout_handler(args):
+        calls.append(args)
+        return json.dumps({"success": True, "checkout_url": "https://checkout.example/session"})
+
+    monkeypatch.setattr(web_server, "handle_business_create_app_checkout", fake_checkout_handler)
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/checkout",
+            json={
+                "plan_key": "monthly",
+                "customer_email": "attacker@example.com",
+                "app_user_id": "attacker_user",
+            },
+            headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=valid"},
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 200
+    assert calls[0]["app_user_id"] == "real_user"
+    assert calls[0]["customer_email"] == "attacker@example.com"
+
+
 def test_app_session_get_dispatches_session_handler_without_account_lookup(monkeypatch):
     from starlette.testclient import TestClient
 

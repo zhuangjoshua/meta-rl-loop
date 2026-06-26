@@ -45,6 +45,25 @@ def test_public_app_post_never_uses_body_app_user_id_as_source_identity():
     ]
 
 
+def test_public_checkout_requires_session_before_creating_intent():
+    source_path = Path(__file__).resolve().parents[2] / "takyon_cli" / "web_server.py"
+    source = source_path.read_text(encoding="utf-8")
+    start = source.index('    if parts == ["checkout"]:\n        token = _takyon_app_session_token(request)')
+    end = source.index('    if parts == ["account"]:', start)
+    checkout_block = source[start:end]
+
+    assert 'if not token:' in checkout_block
+    assert 'HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"}' in checkout_block
+    assert "account_status, account = _takyon_app_tool(handle_business_read_app_account" in checkout_block
+    assert "if account_status != int(HTTPStatus.OK):" in checkout_block
+    assert checkout_block.index("if not token:") < checkout_block.index(
+        "handle_business_create_app_checkout"
+    )
+    assert checkout_block.index("if account_status != int(HTTPStatus.OK):") < checkout_block.index(
+        "handle_business_create_app_checkout"
+    )
+
+
 def test_subuser_money_access_writes_go_through_gate_functions():
     root = Path(__file__).resolve().parents[2]
     entitlements_source = (root / "plugins" / "takyon" / "app_entitlements.py").read_text(
