@@ -40,6 +40,9 @@ Configure the Safebox service environment with:
 Examples after the operator has signed the provider CLI in on the Safebox host:
 
 ```sh
+# Install the Doppler CLI on the Safebox host
+ssh root@67.205.158.170 'bash -s' < deploy/shared/ensure-doppler-cli.sh
+
 # Doppler
 TAKYON_MANAGED_SECRET_COMMAND='doppler secrets get {key} --plain --project takyon --config prd'
 
