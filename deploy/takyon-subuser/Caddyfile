@@ -44,11 +44,29 @@
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
 	}
 	handle @product {
+		@app_auth path_regexp app_auth ^/api/takyon/apps/[^/]+/auth/(request|session|verify)$
+		rate_limit @app_auth {
+			zone product_auth_80 {
+				key {client_ip}
+				events 30
+				window 1m
+			}
+		}
+
 		@app_auth_request path_regexp app_auth_request ^/api/takyon/apps/[^/]+/auth/request$
 		rate_limit @app_auth_request {
 			zone product_auth_request_80 {
 				key {client_ip}
 				events 5
+				window 1m
+			}
+		}
+
+		@app_checkout path_regexp app_checkout ^/api/takyon/apps/[^/]+/checkout$
+		rate_limit @app_checkout {
+			zone product_checkout_80 {
+				key {client_ip}
+				events 30
 				window 1m
 			}
 		}
@@ -83,11 +101,29 @@
 
 	encode zstd gzip
 
+	@app_auth_443 path_regexp app_auth_443 ^/api/takyon/apps/[^/]+/auth/(request|session|verify)$
+	rate_limit @app_auth_443 {
+		zone product_auth_443 {
+			key {client_ip}
+			events 30
+			window 1m
+		}
+	}
+
 	@app_auth_request_443 path_regexp app_auth_request_443 ^/api/takyon/apps/[^/]+/auth/request$
 	rate_limit @app_auth_request_443 {
 		zone product_auth_request_443 {
 			key {client_ip}
 			events 5
+			window 1m
+		}
+	}
+
+	@app_checkout_443 path_regexp app_checkout_443 ^/api/takyon/apps/[^/]+/checkout$
+	rate_limit @app_checkout_443 {
+		zone product_checkout_443 {
+			key {client_ip}
+			events 30
 			window 1m
 		}
 	}
