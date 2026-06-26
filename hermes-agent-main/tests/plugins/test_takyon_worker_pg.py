@@ -1346,3 +1346,154 @@ def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
         worker.ceo_bootstrap_handler(job)
     assert "iteration budget" in str(exc.value)
     assert "acme" in str(exc.value)
+
+
+def test_channel_tracked_link_tags_without_clobbering_and_meta_delegates():
+    tagged = core._channel_tracked_link(
+        "https://acme.example.com/welcome",
+        source="x",
+        medium="social",
+        campaign_key="acme",
+    )
+    assert "utm_source=x" in tagged
+    assert "utm_medium=social" in tagged
+    assert "utm_campaign=acme" in tagged
+    # Caller-set UTM params are not clobbered.
+    preset = core._channel_tracked_link(
+        "https://acme.example.com/?utm_source=newsletter",
+        source="x",
+        medium="social",
+        campaign_key="acme",
+    )
+    assert "utm_source=newsletter" in preset
+    assert "utm_source=x" not in preset
+    # Meta delegates to the shared helper and preserves its source/medium contract.
+    meta = core._meta_tracked_link("https://acme.example.com/", campaign_key="camp", creative_key="cr")
+    assert "utm_source=meta" in meta
+    assert "utm_medium=paid_social" in meta
+    assert "utm_campaign=camp" in meta
+    assert "utm_content=cr" in meta
+
+
+def test_compose_x_link_reply_formats_and_truncates():
+    assert worker._compose_x_link_reply("https://acme.example.com/") == "https://acme.example.com/"
+    assert (
+        worker._compose_x_link_reply("https://acme.example.com/", label="Try it")
+        == "Try it: https://acme.example.com/"
+    )
+    long_url = "https://acme.example.com/" + "a" * 400
+    assert len(worker._compose_x_link_reply(long_url, label="Try it")) <= worker._X_POST_CHAR_LIMIT
+
+
+def _stub_x_credits(monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_reserve_creative_credits",
+        lambda *args, **kwargs: {
+            "requested_credits": 1,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 1, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_commit_creative_credits",
+        lambda *args, **kwargs: {
+            "actual_credits": 1,
+            "balance_credits": 9,
+            "reserved_credits": 0,
+            "budget_bucket": "x",
+            "channel_budget": {"allocated_credits": 1, "used_credits": 1, "reserved_credits": 0, "remaining_credits": 0},
+        },
+    )
+    monkeypatch.setattr(
+        core,
+        "_release_creative_credits",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("release should not run on successful publish")),
+    )
+
+
+def test_x_publish_outreach_handler_posts_destination_link_as_reply(monkeypatch, tmp_path):
+    _stub_x_credits(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    responses = iter(
+        (
+            {"data": {"id": "tweet-root"}},
+            {"data": {"id": "tweet-link"}},
+            {"data": {"username": "sharedacct"}},
+        )
+    )
+
+    def _fake_twitter_execute(tool_slug, *, arguments=None, timeout=0.0, **_kwargs):
+        calls.append({"tool_slug": tool_slug, "arguments": dict(arguments or {}), "timeout": timeout})
+        return next(responses)
+
+    monkeypatch.setattr(worker.composio_distribution, "twitter_execute_tool", _fake_twitter_execute)
+    monkeypatch.setattr(
+        worker,
+        "_record_x_publish_result",
+        lambda slug, **kwargs: {"artifact": "a.md", "receipt": "r.json"},
+    )
+    monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
+
+    dest = "https://acme.example.com/?utm_source=x&utm_medium=social&utm_campaign=acme"
+    result = worker.x_publish_outreach_handler(
+        SimpleNamespace(
+            id="job-link",
+            business_slug="acme",
+            payload={"body": "Ship it", "provider": "x", "destination_url": dest},
+        )
+    )
+
+    assert [c["tool_slug"] for c in calls] == [
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_USER_LOOKUP_ME",
+    ]
+    # First post is the body; second post is the link reply threaded under the root tweet.
+    assert calls[0]["arguments"] == {"text": "Ship it"}
+    assert calls[1]["arguments"]["text"] == dest
+    assert calls[1]["arguments"]["reply_in_reply_to_tweet_id"] == "tweet-root"
+    # The recorded root post stays the body tweet, not the link reply.
+    assert result.result["post_id"] == "tweet-root"
+
+
+def test_x_publish_outreach_handler_skips_link_reply_when_link_already_in_body(monkeypatch, tmp_path):
+    _stub_x_credits(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    responses = iter(
+        (
+            {"data": {"id": "tweet-root"}},
+            {"data": {"username": "sharedacct"}},
+        )
+    )
+
+    def _fake_twitter_execute(tool_slug, *, arguments=None, timeout=0.0, **_kwargs):
+        calls.append({"tool_slug": tool_slug, "arguments": dict(arguments or {}), "timeout": timeout})
+        return next(responses)
+
+    monkeypatch.setattr(worker.composio_distribution, "twitter_execute_tool", _fake_twitter_execute)
+    monkeypatch.setattr(
+        worker,
+        "_record_x_publish_result",
+        lambda slug, **kwargs: {"artifact": "a.md", "receipt": "r.json"},
+    )
+    monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
+
+    worker.x_publish_outreach_handler(
+        SimpleNamespace(
+            id="job-inbody",
+            business_slug="acme",
+            payload={
+                "body": "Check it out https://acme.example.com",
+                "provider": "x",
+                "destination_url": "https://acme.example.com/?utm_source=x&utm_medium=social&utm_campaign=acme",
+            },
+        )
+    )
+
+    # Only the body post + the username lookup — no separate link reply, since the link is in body.
+    assert [c["tool_slug"] for c in calls] == [
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_USER_LOOKUP_ME",
+    ]

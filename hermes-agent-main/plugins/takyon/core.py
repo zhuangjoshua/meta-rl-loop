@@ -24014,6 +24014,19 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
             metadata=metadata,
         )
         destination_label = str(args.get("destination_label") or metadata.get("destination_label") or "").strip()
+        # Acquisition rail: an X post with no link to the product cannot drive traffic. When the
+        # caller did not pin a destination, default it to the business's canonical product URL,
+        # then UTM-tag it so referred sessions can be attributed back to X. The worker posts this
+        # link as a reply to the thread tail (the takyon-x skill keeps links out of the body).
+        if not destination_url:
+            destination_url = _normalize_destination_url(canonical_product_url)
+        if destination_url:
+            destination_url = _channel_tracked_link(
+                destination_url,
+                source="x",
+                medium="social",
+                campaign_key=business,
+            )
         is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
         if not is_x_outreach:
             raise TakyonError(
@@ -28162,17 +28175,28 @@ def _meta_publication_paths(
     }
 
 
-def _meta_tracked_link(link: str, *, campaign_key: str, creative_key: str | None = None) -> str:
+def _channel_tracked_link(
+    link: str,
+    *,
+    source: str,
+    medium: str,
+    campaign_key: str,
+    content_key: str | None = None,
+) -> str:
+    """Append UTM params (source/medium/campaign[/content]) without clobbering any the caller
+    already set. Single source of truth for channel attribution tagging across paid (Meta) and
+    organic (X/Reddit) outreach, so referred sessions can be joined back to the post that drove
+    them."""
     parsed = urllib.parse.urlsplit(str(link or "").strip())
     query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
     existing_keys = {key for key, _value in query}
     additions = [
-        ("utm_source", "meta"),
-        ("utm_medium", "paid_social"),
+        ("utm_source", source),
+        ("utm_medium", medium),
         ("utm_campaign", campaign_key),
     ]
-    if creative_key:
-        additions.append(("utm_content", creative_key))
+    if content_key:
+        additions.append(("utm_content", content_key))
     for key, value in additions:
         if key not in existing_keys and value:
             query.append((key, value))
@@ -28184,6 +28208,16 @@ def _meta_tracked_link(link: str, *, campaign_key: str, creative_key: str | None
             urllib.parse.urlencode(query),
             parsed.fragment,
         )
+    )
+
+
+def _meta_tracked_link(link: str, *, campaign_key: str, creative_key: str | None = None) -> str:
+    return _channel_tracked_link(
+        link,
+        source="meta",
+        medium="paid_social",
+        campaign_key=campaign_key,
+        content_key=creative_key,
     )
 
 

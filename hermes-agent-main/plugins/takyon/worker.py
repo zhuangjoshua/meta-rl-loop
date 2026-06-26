@@ -140,6 +140,17 @@ def _split_x_thread_segments(body: str, *, limit: int = _X_POST_CHAR_LIMIT) -> l
     return segments
 
 
+def _compose_x_link_reply(destination_url: str, *, label: str = "") -> str:
+    """The link reply that ships under an X thread. The takyon-x skill keeps links out of the
+    tweet body (X de-boosts body links), so the product URL goes in a reply — this composes it."""
+    url = str(destination_url or "").strip()
+    label = str(label or "").strip()
+    text = f"{label}: {url}" if label else url
+    if len(text) > _X_POST_CHAR_LIMIT:
+        text = url[:_X_POST_CHAR_LIMIT]
+    return text
+
+
 def _x_tool_data(payload: Mapping[str, Any] | None) -> Mapping[str, Any]:
     current: Any = payload if isinstance(payload, Mapping) else {}
     for _ in range(4):
@@ -1675,6 +1686,60 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             current_reply_to = current_post_id
             # Durably mark each shipped segment immediately so a crash/retry between this
             # tweet and the credit commit cannot re-post it.
+            _write_x_posted_marker(
+                slug,
+                str(job.id),
+                {
+                    "job_id": str(job.id),
+                    "post_id": post_id,
+                    "thread_posts": thread_posts,
+                    "media": media_records,
+                    "provider_response": provider_response,
+                    "credits_committed": False,
+                },
+            )
+        # Acquisition rail (takyon-x skill contract: "no link in the tweet body — the link goes
+        # in a reply"). Nothing used to post that reply, so destination_url only ever reached the
+        # receipt and never the timeline — an X post with no path to the product. Post the link
+        # now as one reply to the thread tail. It rides the SAME creative-credit reservation as
+        # the thread (one outreach action = its segments + its link reply), so it is not a
+        # separately gated paid call. Idempotent across retries via the durable posted-marker
+        # (the appended entry carries kind="link" so a resume never re-posts it).
+        destination_url = str(payload.get("destination_url") or "").strip()
+        link_already_posted = any(
+            isinstance(seg, dict) and seg.get("kind") == "link" for seg in thread_posts
+        )
+        destination_bare = destination_url.split("?", 1)[0].rstrip("/")
+        link_in_body = bool(destination_bare) and destination_bare in body
+        if destination_url and current_reply_to and not link_already_posted and not link_in_body:
+            link_text = _compose_x_link_reply(
+                destination_url,
+                label=str(payload.get("destination_label") or "").strip(),
+            )
+            link_response = composio_distribution.twitter_execute_tool(
+                "TWITTER_CREATION_OF_A_POST",
+                arguments={
+                    "text": link_text,
+                    "reply_in_reply_to_tweet_id": current_reply_to,
+                },
+                timeout=120.0,
+            )
+            link_post_id = _extract_x_post_id(link_response)
+            thread_posts.append(
+                {
+                    "index": len(thread_posts),
+                    "kind": "link",
+                    "post_id": link_post_id or "",
+                    "body": link_text,
+                    "reply_to": current_reply_to,
+                    "media": [],
+                    "provider_response": dict(link_response),
+                }
+            )
+            if link_post_id:
+                current_reply_to = link_post_id
+            # Durably extend the marker so a crash before the credit commit cannot re-post the
+            # link reply on retry.
             _write_x_posted_marker(
                 slug,
                 str(job.id),
