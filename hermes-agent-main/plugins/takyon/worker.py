@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import composio_distribution, jobs, wakes
+from . import app_usage, composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
 
 _log = logging.getLogger("takyon.worker")
@@ -59,6 +59,8 @@ _DEFAULT_TURN_TIMEOUT = 600.0
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker (matches jobs.requeue_stale's own default).
 _STALE_SECONDS = 900
+# Release product-AI usage holds whose provider call crashed before settle/release.
+_APP_USAGE_HOLD_TTL_SECONDS = 3600
 _X_POST_CHAR_LIMIT = 280
 
 
@@ -2404,15 +2406,30 @@ def drain_tick(
 ) -> dict[str, int]:
     """One drain tick on an open autocommit connection: optionally dispatch due wakes, reclaim stale
     claims, then drain queued jobs through ``jobs.run_one`` until the queue is empty (or ``stop`` is
-    set, or ``max_jobs`` reached). Returns counts ``{dispatched, requeued, drained, completed,
-    blocked, failed}``. Pure of process concerns (signals, sleeping, reconnect) so it is directly
-    testable against a real Postgres connection."""
+    set, or ``max_jobs`` reached). Returns counts including dispatch, stale-job reclaim, orphaned
+    product-usage hold release, and job outcomes. Pure of process concerns (signals, sleeping,
+    reconnect) so it is directly testable against a real Postgres connection."""
     handlers = HANDLERS if handlers is None else handlers
-    counts = {"dispatched": 0, "requeued": 0, "drained": 0, "completed": 0, "blocked": 0, "failed": 0}
+    counts = {
+        "dispatched": 0,
+        "requeued": 0,
+        "usage_holds_released": 0,
+        "drained": 0,
+        "completed": 0,
+        "blocked": 0,
+        "failed": 0,
+    }
 
     if dispatch:
         counts["dispatched"] = wakes.dispatch_due_wakes(conn) + _dispatch_due_action_jobs(conn)
     counts["requeued"] = jobs.requeue_stale(conn, older_than_seconds=_STALE_SECONDS, worker_id=worker_id)
+    counts["usage_holds_released"] = app_usage.reconcile_held_usage(
+        conn,
+        older_than_seconds=_env_int(
+            "TAKYON_APP_USAGE_HOLD_TTL_SECONDS",
+            _APP_USAGE_HOLD_TTL_SECONDS,
+        ),
+    )
 
     while stop is None or not stop.is_set():
         outcome: JobOutcome | None = jobs.run_one(

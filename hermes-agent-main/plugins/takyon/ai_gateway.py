@@ -267,23 +267,25 @@ def _require_active_entitlement(entitlement) -> None:
 
 
 def _feature_allowed(plan, feature_name: str) -> bool:
-    metadata = plan.metadata if plan is not None and isinstance(plan.metadata, dict) else {}
+    if plan is None or not isinstance(getattr(plan, "metadata", None), dict):
+        return False
+    metadata = plan.metadata
     features = metadata.get("features")
     if isinstance(features, dict):
-        if feature_name in features:
-            return bool(features.get(feature_name))
-        return True
+        return bool(features.get(feature_name))
     if isinstance(features, (list, tuple, set)):
         return feature_name in set(str(item) for item in features)
-    return True
+    return False
 
 
 def _model_allowed(plan, model: str) -> bool:
-    metadata = plan.metadata if plan is not None and isinstance(plan.metadata, dict) else {}
+    if plan is None or not isinstance(getattr(plan, "metadata", None), dict):
+        return False
+    metadata = plan.metadata
     allowlist = metadata.get("model_allowlist") or metadata.get("models")
     if isinstance(allowlist, (list, tuple, set)) and allowlist:
         return model in {str(item) for item in allowlist}
-    return True
+    return False
 
 
 # Invariant 9 (GOAL_RULES §3): the $0.50 per-user free-tier FLOOR IS REMOVED. There is no free
@@ -448,12 +450,12 @@ def broker_message_for_business(
     entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
     _require_active_entitlement(entitlement)
     feature_name = str(body.get("feature") or "ai_generate").strip() or "ai_generate"
-    if plan is not None and not _feature_allowed(plan, feature_name):
+    if not _feature_allowed(plan, feature_name):
         raise GatewayMessageError(
             status_code=403,
             detail={"error": "feature_not_in_plan", "feature": feature_name},
         )
-    if plan is not None and not _model_allowed(plan, model):
+    if not _model_allowed(plan, model):
         raise GatewayMessageError(
             status_code=403,
             detail={"error": "model_not_in_plan", "model": model},
@@ -723,7 +725,7 @@ def broker_search_for_business(
     entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
     _require_active_entitlement(entitlement)
     feature_name = str(body.get("feature") or "web_search").strip() or "web_search"
-    if plan is not None and not _feature_allowed(plan, feature_name):
+    if not _feature_allowed(plan, feature_name):
         raise GatewayMessageError(
             status_code=403,
             detail={"error": "feature_not_in_plan", "feature": feature_name},

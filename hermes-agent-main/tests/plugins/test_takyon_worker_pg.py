@@ -28,7 +28,7 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
-from plugins.takyon import billing, core, jobs, wakes, worker  # noqa: E402
+from plugins.takyon import app_usage, billing, core, jobs, wakes, worker  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import RuntimeNotConfigured  # noqa: E402
 from plugins.takyon import storage  # noqa: E402
@@ -158,8 +158,28 @@ def test_drain_tick_no_dispatch_drains_without_enqueuing(pg_conn):
 def test_drain_tick_empty_queue_is_noop(pg_conn):
     counts = worker.drain_tick(pg_conn, worker_id="w1", handlers={}, dispatch=False)
     assert counts == {
-        "dispatched": 0, "requeued": 0, "drained": 0, "completed": 0, "blocked": 0, "failed": 0,
+        "dispatched": 0,
+        "requeued": 0,
+        "usage_holds_released": 0,
+        "drained": 0,
+        "completed": 0,
+        "blocked": 0,
+        "failed": 0,
     }
+
+
+def test_drain_tick_reconciles_orphaned_usage_holds(pg_conn, monkeypatch):
+    slug, _uid = _provision_business(pg_conn)
+    app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=1_000)
+    app_usage.reserve_usage(pg_conn, slug, estimated_cost_microusd=400, reservation_key="held")
+    monkeypatch.setenv("TAKYON_APP_USAGE_HOLD_TTL_SECONDS", "0")
+
+    counts = worker.drain_tick(pg_conn, worker_id="w1", handlers={}, dispatch=False)
+
+    assert counts["usage_holds_released"] == 1
+    event = app_usage.list_usage_events(pg_conn, slug)[0]
+    assert event.status == "released"
+    assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 0
 
 
 def test_drain_tick_uses_real_registry_for_ceo_wake(pg_conn, monkeypatch):

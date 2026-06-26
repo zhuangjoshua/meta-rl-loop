@@ -560,7 +560,7 @@ def test_reconcile_held_usage_releases_orphaned_holds(pg_conn):
     app_usage.reserve_usage(pg_conn, slug, estimated_cost_microusd=400, reservation_key="held")
     assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 400
     # cutoff 0s → every reserved row is eligible; one orphaned hold is reconciled to 'released'.
-    released = pg_conn.execute("select safebox_reconcile_held_usage(%s)", (0,)).fetchone()[0]
+    released = app_usage.reconcile_held_usage(pg_conn, older_than_seconds=0)
     assert released == 1
     ev = app_usage.list_usage_events(pg_conn, slug)[0]
     assert ev.status == "released"

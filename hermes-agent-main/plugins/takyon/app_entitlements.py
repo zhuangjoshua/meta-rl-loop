@@ -429,6 +429,42 @@ def _resolve_app_user_id(
     raise ValueError("grant_entitlement requires app_user_id or email")
 
 
+def _insert_entitlement_gate(
+    conn,
+    *,
+    business_slug: str,
+    app_user_id: str,
+    tier: str,
+    status: str,
+    source: str,
+    stripe_customer_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+    stripe_checkout_session_id: str | None = None,
+    plan_key: str | None = None,
+    current_period_end: object = None,
+    metadata: dict | None = None,
+) -> Entitlement:
+    row = conn.execute(
+        f"select {_ENT_COLUMNS} from safebox_insert_app_entitlement("
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb"
+        ")",
+        (
+            business_slug,
+            app_user_id,
+            tier,
+            status,
+            source,
+            stripe_customer_id,
+            stripe_subscription_id,
+            stripe_checkout_session_id,
+            plan_key,
+            current_period_end,
+            _json_dumps(metadata or {}),
+        ),
+    ).fetchone()
+    return _ent_from_row(row)
+
+
 def _sync_user_tier(conn, business_slug: str, app_user_id: str) -> str:
     """Resolve the effective tier from active/trialing grants (highest rank) and cache it onto
     app_users.tier. Mirrors the SQLite `_sync_user_tier`. Caller already holds a transaction."""
@@ -511,29 +547,22 @@ def grant_entitlement(
             app_user_id=resolved_id,
             display_name=name,
         )
-        row = conn.execute(
-            "insert into app_entitlements "
-            "(business_slug, app_user_id, tier, status, source, stripe_customer_id, "
-            " stripe_subscription_id, stripe_checkout_session_id, plan_key, "
-            " current_period_end, metadata) "
-            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
-            f"returning {_ENT_COLUMNS}",
-            (
-                business_slug,
-                resolved_id,
-                tier_value,
-                status_value,
-                source_value,
-                stripe_customer_id,
-                stripe_subscription_id,
-                stripe_checkout_session_id,
-                plan_key,
-                current_period_end,
-                _json_dumps(meta),
-            ),
-        ).fetchone()
+        entitlement = _insert_entitlement_gate(
+            conn,
+            business_slug=business_slug,
+            app_user_id=resolved_id,
+            tier=tier_value,
+            status=status_value,
+            source=source_value,
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_checkout_session_id=stripe_checkout_session_id,
+            plan_key=plan_key,
+            current_period_end=current_period_end,
+            metadata=meta,
+        )
         effective = _sync_user_tier(conn, business_slug, resolved_id)
-    return _ent_from_row(row), effective
+    return entitlement, effective
 
 
 def list_entitlements(
@@ -604,29 +633,18 @@ def set_subscription_status(
     patch = _json_dumps(dict(metadata or {}))
     with conn.transaction():
         targets = conn.execute(
-            "select distinct business_slug, app_user_id, plan_key from app_entitlements "
-            "where source = 'stripe' and stripe_subscription_id = %s",
-            (stripe_subscription_id,),
+            "select business_slug, app_user_id, plan_key "
+            "from safebox_set_subscription_entitlement_status(%s, %s, %s, %s, %s::jsonb)",
+            (
+                stripe_subscription_id,
+                status_value,
+                stripe_customer_id,
+                current_period_end,
+                patch,
+            ),
         ).fetchall()
         updated: list[dict] = []
         for business_slug, app_user_id, plan_key in targets:
-            conn.execute(
-                "update app_entitlements set status = %s, "
-                "stripe_customer_id = coalesce(%s, stripe_customer_id), "
-                "current_period_end = coalesce(%s, current_period_end), "
-                "metadata = metadata || %s::jsonb, updated_at = now() "
-                "where source = 'stripe' and stripe_subscription_id = %s "
-                "and business_slug = %s and app_user_id = %s",
-                (
-                    status_value,
-                    stripe_customer_id,
-                    current_period_end,
-                    patch,
-                    stripe_subscription_id,
-                    business_slug,
-                    app_user_id,
-                ),
-            )
             tier = _sync_user_tier(conn, business_slug, app_user_id)
             updated.append(
                 {
@@ -637,6 +655,32 @@ def set_subscription_status(
                 }
             )
     return updated
+
+
+def patch_subscription_metadata(conn, stripe_subscription_id: str, metadata: dict | None = None) -> int:
+    patch = _json_dumps(dict(metadata or {}))
+    with conn.transaction():
+        row = conn.execute(
+            "select safebox_patch_subscription_entitlement_metadata(%s, %s::jsonb)",
+            (stripe_subscription_id, patch),
+        ).fetchone()
+    return int(row[0] if row else 0)
+
+
+def cancel_checkout_session_entitlements(
+    conn,
+    business_slug: str,
+    stripe_checkout_session_id: str,
+    *,
+    metadata: dict | None = None,
+) -> int:
+    patch = _json_dumps(dict(metadata or {}))
+    with conn.transaction():
+        row = conn.execute(
+            "select safebox_cancel_checkout_session_entitlements(%s, %s, %s::jsonb)",
+            (business_slug, stripe_checkout_session_id, patch),
+        ).fetchone()
+    return int(row[0] if row else 0)
 
 
 def project_openmeter_access(
@@ -702,24 +746,11 @@ def project_openmeter_access(
         if exists is None:
             raise AppUserNotFound(str(app_user_id))
         # OpenMeter is a downstream usage MIRROR, never the payment/access authority (CLAUDE.md).
-        # A degraded OpenMeter (observed: OPENMETER_URL pointed at a Kong gateway that 404s, so the
-        # access snapshot reports has_access=false for EVERY paid customer) must NEVER cancel a paid
-        # Stripe entitlement. Only retire prior OpenMeter-sourced rows here; Stripe-sourced rows stay
-        # authoritative and are governed solely by the Stripe webhook (grant_entitlement +
-        # customer.subscription.* events). This stops a broken OpenMeter from voiding real subscriptions.
+        # A degraded OpenMeter must never cancel a paid Stripe entitlement. Only retire prior
+        # OpenMeter-sourced rows here; Stripe-sourced rows stay authoritative.
         conn.execute(
-            "update app_entitlements set status = 'cancelled', "
-            "current_period_end = coalesce(%s, current_period_end), "
-            "metadata = metadata || %s::jsonb, updated_at = now() "
-            "where business_slug = %s and app_user_id = %s "
-            "and source = 'openmeter' "
-            "and lower(status) not in ('cancelled', 'canceled')",
-            (
-                current_period_end,
-                patch,
-                business_slug,
-                app_user_id,
-            ),
+            "select safebox_retire_openmeter_entitlements(%s, %s, %s, %s::jsonb)",
+            (business_slug, app_user_id, current_period_end, patch),
         )
         entitlement = None
         if active:
@@ -728,20 +759,19 @@ def project_openmeter_access(
                 raise InvalidEntitlementTier(
                     "openmeter access cannot project a free/unentitled billing tier"
                 )
-            row = conn.execute(
-                "insert into app_entitlements "
-                "(business_slug, app_user_id, tier, status, source, plan_key, current_period_end, metadata) "
-                "values (%s, %s, %s, 'active', 'openmeter', %s, %s, %s::jsonb) "
-                f"returning {_ENT_COLUMNS}",
-                (
-                    business_slug,
-                    app_user_id,
-                    tier_value,
-                    plan_key,
-                    current_period_end,
-                    patch,
-                ),
-            ).fetchone()
-            entitlement = _ent_from_row(row)
+            entitlement = _insert_entitlement_gate(
+                conn,
+                business_slug=business_slug,
+                app_user_id=app_user_id,
+                tier=tier_value,
+                status="active",
+                source="openmeter",
+                plan_key=plan_key,
+                current_period_end=current_period_end,
+                metadata={
+                    **meta,
+                    "billing_authority": "openmeter",
+                },
+            )
         effective = _sync_user_tier(conn, business_slug, app_user_id)
     return entitlement, effective

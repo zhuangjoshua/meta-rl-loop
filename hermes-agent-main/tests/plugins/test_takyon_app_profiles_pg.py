@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from plugins.takyon import app_identity, app_profiles  # noqa: E402
+from plugins.takyon import app_connections, app_directory, app_identity, app_profiles, app_records  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 
 psycopg = pytest.importorskip("psycopg")
@@ -112,6 +112,77 @@ def test_get_profile_resolves_from_session_token(pg_conn):
     assert resolved.user.id == user.id
     assert resolved.profile is not None
     assert resolved.profile.display_name == "Session User"
+
+
+def test_profile_rejects_session_token_with_app_user_override(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    alice = app_identity.upsert_app_user(pg_conn, slug, "alice@example.com")
+    bob = app_identity.upsert_app_user(pg_conn, slug, "bob@example.com")
+    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
+    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+
+    with pytest.raises(ValueError, match="session_token is authoritative"):
+        app_profiles.upsert_profile(
+            pg_conn,
+            slug,
+            session_token=session_token,
+            app_user_id=bob.id,
+            display_name="Not Alice",
+        )
+
+
+def test_record_save_rejects_session_token_with_app_user_override(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    alice = app_identity.upsert_app_user(pg_conn, slug, "alice-records@example.com")
+    bob = app_identity.upsert_app_user(pg_conn, slug, "bob-records@example.com")
+    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
+    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+
+    with pytest.raises(ValueError, match="session_token is authoritative"):
+        app_records.save_record(
+            pg_conn,
+            slug,
+            record_type="note",
+            data={"text": "wrong owner"},
+            session_token=session_token,
+            app_user_id=bob.id,
+        )
+
+
+def test_directory_write_rejects_session_token_with_app_user_override(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    alice = app_identity.upsert_app_user(pg_conn, slug, "alice-directory@example.com")
+    bob = app_identity.upsert_app_user(pg_conn, slug, "bob-directory@example.com")
+    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
+    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+
+    with pytest.raises(ValueError, match="session_token is authoritative"):
+        app_directory.upsert_entry(
+            pg_conn,
+            slug,
+            session_token=session_token,
+            app_user_id=bob.id,
+            display_name="Not Alice",
+        )
+
+
+def test_connection_action_rejects_session_token_with_app_user_override(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    alice = app_identity.upsert_app_user(pg_conn, slug, "alice-connections@example.com")
+    bob = app_identity.upsert_app_user(pg_conn, slug, "bob-connections@example.com")
+    target = app_identity.upsert_app_user(pg_conn, slug, "target-connections@example.com")
+    _, raw_magic = app_identity.create_magic_link(pg_conn, slug, alice.email)
+    _, session_token = app_identity.verify_magic_link(pg_conn, slug, raw_magic)
+
+    with pytest.raises(ValueError, match="session_token is authoritative"):
+        app_connections.set_connection(
+            pg_conn,
+            slug,
+            session_token=session_token,
+            app_user_id=bob.id,
+            target_app_user_id=target.id,
+            action="block",
+        )
 
 
 def test_profiles_are_business_scoped(pg_conn):

@@ -58,6 +58,16 @@ class ResolvedAppDirectoryEntry:
     entry: AppDirectoryEntry
 
 
+def _reject_session_identity_override(
+    *,
+    session_token: str | None,
+    app_user_id: str | None,
+    email: str | None,
+) -> None:
+    if session_token is not None and (app_user_id is not None or email is not None):
+        raise ValueError("session_token is authoritative; omit app_user_id/email")
+
+
 def _json_dumps(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
@@ -203,6 +213,11 @@ def _resolve_existing_user(
     email: str | None = None,
     session_token: str | None = None,
 ) -> app_identity.AppUser | None:
+    _reject_session_identity_override(
+        session_token=session_token,
+        app_user_id=app_user_id,
+        email=email,
+    )
     if session_token is not None:
         return app_identity.validate_session(conn, business_slug, session_token)
     if app_user_id is not None:
@@ -220,6 +235,11 @@ def _resolve_writable_user(
     email: str | None = None,
     session_token: str | None = None,
 ) -> app_identity.AppUser:
+    _reject_session_identity_override(
+        session_token=session_token,
+        app_user_id=app_user_id,
+        email=email,
+    )
     if session_token is not None:
         user = app_identity.validate_session(conn, business_slug, session_token)
     elif app_user_id is not None:

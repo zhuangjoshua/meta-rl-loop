@@ -65,6 +65,16 @@ class AppRecordPayloadTooLarge(AppRecordError):
         super().__init__(f"{field} exceeds {limit_bytes} bytes ({size_bytes})")
 
 
+def _reject_session_identity_override(
+    *,
+    session_token: str | None,
+    app_user_id: str | None,
+    email: str | None,
+) -> None:
+    if session_token is not None and (app_user_id is not None or email is not None):
+        raise ValueError("session_token is authoritative; omit app_user_id/email")
+
+
 # --- records-v2 bounded query (§18) -------------------------------------------------
 # One compiler, both dialects. Field names are whitelist-only and NEVER interpolated
 # from caller input; values ALWAYS become bound parameters. Keyset pagination follows
@@ -437,6 +447,11 @@ def _resolve_existing_user(
     email: str | None = None,
     session_token: str | None = None,
 ) -> app_identity.AppUser | None:
+    _reject_session_identity_override(
+        session_token=session_token,
+        app_user_id=app_user_id,
+        email=email,
+    )
     if session_token is not None:
         return app_identity.validate_session(conn, business_slug, session_token)
     if app_user_id is not None:
@@ -575,6 +590,11 @@ def save_record(
     email: str | None = None,
     session_token: str | None = None,
 ) -> tuple[app_identity.AppUser, AppRecord]:
+    _reject_session_identity_override(
+        session_token=session_token,
+        app_user_id=app_user_id,
+        email=email,
+    )
     if session_token is not None:
         user = app_identity.validate_session(conn, business_slug, session_token)
     elif app_user_id is not None:

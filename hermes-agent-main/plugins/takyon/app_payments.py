@@ -48,6 +48,10 @@ _SUBSCRIPTION_EVENT_TYPES = (
     "customer.subscription.updated",
     "customer.subscription.deleted",
 )
+_CHARGE_REVERSAL_EVENT_TYPES = (
+    "charge.refunded",
+    "charge.dispute.created",
+)
 
 
 class AppPaymentError(Exception):
@@ -208,6 +212,46 @@ def _owner_payout_split(plan, gross_cents: int) -> dict[str, int]:
     }
 
 
+def _insert_revenue_event(
+    conn,
+    *,
+    business_slug: str,
+    provider_event_id: str | None,
+    stripe_object_type: str,
+    stripe_object_id: str,
+    stripe_checkout_session_id: str | None = None,
+    stripe_customer_id: str | None = None,
+    revenue_type: str,
+    status: str,
+    currency: str,
+    amount_paid_cents: int,
+    customer_email: str | None = None,
+    occurred_at: object = None,
+    metadata: dict | None = None,
+) -> bool:
+    row = conn.execute(
+        "select safebox_insert_app_revenue_event("
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb"
+        ")",
+        (
+            business_slug,
+            provider_event_id,
+            stripe_object_type,
+            stripe_object_id,
+            stripe_checkout_session_id,
+            stripe_customer_id,
+            revenue_type,
+            status,
+            currency,
+            int(amount_paid_cents or 0),
+            customer_email,
+            occurred_at,
+            _json_dumps(metadata or {}),
+        ),
+    ).fetchone()
+    return bool(row and row[0])
+
+
 # --------------------------------------------------------------------------- checkout intents
 
 
@@ -362,6 +406,12 @@ def record_webhook_and_process(conn, event: dict, *, provider: str = "stripe") -
             processed = _process_checkout_completed(conn, event, obj)
         elif event_type in _SUBSCRIPTION_EVENT_TYPES and isinstance(obj, dict):
             processed = _process_subscription_event(conn, obj)
+        elif event_type == "invoice.paid" and isinstance(obj, dict):
+            processed = _process_invoice_paid(conn, event, obj)
+        elif event_type == "invoice.payment_failed" and isinstance(obj, dict):
+            processed = _process_invoice_payment_failed(conn, event, obj)
+        elif event_type in _CHARGE_REVERSAL_EVENT_TYPES and isinstance(obj, dict):
+            processed = _process_charge_reversal(conn, event, obj)
         else:
             processed = {"recorded": False, "ignored": event_type}
         conn.execute(
@@ -585,30 +635,22 @@ def reconcile_checkout_session(
     owner_user_id = None
     owed_balance_cents = None
     if currency and payment_status == "paid":
-        inserted_revenue = conn.execute(
-            "insert into app_revenue_events "
-            "(business_slug, provider_event_id, stripe_object_type, stripe_object_id, "
-            " stripe_checkout_session_id, stripe_customer_id, revenue_type, status, currency, "
-            " amount_paid_cents, customer_email, occurred_at, metadata) "
-            "values (%s, %s, 'checkout.session', %s, %s, %s, 'checkout', %s, %s, %s, %s, "
-            " coalesce(%s, now()), %s::jsonb) "
-            "on conflict (business_slug, provider_event_id, stripe_object_id) do nothing "
-            "returning id",
-            (
-                business,
-                provider_event_id,
-                session_id,
-                session_id,
-                customer_id,
-                payment_status or "paid",
-                currency or "usd",
-                amount_total,
-                customer_email,
-                occurred,
-                _json_dumps(revenue_metadata),
-            ),
-        ).fetchone()
-        revenue_recorded = inserted_revenue is not None
+        revenue_recorded = _insert_revenue_event(
+            conn,
+            business_slug=business,
+            provider_event_id=provider_event_id,
+            stripe_object_type="checkout.session",
+            stripe_object_id=session_id,
+            stripe_checkout_session_id=session_id,
+            stripe_customer_id=customer_id,
+            revenue_type="checkout",
+            status=payment_status or "paid",
+            currency=currency or "usd",
+            amount_paid_cents=amount_total,
+            customer_email=customer_email,
+            occurred_at=occurred,
+            metadata=revenue_metadata,
+        )
         if amount_total > 0:
             owner_user_id = _resolve_owner(conn, business)
             safebox.open_custody_account(conn, owner_user_id)
@@ -766,6 +808,270 @@ def _process_subscription_event(conn, subscription: dict) -> dict:
     return {"recorded": bool(updated), "updated": updated}
 
 
+def _subscription_targets(conn, subscription_id: str):
+    """Distinct (business_slug, app_user_id, plan_key) carrying this Stripe subscription id across
+    the canonical stripe-sourced entitlements. Empty when the subscription is unknown here — a
+    webhook for a subscription this platform never recorded is a no-op, not an error (mirrors
+    set_subscription_status)."""
+    return conn.execute(
+        "select distinct business_slug, app_user_id, plan_key from app_entitlements "
+        "where source = 'stripe' and stripe_subscription_id = %s",
+        (subscription_id,),
+    ).fetchall()
+
+
+def _invoice_period_end(invoice: dict):
+    """The renewed period end from an invoice — the last line item's period end, falling back to
+    the invoice-level period_end. Used to extend the entitlement on a successful renewal."""
+    lines = invoice.get("lines") if isinstance(invoice.get("lines"), dict) else {}
+    data = lines.get("data") if isinstance(lines.get("data"), list) else []
+    if data and isinstance(data[-1], dict):
+        period = data[-1].get("period")
+        if isinstance(period, dict):
+            end = _epoch_to_dt(period.get("end"))
+            if end is not None:
+                return end
+    return _epoch_to_dt(invoice.get("period_end"))
+
+
+def _process_invoice_paid(conn, event: dict, invoice: dict) -> dict:
+    """Record recurring-subscription RENEWAL revenue + owner custody accrual on `invoice.paid`.
+
+    The FIRST invoice of a subscription (`billing_reason == 'subscription_create'`) is already
+    counted by the checkout.session.completed path, so it is skipped here to avoid double-counting;
+    only renewal/proration cycles accrue. A paid renewal also confirms the subscription is current,
+    so the entitlement is refreshed to active with the new period end (restoring a sub-user whose
+    earlier attempt left them past_due, and clearing any dunning flag). Idempotent on the invoice
+    id via the revenue unique key + the webhook_events dedup, so a resent invoice cannot
+    double-record."""
+    invoice_id = str(invoice.get("id") or "")
+    if not invoice_id:
+        return {"recorded": False, "reason": "missing_invoice_id"}
+    if str(invoice.get("billing_reason") or "") == "subscription_create":
+        return {"recorded": False, "reason": "initial_invoice_counted_at_checkout"}
+    subscription_id = _stripe_object_id(invoice.get("subscription"))
+    if not subscription_id:
+        return {"recorded": False, "reason": "missing_subscription_id"}
+    targets = _subscription_targets(conn, subscription_id)
+    if not targets:
+        return {"recorded": False, "reason": "unknown_subscription"}
+
+    customer_id = _stripe_object_id(invoice.get("customer"))
+    customer_email = invoice.get("customer_email")
+    currency = invoice.get("currency")
+    amount_paid = int(invoice.get("amount_paid") or 0)
+    provider_event_id = str(event.get("id") or "") or None
+    occurred = _epoch_to_dt(event.get("created"))
+
+    # A successful renewal confirms payment -> refresh entitlement(s) active + new period, clear dunning.
+    refreshed = app_entitlements.set_subscription_status(
+        conn,
+        subscription_id,
+        status="active",
+        stripe_customer_id=customer_id,
+        current_period_end=_invoice_period_end(invoice),
+        metadata={
+            "stripe_subscription_status": "active",
+            "dunning": False,
+            "last_invoice_id": invoice_id,
+        },
+    )
+
+    business = str(targets[0][0])
+    plan_key = None if targets[0][2] is None else str(targets[0][2])
+    plan_policy = app_entitlements.get_plan_policy(conn, business, plan_key) if plan_key else None
+    payout_split = _owner_payout_split(plan_policy, amount_paid)
+    revenue_metadata = {
+        "stripe_object": "invoice",
+        "stripe_subscription_id": subscription_id,
+        "billing_reason": invoice.get("billing_reason"),
+        "pricing_split": {
+            "authority": "takyon",
+            "gross_cents": amount_paid,
+            "platform_fee_cents": payout_split["platform_fee_cents"],
+            "prepaid_withheld_cents": payout_split["prepaid_withheld_cents"],
+            "prepaid_withheld_microusd": payout_split["prepaid_withheld_microusd"],
+            "prepaid_dust_microusd": payout_split["prepaid_dust_microusd"],
+            "owner_net_cents": payout_split["owner_net_cents"],
+            "included_ai_budget_microusd": payout_split["included_ai_budget_microusd"],
+        },
+    }
+
+    revenue_recorded = False
+    owner_user_id = None
+    owed_balance_cents = None
+    if currency and amount_paid > 0:
+        revenue_recorded = _insert_revenue_event(
+            conn,
+            business_slug=business,
+            provider_event_id=provider_event_id,
+            stripe_object_type="invoice",
+            stripe_object_id=invoice_id,
+            stripe_customer_id=customer_id,
+            revenue_type="subscription_renewal",
+            status="paid",
+            currency=currency or "usd",
+            amount_paid_cents=amount_paid,
+            customer_email=customer_email,
+            occurred_at=occurred,
+            metadata=revenue_metadata,
+        )
+        if revenue_recorded:
+            owner_user_id = _resolve_owner(conn, business)
+            safebox.open_custody_account(conn, owner_user_id)
+            owed_balance_cents = safebox.accrue_custody(
+                conn,
+                owner_user_id,
+                business,
+                amount_paid,
+                f"app_invoice:{business}:{invoice_id}",
+                stripe_ref=invoice_id,
+                withheld_cents=payout_split["prepaid_withheld_cents"],
+                metadata=revenue_metadata.get("pricing_split"),
+            )
+
+    return {
+        "recorded": True,
+        "type": "invoice.paid",
+        "business_slug": business,
+        "plan_key": plan_key,
+        "amount_paid_cents": amount_paid,
+        "revenue_recorded": revenue_recorded,
+        "accrued_to_owner": owner_user_id is not None,
+        "owner_user_id": owner_user_id,
+        "owner_owed_balance_cents": owed_balance_cents,
+        "entitlements_refreshed": len(refreshed),
+    }
+
+
+def _process_invoice_payment_failed(conn, event: dict, invoice: dict) -> dict:
+    """Mark a failed recurring charge as DUNNING on the matching entitlements WITHOUT changing
+    access. Access stays governed by the Stripe subscription status (active/past_due/canceled) via
+    `customer.subscription.updated/deleted` — Stripe runs its own smart-retry grace window, so a
+    single failed attempt must not revoke a sub-user who will retry-succeed. Flipping to a
+    non-active status here would revoke immediately (past_due is NOT an access status), so this only
+    records the dunning signal for visibility; the next `invoice.paid` clears it."""
+    subscription_id = _stripe_object_id(invoice.get("subscription"))
+    if not subscription_id:
+        return {"recorded": False, "reason": "missing_subscription_id"}
+    marked = app_entitlements.patch_subscription_metadata(
+        conn,
+        subscription_id,
+        metadata={
+            "dunning": True,
+            "last_payment_failed_invoice": str(invoice.get("id") or ""),
+            "last_payment_failed_event": str(event.get("id") or ""),
+        },
+    )
+    return {
+        "recorded": bool(marked),
+        "type": "invoice.payment_failed",
+        "dunning_marked": int(marked),
+    }
+
+
+def _process_charge_reversal(conn, event: dict, obj: dict) -> dict:
+    """Revoke paid access and record a reversal on a refund (`charge.refunded`) or chargeback
+    (`charge.dispute.created`). Resolve the original payment back to its business via the stored
+    checkout session (by payment_intent, else by customer), flip its stripe-sourced entitlement(s)
+    to `cancelled` so the sub-user loses paid access, and append a `reversal` revenue row (stored
+    as a positive amount but netted OUT of revenue totals by `get_revenue_summary`).
+
+    NOTE: owner custody is NOT auto-clawed-back here — the owner may already have been paid out, so
+    clawback belongs to the payout/netting rail. The reversal row carries
+    `custody_clawback_pending=true` so that rail can offset it; this leaf does not silently
+    over- or under-credit custody."""
+    event_type = str(event.get("type") or "")
+    is_dispute = event_type == "charge.dispute.created"
+    object_id = str(obj.get("id") or "")
+    if not object_id:
+        return {"recorded": False, "reason": "missing_object_id", "type": event_type}
+    payment_intent_id = _stripe_object_id(obj.get("payment_intent"))
+    customer_id = _stripe_object_id(obj.get("customer"))
+    amount = int((obj.get("amount") if is_dispute else obj.get("amount_refunded")) or 0)
+    currency = obj.get("currency")
+    provider_event_id = str(event.get("id") or "") or None
+    occurred = _epoch_to_dt(event.get("created"))
+
+    cols = (
+        "business_slug, stripe_subscription_id, stripe_customer_id, customer_email, "
+        "stripe_checkout_session_id"
+    )
+    row = None
+    if payment_intent_id:
+        row = conn.execute(
+            f"select {cols} from app_checkout_sessions where stripe_payment_intent_id = %s limit 1",
+            (payment_intent_id,),
+        ).fetchone()
+    if row is None and customer_id:
+        row = conn.execute(
+            f"select {cols} from app_checkout_sessions where stripe_customer_id = %s "
+            "order by created_at desc limit 1",
+            (customer_id,),
+        ).fetchone()
+    if row is None:
+        return {"recorded": False, "reason": "unknown_payment", "type": event_type}
+    business = str(row[0])
+    subscription_id = None if row[1] is None else str(row[1])
+    resolved_customer = customer_id or (None if row[2] is None else str(row[2]))
+    customer_email = None if row[3] is None else str(row[3])
+    session_id = None if row[4] is None else str(row[4])
+
+    revoke_meta = {"reversal": event_type, "reversal_object_id": object_id}
+    revoked = 0
+    if subscription_id:
+        revoked = len(
+            app_entitlements.set_subscription_status(
+                conn,
+                subscription_id,
+                status="cancelled",
+                stripe_customer_id=resolved_customer,
+                metadata={"stripe_subscription_status": "cancelled", **revoke_meta},
+            )
+        )
+    elif session_id:
+        revoked = app_entitlements.cancel_checkout_session_entitlements(
+            conn,
+            business,
+            session_id,
+            metadata=revoke_meta,
+        )
+
+    reversal_metadata = {
+        "stripe_object": "dispute" if is_dispute else "charge",
+        "reversal": event_type,
+        "original_payment_intent": payment_intent_id,
+        "stripe_subscription_id": subscription_id,
+        "custody_clawback_pending": amount > 0,
+    }
+    reversal_recorded = _insert_revenue_event(
+        conn,
+        business_slug=business,
+        provider_event_id=provider_event_id,
+        stripe_object_type="dispute" if is_dispute else "charge",
+        stripe_object_id=object_id,
+        stripe_checkout_session_id=session_id,
+        stripe_customer_id=resolved_customer,
+        revenue_type="reversal",
+        status="disputed" if is_dispute else "refunded",
+        currency=currency or "usd",
+        amount_paid_cents=abs(amount),
+        customer_email=customer_email,
+        occurred_at=occurred,
+        metadata=reversal_metadata,
+    )
+
+    return {
+        "recorded": True,
+        "type": event_type,
+        "business_slug": business,
+        "access_revoked": revoked,
+        "reversal_recorded": reversal_recorded,
+        "amount_reversed_cents": abs(amount),
+        "custody_clawback_pending": amount > 0,
+    }
+
+
 def _resolve_owner(conn, business_slug: str) -> str:
     row = conn.execute(
         "select owner_user_id from businesses where slug = %s",
@@ -792,9 +1098,14 @@ def list_revenue_events(
 
 
 def get_revenue_summary(conn, business_slug: str) -> dict:
-    """Total recorded revenue for a business (mirrors core.py:3710). Read."""
+    """NET recorded revenue for a business (mirrors core.py:3710). Read.
+
+    Reversal rows (refunds/chargebacks) are stored with a positive amount_paid_cents (the table
+    CHECKs amount >= 0) but tagged revenue_type='reversal'; they are subtracted here so the total
+    reflects money actually kept. `events` counts all rows including reversals."""
     row = conn.execute(
-        "select coalesce(sum(amount_paid_cents), 0), count(*) from app_revenue_events "
+        "select coalesce(sum(case when revenue_type = 'reversal' then -amount_paid_cents "
+        " else amount_paid_cents end), 0), count(*) from app_revenue_events "
         "where business_slug = %s",
         (business_slug,),
     ).fetchone()

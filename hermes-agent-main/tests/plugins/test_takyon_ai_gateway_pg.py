@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,8 +26,8 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 from psycopg.conninfo import make_conninfo  # noqa: E402
 
+from plugins.takyon import ai_gateway, app_entitlements, app_identity  # noqa: E402
 from plugins.takyon.ai_gateway import get_provider_caller  # noqa: E402
-from plugins.takyon import app_entitlements, app_identity  # noqa: E402
 from plugins.takyon.app_gateway_keys import mint_gateway_key  # noqa: E402
 from plugins.takyon.app_usage import (  # noqa: E402
     get_usage_summary,
@@ -37,6 +38,10 @@ from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: 
 from plugins.takyon.runtime_app import build_runtime_app  # noqa: E402
 
 _GENERATE_BODY = {"messages": [{"role": "user", "content": "Hello gateway"}], "max_tokens": 32}
+_DEFAULT_PLAN_METADATA = {
+    "features": {"ai_generate": True, "web_search": True},
+    "model_allowlist": ["claude-sonnet-4-6"],
+}
 
 
 def _auth(raw: str) -> dict[str, str]:
@@ -70,6 +75,7 @@ def _provision_session_user(
     email: str = "cust@example.com",
     tier: str = "paid",
     included_ai_budget_microusd: int = 50_000,
+    metadata: dict | None = None,
 ) -> tuple[app_identity.AppUser, str]:
     plan_key = f"{tier}-plan"
     price_cents = max(1, (int(included_ai_budget_microusd) + 9_999) // 10_000)
@@ -80,6 +86,7 @@ def _provision_session_user(
         tier=tier,
         price_cents=price_cents,
         included_ai_budget_microusd=included_ai_budget_microusd,
+        metadata=_DEFAULT_PLAN_METADATA if metadata is None else metadata,
     )
     link, raw_magic = app_identity.create_magic_link(conn, business_slug, email)
     session_user, session_token = app_identity.verify_magic_link(conn, business_slug, raw_magic)
@@ -122,6 +129,21 @@ def _raising_caller():
 def _none_caller():
     # Mirrors the real default in a key-less environment: no provider configured.
     return None
+
+
+def test_gateway_plan_allowlists_are_default_deny():
+    plan = SimpleNamespace(metadata={})
+
+    assert ai_gateway._feature_allowed(plan, "ai_generate") is False
+    assert ai_gateway._feature_allowed(
+        SimpleNamespace(metadata={"features": {"ai_generate": True}}),
+        "ai_generate",
+    ) is True
+    assert ai_gateway._model_allowed(plan, "claude-sonnet-4-6") is False
+    assert ai_gateway._model_allowed(
+        SimpleNamespace(metadata={"model_allowlist": ["claude-sonnet-4-6"]}),
+        "claude-sonnet-4-6",
+    ) is True
 
 
 @pytest.fixture
@@ -284,6 +306,45 @@ def test_gateway_requires_paid_entitlement(gateway_client, pg_conn):
     )
     assert resp.status_code == 402
     assert resp.json()["detail"] == {"error": "subscription_required"}
+    assert list_usage_events(pg_conn, slug) == []
+
+
+def test_gateway_plan_without_feature_metadata_is_403(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(pg_conn, slug, metadata={})
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == {"error": "feature_not_in_plan", "feature": "ai_generate"}
+    assert list_usage_events(pg_conn, slug) == []
+
+
+def test_gateway_model_not_in_plan_is_403(gateway_client, pg_conn):
+    slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(
+        pg_conn,
+        slug,
+        metadata={
+            "features": {"ai_generate": True},
+            "model_allowlist": ["claude-other"],
+        },
+    )
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,
+        headers=_app_auth(raw, session_token),
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == {"error": "model_not_in_plan", "model": "claude-sonnet-4-6"}
     assert list_usage_events(pg_conn, slug) == []
 
 

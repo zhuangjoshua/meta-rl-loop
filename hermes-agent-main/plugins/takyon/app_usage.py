@@ -54,6 +54,9 @@ from dataclasses import dataclass
 # business). New budgets open with NO pool cap (None), not the old $5 default.
 _NO_POOL_CAP = None
 
+# Reserved usage holds older than this are considered orphaned by the worker reconciliation tick.
+_DEFAULT_HELD_USAGE_TTL_SECONDS = 3600
+
 
 # The restricted, NON-bypassing app-request role migration 0030 creates and migration 0037 binds:
 # after 0037 it has NO direct INSERT/UPDATE/DELETE on app_usage_events (only EXECUTE on the
@@ -667,6 +670,25 @@ def release_usage(
     )
     _raise_for_gate_refusal(row, business_slug=business_slug, reservation_key=key)
     return _event_from_gate_row(row)
+
+
+def reconcile_held_usage(
+    conn,
+    *,
+    older_than_seconds: int = _DEFAULT_HELD_USAGE_TTL_SECONDS,
+) -> int:
+    """Release orphaned reserved usage holds older than ``older_than_seconds``.
+
+    The actual ledger mutation lives in ``safebox_reconcile_held_usage`` (migration 0037), the same
+    SECURITY DEFINER boundary as reserve/settle/release. This wrapper keeps the runtime from calling
+    the function as a privileged table owner: it drops to the restricted app role first, just like the
+    other usage gates.
+    """
+    seconds = int(older_than_seconds)
+    if seconds < 0:
+        raise ValueError("older_than_seconds must be >= 0")
+    row = _gate_execute(conn, "select safebox_reconcile_held_usage(%s)", (seconds,))
+    return int(row[0] if row is not None else 0)
 
 
 def record_completed_usage(

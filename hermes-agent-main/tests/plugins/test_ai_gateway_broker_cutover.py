@@ -19,7 +19,10 @@ class _FakeUser:
 
 
 class _Plan:
-    metadata = {}
+    metadata = {
+        "features": {"ai_generate": True, "web_search": True},
+        "model_allowlist": ["claude-x"],
+    }
     tier = "pro"
     included_ai_budget_microusd = 5_000_000
 

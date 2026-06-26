@@ -13406,7 +13406,8 @@ class TakyonStore:
         Internal connections default to RLS bypass so operator/server code keeps its current authority.
         App-facing handlers use this scope to bind the live business plus either the current app user id
         or a presented session token hash, letting the DB enforce the same customer boundary as the
-        runtime surface for the duration of the block.
+        runtime surface for the duration of the block. If a session token is present, it is the
+        authoritative identity; a caller-supplied ``app_user_id`` is deliberately not bound.
         """
         if not isinstance(conn, _PGConn):
             yield conn
@@ -13438,7 +13439,7 @@ class TakyonStore:
             )
             raw.execute(
                 "select set_config('takyon.rls_app_user_id', %s, true)",
-                (str(app_user_id or "").strip(),),
+                ("" if session_token else str(app_user_id or "").strip(),),
             )
             raw.execute(
                 "select set_config('takyon.rls_session_hash', %s, true)",
@@ -17210,6 +17211,11 @@ class TakyonStore:
                 )
                 if not existing_monthly_plan:
                     bootstrap_plan_metadata = {
+                        "features": {
+                            "ai_generate": True,
+                            "web_search": True,
+                        },
+                        "model_allowlist": ["claude-sonnet-4-6"],
                         "takyon_seed": {
                             "kind": "monthly_access_shell",
                             "price_status": "unset",
@@ -21452,7 +21458,13 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                 "provider_message_id": None,
                 "external_side_effects": "none",
             })
-        origin = str(args.get("origin") or "").rstrip("/")
+        # SECURITY (account-takeover): the emailed verify-link host MUST be the business's
+        # SERVER-AUTHORITATIVE product URL, never a client-supplied `origin`. /auth/request is
+        # unauthenticated, so trusting a client `origin` let an attacker point a real login token
+        # at their own host (POST /auth/request {email: victim, origin: https://evil}) — a
+        # one-click account takeover. Derive the host the same way checkout derives success/cancel
+        # URLs (never from a client origin), and ignore any client-supplied origin for the link host.
+        link_base = _product_publish_target(business).rstrip("/")
         app_slug = _file_slug(str(args.get("app_slug") or business), business)
         send_email = bool(args.get("send_email"))
         with store._connect() as conn:
@@ -21516,7 +21528,7 @@ def handle_business_request_app_magic_link(args: dict, **_: Any) -> str:
                     display_name=user.get("name"),
                 )
                 token = _random_token()
-            link = f"{origin}/api/takyon/apps/{app_slug}/auth/verify?token={urllib.parse.quote(token)}" if origin else ""
+            link = f"{link_base}/api/takyon/apps/{app_slug}/auth/verify?token={urllib.parse.quote(token)}" if link_base else ""
             provider_message_id = None
             email_sent = False
             if send_email:
@@ -23288,129 +23300,6 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
-def _grant_test_checkout_entitlement(
-    store: "TakyonStore",
-    conn: Any,
-    *,
-    business: str,
-    intent_id: str,
-    plan: dict[str, Any],
-    app_user_id: str | None,
-    customer_email: str | None,
-) -> dict[str, Any]:
-    """Flip the customer to entitled for a TEST checkout through the canonical app_entitlements rail.
-
-    A test checkout never fires a Stripe webhook, so without this the customer is recorded as having
-    "paid" in test mode but is never actually entitled. This grants the plan's tier through the SAME
-    canonical entitlement writer the live webhook uses (PG: ``app_entitlements.grant_entitlement``;
-    SQLite: the canonical app_entitlements INSERT + ``_sync_user_tier``), tied to the real recorded
-    test checkout intent as evidence (``stripe_checkout_session_id = test:<intent_id>``) with
-    ``source = "test"`` so it is truthful and distinguishable — not fabricated billing. Returns
-    ``{granted, app_user_id, tier}``; returns ``granted=False`` when there is no customer to grant to
-    (no app_user_id and no email), exactly as the live path skips an anonymous checkout."""
-    tier_value = str(plan.get("tier") or "").strip()
-    if not tier_value:
-        # The canonical rail refuses an empty tier; a plan with no tier cannot entitle anyone.
-        return {"granted": False, "reason": "plan_tier_missing"}
-    email = _normalize_email(str(customer_email)) if customer_email else None
-    resolved_user_id = str(app_user_id or "").strip() or None
-    if not resolved_user_id and not email:
-        return {"granted": False, "reason": "no_checkout_customer"}
-    # Real recorded evidence: the test checkout intent row in app_checkout_intents (status
-    # test_local). Prefixed so it is never confused with a live Stripe session id.
-    test_session_evidence = f"test:{intent_id}"
-    grant_metadata = {
-        "source": "test_checkout",
-        "checkout_intent_id": intent_id,
-        "business_mode": "test",
-        "plan_key": str(plan.get("plan_key") or ""),
-    }
-    if isinstance(conn, _PGConn):
-        leaves = store._app_leaves()
-        try:
-            with store._leaf_conn(conn) as raw:
-                ent, tier = leaves["entitlements"].grant_entitlement(
-                    raw,
-                    business,
-                    app_user_id=resolved_user_id,
-                    email=email,
-                    tier=tier_value,
-                    status="active",
-                    source="test",
-                    stripe_checkout_session_id=test_session_evidence,
-                    plan_key=str(plan.get("plan_key") or "") or None,
-                    metadata=grant_metadata,
-                )
-        except (leaves["entitlements"].EntitlementError, leaves["identity"].AppIdentityError) as exc:
-            raise TakyonError(str(exc)) from exc
-        store._rewrite_app_files(conn, business)
-        store._record_event(
-            conn,
-            scope=f"business:{business}/app",
-            business_slug=business,
-            event_type="app.entitlement.upsert",
-            payload={"app_user_id": ent.app_user_id, "tier": tier, "source": "test"},
-        )
-        return {"granted": True, "app_user_id": ent.app_user_id, "tier": tier}
-    # SQLite trunk: resolve/provision the user, then run the canonical entitlement INSERT + tier sync.
-    user = None
-    if resolved_user_id:
-        user = store._row_to_dict(
-            conn.execute(
-                "SELECT * FROM app_users WHERE business_slug = ? AND id = ?",
-                (business, resolved_user_id),
-            ).fetchone()
-        )
-    if not user and email:
-        conn.execute(
-            "INSERT INTO app_users (id, business_slug, email, status, tier, metadata_json, created_at, updated_at) "
-            "VALUES (?, ?, ?, 'active', ?, ?, ?, ?) "
-            "ON CONFLICT(business_slug, email) DO UPDATE SET tier = excluded.tier, updated_at = excluded.updated_at",
-            (uuid.uuid4().hex, business, email, tier_value, _json_dumps({"source": "test_checkout"}), _now(), _now()),
-        )
-        user = store._row_to_dict(
-            conn.execute(
-                "SELECT * FROM app_users WHERE business_slug = ? AND email = ?",
-                (business, email),
-            ).fetchone()
-        )
-    if not user:
-        return {"granted": False, "reason": "missing_checkout_user"}
-    resolved_user_id = str(user["id"])
-    _ensure_sqlite_app_profile(conn, business, resolved_user_id, display_name=user.get("name"))
-    now = _now()
-    conn.execute(
-        """
-        INSERT INTO app_entitlements (
-          id, business_slug, app_user_id, tier, status, source,
-          stripe_customer_id, stripe_subscription_id, stripe_checkout_session_id,
-          plan_key, current_period_end, metadata_json, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, 'active', 'test', NULL, NULL, ?, ?, NULL, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex,
-            business,
-            resolved_user_id,
-            tier_value,
-            test_session_evidence,
-            str(plan.get("plan_key") or "") or None,
-            _json_dumps(grant_metadata),
-            now,
-            now,
-        ),
-    )
-    tier = store._sync_user_tier(conn, business, resolved_user_id)
-    store._record_event(
-        conn,
-        scope=f"business:{business}/app",
-        business_slug=business,
-        event_type="app.entitlement.upsert",
-        payload={"app_user_id": resolved_user_id, "tier": tier, "source": "test"},
-    )
-    return {"granted": True, "app_user_id": resolved_user_id, "tier": tier}
-
-
 def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
     store = _store()
     try:
@@ -23516,27 +23405,17 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     intent_id=intent_id,
                     origin=args.get("origin"),
                 )
-                # A test checkout never fires a Stripe webhook, so the customer would otherwise be
-                # left UN-entitled even after "paying". Flip them to entitled now through the SAME
-                # canonical app_entitlements rail the live webhook uses, tied to this real test
-                # checkout intent as evidence (source="test"). The grant runs inside this connection
-                # so it commits atomically with the intent completion below.
-                entitlement_grant = _grant_test_checkout_entitlement(
-                    store,
-                    conn,
-                    business=business,
-                    intent_id=intent_id,
-                    plan=plan,
-                    app_user_id=str(args.get("app_user_id") or "").strip() or None,
-                    customer_email=customer_email,
-                )
-                granted = bool(entitlement_grant.get("granted"))
-                # When the entitlement was actually granted, the test "payment" is complete — mark the
-                # intent completed (mirrors the live completed status) rather than leaving it pending.
-                intent_status = "completed" if granted else "test_local"
+                # A test checkout does NOT grant any entitlement. The former fake `source="test"`
+                # grant was removed: an active test grant confers real paid access if the business is
+                # later flipped to live (the runtime access gate does not look at `source`). Test
+                # billing is exercised end-to-end through Stripe TEST mode on the real
+                # checkout->webhook->grant path instead. The intent is recorded as `test_local` (no
+                # payment, no grant) so the flow stays visible without minting access.
+                entitlement_grant = {"granted": False, "reason": "test_mode_no_grant"}
+                granted = False
                 conn.execute(
-                    "UPDATE app_checkout_intents SET status = ?, checkout_url = ?, completed_at = ?, updated_at = ? WHERE id = ?",
-                    (intent_status, checkout_url, _now() if granted else None, _now(), intent_id),
+                    "UPDATE app_checkout_intents SET status = 'test_local', checkout_url = ?, updated_at = ? WHERE id = ?",
+                    (checkout_url, _now(), intent_id),
                 )
                 receipt_rel = f"metrics/receipts/app-checkout/{intent_id}.json"
                 _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
