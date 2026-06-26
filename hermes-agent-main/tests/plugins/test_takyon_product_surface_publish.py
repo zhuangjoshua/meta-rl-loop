@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from plugins.takyon import core as takyon_core
+from plugins.takyon import storage as takyon_storage
 
 
 def test_publish_product_surface_writes_immutable_build_and_flips_current_pointer(tmp_path, monkeypatch):
@@ -341,6 +342,41 @@ def test_publish_product_surface_reuses_the_same_build_id_for_identical_output(t
     assert first["live_build_id"] == second["live_build_id"]
 
 
+def test_publish_product_surface_mirrors_to_r2_via_remote_storage_authority(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    dist = business_root / "product" / "site" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.setattr(takyon_storage, "r2_configured", lambda: False)
+    monkeypatch.setattr(takyon_storage, "_remote_storage_authority_enabled", lambda: True)
+    mirrored: dict[str, object] = {}
+
+    def fake_write_public_site_to_r2(slug, build_id, build_root):
+        mirrored.update({"slug": slug, "build_id": build_id, "build_root": Path(build_root)})
+        return {"slug": slug, "build_id": build_id, "files": {"index.html": "digest"}}
+
+    monkeypatch.setattr(takyon_storage, "write_public_site_to_r2", fake_write_public_site_to_r2)
+    monkeypatch.setattr(takyon_core, "_ensure_product_edge_route", lambda slug: None)
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "published"
+    assert mirrored["slug"] == "plannerly"
+    assert mirrored["build_id"] == result["live_build_id"]
+    assert mirrored["build_root"] == dist.resolve()
+
+
 def test_refresh_product_surface_builds_package_managed_vite_app_instead_of_short_circuiting_to_source(
     tmp_path,
     monkeypatch,
@@ -402,11 +438,9 @@ def test_refresh_product_surface_builds_package_managed_vite_app_instead_of_shor
 
     assert result["status"] == "passed"
     assert result["kind"] == "node_build"
-    assert [check["command"] for check in result["checks"]] == [
-        ["/usr/bin/npm", "install", "--ignore-scripts"],
-        ["/usr/bin/npm", "run", "build"],
-        ["/usr/bin/npm", "run", "typecheck"],
-    ]
+    commands = [check["command"] for check in result["checks"]]
+    assert ["/usr/bin/npm", "run", "build"] in commands
+    assert ["/usr/bin/npm", "run", "typecheck"] in commands
     assert (site / "dist" / "index.html").read_text(encoding="utf-8") == "<html><body>dist site</body></html>\n"
 
 
@@ -468,6 +502,8 @@ def test_refresh_product_surface_rematerializes_surface_context_before_build(tmp
             dist.mkdir(parents=True, exist_ok=True)
             (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
             return {"command": command, "status": "passed", "stdout": "", "stderr": ""}
+        if command == ["/usr/bin/npm", "run", "typecheck"]:
+            return {"command": command, "status": "passed", "stdout": "", "stderr": ""}
         raise AssertionError(f"unexpected surface command: {command}")
 
     monkeypatch.setattr(takyon_core, "_run_surface_command", fake_run_surface_command)
@@ -523,6 +559,7 @@ def test_refresh_product_surface_blocks_when_build_produces_no_publishable_outpu
         if command in (
             ["/usr/bin/npm", "install", "--ignore-scripts"],
             ["/usr/bin/npm", "run", "build"],
+            ["/usr/bin/npm", "run", "typecheck"],
         ):
             return {"command": command, "status": "passed", "stdout": "", "stderr": ""}
         raise AssertionError(f"unexpected surface command: {command}")

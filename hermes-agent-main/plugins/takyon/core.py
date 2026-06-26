@@ -12892,7 +12892,7 @@ def _publish_product_surface_path(
     # edge can serve <slug>.coscale.app without the VPS. This is non-blocking and fail-soft: if
     # R2 is unconfigured we no-op, and any mirror error is logged but never fails the publish (the
     # Supabase artifact above remains the source of truth and the VPS static fallback still serves).
-    if storage.r2_configured():
+    if storage.r2_mirror_available():
         try:
             mirror = storage.write_public_site_to_r2(slug, build_id, publish_source)
             logging.getLogger("takyon.r2").info(

@@ -973,6 +973,17 @@ def r2_configured() -> bool:
     )
 
 
+def r2_mirror_available() -> bool:
+    """True when a product publish should attempt the public R2 mirror.
+
+    Runtime planes may have no raw R2 credentials by design; with remote storage authority enabled,
+    ``write_public_site_to_r2`` delegates the bounded object writes to Safebox instead. Mirror callers
+    should therefore attempt the write when either local R2 config is present OR the remote authority
+    path is active, and let the write itself fail-soft if Safebox reports R2 unconfigured.
+    """
+    return _remote_storage_authority_enabled() or r2_configured()
+
+
 def public_site_object_key(slug: str, build_id: str, rel: str) -> str:
     """Key a single built-site file in the PUBLIC R2 bucket: ``<slug>/<build_id>/<rel>``.
 
