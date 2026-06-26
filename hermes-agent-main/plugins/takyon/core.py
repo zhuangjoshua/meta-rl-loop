@@ -8761,11 +8761,11 @@ def _safebox_remote_authority_reachable() -> bool:
 def _requirement_satisfied_by_safebox_broker(alias_names: tuple[str, ...]) -> bool:
     """True when the safebox broker supplies this paid-provider requirement on a runtime plane.
 
-    Post-safebox-cutover, paid-provider keys (COMPOSIO_API_KEY for X/twitter/reddit/reddit_ads/meta,
+    Post-safebox-cutover, paid-provider keys (COMPOSIO_API_KEY for X/twitter/reddit/reddit_ads,
     GEMINI/FAL/etc.) are on ``provider_key_denylist()`` — the safebox REFUSES to egress them over
     /v1/env, so a runtime plane's ``_env_requirement_value`` returns "" even though the actual call
-    path already brokers fine (``composio_distribution._request`` -> ``safebox.composio_forward()``;
-    Meta Ads also uses that Composio broker/MCP rail). The old raw-env readiness gate therefore
+    path already brokers fine (``composio_distribution._request`` -> ``safebox.composio_forward()``).
+    Meta Ads v2 has its own official MCP broker and is not satisfied by Composio. The old raw-env readiness gate therefore
     fails CLOSED and the CEO bails before ever reaching the working broker.
 
     A requirement is broker-satisfiable iff (a) EVERY alias spelling is a denylisted paid-provider
@@ -27706,13 +27706,11 @@ def _business_file_presigned_get_url(
     backend = store._workspace_storage_backend()
     backend_name = str(getattr(backend, "name", "") or "").strip().lower()
     if backend_name != "supabase_s3":
-        raise TakyonError(
-            "Meta Composio video upload requires the supabase_s3 workspace storage backend"
-        )
+        raise TakyonError("Meta video upload shim requires the supabase_s3 workspace storage backend")
     client = getattr(backend, "_client", None)
     bucket = str(getattr(backend, "bucket", "") or "").strip()
     if client is None or not bucket:
-        raise TakyonError("Meta Composio video upload could not access the workspace storage client")
+        raise TakyonError("Meta video upload shim could not access the workspace storage client")
     key = f"{storage.object_prefix(_slugify(business))}{relative.as_posix()}"
     try:
         return str(
@@ -27752,30 +27750,11 @@ def _meta_graph(
     clean = {k: v for k, v in (params or {}).items() if v is not None}
     rel = path.lstrip("/")
     method = method.upper()
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if connected_account_id:
-        try:
-            payload = composio_distribution.metaads_proxy_request(
-                method=method,
-                endpoint=f"https://{host}/{cfg['version']}/{rel}",
-                connected_account_id=connected_account_id,
-                body=clean if method != "GET" else None,
-                parameters=[
-                    {"name": key, "value": str(value), "type": "query"}
-                    for key, value in clean.items()
-                ]
-                if method == "GET"
-                else None,
-                timeout=float(timeout),
-            )
-        except Exception as exc:
-            raise TakyonError(f"Meta Graph {method} /{rel} failed via Composio MCP: {exc}") from exc
-        result = _composio_tool_unwrap(payload)
-        if isinstance(result, Mapping):
-            return dict(result)
-        if isinstance(result, list):
-            return {"data": result}
-        return {}
+    if str(cfg.get("composio_connected_account_id") or "").strip():
+        raise TakyonError(
+            "Composio Meta Ads is disabled for Takyon Meta v2; use the official Meta MCP broker "
+            "or a safebox-owned Graph shim token"
+        )
 
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
         raise TakyonError(
@@ -27851,28 +27830,10 @@ def _meta_upload_advideo(
 ) -> str:
     """Upload a local mp4 to Meta using a short-lived signed file URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if connected_account_id:
-        if not business or not video_rel:
-            raise TakyonError("Meta Composio video upload requires the business slug and ad_video_path")
-        signed_url = _business_file_presigned_get_url(business, video_rel)
-        try:
-            payload = composio_distribution.metaads_proxy_request(
-                method="POST",
-                endpoint=f"https://graph-video.facebook.com/{cfg['version']}/{acct}/advideos",
-                connected_account_id=connected_account_id,
-                body={
-                    "name": name,
-                    "file_url": signed_url,
-                },
-                timeout=180.0,
-            )
-        except Exception as exc:
-            raise TakyonError(f"Meta video upload failed via Composio MCP: {exc}") from exc
-        video_id = str(_composio_tool_mapping(payload).get("id") or "").strip()
-        if not video_id:
-            raise TakyonError(f"Meta video upload returned no id for {video_path.name}")
-        return video_id
+    if str(cfg.get("composio_connected_account_id") or "").strip():
+        raise TakyonError(
+            "Composio Meta Ads video upload is disabled; use the safebox-owned Graph /advideos shim"
+        )
 
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
         raise TakyonError(
@@ -27919,42 +27880,11 @@ def _meta_adimage_upload_result(data: Mapping[str, Any], image_name: str) -> dic
 def _meta_upload_adimage(image_path: Path, cfg: dict[str, Any]) -> dict[str, Any]:
     """Upload a local image to Meta and return the image hash and URL."""
     acct = _meta_account_path(cfg["ad_account_id"])
-    connected_account_id = str(cfg.get("composio_connected_account_id") or "").strip()
-    if connected_account_id:
-        try:
-            descriptor = composio_distribution.upload_file_descriptor(
-                toolkit_slug="metaads",
-                tool_slug="METAADS_UPLOAD_AD_IMAGE",
-                file_path=image_path,
-                timeout=180.0,
-            )
-            payload = composio_distribution.metaads_execute_tool(
-                "METAADS_UPLOAD_AD_IMAGE",
-                arguments={
-                    "ad_account_id": acct,
-                    "name": image_path.name,
-                    "image": descriptor,
-                },
-                connected_account_id=connected_account_id,
-                timeout=180.0,
-            )
-        except Exception as exc:
-            raise TakyonError(f"Meta image upload failed via Composio MCP: {exc}") from exc
-        result = _composio_tool_mapping(payload)
-        image_hash = str(result.get("hash") or result.get("image_hash") or "").strip()
-        image_url = str(result.get("url") or result.get("image_url") or "").strip()
-        images = result.get("images") if isinstance(result, dict) else None
-        if (not image_hash or not image_url) and isinstance(images, Mapping) and images:
-            first = next(iter(images.values()))
-            if isinstance(first, Mapping):
-                image_hash = image_hash or str(first.get("hash") or "").strip()
-                image_url = image_url or str(first.get("url") or "").strip()
-        if not image_hash:
-            raise TakyonError(f"Meta image upload returned no image hash for {image_path.name}")
-        return {
-            "hash": image_hash,
-            "url": image_url or None,
-        }
+    if str(cfg.get("composio_connected_account_id") or "").strip():
+        raise TakyonError(
+            "Composio Meta Ads image upload is disabled for Meta v2; stage images as public URLs "
+            "and create creatives through official MCP"
+        )
 
     if safebox._remote_enabled() and not safebox._local_authority_enabled():
         raise TakyonError(

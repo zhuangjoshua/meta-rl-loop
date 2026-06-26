@@ -2524,9 +2524,9 @@ def meta_config() -> dict:
 
     The Meta system-user token is a provider secret the safebox holds and refuses to egress over
     /v1/env, so a runtime plane cannot resolve it. This returns the brokered config (graph version,
-    ad account id, page id, composio_* hints) plus a ``has_token`` bool; the token VALUE is redacted to
+    ad account id, page id, MCP endpoint/readiness) plus a ``has_token`` bool; the token VALUE is redacted to
     "" by the safebox route and never reaches this process. Used by ``core._meta_config`` on runtime
-    planes; production launch Graph calls use the Composio Meta Ads MCP/connected-account rail."""
+    planes; production launch/control/read calls use the official Meta Ads MCP broker."""
     payload = _remote_json("POST", "/v1/providers/meta/config", {})
     return payload if isinstance(payload, dict) else {}
 

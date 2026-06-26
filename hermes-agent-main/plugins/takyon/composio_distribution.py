@@ -230,13 +230,9 @@ def resolve_reddit_organic_connected_account_id() -> str:
 
 
 def resolve_metaads_connected_account_id() -> str:
-    return _resolve_connected_account_id(
-        toolkit_slug=_METAADS_TOOLKIT_SLUG,
-        explicit_env_key="COMPOSIO_METAADS_CONNECTED_ACCOUNT_ID",
-        user_id_env_keys=("COMPOSIO_METAADS_USER_ID", "COMPOSIO_USER_ID"),
-        alias_env_key="COMPOSIO_METAADS_ALIAS",
-        default_user_id=_METAADS_DEFAULT_USER_ID,
-        default_alias=_METAADS_DEFAULT_ALIAS,
+    raise ComposioDistributionError(
+        "Composio Meta Ads is disabled for Takyon Meta v2; use official Meta Ads MCP "
+        "with META_MCP_OAUTH_TOKEN"
     )
 
 
@@ -435,12 +431,8 @@ def metaads_execute_tool(
     connected_account_id: str | None = None,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    return execute_tool(
-        tool_slug,
-        arguments=arguments,
-        connected_account_id=connected_account_id or resolve_metaads_connected_account_id(),
-        user_id=_env_value("COMPOSIO_METAADS_USER_ID") or _env_value("COMPOSIO_USER_ID") or _METAADS_DEFAULT_USER_ID,
-        timeout=timeout,
+    raise ComposioDistributionError(
+        "Composio Meta Ads tools are disabled for Takyon Meta v2; use official Meta Ads MCP"
     )
 
 
@@ -454,34 +446,6 @@ def metaads_proxy_request(
     binary_body: Mapping[str, Any] | None = None,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "connected_account_id": connected_account_id or resolve_metaads_connected_account_id(),
-        "endpoint": endpoint,
-        "method": method.upper(),
-    }
-    if body is not None:
-        payload["body"] = dict(body)
-    if parameters:
-        payload["parameters"] = list(parameters)
-    if binary_body is not None:
-        payload["binary_body"] = dict(binary_body)
-    response = _request(
-        "POST",
-        "tools/execute/proxy",
-        json_body=payload,
-        timeout=timeout,
+    raise ComposioDistributionError(
+        "Composio METAADS_PROXY is disabled for Takyon Meta v2; use official Meta Ads MCP"
     )
-    if isinstance(response, Mapping):
-        status = response.get("status")
-        try:
-            status_int = int(status)
-        except (TypeError, ValueError):
-            status_int = 0
-        if response.get("successful") is False or status_int >= 400:
-            message = _proxy_error_message("METAADS_PROXY", response)
-            log_id = str(response.get("log_id") or "").strip()
-            raise ComposioDistributionError(
-                f"Composio METAADS_PROXY returned an error: {message}"
-                + (f" [log_id={log_id}]" if log_id else "")
-            )
-    return response

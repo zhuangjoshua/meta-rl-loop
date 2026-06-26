@@ -114,6 +114,15 @@ def _import_mcp_http():
 
 
 def _auth_error(exc: BaseException) -> bool:
+    response = getattr(exc, "response", None)
+    try:
+        if int(getattr(response, "status_code", 0) or 0) == 401:
+            return True
+    except Exception:
+        pass
+    children = getattr(exc, "exceptions", None)
+    if children and any(_auth_error(child) for child in children):
+        return True
     text = str(exc).lower()
     return any(marker in text for marker in ("401", "unauthorized", "invalid_token", "oauth"))
 

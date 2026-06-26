@@ -2169,8 +2169,8 @@ def build_safebox_app() -> FastAPI:
         body: _MetaGraphBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        # Legacy compatibility route. Production launch calls now go through Composio Meta Ads MCP;
-        # this remains internal-only for diagnostics/old callers and still never egresses the token.
+        # Legacy compatibility route. Production launch/control/read calls use official Meta MCP;
+        # this remains internal-only for Graph shims/diagnostics and still never egresses the token.
         _require_internal_token(authorization)
         from . import core as _core
 

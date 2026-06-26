@@ -14,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from plugins.takyon import composio_distribution, core, creative_gateway, safebox_app
+from plugins.takyon import composio_distribution, core, creative_gateway, meta_mcp, safebox_app
 
 _TOKEN = "secret-internal-token"
 
@@ -105,35 +105,19 @@ def test_meta_config_requires_official_mcp_oauth_when_local_on_safebox_host(monk
 # ── core._meta_graph brokering ───────────────────────────────────────────────────────────────────
 
 
-def test_meta_graph_uses_composio_mcp_when_remote(monkeypatch):
-    captured = {}
-
+def test_meta_graph_rejects_composio_metaads_config(monkeypatch):
     monkeypatch.setattr(core.safebox, "_remote_enabled", lambda: True)
     monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: False)
     monkeypatch.setattr(core.safebox, "meta_graph_forward", _boom)
 
-    def fake_proxy_request(*, method, endpoint, connected_account_id=None, body=None, parameters=None, timeout=120.0):
-        captured["call"] = (method, endpoint, connected_account_id, body, parameters, timeout)
-        return {"id": "me-123", "name": "fourmanifold-server"}
-
-    monkeypatch.setattr(core.composio_distribution, "metaads_proxy_request", fake_proxy_request)
-
-    out = core._meta_graph(
-        "GET",
-        "me",
-        {"fields": "id,name"},
-        {"token": "", "version": "v21.0", "composio_connected_account_id": "conn_metaads_123"},
-        timeout=30,
-    )
-
-    assert out == {"id": "me-123", "name": "fourmanifold-server"}
-    method, endpoint, connected_account_id, body, parameters, timeout = captured["call"]
-    assert method == "GET"
-    assert endpoint == "https://graph.facebook.com/v21.0/me"
-    assert connected_account_id == "conn_metaads_123"
-    assert body is None
-    assert parameters == [{"name": "fields", "value": "id,name", "type": "query"}]
-    assert timeout == 30.0
+    with pytest.raises(core.TakyonError, match="Composio Meta Ads is disabled"):
+        core._meta_graph(
+            "GET",
+            "me",
+            {"fields": "id,name"},
+            {"token": "", "version": "v21.0", "composio_connected_account_id": "conn_metaads_123"},
+            timeout=30,
+        )
 
 
 def test_meta_graph_requires_mcp_connection_when_remote(monkeypatch):
@@ -145,27 +129,10 @@ def test_meta_graph_requires_mcp_connection_when_remote(monkeypatch):
         core._meta_graph("POST", "act_123/campaigns", {"name": "demo"}, {"token": "", "version": "v21.0"})
 
 
-def test_metaads_proxy_request_raises_graph_error(monkeypatch):
-    def fake_request(method, path, *, json_body=None, timeout=60.0, **_kwargs):
-        assert method == "POST"
-        assert path == "tools/execute/proxy"
-        assert json_body["connected_account_id"] == "conn_metaads_123"
-        return {
-            "status": 400,
-            "data": {
-                "error": {
-                    "message": "Ads creative post was created by an app that is in development mode.",
-                    "type": "OAuthException",
-                    "code": 1885316,
-                }
-            },
-        }
-
-    monkeypatch.setattr(composio_distribution, "_request", fake_request)
-
+def test_metaads_proxy_request_is_disabled():
     with pytest.raises(
         composio_distribution.ComposioDistributionError,
-        match="development mode",
+        match="disabled",
     ):
         composio_distribution.metaads_proxy_request(
             method="POST",
@@ -173,6 +140,18 @@ def test_metaads_proxy_request_raises_graph_error(monkeypatch):
             connected_account_id="conn_metaads_123",
             body={"name": "Demo creative"},
         )
+
+
+def test_meta_mcp_auth_error_detects_taskgroup_wrapped_401():
+    class _Response:
+        status_code = 401
+
+    class _HTTPError(Exception):
+        response = _Response()
+
+    wrapped = ExceptionGroup("streamable http task group", [_HTTPError("unauthorized")])
+
+    assert meta_mcp._auth_error(wrapped) is True
 
 
 def test_meta_graph_direct_when_local_on_safebox_host(monkeypatch):
@@ -279,8 +258,7 @@ def test_meta_launch_preflight_missing_oauth_returns_structured_block(monkeypatc
 # ── legacy media upload helpers (not the Meta v2 launch transport) ───────────────────────────────
 
 
-def test_meta_image_upload_uses_composio_mcp_when_remote(monkeypatch, tmp_path):
-    captured = {}
+def test_meta_image_upload_rejects_composio_mcp_config(monkeypatch, tmp_path):
     image_path = tmp_path / "creative.png"
     image_path.write_bytes(b"fake image bytes")
 
@@ -288,88 +266,39 @@ def test_meta_image_upload_uses_composio_mcp_when_remote(monkeypatch, tmp_path):
     monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: False)
     monkeypatch.setattr(core.safebox, "meta_graph_forward", _boom)
 
-    descriptor = {"kind": "file", "name": "creative.png"}
-
-    def fake_upload_file_descriptor(**kwargs):
-        captured["upload"] = kwargs
-        return descriptor
-
-    def fake_execute_tool(tool_slug, *, arguments=None, connected_account_id=None, timeout=120.0):
-        captured["execute"] = (tool_slug, arguments, connected_account_id, timeout)
-        return {"data": {"hash": "hash-123", "url": "https://example.com/creative.png"}}
-
-    monkeypatch.setattr(core.composio_distribution, "upload_file_descriptor", fake_upload_file_descriptor)
-    monkeypatch.setattr(core.composio_distribution, "metaads_execute_tool", fake_execute_tool)
-
-    result = core._meta_upload_adimage(
-        image_path,
-        {
-            "token": "",
-            "version": "v23.0",
-            "ad_account_id": "act_123",
-            "composio_connected_account_id": "conn_metaads_123",
-        },
-    )
-
-    assert result == {"hash": "hash-123", "url": "https://example.com/creative.png"}
-    assert captured["upload"]["toolkit_slug"] == "metaads"
-    assert captured["upload"]["tool_slug"] == "METAADS_UPLOAD_AD_IMAGE"
-    assert captured["upload"]["file_path"] == image_path
-    tool_slug, arguments, connected_account_id, timeout = captured["execute"]
-    assert tool_slug == "METAADS_UPLOAD_AD_IMAGE"
-    assert arguments == {
-        "ad_account_id": "act_123",
-        "name": "creative.png",
-        "image": descriptor,
-    }
-    assert connected_account_id == "conn_metaads_123"
-    assert timeout == 180.0
+    with pytest.raises(core.TakyonError, match="Composio Meta Ads image upload is disabled"):
+        core._meta_upload_adimage(
+            image_path,
+            {
+                "token": "",
+                "version": "v23.0",
+                "ad_account_id": "act_123",
+                "composio_connected_account_id": "conn_metaads_123",
+            },
+        )
 
 
-def test_meta_video_upload_uses_composio_mcp_when_remote(monkeypatch, tmp_path):
-    captured = {}
+def test_meta_video_upload_rejects_composio_mcp_config(monkeypatch, tmp_path):
     video_path = tmp_path / "ad.mp4"
     video_path.write_bytes(b"fake video bytes")
 
     monkeypatch.setattr(core.safebox, "_remote_enabled", lambda: True)
     monkeypatch.setattr(core.safebox, "_local_authority_enabled", lambda: False)
     monkeypatch.setattr(core.safebox, "meta_graph_forward", _boom)
-    monkeypatch.setattr(
-        core,
-        "_business_file_presigned_get_url",
-        lambda business, rel, **_kwargs: f"https://assets.example/{business}/{rel}",
-    )
 
-    def fake_proxy_request(*, method, endpoint, connected_account_id=None, body=None, parameters=None, timeout=120.0):
-        captured["call"] = (method, endpoint, connected_account_id, body, parameters, timeout)
-        return {"data": {"id": "video-123"}}
-
-    monkeypatch.setattr(core.composio_distribution, "metaads_proxy_request", fake_proxy_request)
-
-    result = core._meta_upload_advideo(
-        video_path,
-        {
-            "token": "",
-            "version": "v23.0",
-            "ad_account_id": "123",
-            "composio_connected_account_id": "conn_metaads_123",
-        },
-        name="Demo video",
-        business="homework-one",
-        video_rel="product/ugc-ads/demo/ad.mp4",
-    )
-
-    assert result == "video-123"
-    method, endpoint, connected_account_id, body, parameters, timeout = captured["call"]
-    assert method == "POST"
-    assert endpoint == "https://graph-video.facebook.com/v23.0/act_123/advideos"
-    assert connected_account_id == "conn_metaads_123"
-    assert body == {
-        "name": "Demo video",
-        "file_url": "https://assets.example/homework-one/product/ugc-ads/demo/ad.mp4",
-    }
-    assert parameters is None
-    assert timeout == 180.0
+    with pytest.raises(core.TakyonError, match="Composio Meta Ads video upload is disabled"):
+        core._meta_upload_advideo(
+            video_path,
+            {
+                "token": "",
+                "version": "v23.0",
+                "ad_account_id": "123",
+                "composio_connected_account_id": "conn_metaads_123",
+            },
+            name="Demo video",
+            business="homework-one",
+            video_rel="product/ugc-ads/demo/ad.mp4",
+        )
 
 
 # ── live budget floor ───────────────────────────────────────────────────────────────────────────
