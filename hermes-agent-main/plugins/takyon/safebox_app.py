@@ -13,6 +13,9 @@ import json
 import os
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from contextlib import contextmanager
 from typing import Any, Iterable
@@ -25,6 +28,11 @@ from .safebox_capability import CapabilityScope, mint_capability, verify_capabil
 from .safebox_nonce import pg_claim_nonce
 
 _SAFEBOX_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
+_CLOUDFLARE_AIG_TOKEN_ENV = "CLOUDFLARE_AIG_TOKEN"
+_CLOUDFLARE_AIG_ACCOUNT_ID_ENV = "CLOUDFLARE_AIG_ACCOUNT_ID"
+_CLOUDFLARE_AIG_GATEWAY_ID_ENV = "CLOUDFLARE_AIG_GATEWAY_ID"
+_CLOUDFLARE_AIG_GATEWAY_ID_DEFAULT = "takyon-subuser"
+_CLOUDFLARE_AIG_BASE = "https://gateway.ai.cloudflare.com/v1"
 
 # The capability signing key is a SAFEBOX-ONLY secret: it is read from the process env on the
 # safebox host and is NEVER written to any client .env (that is the whole point — a client cannot
@@ -1066,6 +1074,81 @@ def _first_env_egress_value(names: Iterable[str]) -> str:
     return ""
 
 
+def _cloudflare_aig_config() -> tuple[str, str, str] | None:
+    """Return Cloudflare AI Gateway config, or None when the backstop is intentionally disabled.
+
+    Account ID is the opt-in switch. If the account is configured but auth is missing, fail closed so
+    the sub-user provider path cannot silently bypass the configured gateway.
+    """
+    account_id = str(
+        os.environ.get(_CLOUDFLARE_AIG_ACCOUNT_ID_ENV)
+        or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+        or ""
+    ).strip()
+    if not account_id:
+        return None
+    gateway_id = str(
+        os.environ.get(_CLOUDFLARE_AIG_GATEWAY_ID_ENV)
+        or _CLOUDFLARE_AIG_GATEWAY_ID_DEFAULT
+    ).strip()
+    if not gateway_id:
+        raise BrokerLedgerError("cloudflare_aig_unconfigured")
+    token = str(safebox.read_env_backed_value(_CLOUDFLARE_AIG_TOKEN_ENV) or "").strip()
+    if not token:
+        raise BrokerLedgerError("cloudflare_aig_unconfigured")
+    return account_id, gateway_id, token
+
+
+def _cloudflare_aig_metadata(scope: CapabilityScope, *, provider: str, model: str) -> str:
+    metadata = {
+        "app_user_id": str(scope.app_user_id or ""),
+        "business_slug": str(scope.business_slug or ""),
+        "provider": str(provider or ""),
+        "action": str(scope.action or ""),
+        "model": str(model or ""),
+    }
+    return json.dumps(metadata, separators=(",", ":"))
+
+
+def _cloudflare_aig_anthropic_messages(
+    payload: dict[str, Any],
+    *,
+    api_key: str,
+    scope: CapabilityScope,
+    model: str,
+) -> dict[str, Any] | None:
+    config = _cloudflare_aig_config()
+    if config is None:
+        return None
+    account_id, gateway_id, token = config
+    account = urllib.parse.quote(account_id, safe="")
+    gateway = urllib.parse.quote(gateway_id, safe="")
+    request = urllib.request.Request(
+        f"{_CLOUDFLARE_AIG_BASE}/{account}/{gateway}/anthropic/v1/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": api_key,
+            "cf-aig-authorization": f"Bearer {token}",
+            "cf-aig-metadata": _cloudflare_aig_metadata(scope, provider="anthropic", model=model),
+            "cf-aig-collect-log-payload": "false",
+        },
+        method="POST",
+    )
+    try:
+        timeout = int(os.environ.get("TAKYON_APP_ANTHROPIC_TIMEOUT_SECONDS") or 60)
+    except ValueError:
+        timeout = 60
+    timeout = max(5, min(300, timeout))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Cloudflare AI Gateway Anthropic returned {exc.code}: {body[:500]}") from exc
+
+
 def _anthropic_key_resolver(_scope: CapabilityScope) -> str:
     """Resolve the SHARED Anthropic key LOCALLY on the safebox (never returned to a caller)."""
     from . import ai_provider
@@ -1082,8 +1165,15 @@ def _anthropic_provider_caller(payload: dict[str, Any]):
 
     built_payload, model, estimated_input_tokens = ai_provider.anthropic_payload(payload or {})
 
-    def _call(_scope: CapabilityScope, key: str):
-        raw = ai_provider.call_anthropic(built_payload, key)
+    def _call(scope: CapabilityScope, key: str):
+        raw = _cloudflare_aig_anthropic_messages(
+            built_payload,
+            api_key=key,
+            scope=scope,
+            model=model,
+        )
+        if raw is None:
+            raw = ai_provider.call_anthropic(built_payload, key)
         usage = raw.get("usage") or {}
         in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
         out_tok = int(usage.get("output_tokens") or 0)
