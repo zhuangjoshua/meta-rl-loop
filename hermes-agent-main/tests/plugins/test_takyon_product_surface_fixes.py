@@ -36,3 +36,24 @@ def test_subscribe_intent_is_reactive_to_the_intent_param():
     assert "export function useSubscribeIntent(" in hooks
     assert "intent: string | null" in hooks
     assert "[intent, access.authenticated, access.entitled, access.loading]" in hooks
+
+
+def test_appkit_access_gate_uses_entitlements_not_legacy_account_flags():
+    # Sub-user access authority is the app_entitlements projection returned by /account. A signed-in
+    # app_users.status="active", stale user.tier, or legacy plan/account boolean must never make the
+    # shared UI skip checkout or show paid access.
+    hooks = (_SCAFFOLD / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
+    entitled_block = hooks.split("export function isAccountEntitled", 1)[1].split(
+        "export function subscriptionStateFromAccount", 1
+    )[0]
+    subscription_block = hooks.split("export function subscriptionStateFromAccount", 1)[1].split(
+        "export function resolveViewerCta", 1
+    )[0]
+
+    assert "accountEntitlements(payload).some" in entitled_block
+    assert "payload.entitled" not in entitled_block
+    assert "payload.plan" not in entitled_block
+    assert "user?.tier" not in entitled_block
+    assert "user?.tier" not in subscription_block
+    assert "has_active_subscription" not in hooks
+    assert "subscription.status" not in hooks
