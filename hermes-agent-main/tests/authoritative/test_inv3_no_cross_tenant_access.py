@@ -110,6 +110,9 @@ _AUTHORITY_SPLIT_CONTROL_PLANE_RLS_PATH = (
 _APP_SUPABASE_SESSION_UUID_CAST_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0053_fix_app_supabase_session_uuid_cast.sql"
 )
+_SAFEBOX_APP_CHECKOUT_RECONCILE_GRANTS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0054_safebox_app_checkout_reconcile_grants.sql"
+)
 
 # Identity kwargs that, if accepted from the caller, would let an EVIL user assert a
 # different owner than the one the slug resolves to. None of these may appear as a
@@ -949,6 +952,19 @@ def test_safebox_app_checkout_recovery_requires_product_context_before_stripe():
     assert safebox_app_src.index("checkout_context_required") < safebox_app_src.index(
         'safebox.stripe_request(f"checkout/sessions/{session_id}"'
     )
+
+
+def test_safebox_authority_can_reconcile_checkout_without_app_role_direct_access():
+    assert _SAFEBOX_APP_CHECKOUT_RECONCILE_GRANTS_PATH.exists(), _SAFEBOX_APP_CHECKOUT_RECONCILE_GRANTS_PATH
+    sql = _SAFEBOX_APP_CHECKOUT_RECONCILE_GRANTS_PATH.read_text(encoding="utf-8").lower()
+
+    assert "grant insert, update on app_checkout_sessions\n    to takyon_safebox_authority" in sql
+    assert "grant update (status, completed_at, updated_at) on app_checkout_intents\n    to takyon_safebox_authority" in sql
+    assert "grant update (tier, updated_at) on app_users\n    to takyon_safebox_authority" in sql
+    assert "grant insert on app_user_profiles\n    to takyon_safebox_authority" in sql
+    assert "grant insert, update on app_checkout_sessions\n    to takyon_app" not in sql
+    assert "grant insert, update on app_checkout_sessions\n    to takyon_app_runtime" not in sql
+    assert "revoke select, insert, update, delete on app_checkout_sessions\n    from takyon_app_runtime, takyon_app" in sql
 
 
 def test_safebox_stripe_catalog_mutation_requires_operator_authority():
