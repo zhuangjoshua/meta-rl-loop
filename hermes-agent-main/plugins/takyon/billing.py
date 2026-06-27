@@ -223,6 +223,21 @@ def reserve(
     if estimate_cents < 0:
         raise ValueError("estimate_cents must be >= 0")
     rk = idempotency_key
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        payload = safebox.billing_reserve(
+            conn,
+            user_id,
+            estimate_cents,
+            rk,
+            business_slug=business_slug,
+            job_id=job_id,
+        )
+        return Reservation(
+            key=str(payload.get("reservation_key") or rk),
+            allowance_cents=int(payload.get("allowance_cents") or 0),
+        )
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_billing_reserve (verbatim
     # port): lock the account row, NoBillingAccount when absent, idempotent reservation_key short
     # circuit (replay returns the same held allowance), InsufficientBalance refusal (nothing
@@ -267,6 +282,11 @@ def settle(conn, reservation_key: str, actual_cents: int) -> None:
     if actual_cents < 0:
         raise ValueError("actual_cents must be >= 0")
     rk = reservation_key
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        safebox.billing_settle(conn, rk, actual_cents)
+        return
     # Pre-check the actual<=reserved invariant in Python (a ValueError, not a ledger refusal) so the
     # custody-of-real-money guarantee is enforced BEFORE the gate writes — exactly as before. The
     # reserved-amount read is a pure SELECT on the Safebox authority connection.
@@ -295,6 +315,11 @@ def refund(conn, reservation_key: str) -> None:
     """Release a whole reservation (the failure path). Idempotent — a no-op if the
     reservation was already settled or refunded."""
     rk = reservation_key
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        safebox.billing_refund(conn, rk)
+        return
     # Row ops in the migration-0038 SECURITY DEFINER function safebox_billing_refund (verbatim port):
     # look up the reserve (UnknownReservation when absent), lock the account row, already-finalized →
     # no-op, else release the whole held reservation back to the allowance.
@@ -310,6 +335,19 @@ def get_billing_balances(conn, user_id: str) -> BillingBalances:
     """Read the cached balances plus derived allowance remaining and outstanding
     reserved (Σreserve − Σsettle − Σrefund). Allowance figures are metering units —
     callers must not render them as money."""
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        payload = safebox.billing_balances(conn, user_id)
+        return BillingBalances(
+            user_id=str(payload.get("user_id") or user_id),
+            allowance_included_cents=int(payload.get("allowance_included_cents") or 0),
+            allowance_used_cents=int(payload.get("allowance_used_cents") or 0),
+            allowance_remaining_cents=int(payload.get("allowance_remaining_cents") or 0),
+            reserved_cents=int(payload.get("reserved_cents") or 0),
+            allowance_period_start=payload.get("allowance_period_start"),
+            allowance_resets_at=payload.get("allowance_resets_at"),
+        )
     acct = conn.execute(
         "select allowance_included_cents, allowance_used_cents, "
         "allowance_period_start, allowance_resets_at "

@@ -778,6 +778,27 @@ class _OpenBillingAccountBody(BaseModel):
     allowance_included_cents: int | None = None
 
 
+class _BillingReserveBody(BaseModel):
+    user_id: str
+    estimate_cents: int
+    reservation_key: str
+    business_slug: str | None = None
+    job_id: str | None = None
+
+
+class _BillingSettleBody(BaseModel):
+    reservation_key: str
+    actual_cents: int
+
+
+class _BillingRefundBody(BaseModel):
+    reservation_key: str
+
+
+class _BillingBalancesBody(BaseModel):
+    user_id: str
+
+
 class _StarterAllowanceBody(BaseModel):
     session_token: str | None = None
     user_id: str | None = None
@@ -2272,6 +2293,114 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="billing_open_must_not_mint_allowance")
         safebox._local_open_billing_account(None, body.user_id, allowance_included_cents=0)
         return {"ok": True}
+
+    @app.post("/v1/billing/reserve")
+    def reserve_billing(
+        request: Request,
+        body: _BillingReserveBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        from . import billing
+
+        try:
+            with _safebox_db_conn() as conn:
+                res = billing.reserve(
+                    conn,
+                    body.user_id,
+                    int(body.estimate_cents or 0),
+                    body.reservation_key,
+                    business_slug=body.business_slug or None,
+                    job_id=body.job_id or None,
+                )
+        except billing.InsufficientBalance as exc:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "code": "insufficient_balance",
+                    "estimate_cents": int(exc.estimate_cents),
+                    "allowance_available_cents": int(exc.allowance_available_cents),
+                },
+            ) from exc
+        except billing.NoBillingAccount as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "no_billing_account", "user_id": body.user_id},
+            ) from exc
+        return {"reservation_key": res.key, "allowance_cents": int(res.allowance_cents)}
+
+    @app.post("/v1/billing/settle")
+    def settle_billing(
+        request: Request,
+        body: _BillingSettleBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        from . import billing
+
+        try:
+            with _safebox_db_conn() as conn:
+                billing.settle(conn, body.reservation_key, int(body.actual_cents or 0))
+        except billing.UnknownReservation as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "unknown_reservation", "reservation_key": body.reservation_key},
+            ) from exc
+        return {"ok": True}
+
+    @app.post("/v1/billing/refund")
+    def refund_billing(
+        request: Request,
+        body: _BillingRefundBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        from . import billing
+
+        try:
+            with _safebox_db_conn() as conn:
+                billing.refund(conn, body.reservation_key)
+        except billing.UnknownReservation as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "unknown_reservation", "reservation_key": body.reservation_key},
+            ) from exc
+        return {"ok": True}
+
+    @app.post("/v1/billing/balances")
+    def billing_balances(
+        request: Request,
+        body: _BillingBalancesBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        from . import billing
+
+        try:
+            with _safebox_db_conn() as conn:
+                balances = billing.get_billing_balances(conn, body.user_id)
+        except billing.NoBillingAccount as exc:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "no_billing_account", "user_id": body.user_id},
+            ) from exc
+        return {
+            "user_id": balances.user_id,
+            "allowance_included_cents": int(balances.allowance_included_cents),
+            "allowance_used_cents": int(balances.allowance_used_cents),
+            "allowance_remaining_cents": int(balances.allowance_remaining_cents),
+            "reserved_cents": int(balances.reserved_cents),
+            "allowance_period_start": balances.allowance_period_start.isoformat()
+            if hasattr(balances.allowance_period_start, "isoformat")
+            else balances.allowance_period_start,
+            "allowance_resets_at": balances.allowance_resets_at.isoformat()
+            if hasattr(balances.allowance_resets_at, "isoformat")
+            else balances.allowance_resets_at,
+        }
 
     @app.post("/v1/billing/starter-allowance")
     def grant_starter_allowance(

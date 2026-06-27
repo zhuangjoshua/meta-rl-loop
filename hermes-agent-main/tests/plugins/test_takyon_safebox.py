@@ -608,6 +608,75 @@ def test_remote_safebox_billing_and_custody_open_delegate_to_service(monkeypatch
     ]
 
 
+def test_remote_safebox_operator_billing_ledger_delegates_to_service(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def _fake_remote(method: str, path: str, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        if path == "/v1/billing/reserve":
+            return {"reservation_key": payload["reservation_key"], "allowance_cents": 25}
+        if path == "/v1/billing/balances":
+            return {
+                "user_id": payload["user_id"],
+                "allowance_included_cents": 100,
+                "allowance_used_cents": 25,
+                "allowance_remaining_cents": 75,
+                "reserved_cents": 0,
+            }
+        return {"ok": True}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
+
+    assert safebox.billing_reserve(
+        None,
+        "user-1",
+        25,
+        "rk-1",
+        business_slug="acme",
+        job_id="job-1",
+    ) == {"reservation_key": "rk-1", "allowance_cents": 25}
+    safebox.billing_settle(None, "rk-1", 20)
+    safebox.billing_refund(None, "rk-2")
+    assert safebox.billing_balances(None, "user-1")["allowance_remaining_cents"] == 75
+
+    assert calls == [
+        (
+            "POST",
+            "/v1/billing/reserve",
+            {
+                "user_id": "user-1",
+                "estimate_cents": 25,
+                "reservation_key": "rk-1",
+                "business_slug": "acme",
+                "job_id": "job-1",
+            },
+        ),
+        ("POST", "/v1/billing/settle", {"reservation_key": "rk-1", "actual_cents": 20}),
+        ("POST", "/v1/billing/refund", {"reservation_key": "rk-2"}),
+        ("POST", "/v1/billing/balances", {"user_id": "user-1"}),
+    ]
+
+
+def test_billing_reserve_uses_remote_safebox_on_runtime_plane(monkeypatch):
+    from plugins.takyon import billing
+
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    calls: list[tuple[str, int, str]] = []
+
+    def _fake_reserve(conn, user_id, estimate_cents, reservation_key, **kwargs):
+        calls.append((user_id, estimate_cents, reservation_key))
+        return {"reservation_key": reservation_key, "allowance_cents": 17}
+
+    monkeypatch.setattr(safebox, "billing_reserve", _fake_reserve)
+
+    res = billing.reserve(None, "user-1", 17, "rk-runtime")
+
+    assert (res.key, res.allowance_cents) == ("rk-runtime", 17)
+    assert calls == [("user-1", 17, "rk-runtime")]
+
+
 def test_remote_safebox_signed_webhook_processors_delegate_to_process_routes(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
     calls: list[tuple[str, str, dict | None]] = []

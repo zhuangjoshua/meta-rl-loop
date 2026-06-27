@@ -204,6 +204,10 @@ def _use_remote_authority() -> bool:
 _OPERATOR_AUTH_EXACT_PATHS = frozenset(
     {
         "/v1/billing/accounts/open",
+        "/v1/billing/balances",
+        "/v1/billing/refund",
+        "/v1/billing/reserve",
+        "/v1/billing/settle",
         "/v1/billing/starter-allowance",
         "/v1/billing/operator-subscription/sync",
         "/v1/cloudflare/product-edge-route",
@@ -1673,6 +1677,147 @@ def open_billing_account(conn, user_id: str, *, allowance_included_cents: int = 
         )
         return
     _local_open_billing_account(conn, user_ref, allowance_included_cents=amount)
+
+
+def _billing_error_detail(exc: RemoteSafeboxError) -> dict[str, Any]:
+    detail = exc.payload.get("detail") if isinstance(exc.payload, dict) else None
+    return detail if isinstance(detail, dict) else {"code": str(detail or "")}
+
+
+def billing_reserve(
+    conn,
+    user_id: str,
+    estimate_cents: int,
+    reservation_key: str,
+    *,
+    business_slug: str | None = None,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """Reserve operator allowance through the Safebox authority boundary."""
+    user_ref = str(user_id or "").strip()
+    key = str(reservation_key or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if not key:
+        raise ValueError("missing reservation_key")
+    amount = max(0, int(estimate_cents or 0))
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            return _remote_json(
+                "POST",
+                "/v1/billing/reserve",
+                {
+                    "user_id": user_ref,
+                    "estimate_cents": amount,
+                    "reservation_key": key,
+                    "business_slug": business_slug or None,
+                    "job_id": job_id or None,
+                },
+            )
+        except RemoteSafeboxError as exc:
+            from . import billing
+
+            detail = _billing_error_detail(exc)
+            code = str(detail.get("code") or "").strip()
+            if exc.status_code == 402 and code == "insufficient_balance":
+                raise billing.InsufficientBalance(
+                    estimate_cents=int(detail.get("estimate_cents") or amount),
+                    allowance_available_cents=int(detail.get("allowance_available_cents") or 0),
+                ) from exc
+            if exc.status_code == 404 and code == "no_billing_account":
+                raise billing.NoBillingAccount(user_ref) from exc
+            raise
+    from . import billing
+
+    res = billing.reserve(
+        conn,
+        user_ref,
+        amount,
+        key,
+        business_slug=business_slug or None,
+        job_id=job_id or None,
+    )
+    return {"reservation_key": res.key, "allowance_cents": int(res.allowance_cents)}
+
+
+def billing_settle(conn, reservation_key: str, actual_cents: int) -> None:
+    """Settle an operator billing reservation through Safebox."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        raise ValueError("missing reservation_key")
+    actual = max(0, int(actual_cents or 0))
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            _remote_json(
+                "POST",
+                "/v1/billing/settle",
+                {"reservation_key": key, "actual_cents": actual},
+            )
+            return
+        except RemoteSafeboxError as exc:
+            from . import billing
+
+            detail = _billing_error_detail(exc)
+            if exc.status_code == 404 and str(detail.get("code") or "") == "unknown_reservation":
+                raise billing.UnknownReservation(key) from exc
+            raise
+    from . import billing
+
+    billing.settle(conn, key, actual)
+
+
+def billing_refund(conn, reservation_key: str) -> None:
+    """Release an operator billing reservation through Safebox."""
+    key = str(reservation_key or "").strip()
+    if not key:
+        raise ValueError("missing reservation_key")
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            _remote_json("POST", "/v1/billing/refund", {"reservation_key": key})
+            return
+        except RemoteSafeboxError as exc:
+            from . import billing
+
+            detail = _billing_error_detail(exc)
+            if exc.status_code == 404 and str(detail.get("code") or "") == "unknown_reservation":
+                raise billing.UnknownReservation(key) from exc
+            raise
+    from . import billing
+
+    billing.refund(conn, key)
+
+
+def billing_balances(conn, user_id: str) -> dict[str, Any]:
+    """Read operator billing balances through Safebox."""
+    user_ref = str(user_id or "").strip()
+    if not user_ref:
+        raise ValueError("missing user_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            return _remote_json("POST", "/v1/billing/balances", {"user_id": user_ref})
+        except RemoteSafeboxError as exc:
+            from . import billing
+
+            detail = _billing_error_detail(exc)
+            if exc.status_code == 404 and str(detail.get("code") or "") == "no_billing_account":
+                raise billing.NoBillingAccount(user_ref) from exc
+            raise
+    from . import billing
+
+    balances = billing.get_billing_balances(conn, user_ref)
+    return {
+        "user_id": balances.user_id,
+        "allowance_included_cents": int(balances.allowance_included_cents),
+        "allowance_used_cents": int(balances.allowance_used_cents),
+        "allowance_remaining_cents": int(balances.allowance_remaining_cents),
+        "reserved_cents": int(balances.reserved_cents),
+        "allowance_period_start": balances.allowance_period_start.isoformat()
+        if hasattr(balances.allowance_period_start, "isoformat")
+        else balances.allowance_period_start,
+        "allowance_resets_at": balances.allowance_resets_at.isoformat()
+        if hasattr(balances.allowance_resets_at, "isoformat")
+        else balances.allowance_resets_at,
+    }
 
 
 def grant_starter_allowance(conn, user_id: str, *, session_token: str | None = None) -> int:
