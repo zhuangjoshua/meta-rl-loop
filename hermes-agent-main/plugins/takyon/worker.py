@@ -2394,6 +2394,21 @@ HANDLERS: dict[str, jobs.Handler] = {
 # ── the drain loop ──────────────────────────────────────────────────────────────────────────────
 
 
+def _conn_is_safebox_authority(conn) -> bool:
+    """True only when ``conn`` is logged in as the Safebox DB authority role."""
+    raw = getattr(conn, "_pg", conn)
+    try:
+        from .runtime_app import assert_takyon_pg_role
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon.runtime_app import assert_takyon_pg_role
+
+    try:
+        assert_takyon_pg_role(raw, "safebox")
+    except Exception:
+        return False
+    return True
+
+
 def drain_tick(
     conn,
     *,
@@ -2423,13 +2438,14 @@ def drain_tick(
     if dispatch:
         counts["dispatched"] = wakes.dispatch_due_wakes(conn) + _dispatch_due_action_jobs(conn)
     counts["requeued"] = jobs.requeue_stale(conn, older_than_seconds=_STALE_SECONDS, worker_id=worker_id)
-    counts["usage_holds_released"] = app_usage.reconcile_held_usage(
-        conn,
-        older_than_seconds=_env_int(
-            "TAKYON_APP_USAGE_HOLD_TTL_SECONDS",
-            _APP_USAGE_HOLD_TTL_SECONDS,
-        ),
-    )
+    if _conn_is_safebox_authority(conn):
+        counts["usage_holds_released"] = app_usage.reconcile_held_usage(
+            conn,
+            older_than_seconds=_env_int(
+                "TAKYON_APP_USAGE_HOLD_TTL_SECONDS",
+                _APP_USAGE_HOLD_TTL_SECONDS,
+            ),
+        )
 
     while stop is None or not stop.is_set():
         outcome: JobOutcome | None = jobs.run_one(
