@@ -196,6 +196,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     # Records of credit-guard activity for assertions.
     reservations: list[dict] = []
     commits: list[dict] = []
+    releases: list[dict] = []
 
     def _store():
         return store
@@ -331,6 +332,16 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
         commits.append(record)
         return {"reservation_key": reservation_key, "committed": True}
 
+    def _release_creative_credits(reservation_key, *, action="", budget_bucket="meta", metadata=None, **_):
+        record = {
+            "reservation_key": reservation_key,
+            "action": action,
+            "budget_bucket": budget_bucket,
+            "metadata": metadata or {},
+        }
+        releases.append(record)
+        return {"reservation_key": reservation_key, "released": True}
+
     # Public surface.
     mod._store = _store
     mod.tool_result = tool_result
@@ -342,6 +353,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._creative_credit_backend = _creative_credit_backend
     mod._reserve_creative_credits = _reserve_creative_credits
     mod._commit_creative_credits = _commit_creative_credits
+    mod._release_creative_credits = _release_creative_credits
     mod._business_mode = _business_mode
     mod._resolved_business_slug = _resolved_business_slug
     mod._file_slug = _file_slug
@@ -373,6 +385,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._test_mode_registry = mode_registry
     mod._test_reservations = reservations
     mod._test_commits = commits
+    mod._test_releases = releases
     return mod
 
 
@@ -759,6 +772,36 @@ def test_launch_live_mode_activates_three_objects(harness):
         "clipbook", "distribution/meta-ads/demo-meta/receipt.json"
     )
     assert receipt["mode"] == "live"
+
+
+def test_launch_failure_after_credit_reserve_releases_reservation(harness):
+    harness.set_business_mode("clipbook", "live")
+    harness.write_business_file(
+        "clipbook", "product/static-ads/demo-meta/creative-1.png", b"fake-png-bytes"
+    )
+    harness.mcp.responses["ads_create_campaign"] = {}
+
+    args = _launch_args(
+        asset_kind="image",
+        asset_path="product/static-ads/demo-meta/creative-1.png",
+        idempotency_key="clipbook-meta-fail-v1",
+    )
+    result = _result(harness.module.handle_business_meta_ad_launch(args))
+
+    assert result["success"] is False
+    assert harness.core._test_reservations
+    assert harness.core._test_commits == []
+    assert [r["reservation_key"] for r in harness.core._test_releases] == [
+        "clipbook-meta-fail-v1:creative-credits"
+    ]
+
+    receipt = harness.read_business_file(
+        "clipbook", "distribution/meta-ads/demo-meta/receipt.json"
+    )
+    assert receipt["status"] == "partial_failed"
+    assert receipt["credits_committed"] is False
+    assert receipt["credits_released"] is True
+    assert receipt["ids"]["creative_id"] == "creative-1"
 
 
 # --------------------------------------------------------------------------- #

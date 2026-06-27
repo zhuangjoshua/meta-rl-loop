@@ -259,7 +259,9 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
     receipt_rel = ""
     created_ids: dict[str, str] = {}
     reservation_key = ""
+    credit_metadata: dict[str, Any] = {}
     credits_committed = False
+    credits_released = False
     try:
         store = core._store()
         business = core._resolved_business_slug(args, required=True)
@@ -582,6 +584,17 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
         })
 
     except Exception as exc:
+        if reservation_key and not credits_committed:
+            try:
+                core._release_creative_credits(
+                    reservation_key,
+                    action=_CREATIVE_ACTION,
+                    budget_bucket=_BUDGET_BUCKET,
+                    metadata=credit_metadata,
+                )
+                credits_released = True
+            except Exception:
+                pass
         # A partial launch must leave a repair-able receipt recording any ids already created so a
         # retry can finish (or a human can clean up) — never claim success, never drop the ids.
         if business and receipt_rel and created_ids:
@@ -599,6 +612,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                     "ids": created_ids,
                     "error": str(exc),
                     "credits_committed": credits_committed,
+                    "credits_released": credits_released,
                     "updated_at": core._now(),
                 }
                 core._atomic_write_text(
