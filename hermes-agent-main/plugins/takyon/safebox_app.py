@@ -341,7 +341,7 @@ def _safebox_db_conn():
 
     The usage-ledger STEP-A SECURITY DEFINER functions are writable only by the safebox role, so the
     ledger adapter below runs them on THIS connection on the safebox host."""
-    from .runtime_app import assert_takyon_pg_role, resolve_database_url
+    from .runtime_app import assert_takyon_pg_role, configure_takyon_pg_session, resolve_database_url
     import psycopg
 
     raw_conn = psycopg.connect(
@@ -350,6 +350,7 @@ def _safebox_db_conn():
         prepare_threshold=None,
     )
     try:
+        configure_takyon_pg_session(raw_conn, bypass=True)
         assert_takyon_pg_role(raw_conn, "safebox")
         yield raw_conn
     finally:

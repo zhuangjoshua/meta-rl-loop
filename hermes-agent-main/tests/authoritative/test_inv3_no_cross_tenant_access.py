@@ -453,6 +453,14 @@ def test_store_app_plane_connections_do_not_request_rls_bypass():
     assert "configure_takyon_pg_session(conn, bypass=True)" not in src
 
 
+def test_safebox_db_conn_initializes_authority_rls_session():
+    src = inspect.getsource(safebox_app._safebox_db_conn)
+
+    assert "resolve_database_url(plane=\"safebox\")" in src
+    assert "configure_takyon_pg_session(raw_conn, bypass=True)" in src
+    assert 'assert_takyon_pg_role(raw_conn, "safebox")' in src
+
+
 def test_pg_app_scope_rejects_operator_session_without_role_change(monkeypatch):
     monkeypatch.setattr(core, "_PGConn", _FakePGConn)
     store = core.TakyonStore.__new__(core.TakyonStore)
