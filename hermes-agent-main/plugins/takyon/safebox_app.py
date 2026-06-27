@@ -912,6 +912,12 @@ class _AppCheckoutReconcileBody(BaseModel):
     customer_email: str | None = None
 
 
+class _AppChargeReversalReconcileBody(BaseModel):
+    charge_id: str
+    business_slug: str | None = None
+    checkout_session_id: str | None = None
+
+
 class _AppSubscriptionCancelBody(BaseModel):
     business_slug: str
     app_user_id: str
@@ -3175,6 +3181,96 @@ def build_safebox_app() -> FastAPI:
             "business_slug": business,
             "processed": checkout_result,
             "subscription": subscription_result,
+        }
+
+    @app.post("/v1/stripe/app-reversal/reconcile")
+    def reconcile_stripe_app_reversal(
+        body: _AppChargeReversalReconcileBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # Recovery path for a real Stripe charge refund when the webhook has not arrived yet.
+        # The safebox reads the charge from Stripe, verifies it belongs to the expected app checkout,
+        # and then delegates to the same reversal processor used by signed webhooks.
+        _require_internal_token(authorization)
+        from . import app_payments, stripe_util
+
+        charge_id = str(body.charge_id or "").strip()
+        if not charge_id or not charge_id.startswith("ch_"):
+            raise HTTPException(status_code=400, detail="invalid_charge")
+        expected_business = str(body.business_slug or "").strip()
+        expected_session = str(body.checkout_session_id or "").strip()
+        if not expected_business and not expected_session:
+            raise HTTPException(status_code=403, detail="reversal_context_required")
+        try:
+            charge = safebox.stripe_request(f"charges/{charge_id}", {}, method="GET")
+        except stripe_util.StripeError as exc:
+            message = str(exc)
+            if " failed: 404" in message:
+                raise HTTPException(status_code=404, detail="unknown_charge") from exc
+            if "STRIPE_SECRET_KEY" in message:
+                raise HTTPException(status_code=503, detail="stripe_unconfigured") from exc
+            raise HTTPException(status_code=502, detail="stripe_error") from exc
+        if not isinstance(charge, dict) or not charge:
+            raise HTTPException(status_code=404, detail="unknown_charge")
+        amount_refunded = int(charge.get("amount_refunded") or 0)
+        if amount_refunded <= 0:
+            raise HTTPException(status_code=409, detail="charge_not_refunded")
+
+        payment_intent_id = str(charge.get("payment_intent") or "").strip()
+        customer_id = str(charge.get("customer") or "").strip()
+        with _safebox_db_conn() as conn:
+            row = None
+            if payment_intent_id:
+                row = conn.execute(
+                    "select business_slug, stripe_checkout_session_id "
+                    "from app_checkout_sessions where stripe_payment_intent_id = %s limit 1",
+                    (payment_intent_id,),
+                ).fetchone()
+            if row is None and customer_id:
+                row = conn.execute(
+                    "select business_slug, stripe_checkout_session_id "
+                    "from app_checkout_sessions where stripe_customer_id = %s "
+                    "order by created_at desc limit 1",
+                    (customer_id,),
+                ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown_payment")
+            business = str(row[0] or "").strip()
+            session_id = str(row[1] or "").strip()
+            if expected_business and _require_safe_slug(expected_business) != business:
+                raise HTTPException(status_code=403, detail="reversal_business_mismatch")
+            if expected_session and expected_session != session_id:
+                raise HTTPException(status_code=403, detail="reversal_checkout_session_mismatch")
+            existing = conn.execute(
+                "select id from app_revenue_events "
+                "where business_slug = %s and stripe_object_type = 'charge' "
+                "and stripe_object_id = %s and revenue_type = 'reversal' "
+                "and status = 'refunded' limit 1",
+                (business, charge_id),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "ok": True,
+                    "charge_id": charge_id,
+                    "business_slug": business,
+                    "checkout_session_id": session_id,
+                    "deduplicated": True,
+                    "processed": None,
+                }
+            event = {
+                "id": f"charge.refunded.reconcile:{charge_id}:{amount_refunded}",
+                "type": "charge.refunded",
+                "created": charge.get("created"),
+                "data": {"object": charge},
+            }
+            processed = app_payments.record_webhook_and_process(conn, event)
+        return {
+            "ok": True,
+            "charge_id": charge_id,
+            "business_slug": business,
+            "checkout_session_id": session_id,
+            "deduplicated": False,
+            "processed": processed,
         }
 
     @app.post("/v1/stripe/app-subscription/cancel")
