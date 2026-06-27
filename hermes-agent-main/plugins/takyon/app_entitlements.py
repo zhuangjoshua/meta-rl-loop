@@ -52,6 +52,7 @@ _BILLING_INTERVAL_ALIASES = {
     "one-time": "one_time",
     "single": "one_time",
 }
+_GATEWAY_ALLOWLIST_METADATA_KEYS = ("features", "model_allowlist", "models")
 
 # Statuses that actually confer a tier; everything else (cancelled, past_due, …) does not.
 _ACTIVE_STATUSES = ("active", "trialing")
@@ -192,6 +193,22 @@ def plan_validation_warnings(plan_key: str, tier: str, quota: int, metadata: dic
     return warnings
 
 
+def _preserve_gateway_allowlist_metadata(meta: dict, existing: PlanPolicy | None) -> dict:
+    """Preserve an existing plan's AI gateway allowlist when an update omits gateway metadata.
+
+    Gateway features/model allowlists are non-economic plan metadata, so operators may edit them.
+    But a normal price/Stripe/notes upsert that does not mention metadata must not silently erase
+    the explicit allowlist that lets paid app users consume the plan's included AI budget.
+    """
+    if existing is None or not isinstance(existing.metadata, dict):
+        return meta
+    merged = dict(meta)
+    for key in _GATEWAY_ALLOWLIST_METADATA_KEYS:
+        if key not in merged and key in existing.metadata:
+            merged[key] = existing.metadata[key]
+    return merged
+
+
 def _plan_from_row(row) -> PlanPolicy:
     return PlanPolicy(
         id=str(row[0]),
@@ -318,7 +335,7 @@ def upsert_plan_policy(
                     f"subscribers onto new pricing is a separate billing migration (OpenMeter-owned; "
                     f"not available yet)."
                 )
-    meta = dict(metadata or {})
+    meta = _preserve_gateway_allowlist_metadata(dict(metadata or {}), existing)
     warnings = plan_validation_warnings(key, tier_value, quota, meta)
     if warnings:
         prior = meta.get("takyon_plan_validation")
