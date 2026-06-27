@@ -105,7 +105,15 @@ reject_key() {
   fi
 }
 
+reject_legacy_database_urls() {
+  reject_key DATABASE_URL "$@"
+  reject_key POSTGRES_URL "$@"
+  reject_key POSTGRES_PRISMA_URL "$@"
+  reject_key POSTGRES_URL_NON_POOLING "$@"
+}
+
 env_files=("$@")
+reject_legacy_database_urls "${env_files[@]}"
 
 case "$plane" in
   operator)

@@ -85,6 +85,8 @@ def test_authority_env_validator_is_host_specific_and_secret_safe():
 
     assert "Usage:" in src
     assert "never prints secret" in src
+    assert "reject_legacy_database_urls" in src
+    assert "reject_key DATABASE_URL" in src
     assert "operator)" in src
     assert "require_key TAKYON_OPERATOR_DATABASE_URL" in src
     assert "reject_key TAKYON_APP_DATABASE_URL" in src
@@ -164,3 +166,33 @@ TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token-secret
         assert result.returncode != 0, plane
         assert rejected_key in combined, plane
         assert secret_value not in combined, plane
+
+
+def test_authority_env_validator_rejects_legacy_database_url_aliases(tmp_path):
+    script = ROOT / "deploy/shared/validate-authority-env.sh"
+    env_file = tmp_path / "operator.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "TAKYON_OPERATOR_DATABASE_URL=postgres://operator-secret",
+                "MIGRATION_DATABASE_URL=postgres://migration-secret",
+                "TAKYON_SAFEBOX_TOKEN=transport-secret",
+                "TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token-secret",
+                "DATABASE_URL=postgres://legacy-secret",
+            ]
+        )
+        + "\n"
+    )
+
+    result = subprocess.run(
+        ["bash", str(script), "operator", str(env_file)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "DATABASE_URL" in combined
+    assert "legacy-secret" not in combined
