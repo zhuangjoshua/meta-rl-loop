@@ -22,12 +22,21 @@ const usePath = () => {
   const read = () => window.location.hash.replace(/^#/, "") || "/";
   const [path, setPath] = useState(read);
   useEffect(() => {
-    const onHash = () => {
-      setPath(read());
-      window.scrollTo({ top: 0 });
+    const syncPath = (resetScroll = false) => {
+      const next = read();
+      setPath((current) => (current === next ? current : next));
+      if (resetScroll) window.scrollTo({ top: 0 });
     };
+    const onHash = () => syncPath(true);
+    const onPageShow = () => syncPath(false);
     window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
+    window.addEventListener("popstate", onHash);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("popstate", onHash);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   }, []);
   return path;
 };

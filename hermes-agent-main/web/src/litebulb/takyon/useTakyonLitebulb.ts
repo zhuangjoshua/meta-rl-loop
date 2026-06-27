@@ -644,6 +644,7 @@ export function useTakyonLitebulb() {
   const activeBusinessNameRef = useRef("");
   const chatMessagesRef = useRef<ChatMessage[]>([]);
   const sessionRunningRef = useRef(false);
+  const lastHomeRestoreRefreshRef = useRef(0);
   const liveChatTurnRef = useRef(false);
   // Wall-clock ms until which a fresh history poll must NOT resurrect the
   // "running" state. Set when the operator hits Stop (session.interrupt): the
@@ -1797,6 +1798,27 @@ export function useTakyonLitebulb() {
     sessionRunningRef.current = false;
     setSessionRunning(false);
   }, [auth.status, loadHome, resetLiveChatSignals]);
+
+  useEffect(() => {
+    if (auth.status !== "in") return;
+    const refreshHome = () => {
+      const now = Date.now();
+      if (now - lastHomeRestoreRefreshRef.current < 1500) return;
+      lastHomeRestoreRefreshRef.current = now;
+      void loadHome();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refreshHome();
+    };
+    window.addEventListener("pageshow", refreshHome);
+    window.addEventListener("focus", refreshHome);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pageshow", refreshHome);
+      window.removeEventListener("focus", refreshHome);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [auth.status, loadHome]);
 
   useEffect(() => {
     const sessionId = sessionIdRef.current;
