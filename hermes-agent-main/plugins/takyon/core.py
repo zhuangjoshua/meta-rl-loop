@@ -23692,7 +23692,16 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
 
                     # Safebox validates checkout authority on its own DB connection before creating
                     # the Stripe session, so the intent must be committed before the external call.
+                    # _pg_app_scope uses transaction-local GUCs; committing clears them, so re-bind
+                    # the same customer scope for the post-Stripe pending-session update below.
                     conn.commit()
+                    conn.execute("select set_config('takyon.rls_bypass', '0', true)")
+                    conn.execute("select set_config('takyon.rls_business_slug', %s, true)", (business,))
+                    conn.execute("select set_config('takyon.rls_app_user_id', %s, true)", ("",))
+                    conn.execute(
+                        "select set_config('takyon.rls_session_hash', %s, true)",
+                        (_hash_token(session_token),),
+                    )
 
                     params: dict[str, Any] = {
                         "mode": mode,
