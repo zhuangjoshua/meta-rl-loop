@@ -107,6 +107,9 @@ _SESSION_BOUND_APP_MEDIA_USAGE_PATH = (
 _AUTHORITY_SPLIT_CONTROL_PLANE_RLS_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0052_authority_split_control_plane_rls_policies.sql"
 )
+_APP_SUPABASE_SESSION_UUID_CAST_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0053_fix_app_supabase_session_uuid_cast.sql"
+)
 
 # Identity kwargs that, if accepted from the caller, would let an EVIL user assert a
 # different owner than the one the slug resolves to. None of these may appear as a
@@ -634,6 +637,7 @@ def test_subuser_host_plain_store_refuses_default_operator_plane(monkeypatch):
 
 def test_app_runtime_identity_session_ports_are_bounded():
     sql = _APP_RUNTIME_IDENTITY_PORTS_PATH.read_text(encoding="utf-8").lower()
+    uuid_cast_sql = _APP_SUPABASE_SESSION_UUID_CAST_PATH.read_text(encoding="utf-8").lower()
     money_sql = _APP_RUNTIME_MONEY_READ_PORTS_PATH.read_text(encoding="utf-8").lower()
     usage_sql = _APP_RUNTIME_SESSION_USAGE_PORTS_PATH.read_text(encoding="utf-8").lower()
     checkout_sql = _REVOKE_APP_CHECKOUT_SESSIONS_PATH.read_text(encoding="utf-8").lower()
@@ -667,6 +671,10 @@ def test_app_runtime_identity_session_ports_are_bounded():
     assert "grant execute on function takyon_app_record_event" in sql
     assert "grant execute on function takyon_app_media_usage" in sql
     assert "grant execute on function takyon_app_resolve_tier" not in sql
+    assert "v_supabase_user_id uuid" in uuid_cast_sql
+    assert "v_supabase_user_id := trim(p_supabase_user_id)::uuid" in uuid_cast_sql
+    assert "u.supabase_user_id = v_supabase_user_id" in uuid_cast_sql
+    assert "set supabase_user_id = v_supabase_user_id" in uuid_cast_sql
     assert "to takyon_app_runtime, takyon_app" in sql
     media_usage_body = media_usage_sql.split("as $$", 1)[1].split("$$;", 1)[0]
     assert "p_session_hash text" in media_usage_sql
