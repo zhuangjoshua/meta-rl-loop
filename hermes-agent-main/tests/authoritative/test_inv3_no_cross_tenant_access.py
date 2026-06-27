@@ -113,6 +113,9 @@ _APP_SUPABASE_SESSION_UUID_CAST_PATH = (
 _SAFEBOX_APP_CHECKOUT_RECONCILE_GRANTS_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0054_safebox_app_checkout_reconcile_grants.sql"
 )
+_APP_RUNTIME_RATE_LIMIT_PORT_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0055_app_runtime_rate_limit_port.sql"
+)
 
 # Identity kwargs that, if accepted from the caller, would let an EVIL user assert a
 # different owner than the one the slug resolves to. None of these may appear as a
@@ -965,6 +968,22 @@ def test_safebox_authority_can_reconcile_checkout_without_app_role_direct_access
     assert "grant insert, update on app_checkout_sessions\n    to takyon_app" not in sql
     assert "grant insert, update on app_checkout_sessions\n    to takyon_app_runtime" not in sql
     assert "revoke select, insert, update, delete on app_checkout_sessions\n    from takyon_app_runtime, takyon_app" in sql
+
+
+def test_app_runtime_can_count_rate_limits_without_money_ledger_grants():
+    assert _APP_RUNTIME_RATE_LIMIT_PORT_PATH.exists(), _APP_RUNTIME_RATE_LIMIT_PORT_PATH
+    sql = _APP_RUNTIME_RATE_LIMIT_PORT_PATH.read_text(encoding="utf-8").lower()
+
+    assert "grant select, insert, update on api_rate_limits\n    to takyon_app_runtime, takyon_app" in sql
+    assert "create policy takyon_app_runtime_rate_limit_counter" in sql
+    assert "to takyon_app_runtime, takyon_app" in sql
+    assert "using (true)" in sql
+    assert "with check (true)" in sql
+    assert "revoke delete on api_rate_limits\n    from takyon_app_runtime, takyon_app" in sql
+    assert "app_usage_events" not in sql
+    assert "app_entitlements" not in sql
+    assert "app_revenue_events" not in sql
+    assert "app_checkout_sessions" not in sql
 
 
 def test_safebox_stripe_catalog_mutation_requires_operator_authority():
