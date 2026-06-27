@@ -880,6 +880,14 @@ def test_app_plane_checkout_uses_session_bound_user_and_safebox_stripe():
     assert "\"session_token\": token" in web_src
 
 
+def test_app_stripe_webhook_route_enters_app_database_plane():
+    web_src = (Path(core.__file__).parents[2] / "takyon_cli" / "web_server.py").read_text(encoding="utf-8")
+    route = web_src.split('@app.post("/api/webhooks/stripe")', 1)[1].split('@app.get("/healthz")', 1)[0]
+
+    assert "with app_runtime_database_plane():" in route
+    assert route.index("with app_runtime_database_plane():") < route.index("handle_business_record_stripe_webhook")
+
+
 def test_safebox_app_checkout_recovery_requires_product_context_before_stripe():
     safebox_src = Path(core.__file__).with_name("safebox.py").read_text(encoding="utf-8")
     safebox_app_src = Path(core.__file__).with_name("safebox_app.py").read_text(encoding="utf-8")

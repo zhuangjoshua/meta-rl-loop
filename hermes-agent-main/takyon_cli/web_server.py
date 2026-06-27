@@ -3091,10 +3091,11 @@ async def takyon_app_api_delete(request: Request, business: str, route: str):
 @app.post("/api/webhooks/stripe")
 async def takyon_app_stripe_webhook(request: Request):
     raw_body = (await request.body()).decode("utf-8", errors="replace")
-    status, payload = _takyon_app_tool(handle_business_record_stripe_webhook({
-        "raw_body": raw_body,
-        "stripe_signature": request.headers.get("stripe-signature") or "",
-    }))
+    with app_runtime_database_plane():
+        status, payload = _takyon_app_tool(handle_business_record_stripe_webhook({
+            "raw_body": raw_body,
+            "stripe_signature": request.headers.get("stripe-signature") or "",
+        }))
     return _takyon_app_json(status, payload)
 
 
