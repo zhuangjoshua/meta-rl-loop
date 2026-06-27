@@ -30,6 +30,24 @@ class MetaMCPUnavailable(MetaMCPError):
     """Raised when the MCP client dependency/transport is unavailable."""
 
 
+def _exception_summary(exc: BaseException, *, _depth: int = 0) -> str:
+    """Render nested MCP/HTTP exception groups without leaking OAuth tokens."""
+    text = str(exc).strip() or type(exc).__name__
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code:
+        text = f"{text} [http_status={status_code}]"
+    children = getattr(exc, "exceptions", None)
+    if children and _depth < 3:
+        child_text = "; ".join(
+            _exception_summary(child, _depth=_depth + 1)
+            for child in children
+        )
+        if child_text:
+            text = f"{text}; children=[{child_text}]"
+    return text
+
+
 def _jsonish(value: Any) -> Any:
     if isinstance(value, str):
         stripped = value.strip()
@@ -181,9 +199,10 @@ async def _call_tool_async(
     except MetaMCPError:
         raise
     except Exception as exc:
+        detail = _exception_summary(exc)
         if _auth_error(exc):
-            raise MetaMCPAuthRequired(f"Meta MCP OAuth failed: {exc}") from exc
-        raise MetaMCPError(f"Meta MCP tool {clean_tool} failed: {exc}") from exc
+            raise MetaMCPAuthRequired(f"Meta MCP OAuth failed: {detail}") from exc
+        raise MetaMCPError(f"Meta MCP tool {clean_tool} failed: {detail}") from exc
 
 
 async def _list_tools_async(*, token: str, endpoint: str, timeout: float) -> dict[str, Any]:
@@ -239,9 +258,10 @@ async def _list_tools_async(*, token: str, endpoint: str, timeout: float) -> dic
     except MetaMCPError:
         raise
     except Exception as exc:
+        detail = _exception_summary(exc)
         if _auth_error(exc):
-            raise MetaMCPAuthRequired(f"Meta MCP OAuth failed: {exc}") from exc
-        raise MetaMCPError(f"Meta MCP list_tools failed: {exc}") from exc
+            raise MetaMCPAuthRequired(f"Meta MCP OAuth failed: {detail}") from exc
+        raise MetaMCPError(f"Meta MCP list_tools failed: {detail}") from exc
 
 
 def call_tool(

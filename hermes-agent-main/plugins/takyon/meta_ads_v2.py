@@ -495,8 +495,6 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "objective": objective,
             "buying_type": "AUCTION",
             "special_ad_categories": "[]",
-            "is_adset_budget_sharing_enabled": "false",
-            "status": "PAUSED",
         })
         campaign_id = _extract_id(campaign_resp, "campaign_id")
         if not campaign_id:
@@ -512,7 +510,6 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "optimization_goal": _DEFAULT_OPTIMIZATION_GOAL,
             "bid_strategy": _DEFAULT_BID_STRATEGY,
             "targeting": _targeting_json(args),
-            "status": "PAUSED",
         })
         adset_id = _extract_id(adset_resp, "adset_id", "ad_set_id")
         if not adset_id:
@@ -524,7 +521,6 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             "ad_set_id": adset_id,
             "ad_name": f"{slug}-ad",
             "creative": json.dumps({"creative_id": creative_id}),
-            "status": "PAUSED",
         })
         ad_id = _extract_id(ad_resp, "ad_id")
         if not ad_id:

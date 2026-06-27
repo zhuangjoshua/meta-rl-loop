@@ -676,6 +676,13 @@ def test_launch_video_happy_path_uploads_then_creates_paused(harness):
     # Creative carries the uploaded video id (not an image hash).
     creative_args = harness.mcp.calls[0]["arguments"]
     assert creative_args.get("video_id") == "video-1"
+    campaign_args = harness.mcp.calls[1]["arguments"]
+    adset_args = harness.mcp.calls[2]["arguments"]
+    ad_args = harness.mcp.calls[3]["arguments"]
+    assert "status" not in campaign_args
+    assert "is_adset_budget_sharing_enabled" not in campaign_args
+    assert "status" not in adset_args
+    assert "status" not in ad_args
 
     # Paused mode => no ACTIVE status flips.
     assert not [c for c in harness.graph.status_calls if c["status"] == "ACTIVE"]

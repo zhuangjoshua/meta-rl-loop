@@ -36,6 +36,25 @@ def test_meta_mcp_auth_error_detects_taskgroup_wrapped_401():
     assert meta_mcp._auth_error(wrapped) is True
 
 
+def test_meta_mcp_exception_summary_includes_taskgroup_children():
+    class _Response:
+        status_code = 400
+
+    class _HTTPError(Exception):
+        response = _Response()
+
+    wrapped = ExceptionGroup(
+        "streamable http task group",
+        [_HTTPError("Meta rejected unknown field status")],
+    )
+
+    summary = meta_mcp._exception_summary(wrapped)
+
+    assert "streamable http task group" in summary
+    assert "Meta rejected unknown field status" in summary
+    assert "http_status=400" in summary
+
+
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
