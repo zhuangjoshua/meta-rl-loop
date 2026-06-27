@@ -7,6 +7,7 @@
 -- signature stable, but reinterpret the second argument as the hashed app session token and
 -- derive the app user inside the function.
 
+drop function if exists takyon_app_media_usage(text, text);
 create or replace function takyon_app_media_usage(
     p_business_slug text,
     p_session_hash text

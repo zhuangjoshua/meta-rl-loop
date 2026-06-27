@@ -44,12 +44,14 @@ def test_runtime_units_strip_wrong_plane_and_migration_database_urls():
             "TAKYON_SAFEBOX_DATABASE_URL",
             "TAKYON_MIGRATION_DATABASE_URL",
             "MIGRATION_DATABASE_URL",
+            "TAKYON_RUNTIME_DATABASE_URL",
         },
         "deploy/argon-alpha-14/takyon-worker.service": {
             "TAKYON_APP_DATABASE_URL",
             "TAKYON_SAFEBOX_DATABASE_URL",
             "TAKYON_MIGRATION_DATABASE_URL",
             "MIGRATION_DATABASE_URL",
+            "TAKYON_RUNTIME_DATABASE_URL",
         },
         "deploy/argon-alpha-14/takyon-docker-broker.service": {
             "TAKYON_OPERATOR_DATABASE_URL",
@@ -57,12 +59,14 @@ def test_runtime_units_strip_wrong_plane_and_migration_database_urls():
             "TAKYON_SAFEBOX_DATABASE_URL",
             "TAKYON_MIGRATION_DATABASE_URL",
             "MIGRATION_DATABASE_URL",
+            "TAKYON_RUNTIME_DATABASE_URL",
         },
         "deploy/takyon-subuser/takyon-subuser.service": {
             "TAKYON_OPERATOR_DATABASE_URL",
             "TAKYON_SAFEBOX_DATABASE_URL",
             "TAKYON_MIGRATION_DATABASE_URL",
             "MIGRATION_DATABASE_URL",
+            "TAKYON_RUNTIME_DATABASE_URL",
         },
         "deploy/takyon-safebox/takyon-safebox.service": {
             "DATABASE_URL",
@@ -73,6 +77,7 @@ def test_runtime_units_strip_wrong_plane_and_migration_database_urls():
             "TAKYON_APP_DATABASE_URL",
             "TAKYON_MIGRATION_DATABASE_URL",
             "MIGRATION_DATABASE_URL",
+            "TAKYON_RUNTIME_DATABASE_URL",
         },
     }
     for unit_path, required_unsets in expectations.items():
@@ -98,7 +103,9 @@ def test_authority_env_validator_is_host_specific_and_secret_safe():
     assert "reject_key TAKYON_SAFEBOX_OPERATOR_TOKEN" in src
     assert "safebox)" in src
     assert "require_key TAKYON_SAFEBOX_DATABASE_URL" in src
-    assert "TAKYON_MIGRATION_DATABASE_URL or MIGRATION_DATABASE_URL" in src
+    assert "require_key TAKYON_MIGRATION_DATABASE_URL" in src
+    assert "reject_key MIGRATION_DATABASE_URL" in src
+    assert "reject_key TAKYON_RUNTIME_DATABASE_URL" in src
 
 
 def test_deploy_scripts_preflight_authority_env_before_sync_or_restart():
@@ -117,6 +124,37 @@ def test_deploy_scripts_preflight_authority_env_before_sync_or_restart():
         assert preflight_index < src.index("systemctl restart"), plane
 
 
+def test_operator_deploy_can_skip_runtime_migrations_after_manual_apply():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+
+    assert 'TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-1}"' in src
+    assert "if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres'" in src
+
+
+def test_app_control_blocker_matches_operator_runtime_text_timestamp():
+    src = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0045_app_runtime_identity_ports.sql").read_text()
+
+    signature = src.split("create or replace function takyon_app_control_blocker(", 1)[1].split("language sql", 1)[0]
+    assert "updated_at text" in signature
+    assert "updated_at timestamptz" not in signature
+
+
+def test_app_service_email_sends_today_aliases_authorized_cte():
+    src = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0045_app_runtime_identity_ports.sql").read_text()
+
+    body = src.split("create or replace function takyon_app_service_email_sends_today(", 1)[1].split("create or replace function takyon_app_visible_directory_entries(", 1)[0]
+    assert "select 1 as authorized" in body
+    assert "group by ss.authorized" in body
+
+
+def test_app_media_usage_parameter_rename_migrations_are_idempotent():
+    first = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0045_app_runtime_identity_ports.sql").read_text()
+    second = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0051_session_bound_app_media_usage.sql").read_text()
+
+    assert "drop function if exists takyon_app_media_usage(text, text);" in first
+    assert "drop function if exists takyon_app_media_usage(text, text);" in second
+
+
 def test_authority_env_validator_rejects_cross_plane_database_urls(tmp_path):
     script = ROOT / "deploy/shared/validate-authority-env.sh"
     cases = {
@@ -124,7 +162,7 @@ def test_authority_env_validator_rejects_cross_plane_database_urls(tmp_path):
             """
 TAKYON_OPERATOR_DATABASE_URL=postgres://operator-secret
 TAKYON_APP_DATABASE_URL=postgres://app-secret
-MIGRATION_DATABASE_URL=postgres://migration-secret
+TAKYON_MIGRATION_DATABASE_URL=postgres://migration-secret
 TAKYON_SAFEBOX_TOKEN=transport-secret
 TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token-secret
 """,
@@ -135,7 +173,7 @@ TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token-secret
             """
 TAKYON_APP_DATABASE_URL=postgres://app-secret
 TAKYON_OPERATOR_DATABASE_URL=postgres://operator-secret
-MIGRATION_DATABASE_URL=postgres://migration-secret
+TAKYON_MIGRATION_DATABASE_URL=postgres://migration-secret
 TAKYON_SAFEBOX_TOKEN=transport-secret
 """,
             "TAKYON_OPERATOR_DATABASE_URL",
@@ -175,7 +213,7 @@ def test_authority_env_validator_rejects_legacy_database_url_aliases(tmp_path):
         "\n".join(
             [
                 "TAKYON_OPERATOR_DATABASE_URL=postgres://operator-secret",
-                "MIGRATION_DATABASE_URL=postgres://migration-secret",
+                "TAKYON_MIGRATION_DATABASE_URL=postgres://migration-secret",
                 "TAKYON_SAFEBOX_TOKEN=transport-secret",
                 "TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token-secret",
                 "DATABASE_URL=postgres://legacy-secret",
@@ -224,7 +262,7 @@ def test_authority_env_validator_reports_all_errors_without_values(tmp_path):
     assert result.returncode != 0
     assert "forbidden authority env present on subuser host: DATABASE_URL" in combined
     assert "missing required authority env: TAKYON_APP_DATABASE_URL" in combined
-    assert "missing required authority env: TAKYON_MIGRATION_DATABASE_URL or MIGRATION_DATABASE_URL" in combined
+    assert "missing required authority env: TAKYON_MIGRATION_DATABASE_URL" in combined
     assert "missing required authority env: TAKYON_SAFEBOX_TOKEN" in combined
     assert "forbidden authority env present on subuser host: TAKYON_OPERATOR_DATABASE_URL" in combined
     assert "forbidden authority env present on subuser host: TAKYON_SAFEBOX_OPERATOR_TOKEN" in combined

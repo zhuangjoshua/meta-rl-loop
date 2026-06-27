@@ -114,6 +114,8 @@ reject_legacy_database_urls() {
   reject_key POSTGRES_URL "$@"
   reject_key POSTGRES_PRISMA_URL "$@"
   reject_key POSTGRES_URL_NON_POOLING "$@"
+  reject_key MIGRATION_DATABASE_URL "$@"
+  reject_key TAKYON_RUNTIME_DATABASE_URL "$@"
 }
 
 env_files=("$@")
@@ -122,8 +124,7 @@ reject_legacy_database_urls "${env_files[@]}"
 case "$plane" in
   operator)
     require_key TAKYON_OPERATOR_DATABASE_URL "${env_files[@]}"
-    require_one_of "TAKYON_MIGRATION_DATABASE_URL or MIGRATION_DATABASE_URL" \
-      TAKYON_MIGRATION_DATABASE_URL MIGRATION_DATABASE_URL
+    require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
     require_key TAKYON_SAFEBOX_TOKEN "${env_files[@]}"
     require_key TAKYON_SAFEBOX_OPERATOR_TOKEN "${env_files[@]}"
     reject_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
@@ -131,8 +132,7 @@ case "$plane" in
     ;;
   subuser)
     require_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
-    require_one_of "TAKYON_MIGRATION_DATABASE_URL or MIGRATION_DATABASE_URL" \
-      TAKYON_MIGRATION_DATABASE_URL MIGRATION_DATABASE_URL
+    require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
     require_key TAKYON_SAFEBOX_TOKEN "${env_files[@]}"
     reject_key TAKYON_OPERATOR_DATABASE_URL "${env_files[@]}"
     reject_key TAKYON_SAFEBOX_DATABASE_URL "${env_files[@]}"

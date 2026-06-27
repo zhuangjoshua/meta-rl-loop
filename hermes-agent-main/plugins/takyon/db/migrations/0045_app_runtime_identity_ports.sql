@@ -37,7 +37,7 @@ returns table (
     state text,
     reason text,
     actor text,
-    updated_at timestamptz
+    updated_at text
 )
 language sql
 stable
@@ -328,7 +328,7 @@ security definer
 set search_path = public, pg_temp
 as $$
     with service_session as (
-        select 1
+        select 1 as authorized
           from app_sessions s
           join app_users u
             on u.business_slug = s.business_slug
@@ -537,6 +537,7 @@ begin
 end;
 $$;
 
+drop function if exists takyon_app_media_usage(text, text);
 create or replace function takyon_app_media_usage(
     p_business_slug text,
     p_app_user_id text

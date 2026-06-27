@@ -27,6 +27,16 @@ physically separate database authority end to end:
 Not done until the code, migrations, deployed service config, and live probes prove
 these invariants on the operator VPS, sub-user VPS, and Safebox.
 
+## Operator Approval - 2026-06-27
+
+FULL APPROVAL: Codex is approved to take the most direct path to completion,
+including creating split database role passwords, writing the plane-specific VPS
+env vars, removing the old generic production `DATABASE_URL`, deploying the
+tracked planes, and running live Stripe/test/browser/security probes. Do not
+rotate unrelated provider/API credentials, do not print secret values, and do
+not continue peripheral hardening when a live blocker is waiting for an explicit
+operator action; stop and report the exact blocker instead.
+
 ## Simplicity Rule
 
 The fix should delete mixing, not add more cleverness.
@@ -320,7 +330,7 @@ Done:
   - operator -> `TAKYON_OPERATOR_DATABASE_URL`
   - product/subuser app -> `TAKYON_APP_DATABASE_URL`
   - Safebox -> `TAKYON_SAFEBOX_DATABASE_URL`
-  - migration/deploy -> `TAKYON_MIGRATION_DATABASE_URL` / `MIGRATION_DATABASE_URL`
+  - migration/deploy -> `TAKYON_MIGRATION_DATABASE_URL`
 - Production host roles no longer accept generic `DATABASE_URL` as a fallback for
   operator/app/Safebox DB authority.
 - DB URLs are read from the process' own local env/Takyon env file, not from
