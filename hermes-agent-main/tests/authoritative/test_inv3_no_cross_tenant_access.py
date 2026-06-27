@@ -104,6 +104,9 @@ _IGNORE_APP_USER_ID_GUC_FOR_APP_ROLES_PATH = (
 _SESSION_BOUND_APP_MEDIA_USAGE_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0051_session_bound_app_media_usage.sql"
 )
+_AUTHORITY_SPLIT_CONTROL_PLANE_RLS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0052_authority_split_control_plane_rls_policies.sql"
+)
 
 # Identity kwargs that, if accepted from the caller, would let an EVIL user assert a
 # different owner than the one the slug resolves to. None of these may appear as a
@@ -383,6 +386,28 @@ def test_authority_split_roles_do_not_create_cross_plane_memberships():
 
     assert "revoke insert, update, delete on\n    app_usage_events,\n    app_entitlements,\n    app_revenue_events\n    from takyon_app_runtime" in sql
     assert "revoke insert, update, delete on\n    billing_accounts" in sql
+
+
+def test_split_authority_roles_have_control_plane_rls_policies_but_app_roles_do_not():
+    assert _AUTHORITY_SPLIT_CONTROL_PLANE_RLS_PATH.exists(), _AUTHORITY_SPLIT_CONTROL_PLANE_RLS_PATH
+    sql = _AUTHORITY_SPLIT_CONTROL_PLANE_RLS_PATH.read_text(encoding="utf-8").lower()
+
+    for role in (
+        "takyon_operator_runtime",
+        "takyon_safebox_authority",
+        "takyon_migration",
+    ):
+        assert f"'{role}'" in sql
+        assert "for all to %i" in sql
+        assert "using (takyon_rls_bypass())" in sql
+        assert "with check (takyon_rls_bypass())" in sql
+
+    authority_block = sql.split("authority_roles text[] := array[", 1)[1].split("];", 1)[0]
+    assert "takyon_app_runtime" not in authority_block
+    assert "'takyon_app'" not in authority_block
+    assert "'businesses'" in sql
+    assert "'business_work_requests'" in sql
+    assert "'jobs'" in sql
 
 
 def test_pg_app_scope_flips_bypass_off_and_binds_request_scope():
