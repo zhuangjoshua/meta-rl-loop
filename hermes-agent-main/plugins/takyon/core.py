@@ -22053,14 +22053,10 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             # app_usage read raises, degrade to an empty shape so the rest of
             # /account (user, entitlements, usage_this_period, revenue) still
             # returns — a cosmetic projection must never hard-fail the account.
-            try:
-                budget = (
-                    {}
-                    if isinstance(conn, _PGConn) and store._database_plane == "app"
-                    else store._ensure_app_budget(conn, business)
-                )
-                usage_allocation = _app_usage_allocation_summary(store, conn, business, budget)
-            except Exception:
+            if isinstance(conn, _PGConn) and store._database_plane == "app":
+                # App-plane account reads must not touch the business-level app_usage tables
+                # directly. Session-bound SECURITY DEFINER functions below provide the customer
+                # usage summary without poisoning this transaction on least-privilege roles.
                 budget = {}
                 usage_allocation = {
                     "period_unit": "week",
@@ -22070,6 +22066,20 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     "current_period_start": None,
                     "current_period_end": None,
                 }
+            else:
+                try:
+                    budget = store._ensure_app_budget(conn, business)
+                    usage_allocation = _app_usage_allocation_summary(store, conn, business, budget)
+                except Exception:
+                    budget = {}
+                    usage_allocation = {
+                        "period_unit": "week",
+                        "hard_limit_usd": None,
+                        "committed_usd": None,
+                        "remaining_usd": None,
+                        "current_period_start": None,
+                        "current_period_end": None,
+                    }
             period_start = usage_allocation.get("current_period_start") or budget.get("current_period_start") or "1970-01-01T00:00:00+00:00"
             if isinstance(conn, _PGConn) and store._database_plane == "app":
                 session_hash = _hash_token(session_token)
