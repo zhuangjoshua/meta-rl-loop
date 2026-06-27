@@ -396,6 +396,10 @@ def workspace_cas_key(slug: str, digest: str) -> str:
     return f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/{safe_digest}"
 
 
+def workspace_cas_prefix(slug: str) -> str:
+    return f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/"
+
+
 def workspace_manifest_key(slug: str, revision: int) -> str:
     safe_revision = int(revision)
     if safe_revision < 0:
@@ -440,22 +444,34 @@ def write_workspace_revision(
     *,
     parent_revision: int = 0,
     created_at: str = "",
+    existing_cas_keys: Iterable[str] | None = None,
 ) -> dict[str, object]:
     workspace_root = Path(root).expanduser().resolve()
     digests = workspace_source_digests(workspace_root)
-    cas_prefix = f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/"
-    existing_cas_keys = set(backend.list_digests(cas_prefix).keys())
+    cas_prefix = workspace_cas_prefix(slug)
+    existing_cas_key_set = (
+        set(existing_cas_keys)
+        if existing_cas_keys is not None
+        else set(backend.list_digests(cas_prefix).keys())
+    )
     seen_digests: set[str] = set()
     for rel, digest in sorted(digests.items()):
         digest_text = str(digest or "").strip().lower()
         if not digest_text or digest_text in seen_digests:
             continue
         seen_digests.add(digest_text)
-        if workspace_cas_key(slug, digest_text) in existing_cas_keys:
+        if workspace_cas_key(slug, digest_text) in existing_cas_key_set:
             continue
+        data = _read_file_bytes(workspace_root / rel)
+        actual_digest = digest_bytes(data)
+        if actual_digest != digest_text:
+            raise StorageError(
+                f"workspace source changed while writing revision ({rel}): "
+                f"expected {digest_text}, got {actual_digest}"
+            )
         backend.put(
             workspace_cas_key(slug, digest_text),
-            _read_file_bytes(workspace_root / rel),
+            data,
             digest=digest_text,
         )
     manifest: dict[str, object] = {
@@ -479,6 +495,8 @@ def workspace_revision_incoming_bytes(
     backend: StorageBackend,
     slug: str,
     root: str | os.PathLike[str],
+    *,
+    existing_cas_keys: Iterable[str] | None = None,
 ) -> int:
     """Net NEW object-store bytes a :func:`write_workspace_revision` of ``root`` would add.
 
@@ -491,8 +509,12 @@ def workspace_revision_incoming_bytes(
     workspace_root = Path(root).expanduser().resolve()
     digests = workspace_source_digests(workspace_root)
     # Existing CAS digests for THIS business (the only prefix write_workspace_revision touches).
-    cas_prefix = f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/"
-    existing_cas_keys = set(backend.list_digests(cas_prefix).keys())
+    cas_prefix = workspace_cas_prefix(slug)
+    existing_cas_key_set = (
+        set(existing_cas_keys)
+        if existing_cas_keys is not None
+        else set(backend.list_digests(cas_prefix).keys())
+    )
     incoming = 0
     counted: set[str] = set()
     for rel, digest in digests.items():
@@ -500,7 +522,7 @@ def workspace_revision_incoming_bytes(
         if not digest_text or digest_text in counted:
             continue
         counted.add(digest_text)
-        if workspace_cas_key(slug, digest_text) in existing_cas_keys:
+        if workspace_cas_key(slug, digest_text) in existing_cas_key_set:
             continue  # already stored — CAS dedup means zero new bytes
         try:
             incoming += (workspace_root / rel).stat().st_size

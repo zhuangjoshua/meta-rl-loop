@@ -14655,8 +14655,18 @@ class TakyonStore:
             owned_slugs = self._owner_business_slugs(conn, owner_user_id)
             if normalized not in owned_slugs:
                 owned_slugs = [*owned_slugs, normalized]
-            incoming_bytes = storage.workspace_revision_incoming_bytes(backend, normalized, workspace)
+            existing_cas_keys = set(
+                backend.list_digests(storage.workspace_cas_prefix(normalized)).keys()
+            )
+            incoming_bytes = storage.workspace_revision_incoming_bytes(
+                backend,
+                normalized,
+                workspace,
+                existing_cas_keys=existing_cas_keys,
+            )
             storage.enforce_operator_storage_quota(backend, owned_slugs, incoming_bytes)
+        else:
+            existing_cas_keys = None
         next_revision = current_head + 1
         manifest = storage.write_workspace_revision(
             backend,
@@ -14665,6 +14675,7 @@ class TakyonStore:
             workspace,
             parent_revision=current_head,
             created_at=_now(),
+            existing_cas_keys=existing_cas_keys,
         )
         conn.execute(
             """

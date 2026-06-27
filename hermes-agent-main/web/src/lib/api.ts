@@ -207,7 +207,7 @@ export const api = {
   ) =>
     fetchJSONWithTimeout<TakyonBusinessCreativeCreditsResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/budgets`,
-      30_000,
+      45_000,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
