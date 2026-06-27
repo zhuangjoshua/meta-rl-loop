@@ -25148,7 +25148,6 @@ def _creative_credit_budget_snapshot_from_conn(
 ) -> dict[str, Any]:
     credits_backend = _creative_credit_backend()
     if balances is None:
-        credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
     usage, unbucketed_used_credits = _creative_credit_channel_usage_from_conn(conn, business)
     total_used_credits = sum(item["used_credits"] for item in usage.values())
@@ -25197,7 +25196,6 @@ def _creative_credit_budget_snapshot(business: str) -> dict[str, Any]:
     store = _store()
     credits_backend = _creative_credit_backend()
     with store._connect() as conn:
-        credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
         return _creative_credit_budget_snapshot_from_conn(
             store,

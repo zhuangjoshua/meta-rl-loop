@@ -5074,7 +5074,6 @@ async def set_takyon_business_creative_credit_budgets(request: Request, slug: st
 
         store = TakyonStore(database_url=url, operator_user_id=str(principal.user_id))
         with store._connect() as conn:
-            business_credits.open_business_credit_account(conn, slug)
             balances = business_credits.get_business_credit_balances(conn, slug)
             snapshot = _creative_credit_budget_snapshot_from_conn(
                 store,
