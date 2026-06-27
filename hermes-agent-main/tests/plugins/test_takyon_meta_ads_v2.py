@@ -73,14 +73,16 @@ class _FakeStore:
         self.root = Path(root)
         # Records every workspace-remote sync the handler triggers after a write.
         self.synced_businesses: list[str] = []
+        self.sync_status = "synced"
 
     def _resolve_business_file(self, business: str, rel: str, **_) -> Path:
         return self.root / "businesses" / business / rel
 
-    def _sync_business_workspace_remote(self, business: str, **_) -> None:
+    def _sync_business_workspace_remote(self, business: str, **_) -> str:
         # The real store pushes the business workspace to its remote after a write;
         # the fake just records the call so tests stay offline.
         self.synced_businesses.append(business)
+        return self.sync_status
 
 
 class _FakeSafebox:
@@ -746,6 +748,29 @@ def test_launch_image_happy_path_uploads_adimage_then_creates(harness):
         "clipbook", "distribution/meta-ads/demo-meta/receipt.json"
     )
     assert receipt["ids"]["ad_id"] == "ad-1"
+
+
+def test_launch_fails_if_receipt_does_not_sync_to_canonical_workspace(harness):
+    harness.set_business_mode("clipbook", "live")
+    harness.write_business_file(
+        "clipbook", "product/static-ads/demo-meta/creative-1.png", b"fake-png-bytes"
+    )
+    harness.core._test_store.sync_status = "skipped_disallowed"
+
+    args = _launch_args(
+        asset_kind="image",
+        asset_path="product/static-ads/demo-meta/creative-1.png",
+        idempotency_key="clipbook-meta-sync-fail-v1",
+    )
+    result = _result(harness.module.handle_business_meta_ad_launch(args))
+
+    assert result["success"] is False
+    assert "receipt workspace sync failed" in result["error"]
+    assert result["ids"]["campaign_id"] == "campaign-1"
+    assert result["ids"]["adset_id"] == "adset-1"
+    assert result["ids"]["ad_id"] == "ad-1"
+    assert harness.core._test_commits
+    assert harness.core._test_releases == []
 
 
 # --------------------------------------------------------------------------- #

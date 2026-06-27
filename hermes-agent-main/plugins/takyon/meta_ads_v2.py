@@ -219,7 +219,21 @@ def _write_receipt(business: str, receipt_rel: str, receipt: Mapping[str, Any]) 
             core._atomic_write_text(root / plan_rel, plan_text)
         core._atomic_write_text(root / receipt_rel, receipt_text)
 
-    store._sync_business_workspace_remote(business, before_attempt=_reassert_written_files)
+    sync_status = store._sync_business_workspace_remote(business, before_attempt=_reassert_written_files)
+    if sync_status != "synced":
+        raise core.TakyonError(
+            f"receipt workspace sync failed for {receipt_rel}: {sync_status or 'unknown'}"
+        )
+
+    committed_store = core._store()
+    committed_abs = committed_store._resolve_business_file(business, receipt_rel)
+    committed = json.loads(committed_abs.read_text(encoding="utf-8"))
+    if committed.get("idempotency_key") != receipt.get("idempotency_key"):
+        raise core.TakyonError(f"committed receipt verification failed for {receipt_rel}")
+    if committed.get("status") != receipt.get("status"):
+        raise core.TakyonError(f"committed receipt status mismatch for {receipt_rel}")
+    if isinstance(receipt.get("ids"), Mapping) and committed.get("ids") != receipt.get("ids"):
+        raise core.TakyonError(f"committed receipt ids mismatch for {receipt_rel}")
 
 
 def _is_test_mode(store: Any, business: str) -> bool:
