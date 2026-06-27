@@ -1099,6 +1099,47 @@ def test_run_worker_loop_blocks_without_database_url(monkeypatch):
         worker.run_worker_loop(database_url=None, once=True)
 
 
+def test_run_worker_loop_configures_operator_pg_session_before_draining(monkeypatch):
+    import psycopg as _psycopg
+    import plugins.takyon.runtime_app as runtime_app
+
+    seen: list[str] = []
+
+    class _FakeConn:
+        def close(self):
+            seen.append("close")
+
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(runtime_app, "assert_takyon_pg_role", lambda _conn, plane: seen.append(f"assert:{plane}"))
+    monkeypatch.setattr(
+        runtime_app,
+        "configure_takyon_pg_session",
+        lambda _conn, *, bypass: seen.append(f"configure:{bypass}"),
+    )
+
+    def _fake_drain_tick(_conn, *, stop, **_kw):
+        seen.append("drain")
+        stop.set()
+        return {
+            "dispatched": 0,
+            "requeued": 0,
+            "usage_holds_released": 0,
+            "drained": 0,
+            "completed": 0,
+            "blocked": 0,
+            "failed": 0,
+        }
+
+    monkeypatch.setattr(worker, "drain_tick", _fake_drain_tick)
+
+    drained = worker.run_worker_loop(worker_id="w1", once=True)
+
+    assert drained == 0
+    assert seen[:3] == ["assert:operator", "configure:True", "drain"]
+
+
 def test_run_worker_loop_uses_multiple_threads_when_configured(monkeypatch):
     seen: list[tuple[str, bool]] = []
     seen_lock = threading.Lock()

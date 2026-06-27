@@ -2516,7 +2516,7 @@ def run_worker_loop(
     import psycopg
 
     from .core import load_takyon_env
-    from .runtime_app import assert_takyon_pg_role, resolve_database_url
+    from .runtime_app import assert_takyon_pg_role, configure_takyon_pg_session, resolve_database_url
 
     load_takyon_env()
     # Mark this process as the worker plane: core's worker-deferral dispatcher must run tools INLINE
@@ -2558,6 +2558,7 @@ def run_worker_loop(
                 conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
                 if not database_url:
                     assert_takyon_pg_role(conn, "operator")
+                    configure_takyon_pg_session(conn, bypass=True)
             except Exception as exc:  # noqa: BLE001 — transient DB outage must not crash the daemon
                 if conn is not None:
                     try:
