@@ -9,6 +9,9 @@ Usage:
 Validates authority-bearing env names by presence only. It never prints secret
 values. Values are read from the current process environment first, then from
 the supplied env files.
+
+Set TAKYON_REQUIRE_MIGRATION_DATABASE_URL=0 only for deploy modes that do not
+run migrations from the target host.
 EOF
 }
 
@@ -102,6 +105,17 @@ require_one_of() {
   record_error "missing required authority env: $label"
 }
 
+env_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 reject_key() {
   local key="$1"
   if has_key "$key" "$@"; then
@@ -120,11 +134,14 @@ reject_legacy_database_urls() {
 
 env_files=("$@")
 reject_legacy_database_urls "${env_files[@]}"
+require_migration_database_url="${TAKYON_REQUIRE_MIGRATION_DATABASE_URL:-1}"
 
 case "$plane" in
   operator)
     require_key TAKYON_OPERATOR_DATABASE_URL "${env_files[@]}"
-    require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
+    if env_truthy "$require_migration_database_url"; then
+      require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
+    fi
     require_key TAKYON_SAFEBOX_TOKEN "${env_files[@]}"
     require_key TAKYON_SAFEBOX_OPERATOR_TOKEN "${env_files[@]}"
     reject_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
@@ -132,7 +149,9 @@ case "$plane" in
     ;;
   subuser)
     require_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
-    require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
+    if env_truthy "$require_migration_database_url"; then
+      require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
+    fi
     require_key TAKYON_SAFEBOX_TOKEN "${env_files[@]}"
     reject_key TAKYON_OPERATOR_DATABASE_URL "${env_files[@]}"
     reject_key TAKYON_SAFEBOX_DATABASE_URL "${env_files[@]}"
