@@ -162,8 +162,8 @@ from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_u
 import psycopg
 
 load_takyon_env()
-with psycopg.connect(resolve_database_url(plane="operator"), autocommit=True, prepare_threshold=None) as conn:
-    assert_takyon_pg_role(conn, "operator")
+with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, prepare_threshold=None) as conn:
+    assert_takyon_pg_role(conn, 'operator')
     with conn.cursor() as cur:
         cur.execute(
             \"\"\"

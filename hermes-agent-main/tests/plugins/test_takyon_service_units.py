@@ -131,6 +131,16 @@ def test_operator_deploy_can_skip_runtime_migrations_after_manual_apply():
     assert "if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres'" in src
 
 
+def test_operator_deploy_drain_probe_survives_ssh_double_quoted_string():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+
+    drain = src.split("wait_for_remote_runtime_idle() {", 1)[1].split("wait_for_remote_runtime_idle", 1)[0]
+    assert 'resolve_database_url(plane="operator")' not in drain
+    assert 'assert_takyon_pg_role(conn, "operator")' not in drain
+    assert "resolve_database_url(plane='operator')" in drain
+    assert "assert_takyon_pg_role(conn, 'operator')" in drain
+
+
 def test_app_control_blocker_matches_operator_runtime_text_timestamp():
     src = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0045_app_runtime_identity_ports.sql").read_text()
 
