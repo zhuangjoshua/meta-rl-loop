@@ -21855,13 +21855,17 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
                 openmeter_sync = _openmeter_access_projection_failsoft(
                     store, business, user_record.id
                 )
-                try:
-                    with store._leaf_conn(conn) as leaf:
-                        refreshed = leaves["identity"].get_app_user(
-                            leaf, business, app_user_id=user_record.id
-                        )
-                except Exception:
-                    pass
+                # App-plane callers already have the session-definer result. A direct identity
+                # table refresh is operator-only; on the app role it is denied and can poison
+                # the login transaction after the session was minted.
+                if str(getattr(store, "_database_plane", "") or "").strip().lower() != "app":
+                    try:
+                        with store._leaf_conn(conn) as leaf:
+                            refreshed = leaves["identity"].get_app_user(
+                                leaf, business, app_user_id=user_record.id
+                            )
+                    except Exception:
+                        pass
             if refreshed is None:
                 raise TakyonError("supabase login user is missing")
         payload = {
