@@ -62,6 +62,43 @@ def test_workspace_revision_incoming_bytes_counts_only_new_cas_bytes(tmp_path):
     assert storage.workspace_revision_incoming_bytes(backend, "acme", ws) == 50
 
 
+def test_write_workspace_revision_skips_existing_cas_blobs(tmp_path):
+    """A new revision should not re-upload unchanged CAS blobs.
+
+    Live symptom: one dashboard metrics JSON write for a media-heavy business re-sent the whole
+    workspace (large videos/images) because ``write_workspace_revision`` ignored the CAS listing even
+    though the quota path already computed net-new bytes. Revisions still get a fresh manifest, but
+    unchanged source blobs must be skipped.
+    """
+
+    class CountingBackend(storage.LocalStorageBackend):
+        def __init__(self, root: Path):
+            super().__init__(root)
+            self.put_keys: list[str] = []
+
+        def put(self, key: str, data: bytes, *, digest: str) -> None:
+            self.put_keys.append(key)
+            super().put(key, data, digest=digest)
+
+    backend = CountingBackend(tmp_path / "bucket")
+    ws = tmp_path / "ws"
+    _seed(ws)
+
+    storage.write_workspace_revision(backend, "acme", 1, ws, parent_revision=0)
+    first_put_keys = list(backend.put_keys)
+    assert len([key for key in first_put_keys if "/__takyon/workspace/cas/" in key]) == 2
+    assert len([key for key in first_put_keys if "/__takyon/workspace/manifests/" in key]) == 1
+
+    backend.put_keys.clear()
+    (ws / "product" / "c.txt").write_bytes(b"z" * 50)
+    storage.write_workspace_revision(backend, "acme", 2, ws, parent_revision=1)
+
+    cas_puts = [key for key in backend.put_keys if "/__takyon/workspace/cas/" in key]
+    manifest_puts = [key for key in backend.put_keys if "/__takyon/workspace/manifests/" in key]
+    assert len(cas_puts) == 1
+    assert len(manifest_puts) == 1
+
+
 def test_commit_chokepoint_enforcement_fails_closed_when_over_quota(tmp_path):
     """The exact seam the live commit uses: workspace_revision_incoming_bytes feeds
     enforce_operator_storage_quota. With a forced tiny quota the new revision's bytes push the

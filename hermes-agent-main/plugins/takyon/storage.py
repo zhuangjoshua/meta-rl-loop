@@ -443,11 +443,20 @@ def write_workspace_revision(
 ) -> dict[str, object]:
     workspace_root = Path(root).expanduser().resolve()
     digests = workspace_source_digests(workspace_root)
+    cas_prefix = f"{object_prefix(slug)}{_WORKSPACE_CAS_PREFIX}/"
+    existing_cas_keys = set(backend.list_digests(cas_prefix).keys())
+    seen_digests: set[str] = set()
     for rel, digest in sorted(digests.items()):
+        digest_text = str(digest or "").strip().lower()
+        if not digest_text or digest_text in seen_digests:
+            continue
+        seen_digests.add(digest_text)
+        if workspace_cas_key(slug, digest_text) in existing_cas_keys:
+            continue
         backend.put(
-            workspace_cas_key(slug, digest),
+            workspace_cas_key(slug, digest_text),
             _read_file_bytes(workspace_root / rel),
-            digest=digest,
+            digest=digest_text,
         )
     manifest: dict[str, object] = {
         "slug": _safe_slug(slug),

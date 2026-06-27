@@ -205,13 +205,15 @@ export const api = {
     slug: string,
     allocations: Record<"x" | "meta" | "reddit", number>,
   ) =>
-    fetchJSON<TakyonBusinessCreativeCreditsResponse>(
+    fetchJSONWithTimeout<TakyonBusinessCreativeCreditsResponse>(
       `/api/takyon/businesses/${encodeURIComponent(slug)}/creative-credits/budgets`,
+      30_000,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ allocations }),
       },
+      "takyon.channel-credit-budgets.save",
     ),
   setTakyonBusinessWakeState: (slug: string, paused: boolean) =>
     fetchJSON<{ success: boolean; slug: string; wakes_paused: boolean }>(
