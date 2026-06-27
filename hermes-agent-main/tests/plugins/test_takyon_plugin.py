@@ -2130,6 +2130,48 @@ def test_bootstrap_access_shell_surface_passes_without_generate_workflow(tmp_pat
     assert blocker == ""
 
 
+def test_checkout_cta_without_runtime_checkout_blocks_surface(tmp_path):
+    site = tmp_path / "product" / "site"
+    app_dir = site / "app"
+    app_dir.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<main><a href=\"/app\">Open app</a></main>\n",
+        encoding="utf-8",
+    )
+    (app_dir / "index.html").write_text(
+        """
+        <section>
+          <p>You're signed in</p>
+          <h1>Start studying smarter</h1>
+          <p>LearnForge Pro</p>
+          <p>$9/month</p>
+          <a href="/app">Subscribe - $9/month</a>
+        </section>
+        <script>
+          fetch('/api/takyon/apps/learnforge/session');
+          fetch('/api/takyon/apps/learnforge/account');
+        </script>
+        """,
+        encoding="utf-8",
+    )
+    surface = {
+        "runtime_features": ["auth", "account", "profile", "checkout"],
+        "metadata": {
+            "subuser_app": {"app_mode": "ai_tool", "subscription_style": "monthly"},
+            "customer_experience": {"required_routes": ["/", "/app"]},
+        },
+        "routes": [{"path": "/"}, {"path": "/app"}],
+        "notes": "Private study app with a monthly subscription.",
+    }
+
+    inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
+    ok, blocker = _validate_product_surface_contract(inventory, surface)
+
+    assert ok is False
+    assert "runtime checkout rail" in blocker
+    assert "/app" in blocker
+
+
 def test_ai_surface_without_auth_runtime_features_does_not_require_session_rails(tmp_path):
     site = tmp_path / "product" / "site"
     app = site / "app"

@@ -10239,6 +10239,42 @@ def _validate_product_surface_contract(
     inventory: dict[str, Any],
     surface: dict[str, Any] | None,
 ) -> tuple[bool, str]:
+    if not isinstance(inventory, dict):
+        return True, ""
+    runtime_features = set(_surface_effective_runtime_features(surface))
+    runtime_integrations = {
+        str(item or "").strip().lower()
+        for item in (inventory.get("runtime_integrations") or [])
+        if str(item or "").strip()
+    }
+    risk_issues = {
+        str(item.get("issue") or "").strip().lower()
+        for item in (inventory.get("risk_markers") or [])
+        if isinstance(item, dict)
+    }
+    claim_text = "\n".join(
+        str(item.get("snippet") or "")
+        for item in (inventory.get("claim_snippets") or [])
+        if isinstance(item, dict)
+    )
+    kind = _surface_contract_kind(surface)
+    checkout_is_presented = (
+        kind.get("checkout")
+        or "billing_or_checkout" in risk_issues
+        or _PRODUCT_CHECKOUT_SURFACE_PATTERN.search(claim_text) is not None
+        or re.search(r"\bsubscribe\b|\$\s*\d+|/month|/mo\b", claim_text, re.IGNORECASE) is not None
+    )
+    if (
+        "checkout" in runtime_features
+        and "checkout" not in runtime_integrations
+        and checkout_is_presented
+    ):
+        return (
+            False,
+            "product source presents subscription/checkout UI but does not call the shared "
+            "runtime checkout rail; wire the CTA through starterCheckout/client.checkout() or "
+            "POST /api/takyon/apps/<business>/checkout instead of linking back to /app",
+        )
     return True, ""
 
 
