@@ -446,7 +446,16 @@ def run_one(
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         if estimate_cents > 0:
             billing.refund(conn, reservation_key)
-        status = fail(conn, job.id, error=str(exc), retryable=True)
+        try:
+            status = fail(conn, job.id, error=str(exc), retryable=True)
+        except JobNotRunning:
+            _log.warning(
+                "jobs: handler failed after job %s (kind=%s) lost its running claim; "
+                "continuing drain without wedging the worker",
+                job.id,
+                job.kind,
+            )
+            status = "failed"
         return JobOutcome(
             job.id, job.kind, status, reserved_cents=reserved, reason="handler_error"
         )

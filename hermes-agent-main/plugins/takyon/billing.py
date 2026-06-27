@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 from .ledger_gate import gate_fetchone
 
@@ -72,6 +73,16 @@ def _cell(row, index: int):
     if isinstance(row, Mapping):
         return list(row.values())[index]
     return row[index]
+
+
+def _parse_remote_datetime(value):
+    if not isinstance(value, str) or not value.strip():
+        return value
+    raw = value.strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return value
 
 
 class BillingError(Exception):
@@ -345,8 +356,8 @@ def get_billing_balances(conn, user_id: str) -> BillingBalances:
             allowance_used_cents=int(payload.get("allowance_used_cents") or 0),
             allowance_remaining_cents=int(payload.get("allowance_remaining_cents") or 0),
             reserved_cents=int(payload.get("reserved_cents") or 0),
-            allowance_period_start=payload.get("allowance_period_start"),
-            allowance_resets_at=payload.get("allowance_resets_at"),
+            allowance_period_start=_parse_remote_datetime(payload.get("allowance_period_start")),
+            allowance_resets_at=_parse_remote_datetime(payload.get("allowance_resets_at")),
         )
     acct = conn.execute(
         "select allowance_included_cents, allowance_used_cents, "

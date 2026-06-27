@@ -274,6 +274,33 @@ def test_handler_error_refunds_hold_and_fails(pg_conn):
     assert bal.allowance_used_cents == 0
 
 
+def test_handler_error_lost_claim_does_not_wedge_worker(pg_conn, monkeypatch):
+    # A stale/lost claim can make the terminal fail() transition raise JobNotRunning after the
+    # handler already raised. That must not escape the tick and wedge the daemon; the worker should
+    # keep draining later jobs.
+    slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
+    jobs.enqueue(
+        pg_conn, slug, "ceo_wake", idempotency_key="j",
+        payload={"estimate_cents": 500}, max_attempts=2,
+    )
+    handler = _RecordingHandler(raises=RuntimeError("workspace missing"))
+
+    def _lost_claim_fail(conn, job_id: str, *, error: str, retryable: bool = True) -> str:
+        raise jobs.JobNotRunning(job_id)
+
+    monkeypatch.setattr(jobs, "fail", _lost_claim_fail)
+
+    outcome = jobs.run_one(pg_conn, worker_id="w1", handlers={"ceo_wake": handler})
+
+    assert outcome is not None
+    assert outcome.status == "failed"
+    assert outcome.reason == "handler_error"
+    assert len(handler.calls) == 1
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.reserved_cents == 0
+    assert bal.allowance_used_cents == 0
+
+
 def test_failing_job_retries_to_a_bound_then_fails_with_no_leak(pg_conn):
     # Retries are BOUNDED (mediationplan: exhausted budget/permanent failure stops, never loops), and
     # each attempt's hold is released, so a job that always fails leaks nothing.
