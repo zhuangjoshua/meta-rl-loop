@@ -23,6 +23,7 @@ TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SYNC_PRODUCT_SITES="${TAKYON_SYNC_PRODUCT_SITES:-1}"
+TAKYON_SYNC_PRODUCT_SOURCE_CACHE="${TAKYON_SYNC_PRODUCT_SOURCE_CACHE:-1}"
 TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
@@ -61,7 +62,7 @@ if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   exit 1
 fi
 
-if [[ "$TAKYON_SYNC_PRODUCT_SITES" == "1" && ! -f "$PRODUCT_SITES_SOURCE_KEY" ]]; then
+if [[ ( "$TAKYON_SYNC_PRODUCT_SITES" == "1" || "$TAKYON_SYNC_PRODUCT_SOURCE_CACHE" == "1" ) && ! -f "$PRODUCT_SITES_SOURCE_KEY" ]]; then
   echo "product-sites source key not found: $PRODUCT_SITES_SOURCE_KEY" >&2
   exit 1
 fi
@@ -177,6 +178,51 @@ if [[ "$TAKYON_SYNC_PRODUCT_SITES" == "1" ]]; then
   ssh_opts_target=(-i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
   ssh "${ssh_opts_source[@]}" "$PRODUCT_SITES_SOURCE_HOST" "set -euo pipefail; cd /opt/takyon; tar -cf - .takyon/product-sites" \
     | ssh "${ssh_opts_target[@]}" "$TAKYON_VPS_HOST" "set -euo pipefail; tar -C '$TAKYON_REMOTE_ROOT' -xf -"
+fi
+
+if [[ "$TAKYON_SYNC_PRODUCT_SOURCE_CACHE" == "1" ]]; then
+  ssh_opts_source=(-i "$PRODUCT_SITES_SOURCE_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+  ssh_opts_target=(-i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
+  ssh "${ssh_opts_source[@]}" "$PRODUCT_SITES_SOURCE_HOST" "python3 - <<'PY'
+import pathlib
+import sys
+import tarfile
+
+root = pathlib.Path('/opt/takyon')
+base = root / '.takyon' / 'cache' / 'businesses'
+excluded_names = {
+    '.cache',
+    '.env',
+    '.env.local',
+    '.env.production',
+    '.git',
+    '.next',
+    '__pycache__',
+    'build',
+    'builds',
+    'dist',
+    'node_modules',
+    'secrets',
+}
+
+def include(info):
+    parts = pathlib.PurePosixPath(info.name).parts
+    if any(part in excluded_names or part.endswith('.pyc') for part in parts):
+        return None
+    return info
+
+with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as tar:
+    if not base.is_dir():
+        raise SystemExit(0)
+    for site in sorted(base.glob('*/product/site')):
+        if site.is_dir():
+            tar.add(site, arcname=str(site.relative_to(root)), recursive=True, filter=include)
+PY" \
+    | ssh "${ssh_opts_target[@]}" "$TAKYON_VPS_HOST" "set -euo pipefail
+      install -d '$TAKYON_REMOTE_HOME/cache/businesses'
+      find '$TAKYON_REMOTE_HOME/cache/businesses' -mindepth 4 -maxdepth 4 -type d -path '*/product/site' -prune -exec rm -rf -- {} +
+      tar -C '$TAKYON_REMOTE_ROOT' -xf -
+      chown -R takyon:takyon '$TAKYON_REMOTE_HOME/cache/businesses'"
 fi
 
 if [[ "$TAKYON_APPLY_CADDY" == "1" ]]; then

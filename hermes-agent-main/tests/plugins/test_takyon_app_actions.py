@@ -1842,6 +1842,8 @@ class _InvokeStore:
         self._root = root
         self._surface = surface
         self.events: list[dict[str, Any]] = []
+        self.business_root_sync_flags: list[bool] = []
+        self.resolve_file_sync_flags: list[bool] = []
 
     @contextmanager
     def _connect(self):
@@ -1851,10 +1853,12 @@ class _InvokeStore:
         return self._surface
 
     def _business_root(self, business, sync: bool = True):
+        self.business_root_sync_flags.append(sync)
         return self._root / "businesses" / business
 
-    def _resolve_business_file(self, business, relpath, require_output_root: bool = False):
-        return self._business_root(business) / relpath
+    def _resolve_business_file(self, business, relpath, require_output_root: bool = False, sync: bool = True):
+        self.resolve_file_sync_flags.append(sync)
+        return self._business_root(business, sync=sync) / relpath
 
     def _record_event(self, conn, **kwargs):
         self.events.append(kwargs)
@@ -1916,6 +1920,33 @@ def test_invoke_refuses_undeclared_uncertified_action(tmp_path, monkeypatch):
             store, business_slug="biz", action_name="ghost", payload={},
             principal=_principal(), trigger="http", idempotency_key="k1",
         )
+
+
+def test_invoke_uses_deployed_source_cache_without_workspace_sync(tmp_path, monkeypatch):
+    """Customer action execution must use the deployed sub-user source cache, not re-materialize the
+    operator workspace and risk wiping the just-shipped handler before Deno loads it."""
+    store = _InvokeStore(tmp_path, _HTTP_SURFACE)
+    _write_action_file(store, "biz", "coach", _REAL_HANDLER)
+    store.business_root_sync_flags.clear()
+    store.resolve_file_sync_flags.clear()
+    _stub_runtime_config(monkeypatch)
+    monkeypatch.setattr(app_actions, "_reservation_exists", lambda *a, **k: False)
+    monkeypatch.setattr(app_actions, "_reserve_usage", lambda *a, **k: None)
+    monkeypatch.setattr(app_actions, "_settle_usage", lambda *a, **k: None)
+    monkeypatch.setattr(
+        app_actions,
+        "_run_action_subprocess",
+        lambda **kw: ({"ok": True}, {"isolation": "subprocess"}),
+    )
+
+    app_actions.invoke_action(
+        store, business_slug="biz", action_name="coach", payload={},
+        principal=_principal(), trigger="http", idempotency_key="k-cache",
+    )
+
+    assert store.business_root_sync_flags
+    assert set(store.business_root_sync_flags) == {False}
+    assert store.resolve_file_sync_flags == [False]
 
 
 def test_invoke_replay_returns_cached_success_without_rerunning(tmp_path, monkeypatch):

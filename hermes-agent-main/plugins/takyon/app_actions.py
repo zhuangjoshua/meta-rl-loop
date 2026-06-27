@@ -1252,7 +1252,12 @@ def invoke_action(
     if not isinstance(surface, Mapping) or str(surface.get("status") or "").strip() == "missing":
         raise ActionContractError("app surface contract is missing")
     workflow = _surface_product_workflow_shape(dict(surface))
-    site_root = store._business_root(business_slug) / "product" / "site"
+    # Customer app invokes run on the deployed sub-user plane. The runtime source
+    # artifact is shipped to that host by the sub-user deploy rail alongside the
+    # static product site; re-materializing the operator workspace here can wipe
+    # that deployed cache and replace it with stale/missing storage state before
+    # Deno loads the handler.
+    site_root = store._business_root(business_slug, sync=False) / "product" / "site"
     specs = file_backed_action_specs(site_root, workflow)
     outbound_hosts = normalize_outbound_hosts(workflow.get("outbound_hosts"))
     validate_action_contract(specs=specs, outbound_hosts=outbound_hosts, runtime_features=list(surface.get("runtime_features") or []))
@@ -1303,6 +1308,7 @@ def invoke_action(
         business_slug,
         receipt_rel,
         require_output_root=True,
+        sync=False,
     )
     request = {
         "payload": payload,
