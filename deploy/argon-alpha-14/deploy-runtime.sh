@@ -7,6 +7,7 @@ BOOTSTRAP_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/bootstrap-host.sh"
 REPAIR_PRODUCT_RUNTIME_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/repair-product-runtime.sh"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
+VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
@@ -73,10 +74,19 @@ if [[ ! -f "$VERIFY_SUPABASE_AUTH_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VALIDATE_AUTHORITY_ENV_SCRIPT" ]]; then
+  echo "authority env validator not found: $VALIDATE_AUTHORITY_ENV_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   echo "deploy key not found: $TAKYON_VPS_KEY" >&2
   exit 1
 fi
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "bash -s -- operator /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
 
 if [[ "$TAKYON_BOOTSTRAP_HOST" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \

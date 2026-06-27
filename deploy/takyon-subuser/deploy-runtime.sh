@@ -6,6 +6,7 @@ RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
+VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 PRODUCT_SITES_SOURCE_HOST="${TAKYON_PRODUCT_SITES_SOURCE_HOST:-root@137.184.75.57}"
 PRODUCT_SITES_SOURCE_KEY="${TAKYON_PRODUCT_SITES_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -45,6 +46,11 @@ if [[ ! -f "$ENSURE_DENO_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VALIDATE_AUTHORITY_ENV_SCRIPT" ]]; then
+  echo "authority env validator not found: $VALIDATE_AUTHORITY_ENV_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$VERIFY_SUPABASE_AUTH_SCRIPT" ]]; then
   echo "supabase auth verifier not found: $VERIFY_SUPABASE_AUTH_SCRIPT" >&2
   exit 1
@@ -59,6 +65,10 @@ if [[ "$TAKYON_SYNC_PRODUCT_SITES" == "1" && ! -f "$PRODUCT_SITES_SOURCE_KEY" ]]
   echo "product-sites source key not found: $PRODUCT_SITES_SOURCE_KEY" >&2
   exit 1
 fi
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "bash -s -- subuser /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
   (cd "$RUNTIME_DIR/web" && npm ci && npm run build)

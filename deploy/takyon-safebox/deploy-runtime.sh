@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
 SUPABASE_AUTH_HELPER="$ROOT_DIR/deploy/shared/supabase-auth-env.sh"
+VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@67.205.158.170}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -28,10 +29,19 @@ if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$VALIDATE_AUTHORITY_ENV_SCRIPT" ]]; then
+  echo "authority env validator not found: $VALIDATE_AUTHORITY_ENV_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -x "$SUPABASE_AUTH_HELPER" ]]; then
   echo "supabase auth helper not found or not executable: $SUPABASE_AUTH_HELPER" >&2
   exit 1
 fi
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "bash -s -- safebox /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
   (cd "$RUNTIME_DIR/web" && npm ci && npm run build)
