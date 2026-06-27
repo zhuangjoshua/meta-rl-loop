@@ -1202,6 +1202,41 @@ def test_takyon_businesses_for_session_caches_reads(server, monkeypatch):
     assert store.calls == 1
 
 
+def test_takyon_can_access_business_falls_back_to_owner_row(server, monkeypatch):
+    session = {
+        "takyon_operator_user_id": "user-123",
+        "takyon_businesses_cache": {
+            "at": time.monotonic(),
+            "items": [{"slug": "stale-old"}],
+        },
+    }
+
+    class FakeResult:
+        def fetchone(self):
+            return {"exists": 1}
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def execute(self, sql, params=()):
+            assert "FROM businesses" in sql
+            assert params == ("fresh-new", "user-123")
+            return FakeResult()
+
+    class FakeStore:
+        def _connect(self):
+            return FakeConn()
+
+    monkeypatch.setattr(server, "_takyon_store", lambda *_args, **_kwargs: FakeStore())
+
+    assert server._takyon_can_access_business(session, "fresh-new")
+    assert "takyon_businesses_cache" not in session
+
+
 def test_takyon_dashboard_state_payload_reuses_prefetched_businesses(server, monkeypatch):
     session = {"takyon_current_business": "latexflow"}
 

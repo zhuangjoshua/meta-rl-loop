@@ -13609,6 +13609,7 @@ class TakyonStore:
                 "app scope requires an app-plane database login"
             ) from exc
 
+        scope_exc: BaseException | None = None
         try:
             raw.execute("select set_config('takyon.rls_bypass', '0', true)")
             raw.execute(
@@ -13624,9 +13625,17 @@ class TakyonStore:
                 (_hash_token(str(session_token or "").strip()) if session_token else "",),
             )
             yield conn
+        except BaseException as exc:
+            scope_exc = exc
+            raise
         finally:
             for key, value in previous.items():
-                raw.execute("select set_config(%s, %s, true)", (key, value))
+                try:
+                    raw.execute("select set_config(%s, %s, true)", (key, value))
+                except Exception:
+                    if scope_exc is not None:
+                        continue
+                    raise
 
     @staticmethod
     def _app_leaves() -> dict[str, Any]:
@@ -21830,7 +21839,7 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
             with store._pg_app_scope(conn, business, session_token=session_token):
                 with store._leaf_conn(conn) as leaf:
                     leaves["profiles"].ensure_profile(
-                        leaf, business, app_user_id=user_record.id, display_name=user_record.name
+                        leaf, business, session_token=session_token, display_name=user_record.name
                     )
             openmeter_sync = None
             if _openmeter_enabled():

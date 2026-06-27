@@ -378,6 +378,27 @@ def test_run_one_heartbeats_while_handler_is_running(pg_conn, monkeypatch):
     assert heartbeat_calls and heartbeat_calls[0][1] == "w1"
 
 
+def test_run_one_refreshes_lifecycle_session_after_handler_mutates_guc(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")
+
+    class _ClearingHandler:
+        def __call__(self, job: jobs.Job) -> jobs.JobRunResult:
+            pg_conn.execute("select set_config('takyon.rls_bypass', '0', false)")
+            return jobs.JobRunResult(result={"ok": job.business_slug}, actual_cost_cents=0)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_wake": _ClearingHandler()},
+    )
+
+    assert outcome is not None and outcome.status == "completed"
+    assert jobs.get_job(pg_conn, outcome.job_id).status == "completed"
+    row = pg_conn.execute("select current_setting('takyon.rls_bypass', true)").fetchone()
+    assert str(row[0]) == "1"
+
+
 def test_run_one_heartbeat_failure_does_not_requeue_a_finished_job(pg_conn, monkeypatch):
     """The regression: a long build (bootstrap Docker→R2) outruns the stale window, the heartbeat
     raises JobNotRunning mid-handler, and the WHOLE finished build was requeued + re-run from scratch

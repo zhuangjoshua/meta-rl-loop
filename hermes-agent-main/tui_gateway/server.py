@@ -10907,10 +10907,32 @@ def _takyon_can_access_business(
     slug = str(business or "").strip()
     if not slug:
         return False
-    return any(
+    if any(
         str(item.get("slug") or "").strip() == slug
         for item in (businesses if businesses is not None else _takyon_businesses_for_session(session))
-    )
+    ):
+        return True
+    operator_user_id = _takyon_operator_user_id(session)
+    if not operator_user_id:
+        return False
+    try:
+        store = _takyon_store(session)
+        with store._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM businesses WHERE slug = ? AND owner_user_id = ? LIMIT 1",
+                (slug, operator_user_id),
+            ).fetchone()
+        if row is not None:
+            _takyon_invalidate_businesses_cache(session)
+            return True
+    except Exception as exc:  # noqa: BLE001 - fail closed, but keep the denial diagnosable.
+        logger.warning(
+            "takyon access ownership fallback failed business=%s operator_user_id=%s error=%s",
+            slug,
+            operator_user_id,
+            exc,
+        )
+    return False
 
 
 def _takyon_require_business_access(

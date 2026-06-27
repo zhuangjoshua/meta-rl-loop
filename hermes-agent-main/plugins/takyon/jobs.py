@@ -34,6 +34,7 @@ import json
 import logging
 import concurrent.futures
 import contextvars
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -79,6 +80,36 @@ _COLS = (
     "id, business_slug, kind, status, idempotency_key, payload, result, error, "
     "reserved_billing_entry_id, attempts, max_attempts, locked_by, locked_at, created_at, updated_at"
 )
+
+
+def _operator_lifecycle_session_required() -> bool:
+    return str(os.getenv("TAKYON_HOST_ROLE") or "").strip().lower() in {
+        "operator",
+        "dashboard",
+        "worker",
+    }
+
+
+def _refresh_job_lifecycle_session(conn) -> None:
+    """Reassert control-plane RLS state before touching the jobs queue."""
+    required = _operator_lifecycle_session_required()
+    try:
+        try:
+            conn.execute("reset role")
+        except Exception:
+            if required:
+                raise
+        try:
+            from .runtime_app import assert_takyon_pg_role, configure_takyon_pg_session
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon.runtime_app import assert_takyon_pg_role, configure_takyon_pg_session
+
+        configure_takyon_pg_session(conn, bypass=True)
+        if required:
+            assert_takyon_pg_role(conn, "operator")
+    except Exception:
+        if required:
+            raise
 
 
 @dataclass(frozen=True)
@@ -168,6 +199,7 @@ def enqueue(
     run_one reserves before running) and any handler input."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
+    _refresh_job_lifecycle_session(conn)
     body = json.dumps(payload or {})
     with conn.transaction():
         row = conn.execute(
@@ -210,6 +242,7 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
     ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to 'running', stamp
     locked_by/locked_at, and increment attempts. Returns the claimed job, or None if the queue is
     empty. The whole claim is one transaction; the row is committed 'running' before this returns."""
+    _refresh_job_lifecycle_session(conn)
     lane_gate = (
         "and not exists ("
         "  select 1 from jobs r "
@@ -248,6 +281,7 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
 
 def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
     """Refresh a running job's claim so other workers can distinguish live work from a stale claim."""
+    _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         updated = conn.execute(
             "update jobs set locked_at = now(), updated_at = now() "
@@ -261,6 +295,7 @@ def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
 def complete(conn, job_id: str, *, result: dict[str, Any] | None = None) -> None:
     """Terminal success. Only a 'running' job may complete — the lifecycle is single-writer (the
     claimer holds it), so a non-'running' row means a bug, and we raise rather than overwrite."""
+    _refresh_job_lifecycle_session(conn)
     body = json.dumps(result) if result is not None else None
     with conn.transaction():
         updated = conn.execute(
@@ -279,6 +314,7 @@ def block(conn, job_id: str, *, reason: str, detail: dict[str, Any] | None = Non
     err = {"reason": reason}
     if detail:
         err["detail"] = detail
+    _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         updated = conn.execute(
             "update jobs set status = 'blocked', error = %s::jsonb, "
@@ -296,6 +332,7 @@ def fail(conn, job_id: str, *, error: str, retryable: bool = True) -> str:
     The hold is released by run_one BEFORE this is called, and the stale-hold reconciliation in
     run_one releases it again (idempotent) on the next attempt, so no reservation leaks on requeue."""
     err = json.dumps({"reason": "handler_error", "error": error})
+    _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         row = conn.execute(
             "select attempts, max_attempts from jobs where id = %s and status = 'running' for update",
@@ -325,6 +362,7 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
     stuck forever. Re-queue 'running' jobs whose lock is older than the threshold and that have
     attempts left; those at max_attempts are blocked with a reason (never retried forever). The next
     claim's run_one releases any stale billing hold before reserving again. Returns rows touched."""
+    _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         requeued = conn.execute(
             "update jobs set status = 'queued', locked_by = null, locked_at = null, updated_at = now() "
@@ -496,6 +534,7 @@ def run_one(
 
 
 def _set_reserved_key(conn, job_id: str, reservation_key: str) -> None:
+    _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         conn.execute(
             "update jobs set reserved_billing_entry_id = %s, updated_at = now() where id = %s",
