@@ -23690,6 +23690,10 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                             }
                         )
 
+                    # Safebox validates checkout authority on its own DB connection before creating
+                    # the Stripe session, so the intent must be committed before the external call.
+                    conn.commit()
+
                     params: dict[str, Any] = {
                         "mode": mode,
                         "line_items[0][price]": plan["stripe_price_id"],

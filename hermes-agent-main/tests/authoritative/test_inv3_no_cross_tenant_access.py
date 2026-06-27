@@ -464,6 +464,15 @@ def test_safebox_db_conn_initializes_authority_rls_session():
     assert 'assert_takyon_pg_role(raw_conn, "safebox")' in src
 
 
+def test_app_checkout_commits_intent_before_safebox_stripe_call():
+    src = inspect.getsource(core.handle_business_create_app_checkout)
+
+    intent_pos = src.index("INSERT INTO app_checkout_intents")
+    commit_pos = src.index("conn.commit()", intent_pos)
+    stripe_pos = src.index('safebox.stripe_request("checkout/sessions"', intent_pos)
+    assert intent_pos < commit_pos < stripe_pos
+
+
 def test_pg_app_scope_rejects_operator_session_without_role_change(monkeypatch):
     monkeypatch.setattr(core, "_PGConn", _FakePGConn)
     store = core.TakyonStore.__new__(core.TakyonStore)
