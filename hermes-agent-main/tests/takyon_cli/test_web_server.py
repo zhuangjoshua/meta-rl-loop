@@ -6230,6 +6230,47 @@ class _WakeNowFakeStore:
         return _WakeNowCM(object())
 
 
+def test_dashboard_business_owner_check_uses_control_plane_not_cached_principal(monkeypatch):
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    class _OwnerCheckConn:
+        def __init__(self):
+            self.params = None
+
+        def execute(self, sql, params=()):
+            assert "businesses" in sql
+            assert "owner_user_id" in sql
+            self.params = tuple(params)
+            return self
+
+        def fetchone(self):
+            return (1,) if self.params == ("fresh-slug", "user-123") else None
+
+    class _OwnerCheckStore:
+        last = None
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.conn = _OwnerCheckConn()
+            type(self).last = self
+
+        def _connect(self):
+            return _WakeNowCM(self.conn)
+
+    monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _r: "postgres://runtime")
+    monkeypatch.setattr(core, "TakyonStore", _OwnerCheckStore)
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "x"}))
+    principal = _wake_now_principal(("old-cached-slug",))
+
+    assert web_server._dashboard_principal_owns_business(request, principal, "fresh-slug") is True
+    assert _OwnerCheckStore.last.kwargs["database_url"] == "postgres://runtime"
+    assert _OwnerCheckStore.last.kwargs["operator_user_id"] == "user-123"
+    assert web_server._dashboard_principal_owns_business(request, principal, "other-slug") is False
+
+
 def test_wake_now_rejects_unauthenticated(monkeypatch):
     import takyon_cli.web_server as web_server
 
@@ -6246,6 +6287,7 @@ def test_wake_now_rejects_unowned_business(monkeypatch):
     monkeypatch.setattr(
         web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal(("alpha",))
     )
+    monkeypatch.setattr(web_server, "_dashboard_principal_owns_business", lambda _r, _p, _slug: False)
     request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "x"}))
     with pytest.raises(web_server.HTTPException) as exc:
         asyncio.run(web_server.wake_takyon_business_now(request, "ghost"))
@@ -6273,6 +6315,7 @@ def test_wake_now_enqueues_money_gated_ceo_wake(monkeypatch):
     monkeypatch.setattr(
         web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal()
     )
+    monkeypatch.setattr(web_server, "_dashboard_principal_owns_business", lambda _r, _p, _slug: True)
     monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _r: "postgres://runtime")
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(core, "TakyonStore", _WakeNowFakeStore)
@@ -6310,6 +6353,7 @@ def test_wake_now_dedups_already_pending_wake(monkeypatch):
     monkeypatch.setattr(
         web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal()
     )
+    monkeypatch.setattr(web_server, "_dashboard_principal_owns_business", lambda _r, _p, _slug: True)
     monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _r: "postgres://runtime")
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(core, "TakyonStore", _WakeNowFakeStore)

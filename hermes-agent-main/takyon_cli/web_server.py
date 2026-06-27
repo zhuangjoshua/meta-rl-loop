@@ -3692,6 +3692,39 @@ def _business_wakes_paused(store: Any, conn: Any, slug: str) -> bool:
     return False
 
 
+def _dashboard_principal_owns_business(request: Request, principal: Any, slug: str) -> bool:
+    """Authorize dashboard business routes against current control-plane ownership.
+
+    The operator business list is read fresh from ``businesses.owner_user_id``. A newly-created
+    business can therefore appear in the dashboard before the authenticated principal's cached
+    ``business_slugs`` claim is refreshed. Re-checking Postgres here keeps the child routes aligned
+    with the list without granting access from stale client/session state.
+    """
+    business = str(slug or "").strip()
+    user_id = str(getattr(principal, "user_id", "") or "").strip()
+    if not business or not user_id:
+        return False
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        url = _request_runtime_database_url(request)
+        store = TakyonStore(database_url=url, operator_user_id=user_id) if url else TakyonStore(operator_user_id=user_id)
+        with store._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM businesses WHERE slug = ? AND owner_user_id = ? LIMIT 1",
+                (business, user_id),
+            ).fetchone()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001 - fail closed on authority lookup errors
+        _log.warning(
+            "dashboard business owner check failed for %s/%s: %s",
+            business,
+            user_id,
+            exc,
+        )
+        return False
+
+
 def _takyon_operator_businesses_payload(principal: Any) -> dict[str, Any]:
     try:
         from plugins.takyon.core import TakyonStore
@@ -4699,7 +4732,7 @@ async def get_takyon_business_file(request: Request, slug: str, path: str = "") 
         raise HTTPException(status_code=400, detail="business slug required")
     if not rel_path:
         raise HTTPException(status_code=400, detail="path required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         from plugins.takyon.core import TakyonStore
@@ -4738,7 +4771,7 @@ async def get_takyon_business_asset(request: Request, slug: str, path: str = "")
         raise HTTPException(status_code=400, detail="business slug required")
     if not rel_path:
         raise HTTPException(status_code=400, detail="path required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         from plugins.takyon.core import TakyonStore
@@ -4792,7 +4825,7 @@ async def get_takyon_business_site_preview(
     requested_path = str(path or "").strip() or "product/site"
     if not business:
         raise HTTPException(status_code=400, detail="business slug required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         return await asyncio.to_thread(
@@ -4822,7 +4855,7 @@ async def get_takyon_site_preview_document(
     requested_path = str(path or "").strip() or "product/site"
     if not business:
         raise HTTPException(status_code=400, detail="business slug required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
 
     preview = await asyncio.to_thread(
@@ -4869,7 +4902,7 @@ async def get_takyon_business_workspace(
     business = str(slug or "").strip()
     if not business:
         raise HTTPException(status_code=400, detail="business slug required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         return await asyncio.to_thread(
@@ -4898,7 +4931,7 @@ async def get_takyon_business_traction(
     business = str(slug or "").strip()
     if not business:
         raise HTTPException(status_code=400, detail="business slug required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         return await asyncio.to_thread(
@@ -4926,7 +4959,7 @@ async def get_takyon_business_home(
     business = str(slug or "").strip()
     if not business:
         raise HTTPException(status_code=400, detail="business slug required")
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         return await asyncio.to_thread(
@@ -4951,7 +4984,7 @@ async def get_takyon_business_creative_credits(request: Request, slug: str) -> d
             "business_slug": slug,
             "reason": "operator_principal_unavailable",
         }
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         return {
             "available": False,
             "business_slug": slug,
@@ -5037,7 +5070,7 @@ async def set_takyon_business_creative_credit_budgets(request: Request, slug: st
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         body = await request.json()
@@ -5119,7 +5152,7 @@ async def set_takyon_business_wake_state(request: Request, slug: str) -> dict[st
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         body = await request.json()
@@ -5187,7 +5220,7 @@ async def wake_takyon_business_now(request: Request, slug: str) -> dict[str, Any
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         from uuid import uuid4
@@ -5274,7 +5307,7 @@ async def delete_takyon_business(request: Request, slug: str) -> dict[str, Any]:
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         from uuid import uuid4
@@ -5380,7 +5413,7 @@ async def get_takyon_business_creative_credit_packs(
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         from plugins.takyon.control_api import (
@@ -5411,7 +5444,7 @@ async def create_takyon_business_creative_credit_checkout(
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         body = await request.json()
@@ -5466,7 +5499,7 @@ async def reconcile_takyon_business_creative_credit_checkout(
     principal = _resolve_dashboard_request_principal(request)
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
-    if slug not in principal.business_slugs:
+    if not _dashboard_principal_owns_business(request, principal, slug):
         raise HTTPException(status_code=404, detail="not_found")
     try:
         body = await request.json()
@@ -5531,7 +5564,7 @@ async def start_takyon_business_outreach_channel(
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     business = str(slug or "").strip()
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         body = await request.json()
@@ -5614,7 +5647,7 @@ async def sync_takyon_business_meta_manual_metrics(
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     business = str(slug or "").strip()
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         body = await request.json()
@@ -5649,7 +5682,7 @@ async def sync_takyon_business_meta_metrics(
     if principal is None:
         raise HTTPException(status_code=401, detail="operator_principal_unavailable")
     business = str(slug or "").strip()
-    if business not in set(getattr(principal, "business_slugs", ()) or ()):
+    if not _dashboard_principal_owns_business(request, principal, business):
         raise HTTPException(status_code=404, detail="business not found")
     try:
         body = await request.json()
