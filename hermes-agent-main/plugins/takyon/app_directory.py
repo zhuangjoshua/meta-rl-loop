@@ -397,6 +397,12 @@ def list_visible_entries(
     if not isinstance(limit, int):
         raise ValueError("limit must be an integer")
     limit_value = max(1, min(limit, 100))
+    if session_token is not None and app_identity._is_app_runtime_user(conn):
+        rows = conn.execute(
+            "select * from takyon_app_visible_directory_entries(%s, %s, %s)",
+            (business_slug, app_identity._hash_token(session_token), limit_value),
+        ).fetchall()
+        return viewer, [_resolved_from_joined_row(row) for row in rows]
     rows = conn.execute(
         "select "
         f"{_USER_COLUMNS}, {_ENTRY_COLUMNS} "
@@ -426,7 +432,8 @@ def get_visible_entry(
     conn,
     business_slug: str,
     *,
-    target_app_user_id: str,
+    target_app_user_id: str = "",
+    target_email: str | None = None,
     app_user_id: str | None = None,
     email: str | None = None,
     session_token: str | None = None,
@@ -440,13 +447,26 @@ def get_visible_entry(
     )
     if viewer is None:
         return None
+    if session_token is not None and app_identity._is_app_runtime_user(conn):
+        row = conn.execute(
+            "select * from takyon_app_visible_directory_entry(%s, %s, %s, %s)",
+            (
+                business_slug,
+                app_identity._hash_token(session_token),
+                target_app_user_id,
+                target_email,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        return viewer, _resolved_from_joined_row(row)
     row = conn.execute(
         "select "
         f"{_USER_COLUMNS}, {_ENTRY_COLUMNS} "
         "from app_user_profiles p "
         "join app_users u on u.business_slug = p.business_slug and u.id = p.id "
         "where p.business_slug = %s "
-        "  and p.id = %s "
+        "  and (p.id::text = %s or (%s <> '' and lower(u.email::text) = lower(%s))) "
         "  and p.directory_enabled = true "
         "  and u.status = 'active' "
         "  and p.id <> %s "
@@ -460,7 +480,7 @@ def get_visible_entry(
         "      )"
         "  ) "
         "limit 1",
-        (business_slug, target_app_user_id, viewer.id, viewer.id, viewer.id),
+        (business_slug, target_app_user_id, str(target_email or "").strip(), str(target_email or "").strip(), viewer.id, viewer.id, viewer.id),
     ).fetchone()
     if row is None:
         return None

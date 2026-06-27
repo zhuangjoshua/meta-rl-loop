@@ -1,17 +1,17 @@
-"""Unit tests for the safebox-proxy cutover of the Tavily web provider.
+"""Unit tests for the Tavily web provider authority boundary.
 
 Covers ``plugins.web.tavily.provider._tavily_request`` — the single chokepoint
 for Tavily search/extract/crawl. On a runtime plane it must NOT read the raw
-``TAVILY_API_KEY``; it must broker the call through the safebox provider proxy.
-No network; stdlib + pytest + monkeypatch.
+``TAVILY_API_KEY``. This generic provider does not carry a business-owner identity
+and therefore cannot mint an operator.session capability; it must fail closed
+instead of sending the shared Safebox transport token to the operator proxy. No
+network; stdlib + pytest + monkeypatch.
 
 Contract:
   (a) When ``safebox._use_remote_authority()`` is True (runtime plane), the call
-      goes through ``safebox.proxy_request("tavily", op, payload)`` and the raw
-      ``TAVILY_API_KEY`` is NEVER read / no direct httpx.post is made. The proxy
-      result (raw Tavily JSON) flows back unchanged through the normalizers.
-  (b) When it is False (safebox host / local dev), the existing direct httpx
-      path is used unchanged: key read from env, injected into the body.
+      raises ``SafeboxAuthorityUnavailable`` before proxy/network/key access.
+  (b) When it is False (safebox host / local dev), the direct httpx path resolves
+      the key through the safebox/local config helper and injects it into the body.
 """
 
 import pytest
@@ -20,22 +20,17 @@ from plugins.takyon import safebox as _safebox
 from plugins.web.tavily import provider as tavily
 
 
-# ─── (a) runtime plane → proxy, no raw key ────────────────────────────────────
+# ─── (a) runtime plane → fail closed, no raw key ──────────────────────────────
 
 
-def test_tavily_request_uses_proxy_on_runtime_plane(monkeypatch):
-    """Remote authority → proxy_request(provider, op, payload); the raw key is
-    never read and no httpx.post is made. The op is passed through verbatim and
-    the api_key is NOT injected into the payload (the safebox injects it)."""
-    proxy_calls = []
-    raw_json = {"results": [{"title": "R", "url": "https://r.com", "content": "d"}]}
-
-    def _fake_proxy(provider, path, payload, **kwargs):
-        proxy_calls.append((provider, path, dict(payload)))
-        return raw_json
-
+def test_tavily_request_remote_plane_fails_closed_without_operator_capability(monkeypatch):
+    """Remote authority with no caller-bound operator.session capability refuses before proxy/network."""
     monkeypatch.setattr(_safebox, "_use_remote_authority", lambda: True)
-    monkeypatch.setattr(_safebox, "proxy_request", _fake_proxy)
+    monkeypatch.setattr(
+        _safebox,
+        "proxy_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("proxy used without capability")),
+    )
 
     # No TAVILY_API_KEY in the env at all — proves the runtime plane never needs it.
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
@@ -48,58 +43,59 @@ def test_tavily_request_uses_proxy_on_runtime_plane(monkeypatch):
 
     monkeypatch.setattr(httpx, "post", _boom_post)
 
-    out = tavily._tavily_request("search", {"query": "hi", "max_results": 5})
-
-    assert out is raw_json
-    assert proxy_calls == [("tavily", "search", {"query": "hi", "max_results": 5})]
-    # api_key must NOT be injected into the proxied payload.
-    assert "api_key" not in proxy_calls[0][2]
+    with pytest.raises(_safebox.SafeboxAuthorityUnavailable, match="operator.session capability"):
+        tavily._tavily_request("search", {"query": "hi", "max_results": 5})
 
 
-def test_tavily_request_proxy_op_lowercased(monkeypatch):
-    """The op passed to the proxy is the normalized (stripped/lowercased) name."""
-    seen = {}
-
-    def _fake_proxy(provider, path, payload, **kwargs):
-        seen["op"] = path
-        return {"results": []}
-
+def test_tavily_request_remote_plane_ignores_raw_key_env(monkeypatch):
     monkeypatch.setattr(_safebox, "_use_remote_authority", lambda: True)
-    monkeypatch.setattr(_safebox, "proxy_request", _fake_proxy)
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-env-must-not-unlock-runtime")
 
-    tavily._tavily_request("/Extract/", {"urls": ["https://x.com"]})
-    assert seen["op"] == "extract"
+    def _local_key_used(*_args, **_kwargs):
+        raise AssertionError("runtime plane tried to resolve local Tavily key")
+
+    monkeypatch.setattr(tavily, "_local_tavily_api_key", _local_key_used)
+
+    with pytest.raises(_safebox.SafeboxAuthorityUnavailable, match="operator.session capability"):
+        tavily._tavily_request("search", {"query": "hi", "max_results": 5})
+
+    assert tavily.TavilyWebSearchProvider().is_available() is False
 
 
-def test_tavily_search_provider_uses_proxy_result(monkeypatch):
-    """End-to-end through the provider: a search on the runtime plane returns the
-    normalized shape, driven by the proxy result with no raw key read."""
+def test_tavily_request_remote_plane_refuses_extract_too(monkeypatch):
     monkeypatch.setattr(_safebox, "_use_remote_authority", lambda: True)
     monkeypatch.setattr(
         _safebox,
         "proxy_request",
-        lambda *a, **k: {
-            "results": [{"title": "Doc", "url": "https://d.com", "content": "snippet"}]
-        },
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("proxy used without capability")),
+    )
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    with pytest.raises(_safebox.SafeboxAuthorityUnavailable):
+        tavily._tavily_request("/Extract/", {"urls": ["https://x.com"]})
+
+
+def test_tavily_search_provider_surfaces_remote_authority_refusal(monkeypatch):
+    """End-to-end through the provider: remote runtime refuses rather than falling back to raw key."""
+    monkeypatch.setattr(_safebox, "_use_remote_authority", lambda: True)
+    monkeypatch.setattr(
+        _safebox,
+        "proxy_request",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("proxy used without capability")),
     )
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     result = tavily.TavilyWebSearchProvider().search("query", limit=3)
-    assert result["success"] is True
-    web = result["data"]["web"]
-    assert len(web) == 1
-    assert web[0]["title"] == "Doc"
-    assert web[0]["url"] == "https://d.com"
-    assert web[0]["description"] == "snippet"
+    assert result["success"] is False
+    assert "operator.session capability" in result["error"]
 
 
 # ─── (b) local / safebox authority → direct httpx path unchanged ──────────────
 
 
 def test_tavily_request_direct_path_when_not_remote(monkeypatch):
-    """No remote authority → the existing direct httpx path runs: the env key is
-    read and injected into the request body; the proxy is NEVER touched."""
+    """No remote authority -> the direct httpx path runs: the local Safebox helper
+    resolves the key, it is injected into the body, and the proxy is NEVER touched."""
     monkeypatch.setattr(_safebox, "_use_remote_authority", lambda: False)
     monkeypatch.setattr(
         _safebox,
@@ -108,7 +104,7 @@ def test_tavily_request_direct_path_when_not_remote(monkeypatch):
             AssertionError("proxy used on the local/safebox plane")
         ),
     )
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-local-key")
+    monkeypatch.setattr(_safebox, "first_env_backed_value", lambda *names: "tvly-local-key")
 
     captured = {}
 
@@ -139,7 +135,7 @@ def test_tavily_request_direct_path_when_not_remote(monkeypatch):
 def test_tavily_request_direct_path_raises_without_key(monkeypatch):
     """Local plane with no key → ValueError (the existing fail-closed behavior)."""
     monkeypatch.setattr(_safebox, "_use_remote_authority", lambda: False)
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(_safebox, "first_env_backed_value", lambda *names: "")
 
     with pytest.raises(ValueError, match="TAVILY_API_KEY"):
         tavily._tavily_request("search", {"query": "hi"})

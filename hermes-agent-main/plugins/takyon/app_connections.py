@@ -9,7 +9,7 @@ profiles.
 
 from __future__ import annotations
 
-from plugins.takyon import app_identity
+from plugins.takyon import app_directory, app_identity
 
 _STATE_CHOICES = frozenset({"like", "pass", "block"})
 _LIST_STATE_CHOICES = frozenset({"matches", "likes", "passes", "blocks"})
@@ -149,6 +149,34 @@ def _target_directory_snapshot(conn, business_slug: str, *, viewer_id: str, targ
     }
 
 
+def _visible_target_for_session(conn, business_slug: str, *, session_token: str, target_id: str):
+    if not app_identity._is_app_runtime_user(conn):
+        return None
+    resolved = app_directory.get_visible_entry(
+        conn,
+        business_slug,
+        target_app_user_id=target_id,
+        session_token=session_token,
+    )
+    if resolved is None:
+        return None
+    viewer, target = resolved
+    if target.user.id == viewer.id:
+        return None
+    return viewer, target.user, target.entry
+
+
+def _target_placeholder(business_slug: str, target_id: str) -> app_identity.AppUser:
+    return app_identity.AppUser(
+        id=str(target_id),
+        business_slug=str(business_slug),
+        email="",
+        name=None,
+        status="active",
+        tier="",
+    )
+
+
 def _is_match(conn, business_slug: str, *, source_id: str, target_id: str) -> bool:
     row = conn.execute(
         "select 1 "
@@ -195,13 +223,28 @@ def set_connection(
         session_token=session_token,
     )
     normalized_action = _normalize_action(action)
-    target = app_identity.get_app_user(conn, business_slug, app_user_id=target_app_user_id)
-    if target is None or str(target.status or "active") != "active":
-        raise AppConnectionTargetNotFound("app connection target not found")
-    if target.id == user.id:
-        raise ValueError("target_app_user_id must not be the current app user")
     visible_target = None
-    if normalized_action in {"like", "pass"}:
+    target = None
+    if target_app_user_id == user.id:
+        raise ValueError("target_app_user_id must not be the current app user")
+    if session_token is not None and app_identity._is_app_runtime_user(conn):
+        if normalized_action in {"like", "pass"}:
+            visible = _visible_target_for_session(
+                conn,
+                business_slug,
+                session_token=session_token,
+                target_id=target_app_user_id,
+            )
+            if visible is None:
+                raise AppConnectionTargetNotFound("app connection target not found")
+            _viewer, target, visible_target = visible
+        else:
+            target = _target_placeholder(business_slug, target_app_user_id)
+    else:
+        target = app_identity.get_app_user(conn, business_slug, app_user_id=target_app_user_id)
+        if target is None or str(target.status or "active") != "active":
+            raise AppConnectionTargetNotFound("app connection target not found")
+    if normalized_action in {"like", "pass"} and visible_target is None:
         visible_target = _target_directory_snapshot(
             conn,
             business_slug,
@@ -292,6 +335,97 @@ def list_connections(
         raise ValueError("limit must be an integer")
     limit_value = max(1, min(limit, 100))
     list_state = _normalize_list_state(state)
+    if session_token is not None and app_identity._is_app_runtime_user(conn):
+        if list_state == "matches":
+            rows = conn.execute(
+                "select c.business_slug, c.source_app_user_id, c.target_app_user_id, c.state, "
+                "greatest(c.updated_at, r.updated_at), c.created_at "
+                "from app_connections c "
+                "join app_connections r "
+                "  on r.business_slug = c.business_slug "
+                " and r.source_app_user_id = c.target_app_user_id "
+                " and r.target_app_user_id = c.source_app_user_id "
+                " and r.state = 'like' "
+                "where c.business_slug = %s "
+                "  and c.source_app_user_id = %s "
+                "  and c.state = 'like' "
+                "  and not exists ("
+                "    select 1 from app_connections b "
+                "    where b.business_slug = c.business_slug "
+                "      and b.state = 'block' "
+                "      and ("
+                "        (b.source_app_user_id = c.source_app_user_id and b.target_app_user_id = c.target_app_user_id) "
+                "        or (b.source_app_user_id = c.target_app_user_id and b.target_app_user_id = c.source_app_user_id)"
+                "      )"
+                "  ) "
+                "order by greatest(c.updated_at, r.updated_at) desc, c.target_app_user_id asc "
+                "limit %s",
+                (business_slug, user.id, limit_value),
+            ).fetchall()
+            items = []
+            for row in rows:
+                target_id = str(row[2])
+                visible = app_directory.get_visible_entry(
+                    conn,
+                    business_slug,
+                    target_app_user_id=target_id,
+                    session_token=session_token,
+                )
+                if visible is None:
+                    continue
+                items.append(
+                    {
+                        "business_slug": str(row[0]),
+                        "source_app_user_id": str(row[1]),
+                        "target_app_user_id": target_id,
+                        "state": "like",
+                        "matched": True,
+                        "updated_at": row[4],
+                        "created_at": row[5],
+                        "target": visible[1].entry,
+                    }
+                )
+            return user, items
+
+        row_state = {"likes": "like", "passes": "pass", "blocks": "block"}[list_state]
+        rows = conn.execute(
+            "select business_slug, source_app_user_id, target_app_user_id, state, created_at, updated_at "
+            "from app_connections "
+            "where business_slug = %s and source_app_user_id = %s and state = %s "
+            "order by updated_at desc, target_app_user_id asc "
+            "limit %s",
+            (business_slug, user.id, row_state, limit_value),
+        ).fetchall()
+        items = []
+        for row in rows:
+            target_id = str(row[2])
+            visible = (
+                None
+                if row_state == "block"
+                else app_directory.get_visible_entry(
+                    conn,
+                    business_slug,
+                    target_app_user_id=target_id,
+                    session_token=session_token,
+                )
+            )
+            items.append(
+                {
+                    "business_slug": str(row[0]),
+                    "source_app_user_id": str(row[1]),
+                    "target_app_user_id": target_id,
+                    "state": str(row[3]),
+                    "matched": (
+                        row_state == "like"
+                        and _is_match(conn, business_slug, source_id=user.id, target_id=target_id)
+                    ),
+                    "created_at": row[4],
+                    "updated_at": row[5],
+                    "target": None if visible is None else visible[1].entry,
+                }
+            )
+        return user, items
+
     if list_state == "matches":
         rows = conn.execute(
             "select c.business_slug, c.source_app_user_id, c.target_app_user_id, c.state, "

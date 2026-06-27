@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
+from contextlib import nullcontext
 from typing import Any, Mapping
 
 try:
@@ -72,20 +73,53 @@ def _backend(store: Any):
     return store._workspace_storage_backend()
 
 
-def _resolve_uploader(store: Any, business_slug: str, app_user_id: str) -> dict[str, Any]:
+def _resolve_uploader(
+    store: Any,
+    business_slug: str,
+    app_user_id: str,
+    *,
+    session_token: str | None = None,
+) -> dict[str, Any]:
     try:
-        from .core import _PGConn
+        from .core import _PGConn, _hash_token, _now, _require_app_database_plane_for_pg
     except Exception:
-        from plugins.takyon.core import _PGConn
+        from plugins.takyon.core import _PGConn, _hash_token, _now, _require_app_database_plane_for_pg
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
+            _require_app_database_plane_for_pg(store, conn, action="app media uploader read")
             leaves = store._app_leaves()
-            with store._leaf_conn(conn) as leaf:
-                user = leaves["identity"].get_app_user(leaf, business_slug, app_user_id)
+            with store._pg_app_scope(
+                conn,
+                business_slug,
+                session_token=session_token,
+                app_user_id=None if session_token else app_user_id,
+            ):
+                with store._leaf_conn(conn) as leaf:
+                    if session_token:
+                        user = leaves["identity"].validate_session(leaf, business_slug, session_token)
+                    else:
+                        user = leaves["identity"].get_app_user(leaf, business_slug, app_user_id)
             if user is None or str(getattr(user, "status", "") or "") != "active":
                 raise AppMediaError("uploader app user not found")
+            if session_token and str(getattr(user, "id", "") or "") != str(app_user_id):
+                raise AppMediaError("uploader app user not found")
             return {"id": user.id, "email": user.email, "tier": getattr(user, "tier", "") or ""}
+        if session_token:
+            row = conn.execute(
+                "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id "
+                "WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL "
+                "AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
+                (business_slug, _hash_token(str(session_token)), _now()),
+            ).fetchone()
+            user = store._row_to_dict(row)
+            if not user or str(user.get("id") or "") != str(app_user_id):
+                raise AppMediaError("uploader app user not found")
+            return {
+                "id": str(user.get("id") or ""),
+                "email": str(user.get("email") or ""),
+                "tier": str(user.get("tier") or ""),
+            }
         row = conn.execute(
             "SELECT id, email, tier, status FROM app_users WHERE business_slug = ? AND id = ?",
             (business_slug, app_user_id),
@@ -96,25 +130,43 @@ def _resolve_uploader(store: Any, business_slug: str, app_user_id: str) -> dict[
         return {"id": str(user.get("id") or ""), "email": str(user.get("email") or ""), "tier": str(user.get("tier") or "")}
 
 
-def _usage_bytes(store: Any, business_slug: str, app_user_id: str | None) -> int:
+def _usage_bytes(
+    store: Any,
+    business_slug: str,
+    app_user_id: str | None,
+    *,
+    session_token: str | None = None,
+) -> int:
     try:
-        from .core import _PGConn
+        from .core import _PGConn, _hash_token, _require_app_database_plane_for_pg
     except Exception:
-        from plugins.takyon.core import _PGConn
+        from plugins.takyon.core import _PGConn, _hash_token, _require_app_database_plane_for_pg
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
+            if app_user_id is not None:
+                if not session_token:
+                    raise AppMediaError("session_token is required")
+                _require_app_database_plane_for_pg(store, conn, action="app media usage read")
+                with store._pg_app_scope(
+                    conn,
+                    business_slug,
+                    session_token=session_token,
+                    app_user_id=None if session_token else app_user_id,
+                ):
+                    with store._leaf_conn(conn) as leaf:
+                        row = leaf.execute(
+                            "select user_bytes from takyon_app_media_usage(%s, %s)",
+                            (business_slug, _hash_token(str(session_token))),
+                        ).fetchone()
+                if row is None:
+                    return 0
+                return int(row["user_bytes"] if isinstance(row, Mapping) else row[0] or 0)
             with store._leaf_conn(conn) as leaf:
-                if app_user_id is None:
-                    row = leaf.execute(
-                        "select coalesce(sum(size_bytes), 0) from app_media where business_slug = %s",
-                        (business_slug,),
-                    ).fetchone()
-                else:
-                    row = leaf.execute(
-                        "select coalesce(sum(size_bytes), 0) from app_media where business_slug = %s and app_user_id = %s",
-                        (business_slug, app_user_id),
-                    ).fetchone()
+                row = leaf.execute(
+                    "select coalesce(sum(size_bytes), 0) from app_media where business_slug = %s",
+                    (business_slug,),
+                ).fetchone()
             return int(row[0]) if row else 0
         if app_user_id is None:
             row = conn.execute(
@@ -126,25 +178,72 @@ def _usage_bytes(store: Any, business_slug: str, app_user_id: str | None) -> int
                 "SELECT COALESCE(SUM(size_bytes), 0) FROM app_media WHERE business_slug = ? AND app_user_id = ?",
                 (business_slug, app_user_id),
             ).fetchone()
-        return int(row[0]) if row else 0
+    return int(row[0]) if row else 0
+
+
+def _usage_totals(
+    store: Any,
+    business_slug: str,
+    app_user_id: str,
+    *,
+    session_token: str | None = None,
+) -> tuple[int, int]:
+    try:
+        from .core import _PGConn, _hash_token, _require_app_database_plane_for_pg
+    except Exception:
+        from plugins.takyon.core import _PGConn, _hash_token, _require_app_database_plane_for_pg
+
+    with store._connect() as conn:
+        if isinstance(conn, _PGConn):
+            if not session_token:
+                raise AppMediaError("session_token is required")
+            _require_app_database_plane_for_pg(store, conn, action="app media usage read")
+            with store._pg_app_scope(
+                conn,
+                business_slug,
+                session_token=session_token,
+                app_user_id=None if session_token else app_user_id,
+            ):
+                with store._leaf_conn(conn) as leaf:
+                    row = leaf.execute(
+                        "select user_bytes, business_bytes from takyon_app_media_usage(%s, %s)",
+                        (business_slug, _hash_token(str(session_token))),
+                    ).fetchone()
+            if row is None:
+                return 0, 0
+            if isinstance(row, Mapping):
+                return int(row["user_bytes"] or 0), int(row["business_bytes"] or 0)
+            return int(row[0] or 0), int(row[1] or 0)
+    return (
+        _usage_bytes(store, business_slug, app_user_id, session_token=session_token),
+        _usage_bytes(store, business_slug, None),
+    )
 
 
 def _insert_media_row(store: Any, *, business_slug: str, app_user_id: str, media_id: str,
-                      filename: str, mime: str, size_bytes: int, storage_key: str) -> None:
+                      filename: str, mime: str, size_bytes: int, storage_key: str,
+                      session_token: str | None = None) -> None:
     try:
-        from .core import _PGConn
+        from .core import _PGConn, _require_app_database_plane_for_pg
     except Exception:
-        from plugins.takyon.core import _PGConn
+        from plugins.takyon.core import _PGConn, _require_app_database_plane_for_pg
 
     now = _now()
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
-            with store._leaf_conn(conn) as leaf:
-                leaf.execute(
-                    "insert into app_media (id, business_slug, app_user_id, media_id, filename, mime, "
-                    "size_bytes, storage_key, created_at) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (uuid.uuid4().hex, business_slug, app_user_id, media_id, filename, mime, size_bytes, storage_key, now),
-                )
+            _require_app_database_plane_for_pg(store, conn, action="app media row insert")
+            with store._pg_app_scope(
+                conn,
+                business_slug,
+                session_token=session_token,
+                app_user_id=None if session_token else app_user_id,
+            ):
+                with store._leaf_conn(conn) as leaf:
+                    leaf.execute(
+                        "insert into app_media (id, business_slug, app_user_id, media_id, filename, mime, "
+                        "size_bytes, storage_key, created_at) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (uuid.uuid4().hex, business_slug, app_user_id, media_id, filename, mime, size_bytes, storage_key, now),
+                    )
         else:
             conn.execute(
                 "INSERT INTO app_media (id, business_slug, app_user_id, media_id, filename, mime, "
@@ -154,20 +253,40 @@ def _insert_media_row(store: Any, *, business_slug: str, app_user_id: str, media
             conn.commit()
 
 
-def _media_row(store: Any, business_slug: str, media_id: str) -> dict[str, Any] | None:
+def _media_row(
+    store: Any,
+    business_slug: str,
+    media_id: str,
+    *,
+    app_user_id: str | None = None,
+    session_token: str | None = None,
+) -> dict[str, Any] | None:
     try:
-        from .core import _PGConn
+        from .core import _PGConn, _require_app_database_plane_for_pg
     except Exception:
-        from plugins.takyon.core import _PGConn
+        from plugins.takyon.core import _PGConn, _require_app_database_plane_for_pg
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
-            with store._leaf_conn(conn) as leaf:
-                row = leaf.execute(
-                    "select app_user_id, mime, size_bytes, storage_key from app_media "
-                    "where business_slug = %s and media_id = %s",
-                    (business_slug, media_id),
-                ).fetchone()
+            if app_user_id:
+                _require_app_database_plane_for_pg(store, conn, action="app media row read")
+            scope = (
+                store._pg_app_scope(
+                    conn,
+                    business_slug,
+                    session_token=session_token,
+                    app_user_id=None if session_token else app_user_id,
+                )
+                if app_user_id or session_token
+                else nullcontext()
+            )
+            with scope:
+                with store._leaf_conn(conn) as leaf:
+                    row = leaf.execute(
+                        "select app_user_id, mime, size_bytes, storage_key from app_media "
+                        "where business_slug = %s and media_id = %s",
+                        (business_slug, media_id),
+                    ).fetchone()
             if row is None:
                 return None
             return {"app_user_id": row[0], "mime": row[1], "size_bytes": row[2], "storage_key": row[3]}
@@ -179,19 +298,39 @@ def _media_row(store: Any, business_slug: str, media_id: str) -> dict[str, Any] 
         return store._row_to_dict(row) if row is not None else None
 
 
-def _delete_media_row(store: Any, business_slug: str, media_id: str) -> None:
+def _delete_media_row(
+    store: Any,
+    business_slug: str,
+    media_id: str,
+    *,
+    app_user_id: str | None = None,
+    session_token: str | None = None,
+) -> None:
     try:
-        from .core import _PGConn
+        from .core import _PGConn, _require_app_database_plane_for_pg
     except Exception:
-        from plugins.takyon.core import _PGConn
+        from plugins.takyon.core import _PGConn, _require_app_database_plane_for_pg
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
-            with store._leaf_conn(conn) as leaf:
-                leaf.execute(
-                    "delete from app_media where business_slug = %s and media_id = %s",
-                    (business_slug, media_id),
+            if app_user_id:
+                _require_app_database_plane_for_pg(store, conn, action="app media row delete")
+            scope = (
+                store._pg_app_scope(
+                    conn,
+                    business_slug,
+                    session_token=session_token,
+                    app_user_id=None if session_token else app_user_id,
                 )
+                if app_user_id or session_token
+                else nullcontext()
+            )
+            with scope:
+                with store._leaf_conn(conn) as leaf:
+                    leaf.execute(
+                        "delete from app_media where business_slug = %s and media_id = %s",
+                        (business_slug, media_id),
+                    )
         else:
             conn.execute(
                 "DELETE FROM app_media WHERE business_slug = ? AND media_id = ?",
@@ -202,15 +341,17 @@ def _delete_media_row(store: Any, business_slug: str, media_id: str) -> None:
 
 def _session_user_id(store: Any, business_slug: str, session_token: str) -> str | None:
     try:
-        from .core import _PGConn, _resolve_sqlite_app_user
+        from .core import _PGConn, _require_app_database_plane_for_pg, _resolve_sqlite_app_user
     except Exception:
-        from plugins.takyon.core import _PGConn, _resolve_sqlite_app_user
+        from plugins.takyon.core import _PGConn, _require_app_database_plane_for_pg, _resolve_sqlite_app_user
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
+            _require_app_database_plane_for_pg(store, conn, action="app media session read")
             leaves = store._app_leaves()
-            with store._leaf_conn(conn) as leaf:
-                user = leaves["identity"].validate_session(leaf, business_slug, session_token)
+            with store._pg_app_scope(conn, business_slug, session_token=session_token):
+                with store._leaf_conn(conn) as leaf:
+                    user = leaves["identity"].validate_session(leaf, business_slug, session_token)
             return user.id if user is not None else None
         user = _resolve_sqlite_app_user(conn, business_slug, session_token=session_token)
         return str(user.get("id")) if user else None
@@ -244,12 +385,15 @@ def store_media(
     *,
     business_slug: str,
     app_user_id: str,
+    app_user_email: str = "",
+    app_user_tier: str = "",
     filename: str,
     content: bytes,
     mime: str,
     idempotency_key: str,
     test_mode: bool,
     principal: Mapping[str, Any],
+    session_token: str | None = None,
 ) -> dict[str, Any]:
     mime = str(mime or "").strip().lower()
     if mime not in _ALLOWED_MIME:
@@ -260,14 +404,32 @@ def store_media(
     if size_bytes > _max_bytes():
         raise MediaQuotaExceeded(f"media exceeds the {_max_bytes()} byte limit ({size_bytes})")
 
-    uploader = _resolve_uploader(store, business_slug, str(app_user_id or "").strip())
+    if app_user_email or app_user_tier:
+        uploader = {
+            "id": str(app_user_id or "").strip(),
+            "email": str(app_user_email or ""),
+            "tier": str(app_user_tier or ""),
+        }
+    else:
+        uploader = _resolve_uploader(
+            store,
+            business_slug,
+            str(app_user_id or "").strip(),
+            session_token=session_token,
+        )
+    if not uploader["id"]:
+        raise AppMediaError("uploader app user not found")
     if is_service_email(uploader["email"]):
         raise AppMediaError("service identities cannot upload media")
 
-    user_used = _usage_bytes(store, business_slug, uploader["id"])
+    user_used, business_used = _usage_totals(
+        store,
+        business_slug,
+        uploader["id"],
+        session_token=session_token,
+    )
     if user_used + size_bytes > _user_quota():
         raise MediaQuotaExceeded(f"per-user media quota exceeded: {user_used + size_bytes}/{_user_quota()} bytes")
-    business_used = _usage_bytes(store, business_slug, None)
     if business_used + size_bytes > _business_quota():
         raise MediaQuotaExceeded(f"per-business media quota exceeded: {business_used + size_bytes}/{_business_quota()} bytes")
 
@@ -279,6 +441,7 @@ def store_media(
         reservation_key=idempotency_key,
         app_user_id=uploader["id"],
         app_user_tier=uploader["tier"] or None,
+        session_token=session_token,
         estimate_microusd=price,
         route="media",
         metadata=dict(metadata),
@@ -300,15 +463,21 @@ def store_media(
             mime=mime,
             size_bytes=size_bytes,
             storage_key=storage_key,
+            session_token=session_token,
         )
     except Exception as exc:
         _app_actions._release_usage(
-            store, business_slug, reservation_key=idempotency_key, error=str(exc)[:300], metadata=dict(metadata)
+            store,
+            business_slug,
+            reservation_key=idempotency_key,
+            session_token=session_token,
+            error=str(exc)[:300],
+            metadata=dict(metadata),
         )
         raise
 
     _app_actions._settle_usage(
-        store, business_slug, reservation_key=idempotency_key, actual_microusd=price,
+        store, business_slug, reservation_key=idempotency_key, session_token=session_token, actual_microusd=price,
         metadata={**metadata, "media_id": media_id, "size_bytes": size_bytes, "suppressed": bool(test_mode)},
     )
 
@@ -341,12 +510,13 @@ def get_media(store: Any, *, business_slug: str, media_id: str, session_token: s
     if not token:
         raise AppMediaError("app account not found")
     try:
-        from .core import _PGConn, _resolve_sqlite_app_user
+        from .core import _PGConn, _require_app_database_plane_for_pg, _resolve_sqlite_app_user
     except Exception:
-        from plugins.takyon.core import _PGConn, _resolve_sqlite_app_user
+        from plugins.takyon.core import _PGConn, _require_app_database_plane_for_pg, _resolve_sqlite_app_user
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
+            _require_app_database_plane_for_pg(store, conn, action="app media read")
             leaves = store._app_leaves()
             with store._pg_app_scope(conn, business_slug, session_token=token):
                 with store._leaf_conn(conn) as leaf:
@@ -375,8 +545,21 @@ def get_media(store: Any, *, business_slug: str, media_id: str, session_token: s
     return {"content": content, "mime": str(row_dict["mime"]), "size_bytes": int(row_dict["size_bytes"])}
 
 
-def delete_media(store: Any, *, business_slug: str, media_id: str, app_user_id: str) -> dict[str, Any]:
-    row = _media_row(store, business_slug, str(media_id or "").strip())
+def delete_media(
+    store: Any,
+    *,
+    business_slug: str,
+    media_id: str,
+    app_user_id: str,
+    session_token: str | None = None,
+) -> dict[str, Any]:
+    row = _media_row(
+        store,
+        business_slug,
+        str(media_id or "").strip(),
+        app_user_id=app_user_id,
+        session_token=session_token,
+    )
     if row is None:
         raise AppMediaError("media not found")
     if str(row["app_user_id"]) != str(app_user_id):
@@ -385,5 +568,11 @@ def delete_media(store: Any, *, business_slug: str, media_id: str, app_user_id: 
         _backend(store).delete(str(row["storage_key"]))
     except Exception:
         pass  # row deletion is authoritative; orphaned bytes are swept separately
-    _delete_media_row(store, business_slug, str(media_id))
+    _delete_media_row(
+        store,
+        business_slug,
+        str(media_id),
+        app_user_id=app_user_id,
+        session_token=session_token,
+    )
     return {"media_id": str(media_id), "deleted": True}

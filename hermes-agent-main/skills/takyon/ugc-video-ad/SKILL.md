@@ -30,7 +30,7 @@ metadata:
       - product/ugc-ads/<slug>/script.json
       - product/ugc-ads/<slug>/reference.png
 
-required_environment_variables: [OPENAI_API_KEY, FAL_KEY]
+required_environment_variables: []
 required_credential_files: []
 ---
 
@@ -75,8 +75,10 @@ multi-business assets (this skill is business-scoped).
 
 ## Prerequisites
 
-- **`OPENAI_API_KEY`** — gpt-image-2 reference image (env or a local `.env`; never hardcode).
-- **`FAL_KEY`** — Kling image-to-video via fal.ai (env or `.env`).
+- Live renders must go through `business_ugc_ad_generate`, which gates creative credits and routes
+  provider credentials through Safebox.
+- Direct local pipeline debugging may pass `--openai-api-key-file` and `--fal-key-file`; provider
+  keys are not read from ambient env or local `.env` by this skill.
 - **`ffmpeg` + `ffprobe`** on `PATH` — stitching and post.
 - Python deps for the live path: `httpx`, `fal-client`.
 - The **`business_ugc_ad_generate`** tool must be registered (gated in frontmatter
@@ -187,13 +189,14 @@ Published under `product/ugc-ads/<slug>/`:
 3. Use the canonical tool (`business_ugc_ad_write`) and the canonical path
    (`product/ugc-ads/<slug>/`) — never parallel state.
 4. Keep the **script** and **production** layers separate (see Overview).
-5. Credentials come from env/`.env` only; never hardcode keys.
+5. Live credentials stay behind Safebox. Direct local debugging uses explicit key files only;
+   never rely on ambient env provider keys and never hardcode keys.
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| `OPENAI_API_KEY/FAL_KEY is not set` | Export it or add to a local `.env`; never hardcode. |
+| `OPENAI_API_KEY/FAL_KEY is not available` | Use `business_ugc_ad_generate` for live Takyon renders, or pass `--openai-api-key-file` and `--fal-key-file` for direct local debugging. |
 | `ffmpeg/ffprobe not found` | Install ffmpeg and ensure both are on `PATH`. |
 | Clip flagged "speech > cap, clamped" | A single beat exceeds `--max-clip`; split that beat in the script. |
 | Person/voice changes between clips | Ensure continuity ran (clip N from last frame of N-1); keep one persona. |

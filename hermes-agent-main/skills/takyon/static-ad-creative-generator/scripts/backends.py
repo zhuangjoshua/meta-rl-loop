@@ -7,8 +7,9 @@ strategy, spec, prompt compilation, QA) is backend-agnostic. To swap backends, i
 
 API keys are never hardcoded. On a RUNTIME plane the creative gateway injects the safebox proxy env
 (TAKYON_CREATIVE_VIA_PROXY=1 + TAKYON_SAFEBOX_URL + TAKYON_SAFEBOX_TOKEN) and the OpenAI image call
-routes through the safebox PROXY — the raw ``OPENAI_API_KEY`` is NEVER read on that plane. In local
-dev (proxy env absent) the OpenAI SDK reads ``OPENAI_API_KEY`` from the environment.
+routes through the safebox PROXY — the raw ``OPENAI_API_KEY`` is NEVER read on that plane. Direct
+local-dev SDK calls require an explicit ``--api-key-file`` value; this skill does not read provider
+keys from process env.
 """
 
 from __future__ import annotations
@@ -36,8 +37,8 @@ DEFAULT_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
 # OPENAI_API_KEY LOCALLY, and forwards, so the raw key is NEVER read on this
 # plane. The gated route returns the verbatim OpenAI JSON, so the rest of this
 # file handles the SAME b64_json response shape as the direct SDK path. Fail
-# closed: a failure surfaces, never a raw-key fallback. The direct SDK
-# (OPENAI_API_KEY) path runs ONLY in local dev (gate env absent).
+# closed: a failure surfaces, never a raw-key fallback. The direct SDK path is explicit-key only and
+# intended for local dev (gate env absent).
 # ---------------------------------------------------------------------------
 _VIA_PROXY_ENV = "TAKYON_CREATIVE_VIA_PROXY"
 _SAFEBOX_URL_ENV = "TAKYON_SAFEBOX_URL"
@@ -205,7 +206,7 @@ class OpenAIImageBackend(ImageBackend):
     """OpenAI Images backend. Default model gpt-image-2 (override with OPENAI_IMAGE_MODEL).
 
     Uses ``images.generate`` normally, or ``images.edit`` when reference images are supplied
-    so the model conditions on brand/reference art. The SDK reads OPENAI_API_KEY from env.
+    so the model conditions on brand/reference art. Direct SDK use requires an explicit key.
     """
 
     name = "openai"
@@ -217,10 +218,11 @@ class OpenAIImageBackend(ImageBackend):
         self.api_key = api_key
 
     def _client(self):
-        key = self.api_key or os.environ.get("OPENAI_API_KEY")
+        key = self.api_key
         if not key:
             raise RuntimeError(
-                "No API key available. Pass --api-key-file PATH or set OPENAI_API_KEY."
+                "No API key available. Use business_static_ad_generate for live Takyon renders "
+                "or pass --api-key-file PATH for local direct SDK dev."
             )
         try:
             from openai import OpenAI

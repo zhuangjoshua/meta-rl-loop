@@ -97,10 +97,13 @@ function activePaidEntitlement(entitlement: Record<string, unknown>): boolean {
 
 export function isAccountEntitled(payload: AccountPayload | null): boolean {
   if (!payload || !isObject(payload)) return false;
+  if (payload.entitled === true) return true;
+  if (isObject(payload.plan) && payload.plan.active === true) return true;
   if (accountEntitlements(payload).some((entitlement) => activePaidEntitlement(entitlement))) {
     return true;
   }
-  return false;
+  const user = accountUser(payload);
+  return isPaidTier(user?.tier);
 }
 
 export function subscriptionStateFromAccount(payload: AccountPayload | null): string {
@@ -126,6 +129,10 @@ export function subscriptionStateFromAccount(payload: AccountPayload | null): st
       return (rank[left] ?? 9) - (rank[right] ?? 9);
     });
   if (ranked[0]) return ranked[0];
+  const user = accountUser(payload);
+  if (isPaidTier(user?.tier)) {
+    return lowerText(user?.tier) === "trial" ? "trialing" : "active";
+  }
   return "none";
 }
 

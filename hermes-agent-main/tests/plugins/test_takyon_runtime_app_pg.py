@@ -27,7 +27,9 @@ from psycopg.conninfo import make_conninfo  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import (  # noqa: E402
     DatabaseAccessDenied,
+    DatabaseRoleMismatch,
     RuntimeNotConfigured,
+    assert_takyon_pg_role,
     build_runtime_app,
     resolve_database_url,
 )
@@ -39,6 +41,42 @@ def _sub() -> str:
 
 def _auth(raw: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {raw}"}
+
+
+class _RoleResult:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _RoleConn:
+    def __init__(self, *, session_user: str, current_user: str):
+        self.session_user = session_user
+        self.current_user = current_user
+
+    def execute(self, _sql, _params=None):
+        return _RoleResult(
+            {
+                "session_user": self.session_user,
+                "current_user": self.current_user,
+            }
+        )
+
+
+def _app_route_paths(app) -> set[str]:
+    paths: set[str] = set()
+    for route in app.routes:
+        path = str(getattr(route, "path", "") or "")
+        if path:
+            paths.add(path)
+        original_router = getattr(route, "original_router", None)
+        for child in getattr(original_router, "routes", []) if original_router is not None else []:
+            child_path = str(getattr(child, "path", "") or "")
+            if child_path:
+                paths.add(child_path)
+    return paths
 
 
 @pytest.fixture
@@ -103,13 +141,70 @@ def test_build_without_database_url_raises(monkeypatch):
     # where TAKYON_TEST_PG_DSN is unset.
     from plugins.takyon import safebox
 
-    for name in ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"):
+    for name in (
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRES_PRISMA_URL",
+        "POSTGRES_URL_NON_POOLING",
+        "TAKYON_OPERATOR_DATABASE_URL",
+        "TAKYON_APP_DATABASE_URL",
+        "TAKYON_SAFEBOX_DATABASE_URL",
+        "TAKYON_MIGRATION_DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
     monkeypatch.setattr(safebox, "load_env", lambda: {})
     with pytest.raises(RuntimeNotConfigured):
         build_runtime_app()
     with pytest.raises(RuntimeNotConfigured):
         resolve_database_url()
+
+
+def test_build_runtime_app_operator_host_mounts_only_operator_plane(monkeypatch):
+    import plugins.takyon.runtime_app as runtime_app_mod
+
+    calls: list[str | None] = []
+
+    def _fake_resolve_database_url(explicit=None, *, plane=None):
+        calls.append(plane)
+        if plane == "app":
+            raise AssertionError("operator host must not resolve the app-plane DSN")
+        return "postgresql://operator.example.com/runtime"
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setattr(runtime_app_mod, "resolve_database_url", _fake_resolve_database_url)
+
+    app = runtime_app_mod.build_runtime_app()
+    route_paths = _app_route_paths(app)
+
+    assert calls == ["operator"]
+    assert "/v1/me" in route_paths
+    assert "/internal/creative-gateway/logo-render" in route_paths
+    assert "/internal/ai-gateway/messages" not in route_paths
+
+
+def test_build_runtime_app_subuser_host_mounts_only_app_plane(monkeypatch):
+    import plugins.takyon.runtime_app as runtime_app_mod
+
+    calls: list[str | None] = []
+
+    def _fake_resolve_database_url(explicit=None, *, plane=None):
+        calls.append(plane)
+        if plane == "operator":
+            raise AssertionError("subuser host must not resolve the operator-plane DSN")
+        return "postgresql://app.example.com/runtime"
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+    monkeypatch.setattr(runtime_app_mod, "resolve_database_url", _fake_resolve_database_url)
+
+    app = runtime_app_mod.build_runtime_app()
+    route_paths = _app_route_paths(app)
+
+    assert calls == ["app"]
+    assert "/internal/ai-gateway/messages" in route_paths
+    assert "/v1/me" not in route_paths
+    assert "/internal/creative-gateway/logo-render" not in route_paths
 
 
 def test_resolve_database_url_blocks_macos_by_default(monkeypatch):
@@ -139,10 +234,46 @@ def test_resolve_database_url_allows_remote_on_approved_vps_runtime(monkeypatch)
     )
 
 
-def test_resolve_database_url_memoises_the_env_lookup(monkeypatch):
-    # The no-explicit lookup is process-static but runs on EVERY product DB op; on a subuser node
-    # it is a remote POST /v1/env/first to the Safebox. Re-resolving per op produced a ~1700 req/min
-    # Safebox storm that could self-DoS it during a blip. Memoise: one round-trip per process.
+def test_resolve_database_url_requires_plane_specific_dsn_on_host_role(monkeypatch):
+    import plugins.takyon.runtime_app as runtime_app_mod
+    from plugins.takyon import safebox
+
+    runtime_app_mod.reset_database_url_cache()
+    monkeypatch.setattr("plugins.takyon.runtime_app.platform.system", lambda: "Linux")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setenv("TAKYON_HOME", "/opt/takyon/.takyon")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://db.example.com/legacy")
+    monkeypatch.delenv("TAKYON_OPERATOR_DATABASE_URL", raising=False)
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
+
+    try:
+        with pytest.raises(RuntimeNotConfigured, match="operator database URL"):
+            resolve_database_url()
+    finally:
+        runtime_app_mod.reset_database_url_cache()
+
+
+def test_resolve_database_url_uses_named_app_plane(monkeypatch):
+    import plugins.takyon.runtime_app as runtime_app_mod
+    from plugins.takyon import safebox
+
+    runtime_app_mod.reset_database_url_cache()
+    monkeypatch.setattr("plugins.takyon.runtime_app.platform.system", lambda: "Linux")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+    monkeypatch.setenv("TAKYON_HOME", "/opt/takyon/.takyon")
+    monkeypatch.delenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", raising=False)
+    monkeypatch.setenv("TAKYON_APP_DATABASE_URL", "postgresql://db.example.com/app")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://db.example.com/operator")
+    monkeypatch.setattr(safebox, "load_env", lambda: {})
+
+    try:
+        assert resolve_database_url() == "postgresql://db.example.com/app"
+        assert resolve_database_url(plane="app") == "postgresql://db.example.com/app"
+    finally:
+        runtime_app_mod.reset_database_url_cache()
+
+
+def test_resolve_database_url_memoises_the_local_env_lookup(monkeypatch):
     import plugins.takyon.runtime_app as runtime_app_mod
     from plugins.takyon import safebox
 
@@ -151,19 +282,68 @@ def test_resolve_database_url_memoises_the_env_lookup(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
     monkeypatch.setenv("TAKYON_HOME", "/opt/takyon/.takyon")
     monkeypatch.delenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", raising=False)
+    monkeypatch.setenv("TAKYON_OPERATOR_DATABASE_URL", "postgresql://db.example.com/prod")
 
     calls = {"n": 0}
 
-    def _counting_first(*_keys):
+    def _counting_load_env():
         calls["n"] += 1
-        return "postgresql://db.example.com/prod"
+        return {}
 
-    monkeypatch.setattr(safebox, "first_env_backed_value", _counting_first)
+    monkeypatch.setattr(safebox, "load_env", _counting_load_env)
 
     try:
         first = resolve_database_url()
         second = resolve_database_url()
         assert first == second == "postgresql://db.example.com/prod"
-        assert calls["n"] == 1, "DB-URL env lookup must be memoised (one Safebox round-trip per process)"
+        assert calls["n"] == 1, "DB-URL env lookup must be memoised once per process"
     finally:
         runtime_app_mod.reset_database_url_cache()
+
+
+def test_assert_takyon_pg_role_accepts_direct_app_runtime_role():
+    assert assert_takyon_pg_role(
+        _RoleConn(session_user="takyon_app_runtime", current_user="takyon_app_runtime"),
+        "app",
+    ) == ("takyon_app_runtime", "takyon_app_runtime")
+
+
+def test_assert_takyon_pg_role_rejects_legacy_app_role_by_default(monkeypatch):
+    monkeypatch.delenv("TAKYON_ALLOW_LEGACY_DB_ROLES", raising=False)
+    with pytest.raises(DatabaseRoleMismatch, match="app database role mismatch"):
+        assert_takyon_pg_role(
+            _RoleConn(session_user="takyon_app", current_user="takyon_app"),
+            "app",
+        )
+
+
+def test_assert_takyon_pg_role_accepts_legacy_roles_only_with_explicit_cutover_opt_in(monkeypatch):
+    monkeypatch.setenv("TAKYON_ALLOW_LEGACY_DB_ROLES", "1")
+    assert assert_takyon_pg_role(
+        _RoleConn(session_user="takyon_app", current_user="takyon_app"),
+        "app",
+    ) == ("takyon_app", "takyon_app")
+    assert assert_takyon_pg_role(
+        _RoleConn(session_user="takyon_runtime", current_user="takyon_runtime"),
+        "operator",
+    ) == ("takyon_runtime", "takyon_runtime")
+    assert assert_takyon_pg_role(
+        _RoleConn(session_user="postgres", current_user="postgres"),
+        "safebox",
+    ) == ("postgres", "postgres")
+
+
+def test_assert_takyon_pg_role_rejects_demoted_operator_session_for_app():
+    with pytest.raises(DatabaseRoleMismatch, match="app database role mismatch"):
+        assert_takyon_pg_role(
+            _RoleConn(session_user="takyon_runtime", current_user="takyon_app"),
+            "app",
+        )
+
+
+def test_assert_takyon_pg_role_rejects_app_current_user_for_operator():
+    with pytest.raises(DatabaseRoleMismatch, match="operator database role mismatch"):
+        assert_takyon_pg_role(
+            _RoleConn(session_user="takyon_runtime", current_user="takyon_app"),
+            "operator",
+        )

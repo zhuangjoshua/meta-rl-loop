@@ -89,9 +89,10 @@ def app_fee_bps() -> int:
 
 
 # The mutating ops route their writes through the migration-0038 SECURITY DEFINER functions
-# (safebox_custody_*), the only sanctioned writers of the custody ledger once the runtime runs as the
-# demoted `takyon_runtime` role. Each runs under the restricted role (ledger_gate); the function still
-# executes its row ops with the owner's privileges, so the money math is unchanged. Result columns:
+# (safebox_custody_*), the only sanctioned writers of the custody ledger from live request paths. The
+# shared ledger gate requires a Safebox authority DB login; runtime planes do not demote into a
+# money-writing role. The function still executes its row ops with the owner's privileges, so the money
+# math is unchanged. Result columns:
 #   0 refusal   1 fig_requested_cents   2 fig_owed_cents   3 new_owed
 
 

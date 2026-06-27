@@ -493,6 +493,71 @@ def test_reserve_usage_pg_uses_leaf_conn_and_plan_limit(monkeypatch):
     assert captured["app_user_tier"] == "paid"
 
 
+def test_reserve_usage_pg_session_bound_limit_port(monkeypatch):
+    from plugins.takyon import app_usage as takyon_app_usage
+
+    class FakePGConn:
+        pass
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Raw:
+        def __init__(self):
+            self.statements: list[tuple[str, tuple[object, ...]]] = []
+
+        def execute(self, sql, params=()):
+            self.statements.append((sql, tuple(params or ())))
+            return _Result(("u_123", "paid", "monthly", 5_000_000))
+
+    raw_conn = _Raw()
+    captured: dict[str, object] = {}
+
+    class _Store:
+        @contextmanager
+        def _connect(self):
+            yield FakePGConn()
+
+        @contextmanager
+        def _leaf_conn(self, conn):
+            assert isinstance(conn, FakePGConn)
+            yield raw_conn
+
+        def _app_leaves(self):
+            raise AssertionError("session-bound PG path must not raw-read entitlement leaves")
+
+    def _fake_reserve(conn, business_slug, **kwargs):
+        captured["conn"] = conn
+        captured["business_slug"] = business_slug
+        captured.update(kwargs)
+
+    monkeypatch.setattr(takyon_core, "_PGConn", FakePGConn)
+    monkeypatch.setattr(takyon_app_usage, "reserve_usage", _fake_reserve)
+
+    app_actions._reserve_usage(
+        _Store(),
+        "mathflow",
+        reservation_key="idem_123",
+        app_user_id="u_123",
+        app_user_tier="paid",
+        session_token="sess_123",
+        estimate_microusd=2_000,
+        route="/api/takyon/apps/mathflow/actions/coach",
+        metadata={"trigger": "http"},
+    )
+
+    sql = "\n".join(statement for statement, _ in raw_conn.statements)
+    assert "takyon_app_action_usage_limit" in sql
+    assert captured["conn"] is raw_conn
+    from plugins.takyon import ai_gateway as _g
+    assert captured["user_monthly_limit_microusd"] == 5_000_000 * _g._USAGE_WINDOW_DAYS // _g._PLAN_FUNDING_PERIOD_DAYS
+    assert captured["app_user_tier"] == "paid"
+
+
 def test_settle_and_release_usage_pg_use_leaf_conn(monkeypatch):
     from plugins.takyon import app_usage as takyon_app_usage
 

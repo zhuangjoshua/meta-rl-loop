@@ -57,6 +57,17 @@ def _load_json(path: str) -> dict:
         return json.load(f)
 
 
+def _read_key_file(path: str | None) -> str | None:
+    if not path:
+        return None
+    with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
+        for line in f:
+            value = line.strip()
+            if value and not value.startswith("#"):
+                return value
+    raise SystemExit(f"{path!r} contained no key")
+
+
 def _beats_from(obj) -> list[pl.Beat]:
     """Accept {beats:[...]}, a bare [...] list, or app-shaped {dialogue_action:[...]}."""
     if isinstance(obj, dict):
@@ -182,7 +193,9 @@ def generate(brief, script, beats, image, persona, clips, slug, args):
     image_prompt = pl.compile_image_prompt(image)
     ref_path = os.path.join(work, "reference.png")
     print("generating reference image (gpt-image-2)…")
-    pl.generate_image(image_prompt, ref_path, size=pl.IMAGE_SIZE_9_16)
+    openai_api_key = _read_key_file(args.openai_api_key_file)
+    fal_key = _read_key_file(args.fal_key_file)
+    pl.generate_image(image_prompt, ref_path, size=pl.IMAGE_SIZE_9_16, api_key=openai_api_key)
 
     clip_paths: list[str] = []
     start_image = ref_path
@@ -193,8 +206,8 @@ def generate(brief, script, beats, image, persona, clips, slug, args):
         clip_start_image = ref_path if args.transition_mode == "jumpcut" else start_image
         prompt = pl.compile_clip_prompt(c["beats"], clip_persona(persona, i, args.transition_mode))
         print(f"clip {i}: uploading {clip_start_label(i, args.transition_mode)} + generating {c['duration']}s Kling clip…")
-        image_url = pl.upload_image(clip_start_image)
-        video_url = pl.generate_clip(image_url, prompt, c["duration"], generate_audio=True)
+        image_url = pl.upload_image(clip_start_image, fal_key=fal_key)
+        video_url = pl.generate_clip(image_url, prompt, c["duration"], generate_audio=True, fal_key=fal_key)
         cp = os.path.join(work, f"c{i}.mp4")
         pl.download(video_url, cp)
         clip_paths.append(cp)
@@ -287,6 +300,14 @@ def main(argv=None):
     ap.add_argument("--skip-post", action="store_true", help="skip grain/jump-cut post pass")
     ap.add_argument("--workdir", help="scratch dir for clips (default: a temp dir)")
     ap.add_argument("--env-file", default=".env", help="local .env to load (default: ./.env)")
+    ap.add_argument(
+        "--openai-api-key-file",
+        help="explicit local OpenAI key file for direct-provider debugging; ignored in Safebox proxy mode",
+    )
+    ap.add_argument(
+        "--fal-key-file",
+        help="explicit local FAL key file for direct-provider debugging; ignored in Safebox proxy mode",
+    )
     ap.add_argument("--wps", type=float, default=WORDS_PER_SECOND,
                     help="words/sec for clip planning (brisk UGC pace; raise to pack more / speak faster)")
     ap.add_argument("--max-clip", type=int, default=MAX_CLIP, help="max seconds of speech per clip")

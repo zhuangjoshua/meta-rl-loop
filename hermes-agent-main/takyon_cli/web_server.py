@@ -60,6 +60,7 @@ from takyon_cli.config import (
 from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.app_runtime_constants import APP_SESSION_COOKIE
 from plugins.takyon.core import (
+    app_runtime_database_plane,
     handle_business_act_on_app_connection,
     handle_business_cancel_app_subscription,
     handle_business_create_app_checkout,
@@ -636,7 +637,6 @@ _AUTH0_STATE_MAX_AGE_SECONDS = 10 * 60
 _AUTH0_CONFIG_CACHE_MISSING = object()
 _AUTH0_CONFIG_CACHE_KEY: tuple[str, ...] | None = None
 _AUTH0_CONFIG_CACHE_VALUE: object = _AUTH0_CONFIG_CACHE_MISSING
-_RUNTIME_DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
 _POSTGRES_RUNTIME_ROUTES_MOUNTED = False
 _REQUEST_RUNTIME_DATABASE_URL_ATTR = "_takyon_runtime_database_url"
 _REQUEST_RUNTIME_DATABASE_URL_MISSING = object()
@@ -669,13 +669,11 @@ def _env_value(key: str) -> str:
         return ""
 
 
-def _resolve_runtime_database_url() -> str:
-    """Resolve the Postgres runtime URL from the same env sources the dashboard already uses."""
+def _resolve_runtime_database_url(*, plane: str = "operator") -> str:
+    """Resolve the Postgres runtime URL for one authority plane."""
     from plugins.takyon.runtime_app import resolve_database_url
 
-    return resolve_database_url(
-        explicit=takyon_safebox.first_env_backed_value(*_RUNTIME_DATABASE_URL_ENV) or None
-    )
+    return resolve_database_url(plane=plane)
 
 
 def _request_runtime_database_url(request: Request) -> str | None:
@@ -1125,6 +1123,12 @@ _OPERATOR_ONLY_HTTP_PATH_PREFIXES: tuple[str, ...] = (
     "/api/pub",
     "/api/events",
 )
+_PRODUCT_HOST_DENIED_PATH_PREFIXES: tuple[str, ...] = (
+    "/auth",
+    "/billing",
+    "/internal",
+    "/v1",
+)
 
 
 def _host_role() -> str:
@@ -1141,18 +1145,16 @@ def _http_path_allowed_for_host_role(*, role: str, host: str, path: str) -> bool
     if role == _HOST_ROLE_SUBUSER:
         if path == "/healthz":
             return True
-        if path in _APP_PLANE_EXACT_PATHS:
-            return True
-        if path.startswith(_APP_PLANE_PATH_PREFIXES):
-            return True
         if product_business:
+            if path.startswith(_PRODUCT_HOST_DENIED_PATH_PREFIXES):
+                return False
             if not path.startswith("/api/"):
                 return True
-            return path.startswith("/api/takyon/apps/")
+            return path in _APP_PLANE_EXACT_PATHS or path.startswith("/api/takyon/apps/")
         return False
     if role == _HOST_ROLE_OPERATOR:
         if product_business:
-            return _is_app_plane_path(path)
+            return False
         if path == "/api/product-tls/ask":
             return True
         if _is_app_plane_path(path):
@@ -1445,6 +1447,7 @@ def _provision_dashboard_user_if_postgres(
 
         from plugins.takyon.control_plane import provision_user_on_first_login
         from plugins.takyon.runtime_app import (
+            assert_takyon_pg_role,
             RuntimeNotConfigured,
             configure_takyon_pg_session,
         )
@@ -1453,7 +1456,7 @@ def _provision_dashboard_user_if_postgres(
             url = _resolve_runtime_database_url()
         except RuntimeNotConfigured:
             _log.error(
-                "Auth0 login on the Postgres backend but no DATABASE_URL configured; "
+                "Auth0 login on the Postgres backend but no operator database URL configured; "
                 "top-level user was NOT provisioned"
             )
             return
@@ -1468,6 +1471,7 @@ def _provision_dashboard_user_if_postgres(
             # provisioned, so their later dashboard turns resolve no principal and the build refuses
             # with "operator identity required".
             configure_takyon_pg_session(conn)
+            assert_takyon_pg_role(conn, "operator")
             user_id, created, raw_key = provision_user_on_first_login(
                 conn,
                 sub,
@@ -1509,6 +1513,7 @@ def _resolve_dashboard_principal(
 
         from plugins.takyon.control_plane import resolve_auth0_principal
         from plugins.takyon.runtime_app import (
+            assert_takyon_pg_role,
             RuntimeNotConfigured,
             configure_takyon_pg_session,
         )
@@ -1528,6 +1533,7 @@ def _resolve_dashboard_principal(
             # Returning users still resolve READ-ONLY in resolve_auth0_principal; this only unblocks
             # the genuine first-login provisioning insert.
             configure_takyon_pg_session(conn)
+            assert_takyon_pg_role(conn, "operator")
             return resolve_auth0_principal(
                 conn,
                 str(user.get("sub") or ""),
@@ -1555,6 +1561,7 @@ def _resolve_local_dashboard_principal(*, runtime_database_url: str | None = Non
             resolve_user_principal,
         )
         from plugins.takyon.runtime_app import (
+            assert_takyon_pg_role,
             RuntimeNotConfigured,
             configure_takyon_pg_session,
         )
@@ -1568,6 +1575,7 @@ def _resolve_local_dashboard_principal(*, runtime_database_url: str | None = Non
             # Same internal-authority RLS GUC as every store connection (see
             # _resolve_dashboard_principal) so a first-call platform-owner provision can insert.
             configure_takyon_pg_session(conn)
+            assert_takyon_pg_role(conn, "operator")
             owner_user_id = resolve_platform_owner_id(conn)
             if not owner_user_id:
                 return None
@@ -2051,7 +2059,7 @@ def _takyon_app_check_sql_rate_limit_for_session(
     from plugins.takyon import app_identity as takyon_app_identity
     from plugins.takyon import rate_limit as takyon_rate_limit
     from plugins.takyon.core import _db_backend
-    from plugins.takyon.runtime_app import RuntimeNotConfigured
+    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured, assert_takyon_pg_role
 
     if _db_backend() != "postgres":
         raise HTTPException(
@@ -2059,7 +2067,7 @@ def _takyon_app_check_sql_rate_limit_for_session(
             detail="app rate limiting requires the Postgres runtime authority",
         )
     try:
-        resolved_url = _resolve_runtime_database_url()
+        resolved_url = _resolve_runtime_database_url(plane="app")
     except RuntimeNotConfigured as exc:
         raise HTTPException(
             status_code=503,
@@ -2075,6 +2083,13 @@ def _takyon_app_check_sql_rate_limit_for_session(
 
     conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
     try:
+        try:
+            assert_takyon_pg_role(conn, "app")
+        except DatabaseRoleMismatch as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="app database authority role mismatch",
+            ) from exc
         app_user = takyon_app_identity.validate_session(conn, business, session_token)
         if app_user is None:
             raise HTTPException(status_code=401, detail="invalid app session")
@@ -2329,7 +2344,7 @@ def _takyon_app_broker_generate(
         broker_message_for_business,
     )
     from plugins.takyon.core import _db_backend
-    from plugins.takyon.runtime_app import RuntimeNotConfigured
+    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured, assert_takyon_pg_role
 
     if _db_backend() != "postgres":
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
@@ -2338,7 +2353,7 @@ def _takyon_app_broker_generate(
         }
 
     try:
-        resolved_url = _resolve_runtime_database_url()
+        resolved_url = _resolve_runtime_database_url(plane="app")
     except RuntimeNotConfigured:
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
             "success": False,
@@ -2355,6 +2370,13 @@ def _takyon_app_broker_generate(
 
     conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
     try:
+        try:
+            assert_takyon_pg_role(conn, "app")
+        except DatabaseRoleMismatch:
+            return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+                "success": False,
+                "error": "app database authority role mismatch",
+            }
         payload = broker_message_for_business(
             conn,
             business_slug=business,
@@ -2383,7 +2405,7 @@ def _takyon_app_broker_search(
         broker_search_for_business,
     )
     from plugins.takyon.core import _db_backend
-    from plugins.takyon.runtime_app import RuntimeNotConfigured
+    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured, assert_takyon_pg_role
 
     if _db_backend() != "postgres":
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
@@ -2392,7 +2414,7 @@ def _takyon_app_broker_search(
         }
 
     try:
-        resolved_url = _resolve_runtime_database_url()
+        resolved_url = _resolve_runtime_database_url(plane="app")
     except RuntimeNotConfigured:
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
             "success": False,
@@ -2409,6 +2431,13 @@ def _takyon_app_broker_search(
 
     conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
     try:
+        try:
+            assert_takyon_pg_role(conn, "app")
+        except DatabaseRoleMismatch:
+            return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+                "success": False,
+                "error": "app database authority role mismatch",
+            }
         payload = broker_search_for_business(
             conn,
             business_slug=business,
@@ -2715,16 +2744,15 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
 
     if parts == ["checkout"]:
         token = _takyon_app_session_token(request)
-        if not token:
-            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        account_status, account = _takyon_app_tool(handle_business_read_app_account({
-            "business": business,
-            "session_token": token,
-        }))
-        if account_status != int(HTTPStatus.OK):
-            return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
+        account: dict[str, Any] = {}
+        if token:
+            _account_status, account = _takyon_app_tool(handle_business_read_app_account({
+                "business": business,
+                "session_token": token,
+            }))
         status, payload = _takyon_app_tool(handle_business_create_app_checkout({
             "business": business,
+            "session_token": token,
             "plan_key": body.get("plan_key") or body.get("planKey") or body.get("price_key") or body.get("priceKey"),
             "success_url": body.get("success_url") or body.get("successUrl"),
             "cancel_url": body.get("cancel_url") or body.get("cancelUrl"),
@@ -3040,21 +3068,24 @@ def _product_host_business_mismatch(request: Request, business: str) -> bool:
 async def takyon_app_api_get(request: Request, business: str, route: str):
     if _product_host_business_mismatch(request, business):
         return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
-    return await _takyon_app_get(request, business, route)
+    with app_runtime_database_plane():
+        return await _takyon_app_get(request, business, route)
 
 
 @app.post("/api/takyon/apps/{business}/{route:path}")
 async def takyon_app_api_post(request: Request, business: str, route: str):
     if _product_host_business_mismatch(request, business):
         return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
-    return await _takyon_app_post(request, business, route)
+    with app_runtime_database_plane():
+        return await _takyon_app_post(request, business, route)
 
 
 @app.delete("/api/takyon/apps/{business}/{route:path}")
 async def takyon_app_api_delete(request: Request, business: str, route: str):
     if _product_host_business_mismatch(request, business):
         return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
-    return await _takyon_app_delete(request, business, route)
+    with app_runtime_database_plane():
+        return await _takyon_app_delete(request, business, route)
 
 
 @app.post("/api/webhooks/stripe")
@@ -5283,9 +5314,25 @@ async def delete_takyon_business(request: Request, slug: str) -> dict[str, Any]:
             actor="dashboard",
         )
         payload = result[0] if isinstance(result, list) and result else result
+        # store.commit wraps the operation results: {success, scope, results:[...]}. Unwrap to the
+        # actual business.delete result so the shared rail's honesty signal reaches the operator.
+        if isinstance(payload, dict) and "results" in payload and isinstance(payload.get("results"), list):
+            inner = payload["results"]
+            payload = inner[0] if inner else payload
         deleted = ((payload or {}).get("database", {}) or {}).get("deleted", {})
         deleted_rows = sum(deleted.values()) if isinstance(deleted, dict) else deleted
-        return {"success": True, "slug": slug, "deleted_rows": deleted_rows}
+        # The shared delete rail re-verifies that nothing is still serving. Surface that honestly so
+        # the dashboard "X" never reports a clean delete while the customer site is still reachable
+        # (matches the CLI `takyon delete`, which prints the same warning).
+        still_serving = bool((payload or {}).get("still_serving"))
+        reasons = list((payload or {}).get("still_serving_reasons") or [])
+        return {
+            "success": True,
+            "slug": slug,
+            "deleted_rows": deleted_rows,
+            "still_serving": still_serving,
+            "still_serving_reasons": reasons,
+        }
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - surface honest dashboard error
@@ -10526,32 +10573,66 @@ def _mount_postgres_runtime_routes() -> None:
         from plugins.takyon.ai_gateway import build_ai_gateway_router, get_gateway_conn
         from plugins.takyon.control_api import build_control_router, get_control_conn
         from plugins.takyon.creative_gateway import build_creative_gateway_router
-        from plugins.takyon.runtime_app import RuntimeNotConfigured
+        from plugins.takyon.runtime_app import RuntimeNotConfigured, assert_takyon_pg_role, configure_takyon_pg_session
 
-        try:
-            resolved_url = _resolve_runtime_database_url()
-        except RuntimeNotConfigured:
-            _log.warning(
-                "Postgres backend enabled but no DATABASE_URL is configured; "
-                "skipping /v1, /internal/ai-gateway, and /internal/creative-gateway mount"
-            )
+        role = _host_role()
+        mount_operator = role != _HOST_ROLE_SUBUSER
+        mount_app = role != _HOST_ROLE_OPERATOR
+        operator_url = ""
+        app_url = ""
+        if mount_operator:
+            try:
+                operator_url = _resolve_runtime_database_url(plane="operator")
+            except RuntimeNotConfigured:
+                mount_operator = False
+                _log.warning(
+                    "Postgres backend enabled but operator-plane database URL is not configured; "
+                    "skipping /v1 and /internal/creative-gateway mount"
+                )
+        if mount_app:
+            try:
+                app_url = _resolve_runtime_database_url(plane="app")
+            except RuntimeNotConfigured:
+                mount_app = False
+                _log.warning(
+                    "Postgres backend enabled but app-plane database URL is not configured; "
+                    "skipping /internal/ai-gateway mount"
+                )
+        if not mount_operator and not mount_app:
             return
 
         def control_conn():
-            conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+            conn = psycopg.connect(operator_url, autocommit=True, prepare_threshold=None)
             try:
+                configure_takyon_pg_session(conn, bypass=True)
+                assert_takyon_pg_role(conn, "operator")
                 yield conn
             finally:
                 conn.close()
 
-        app.include_router(build_control_router())
-        app.include_router(build_ai_gateway_router())
-        app.include_router(build_creative_gateway_router())
-        app.dependency_overrides[get_control_conn] = control_conn
-        app.dependency_overrides[get_gateway_conn] = control_conn
+        def app_conn():
+            conn = psycopg.connect(app_url, autocommit=True, prepare_threshold=None)
+            try:
+                configure_takyon_pg_session(conn, bypass=False)
+                assert_takyon_pg_role(conn, "app")
+                yield conn
+            finally:
+                conn.close()
+
+        if mount_operator:
+            app.include_router(build_control_router())
+            app.dependency_overrides[get_control_conn] = control_conn
+        if mount_app:
+            app.include_router(build_ai_gateway_router())
+            app.dependency_overrides[get_gateway_conn] = app_conn
+        if mount_operator:
+            app.include_router(build_creative_gateway_router())
         _POSTGRES_RUNTIME_ROUTES_MOUNTED = True
         _log.info(
-            "Mounted Postgres control, AI gateway, and creative gateway routers into the dashboard host."
+            "Mounted Postgres runtime routers for host role %s: operator=%s app=%s",
+            role,
+            bool(mount_operator),
+            bool(mount_app),
         )
     except Exception as exc:  # noqa: BLE001 - do not prevent the dashboard from starting
         _log.warning("Failed to mount Postgres control/gateway routers: %s", exc)

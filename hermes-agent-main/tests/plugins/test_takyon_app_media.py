@@ -78,11 +78,16 @@ def _store(tmp_path: Path) -> _SQLiteStore:
         "CREATE TABLE app_sessions (id TEXT, business_slug TEXT, app_user_id TEXT, token_hash TEXT, "
         "expires_at TEXT, revoked_at TEXT, created_at TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE app_entitlements (business_slug TEXT, app_user_id TEXT, tier TEXT, status TEXT)"
+    )
     now = _now()
     conn.execute("INSERT INTO app_users (id, business_slug, email, created_at, updated_at) VALUES ('u1','biz','a@example.com',?,?)", (now, now))
     conn.execute("INSERT INTO app_users (id, business_slug, email, created_at, updated_at) VALUES ('u2','biz','b@example.com',?,?)", (now, now))
     conn.execute("INSERT INTO app_users (id, business_slug, email, status, tier, created_at, updated_at) "
                  "VALUES ('svc','biz','scheduler@service.biz.takyon.invalid','active','service',?,?)", (now, now))
+    conn.execute("INSERT INTO app_entitlements (business_slug, app_user_id, tier, status) VALUES ('biz', 'u1', 'paid', 'active')")
+    conn.execute("INSERT INTO app_entitlements (business_slug, app_user_id, tier, status) VALUES ('biz', 'u2', 'paid', 'active')")
     conn.commit()
     return _SQLiteStore(conn, tmp_path)
 
@@ -107,6 +112,23 @@ def test_store_succeeds_with_receipt_row_and_metered_event(tmp_path):
     assert (tmp_path / "biz" / result["receipt_path"]).is_file()
     ev = store._conn.execute("SELECT purpose, route, status FROM app_usage_events").fetchone()
     assert ev["purpose"] == "media_store" and ev["route"] == "media" and ev["status"] == "completed"
+
+
+def test_store_with_session_token_resolves_uploader(tmp_path):
+    store = _store(tmp_path)
+    now = _now()
+    store._conn.execute(
+        "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, revoked_at, created_at) "
+        "VALUES ('s1', 'biz', 'u1', ?, ?, NULL, ?)",
+        (_hash_token("tok-u1"), "2099-01-01T00:00:00+00:00", now),
+    )
+    store._conn.commit()
+
+    result = _upload(store, session_token="tok-u1")
+
+    assert result["mime"] == "image/png"
+    row = store._conn.execute("SELECT app_user_id FROM app_media WHERE media_id = ?", (result["media_id"],)).fetchone()
+    assert row["app_user_id"] == "u1"
 
 
 def test_test_mode_suppresses_backend_write(tmp_path):

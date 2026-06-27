@@ -13,11 +13,11 @@ Recheck:
 
 Observed key names are present locally as of 2026-05-25; values are intentionally omitted.
 
-- Core agent/model: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CLAUDE_BIN`
-- App runtime and billing: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`
-- App email/auth: `POSTMARK_SERVER_TOKEN`, `POSTMARK_FROM_EMAIL`, `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, `AUTH0_CLIENT_SECRET`, `AUTH0_AUDIENCE`, `AUTH0_SECRET`
+- Core agent/model: raw provider keys live behind Safebox/provider proxy; runtime planes use brokered capability paths plus `CLAUDE_BIN` where needed.
+- App runtime and billing: product app runtime may use public Stripe publishable config only. `STRIPE_SECRET_KEY`, app/billing webhook secrets, and reconciliation authority live on Safebox.
+- App email/auth: product/runtime planes may use public config such as `POSTMARK_FROM_EMAIL`, `AUTH0_DOMAIN`, and `AUTH0_CLIENT_ID`. `POSTMARK_SERVER_TOKEN`, `AUTH0_CLIENT_SECRET`, `AUTH0_SECRET`, and Supabase JWT/service-role secrets live on Safebox or are unused by runtime planes.
 - Deploy/domain: `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, `VERCEL_TEAM_ID`, `VERCEL_OIDC_TOKEN`, `PUBLIC_COMPANY_BASE_DOMAIN`
-- Research: `TAVILY_API_KEY`
+- Research: `TAVILY_API_KEY` lives behind Safebox/brokered provider paths; generic runtime Tavily does not read it from process env.
 - Meta Ads v2: official Meta Ads MCP OAuth (`META_MCP_OAUTH_TOKEN`) held by Safebox, with optional `META_MCP_ENDPOINT` defaulting to `https://mcp.facebook.com/ads`; provider defaults remain `META_AD_ACCOUNT_ID` and `META_PAGE_ID`. Legacy app-registration/system-user values such as `META_SYSTEM_USER_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET`, and `META_BUSINESS_ID` remain only for Graph shims/diagnostics such as pixel/custom-conversion/video-upload gaps; they are not the v2 launch transport. Composio Meta Ads is not a valid fallback for `takyon-meta-ads-v2`.
 - Reddit organic (skill/tool requirement): `COMPOSIO_API_KEY` plus one active Composio Reddit connected account (`COMPOSIO_REDDIT_CONNECTED_ACCOUNT_ID`, or a resolvable `COMPOSIO_REDDIT_USER_ID` / alias pair).
 - Reddit Ads (skill/tool requirement): `COMPOSIO_API_KEY` plus one active Composio Reddit Ads connected account (`COMPOSIO_REDDIT_ADS_CONNECTED_ACCOUNT_ID`, or a resolvable `COMPOSIO_REDDIT_ADS_USER_ID` / alias pair). Optional provider defaults remain `REDDIT_ADS_BUSINESS_ID`, `REDDIT_ADS_ACCOUNT_ID`, `REDDIT_ADS_PROFILE_ID`, `REDDIT_ADS_FUNDING_INSTRUMENT_ID`, and `REDDIT_ADS_PIXEL_ID`.

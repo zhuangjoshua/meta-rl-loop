@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 from http.cookies import SimpleCookie
 import logging
+from types import SimpleNamespace
 import uuid
 from typing import Any, Callable
 
@@ -124,6 +125,7 @@ def _settle_or_hold(
     reservation_key: str,
     *,
     actual_cost_microusd: int,
+    session_token: str | None = None,
     **settle_kwargs,
 ) -> bool:
     """Finalize a reservation after the provider was ALREADY PAID. On a settle failure we must NOT
@@ -139,6 +141,7 @@ def _settle_or_hold(
             business_slug,
             reservation_key,
             actual_cost_microusd=actual_cost_microusd,
+            session_token=session_token,
             **settle_kwargs,
         )
         return True
@@ -246,7 +249,60 @@ def _session_token(body: dict, header_value: str | None, cookie_header: str | No
     return "" if morsel is None else str(morsel.value or "").strip()
 
 
-def _resolve_plan_for_user(conn, business_slug: str, user: app_identity.AppUser):
+def _json_object(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            import json
+
+            value = json.loads(value)
+        except Exception:
+            return None
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _namespace_from_json(value: Any):
+    data = _json_object(value)
+    if not data:
+        return None
+    metadata = data.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            import json
+
+            data["metadata"] = json.loads(metadata)
+        except Exception:
+            data["metadata"] = {}
+    elif not isinstance(metadata, dict):
+        data["metadata"] = {}
+    return SimpleNamespace(**data)
+
+
+def _resolve_plan_for_session(conn, business_slug: str, session_token: str):
+    row = conn.execute(
+        "select takyon_app_session_plan(%s, %s)",
+        (business_slug, app_identity._hash_token(session_token)),
+    ).fetchone()
+    payload = _json_object(row[0] if row else None) or {}
+    return (
+        _namespace_from_json(payload.get("entitlement")),
+        _namespace_from_json(payload.get("plan")),
+    )
+
+
+def _resolve_plan_for_user(
+    conn,
+    business_slug: str,
+    user: app_identity.AppUser,
+    *,
+    session_token: str | None = None,
+):
+    token = str(session_token or "").strip()
+    if token and app_identity._is_app_runtime_user(conn):
+        return _resolve_plan_for_session(conn, business_slug, token)
     entitlement = app_entitlements.get_active_entitlement(conn, business_slug, user.id)
     if entitlement is not None and entitlement.plan_key:
         plan = app_entitlements.get_plan_policy(conn, business_slug, entitlement.plan_key)
@@ -331,6 +387,7 @@ def broker_provider_call(
     *,
     app_user,
     plan,
+    session_token: str | None = None,
     provider: str,
     model: str,
     estimated_cost_microusd: int,
@@ -361,6 +418,7 @@ def broker_provider_call(
             # monthly plan allowance pro-rated to the week (see _user_weekly_budget_microusd).
             user_monthly_limit_microusd=_user_weekly_budget_microusd(plan),
             app_user_tier=app_user.tier,
+            session_token=session_token,
             purpose=purpose,
             route=audit_route,
             provider=provider,
@@ -373,7 +431,7 @@ def broker_provider_call(
     try:
         raw = do_call()
     except Exception as exc:
-        release_usage(conn, business_slug, reservation_key, error=str(exc))
+        release_usage(conn, business_slug, reservation_key, error=str(exc), session_token=session_token)
         raise GatewayMessageError(status_code=502, detail=provider_error_detail) from exc
 
     cost, settle_kwargs = actual_cost(raw)
@@ -382,6 +440,7 @@ def broker_provider_call(
         business_slug,
         reservation_key,
         actual_cost_microusd=cost,
+        session_token=session_token,
         provider=provider,
         model=model,
         **settle_kwargs,
@@ -447,7 +506,12 @@ def broker_message_for_business(
     except AnthropicPricingUnavailable as exc:
         raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
 
-    entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    entitlement, plan = _resolve_plan_for_user(
+        conn,
+        business_slug,
+        app_user,
+        session_token=raw_session_token,
+    )
     _require_active_entitlement(entitlement)
     feature_name = str(body.get("feature") or "ai_generate").strip() or "ai_generate"
     if not _feature_allowed(plan, feature_name):
@@ -511,6 +575,7 @@ def broker_message_for_business(
             business_slug,
             app_user=app_user,
             plan=plan,
+            session_token=raw_session_token,
             provider="anthropic",
             model=model,
             estimated_cost_microusd=estimated_cost,
@@ -722,7 +787,12 @@ def broker_search_for_business(
     except TavilyPricingUnavailable as exc:
         raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
 
-    entitlement, plan = _resolve_plan_for_user(conn, business_slug, app_user)
+    entitlement, plan = _resolve_plan_for_user(
+        conn,
+        business_slug,
+        app_user,
+        session_token=raw_session_token,
+    )
     _require_active_entitlement(entitlement)
     feature_name = str(body.get("feature") or "web_search").strip() or "web_search"
     if not _feature_allowed(plan, feature_name):
@@ -755,6 +825,7 @@ def broker_search_for_business(
             business_slug,
             app_user=app_user,
             plan=plan,
+            session_token=raw_session_token,
             provider="tavily",
             model=pricing_op,
             estimated_cost_microusd=cost,

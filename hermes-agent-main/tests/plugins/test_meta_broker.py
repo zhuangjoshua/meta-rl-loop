@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 from plugins.takyon import composio_distribution, meta_graph, meta_mcp, safebox_app
 
 _TOKEN = "secret-internal-token"
+_OPERATOR_TOKEN = "secret-operator-route-token"
 
 
 def test_metaads_proxy_request_is_disabled():
@@ -38,11 +39,16 @@ def test_meta_mcp_auth_error_detects_taskgroup_wrapped_401():
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
+    monkeypatch.setenv(safebox_app._OPERATOR_TOKEN_ENV, _OPERATOR_TOKEN)
+    monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "testclient")
     return TestClient(safebox_app.build_safebox_app())
 
 
 def _auth():
-    return {"Authorization": f"Bearer {_TOKEN}"}
+    return {
+        "Authorization": f"Bearer {_TOKEN}",
+        "X-Takyon-Operator-Token": _OPERATOR_TOKEN,
+    }
 
 
 def test_meta_config_route_redacts_token(client, monkeypatch):
@@ -150,6 +156,35 @@ def test_meta_graph_route_brokers_graph_call_without_egressing_token(client, mon
         "graph.facebook.com",
         15.0,
     )
+
+
+def test_meta_graph_route_rejects_caller_chosen_host_before_forward(client, monkeypatch):
+    values = {
+        "META_GRAPH_VERSION": "v21.0",
+        "META_SYSTEM_USER_ACCESS_TOKEN": "local-graph-token",
+    }
+
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "first_env_backed_value",
+        lambda *keys: next((values[key] for key in keys if values.get(key)), ""),
+    )
+    monkeypatch.setattr(meta_graph, "_graph", lambda *a, **k: pytest.fail("opened graph socket"))
+
+    resp = client.post(
+        "/v1/providers/meta/graph",
+        headers=_auth(),
+        json={
+            "method": "GET",
+            "path": "/me",
+            "params": {"fields": "id,name"},
+            "host": "169.254.169.254",
+            "timeout": 15,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "meta_graph_host_not_allowed"
 
 
 def test_meta_graph_route_requires_system_user_token(client, monkeypatch):

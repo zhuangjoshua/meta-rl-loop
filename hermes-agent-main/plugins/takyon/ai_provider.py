@@ -318,6 +318,27 @@ class TavilyPricingUnavailable(ValueError):
     """Raised when a Tavily operation has no exact known per-request pricing."""
 
 
+def normalize_tavily_endpoint_operation(endpoint: str | None, operation: str | None = None) -> tuple[str, str]:
+    """Return ``(wire_endpoint, pricing_operation)`` for the Tavily surface Takyon exposes.
+
+    ``search_advanced`` is a priced search depth, not a separate provider URL path. Anything outside
+    search/extract fails before a key is attached or a socket opens.
+    """
+    raw_endpoint = str(endpoint or "").strip("/").lower()
+    raw_operation = str(operation or "").strip().lower()
+    if not raw_endpoint:
+        raw_endpoint = "search"
+    if not raw_operation:
+        raw_operation = raw_endpoint
+    if raw_endpoint == "search_advanced" and raw_operation == "search_advanced":
+        raw_endpoint = "search"
+    if raw_endpoint == "search" and raw_operation in {"search", "search_advanced"}:
+        return "search", raw_operation
+    if raw_endpoint == "extract" and raw_operation == "extract":
+        return "extract", "extract"
+    raise ValueError("unsupported_tavily_operation")
+
+
 def tavily_key() -> str:
     """The SHARED platform Tavily key, resolved server-side (safebox-aware, then env).
     Returns "" when unconfigured — callers MUST treat "" as blocked, never as permission
@@ -354,16 +375,15 @@ def tavily_request_microusd(operation: str, *, units: int = 1) -> int:
 
 def call_tavily(endpoint: str, payload: dict, api_key: str) -> dict:
     """Server-side Tavily call with an EXPLICIT key (mirrors ``call_anthropic``). The key is
-    injected into the request body (and a Bearer header for /crawl, which Tavily additionally
-    requires) and is never returned. Returns the parsed JSON; raises ``RuntimeError`` on HTTP
+    injected into the request body and is never returned. Returns the parsed JSON; raises ``RuntimeError`` on HTTP
     error so the broker releases the reservation."""
-    endpoint = str(endpoint or "search").strip("/").lower()
+    endpoint, _operation = normalize_tavily_endpoint_operation(
+        endpoint, str((payload or {}).get("operation") or "")
+    )
     base_url = (_env("TAVILY_BASE_URL") or TAVILY_BASE_URL_DEFAULT).rstrip("/")
     body = dict(payload or {})
     body["api_key"] = api_key
     headers = {"Content-Type": "application/json"}
-    if endpoint == "crawl":
-        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         f"{base_url}/{endpoint}",
         data=json.dumps(body).encode("utf-8"),

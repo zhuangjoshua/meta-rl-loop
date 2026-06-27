@@ -34,11 +34,34 @@ from .control_api import build_control_router, get_control_conn
 from .creative_gateway import build_creative_gateway_router
 from . import safebox
 
-# DATABASE_URL is canonical; POSTGRES_URL / POSTGRES_PRISMA_URL are the platform-managed aliases
-# (Supabase / Vercel). Kept identical to core.py's "database" provider aliases on purpose, so one
-# deploy variable feeds both the SQLite-era config reader and this Postgres host.
-_DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
+# Production database authority is plane-specific. Generic DATABASE_URL remains accepted only for
+# explicit test/maintenance calls and local/unset host-role compatibility; a production host role must
+# resolve its own named DSN so operator, app, Safebox, and migration authority cannot blur together.
+_LEGACY_DATABASE_URL_ENV = ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL")
+_DATABASE_PLANE_ENV: dict[str, tuple[str, ...]] = {
+    "operator": ("TAKYON_OPERATOR_DATABASE_URL",),
+    "app": ("TAKYON_APP_DATABASE_URL",),
+    "safebox": ("TAKYON_SAFEBOX_DATABASE_URL",),
+    "migration": ("TAKYON_MIGRATION_DATABASE_URL", "MIGRATION_DATABASE_URL"),
+}
+_DATABASE_PLANE_ALIASES = {
+    "": "",
+    "operator": "operator",
+    "dashboard": "operator",
+    "worker": "operator",
+    "control": "operator",
+    "app": "app",
+    "subuser": "app",
+    "product": "app",
+    "customer": "app",
+    "safebox": "safebox",
+    "authority": "safebox",
+    "migration": "migration",
+    "migrate": "migration",
+    "deploy": "migration",
+}
 _ALLOW_POSTGRES_OUTSIDE_VPS_ENV = "TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"
+_ALLOW_LEGACY_DB_ROLES_ENV = "TAKYON_ALLOW_LEGACY_DB_ROLES"
 _HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _HOST_ROLE_ALIASES = {
     "": "",
@@ -64,13 +87,80 @@ class DatabaseAccessDenied(RuntimeError):
     """Raised when a Takyon process tries to open Postgres from an unapproved host/runtime."""
 
 
+class DatabaseRoleMismatch(RuntimeError):
+    """Raised when a Postgres connection is not using the expected authority plane role."""
+
+
+_DATABASE_PLANE_ROLES: dict[str, tuple[str, ...]] = {
+    "operator": ("takyon_operator_runtime",),
+    "app": ("takyon_app_runtime",),
+    "safebox": ("takyon_safebox_authority",),
+    "migration": ("takyon_migration",),
+}
+_LEGACY_DATABASE_PLANE_ROLES: dict[str, tuple[str, ...]] = {
+    # Temporary cutover roles only. They preserve old deployments when explicitly opted in, but are
+    # not accepted by default because they keep the old mixed-session model reachable.
+    "operator": ("takyon_runtime",),
+    "app": ("takyon_app",),
+    "safebox": ("postgres",),
+    "migration": ("postgres",),
+}
+
+
 def _env_truthy(name: str) -> bool:
     return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _database_plane_roles(plane: str) -> tuple[str, ...]:
+    roles = _DATABASE_PLANE_ROLES.get(plane, ())
+    if _env_truthy(_ALLOW_LEGACY_DB_ROLES_ENV):
+        roles = roles + _LEGACY_DATABASE_PLANE_ROLES.get(plane, ())
+    return roles
 
 
 def _normalized_host_role() -> str:
     raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
     return _HOST_ROLE_ALIASES.get(raw, raw)
+
+
+def _normalize_database_plane(plane: str | None) -> str:
+    raw = str(plane or "").strip().lower()
+    return _DATABASE_PLANE_ALIASES.get(raw, raw)
+
+
+def _database_plane_from_host_role() -> str:
+    role = _normalized_host_role()
+    if role == "operator":
+        return "operator"
+    if role == "subuser":
+        return "app"
+    if role == "safebox":
+        return "safebox"
+    return ""
+
+
+def _runtime_planes_from_host_role() -> tuple[str, ...]:
+    role = _normalized_host_role()
+    if role == "operator":
+        return ("operator",)
+    if role == "subuser":
+        return ("app",)
+    return ("operator", "app")
+
+
+def _normalize_runtime_planes(planes: tuple[str, ...] | list[str] | set[str] | None) -> tuple[str, ...]:
+    if planes is None:
+        return _runtime_planes_from_host_role()
+    normalized: list[str] = []
+    for plane in planes:
+        value = _normalize_database_plane(plane)
+        if value not in {"operator", "app"}:
+            raise RuntimeNotConfigured(f"unknown runtime app plane: {plane}")
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise RuntimeNotConfigured("at least one runtime app plane is required")
+    return tuple(normalized)
 
 
 def _resolved_takyon_home() -> Path | None:
@@ -164,39 +254,105 @@ def configure_takyon_pg_session(conn, *, bypass: bool = True) -> None:
     )
 
 
-# Process-static memo of the resolved no-explicit DB-URL env value (see resolve_database_url).
-_resolved_database_url_env_value: str | None = None
+def _row_value(row, index: int, key: str) -> str:
+    if row is None:
+        return ""
+    if isinstance(row, dict):
+        return str(row.get(key) or "").strip()
+    try:
+        return str(row[key] or "").strip()
+    except Exception:
+        try:
+            return str(row[index] or "").strip()
+        except Exception:
+            return ""
+
+
+def current_takyon_pg_roles(conn) -> tuple[str, str]:
+    row = conn.execute("select session_user::text as session_user, current_user::text as current_user").fetchone()
+    return _row_value(row, 0, "session_user"), _row_value(row, 1, "current_user")
+
+
+def assert_takyon_pg_role(conn, plane: str) -> tuple[str, str]:
+    """Fail closed if a connection is not on the expected DB authority plane.
+
+    This checks BOTH session_user and current_user. That is deliberate: the observed production
+    failure was exactly a pooled operator-capable session demoted to current_user=takyon_app.
+    Checking current_user alone would accept that bad state on the app side and miss the leak on the
+    operator side.
+    """
+    database_plane = _normalize_database_plane(plane)
+    allowed = _database_plane_roles(database_plane)
+    if not allowed:
+        raise DatabaseRoleMismatch(f"unknown database authority plane: {database_plane or plane}")
+    session_user, current_user = current_takyon_pg_roles(conn)
+    if session_user in allowed and current_user in allowed:
+        return session_user, current_user
+    raise DatabaseRoleMismatch(
+        f"{database_plane} database role mismatch: "
+        f"session_user={session_user or 'unknown'} current_user={current_user or 'unknown'} "
+        f"allowed={','.join(allowed)}"
+    )
+
+
+# Process-static memo of resolved no-explicit DB-URL env values (see resolve_database_url).
+_resolved_database_url_env_values: dict[str, str] = {}
 
 
 def reset_database_url_cache() -> None:
     """Clear the process-static DB-URL memo. For tests; a rotated URL is picked up on restart
     (which every deploy performs), so no runtime invalidation is needed."""
-    global _resolved_database_url_env_value
-    _resolved_database_url_env_value = None
+    _resolved_database_url_env_values.clear()
 
 
-def resolve_database_url(explicit: str | None = None) -> str:
-    """The configured Postgres URL: an explicit argument wins (tests point it at a throwaway DB),
-    else the first non-empty of DATABASE_URL / POSTGRES_URL / POSTGRES_PRISMA_URL. Absent
-    everywhere → ``RuntimeNotConfigured``.
-
-    The no-explicit env/Safebox lookup is memoised process-wide. The URL is static for a process
-    lifetime, but every product DB op resolves it, and on a subuser node that lookup is a remote
-    ``POST /v1/env/first`` to the Safebox — re-resolving per op produced ~1700 Safebox requests/min
-    that hard-coupled every DB op to a live Safebox round-trip and could self-DoS the Safebox during
-    a blip. Only the non-empty resolved value is cached, so "no DB configured → raise" is unchanged
-    and the policy gate still runs on every call; a restart picks up a rotated URL."""
-    if explicit and explicit.strip():
-        return _enforce_database_url_policy(explicit)
-    global _resolved_database_url_env_value
-    value = _resolved_database_url_env_value
+def _first_configured_database_url(env_names: tuple[str, ...], *, cache_key: str) -> str:
+    value = _resolved_database_url_env_values.get(cache_key, "")
     if not value:
         try:
-            value = safebox.first_env_backed_value(*_DATABASE_URL_ENV)
-        except safebox.SafeboxAuthorityUnavailable:
-            value = ""
+            env_values = safebox.load_env()
+        except OSError:
+            env_values = {}
+        for name in env_names:
+            value = str(os.environ.get(name) or env_values.get(name) or "").strip()
+            if value:
+                break
         if value:
-            _resolved_database_url_env_value = value
+            _resolved_database_url_env_values[cache_key] = value
+    return value
+
+
+def resolve_database_url(explicit: str | None = None, *, plane: str | None = None) -> str:
+    """Resolve the configured Postgres URL for one authority plane.
+
+    Explicit arguments win for tests and intentional one-off maintenance. Otherwise production host
+    roles resolve only their named plane DSN:
+
+    * operator/dashboard/worker -> TAKYON_OPERATOR_DATABASE_URL
+    * product app/sub-user -> TAKYON_APP_DATABASE_URL
+    * Safebox -> TAKYON_SAFEBOX_DATABASE_URL
+    * migrations/deploy -> TAKYON_MIGRATION_DATABASE_URL
+
+    The no-explicit env lookup is memoised process-wide. DB URLs are intentionally read from this
+    process' own environment/Takyon env file, not from the Safebox /v1/env HTTP egress path: possession
+    of the shared Safebox transport token must not let one plane ask for another plane's DSN. Only the
+    non-empty resolved value is cached, so "no DB configured -> raise" is unchanged and the policy gate
+    still runs on every call; a restart picks up a rotated URL."""
+    if explicit and explicit.strip():
+        return _enforce_database_url_policy(explicit)
+
+    database_plane = _normalize_database_plane(plane) or _database_plane_from_host_role()
+    if database_plane:
+        env_names = _DATABASE_PLANE_ENV.get(database_plane)
+        if env_names is None:
+            raise RuntimeNotConfigured(f"unknown database authority plane: {database_plane}")
+        value = _first_configured_database_url(env_names, cache_key=f"plane:{database_plane}")
+        if value:
+            return _enforce_database_url_policy(value)
+        raise RuntimeNotConfigured(
+            f"no {database_plane} database URL configured; set {env_names[0]}"
+        )
+
+    value = _first_configured_database_url(_LEGACY_DATABASE_URL_ENV, cache_key="legacy")
     if value:
         return _enforce_database_url_policy(value)
     raise RuntimeNotConfigured(
@@ -205,14 +361,41 @@ def resolve_database_url(explicit: str | None = None) -> str:
     )
 
 
-def build_runtime_app(*, database_url: str | None = None) -> FastAPI:
+def build_runtime_app(
+    *,
+    database_url: str | None = None,
+    operator_database_url: str | None = None,
+    app_database_url: str | None = None,
+    planes: tuple[str, ...] | list[str] | set[str] | None = None,
+) -> FastAPI:
     """Build the host app that serves the Postgres-backed routers against ``database_url`` (or the
     environment). Raises ``RuntimeNotConfigured`` if no URL is configured."""
-    resolved_url = resolve_database_url(database_url)
+    runtime_planes = _normalize_runtime_planes(planes)
+    mount_operator = "operator" in runtime_planes
+    mount_app = "app" in runtime_planes
+    resolved_operator_url = (
+        resolve_database_url(
+            operator_database_url or database_url,
+            plane="operator" if not database_url else None,
+        )
+        if mount_operator
+        else ""
+    )
+    resolved_app_url = (
+        resolve_database_url(
+            app_database_url or database_url,
+            plane="app" if not database_url else None,
+        )
+        if mount_app
+        else ""
+    )
 
     app = FastAPI(title="Takyon Runtime")
 
-    def control_conn():
+    enforce_operator_role = not (database_url or operator_database_url)
+    enforce_app_role = not (database_url or app_database_url)
+
+    def _connect(url: str, *, bypass: bool, plane: str, enforce_role: bool):
         # One psycopg connection per request, autocommit=True to mirror exactly how every leaf is
         # tested and used: read paths need no transaction, and each mutating leaf op opens its own
         # `with conn.transaction():`. FastAPI caches this dependency per-request (use_cache), so the
@@ -227,22 +410,38 @@ def build_runtime_app(*, database_url: str | None = None) -> FastAPI:
         # (=5), but disabling auto-prepare removes the entire failure class regardless of pooler
         # mode. Correctness is identical (extended protocol either way); only a micro perf hint is
         # dropped, which a low-QPS control plane does not need.
-        conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
-        configure_takyon_pg_session(conn, bypass=True)
+        conn = psycopg.connect(url, autocommit=True, prepare_threshold=None)
         try:
+            configure_takyon_pg_session(conn, bypass=bypass)
+            if enforce_role:
+                assert_takyon_pg_role(conn, plane)
             yield conn
         finally:
             conn.close()
 
-    app.include_router(build_control_router())
-    app.include_router(build_ai_gateway_router())
-    app.include_router(build_creative_gateway_router())
-    # Both routers open the SAME kind of per-request connection to the SAME database, so one
-    # connection factory serves both seams. get_provider_caller is deliberately NOT overridden:
-    # its default resolves the real shared provider key server-side (invariant #8 blocks when none
-    # is configured), which is exactly the production behavior — only tests override it.
-    app.dependency_overrides[get_control_conn] = control_conn
-    app.dependency_overrides[get_gateway_conn] = control_conn
+    def control_conn():
+        yield from _connect(
+            resolved_operator_url,
+            bypass=True,
+            plane="operator",
+            enforce_role=enforce_operator_role,
+        )
+
+    def app_conn():
+        yield from _connect(
+            resolved_app_url,
+            bypass=False,
+            plane="app",
+            enforce_role=enforce_app_role,
+        )
+
+    if mount_operator:
+        app.include_router(build_control_router())
+        app.include_router(build_creative_gateway_router())
+        app.dependency_overrides[get_control_conn] = control_conn
+    if mount_app:
+        app.include_router(build_ai_gateway_router())
+        app.dependency_overrides[get_gateway_conn] = app_conn
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

@@ -74,10 +74,10 @@ class OpenMeterAccessSnapshot:
     metadata: dict[str, Any]
     raw_access: dict[str, Any]
     raw_subscription: dict[str, Any] | None
-    # True when access could NOT be authoritatively read (the entitlement-access endpoint 404'd /
-    # gave no definitive answer AND there was no active subscription to confirm from). A degraded
+    # True when access could NOT be definitively read (the entitlement-access endpoint 404'd /
+    # gave no explicit answer AND there was no active subscription to confirm from). A degraded
     # snapshot must NEVER retire a customer's local access — it is the fail-OPEN-grace signal that
-    # distinguishes "OpenMeter says no access" (authoritative, may retire) from "OpenMeter could
+    # distinguishes "OpenMeter explicitly says no access" (definitive mirror, may retire) from "OpenMeter could
     # not tell us" (unreachable/404, preserve last-known-good).
     degraded: bool = False
 
@@ -450,14 +450,14 @@ def project_customer_access(
         and str(current.get("status") or "").strip().lower() in _SUBSCRIPTION_STATUSES
     )
     has_access = _entitlement_has_access(entitlement) or subscription_active
-    # A read is AUTHORITATIVE only when it carries an EXPLICIT access decision (the resolved
+    # A read is definitive only when it carries an EXPLICIT access decision (the resolved
     # entitlement payload actually contains has_access/hasAccess/access) OR an active subscription
     # confirms access. Everything else -- a 404 (raw_access None), a 200 empty/non-dict body ({}),
     # or a 200 envelope that lacks THIS feature's entitlement (the live Kong-misroute case) -- CANNOT
     # prove no-access, so it is degraded and must preserve last-known-good rather than retire.
     # (Keying degraded on `raw_access is None` alone missed every non-404 degraded 200.)
-    authoritative = subscription_active or _entitlement_access_is_authoritative(entitlement)
-    degraded = not authoritative
+    definitive = subscription_active or _entitlement_access_is_authoritative(entitlement)
+    degraded = not definitive
     plan_ref = current.get("plan") if isinstance(current, dict) and isinstance(current.get("plan"), dict) else {}
     plan_payload = None
     plan_id = str(plan_ref.get("id") or "").strip()
@@ -505,7 +505,7 @@ def project_customer_access(
         if isinstance(current, dict)
         else None,
         metadata={
-            "authority": "openmeter",
+            "projection": "openmeter",
             "openmeter_customer_key": customer_key,
             "openmeter_feature_key": feature_key,
             "openmeter_subscription_id": str((current or {}).get("id") or "") if isinstance(current, dict) else "",

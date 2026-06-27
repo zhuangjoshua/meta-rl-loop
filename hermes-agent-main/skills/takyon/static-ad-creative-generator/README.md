@@ -28,11 +28,11 @@ the backend is swappable and the strategy is reviewable before you spend on gene
 
 ```bash
 pip install -r scripts/requirements.txt      # openai (required for real gen), Pillow + jsonschema (optional)
-export OPENAI_API_KEY=sk-...                  # never hardcode  — OR pass --api-key-file ~/.openai_key
 ```
 
-The key can be supplied two ways: `OPENAI_API_KEY` in the environment, or `--api-key-file PATH`
-(read at runtime and handed straight to the client, never exported to an env var).
+Live Takyon renders should use `business_static_ad_generate`, which gates credits and routes the
+provider credential through Safebox. Direct local SDK debugging can pass `--api-key-file PATH`;
+the key is handed straight to the client and never exported to an env var.
 
 - **Python 3.9+.**
 - `openai` is needed for generation. `Pillow` enables exact `--crop`. `jsonschema` improves
@@ -47,11 +47,11 @@ python scripts/validate_spec.py examples/example-spec.json
 # 2) preview the compiled image prompt
 python scripts/compile_prompt.py examples/example-spec.json
 
-# 3) generate one creative
-python scripts/generate_image.py examples/example-spec.json -o output/ --crop
+# 3) generate one creative with an explicit local key file
+python scripts/generate_image.py examples/example-spec.json -o output/ --crop --api-key-file ~/.openai_key
 
 # 4) batch a test matrix of angles/placements
-python scripts/batch_generate.py examples/example-batch.json -o output/ --crop
+python scripts/batch_generate.py examples/example-batch.json -o output/ --crop --api-key-file ~/.openai_key
 ```
 
 Each creative produces a full bundle: `*.png`, `*.spec.json`, `*.prompt.txt`, `*.qa.json`,

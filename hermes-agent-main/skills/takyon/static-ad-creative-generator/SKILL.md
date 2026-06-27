@@ -31,7 +31,7 @@ metadata:
       - product/static-ads/<slug>
       - product/static-ads/<slug>/manifest.json
 
-required_environment_variables: [OPENAI_API_KEY]
+required_environment_variables: []
 required_credential_files: []
 ---
 
@@ -100,9 +100,10 @@ a *static performance-ad creative spec generator*.
 ## Prerequisites
 
 - **Python 3.9+.**
-- **Live mode (real render, real spend)** needs the `openai` package plus an API key, supplied
-  either via `OPENAI_API_KEY` **or** `--api-key-file PATH` (passed straight to the client, never
-  exported to the environment). `pip install -r scripts/requirements.txt`.
+- **Live mode (real render, real spend)** should use `business_static_ad_generate`, which gates
+  creative credits and routes provider keys through Safebox. Direct local SDK dev needs the `openai`
+  package plus `--api-key-file PATH` (passed straight to the client, never exported to the
+  environment). `pip install -r scripts/requirements.txt`.
 - Optional: `Pillow` (exact `--crop` to 1:1/4:5/9:16) and `jsonschema`
   (richer validation; a zero-dependency fallback runs without it).
 - Optional env: `OPENAI_IMAGE_MODEL` (default `gpt-image-2`).
@@ -156,7 +157,7 @@ Common path (one creative, live render):
 pip install -r ${HERMES_SKILL_DIR}/scripts/requirements.txt
 python ${HERMES_SKILL_DIR}/scripts/validate_spec.py examples/example-spec.json        # must be 0 errors
 python ${HERMES_SKILL_DIR}/scripts/generate_image.py examples/example-spec.json -o "$PUBLICATION_DIR" --crop \
-  --api-key-file ~/.openai_key                                      # or export OPENAI_API_KEY
+  --api-key-file ~/.openai_key
 ```
 
 One creative at every size a placement needs (multi-size fan-out):
@@ -286,8 +287,9 @@ directory plus a batch `manifest.json`.
    sidecar files. No placeholders, mock output, or fake success claims.
 3. **Truthful proof.** Do not fabricate testimonials, reviews, ratings, endorsements,
    third-party screenshots, or "as seen in" logos; sample proof must be labeled illustrative.
-4. **Backend-agnostic, key-safe.** Default to `gpt-image-2`; keep the backend swappable; read
-   the key from `OPENAI_API_KEY` or `--api-key-file` and never hardcode or persist it.
+4. **Backend-agnostic, key-safe.** Default to `gpt-image-2`; keep the backend swappable. Live
+   Takyon renders go through `business_static_ad_generate` and Safebox; direct local SDK dev may
+   pass `--api-key-file`, but this skill does not read provider keys from process env.
 5. **Canonical publication.** Publish bundles under `product/static-ads/<slug>/`, not a
    generic `output/` directory.
 6. **Self-contained.** No dependency on Creatify, Luma, Higgsfield, Canva, Midjourney, Runway,
@@ -297,7 +299,7 @@ directory plus a batch `manifest.json`.
 
 | Problem | Fix |
 | --- | --- |
-| `No API key available` | Pass `--api-key-file PATH` or `export OPENAI_API_KEY`. |
+| `No API key available` | Use `business_static_ad_generate` for live Takyon renders, or pass `--api-key-file PATH` for direct local SDK dev. |
 | `The 'openai' package is required` | `pip install -r scripts/requirements.txt`. |
 | Spec rejected with ERRORs | Read each path in the message; fix against `templates/ad-spec.schema.json`. |
 | Lint WARN about a proof angle | State in `qa.policy_risks` whether proof is real & rights-cleared or labeled illustrative. |

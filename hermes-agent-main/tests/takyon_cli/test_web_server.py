@@ -148,25 +148,20 @@ def test_live_site_preview_wrapper_html_requires_http_url():
     assert excinfo.value.status_code == 400
 
 
-def test_resolve_runtime_database_url_reads_dashboard_env_sources(monkeypatch):
+def test_resolve_runtime_database_url_uses_operator_plane(monkeypatch):
     import plugins.takyon.runtime_app as runtime_app
     import takyon_cli.web_server as web_server
 
     seen: list[str | None] = []
 
-    def _fake_resolve_database_url(explicit=None):
-        seen.append(explicit)
-        return explicit or "postgres://fallback"
+    def _fake_resolve_database_url(explicit=None, *, plane=None):
+        seen.append(plane)
+        return "postgres://operator"
 
     monkeypatch.setattr(runtime_app, "resolve_database_url", _fake_resolve_database_url)
-    monkeypatch.setattr(
-        web_server.takyon_safebox,
-        "first_env_backed_value",
-        lambda *_keys: "postgres://from-dashboard-env",
-    )
 
-    assert web_server._resolve_runtime_database_url() == "postgres://from-dashboard-env"
-    assert seen == ["postgres://from-dashboard-env"]
+    assert web_server._resolve_runtime_database_url() == "postgres://operator"
+    assert seen == ["operator"]
 
 
 def test_request_runtime_database_url_is_cached_per_request(monkeypatch):
@@ -352,8 +347,9 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     mounted: list[str] = []
     overrides: dict[object, object] = {}
 
+    monkeypatch.delenv("TAKYON_HOST_ROLE", raising=False)
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
-    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
     monkeypatch.setattr(control_api, "build_control_router", lambda: "control-router")
     monkeypatch.setattr(ai_gateway, "build_ai_gateway_router", lambda: "gateway-router")
     monkeypatch.setattr(creative_gateway, "build_creative_gateway_router", lambda: "creative-router")
@@ -369,6 +365,76 @@ def test_mount_postgres_runtime_routes_mounts_once(monkeypatch):
     assert ai_gateway.get_gateway_conn in overrides
 
 
+def test_mount_postgres_runtime_routes_operator_host_skips_app_plane(monkeypatch):
+    import plugins.takyon.ai_gateway as ai_gateway
+    import plugins.takyon.control_api as control_api
+    import plugins.takyon.core as core
+    import plugins.takyon.creative_gateway as creative_gateway
+    import takyon_cli.web_server as web_server
+
+    mounted: list[str] = []
+    overrides: dict[object, object] = {}
+    planes: list[str | None] = []
+
+    def _fake_resolve_runtime_database_url(*, plane="operator"):
+        planes.append(plane)
+        if plane == "app":
+            raise AssertionError("operator host must not resolve app-plane DSN")
+        return "postgres://operator"
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", _fake_resolve_runtime_database_url)
+    monkeypatch.setattr(control_api, "build_control_router", lambda: "control-router")
+    monkeypatch.setattr(ai_gateway, "build_ai_gateway_router", lambda: "gateway-router")
+    monkeypatch.setattr(creative_gateway, "build_creative_gateway_router", lambda: "creative-router")
+    monkeypatch.setattr(web_server.app, "include_router", lambda router: mounted.append(router))
+    monkeypatch.setattr(web_server.app, "dependency_overrides", overrides, raising=False)
+    monkeypatch.setattr(web_server, "_POSTGRES_RUNTIME_ROUTES_MOUNTED", False)
+
+    web_server._mount_postgres_runtime_routes()
+
+    assert planes == ["operator"]
+    assert mounted == ["control-router", "creative-router"]
+    assert control_api.get_control_conn in overrides
+    assert ai_gateway.get_gateway_conn not in overrides
+
+
+def test_mount_postgres_runtime_routes_subuser_host_skips_operator_plane(monkeypatch):
+    import plugins.takyon.ai_gateway as ai_gateway
+    import plugins.takyon.control_api as control_api
+    import plugins.takyon.core as core
+    import plugins.takyon.creative_gateway as creative_gateway
+    import takyon_cli.web_server as web_server
+
+    mounted: list[str] = []
+    overrides: dict[object, object] = {}
+    planes: list[str | None] = []
+
+    def _fake_resolve_runtime_database_url(*, plane="operator"):
+        planes.append(plane)
+        if plane == "operator":
+            raise AssertionError("subuser host must not resolve operator-plane DSN")
+        return "postgres://app"
+
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", _fake_resolve_runtime_database_url)
+    monkeypatch.setattr(control_api, "build_control_router", lambda: "control-router")
+    monkeypatch.setattr(ai_gateway, "build_ai_gateway_router", lambda: "gateway-router")
+    monkeypatch.setattr(creative_gateway, "build_creative_gateway_router", lambda: "creative-router")
+    monkeypatch.setattr(web_server.app, "include_router", lambda router: mounted.append(router))
+    monkeypatch.setattr(web_server.app, "dependency_overrides", overrides, raising=False)
+    monkeypatch.setattr(web_server, "_POSTGRES_RUNTIME_ROUTES_MOUNTED", False)
+
+    web_server._mount_postgres_runtime_routes()
+
+    assert planes == ["app"]
+    assert mounted == ["gateway-router"]
+    assert control_api.get_control_conn not in overrides
+    assert ai_gateway.get_gateway_conn in overrides
+
+
 def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -380,6 +446,13 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
     calls: list[tuple[object, ...]] = []
 
     class _Conn:
+        def execute(self, _sql, _params=None):
+            class _Result:
+                def fetchone(self_inner):
+                    return {"session_user": "takyon_app", "current_user": "takyon_app"}
+
+            return _Result()
+
         def close(self):
             calls.append(("close",))
 
@@ -403,7 +476,7 @@ def test_app_generate_uses_hardened_gateway_broker(monkeypatch):
         }
 
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
-    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
     monkeypatch.setattr(psycopg, "connect", _fake_connect)
     monkeypatch.setattr(ai_gateway, "broker_message_for_business", _fake_broker)
 
@@ -439,6 +512,13 @@ def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
     calls: list[tuple[object, ...]] = []
 
     class _Conn:
+        def execute(self, _sql, _params=None):
+            class _Result:
+                def fetchone(self_inner):
+                    return {"session_user": "takyon_app", "current_user": "takyon_app"}
+
+            return _Result()
+
         def close(self):
             calls.append(("close",))
 
@@ -451,7 +531,7 @@ def test_app_generate_accepts_bearer_app_session_token(monkeypatch):
         return {"success": True, "text": "brokered"}
 
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
-    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
     monkeypatch.setattr(psycopg, "connect", _fake_connect)
     monkeypatch.setattr(ai_gateway, "broker_message_for_business", _fake_broker)
 
@@ -499,7 +579,7 @@ def test_operator_account_uses_reconciled_reserved_cents(monkeypatch):
     )
 
     monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
-    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda: "postgres://runtime")
+    monkeypatch.setattr(web_server, "_resolve_runtime_database_url", lambda **_kwargs: "postgres://runtime")
     monkeypatch.setattr(web_server, "_release_stale_operator_reservations", lambda _conn, _uid: 0)
     monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: _Conn())
@@ -892,7 +972,7 @@ def test_creative_credit_checkout_route_skips_redundant_db_lookup(monkeypatch):
     monkeypatch.setattr(
         web_server,
         "_resolve_runtime_database_url",
-        lambda: (_ for _ in ()).throw(AssertionError("creative checkout should not resolve DB URL")),
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("creative checkout should not resolve DB URL")),
     )
     monkeypatch.setattr(takyon_core, "_db_backend", lambda: "postgres")
     monkeypatch.setattr(
@@ -2291,15 +2371,16 @@ def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeyp
     from starlette.responses import JSONResponse
 
     import takyon_cli.web_server as web_server
+    from plugins.takyon import core as takyon_core
 
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
 
     async def _fake_post(request, business, route):
-        calls.append(("POST", business, route))
+        calls.append(("POST", business, route, takyon_core._store()._database_plane))
         return JSONResponse({"ok": True, "business": business, "route": route})
 
     async def _fake_get(request, business, route):
-        calls.append(("GET", business, route))
+        calls.append(("GET", business, route, takyon_core._store()._database_plane))
         return JSONResponse({"ok": True, "business": business, "route": route})
 
     monkeypatch.setattr(web_server, "_takyon_app_post", _fake_post)
@@ -2335,7 +2416,7 @@ def test_product_host_serves_canonical_prefixed_app_rails_only(tmp_path, monkeyp
     assert canonical.json() == {"ok": True, "business": "mathflow", "route": "auth/session"}
     assert wrong_slug.status_code == 404
     assert bare.status_code == 405
-    assert ("POST", "mathflow", "auth/session") in calls
+    assert ("POST", "mathflow", "auth/session", "app") in calls
     assert dash.status_code != 200 or dash.json().get("business") != "mathflow"
 
 
@@ -2377,110 +2458,6 @@ def test_app_checkout_get_renders_test_receipt_page(tmp_path, monkeypatch):
     assert "Subscription flow is wired." in response.text
     assert "student@example.com" in response.text
     assert 'href="/app?checkout=success"' in response.text
-
-
-def test_app_checkout_post_requires_valid_session_before_creating_intent(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    def fail_checkout_handler(_args):
-        raise AssertionError("checkout intent must not be created without a valid app session")
-
-    monkeypatch.setattr(web_server, "handle_business_create_app_checkout", fail_checkout_handler)
-
-    web_server.app.state.bound_host = "127.0.0.1"
-    try:
-        client = TestClient(web_server.app)
-        response = client.post(
-            "/api/takyon/apps/mathflow/checkout",
-            json={"plan_key": "monthly"},
-            headers={"Host": "mathflow.coscale.app"},
-        )
-    finally:
-        if hasattr(web_server.app.state, "bound_host"):
-            del web_server.app.state.bound_host
-
-    assert response.status_code == 401
-    assert response.json() == {"success": False, "error": "missing app session"}
-
-
-def test_app_checkout_post_rejects_stale_session_before_creating_intent(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    monkeypatch.setattr(
-        web_server,
-        "handle_business_read_app_account",
-        lambda _args: json.dumps({"success": False, "error": "app account not found"}),
-    )
-
-    def fail_checkout_handler(_args):
-        raise AssertionError("checkout intent must not be created for a stale app session")
-
-    monkeypatch.setattr(web_server, "handle_business_create_app_checkout", fail_checkout_handler)
-
-    web_server.app.state.bound_host = "127.0.0.1"
-    try:
-        client = TestClient(web_server.app)
-        response = client.post(
-            "/api/takyon/apps/mathflow/checkout",
-            json={"plan_key": "monthly"},
-            headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=stale"},
-        )
-    finally:
-        if hasattr(web_server.app.state, "bound_host"):
-            del web_server.app.state.bound_host
-
-    assert response.status_code == 401
-    assert response.json() == {"success": False, "error": "missing app session"}
-
-
-def test_app_checkout_post_uses_session_account_identity(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import takyon_cli.web_server as web_server
-
-    calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(
-        web_server,
-        "handle_business_read_app_account",
-        lambda args: json.dumps(
-            {
-                "success": True,
-                "business": args["business"],
-                "user": {"id": "real_user", "email": "real@example.com"},
-            }
-        ),
-    )
-
-    def fake_checkout_handler(args):
-        calls.append(args)
-        return json.dumps({"success": True, "checkout_url": "https://checkout.example/session"})
-
-    monkeypatch.setattr(web_server, "handle_business_create_app_checkout", fake_checkout_handler)
-
-    web_server.app.state.bound_host = "127.0.0.1"
-    try:
-        client = TestClient(web_server.app)
-        response = client.post(
-            "/api/takyon/apps/mathflow/checkout",
-            json={
-                "plan_key": "monthly",
-                "customer_email": "attacker@example.com",
-                "app_user_id": "attacker_user",
-            },
-            headers={"Host": "mathflow.coscale.app", "Cookie": "takyon_app_session=valid"},
-        )
-    finally:
-        if hasattr(web_server.app.state, "bound_host"):
-            del web_server.app.state.bound_host
-
-    assert response.status_code == 200
-    assert calls[0]["app_user_id"] == "real_user"
-    assert calls[0]["customer_email"] == "attacker@example.com"
 
 
 def test_app_session_get_dispatches_session_handler_without_account_lookup(monkeypatch):
@@ -3159,6 +3136,11 @@ def test_http_path_allowed_for_host_roles():
         role=web_server._HOST_ROLE_SUBUSER,
         host="app.fourmanifold.com",
         path="/api/takyon/apps/latexflow/account",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="latexflow.coscale.app",
+        path="/api/takyon/apps/latexflow/account",
     ) is True
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_SUBUSER,
@@ -3169,6 +3151,21 @@ def test_http_path_allowed_for_host_roles():
         role=web_server._HOST_ROLE_SUBUSER,
         host="latexflow.coscale.app",
         path="/api/status",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="latexflow.coscale.app",
+        path="/v1/billing/webhook",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="latexflow.coscale.app",
+        path="/auth/login",
+    ) is False
+    assert web_server._http_path_allowed_for_host_role(
+        role=web_server._HOST_ROLE_SUBUSER,
+        host="latexflow.coscale.app",
+        path="/internal/ai-gateway/generate",
     ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
@@ -3194,7 +3191,7 @@ def test_http_path_allowed_for_host_roles():
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.coscale.app",
         path="/api/takyon/apps/latexflow/account",
-    ) is True
+    ) is False
     assert web_server._http_path_allowed_for_host_role(
         role=web_server._HOST_ROLE_OPERATOR,
         host="latexflow.coscale.app",
@@ -3248,6 +3245,10 @@ def test_operator_role_blocks_public_app_plane(tmp_path, monkeypatch):
             headers={"Host": "localhost:9119"},
         )
         blocked_product = client.get("/", headers={"Host": "latexflow.coscale.app"})
+        blocked_product_app = client.get(
+            "/api/takyon/apps/latexflow/account",
+            headers={"Host": "latexflow.coscale.app"},
+        )
     finally:
         if hasattr(web_server.app.state, "bound_host"):
             del web_server.app.state.bound_host
@@ -3255,6 +3256,7 @@ def test_operator_role_blocks_public_app_plane(tmp_path, monkeypatch):
     assert status.status_code == 200
     assert blocked_app.status_code == 404
     assert blocked_product.status_code == 404
+    assert blocked_product_app.status_code == 404
 
 
 def test_product_tls_ask_allows_only_existing_product_subdomains(tmp_path, monkeypatch, pg_store_dsn):

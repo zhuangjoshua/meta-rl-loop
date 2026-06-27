@@ -3,8 +3,8 @@
 These are the operator/platform counterpart to the metered ``/v1/providers/*`` business broker: keyless
 egress (the safebox resolves the real provider key LOCALLY and forwards) AND an authoritative money gate
 (every call reserves -> settles the OPERATOR's control-plane budget keyed on the verified operator scope,
-BEFORE/AFTER resolving the key). There is NO ungated path — the transitional internal token is metered
-too. After the creative-credit cutover, ONLY the Anthropic (streaming) + Tavily proxy routes live here;
+BEFORE/AFTER resolving the key). There is NO ungated path, and the shared Safebox transport token is not
+spend authority. After the creative-credit cutover, ONLY the Anthropic (streaming) + Tavily proxy routes live here;
 the two route-wiring tests pin that the ungated creative proxy routes are gone.
 
 These tests are hermetic — NO network, NO live providers, NO live DB. ``httpx`` and the per-provider key
@@ -34,6 +34,7 @@ from plugins.takyon import safebox_app, safebox_provider_proxy
 from plugins.takyon.safebox_capability import CapabilityScope, mint_capability
 
 _TOKEN = "secret-internal-token"
+_OPERATOR_TOKEN = "operator-route-token-not-on-subuser"
 _SIGNING_KEY = b"safebox-only-signing-key-not-on-clients"
 _OPERATOR = "operator_user_A"
 # A canary that must NEVER be observed in any response surfaced to the caller.
@@ -77,13 +78,15 @@ def _patch_budget(monkeypatch):
 def client(monkeypatch):
     monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
     monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, _SIGNING_KEY.decode())
-    # The transitional internal-token path meters against this platform operator.
+    monkeypatch.setenv(safebox_app._OPERATOR_TOKEN_ENV, _OPERATOR_TOKEN)
+    monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "testclient")
+    # Kept set to prove the old platform-operator fallback does not revive shared-token spend.
     monkeypatch.setenv("TAKYON_PLATFORM_OPERATOR_USER_ID", _OPERATOR)
     return TestClient(safebox_app.build_safebox_app())
 
 
 def _auth():
-    return {"Authorization": f"Bearer {_TOKEN}"}
+    return {"Authorization": f"Bearer {_TOKEN}", "X-Takyon-Operator-Token": _OPERATOR_TOKEN}
 
 
 def _session_cap(*, max_cost_microusd=5_000_000, ttl=3600, nonce="sess-1"):
@@ -654,7 +657,8 @@ def test_ungated_creative_proxy_routes_are_deleted():
     # The gated replacements ARE mounted.
     assert "/v1/providers/gemini/logo" in paths
     assert "/v1/providers/openai/images" in paths
-    assert "/v1/providers/fal/{fal_path:path}" in paths
+    assert "/v1/providers/fal/kling-image-to-video" in paths
+    assert "/v1/providers/fal/{fal_path:path}" not in paths
 
 
 def test_deleted_ungated_creative_proxy_routes_are_unreachable(client):

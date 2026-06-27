@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -20,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, Iterable
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from . import safebox
@@ -40,6 +41,9 @@ _CLOUDFLARE_AIG_BASE = "https://gateway.ai.cloudflare.com/v1"
 # safebox-internal code on the safebox host, not a business runtime), and fail closed if absent so a
 # misconfigured host can never broker or mint without a key.
 _CAP_SIGNING_KEY_ENV = "TAKYON_CAP_SIGNING_KEY"
+_OPERATOR_CLIENTS_ENV = "TAKYON_SAFEBOX_OPERATOR_CLIENTS"
+_OPERATOR_TOKEN_ENV = "TAKYON_SAFEBOX_OPERATOR_TOKEN"
+_OPERATOR_TOKEN_HEADER = "x-takyon-operator-token"
 
 # Per-action audience + provider-key aliases + pricing seam. The audience binds a minted token to
 # exactly one provider action; mismatched audiences are rejected by verify_capability. Key aliases
@@ -48,6 +52,7 @@ _CAP_SIGNING_KEY_ENV = "TAKYON_CAP_SIGNING_KEY"
 _ANTHROPIC_AUDIENCE = "anthropic.messages"
 _TAVILY_AUDIENCE = "tavily.search"
 _GEMINI_IMAGE_AUDIENCE = "gemini.image"
+_POSTMARK_SEND_AUDIENCE = "postmark.send"
 
 # ── Operator/platform SESSION capability audience ────────────────────────────────────────────────
 # The operator/platform plane (CEO agent + coding worker + platform web_tools) calls Anthropic /
@@ -135,18 +140,13 @@ def _normalize_stripe_request(path: str, method: str, params: dict[str, Any] | N
     if not stripe_path or "?" in stripe_path or "\\" in stripe_path or ".." in stripe_path.split("/"):
         raise HTTPException(status_code=403, detail="stripe_path_not_allowed")
     clean_params = dict(params or {})
-    parts = stripe_path.split("/")
     if stripe_method == "POST" and stripe_path in {"products", "prices", "checkout/sessions"}:
         _require_takyon_app_stripe_params(stripe_path, clean_params)
         return stripe_path, stripe_method, clean_params
-    if stripe_method == "GET" and len(parts) == 3 and parts[:2] == ["checkout", "sessions"] and parts[2].startswith("cs_"):
-        return stripe_path, stripe_method, clean_params
-    if len(parts) == 2 and parts[0] == "subscriptions" and parts[1].startswith("sub_"):
-        if stripe_method == "GET":
-            return stripe_path, stripe_method, clean_params
-        if stripe_method == "POST" and set(clean_params) <= {"cancel_at_period_end"}:
-            return stripe_path, stripe_method, clean_params
     raise HTTPException(status_code=403, detail="stripe_path_not_allowed")
+
+
+_STRIPE_CATALOG_MUTATION_PATHS = frozenset({"products", "prices"})
 
 
 def _storage_provider(provider: str) -> str:
@@ -217,10 +217,84 @@ def _require_takyon_app_stripe_params(path: str, params: dict[str, Any]) -> str:
         if not _metadata_value(params, "plan_key") or not _metadata_value(params, "checkout_intent_id"):
             raise HTTPException(status_code=403, detail="stripe_checkout_scope_required")
         for url_key in ("success_url", "cancel_url"):
-            url = str(params.get(url_key) or "").strip()
-            if not url.startswith("https://") or any(ch.isspace() for ch in url):
-                raise HTTPException(status_code=403, detail="stripe_redirect_not_allowed")
+            _require_app_checkout_redirect_url(str(params.get(url_key) or ""), business=business)
     return business
+
+
+def _require_app_checkout_redirect_url(raw_url: str, *, business: str) -> None:
+    url = str(raw_url or "").strip()
+    if not url or any(ch.isspace() for ch in url):
+        raise HTTPException(status_code=403, detail="stripe_redirect_not_allowed")
+    parsed = urllib.parse.urlsplit(url)
+    host = str(parsed.hostname or "").strip().lower()
+    expected_host = f"{_require_safe_slug(business)}.coscale.app"
+    path = str(parsed.path or "")
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or host != expected_host
+        or (path != "/app" and not path.startswith("/app/"))
+    ):
+        raise HTTPException(status_code=403, detail="stripe_redirect_not_allowed")
+
+
+def _db_row_value(row: Any, index: int, key: str) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row[index]
+        except Exception:
+            return None
+
+
+def _require_app_checkout_intent_authority(params: dict[str, Any], *, price_id: str) -> None:
+    """Checkout creation authority is the recorded app checkout intent, not the bearer token.
+
+    The product runtime creates the intent through the app DB plane after validating the customer's
+    app session. Safebox refuses to create a Stripe Checkout Session unless that intent and plan exist
+    and match the submitted Stripe price. A caller with only the shared transport token plus forged
+    metadata cannot mint checkout sessions.
+    """
+    business = _require_safe_slug(_metadata_value(params, "business"))
+    plan_key = _require_safe_slug(_metadata_value(params, "plan_key"))
+    intent_id = str(_metadata_value(params, "checkout_intent_id") or "").strip()
+    if not intent_id:
+        raise HTTPException(status_code=403, detail="stripe_checkout_scope_required")
+    if not str(price_id or "").strip():
+        raise HTTPException(status_code=403, detail="stripe_price_scope_required")
+    with _safebox_db_conn() as conn:
+        row = conn.execute(
+            """
+            select i.app_user_id, i.customer_email, i.status, p.stripe_price_id
+            from app_checkout_intents i
+            join app_plan_policies p
+              on p.business_slug = i.business_slug
+             and p.plan_key = i.plan_key
+            where i.id = %s
+              and i.business_slug = %s
+              and i.plan_key = %s
+            limit 1
+            """,
+            (intent_id, business, plan_key),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=403, detail="stripe_checkout_intent_required")
+    status = str(_db_row_value(row, 2, "status") or "").strip().lower()
+    if status != "created":
+        raise HTTPException(status_code=409, detail="stripe_checkout_intent_not_open")
+    expected_price = str(_db_row_value(row, 3, "stripe_price_id") or "").strip()
+    if expected_price and expected_price != str(price_id or "").strip():
+        raise HTTPException(status_code=403, detail="stripe_price_scope_mismatch")
+    intent_email = str(_db_row_value(row, 1, "customer_email") or "").strip().lower()
+    param_email = str(params.get("customer_email") or "").strip().lower()
+    if intent_email and param_email and intent_email != param_email:
+        raise HTTPException(status_code=403, detail="stripe_checkout_customer_mismatch")
 
 
 def _require_takyon_app_stripe_object(payload: dict[str, Any], *, require_source: bool = False) -> str:
@@ -267,15 +341,16 @@ def _safebox_db_conn():
 
     The usage-ledger STEP-A SECURITY DEFINER functions are writable only by the safebox role, so the
     ledger adapter below runs them on THIS connection on the safebox host."""
-    from .runtime_app import resolve_database_url
+    from .runtime_app import assert_takyon_pg_role, resolve_database_url
     import psycopg
 
     raw_conn = psycopg.connect(
-        resolve_database_url(),
+        resolve_database_url(plane="safebox"),
         autocommit=True,
         prepare_threshold=None,
     )
     try:
+        assert_takyon_pg_role(raw_conn, "safebox")
         yield raw_conn
     finally:
         raw_conn.close()
@@ -292,8 +367,10 @@ class _UsageLedgerAdapter:
     reservation handle returned by reserve is passed straight back to settle/release — the broker
     never inspects it."""
 
-    def __init__(self, *, provider: str):
+    def __init__(self, *, provider: str, purpose: str = "product_usage", route: str = "app"):
         self._provider = str(provider or "")
+        self._purpose = str(purpose or "product_usage")
+        self._route = str(route or "app")
 
     def reserve(self, scope: CapabilityScope, estimate_microusd: int):
         from . import app_entitlements, app_usage
@@ -327,6 +404,8 @@ class _UsageLedgerAdapter:
                 user_monthly_limit_microusd=limit,
                 app_user_tier=tier,
                 provider=self._provider,
+                purpose=self._purpose,
+                route=self._route,
                 metadata={"via": "safebox_broker", "action": scope.action},
             )
         return {"business_slug": scope.business_slug, "reservation_key": key}
@@ -621,6 +700,7 @@ class _MetaGraphBody(BaseModel):
     method: str
     path: str
     params: dict[str, Any] = {}
+    # Compatibility only: the broker route below accepts only graph.facebook.com.
     host: str = "graph.facebook.com"
     timeout: float = 60.0
 
@@ -831,6 +911,13 @@ class _AppCheckoutReconcileBody(BaseModel):
     customer_email: str | None = None
 
 
+class _AppSubscriptionCancelBody(BaseModel):
+    business_slug: str
+    app_user_id: str
+    session_token: str | None = None
+    cancel_at_period_end: bool = True
+
+
 class _Auth0LoginStateBody(BaseModel):
     state: str
     nonce: str
@@ -944,6 +1031,52 @@ def _require_internal_token(authorization: str | None = Header(default=None)) ->
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def _client_host(request: Request) -> str:
+    client = getattr(request, "client", None)
+    return str(getattr(client, "host", "") or "").strip()
+
+
+def _client_allowed_by_entry(host: str, entry: str) -> bool:
+    candidate = str(entry or "").strip()
+    if not candidate:
+        return False
+    if hmac.compare_digest(host.encode(), candidate.encode()):
+        return True
+    try:
+        return ipaddress.ip_address(host) in ipaddress.ip_network(candidate, strict=False)
+    except ValueError:
+        return False
+
+
+def _require_operator_client(request: Request) -> None:
+    """Restrict operator/infrastructure-only Safebox routes to exact trusted service clients.
+
+    ``TAKYON_SAFEBOX_TOKEN`` is transport reachability and is shared by multiple planes during cutover.
+    It must not be enough to mint operator capabilities or touch private workspace/storage surfaces.
+    The Safebox host therefore needs a route-specific operator token AND an explicit client allowlist for
+    these routes, normally the operator VPS private address plus local test clients.
+    """
+    expected_operator_token = str(os.environ.get(_OPERATOR_TOKEN_ENV) or "").strip()
+    if not expected_operator_token:
+        raise HTTPException(status_code=503, detail="operator_token_not_configured")
+    presented_operator_token = str(request.headers.get(_OPERATOR_TOKEN_HEADER) or "").strip()
+    if not hmac.compare_digest(
+        presented_operator_token.encode(),
+        expected_operator_token.encode(),
+    ):
+        raise HTTPException(status_code=401, detail="operator_unauthorized")
+
+    raw = str(os.environ.get(_OPERATOR_CLIENTS_ENV) or "").strip()
+    if not raw:
+        raise HTTPException(status_code=503, detail="operator_client_allowlist_unconfigured")
+    host = _client_host(request)
+    if not host:
+        raise HTTPException(status_code=403, detail="operator_client_unavailable")
+    allowed = [part.strip() for part in raw.replace(",", " ").split() if part.strip()]
+    if not any(_client_allowed_by_entry(host, part) for part in allowed):
+        raise HTTPException(status_code=403, detail="operator_client_not_allowed")
+
+
 def _provider_key_denylist() -> frozenset[str]:
     """Canonical set of PAID-PROVIDER key names the /v1/env HTTP routes must REFUSE to vend
     (GOAL_RULES §1 step 4). Sourced from ``core.provider_key_denylist`` (built from the single
@@ -993,7 +1126,7 @@ def _refuse_provider_key(name: str) -> None:
 # (``_env_egress_allowed``); the write/delete gate hard-refuses the self-authority secrets so they can
 # never be overwritten or removed over HTTP either.
 _SAFEBOX_SELF_AUTHORITY_FALLBACK: frozenset[str] = frozenset(
-    {"TAKYON_CAP_SIGNING_KEY", "TAKYON_SAFEBOX_TOKEN"}
+    {"TAKYON_CAP_SIGNING_KEY", "TAKYON_SAFEBOX_OPERATOR_TOKEN", "TAKYON_SAFEBOX_TOKEN"}
 )
 
 
@@ -1013,29 +1146,22 @@ def _is_sensitive_env_name(name: str) -> bool:
         n = str(name or "").strip()
         return bool(n) and (
             n == "DATABASE_URL"
+            or n in {
+                "POSTGRES_URL",
+                "POSTGRES_PRISMA_URL",
+                "POSTGRES_URL_NON_POOLING",
+                "TAKYON_OPERATOR_DATABASE_URL",
+                "TAKYON_APP_DATABASE_URL",
+                "TAKYON_SAFEBOX_DATABASE_URL",
+                "TAKYON_MIGRATION_DATABASE_URL",
+                "MIGRATION_DATABASE_URL",
+            }
+            or n.endswith("_DATABASE_URL")
             or n.endswith((
                 "_KEY", "_TOKEN", "_SECRET", "_PASSWORD",
                 "_SECRET_ACCESS_KEY", "_WEBHOOK_SECRET", "_CLIENT_SECRET", "_ACCESS_KEY_ID",
             ))
         )
-
-
-def _refuse_env_write(name: str) -> None:
-    """No runtime plane writes env over HTTP — secrets are provisioned out-of-band on the safebox host.
-    So POST/DELETE /v1/env refuse ANY sensitive key (provider key, self-authority/verification secret,
-    or any *_KEY/_TOKEN/_SECRET/_PASSWORD), in any case — closing the DATABASE_URL clobber/DoS, the
-    provider-key swap (keys the safebox's own proxies resolve locally), and the lowercase-500 vector.
-    403."""
-    n = str(name or "").strip()
-    if not n:
-        raise HTTPException(status_code=403, detail="env_write_forbidden")
-    for cand in {n, n.upper()}:
-        if (
-            cand in _self_authority_secret_names()
-            or _is_denied_provider_key(cand)
-            or _is_sensitive_env_name(cand)
-        ):
-            raise HTTPException(status_code=403, detail="env_write_forbidden")
 
 
 def _env_egress_allowed(name: str) -> bool:
@@ -1053,33 +1179,19 @@ def _env_egress_allowed(name: str) -> bool:
         n = str(name or "").strip()
         if not n or n in _SAFEBOX_SELF_AUTHORITY_FALLBACK or _is_denied_provider_key(n):
             return False
-        return n in {
-            "DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING",
-        }
+        return False
 
 
-_RUNTIME_DATABASE_EGRESS_NAMES: frozenset[str] = frozenset(
-    {"DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING"}
-)
-_RUNTIME_DATABASE_URL_ENV = "TAKYON_RUNTIME_DATABASE_URL"
+_RUNTIME_DATABASE_EGRESS_NAMES: frozenset[str] = frozenset()
 
 
 def _env_egress_value(name: str) -> str:
     """Resolve an allowlisted value for runtime-plane egress.
 
-    The safebox itself keeps its owner DATABASE_URL locally so provider proxies, webhook processors, and
-    money gates can still run with authority. Runtime planes must receive the least-privilege database
-    DSN after the G3 cutover, so database aliases egress as TAKYON_RUNTIME_DATABASE_URL when configured.
+    DB DSNs are not vendable through this route. Each runtime process gets its own least-privilege DSN
+    from local service env/Doppler/systemd; the shared Safebox transport token is not DB authority.
     """
     n = str(name or "").strip()
-    if n in _RUNTIME_DATABASE_EGRESS_NAMES:
-        runtime_database_url = str(
-            os.environ.get(_RUNTIME_DATABASE_URL_ENV)
-            or safebox.load_env().get(_RUNTIME_DATABASE_URL_ENV)
-            or ""
-        ).strip()
-        if runtime_database_url:
-            return runtime_database_url
     try:
         return safebox.read_env_backed_value(n)
     except KeyError:
@@ -1231,6 +1343,7 @@ def _tavily_provider_caller(payload: dict[str, Any]):
     body = dict(payload or {})
     endpoint = str(body.pop("endpoint", None) or body.get("operation") or "search").strip("/").lower()
     operation = str(body.pop("operation", None) or endpoint).strip().lower()
+    endpoint, operation = ai_provider.normalize_tavily_endpoint_operation(endpoint, operation)
     units = max(1, int(body.pop("units", 1) or 1))
 
     def _call(_scope: CapabilityScope, key: str):
@@ -1319,6 +1432,7 @@ def _tavily_estimate(payload: dict[str, Any]):
     body = dict(payload or {})
     endpoint = str(body.get("endpoint") or body.get("operation") or "search").strip("/").lower()
     operation = str(body.get("operation") or endpoint).strip().lower()
+    endpoint, operation = ai_provider.normalize_tavily_endpoint_operation(endpoint, operation)
     units = max(1, int(body.get("units") or 1))
 
     def _estimate(_scope: CapabilityScope) -> int:
@@ -1353,6 +1467,162 @@ def _gemini_image_estimate(payload: dict[str, Any]):
     return _estimate
 
 
+def _postmark_send_price_microusd() -> int:
+    from . import app_email
+
+    return int(app_email._send_price_microusd())
+
+
+def _postmark_key_resolver(_scope: CapabilityScope) -> str:
+    return str(safebox.first_env_backed_value("POSTMARK_SERVER_TOKEN") or "").strip()
+
+
+def _postmark_from_email() -> str:
+    return str(
+        os.environ.get("POSTMARK_FROM_EMAIL")
+        or safebox.load_env().get("POSTMARK_FROM_EMAIL")
+        or ""
+    ).strip()
+
+
+def _postmark_estimate(_payload: dict[str, Any]):
+    def _estimate(_scope: CapabilityScope) -> int:
+        return _postmark_send_price_microusd()
+
+    return _estimate
+
+
+def _postmark_provider_caller(payload: dict[str, Any]):
+    body = dict(payload or {})
+    to_email = str(body.get("to_email") or "").strip()
+    subject = str(body.get("subject") or "")
+    text_body = str(body.get("text_body") or "")
+    html_body = body.get("html_body")
+    message_stream = str(body.get("message_stream") or "").strip()
+    if "@" not in to_email:
+        raise ValueError("invalid_recipient")
+    if not subject.strip() or not text_body.strip():
+        raise ValueError("missing_email_body")
+
+    def _call(_scope: CapabilityScope, key: str):
+        from_email = _postmark_from_email()
+        if not key or not from_email:
+            raise BrokerLedgerError("postmark_unconfigured")
+        postmark_payload: dict[str, Any] = {
+            "From": from_email,
+            "To": to_email,
+            "Subject": subject,
+            "TextBody": text_body,
+        }
+        if html_body:
+            postmark_payload["HtmlBody"] = str(html_body)
+        stream = message_stream or str(
+            os.environ.get("TAKYON_APP_EMAIL_MESSAGE_STREAM")
+            or safebox.load_env().get("TAKYON_APP_EMAIL_MESSAGE_STREAM")
+            or ""
+        ).strip()
+        if stream:
+            postmark_payload["MessageStream"] = stream
+        req = urllib.request.Request(
+            "https://api.postmarkapp.com/email",
+            data=json.dumps(postmark_payload).encode("utf-8"),
+            headers={
+                "X-Postmark-Server-Token": key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                response_body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            raise BrokerLedgerError(f"provider_http_{int(exc.code)}:{detail}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise BrokerLedgerError("provider_unreachable") from exc
+        return (
+            {
+                "message_id": response_body.get("MessageID"),
+                "provider": "postmark",
+                "status": "sent",
+            },
+            _postmark_send_price_microusd(),
+        )
+
+    return _call
+
+
+def _postmark_authorize_service_send(
+    *,
+    business: str,
+    session_token: str,
+    recipient_app_user_id: str,
+) -> dict[str, str]:
+    from . import app_email, app_identity
+
+    business = _require_safe_slug(business)
+    token = str(session_token or "").strip()
+    recipient = str(recipient_app_user_id or "").strip()
+    if not token:
+        raise HTTPException(status_code=403, detail="product_session_token_required")
+    if not recipient:
+        raise HTTPException(status_code=400, detail="recipient_app_user_id_required")
+
+    with _safebox_db_conn() as conn:
+        service_user = app_identity.validate_session(conn, business, token)
+        if service_user is None:
+            raise HTTPException(status_code=403, detail="invalid_session")
+        service_user_id = str(service_user.id or "").strip()
+        service_email = str(service_user.email or "").strip()
+        if not app_email.is_service_email(service_email):
+            raise HTTPException(status_code=403, detail="service_session_required")
+        owner_row = conn.execute(
+            "select owner_user_id from businesses where slug = %s",
+            (business,),
+        ).fetchone()
+        if owner_row is None:
+            raise HTTPException(status_code=403, detail="unknown_business")
+        owner_user_id = str(_db_row_value(owner_row, 0, "owner_user_id") or "").strip()
+        if not owner_user_id:
+            raise HTTPException(status_code=403, detail="business_owner_missing")
+        recipient_row = conn.execute(
+            """
+            select r.id::text, r.email::text, r.tier::text
+              from app_users r
+             where r.business_slug = %s
+               and r.id::text = %s
+               and r.status = 'active'
+               and lower(r.email::text) not like '%.takyon.invalid'
+             limit 1
+            """,
+            (business, recipient),
+        ).fetchone()
+        if recipient_row is None:
+            raise HTTPException(status_code=403, detail="recipient_not_authorized")
+        count_row = conn.execute(
+            """
+            select count(*)::bigint
+              from app_usage_events
+             where business_slug = %s
+               and purpose = 'email_send'
+               and created_at >= date_trunc('day', now() at time zone 'utc')
+            """,
+            (business,),
+        ).fetchone()
+
+    sends_today = int(_db_row_value(count_row, 0, "count") or 0)
+    if sends_today >= app_email._daily_send_cap():
+        raise HTTPException(status_code=403, detail="email_daily_cap_exceeded")
+    return {
+        "owner_user_id": owner_user_id,
+        "service_app_user_id": service_user_id,
+        "recipient_app_user_id": str(_db_row_value(recipient_row, 0, "id") or recipient),
+        "recipient_email": str(_db_row_value(recipient_row, 1, "email") or ""),
+        "recipient_tier": str(_db_row_value(recipient_row, 2, "tier") or ""),
+    }
+
+
 # ── Creative-credit provider routes (logo / UGC / static-ad) ──────────────────────────────────────
 # Upstream provider hosts for the gated creative forwards. Kept here on the safebox (never in the
 # business runtime) because only the safebox holds the key and forwards. Mirrors the constants that
@@ -1362,14 +1632,16 @@ _FAL_BASE_URL = "https://fal.run"
 # Long-running FAL models (Kling video i2v) routinely generate for >3 min, which exceeds the
 # synchronous fal.run gateway/timeout and 502s. Those models MUST go through the FAL queue API
 # (submit -> poll status -> fetch result): each HTTP hop stays short while the generation runs
-# server-side. See _forward_fal_queue / _creative_fal_caller.
+# server-side. See _forward_fal_queue / _creative_fal_kling_image_to_video_caller.
 _FAL_QUEUE_BASE_URL = "https://queue.fal.run"
+_FAL_KLING_IMAGE_TO_VIDEO_PATH = "fal-ai/kling-video/v3/pro/image-to-video"
 _CREATIVE_UPSTREAM_TIMEOUT_S = 180.0
 # Max wall-clock the safebox waits for a queued FAL render to COMPLETE, and the poll cadence. The
 # total budget stays below the runtime subprocess's proxy timeout (pipeline.py _PROXY_TIMEOUT_S) so
 # the subprocess hears a clean result/refusal rather than its own transport timeout.
 _FAL_QUEUE_TOTAL_BUDGET_S = 840.0
 _FAL_QUEUE_POLL_INTERVAL_S = 4.0
+_FAL_QUEUE_ALLOWED_HOSTS = frozenset({"queue.fal.run"})
 
 
 def _openai_image_key() -> str:
@@ -1417,6 +1689,25 @@ def _forward_json_post(url: str, *, headers: dict[str, str], payload: dict[str, 
         return {}
 
 
+def _require_fal_queue_url(raw_url: str, *, label: str) -> str:
+    """Allow FAL queue follow-up requests only to fixed HTTPS queue.fal.run URLs."""
+    url = str(raw_url or "").strip()
+    if not url:
+        raise BrokerLedgerError(f"provider_queue_missing_{label}")
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _FAL_QUEUE_ALLOWED_HOSTS
+        or parsed.username
+        or parsed.password
+        or parsed.port is not None
+        or not parsed.path.startswith("/")
+        or parsed.fragment
+    ):
+        raise BrokerLedgerError("provider_queue_invalid_url")
+    return urllib.parse.urlunsplit(parsed)
+
+
 def _forward_fal_queue(path: str, *, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
     """Submit a FAL request to the QUEUE API and block until it completes, returning the KEY-FREE
     result JSON.
@@ -1438,12 +1729,16 @@ def _forward_fal_queue(path: str, *, headers: dict[str, str], payload: dict[str,
             if resp.status_code >= 400:
                 raise BrokerLedgerError(f"provider_http_{int(resp.status_code)}")
             submit = json.loads(resp.text) if resp.text.strip() else {}
-            status_url = str(submit.get("status_url") or "").strip()
-            response_url = str(submit.get("response_url") or "").strip()
-            if not response_url:
+            status_url_raw = str(submit.get("status_url") or "").strip()
+            response_url_raw = str(submit.get("response_url") or "").strip()
+            if not response_url_raw:
                 # A submit with neither a response_url nor a status_url is not a queue response we can
                 # follow — surface it rather than hang.
                 raise BrokerLedgerError("provider_queue_no_response_url")
+            status_url = (
+                _require_fal_queue_url(status_url_raw, label="status_url") if status_url_raw else ""
+            )
+            response_url = _require_fal_queue_url(response_url_raw, label="response_url")
 
             deadline = time.monotonic() + _FAL_QUEUE_TOTAL_BUDGET_S
             while True:
@@ -1514,29 +1809,25 @@ def _creative_openai_images_caller(payload: dict[str, Any]):
     return _call
 
 
-def _creative_fal_caller(fal_path: str):
-    """Build the FAL forwarder for a given FAL ``path`` (e.g. ``fal-ai/kling-video/...``). Resolves the
-    FAL key LOCALLY and forwards to ``https://fal.run/<path>``; returns the KEY-FREE upstream JSON."""
-    path = str(fal_path or "").strip().strip("/")
+def _creative_fal_kling_image_to_video_caller(payload: dict[str, Any]):
+    """Resolve the FAL key LOCALLY and call the one UGC video model Takyon exposes through this gate.
 
-    def _build(payload: dict[str, Any]):
-        body = dict(payload or {})
+    This is deliberately not a generic FAL path proxy. Product creative code may call only the named
+    Kling image-to-video route; adding another FAL model means adding a new explicit route/audience
+    contract, not passing a caller-chosen provider path through Safebox."""
+    body = dict(payload or {})
 
-        def _call(_scope: "CapabilityScope"):
-            if not path:
-                raise ValueError("missing_fal_path")
-            key = _fal_key()
-            if not key:
-                raise BrokerLedgerError("fal_unconfigured")
-            headers = {"Authorization": f"Key {key}", "content-type": "application/json"}
-            # Route through the FAL QUEUE API: Kling video renders run for minutes and 502 on the
-            # synchronous fal.run endpoint. _forward_fal_queue submits, polls, and fetches the result
-            # with short per-hop HTTP calls, returning the same KEY-FREE provider JSON.
-            return _forward_fal_queue(path, headers=headers, payload=body)
+    def _call(_scope: "CapabilityScope"):
+        key = _fal_key()
+        if not key:
+            raise BrokerLedgerError("fal_unconfigured")
+        headers = {"Authorization": f"Key {key}", "content-type": "application/json"}
+        # Route through the FAL QUEUE API: Kling video renders run for minutes and 502 on the
+        # synchronous fal.run endpoint. _forward_fal_queue submits, polls, and fetches the result
+        # with short per-hop HTTP calls, returning the same KEY-FREE provider JSON.
+        return _forward_fal_queue(_FAL_KLING_IMAGE_TO_VIDEO_PATH, headers=headers, payload=body)
 
-        return _call
-
-    return _build
+    return _call
 
 
 def _creative_provider_route(
@@ -1793,17 +2084,21 @@ def build_safebox_app() -> FastAPI:
         return {"value": _first_env_egress_value(body.keys or [])}
 
     @app.post("/v1/env/{key}")
-    def save_env_value(key: str, body: _EnvValueBody, authorization: str | None = Header(default=None)) -> dict[str, bool]:
+    def save_env_value(
+        key: str,
+        body: _EnvValueBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
         _require_internal_token(authorization)
-        _refuse_env_write(key)
-        safebox.save_env_backed_value(key, body.value)
-        return {"ok": True}
+        raise HTTPException(status_code=403, detail="env_write_forbidden")
 
     @app.delete("/v1/env/{key}")
-    def delete_env_value(key: str, authorization: str | None = Header(default=None)) -> dict[str, bool]:
+    def delete_env_value(
+        key: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
         _require_internal_token(authorization)
-        _refuse_env_write(key)
-        return {"removed": safebox.remove_env_backed_value(key)}
+        raise HTTPException(status_code=403, detail="env_write_forbidden")
 
     @app.get("/v1/env")
     def env_keys(
@@ -1822,10 +2117,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/auth0/login-state")
     def auth0_login_state(
+        request: Request,
         body: _Auth0LoginStateBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.auth0_login_state(
                 state=body.state,
@@ -1840,10 +2137,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/auth0/callback")
     def auth0_callback(
+        request: Request,
         body: _Auth0CallbackBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.auth0_exchange_callback(
                 code=body.code,
@@ -1862,10 +2161,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/auth0/session/verify")
     def auth0_session_verify(
+        request: Request,
         body: _Auth0SessionVerifyBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             user = safebox.auth0_verify_session(
                 session_token=body.session_token,
@@ -1879,10 +2180,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/user-api-keys/register")
     def register_user_key(
+        request: Request,
         body: _RegisterUserKeyBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         return {
             "record": safebox.register_user_api_key(
                 body.user_id,
@@ -1894,26 +2197,32 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/user-api-keys/resolve")
     def resolve_user_key(
+        request: Request,
         body: _ResolveUserKeyBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         return {"record": safebox.resolve_user_api_key(body.raw_key)}
 
     @app.post("/v1/user-api-keys/revoke")
     def revoke_user_key(
+        request: Request,
         body: _RevokeUserKeyBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         return {"revoked": safebox.revoke_user_api_key(body.key_id, revoked_at=body.revoked_at)}
 
     @app.post("/v1/user-api-keys/revoke-for-user")
     def revoke_user_keys_for_user(
+        request: Request,
         body: _RevokeUserKeysForUserBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, list[str]]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         return {
             "revoked_ids": safebox.revoke_user_api_keys_for_user(
                 body.user_id,
@@ -1923,24 +2232,33 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/user-api-keys/restore")
     def restore_user_keys(
+        request: Request,
         body: _RestoreUserKeysBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         safebox.restore_user_api_keys(body.key_ids)
         return {"ok": True}
 
     @app.delete("/v1/user-api-keys/{key_id}")
-    def delete_user_key(key_id: str, authorization: str | None = Header(default=None)) -> dict[str, bool]:
+    def delete_user_key(
+        request: Request,
+        key_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         return {"deleted": safebox.delete_user_api_key(key_id)}
 
     @app.post("/v1/billing/accounts/open")
     def open_billing_account(
+        request: Request,
         body: _OpenBillingAccountBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         # Account-open is allowed only as a zero-balance provisioning primitive. Any non-zero amount
         # is a grant and must go through starter/subscription/webhook policy.
         if int(body.allowance_included_cents or 0) != 0:
@@ -1950,10 +2268,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/billing/starter-allowance")
     def grant_starter_allowance(
+        request: Request,
         body: _StarterAllowanceBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         user = safebox.auth0_verify_session(session_token=str(body.session_token or ""))
         if not isinstance(user, dict):
             raise HTTPException(status_code=403, detail="starter_session_required")
@@ -1977,10 +2297,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/billing/operator-subscription/sync")
     def sync_operator_subscription_allowance(
+        request: Request,
         body: _OperatorSubscriptionSyncBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from .control_api import sync_operator_subscription_allowance as _sync
 
         with _safebox_db_conn() as conn:
@@ -1989,10 +2311,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/operator/payouts/state")
     def operator_payout_state(
+        request: Request,
         body: _OperatorPayoutStateBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.get_operator_payout_state(
                 body.user_id,
@@ -2008,10 +2332,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/operator/billing/portal")
     def operator_billing_portal(
+        request: Request,
         body: _OperatorBillingPortalBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             session = safebox.create_operator_billing_portal(
                 body.user_id,
@@ -2033,10 +2359,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/operator/billing/subscription/checkout")
     def operator_subscription_checkout(
+        request: Request,
         body: _OperatorSubscriptionCheckoutBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.create_operator_subscription_checkout(
                 body.user_id,
@@ -2058,10 +2386,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/operator/payouts/connect")
     def operator_payout_connect(
+        request: Request,
         body: _OperatorPayoutConnectBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.create_operator_payout_connect(
                 body.user_id,
@@ -2080,11 +2410,14 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/stripe/request")
     def stripe_request(
+        request: Request,
         body: _StripeRequestBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         path, method, params = _normalize_stripe_request(body.path, body.method or "POST", body.params)
+        if method == "POST" and path in _STRIPE_CATALOG_MUTATION_PATHS:
+            _require_operator_client(request)
         try:
             if path == "checkout/sessions" and method == "POST":
                 price_id = str(params.get("line_items[0][price]") or "").strip()
@@ -2093,14 +2426,8 @@ def build_safebox_app() -> FastAPI:
                     business = _require_takyon_app_stripe_object(price, require_source=True)
                     if business != _metadata_value(params, "business"):
                         raise HTTPException(status_code=403, detail="stripe_price_scope_mismatch")
-            if path.startswith("subscriptions/"):
-                subscription = safebox.stripe_request(path, {}, method="GET")
-                _require_takyon_app_stripe_object(subscription)
-                if method == "GET":
-                    return subscription
+                _require_app_checkout_intent_authority(params, price_id=price_id)
             result = safebox.stripe_request(path, params, method=method)
-            if method == "GET" and path.startswith("checkout/sessions/"):
-                _require_takyon_app_stripe_object(result, require_source=True)
             return result
         except Exception as exc:
             if isinstance(exc, HTTPException):
@@ -2112,10 +2439,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/postmark/send")
     def postmark_send(
+        request: Request,
         body: _PostmarkSendBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         if "@" not in str(body.to_email or ""):
             raise HTTPException(status_code=400, detail="invalid_recipient")
         if not str(body.subject or "").strip() or not str(body.text_body or "").strip():
@@ -2137,10 +2466,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/cloudflare/product-edge-route")
     def cloudflare_product_edge_route(
+        request: Request,
         body: _ProductEdgeRouteBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             slug = _require_existing_business(body.slug)
             return safebox.ensure_product_edge_route(slug)
@@ -2156,10 +2487,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/vercel/domain/delete")
     def vercel_domain_delete(
+        request: Request,
         body: _VercelDomainDeleteBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             _domain_business_slug(body.domain)
             return safebox.delete_vercel_project_domain(body.domain)
@@ -2177,10 +2510,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/storage/put")
     def storage_put(
+        request: Request,
         body: _StoragePutBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         provider = _storage_provider(body.provider)
         _storage_business_slug(body.key)
         try:
@@ -2194,6 +2529,7 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/composio/forward")
     def provider_composio_forward(
+        request: Request,
         body: _ComposioForwardBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
@@ -2203,6 +2539,7 @@ def build_safebox_app() -> FastAPI:
         # directly, returning the key-free upstream JSON. Gated by the internal token (transport
         # reachability); the per-action money gate lives upstream in the distribution skill/tool.
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import composio_distribution as _cd
 
         params = None
@@ -2225,6 +2562,7 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/config")
     def provider_meta_config(
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         # The official Meta MCP OAuth token and legacy system-user token are provider secrets held
@@ -2233,6 +2571,7 @@ def build_safebox_app() -> FastAPI:
         # Gated by the internal token (transport reachability); the per-action money gate lives
         # upstream in the meta-ads handlers.
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import meta_mcp as _meta_mcp
 
         version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
@@ -2264,12 +2603,14 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/mcp/tools")
     def provider_meta_mcp_tools(
+        request: Request,
         body: _MetaMCPToolsBody | None = None,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         # Official Meta Ads MCP tool discovery. The OAuth token is resolved locally by safebox.py and
         # never leaves this host; callers receive only the key-free MCP tool schemas.
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.meta_mcp_list_tools(timeout=(body.timeout if body else 60.0))
         except safebox.RemoteSafeboxError as exc:
@@ -2279,12 +2620,14 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/mcp/call")
     def provider_meta_mcp_call(
+        request: Request,
         body: _MetaMCPCallBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         # Official Meta Ads MCP action broker. This is the v2 launch/control/read transport; it does
         # not use the legacy Meta developer app, and it does not use Composio.
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             return safebox.meta_mcp_call(
                 tool_name=body.tool_name,
@@ -2298,12 +2641,14 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/graph")
     def provider_meta_graph(
+        request: Request,
         body: _MetaGraphBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         # Legacy compatibility route. Production launch/control/read calls use official Meta MCP;
         # this remains internal-only for Graph shims/diagnostics and still never egresses the token.
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import meta_graph as _meta_graph
 
         version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
@@ -2316,6 +2661,9 @@ def build_safebox_app() -> FastAPI:
         ).strip()
         if not token:
             raise HTTPException(status_code=502, detail="META_SYSTEM_USER_ACCESS_TOKEN is not configured")
+        host = str(body.host or _meta_graph._GRAPH_HOST).strip().lower()
+        if host != _meta_graph._GRAPH_HOST:
+            raise HTTPException(status_code=400, detail="meta_graph_host_not_allowed")
         try:
             return _meta_graph._graph(
                 body.method,
@@ -2323,7 +2671,7 @@ def build_safebox_app() -> FastAPI:
                 dict(body.params or {}),
                 token=token,
                 version=version,
-                host=body.host,
+                host=_meta_graph._GRAPH_HOST,
                 timeout=float(body.timeout),
             )
         except _meta_graph.MetaGraphError as exc:
@@ -2331,10 +2679,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/graph/upload-video")
     def provider_meta_graph_upload_video(
+        request: Request,
         body: _MetaGraphUploadVideoBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import meta_graph as _meta_graph
 
         version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
@@ -2367,10 +2717,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/graph/upload-image")
     def provider_meta_graph_upload_image(
+        request: Request,
         body: _MetaGraphUploadImageBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import meta_graph as _meta_graph
 
         version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
@@ -2401,10 +2753,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/providers/meta/graph/ensure-custom-conversion")
     def provider_meta_graph_ensure_custom_conversion(
+        request: Request,
         body: _MetaEnsureCustomConversionBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import meta_graph as _meta_graph
 
         version = str(safebox.first_env_backed_value("META_GRAPH_VERSION") or "v23.0").strip().lstrip("/")
@@ -2431,10 +2785,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/storage/get")
     def storage_get(
+        request: Request,
         body: _StorageKeyBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         provider = _storage_provider(body.provider)
         _storage_business_slug(body.key)
         try:
@@ -2447,10 +2803,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/storage/delete")
     def storage_delete(
+        request: Request,
         body: _StorageKeyBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         provider = _storage_provider(body.provider)
         _storage_business_slug(body.key)
         try:
@@ -2460,10 +2818,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/storage/list-digests")
     def storage_list_digests(
+        request: Request,
         body: _StorageListBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         provider = _storage_provider(body.provider)
         try:
             _storage_business_slug(body.prefix)
@@ -2478,10 +2838,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/storage/list-sizes")
     def storage_list_sizes(
+        request: Request,
         body: _StorageListBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         provider = _storage_provider(body.provider)
         try:
             _storage_business_slug(body.prefix)
@@ -2513,28 +2875,34 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/custody/accounts/open")
     def open_custody_account(
+        request: Request,
         body: _OpenCustodyAccountBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         safebox._local_open_custody_account(None, body.user_id, currency=body.currency or "usd")
         return {"ok": True}
 
     @app.post("/v1/creative-credits/accounts/open")
     def open_creative_credit_account(
+        request: Request,
         body: _OpenCreativeCreditAccountBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, bool]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         safebox._local_open_business_credit_account(None, body.business_slug)
         return {"ok": True}
 
     @app.post("/v1/creative-credits/bootstrap-starter")
     def grant_business_bootstrap_credits(
+        request: Request,
         body: _BusinessBootstrapCreditsBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         try:
             balances = safebox._local_grant_business_bootstrap_credits(
                 None,
@@ -2557,10 +2925,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.get("/v1/creative-credits/{business_slug}")
     def get_creative_credit_balances(
+        request: Request,
         business_slug: str,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         balances = safebox._local_get_business_credit_balances(None, business_slug)
         return {
             "business_slug": balances.business_slug,
@@ -2570,10 +2940,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/creative-credits/checkout")
     def create_creative_credit_checkout(
+        request: Request,
         body: _CreativeCreditCheckoutBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import stripe_util
         from .control_api import create_creative_credit_checkout_session
 
@@ -2609,10 +2981,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/creative-credits/reconcile")
     def reconcile_creative_credit_checkout(
+        request: Request,
         body: _ReconcileCreativeCreditCheckoutBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import stripe_util
 
         try:
@@ -2639,10 +3013,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/creative-credits/grant")
     def grant_creative_credits(
+        request: Request,
         body: _GrantCreativeCreditsBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         raise HTTPException(
             status_code=403,
             detail="creative_credit_grant_requires_verified_checkout_or_webhook",
@@ -2723,6 +3099,11 @@ def build_safebox_app() -> FastAPI:
         session_id = str(body.session_id or "").strip()
         if not session_id or not session_id.startswith("cs_"):
             raise HTTPException(status_code=400, detail="invalid_checkout_session")
+        expected_business = str(body.business_slug or "").strip()
+        expected_user = str(body.app_user_id or "").strip()
+        expected_email = str(body.customer_email or "").strip().lower()
+        if not expected_business or (not expected_user and not expected_email):
+            raise HTTPException(status_code=403, detail="checkout_context_required")
         try:
             session = safebox.stripe_request(f"checkout/sessions/{session_id}", {}, method="GET")
         except stripe_util.StripeError as exc:
@@ -2735,7 +3116,6 @@ def build_safebox_app() -> FastAPI:
         if not isinstance(session, dict) or not session:
             raise HTTPException(status_code=404, detail="unknown_checkout_session")
         business = _require_takyon_app_stripe_object(session, require_source=True)
-        expected_business = str(body.business_slug or "").strip()
         if expected_business and _require_safe_slug(expected_business) != business:
             raise HTTPException(status_code=403, detail="checkout_business_mismatch")
         if str(session.get("status") or "").strip().lower() != "complete":
@@ -2743,8 +3123,6 @@ def build_safebox_app() -> FastAPI:
         if str(session.get("payment_status") or "").strip().lower() not in {"paid", "no_payment_required"}:
             raise HTTPException(status_code=409, detail="checkout_session_unpaid")
 
-        expected_user = str(body.app_user_id or "").strip()
-        expected_email = str(body.customer_email or "").strip().lower()
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         intent_id = str(metadata.get("checkout_intent_id") or "").strip()
         client_reference_id = str(session.get("client_reference_id") or "").strip()
@@ -2798,6 +3176,46 @@ def build_safebox_app() -> FastAPI:
             "subscription": subscription_result,
         }
 
+    @app.post("/v1/stripe/app-subscription/cancel")
+    def cancel_stripe_app_subscription(
+        body: _AppSubscriptionCancelBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import app_identity, app_payments, stripe_util
+
+        business = _require_safe_slug(body.business_slug)
+        app_user_id = str(body.app_user_id or "").strip()
+        if not app_user_id:
+            raise HTTPException(status_code=400, detail="app_user_id_required")
+        session_token = str(body.session_token or "").strip()
+        if not session_token:
+            raise HTTPException(status_code=403, detail="app_session_required")
+        with _safebox_db_conn() as conn:
+            session_user = app_identity.validate_session(conn, business, session_token)
+            if session_user is None:
+                raise HTTPException(status_code=403, detail="app_session_invalid")
+            if str(session_user.id) != app_user_id:
+                raise HTTPException(status_code=403, detail="app_session_user_mismatch")
+            try:
+                return app_payments.cancel_subscription(
+                    conn,
+                    business,
+                    app_user_id=app_user_id,
+                    cancel_at_period_end=bool(body.cancel_at_period_end),
+                    subscription_updater=lambda subscription_id, should_cancel_at_period_end: safebox.stripe_request(
+                        f"subscriptions/{subscription_id}",
+                        {"cancel_at_period_end": "true" if should_cancel_at_period_end else "false"},
+                    ),
+                )
+            except app_payments.CancelableSubscriptionNotFound as exc:
+                raise HTTPException(status_code=404, detail="no_cancelable_subscription") from exc
+            except stripe_util.StripeError as exc:
+                message = str(exc)
+                if "STRIPE_SECRET_KEY" in message:
+                    raise HTTPException(status_code=503, detail="stripe_unconfigured") from exc
+                raise HTTPException(status_code=502, detail="stripe_error") from exc
+
     @app.post("/v1/creative-credits/reserve")
     def reserve_creative_credits(
         body: _ReserveCreativeCreditsBody,
@@ -2822,12 +3240,13 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         raise HTTPException(status_code=403, detail="creative_credit_spend_requires_creative_gate")
 
-    # ── Capability mint + action-shaped broker routes (Phase 2 cutover prep) ──────────────────────
-    # These are ADDITIVE alongside /v1/env/*; the env egress routes stay live until Codex STEP E
-    # deletes them. Each provider route brokers the call entirely inside the safebox: the capability
-    # token is verified (authoritative scope), its nonce claimed once, usage reserved on the validated
-    # {business, app_user} via the STEP-A SECURITY DEFINER ledger, the provider key resolved LOCALLY,
-    # the provider called, and the cost settled — the caller never sees the key.
+    # ── Capability mint + action-shaped broker routes ─────────────────────────────────────────────
+    # These are the authority path. The remaining /v1/env egress routes are read-only public-config
+    # compatibility, not provider/money/secret authority. Each provider route brokers the call entirely
+    # inside the safebox: the capability token is verified (authoritative scope), its nonce claimed
+    # once, usage reserved on the validated {business, app_user} via the SECURITY DEFINER ledger, the
+    # provider key resolved LOCALLY, the provider called, and the cost settled — the caller never sees
+    # the key.
 
     @app.post("/v1/token/mint")
     def mint_token(
@@ -2865,6 +3284,7 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/operator/session-token")
     def operator_session_token(
+        request: Request,
         body: _OperatorSessionTokenBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
@@ -2879,6 +3299,7 @@ def build_safebox_app() -> FastAPI:
         token for the operator PROXY routes, which meter EACH call against the operator's control-plane
         budget without claiming a nonce."""
         _require_internal_token(authorization)
+        _require_operator_client(request)
         ttl_seconds = int(body.ttl_seconds or _OPERATOR_SESSION_TTL_SECONDS)
         if ttl_seconds <= 0:
             raise HTTPException(status_code=400, detail="ttl_must_be_positive")
@@ -2946,6 +3367,98 @@ def build_safebox_app() -> FastAPI:
             estimate_builder=_gemini_image_estimate,
         )
 
+    @app.post("/v1/providers/postmark/send")
+    def provider_postmark_send(
+        body: _ProviderCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        from . import app_usage, safebox_broker
+        from .safebox_capability import CapabilityError, CapabilityScope
+
+        signing_key = _cap_signing_key()
+        if not signing_key:
+            raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
+        if str(body.token or "").strip():
+            raise HTTPException(status_code=403, detail="postmark_requires_service_session")
+        if str(body.action or "").strip() != _POSTMARK_SEND_AUDIENCE:
+            raise HTTPException(status_code=400, detail="action_audience_mismatch")
+
+        payload = dict(body.payload or {})
+        recipient_ref = str(payload.get("recipient_app_user_id") or "").strip()
+        try:
+            subject = str(payload.get("subject") or "")
+            text_body = str(payload.get("text_body") or "")
+            if not subject.strip() or not text_body.strip():
+                raise ValueError("missing_email_body")
+            resolved = _postmark_authorize_service_send(
+                business=str(body.business or ""),
+                session_token=str(body.session_token or ""),
+                recipient_app_user_id=recipient_ref,
+            )
+        except HTTPException:
+            raise
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid_provider_payload") from exc
+
+        now = int(time.time())
+        token = mint_capability(
+            CapabilityScope(
+                takyon_user_id=resolved["owner_user_id"],
+                business_slug=_require_safe_slug(str(body.business or "")),
+                app_user_id=resolved["recipient_app_user_id"],
+                action=_POSTMARK_SEND_AUDIENCE,
+                max_cost_microusd=int(body.estimate_microusd),
+            ),
+            signing_key=signing_key,
+            audience=_POSTMARK_SEND_AUDIENCE,
+            nonce=str(uuid.uuid4()),
+            issued_at=now,
+            ttl_seconds=_CAP_TTL_SECONDS,
+        )
+        provider_payload = {
+            "to_email": resolved["recipient_email"],
+            "subject": subject,
+            "text_body": text_body,
+            "html_body": payload.get("html_body"),
+            "message_stream": payload.get("message_stream"),
+        }
+        try:
+            return safebox_broker.handle_provider_request(
+                token=token,
+                signing_key=signing_key,
+                audience=_POSTMARK_SEND_AUDIENCE,
+                now=now,
+                nonce_store=_PgNonceStore(),
+                ledger=_UsageLedgerAdapter(provider="postmark", purpose="email_send", route="email"),
+                key_resolver=_postmark_key_resolver,
+                provider_caller=_postmark_provider_caller(provider_payload),
+                estimate_microusd=int(body.estimate_microusd),
+                estimate_fn=_postmark_estimate(provider_payload),
+            )
+        except CapabilityError as exc:
+            raise HTTPException(status_code=401, detail=f"capability_invalid: {exc}") from exc
+        except safebox_broker.BrokerError as exc:
+            if str(exc).endswith("_unconfigured"):
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        except (app_usage.AppBudgetInactive, app_usage.AppBudgetExceeded, app_usage.AppUserBudgetExceeded) as exc:
+            raise HTTPException(
+                status_code=402, detail={"error": type(exc).__name__, "detail": str(exc)}
+            ) from exc
+        except app_usage.AppUserNotFound as exc:
+            raise HTTPException(status_code=400, detail="unknown_app_user") from exc
+        except BrokerLedgerError as exc:
+            message = str(exc)
+            if message.endswith("_unconfigured") or message.endswith("_pricing_unavailable"):
+                raise HTTPException(status_code=503, detail=message) from exc
+            raise HTTPException(status_code=502, detail="provider_error") from exc
+        except Exception as exc:
+            message = str(exc)
+            if message.endswith("_unconfigured"):
+                raise HTTPException(status_code=503, detail=message) from exc
+            raise HTTPException(status_code=502, detail="provider_error") from exc
+
     # ── Creative-credit gate: AUTHORITATIVE reserve/commit/release (operator-owned) ───────────────
     # These three routes are the ONE money gate for the fixed-price creative actions (logo / UGC /
     # static ad). The operator (boundary-1 ownership) reserves the action's canonical fixed credit
@@ -2956,10 +3469,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/creative/reserve")
     def creative_reserve(
+        request: Request,
         body: _CreativeReserveBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import safebox
 
         action = str(body.action or "").strip()
@@ -3037,10 +3552,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/creative/commit")
     def creative_commit(
+        request: Request,
         body: _CreativeFinalizeBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import safebox
 
         reservation_key = str(body.reservation_key or "").strip()
@@ -3065,10 +3582,12 @@ def build_safebox_app() -> FastAPI:
 
     @app.post("/v1/creative/release")
     def creative_release(
+        request: Request,
         body: _CreativeFinalizeBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        _require_operator_client(request)
         from . import safebox
 
         reservation_key = str(body.reservation_key or "").strip()
@@ -3121,9 +3640,8 @@ def build_safebox_app() -> FastAPI:
             caller_builder=_creative_openai_images_caller,
         )
 
-    @app.post("/v1/providers/fal/{fal_path:path}")
-    def provider_fal(
-        fal_path: str,
+    @app.post("/v1/providers/fal/kling-image-to-video")
+    def provider_fal_kling_image_to_video(
         body: _CreativeProviderCallBody,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
@@ -3131,7 +3649,7 @@ def build_safebox_app() -> FastAPI:
         return _creative_provider_route(
             body,
             allowed_audiences=_CREATIVE_FAL_AUDIENCES,
-            caller_builder=_creative_fal_caller(fal_path),
+            caller_builder=_creative_fal_kling_image_to_video_caller,
         )
 
     # ── Operator/platform provider proxy (internal-token only, platform-billed, key-free) ─────────

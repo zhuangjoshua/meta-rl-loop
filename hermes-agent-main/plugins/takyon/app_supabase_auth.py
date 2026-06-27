@@ -94,21 +94,6 @@ def _publishable_key() -> str:
     )
 
 
-def _jwt_secret() -> str:
-    """The project JWT secret, resolved server-side (safebox-aware, then env). Sensitive — never an
-    argument the browser supplies, never returned. "" when unconfigured → callers must block."""
-    try:
-        from . import safebox
-
-        if safebox.is_sensitive_env_key("SUPABASE_JWT_SECRET"):
-            value = safebox.read_env_backed_value("SUPABASE_JWT_SECRET")
-            if value:
-                return str(value).strip()
-    except Exception:
-        pass
-    return str(os.getenv("SUPABASE_JWT_SECRET") or "").strip()
-
-
 @lru_cache(maxsize=8)
 def _jwks_client(jwks_url: str):
     import jwt  # PyJWT

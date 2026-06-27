@@ -10363,8 +10363,8 @@ def cmd_dashboard(args):
 
 def cmd_worker(args):
     """Run the Postgres-native worker-drain loop: dispatch due CEO wakes, reclaim stale claims, and
-    drain queued jobs through the budget-gated run_one cycle. Requires DATABASE_URL (Postgres
-    control plane); raises loudly if unconfigured. This is the Phase-6 worker plane process — the
+    drain queued jobs through the budget-gated run_one cycle. Requires TAKYON_OPERATOR_DATABASE_URL
+    (Postgres control plane); raises loudly if unconfigured. This is the Phase-6 worker plane process — the
     Postgres-native replacement for the legacy file-cron CEO wakeups."""
     from plugins.takyon.worker import run_worker_loop
 
@@ -10376,7 +10376,7 @@ def cmd_worker(args):
             once=getattr(args, "once", False),
             max_jobs=getattr(args, "max_jobs", None),
         )
-    except Exception as e:  # invariant #8: a missing DATABASE_URL (or any startup failure) is loud.
+    except Exception as e:  # invariant #8: a missing operator DSN (or any startup failure) is loud.
         print(f"✗ worker could not start: {e}")
         sys.exit(1)
     if getattr(args, "once", False):
@@ -13238,7 +13238,7 @@ Examples:
         description=(
             "Run the Postgres-native worker plane: self-dispatch due CEO wakes, reclaim stale "
             "claims, and drain queued jobs through the budget-gated run_one cycle. Requires "
-            "DATABASE_URL (Postgres control plane). Runs until SIGTERM/SIGINT."
+            "TAKYON_OPERATOR_DATABASE_URL (Postgres control plane). Runs until SIGTERM/SIGINT."
         ),
     )
     worker_parser.add_argument(

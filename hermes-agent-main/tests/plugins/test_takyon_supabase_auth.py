@@ -106,7 +106,6 @@ def test_verifies_es256_token_via_jwks(monkeypatch):
 
 def test_verifies_hs256_token_via_auth_server_when_secret_missing(monkeypatch):
     token = _token()
-    monkeypatch.setattr(sa, "_jwt_secret", lambda: "")
     monkeypatch.setattr(sa, "_publishable_key", lambda: "sb_publishable_test")
     monkeypatch.setattr(
         sa,
@@ -139,6 +138,10 @@ def test_ambient_jwt_secret_not_used_for_hs_verification(monkeypatch):
     monkeypatch.setattr(sa, "_verified_user_via_auth_server", _boom)
     with pytest.raises(sa.SupabaseAuthError):
         sa.verify_supabase_jwt(_token(), project_url="https://example.supabase.co")
+
+
+def test_no_ambient_jwt_secret_helper_exists():
+    assert not hasattr(sa, "_jwt_secret")
 
 
 def test_resolves_public_supabase_url_via_safebox_alias_lookup(monkeypatch):

@@ -973,17 +973,6 @@ def r2_configured() -> bool:
     )
 
 
-def r2_mirror_available() -> bool:
-    """True when a product publish should attempt the public R2 mirror.
-
-    Runtime planes may have no raw R2 credentials by design; with remote storage authority enabled,
-    ``write_public_site_to_r2`` delegates the bounded object writes to Safebox instead. Mirror callers
-    should therefore attempt the write when either local R2 config is present OR the remote authority
-    path is active, and let the write itself fail-soft if Safebox reports R2 unconfigured.
-    """
-    return _remote_storage_authority_enabled() or r2_configured()
-
-
 def public_site_object_key(slug: str, build_id: str, rel: str) -> str:
     """Key a single built-site file in the PUBLIC R2 bucket: ``<slug>/<build_id>/<rel>``.
 
@@ -1024,6 +1013,14 @@ def delete_public_site_from_r2(
     reports a skipped cleanup, matching the publish mirror's optional deployment posture. If R2 is
     provisioned and the backend errors, the exception propagates so the caller can avoid deleting the
     control-plane row while the public site is still live.
+
+    Truthfulness gate: after deleting the prefix this RE-LISTS it. The edge serves
+    ``<slug>/current -> build_id -> index.html`` straight from R2, so if any object survives the
+    delete (e.g. a slow eventual-consistency window, a partial backend failure, or a scope that could
+    not enumerate every key) the public site is still reachable. In that case ``removed`` is reported
+    ``False`` with ``residual_count`` and ``still_present=True`` so the caller never records a clean
+    delete while customers can still load the "deleted" site — exactly the spec's "say so if a piece
+    can't be removed synchronously".
     """
     safe_slug = _safe_slug(slug)
     prefix = public_site_object_prefix(safe_slug)
@@ -1040,6 +1037,22 @@ def delete_public_site_from_r2(
             }
         backend = SafeboxStorageBackend("r2") if _remote_storage_authority_enabled() else R2StorageBackend()
     deleted = delete_prefix(backend, prefix)
+    # Confirm the namespace is actually empty — the edge reads R2 directly, so a surviving object
+    # (especially the <slug>/current pointer) keeps the public site live. Re-listing is cheap relative
+    # to leaving a "deleted" customer site serving on the internet.
+    residual = sorted(backend.list_digests(prefix).keys())
+    if residual:
+        return {
+            "slug": safe_slug,
+            "prefix": prefix,
+            "status": "still_present",
+            "removed": False,
+            "deleted": deleted,
+            "deleted_count": len(deleted),
+            "still_present": True,
+            "residual": residual,
+            "residual_count": len(residual),
+        }
     return {
         "slug": safe_slug,
         "prefix": prefix,

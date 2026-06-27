@@ -60,7 +60,13 @@ def _send_price_microusd() -> int:
     return max(0, value)
 
 
-def _resolve_recipient(store: Any, business_slug: str, app_user_id: str) -> dict[str, Any]:
+def _resolve_recipient(
+    store: Any,
+    business_slug: str,
+    app_user_id: str,
+    *,
+    service_session_token: str | None = None,
+) -> dict[str, Any]:
     try:
         from .core import _PGConn
     except Exception:
@@ -70,7 +76,25 @@ def _resolve_recipient(store: Any, business_slug: str, app_user_id: str) -> dict
         if isinstance(conn, _PGConn):
             leaves = store._app_leaves()
             with store._leaf_conn(conn) as leaf:
-                user = leaves["identity"].get_app_user(leaf, business_slug, app_user_id)
+                if service_session_token:
+                    with store._pg_app_scope(conn, business_slug, session_token=service_session_token):
+                        row = leaf.execute(
+                            "select app_user_id, business_slug, email, name, status, tier "
+                            "from takyon_app_service_email_recipient(%s, %s, %s)",
+                            (
+                                business_slug,
+                                leaves["identity"]._hash_token(service_session_token),
+                                app_user_id,
+                            ),
+                        ).fetchone()
+                    user = None if row is None else leaves["identity"]._app_user_from_row(row)
+                else:
+                    row = leaf.execute(
+                        "select id, business_slug, email, name, status, tier "
+                        "from app_users where business_slug = %s and id = %s",
+                        (business_slug, app_user_id),
+                    ).fetchone()
+                    user = None if row is None else leaves["identity"]._app_user_from_row(row)
             if user is None or str(getattr(user, "status", "") or "") != "active":
                 raise AppEmailError("recipient app user not found")
             return {"id": user.id, "email": user.email, "tier": getattr(user, "tier", "") or ""}
@@ -88,7 +112,7 @@ def _resolve_recipient(store: Any, business_slug: str, app_user_id: str) -> dict
         }
 
 
-def _sends_today(store: Any, business_slug: str) -> int:
+def _sends_today(store: Any, business_slug: str, *, service_session_token: str | None = None) -> int:
     try:
         from .core import _PGConn
     except Exception:
@@ -96,13 +120,23 @@ def _sends_today(store: Any, business_slug: str) -> int:
 
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
+            leaves = store._app_leaves()
             with store._leaf_conn(conn) as leaf:
-                row = leaf.execute(
-                    "select count(*) from app_usage_events "
-                    "where business_slug = %s and purpose = 'email_send' "
-                    "and created_at >= date_trunc('day', now() at time zone 'utc')",
-                    (business_slug,),
-                ).fetchone()
+                if service_session_token:
+                    with store._pg_app_scope(conn, business_slug, session_token=service_session_token):
+                        row = leaf.execute(
+                            "select takyon_app_service_email_sends_today(%s, %s)",
+                            (business_slug, leaves["identity"]._hash_token(service_session_token)),
+                        ).fetchone()
+                    if row is None:
+                        raise AppEmailError("service app session not authorized for product email")
+                else:
+                    row = leaf.execute(
+                        "select count(*) from app_usage_events "
+                        "where business_slug = %s and purpose = 'email_send' "
+                        "and created_at >= date_trunc('day', now() at time zone 'utc')",
+                        (business_slug,),
+                    ).fetchone()
             return int(row[0]) if row else 0
         row = conn.execute(
             "SELECT COUNT(*) FROM app_usage_events "
@@ -149,6 +183,48 @@ def _send_postmark(
         raise AppEmailError(f"product email provider failed: {exc}") from exc
 
 
+def _send_postmark_broker(
+    *,
+    business_slug: str,
+    session_token: str,
+    recipient_app_user_id: str,
+    subject: str,
+    text_body: str,
+    html_body: str | None,
+    estimate_microusd: int,
+) -> str | None:
+    try:
+        from . import safebox
+    except Exception:
+        from plugins.takyon import safebox
+
+    if not str(session_token or "").strip():
+        raise AppEmailError("product email broker requires a service app session")
+    try:
+        body = safebox.broker_provider_call(
+            "postmark",
+            "send",
+            {
+                "recipient_app_user_id": recipient_app_user_id,
+                "subject": subject,
+                "text_body": text_body,
+                "html_body": html_body,
+                "message_stream": str(os.getenv("TAKYON_APP_EMAIL_MESSAGE_STREAM") or "").strip() or None,
+            },
+            estimate_microusd=int(estimate_microusd),
+            business=business_slug,
+            action="postmark.send",
+            session_token=session_token,
+        )
+        return body.get("message_id")
+    except Exception as exc:
+        if "postmark_unconfigured" in str(exc):
+            raise AppEmailError(
+                "product email requires POSTMARK_SERVER_TOKEN and POSTMARK_FROM_EMAIL"
+            ) from exc
+        raise AppEmailError(f"product email provider failed: {exc}") from exc
+
+
 def _receipt_relpath(business_slug: str, purpose: str, reservation_key: str) -> str:
     digest = hashlib.sha256(f"{business_slug}:{purpose}:{reservation_key}".encode("utf-8")).hexdigest()[:16]
     return f"metrics/receipts/app-email/{purpose}-{digest}.json"
@@ -166,6 +242,7 @@ def send_app_email(
     idempotency_key: str,
     test_mode: bool,
     principal: Mapping[str, Any],
+    service_session_token: str | None = None,
 ) -> dict[str, Any]:
     subject = str(subject or "").strip()
     text_body = str(text_body or "")
@@ -177,12 +254,17 @@ def send_app_email(
     if not _PURPOSE_PATTERN.match(purpose):
         raise AppEmailError("purpose must be a lowercase slug (a-z, 0-9, -, _)")
 
-    recipient = _resolve_recipient(store, business_slug, str(recipient_app_user_id or "").strip())
+    recipient = _resolve_recipient(
+        store,
+        business_slug,
+        str(recipient_app_user_id or "").strip(),
+        service_session_token=service_session_token,
+    )
     if is_service_email(recipient["email"]):
         raise AppEmailError("service identities cannot receive product email")
 
     cap = _daily_send_cap()
-    sent_today = _sends_today(store, business_slug)
+    sent_today = _sends_today(store, business_slug, service_session_token=service_session_token)
     if sent_today >= cap:
         raise EmailDailyCapExceeded(f"daily send cap reached: {sent_today}/{cap}")
 
@@ -192,52 +274,73 @@ def send_app_email(
         "recipient": recipient["id"],
         "principal": str(principal.get("kind") or "unknown"),
     }
-    try:
-        _app_actions._reserve_usage(
-            store,
-            business_slug,
-            reservation_key=idempotency_key,
-            app_user_id=recipient["id"],
-            app_user_tier=recipient["tier"] or None,
-            estimate_microusd=price,
-            route="email",
-            metadata=dict(metadata),
-            purpose="email_send",
-        )
-    except Exception as exc:
-        message = str(exc)
-        if "budget" in message.lower():
-            raise EmailBudgetExceeded(message) from exc
-        raise
-
     suppressed = bool(test_mode)
+    brokered = False
+    provider_message_id: str | None
     try:
-        if suppressed:
-            provider_message_id: str | None = f"test-mode-suppressed:{uuid.uuid4().hex}"
-        else:
-            provider_message_id = _send_postmark(recipient["email"], subject, text_body, html_body)
-    except Exception as exc:
-        _app_actions._release_usage(
+        from . import safebox
+    except Exception:
+        from plugins.takyon import safebox
+
+    if not suppressed and service_session_token:
+        if not safebox.provider_broker_enabled():
+            raise AppEmailError("live service email requires the Safebox provider broker")
+        provider_message_id = _send_postmark_broker(
+            business_slug=business_slug,
+            session_token=service_session_token,
+            recipient_app_user_id=recipient["id"],
+            subject=subject,
+            text_body=text_body,
+            html_body=html_body,
+            estimate_microusd=price,
+        )
+        brokered = True
+    else:
+        try:
+            _app_actions._reserve_usage(
+                store,
+                business_slug,
+                reservation_key=idempotency_key,
+                app_user_id=recipient["id"],
+                app_user_tier=recipient["tier"] or None,
+                estimate_microusd=price,
+                route="email",
+                metadata=dict(metadata),
+                purpose="email_send",
+            )
+        except Exception as exc:
+            message = str(exc)
+            if "budget" in message.lower():
+                raise EmailBudgetExceeded(message) from exc
+            raise
+
+        try:
+            if suppressed:
+                provider_message_id = f"test-mode-suppressed:{uuid.uuid4().hex}"
+            else:
+                provider_message_id = _send_postmark(recipient["email"], subject, text_body, html_body)
+        except Exception as exc:
+            _app_actions._release_usage(
+                store,
+                business_slug,
+                reservation_key=idempotency_key,
+                error=str(exc)[:300],
+                metadata=dict(metadata),
+            )
+            raise
+
+        settle_metadata = {
+            **metadata,
+            "external_side_effects": "suppressed" if suppressed else "sent",
+            "provider_message_id": provider_message_id,
+        }
+        _app_actions._settle_usage(
             store,
             business_slug,
             reservation_key=idempotency_key,
-            error=str(exc)[:300],
-            metadata=dict(metadata),
+            actual_microusd=price,
+            metadata=settle_metadata,
         )
-        raise
-
-    settle_metadata = {
-        **metadata,
-        "external_side_effects": "suppressed" if suppressed else "sent",
-        "provider_message_id": provider_message_id,
-    }
-    _app_actions._settle_usage(
-        store,
-        business_slug,
-        reservation_key=idempotency_key,
-        actual_microusd=price,
-        metadata=settle_metadata,
-    )
 
     receipt_rel = _receipt_relpath(business_slug, purpose, idempotency_key)
     receipt_abs = Path(store._business_root(business_slug)) / receipt_rel
@@ -253,6 +356,7 @@ def send_app_email(
             "subject": subject[:120],
             "principal": str(principal.get("kind") or "unknown"),
             "suppressed": suppressed,
+            "brokered": brokered,
             "provider_message_id": provider_message_id,
             "cost_microusd": price,
             "created_at": _utc_now_text(),
@@ -261,6 +365,7 @@ def send_app_email(
     return {
         "provider_message_id": provider_message_id,
         "suppressed": suppressed,
+        "brokered": brokered,
         "receipt_path": receipt_rel,
         "purpose": purpose,
     }

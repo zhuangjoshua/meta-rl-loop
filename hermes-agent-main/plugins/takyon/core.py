@@ -717,6 +717,15 @@ class _PostgresPool:
         if not broken:
             try:
                 conn.rollback()
+                conn.execute("reset role")
+                conn.execute(
+                    "select"
+                    " set_config('takyon.rls_bypass', '0', false),"
+                    " set_config('takyon.rls_business_slug', '', false),"
+                    " set_config('takyon.rls_app_user_id', '', false),"
+                    " set_config('takyon.rls_session_hash', '', false)"
+                )
+                conn.commit()
             except Exception:
                 broken = True
         if broken:
@@ -747,16 +756,32 @@ class _PostgresPool:
 
 _POSTGRES_POOLS: dict[str, _PostgresPool] = {}
 _POSTGRES_POOLS_LOCK = threading.Lock()
+_ACTIVE_DATABASE_PLANE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "takyon_active_database_plane",
+    default="",
+)
 
 
-def _postgres_pool(dsn: str) -> _PostgresPool:
-    key = str(dsn or "").strip()
+def _postgres_pool(dsn: str, *, plane: str = "") -> _PostgresPool:
+    dsn_key = str(dsn or "").strip()
+    plane_key = str(plane or "").strip().lower()
+    key = f"{plane_key}\0{dsn_key}"
     with _POSTGRES_POOLS_LOCK:
         pool = _POSTGRES_POOLS.get(key)
         if pool is None:
-            pool = _PostgresPool(key, max_size=_POSTGRES_POOL_MAX_SIZE)
+            pool = _PostgresPool(dsn_key, max_size=_POSTGRES_POOL_MAX_SIZE)
             _POSTGRES_POOLS[key] = pool
         return pool
+
+
+@contextmanager
+def app_runtime_database_plane():
+    """Bind shared product-app handlers to the app DB login for one request."""
+    token = _ACTIVE_DATABASE_PLANE.set("app")
+    try:
+        yield
+    finally:
+        _ACTIVE_DATABASE_PLANE.reset(token)
 
 
 def _close_postgres_pools() -> None:
@@ -1145,7 +1170,17 @@ def _business_file_truth_metadata(path: str, *, session_scoped: bool, revision: 
 _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
     "composio": ("COMPOSIO_API_KEY",),
-    "database": ("DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL"),
+    "database": (
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRES_PRISMA_URL",
+        "POSTGRES_URL_NON_POOLING",
+        "TAKYON_OPERATOR_DATABASE_URL",
+        "TAKYON_APP_DATABASE_URL",
+        "TAKYON_SAFEBOX_DATABASE_URL",
+        "TAKYON_MIGRATION_DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+    ),
     "dataforseo": ("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
@@ -1182,13 +1217,13 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 # Provider-name buckets within _API_ENV_ALIASES that are INFRASTRUCTURE secrets, NOT paid-provider
-# keys. The safebox MUST keep vending these over /v1/env so the runtime planes can open Postgres,
-# verify Stripe/billing webhooks, deploy, send transactional email, and register search-console
-# ownership. Everything else in _API_ENV_ALIASES is a PAID-PROVIDER credential whose raw value the
-# runtime planes must never fetch (GOAL_RULES §1 step 4) — those go through the safebox broker.
+# keys. DB DSNs are deliberately NOT an infra egress provider anymore: each process gets exactly one
+# least-privilege DSN in its own service env, and /v1/env must not let a shared transport token fetch
+# another plane's DB authority. Everything else in _API_ENV_ALIASES is a PAID-PROVIDER credential
+# whose raw value the runtime planes must never fetch (GOAL_RULES §1 step 4) -- those go through the
+# safebox broker.
 _INFRA_API_ALIAS_PROVIDERS: frozenset[str] = frozenset(
     {
-        "database",               # DATABASE_URL / POSTGRES_* — the control-plane connection
         "stripe",                 # STRIPE_SECRET_KEY — payment/webhook reconciliation rail
         "vercel",                 # VERCEL_TOKEN — frontdoor deploy, not a model provider
         "postmark",               # POSTMARK_* — transactional email infra
@@ -1227,15 +1262,18 @@ def provider_key_denylist() -> frozenset[str]:
 
 
 # ── The safebox's OWN authority secrets (GOAL_RULES §1 / authority principle) ──────────────────────
-# The HMAC capability signing key and the master transport token are the secrets that let a caller
-# BECOME an authority: read the signing key and you can forge any capability offline (any account, any
-# ceiling); read/own the master token and you pass as an authenticated plane. They are therefore
-# CATEGORICALLY non-egress and non-ingress over /v1/env — never returned, never overwritten, on any
-# route, regardless of provider classification. This is the structural fix for the G1 class of bug: a
-# DENYLIST leaks anything you forget to list; these secrets simply are not in the egress ALLOWLIST.
+# The HMAC capability signing key, shared transport token, and operator-route token are secrets that let
+# a caller BECOME an authority: read the signing key and you can forge any capability offline (any
+# account, any ceiling); read/own the transport token and you pass as an authenticated plane; read/own the
+# operator token and operator-only safebox routes become reachable from the operator client allowlist.
+# They are therefore CATEGORICALLY non-egress and non-ingress over /v1/env — never returned, never
+# overwritten, on any route, regardless of provider classification. This is the structural fix for the G1
+# class of bug: a DENYLIST leaks anything you forget to list; these secrets simply are not in the egress
+# ALLOWLIST.
 _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
     {
         "TAKYON_CAP_SIGNING_KEY",
+        "TAKYON_SAFEBOX_OPERATOR_TOKEN",
         "TAKYON_SAFEBOX_TOKEN",
         # Secrets the safebox uses as its OWN inbound-verification / RLS-bypass authority and that NO
         # runtime plane fetches over /v1/env (the safebox verifies billing webhooks locally; the
@@ -1246,33 +1284,42 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
     }
 )
 
-# Infra secrets the runtime planes legitimately fetch over /v1/env. The egress gate is an EXACT-NAME
-# ALLOWLIST (deny-by-default): a name not on this list is non-vendable, so forgetting to list a
-# sensitive secret denies it (the inverse of a denylist, where a forgotten name silently leaks — the
-# G1 bug class). Broad PREFIX admission was removed: it swept in signature-verification authority
-# (`*_WEBHOOK_SECRET`, `AUTH0_*_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`). This list is exactly the set of
-# names a runtime plane actually requests (enumerated from the read_env_backed_value/first call sites);
-# add a name here only when a runtime plane provably needs to fetch it.
+_DATABASE_AUTHORITY_ENV_NAMES: frozenset[str] = frozenset(
+    {
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRES_PRISMA_URL",
+        "POSTGRES_URL_NON_POOLING",
+        "TAKYON_OPERATOR_DATABASE_URL",
+        "TAKYON_APP_DATABASE_URL",
+        "TAKYON_SAFEBOX_DATABASE_URL",
+        "TAKYON_MIGRATION_DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+    }
+)
+
+# Public runtime configuration the runtime planes may fetch over /v1/env. The egress gate is an
+# EXACT-NAME ALLOWLIST (deny-by-default): a name not on this list is non-vendable, so forgetting to
+# list a sensitive secret denies it (the inverse of a denylist, where a forgotten name silently leaks
+# — the G1 bug class). Broad PREFIX admission was removed: it swept in signature-verification
+# authority (`*_WEBHOOK_SECRET`, `AUTH0_*_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`).
 #
 # Authority-equivalent residuals are intentionally absent here: Stripe/Postmark/Vercel/Cloudflare
-# actions and S3/R2 object-store operations now execute through safebox action routes. Runtime planes
-# may still fetch public config (URLs, client IDs, bucket names, sender address), but they never fetch
-# the secret that lets them impersonate payment, email, deploy/edge, or object-store authority.
+# actions, S3/R2 object-store operations, analytics/reporting API calls, dashboard-session use, and
+# Search Console ownership all execute locally on the safebox or through narrow action routes. Runtime
+# planes may still fetch public config (URLs, client IDs, bucket names, sender address), but never a
+# bearer token, service-account JSON, storage key, session token, or other credential value.
 _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
     {
-        # DB
-        "DATABASE_URL", "POSTGRES_URL", "POSTGRES_PRISMA_URL", "POSTGRES_URL_NON_POOLING",
-        # Supabase (public config + object store). SUPABASE_JWT_SECRET is intentionally NOT here: the
+        # Supabase public config + object-store endpoint names. SUPABASE_JWT_SECRET is intentionally NOT here: the
         # runtime no longer verifies product JWTs with the symmetric secret (alg-confusion fix in
         # app_supabase_auth.verify_supabase_jwt — HS tokens are validated server-side by Supabase Auth,
-        # asymmetric via JWKS), so the secret is never fetched and never vended.
+        # asymmetric via JWKS), so the secret is never fetched and never vended. S3 access keys are
+        # intentionally absent too; storage writes/reads broker through safebox action routes.
         "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "TAKYON_SUPABASE_URL",
         "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_ANON_KEY",
         "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-        "SUPABASE_S3_ACCESS_KEY_ID",
         "SUPABASE_S3_ENDPOINT", "SUPABASE_S3_REGION",
-        # R2 object store
-        "R2_S3_ACCESS_KEY_ID",
         # Stripe (payment rail). STRIPE_WEBHOOK_SECRET is intentionally NOT here: the sub-user
         # (flow-B) app webhook is now verified server-side on the safebox
         # (/v1/stripe/app-webhook/verify), mirroring the flow-A billing webhook, so no runtime plane
@@ -1285,13 +1332,9 @@ _INFRA_ENV_ALLOW_EXACT: frozenset[str] = frozenset(
         # Deploy / edge
         "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID", "CLOUDFLARE_ZONE_NAME",
         "TAKYON_PRODUCT_EDGE_WORKER",
-        # Search console, analytics, object-store bucket
-        "TAKYON_GSC_SERVICE_ACCOUNT_KEY", "UMAMI_API_KEY", "TAKYON_STORAGE_BUCKET",
-        # Dashboard session token (operator plane creative/gateway tools)
-        "TAKYON_DASHBOARD_SESSION_TOKEN",
-        # OpenMeter usage-metering backend
+        # Object-store bucket and mirror endpoints. Tokens stay on the safebox host.
+        "TAKYON_STORAGE_BUCKET",
         "TAKYON_OPENMETER_URL", "OPENMETER_URL", "OPENMETER_API_URL",
-        "OPENMETER_API_TOKEN", "TAKYON_OPENMETER_API_TOKEN",
     }
 )
 
@@ -1315,6 +1358,8 @@ def env_egress_allowed(name: str) -> bool:
     if not n:
         return False
     if n in _SAFEBOX_SELF_AUTHORITY_SECRETS:
+        return False
+    if n in _DATABASE_AUTHORITY_ENV_NAMES:
         return False
     if n in provider_key_denylist():
         return False
@@ -6528,7 +6573,6 @@ def _materialize_subuser_app_scaffold(
 # scaffold on every materialize, exactly like the `_takyon/` kit. They are additive/backward-
 # compatible by policy (new exports, never breaking the API the worker screens import).
 _APPKIT_OWNED_SRC_FILES = (
-    "src/main.tsx",
     "src/lib/takyon.ts",
     "src/lib/hooks.ts",
     "src/lib/product-auth.tsx",
@@ -8744,9 +8788,10 @@ def _requirement_satisfied_by_safebox_broker(alias_names: tuple[str, ...]) -> bo
 
     A requirement is broker-satisfiable iff (a) EVERY alias spelling is a denylisted paid-provider
     key the safebox holds (so the broker — not local env — is the canonical supplier), and
-    (b) the remote safebox authority is reachable. Infra keys (DATABASE_URL/STRIPE_*/VERCEL/...) are
-    deliberately NOT denylisted and are vended over /v1/env, so they keep resolving through the
-    local-env path and are never short-circuited here. This does NOT weaken gating for keys the
+    (b) the remote safebox authority is reachable. Public infra config may still be vended over
+    /v1/env; infra credentials (Stripe/Vercel/Postmark/storage/reporting tokens) are not. This helper
+    is only for brokered provider credentials, so it does not short-circuit public config and does not
+    add anything to the /v1/env egress allowlist. This does NOT weaken gating for keys the
     safebox does not hold, and adds nothing to any /v1/env egress allowlist.
     """
     names = tuple(str(name or "").strip() for name in alias_names if str(name or "").strip())
@@ -12893,7 +12938,7 @@ def _publish_product_surface_path(
     # edge can serve <slug>.coscale.app without the VPS. This is non-blocking and fail-soft: if
     # R2 is unconfigured we no-op, and any mirror error is logged but never fails the publish (the
     # Supabase artifact above remains the source of truth and the VPS static fallback still serves).
-    if storage.r2_mirror_available():
+    if storage.r2_configured():
         try:
             mirror = storage.write_public_site_to_r2(slug, build_id, publish_source)
             logging.getLogger("takyon.r2").info(
@@ -13110,8 +13155,7 @@ def _db_backend() -> str:
 
     ``TAKYON_DB_BACKEND`` now exists only as a loud stale-config guard: any non-empty value other than
     ``postgres`` is rejected instead of silently reviving the retired SQLite control plane.
-    ``DATABASE_URL`` / ``POSTGRES_URL`` / ``POSTGRES_PRISMA_URL`` remain the canonical runtime DSN
-    inputs via ``resolve_database_url``.
+    Runtime DSNs are plane-specific and resolved through ``resolve_database_url``.
     """
     raw = str(os.getenv("TAKYON_DB_BACKEND") or "").strip().lower()
     if raw and raw != "postgres":
@@ -13265,6 +13309,7 @@ class TakyonStore:
         root: str | os.PathLike[str] | None = None,
         *,
         database_url: str | None = None,
+        database_plane: str | None = None,
         operator_user_id: str | None = None,
         system_plane: str = "",
     ):
@@ -13279,6 +13324,9 @@ class TakyonStore:
         self.root = base.resolve()
         # Explicit Postgres DSN for tests/callers that want a throwaway DB instead of the runtime env.
         self._database_url = database_url
+        # TakyonStore is the operator/business store unless a caller explicitly opts into a narrower
+        # plane. Explicit test DSNs keep using the supplied URL directly.
+        self._database_plane = str(database_plane or "operator").strip().lower()
         session_user_id = ""
         session_workspace_root = ""
         if operator_user_id is None:
@@ -13345,12 +13393,15 @@ class TakyonStore:
         from psycopg.rows import dict_row
 
         try:
-            from .runtime_app import configure_takyon_pg_session, resolve_database_url
+            from .runtime_app import assert_takyon_pg_role, configure_takyon_pg_session, resolve_database_url
         except ImportError:  # pragma: no cover - import-style robustness for alternate load paths
-            from plugins.takyon.runtime_app import configure_takyon_pg_session, resolve_database_url
+            from plugins.takyon.runtime_app import assert_takyon_pg_role, configure_takyon_pg_session, resolve_database_url
 
-        database_url = resolve_database_url(self._database_url)
-        pool = _postgres_pool(database_url)
+        database_url = resolve_database_url(
+            self._database_url,
+            plane=None if self._database_url else self._database_plane,
+        )
+        pool = _postgres_pool(database_url, plane=self._database_plane)
         conn = pool.acquire(
             lambda: psycopg.connect(
                 database_url,
@@ -13362,7 +13413,9 @@ class TakyonStore:
                 prepare_threshold=None,
             )
         )
-        configure_takyon_pg_session(conn, bypass=True)
+        configure_takyon_pg_session(conn, bypass=self._database_plane != "app")
+        if not self._database_url:
+            assert_takyon_pg_role(conn, self._database_plane)
         return _PGConn(conn, release=pool.release)
 
     def seed_platform_owner(self) -> tuple[str | None, str | None]:
@@ -13526,13 +13579,12 @@ class TakyonStore:
         app_user_id: str | None = None,
         session_token: str | None = None,
     ):
-        """Temporarily narrow a pooled Postgres connection to one app-customer scope.
+        """Bind one direct app-plane Postgres connection to one app-customer scope.
 
-        Internal connections default to RLS bypass so operator/server code keeps its current authority.
-        App-facing handlers use this scope to bind the live business plus either the current app user id
-        or a presented session token hash, letting the DB enforce the same customer boundary as the
-        runtime surface for the duration of the block. If a session token is present, it is the
-        authoritative identity; a caller-supplied ``app_user_id`` is deliberately not bound.
+        Product app/customer work must already be connected as the app DB login. This scope only binds
+        request-local RLS GUCs; it must never demote an operator-capable session. If a session token is
+        present, it is the authoritative identity; a caller-supplied ``app_user_id`` is deliberately not
+        bound.
         """
         if not isinstance(conn, _PGConn):
             yield conn
@@ -13545,18 +13597,19 @@ class TakyonStore:
             "takyon.rls_session_hash",
         )
         previous = {key: self._pg_current_setting(raw, key) for key in settings}
-        # The connection's login role is the privileged control-plane/runtime owner, which
-        # PostgreSQL exempts from RLS (superuser / BYPASSRLS) even under FORCE — so the 0027
-        # policies only actually deny a stray cross-tenant query if the request runs under a
-        # NON-bypassing role. Drop to the restricted `takyon_app` role (migration 0030) for the
-        # duration of this app-customer scope so the DB enforces the same per-customer boundary
-        # as the runtime; RESET ROLE returns to the privileged session-default login role on exit.
-        # The store connection is autocommit=False, so SET LOCAL is transaction-scoped and also
-        # auto-reverts at commit/rollback; the explicit reset covers a caller that holds the
-        # connection across the block. App scope is always entered from the session default role
-        # (never nested under another non-default role), so RESET ROLE is the correct restore.
         try:
-            raw.execute("set local role takyon_app")
+            from .runtime_app import assert_takyon_pg_role
+        except ImportError:  # pragma: no cover - import-style robustness for alternate load paths
+            from plugins.takyon.runtime_app import assert_takyon_pg_role
+
+        try:
+            assert_takyon_pg_role(raw, "app")
+        except Exception as exc:
+            raise TakyonError(
+                "app scope requires an app-plane database login"
+            ) from exc
+
+        try:
             raw.execute("select set_config('takyon.rls_bypass', '0', true)")
             raw.execute(
                 "select set_config('takyon.rls_business_slug', %s, true)",
@@ -13572,7 +13625,6 @@ class TakyonStore:
             )
             yield conn
         finally:
-            raw.execute("reset role")
             for key, value in previous.items():
                 raw.execute("select set_config(%s, %s, true)", (key, value))
 
@@ -14817,7 +14869,13 @@ class TakyonStore:
         return result
 
     def _business(self, conn: sqlite3.Connection, slug: str) -> dict[str, Any] | None:
-        row = conn.execute("SELECT * FROM businesses WHERE slug = ?", (_slugify(slug),)).fetchone()
+        if self._database_plane == "app" and isinstance(conn, _PGConn):
+            row = conn.execute(
+                "SELECT * FROM takyon_app_runtime_business(?)",
+                (_slugify(slug),),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM businesses WHERE slug = ?", (_slugify(slug),)).fetchone()
         business = self._row_to_dict(row)
         if business and "budget" in business:
             business["budget"] = _normalize_budget_spec(business.get("budget"))
@@ -14831,11 +14889,17 @@ class TakyonStore:
 
     def _control_blocker(self, conn: sqlite3.Connection, scope: str, *, allow_paused: bool = False) -> dict[str, Any] | None:
         ancestors = _scope_ancestors(scope)
-        placeholders = ",".join("?" for _ in ancestors)
-        rows = conn.execute(
-            f"SELECT * FROM control_states WHERE scope IN ({placeholders})",
-            ancestors,
-        ).fetchall()
+        if self._database_plane == "app" and isinstance(conn, _PGConn):
+            rows = conn.execute(
+                "SELECT * FROM takyon_app_control_blocker(?::text[])",
+                (ancestors,),
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" for _ in ancestors)
+            rows = conn.execute(
+                f"SELECT * FROM control_states WHERE scope IN ({placeholders})",
+                ancestors,
+            ).fetchall()
         states = {row["scope"]: self._row_to_dict(row) for row in rows}
         for ancestor in ancestors:
             state = states.get(ancestor)
@@ -14857,6 +14921,12 @@ class TakyonStore:
         payload: Any,
     ) -> str:
         event_id = uuid.uuid4().hex
+        if self._database_plane == "app" and isinstance(conn, _PGConn):
+            row = conn.execute(
+                "SELECT takyon_app_record_event(?, ?, ?, ?) AS id",
+                (scope, business_slug, event_type, _json_dumps(payload)),
+            ).fetchone()
+            return str(row["id"] if isinstance(row, Mapping) else row[0])
         conn.execute(
             "INSERT INTO events (id, scope, business_slug, event_type, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (event_id, scope, business_slug, event_type, _json_dumps(payload), _now()),
@@ -19513,6 +19583,15 @@ class TakyonStore:
 
 
 def _store() -> TakyonStore:
+    plane = str(_ACTIVE_DATABASE_PLANE.get() or "").strip().lower()
+    if plane:
+        return TakyonStore(database_plane=plane)
+    host_role = _normalized_host_role()
+    if host_role == "subuser":
+        raise TakyonError(
+            "subuser host cannot open the default operator store; "
+            "enter app_runtime_database_plane() for product app requests"
+        )
     return TakyonStore()
 
 
@@ -19583,19 +19662,13 @@ def _openmeter_enabled() -> bool:
 
 
 def _business_openmeter_authoritative(business_row: Mapping[str, Any] | None) -> bool:
-    """Per-business OpenMeter-authority flag (`metadata.openmeter_authority`). Default OFF: absent /
-    falsey metadata keeps the business on the proven Stripe-authoritative rail (coscale, wandr, and
-    every existing business — no migration, no backfill). When ON, the OpenMeter billing anchor
-    (binding the OpenMeter customer to the real Stripe customer + correlating the subscription) is
-    wired for that business so OpenMeter subscriptions activate against the actual charge. The
-    request-time access gate stays local and source-agnostic either way — this flag never moves a
-    live OpenMeter call onto the reserve path."""
-    if not isinstance(business_row, Mapping):
-        return False
-    metadata = business_row.get("metadata")
-    if not isinstance(metadata, Mapping):
-        return False
-    return bool(metadata.get("openmeter_authority"))
+    """OpenMeter is never product-access authority.
+
+    Kept as a compatibility shim for older call sites/tests that pass the flag through; any
+    `metadata.openmeter_authority` value is ignored so a business record cannot promote a reporting
+    mirror into an entitlement source.
+    """
+    return False
 
 
 def _queue_openmeter_sync_job(
@@ -20042,7 +20115,7 @@ def _pg_sync_openmeter_access_projection(
             plan_version=None,
             subscription_id=None,
             current_period_end=None,
-            metadata={"authority": "openmeter", "openmeter_degraded": "true"},
+            metadata={"projection": "openmeter", "openmeter_degraded": "true"},
             raw_access={},
             raw_subscription=None,
             degraded=True,
@@ -21333,6 +21406,43 @@ def _app_record_runtime_payload(record: Any) -> dict[str, Any] | None:
     }
 
 
+def _app_plane_customer_write_context(
+    store: "TakyonStore",
+    conn: sqlite3.Connection,
+    business: str,
+    *,
+    action: str,
+) -> None:
+    business_row = store._ensure_business(conn, business)
+    _enforce_business_work_focus(
+        {"action": action, "business": business},
+        str(business_row.get("work_focus") or "all"),
+    )
+    blocker = store._control_blocker(conn, f"business:{business}/app")
+    if blocker:
+        raise TakyonError(
+            f"scope business:{business}/app is {blocker['state']} by kill switch {blocker['scope']}: "
+            f"{blocker.get('reason') or ''}"
+        )
+
+
+def _require_app_plane_session_token(args: Mapping[str, Any]) -> str:
+    session_token = str(args.get("session_token") or "").strip()
+    if not session_token:
+        raise TakyonError("session_token is required")
+    return session_token
+
+
+def _require_app_database_plane_for_pg(
+    store: "TakyonStore",
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+) -> None:
+    if isinstance(conn, _PGConn) and getattr(store, "_database_plane", "") != "app":
+        raise TakyonError(f"{action} requires app-plane database login")
+
+
 def _ensure_sqlite_app_profile(
     conn: sqlite3.Connection,
     business_slug: str,
@@ -21488,6 +21598,7 @@ def _sqlite_app_connection_is_match(
 
 
 def handle_business_upsert_app_profile(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.profile.upsert",
         "business": args.get("business"),
@@ -21501,6 +21612,50 @@ def handle_business_upsert_app_profile(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata"),
     }
     try:
+        if store._database_plane == "app":
+            business = _resolved_business_slug(args, required=True)
+            session_token = _require_app_plane_session_token(args)
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane profile writes require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.profile.upsert")
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as raw:
+                            resolved = leaves["profiles"].upsert_profile(
+                                raw,
+                                business,
+                                session_token=session_token,
+                                display_name=args.get("display_name"),
+                                headline=args.get("headline"),
+                                bio=args.get("bio"),
+                                attributes=args.get("attributes"),
+                                metadata=args.get("metadata"),
+                            )
+                except (leaves["profiles"].AppProfileError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                if resolved.profile is None:
+                    raise TakyonError("app profile write did not return a profile row")
+                profile_payload = _app_profile_runtime_payload(resolved.profile)
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.profile.upsert",
+                    payload={"app_user_id": resolved.user.id, "profile_id": profile_payload["id"]},
+                )
+            return tool_result(
+                {
+                    "success": True,
+                    "action": "app.profile.upsert",
+                    "business": business,
+                    "app_user_id": resolved.user.id,
+                    "profile": profile_payload,
+                }
+            )
+        if args.get("session_token"):
+            raise TakyonError("app profile upsert requires app-plane database login")
         result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = (
             result.get("results")[0]
@@ -21538,6 +21693,7 @@ def handle_business_read_app_session(args: dict, **_: Any) -> str:
         with store._connect() as conn:
             store._ensure_business(conn, business)
             if isinstance(conn, _PGConn):
+                _require_app_database_plane_for_pg(store, conn, action="app session read")
                 leaves = store._app_leaves()
                 try:
                     with store._pg_app_scope(conn, business, session_token=session_token):
@@ -21583,20 +21739,15 @@ def handle_business_delete_app_session(args: dict, **_: Any) -> str:
         with store._connect() as conn:
             store._ensure_business(conn, business)
             if isinstance(conn, _PGConn):
+                _require_app_database_plane_for_pg(store, conn, action="app session revoke")
                 leaves = store._app_leaves()
                 try:
-                    # Session revoke is an identity MUTATION (UPDATE app_sessions). By the 0030
-                    # RLS-role design, identity/session mutation stays on the PRIVILEGED
-                    # operator/runtime path: the restricted `takyon_app` role that _pg_app_scope
-                    # drops to holds SELECT-only on app_sessions (0030), so revoking under that
-                    # scope raises "permission denied for table app_sessions" — the customer can
-                    # never sign out AND the session stays live server-side. The presented
-                    # session_token IS the authorization: revoke_session scopes the UPDATE by
-                    # business_slug + token_hash, so a caller can only revoke the exact session
-                    # whose raw token they hold — symmetric with the privileged session MINT in
-                    # handle_business_supabase_login (start_session), which is also unscoped.
-                    with store._leaf_conn(conn) as leaf:
-                        revoked = leaves["identity"].revoke_session(leaf, business, session_token)
+                    # The presented session token is the authorization; the identity leaf uses the
+                    # app-runtime SECURITY DEFINER port when connected as takyon_app_runtime, so this
+                    # never needs an operator-capable DB session on the product app plane.
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as leaf:
+                            revoked = leaves["identity"].revoke_session(leaf, business, session_token)
                 except leaves["identity"].AppIdentityError as exc:
                     raise TakyonError(str(exc)) from exc
             else:
@@ -21629,7 +21780,8 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
     mint the 30-day ``app_session``, and leave unpaid users unentitled until a real paid entitlement
     exists. ``validate_session`` and everything downstream are unchanged.
     Requires the Postgres runtime plus Supabase project config readable through Safebox
-    (``SUPABASE_URL`` and a public/browser key; ``SUPABASE_JWT_SECRET`` is legacy fallback only)."""
+    (``SUPABASE_URL`` and a public/browser key). ``SUPABASE_JWT_SECRET`` is not used or vended;
+    HS tokens are checked server-side by Supabase Auth."""
     store = _store()
     try:
         business = _slugify(str(args.get("business") or ""))
@@ -21648,29 +21800,27 @@ def handle_business_supabase_login(args: dict, **_: Any) -> str:
             )
             if not isinstance(conn, _PGConn):
                 raise TakyonError("supabase login requires the Postgres runtime")
+            _require_app_database_plane_for_pg(store, conn, action="supabase app login")
             leaves = store._app_leaves()
-            with store._leaf_conn(conn) as leaf:
-                user_record = leaves["identity"].upsert_app_user_by_supabase_id(
-                    leaf,
-                    business,
-                    identity.supabase_user_id,
-                    identity.email,
-                    name=args.get("name"),
-                )
-                if _app_user_is_service_identity(
-                    {"id": user_record.id, "email": user_record.email, "status": user_record.status}
-                ):
-                    raise TakyonError("login is not permitted for this account")
-                session, session_token = leaves["identity"].start_session(
-                    leaf, business, user_record.id
-                )
-                leaves["entitlements"].resolve_user_tier(leaf, business, user_record.id)
-                refreshed = leaves["identity"].get_app_user(
-                    leaf, business, app_user_id=user_record.id
-                )
-                leaves["profiles"].ensure_profile(
-                    leaf, business, app_user_id=user_record.id, display_name=user_record.name
-                )
+            with store._pg_app_scope(conn, business):
+                with store._leaf_conn(conn) as leaf:
+                    user_record, session, session_token = leaves["identity"].start_supabase_session(
+                        leaf,
+                        business,
+                        identity.supabase_user_id,
+                        identity.email,
+                        name=args.get("name"),
+                    )
+                    if _app_user_is_service_identity(
+                        {"id": user_record.id, "email": user_record.email, "status": user_record.status}
+                    ):
+                        raise TakyonError("login is not permitted for this account")
+                    refreshed = user_record
+            with store._pg_app_scope(conn, business, session_token=session_token):
+                with store._leaf_conn(conn) as leaf:
+                    leaves["profiles"].ensure_profile(
+                        leaf, business, app_user_id=user_record.id, display_name=user_record.name
+                    )
             openmeter_sync = None
             if _openmeter_enabled():
                 # Downstream usage mirror, not a login gate: an OpenMeter 404/outage must never abort
@@ -21725,6 +21875,8 @@ def _app_usage_allocation_summary(store, conn, business: str, budget: dict[str, 
             "hard_limit_usd": summary.get("hard_limit_usd"),
             "committed_usd": summary.get("committed_usd"),
             "remaining_usd": summary.get("remaining_usd"),
+            "current_period_start": summary.get("current_period_start"),
+            "current_period_end": summary.get("current_period_end"),
         }
     # SQLite/local projection — same money math as app_usage, $-denominated for the UI.
     hard_limit_microusd = budget.get("hard_limit_microusd")
@@ -21745,7 +21897,24 @@ def _app_usage_allocation_summary(store, conn, business: str, budget: dict[str, 
         "hard_limit_usd": _app_usage._microusd_to_usd(hard_limit_microusd),
         "committed_usd": _app_usage._microusd_to_usd(committed_microusd),
         "remaining_usd": _app_usage._microusd_to_usd(remaining_microusd),
+        "current_period_start": budget.get("current_period_start"),
+        "current_period_end": budget.get("current_period_end"),
     }
+
+
+def _coerce_jsonb_array(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return []
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, Mapping):
+            rows.append(dict(item))
+    return rows
 
 
 def handle_business_read_app_account(args: dict, **_: Any) -> str:
@@ -21757,27 +21926,38 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
             session_token = str(args.get("session_token") or "").strip()
             app_user_id = str(args.get("app_user_id") or "").strip()
             email = str(args.get("email") or "").strip()
-            resolve_scope = (
-                store._pg_app_scope(
-                    conn,
-                    business,
-                    app_user_id=(app_user_id or None),
-                    session_token=(session_token or None),
+            if session_token:
+                _require_app_database_plane_for_pg(store, conn, action="app account session read")
+            if isinstance(conn, _PGConn) and store._database_plane == "app":
+                if not session_token:
+                    raise TakyonError("session_token is required")
+                leaves = store._app_leaves()
+                with store._pg_app_scope(conn, business, session_token=session_token):
+                    with store._leaf_conn(conn) as leaf:
+                        resolved_user = leaves["identity"].validate_session(leaf, business, session_token)
+                user = None if resolved_user is None else _app_user_runtime_payload(resolved_user)
+            else:
+                resolve_scope = (
+                    store._pg_app_scope(
+                        conn,
+                        business,
+                        app_user_id=(app_user_id or None),
+                        session_token=(session_token or None),
+                    )
+                    if session_token or app_user_id
+                    else nullcontext()
                 )
-                if session_token or app_user_id
-                else nullcontext()
-            )
-            with resolve_scope:
-                user = None
-                if session_token:
-                    user = store._row_to_dict(conn.execute(
-                        "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
-                        (business, _hash_token(session_token), _now()),
-                    ).fetchone())
-                elif app_user_id:
-                    user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, app_user_id)).fetchone())
-                elif email:
-                    user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, _normalize_email(email))).fetchone())
+                with resolve_scope:
+                    user = None
+                    if session_token:
+                        user = store._row_to_dict(conn.execute(
+                            "SELECT u.* FROM app_sessions s JOIN app_users u ON u.id = s.app_user_id WHERE s.business_slug = ? AND s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active' LIMIT 1",
+                            (business, _hash_token(session_token), _now()),
+                        ).fetchone())
+                    elif app_user_id:
+                        user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, app_user_id)).fetchone())
+                    elif email:
+                        user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND email = ?", (business, _normalize_email(email))).fetchone())
             if not user:
                 raise TakyonError("app account not found")
             _maybe_reconcile_pg_completed_checkout(store, conn, business, user)
@@ -21797,43 +21977,73 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     )
                 except Exception:
                     pass
-            # The app_budgets reads/writes below run on the PRIVILEGED default login role, OUTSIDE
-            # the per-customer `_pg_app_scope` (which drops to `takyon_app`). `takyon_app` (migration
-            # 0030) holds DML grants only on the 9 customer tables + SELECT on app_users/app_sessions;
-            # it has NO grant on app_budgets, so _ensure_app_budget's SELECT+INSERT (and
-            # _app_usage_allocation_summary -> get_usage_summary -> get_app_budget) raised
-            # "permission denied for table app_budgets" under that role and hard-failed the whole
-            # /account read on a fresh business (no budget row yet). Budget access is a server/runtime
-            # concern, not a customer-scoped one — the canonical usage reserve/settle rail always
-            # touches app_budgets under store._leaf_conn (privileged, no role switch). Compute budget
-            # first because the in-scope usage query below windows on budget["current_period_start"].
-            budget = store._ensure_app_budget(conn, business)
             # Weekly $-allocation summary the customer's app surface renders ("$X of $Y used this
             # week"). On Postgres (the live runtime) read it from the canonical app_usage rail so
             # the conversion + period unit are derived once; the microUSD figures stay
             # authoritative and these are display-only $ projections (never micro-USD or raw
-            # provider cost). app_usage.get_usage_summary is a psycopg leaf, so the SQLite/local
-            # path projects the same shape from the budget dict + the per-period business sum.
+            # provider cost). App-plane /account reads must not open or mutate app_budgets; the
+            # authoritative reserve path opens/rolls that row when paid usage happens.
             # Fail-soft: the $ allocation is a display-only projection. If the
             # app_usage read raises, degrade to an empty shape so the rest of
             # /account (user, entitlements, usage_this_period, revenue) still
             # returns — a cosmetic projection must never hard-fail the account.
             try:
+                budget = (
+                    {}
+                    if isinstance(conn, _PGConn) and store._database_plane == "app"
+                    else store._ensure_app_budget(conn, business)
+                )
                 usage_allocation = _app_usage_allocation_summary(store, conn, business, budget)
             except Exception:
-                usage_allocation = {"period_unit": "week", "hard_limit_usd": None, "committed_usd": None, "remaining_usd": None}
-            with (
-                store._pg_app_scope(conn, business, app_user_id=str(user["id"]))
-                if isinstance(conn, _PGConn)
-                else nullcontext()
-            ):
-                user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
-                entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
-                usage = conn.execute(
-                    "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
-                    (business, user["id"], budget["current_period_start"]),
-                ).fetchone()
-                revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
+                budget = {}
+                usage_allocation = {
+                    "period_unit": "week",
+                    "hard_limit_usd": None,
+                    "committed_usd": None,
+                    "remaining_usd": None,
+                    "current_period_start": None,
+                    "current_period_end": None,
+                }
+            period_start = usage_allocation.get("current_period_start") or budget.get("current_period_start") or "1970-01-01T00:00:00+00:00"
+            if isinstance(conn, _PGConn) and store._database_plane == "app":
+                session_hash = _hash_token(session_token)
+                with store._leaf_conn(conn) as leaf:
+                    ent_row = leaf.execute(
+                        "select takyon_app_account_entitlements(%s, %s)",
+                        (business, session_hash),
+                    ).fetchone()
+                    usage_row = leaf.execute(
+                        "select count, estimated_cost_microusd, actual_cost_microusd "
+                        "from takyon_app_account_usage_summary(%s, %s, %s)",
+                        (business, session_hash, period_start),
+                    ).fetchone()
+                    revenue_row = leaf.execute(
+                        "select amount_paid_cents, count from takyon_app_account_revenue_summary(%s, %s)",
+                        (business, session_hash),
+                    ).fetchone()
+                entitlements = _coerce_jsonb_array(ent_row[0] if ent_row else [])
+                usage = {
+                    "count": int((usage_row or [0, 0, 0])[0] or 0),
+                    "estimated": int((usage_row or [0, 0, 0])[1] or 0),
+                    "actual": int((usage_row or [0, 0, 0])[2] or 0),
+                }
+                revenue = {
+                    "cents": int((revenue_row or [0, 0])[0] or 0),
+                    "count": int((revenue_row or [0, 0])[1] or 0),
+                }
+            else:
+                with (
+                    store._pg_app_scope(conn, business, app_user_id=str(user["id"]))
+                    if isinstance(conn, _PGConn)
+                    else nullcontext()
+                ):
+                    user = store._row_to_dict(conn.execute("SELECT * FROM app_users WHERE business_slug = ? AND id = ?", (business, user["id"])).fetchone()) or user
+                    entitlements = [store._row_to_dict(row) for row in conn.execute("SELECT * FROM app_entitlements WHERE business_slug = ? AND app_user_id = ? ORDER BY updated_at DESC", (business, user["id"])).fetchall()]
+                    usage = conn.execute(
+                        "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
+                        (business, user["id"], period_start),
+                    ).fetchone()
+                    revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
             for entitlement in entitlements:
                 metadata = entitlement.get("metadata") if isinstance(entitlement.get("metadata"), dict) else {}
                 if "cancel_at_period_end" not in entitlement and "cancel_at_period_end" in metadata:
@@ -21852,76 +22062,41 @@ def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
         session_token = str(args.get("session_token") or "").strip()
         if not session_token:
             raise TakyonError("session_token is required")
-        with store._connect() as conn:
-            store._ensure_business(conn, business)
-            if not isinstance(conn, _PGConn):
-                raise TakyonError("app subscription cancellation requires the Postgres runtime")
-            leaves = store._app_leaves()
-            with store._pg_app_scope(conn, business, session_token=session_token):
-                with store._leaf_conn(conn) as leaf:
-                    user = leaves["identity"].validate_session(leaf, business, session_token)
+        if store._database_plane == "app":
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app subscription cancellation requires the Postgres runtime")
+                _app_plane_customer_write_context(store, conn, business, action="app.subscription.cancel")
+                leaves = store._app_leaves()
+                with store._pg_app_scope(conn, business, session_token=session_token):
+                    with store._leaf_conn(conn) as leaf:
+                        user = leaves["identity"].validate_session(leaf, business, session_token)
                     if user is None:
                         raise TakyonError("app account not found")
-            try:
-                from . import stripe_util
-            except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-                from plugins.takyon import stripe_util
-            try:
-                with store._leaf_conn(conn) as leaf:
-                    outcome = leaves["payments"].cancel_subscription(
-                        leaf,
-                        business,
+                try:
+                    outcome = safebox.cancel_app_subscription(
+                        business_slug=business,
                         app_user_id=user.id,
-                        subscription_updater=lambda subscription_id, cancel_at_period_end: stripe_util.stripe_request(
-                            f"subscriptions/{subscription_id}",
-                            {
-                                "cancel_at_period_end": (
-                                    "true" if cancel_at_period_end else "false"
-                                ),
-                            },
-                        ),
+                        session_token=session_token,
+                        cancel_at_period_end=True,
                     )
-            except leaves["payments"].AppPaymentError as exc:
-                raise TakyonError(str(exc)) from exc
-            store._record_event(
-                conn,
-                scope=f"business:{business}/app",
-                business_slug=business,
-                event_type="app.subscription.cancel",
-                payload={
-                    "app_user_id": user.id,
-                    "stripe_subscription_id": outcome.get("stripe_subscription_id"),
-                    "cancel_at_period_end": bool(outcome.get("cancel_at_period_end")),
-                    "already_canceling": bool(outcome.get("already_canceling")),
-                },
-            )
-            store._rewrite_app_files(conn, business)
-        openmeter_sync = None
-        if _openmeter_enabled():
-            try:
-                openmeter_sync = _pg_sync_openmeter_access_projection(
-                    store,
-                    business,
-                    user.id,
+                except LookupError as exc:
+                    raise TakyonError("no cancelable Stripe subscription found") from exc
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.subscription.cancel",
+                    payload={
+                        "app_user_id": user.id,
+                        "stripe_subscription_id": outcome.get("stripe_subscription_id"),
+                        "cancel_at_period_end": bool(outcome.get("cancel_at_period_end")),
+                        "already_canceling": bool(outcome.get("already_canceling")),
+                        "authority": "safebox",
+                    },
                 )
-            except Exception as exc:
-                openmeter_sync = {"configured": True, "ok": False, "error": str(exc)}
-                queued = _queue_openmeter_sync_job(
-                    store,
-                    business,
-                    scope="access",
-                    app_user_id=user.id,
-                )
-                if queued is not None:
-                    openmeter_sync["retry_job"] = queued
-        payload = {
-            "success": True,
-            "business": business,
-            **outcome,
-        }
-        if openmeter_sync is not None:
-            payload["openmeter_sync"] = openmeter_sync
-        return tool_result(payload)
+            return tool_result({"success": True, "business": business, **outcome})
+        raise TakyonError("app subscription cancellation requires app-plane database login")
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -21934,6 +22109,8 @@ def _maybe_reconcile_pg_completed_checkout(
 ) -> dict[str, Any] | None:
     if not isinstance(conn, _PGConn):
         return None
+    if store._database_plane == "app":
+        return {"attempted": False, "reason": "app_plane_read_does_not_reconcile_checkout"}
     user_id = str(user.get("id") or "").strip()
     user_email = _normalize_email(str(user.get("email") or "")) if user.get("email") else ""
     if not user_id and not user_email:
@@ -21990,52 +22167,7 @@ def _maybe_reconcile_pg_completed_checkout(
                 }
         return {"attempted": True, "error": last_error or "checkout_not_reconciled"}
 
-    try:
-        from . import stripe_util
-    except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
-        from plugins.takyon import stripe_util
-    leaves = store._app_leaves()
-    last_error = ""
-    for row in pending_rows:
-        session_id = str(row["stripe_checkout_session_id"] or "").strip()
-        if not session_id:
-            continue
-        try:
-            session = stripe_util.stripe_request(f"checkout/sessions/{session_id}", {}, method="GET")
-            if not isinstance(session, dict):
-                continue
-            if str(session.get("status") or "").strip().lower() != "complete":
-                continue
-            with store._leaf_conn(conn) as leaf:
-                checkout_result = leaves["payments"].reconcile_checkout_session(
-                    leaf,
-                    session,
-                    event_created=session.get("created"),
-                )
-            subscription_result = None
-            subscription_id = _stripe_object_id(session.get("subscription"))
-            if subscription_id:
-                subscription = stripe_util.stripe_request(
-                    f"subscriptions/{subscription_id}",
-                    {},
-                    method="GET",
-                )
-                if isinstance(subscription, dict):
-                    with store._leaf_conn(conn) as leaf:
-                        subscription_result = leaves["payments"].reconcile_subscription(
-                            leaf,
-                            subscription,
-                        )
-            if checkout_result.get("recorded"):
-                return {
-                    "attempted": True,
-                    "session_id": session_id,
-                    "checkout": checkout_result,
-                    "subscription": subscription_result,
-                }
-        except (stripe_util.StripeError, leaves["payments"].AppPaymentError, ValueError) as exc:
-            last_error = str(exc)
-    return {"attempted": True, "error": last_error or "checkout_not_reconciled"}
+    return {"attempted": True, "error": "checkout_reconciliation_requires_safebox"}
 
 
 def handle_business_read_app_profile(args: dict, **_: Any) -> str:
@@ -22047,6 +22179,8 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
+                    if args.get("session_token"):
+                        _require_app_database_plane_for_pg(store, conn, action="app profile session read")
                     scope = (
                         store._pg_app_scope(
                             conn,
@@ -22073,7 +22207,13 @@ def handle_business_read_app_profile(args: dict, **_: Any) -> str:
                 if _is_service_email(resolved.user.email):
                     raise TakyonError("service identities have no profile")
                 if resolved.profile is None:
-                    with store._pg_app_scope(conn, business, app_user_id=resolved.user.id):
+                    session_token = str(args.get("session_token") or "").strip()
+                    with store._pg_app_scope(
+                        conn,
+                        business,
+                        session_token=session_token or None,
+                        app_user_id=None if session_token else resolved.user.id,
+                    ):
                         with store._leaf_conn(conn) as leaf:
                             resolved = leaves["profiles"].ensure_profile(
                                 leaf,
@@ -22156,6 +22296,8 @@ def handle_business_list_app_directory_entries(args: dict, **_: Any) -> str:
                 if isinstance(conn, _PGConn):
                     leaves = store._app_leaves()
                     try:
+                        if args.get("session_token"):
+                            _require_app_database_plane_for_pg(store, conn, action="app directory session list")
                         scope = (
                             store._pg_app_scope(
                                 conn,
@@ -22303,23 +22445,17 @@ def handle_business_read_app_directory_entry(args: dict, **_: Any) -> str:
             store._ensure_business(conn, business)
             if session_token:
                 if isinstance(conn, _PGConn):
+                    _require_app_database_plane_for_pg(store, conn, action="app directory session read")
                     leaves = store._app_leaves()
                     try:
                         with store._pg_app_scope(conn, business, session_token=session_token):
                             with store._leaf_conn(conn) as leaf:
                                 if target_app_user_id or target_email:
-                                    target_id = target_app_user_id
-                                    if not target_id and target_email:
-                                        target_user = leaves["identity"].get_app_user(
-                                            leaf,
-                                            business,
-                                            email=target_email,
-                                        )
-                                        target_id = target_user.id if target_user is not None else ""
                                     resolved = leaves["directory"].get_visible_entry(
                                         leaf,
                                         business,
-                                        target_app_user_id=target_id,
+                                        target_app_user_id=target_app_user_id,
+                                        target_email=target_email or None,
                                         session_token=session_token,
                                     )
                                 else:
@@ -22448,6 +22584,7 @@ def handle_business_read_app_directory_entry(args: dict, **_: Any) -> str:
 
 
 def handle_business_upsert_app_directory_entry(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.directory.upsert",
         "business": args.get("business"),
@@ -22460,6 +22597,51 @@ def handle_business_upsert_app_directory_entry(args: dict, **_: Any) -> str:
         "attributes": args.get("attributes"),
     }
     try:
+        if store._database_plane == "app":
+            business = _resolved_business_slug(args, required=True)
+            session_token = _require_app_plane_session_token(args)
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane directory writes require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.directory.upsert")
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as raw:
+                            resolved = leaves["directory"].upsert_entry(
+                                raw,
+                                business,
+                                session_token=session_token,
+                                display_name=args.get("display_name"),
+                                headline=args.get("headline"),
+                                bio=args.get("bio"),
+                                attributes=args.get("attributes"),
+                            )
+                except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                if _is_service_email(resolved.user.email):
+                    raise TakyonError("service identities cannot appear in the directory")
+                user_payload = _app_user_runtime_payload(resolved.user)
+                entry_payload = _app_directory_entry_runtime_payload(resolved.entry)
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.directory.upsert",
+                    payload={"app_user_id": resolved.user.id, "directory_enabled": True},
+                )
+            return tool_result(
+                {
+                    "success": True,
+                    "action": "app.directory.upsert",
+                    "business": business,
+                    "app_user_id": resolved.user.id,
+                    "user": user_payload,
+                    "directory_entry": entry_payload,
+                }
+            )
+        if args.get("session_token"):
+            raise TakyonError("app directory upsert requires app-plane database login")
         result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
         return tool_result({"success": True, **payload})
@@ -22468,6 +22650,7 @@ def handle_business_upsert_app_directory_entry(args: dict, **_: Any) -> str:
 
 
 def handle_business_disable_app_directory_entry(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.directory.disable",
         "business": args.get("business"),
@@ -22476,6 +22659,48 @@ def handle_business_disable_app_directory_entry(args: dict, **_: Any) -> str:
         "session_token": args.get("session_token"),
     }
     try:
+        if store._database_plane == "app":
+            business = _resolved_business_slug(args, required=True)
+            session_token = _require_app_plane_session_token(args)
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane directory writes require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.directory.disable")
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as raw:
+                            resolved = leaves["directory"].disable_entry(
+                                raw,
+                                business,
+                                session_token=session_token,
+                            )
+                except (leaves["directory"].AppDirectoryError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                if _is_service_email(resolved.user.email):
+                    raise TakyonError("service identities cannot appear in the directory")
+                user_payload = _app_user_runtime_payload(resolved.user)
+                entry_payload = _app_directory_entry_runtime_payload(resolved.entry)
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.directory.disable",
+                    payload={"app_user_id": resolved.user.id, "directory_enabled": False},
+                )
+            return tool_result(
+                {
+                    "success": True,
+                    "action": "app.directory.disable",
+                    "business": business,
+                    "app_user_id": resolved.user.id,
+                    "user": user_payload,
+                    "directory_entry": entry_payload,
+                    "disabled": True,
+                }
+            )
+        if args.get("session_token"):
+            raise TakyonError("app directory disable requires app-plane database login")
         result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
         return tool_result({"success": True, **payload})
@@ -22494,6 +22719,8 @@ def handle_business_list_app_connections(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
+                    if args.get("session_token"):
+                        _require_app_database_plane_for_pg(store, conn, action="app connection session list")
                     scope = (
                         store._pg_app_scope(
                             conn,
@@ -22627,6 +22854,7 @@ def handle_business_list_app_connections(args: dict, **_: Any) -> str:
 
 
 def handle_business_act_on_app_connection(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.connection.set",
         "business": args.get("business"),
@@ -22637,6 +22865,59 @@ def handle_business_act_on_app_connection(args: dict, **_: Any) -> str:
         "connection_action": args.get("connection_action") if args.get("connection_action") is not None else args.get("state"),
     }
     try:
+        if store._database_plane == "app":
+            business = _resolved_business_slug(args, required=True)
+            session_token = _require_app_plane_session_token(args)
+            target_app_user_id = str(
+                args.get("target_app_user_id") if args.get("target_app_user_id") is not None else args.get("target_id") or ""
+            ).strip()
+            if not target_app_user_id:
+                raise TakyonError("target_app_user_id is required")
+            action_value = str(
+                args.get("connection_action") if args.get("connection_action") is not None else args.get("state") or ""
+            ).strip() or "like"
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane connection writes require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.connection.set")
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as raw:
+                            user, connection_payload = leaves["connections"].set_connection(
+                                raw,
+                                business,
+                                target_app_user_id=target_app_user_id,
+                                action=action_value,
+                                session_token=session_token,
+                            )
+                except (leaves["connections"].AppConnectionError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                user_payload = _app_user_runtime_payload(user)
+                connection_result = _app_connection_runtime_payload(connection_payload)
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.connection.set",
+                    payload={
+                        "app_user_id": user.id,
+                        "target_app_user_id": target_app_user_id,
+                        "connection_action": connection_result.get("state"),
+                    },
+                )
+            return tool_result(
+                {
+                    "success": True,
+                    "action": "app.connection.set",
+                    "business": business,
+                    "app_user_id": user.id,
+                    "user": user_payload,
+                    "connection": connection_result,
+                }
+            )
+        if args.get("session_token"):
+            raise TakyonError("app connection write requires app-plane database login")
         result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = result.get("results")[0] if isinstance(result.get("results"), list) and result.get("results") else {}
         return tool_result({"success": True, **payload})
@@ -22664,6 +22945,8 @@ def handle_business_list_app_records(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
+                    if args.get("session_token"):
+                        _require_app_database_plane_for_pg(store, conn, action="app record session list")
                     scope = (
                         store._pg_app_scope(
                             conn,
@@ -22799,6 +23082,8 @@ def handle_business_read_app_record(args: dict, **_: Any) -> str:
             if isinstance(conn, _PGConn):
                 leaves = store._app_leaves()
                 try:
+                    if args.get("session_token"):
+                        _require_app_database_plane_for_pg(store, conn, action="app record session read")
                     scope = (
                         store._pg_app_scope(
                             conn,
@@ -22871,6 +23156,7 @@ def handle_business_read_app_record(args: dict, **_: Any) -> str:
 
 
 def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.record.upsert",
         "business": args.get("business"),
@@ -22884,6 +23170,73 @@ def handle_business_upsert_app_record(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata"),
     }
     try:
+        if store._database_plane == "app":
+            business = _resolved_business_slug(args, required=True)
+            session_token = _require_app_plane_session_token(args)
+            record_type = _normalize_app_record_type(
+                args.get("record_type") if args.get("record_type") is not None else args.get("type")
+            )
+            metadata_value = _normalize_app_record_json_value(
+                args.get("metadata"),
+                field="metadata",
+                object_only=True,
+                max_bytes=_MAX_APP_RECORD_METADATA_BYTES,
+            )
+            data_value = _normalize_app_record_json_value(
+                args.get("data"),
+                field="data",
+                required=True,
+                max_bytes=_MAX_APP_RECORD_DATA_BYTES,
+            )
+            title_value = _normalize_app_record_title(args.get("title"))
+            raw_record_id = args.get("record_id") if args.get("record_id") is not None else args.get("id")
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane record writes require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.record.upsert")
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as raw:
+                            user, record = leaves["records"].save_record(
+                                raw,
+                                business,
+                                record_type=record_type,
+                                data=data_value,
+                                record_id=(
+                                    str(raw_record_id).strip()
+                                    if raw_record_id not in {None, ""}
+                                    else None
+                                ),
+                                title=title_value,
+                                metadata=metadata_value,
+                                session_token=session_token,
+                            )
+                except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                record_payload = _app_record_runtime_payload(record)
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.record.upsert",
+                    payload={
+                        "app_user_id": user.id,
+                        "record_type": record_type,
+                        "record_id": record_payload["id"],
+                    },
+                )
+            return tool_result(
+                {
+                    "success": True,
+                    "action": "app.record.upsert",
+                    "business": business,
+                    "app_user_id": user.id,
+                    "record": record_payload,
+                }
+            )
+        if args.get("session_token"):
+            raise TakyonError("app record upsert requires app-plane database login")
         result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = (
             result.get("results")[0]
@@ -22946,7 +23299,25 @@ def handle_business_upload_app_media(args: dict, **_: Any) -> str:
             surface = store._app_surface_contract(conn, business)
             if "media" not in _surface_runtime_features(surface):
                 raise TakyonError("runtime_features does not include media for this business")
-        user_id = _media_session_user_id(store, business, session_token) if session_token else None
+            user_id = None
+            user_email = ""
+            user_tier = ""
+            if session_token and isinstance(conn, _PGConn):
+                _require_app_database_plane_for_pg(store, conn, action="app media upload")
+                leaves = store._app_leaves()
+                with store._pg_app_scope(conn, business, session_token=session_token):
+                    with store._leaf_conn(conn) as leaf:
+                        user = leaves["identity"].validate_session(leaf, business, session_token)
+                if user is not None:
+                    user_id = user.id
+                    user_email = user.email
+                    user_tier = user.tier
+            elif session_token:
+                user = _resolve_sqlite_app_user(conn, business, session_token=session_token)
+                if user:
+                    user_id = str(user.get("id") or "")
+                    user_email = str(user.get("email") or "")
+                    user_tier = str(user.get("tier") or "")
         if not user_id:
             raise TakyonError("app account not found")
         idempotency_key = str(args.get("idempotency_key") or "").strip() or f"media:{business}:{uuid.uuid4().hex}"
@@ -22954,12 +23325,15 @@ def handle_business_upload_app_media(args: dict, **_: Any) -> str:
             store,
             business_slug=business,
             app_user_id=user_id,
+            app_user_email=user_email,
+            app_user_tier=user_tier,
             filename=str(args.get("filename") or ""),
             content=args.get("content") or b"",
             mime=str(args.get("mime") or ""),
             idempotency_key=idempotency_key,
             test_mode=_business_mode(store, business) == "test",
             principal={"kind": "session", "id": user_id},
+            session_token=session_token,
         )
         return tool_result({"success": True, **result})
     except Exception as exc:
@@ -22980,7 +23354,11 @@ def handle_business_delete_app_media(args: dict, **_: Any) -> str:
         if not user_id:
             raise TakyonError("app account not found")
         result = takyon_app_media.delete_media(
-            store, business_slug=business, media_id=str(args.get("media_id") or ""), app_user_id=user_id
+            store,
+            business_slug=business,
+            media_id=str(args.get("media_id") or ""),
+            app_user_id=user_id,
+            session_token=session_token,
         )
         return tool_result({"success": True, **result})
     except Exception as exc:
@@ -23005,16 +23383,24 @@ def handle_business_send_app_email(args: dict, **_: Any) -> str:
         if not idempotency_key:
             raise TakyonError("idempotency_key is required")
         session_token = str(args.get("session_token") or "").strip()
+        if getattr(store, "_database_plane", "") == "app":
+            session_token = _require_app_plane_session_token(args)
         with store._connect() as conn:
+            if getattr(store, "_database_plane", "") == "app":
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane email sends require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.email.send")
             surface = store._app_surface_contract(conn, business)
             if "email" not in _surface_runtime_features(surface):
                 raise TakyonError("runtime_features does not include email for this business")
             principal: dict[str, Any] = {"kind": "owner"}
             if session_token:
                 if isinstance(conn, _PGConn):
+                    _require_app_database_plane_for_pg(store, conn, action="app service email send")
                     leaves = store._app_leaves()
-                    with store._leaf_conn(conn) as leaf:
-                        user = leaves["identity"].validate_session(leaf, business, session_token)
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as leaf:
+                            user = leaves["identity"].validate_session(leaf, business, session_token)
                     if user is None:
                         raise TakyonError("app account not found")
                     caller_email = user.email
@@ -23039,6 +23425,7 @@ def handle_business_send_app_email(args: dict, **_: Any) -> str:
             idempotency_key=idempotency_key,
             test_mode=_business_mode(store, business) == "test",
             principal=principal,
+            service_session_token=session_token or None,
         )
         return tool_result({"success": True, **result})
     except Exception as exc:
@@ -23073,10 +23460,16 @@ def handle_business_invoke_app_action(args: dict, **_: Any) -> str:
             raise TakyonError("idempotency_key is required")
         with store._connect() as conn:
             surface = store._app_surface_contract(conn, business)
+            if getattr(store, "_database_plane", "") == "app":
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane action invocation requires Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.action.invoke")
             if isinstance(conn, _PGConn):
+                _require_app_database_plane_for_pg(store, conn, action="app action invocation")
                 leaves = store._app_leaves()
-                with store._leaf_conn(conn) as leaf:
-                    user = leaves["identity"].validate_session(leaf, business, session_token)
+                with store._pg_app_scope(conn, business, session_token=session_token):
+                    with store._leaf_conn(conn) as leaf:
+                        user = leaves["identity"].validate_session(leaf, business, session_token)
                 if user is None:
                     raise TakyonError("app account not found")
                 principal_user = {
@@ -23115,6 +23508,7 @@ def handle_business_invoke_app_action(args: dict, **_: Any) -> str:
 
 
 def handle_business_delete_app_record(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.record.delete",
         "business": args.get("business"),
@@ -23125,6 +23519,56 @@ def handle_business_delete_app_record(args: dict, **_: Any) -> str:
         "record_id": args.get("record_id") if args.get("record_id") is not None else args.get("id"),
     }
     try:
+        if store._database_plane == "app":
+            business = _resolved_business_slug(args, required=True)
+            session_token = _require_app_plane_session_token(args)
+            record_type = _normalize_app_record_type(
+                args.get("record_type") if args.get("record_type") is not None else args.get("type")
+            )
+            record_id = _require_app_record_id(
+                args.get("record_id") if args.get("record_id") is not None else args.get("id")
+            )
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane record writes require Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.record.delete")
+                leaves = store._app_leaves()
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as raw:
+                            user, record = leaves["records"].delete_record(
+                                raw,
+                                business,
+                                record_type=record_type,
+                                record_id=record_id,
+                                session_token=session_token,
+                            )
+                except (leaves["records"].AppRecordError, leaves["identity"].AppIdentityError, ValueError) as exc:
+                    raise TakyonError(str(exc)) from exc
+                record_payload = _app_record_runtime_payload(record)
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.record.delete",
+                    payload={
+                        "app_user_id": user.id,
+                        "record_type": record_type,
+                        "record_id": record_id,
+                    },
+                )
+            return tool_result(
+                {
+                    "success": True,
+                    "action": "app.record.delete",
+                    "business": business,
+                    "app_user_id": user.id,
+                    "record": record_payload,
+                    "deleted": True,
+                }
+            )
+        if args.get("session_token"):
+            raise TakyonError("app record delete requires app-plane database login")
         result = _commit_tool_data(args, operation, principal=({"kind": "session"} if args.get("session_token") else None))
         payload = (
             result.get("results")[0]
@@ -23161,152 +23605,153 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
             cancel_url = cancel_url or f"{base}/app?checkout=cancel"
         if not success_url or not cancel_url:
             raise TakyonError("success_url and cancel_url are required")
-        with store._connect() as conn:
-            business_row = store._ensure_business(conn, business)
-            _enforce_business_work_focus(
-                {"action": "app.entitlement.upsert", "business": business},
-                str(business_row.get("work_focus") or "all"),
-            )
-            test_mode = _effective_business_mode(business_row.get("mode")) == "test"
-            plan = store._row_to_dict(conn.execute("SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?", (business, plan_key)).fetchone())
-            if not plan:
-                raise TakyonError(f"app plan not found: {plan_key}")
-            checkout_metadata = dict(args.get("metadata") or {})
-            if (
-                isinstance(conn, _PGConn)
-                and _openmeter_enabled()
-                and str(plan.get("billing_interval") or "").strip().lower() != "one_time"
-            ):
-                # OpenMeter is a downstream usage-PROJECTION mirror, never a payment authority — it must
-                # NEVER block checkout. A non-2xx from the Kong-fronted OpenMeter API (e.g. a fresh
-                # business's first plan CREATE/PUBLISH) raises OpenMeterAPIError; previously that
-                # hard-failed the FIRST subscription checkout even though the Stripe rail was healthy.
-                # Fail-soft exactly like the sibling session/access projection paths
-                # (`_openmeter_access_projection_failsoft`): attempt the sync, enqueue a retry job, and
-                # SWALLOW every exception so a healthy Stripe rail still returns a checkout URL.
-                openmeter_sync = _pg_sync_openmeter_plan_failsoft(store, business, plan_key)
-                app_user_id = str(args.get("app_user_id") or "").strip()
-                if app_user_id:
-                    customer_sync = _pg_sync_openmeter_customer_failsoft(store, business, app_user_id)
-                    if isinstance(openmeter_sync, dict) and isinstance(customer_sync, dict):
-                        openmeter_sync = {
-                            **openmeter_sync,
-                            "customer": customer_sync,
-                        }
-                if isinstance(openmeter_sync, dict):
-                    checkout_metadata = {
-                        **checkout_metadata,
-                        "billing_authority": "openmeter",
-                        "openmeter_plan_key": openmeter_sync.get("openmeter_plan_key"),
-                        "openmeter_plan_version": openmeter_sync.get("openmeter_plan_version"),
+        if store._database_plane == "app":
+            session_token = _require_app_plane_session_token(args)
+            with store._connect() as conn:
+                if not isinstance(conn, _PGConn):
+                    raise TakyonError("app-plane checkout requires Postgres")
+                _app_plane_customer_write_context(store, conn, business, action="app.checkout.create")
+                business_row = store._ensure_business(conn, business)
+                test_mode = _effective_business_mode(business_row.get("mode")) == "test"
+                leaves = store._app_leaves()
+                with store._pg_app_scope(conn, business, session_token=session_token):
+                    with store._leaf_conn(conn) as raw:
+                        user = leaves["identity"].validate_session(raw, business, session_token)
+                    if user is None:
+                        raise TakyonError("app account not found")
+                    customer_email = str(user.email or "")
+                    plan = store._row_to_dict(
+                        conn.execute(
+                            "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",
+                            (business, plan_key),
+                        ).fetchone()
+                    )
+                    if not plan:
+                        raise TakyonError(f"app plan not found: {plan_key}")
+                    if not test_mode and not str(plan.get("stripe_price_id") or "").strip():
+                        raise TakyonError("app plan is not configured for Stripe checkout")
+
+                    canonical_base = _product_publish_target(business).rstrip("/")
+                    success_url = f"{canonical_base}/app?checkout=success"
+                    cancel_url = f"{canonical_base}/app?checkout=cancel"
+                    mode = "payment" if plan.get("billing_interval") == "one_time" else "subscription"
+                    client_reference_id = uuid.uuid4().hex
+                    checkout_metadata = dict(args.get("metadata") or {})
+                    intent = store._row_to_dict(
+                        conn.execute(
+                            "INSERT INTO app_checkout_intents "
+                            "(business_slug, app_user_id, plan_key, status, client_reference_id, customer_email, metadata) "
+                            "VALUES (?, ?, ?, 'created', ?, ?, ?::jsonb) "
+                            "RETURNING *",
+                            (
+                                business,
+                                user.id,
+                                plan_key,
+                                client_reference_id,
+                                customer_email,
+                                _json_dumps(checkout_metadata),
+                            ),
+                        ).fetchone()
+                    )
+                    intent_id = str(intent["id"])
+                    if test_mode:
+                        checkout_url = success_url
+                        conn.execute(
+                            "UPDATE app_checkout_intents SET status = 'test_local', checkout_url = ?, updated_at = now() "
+                            "WHERE id = ? AND business_slug = ? AND app_user_id = ?",
+                            (checkout_url, intent_id, business, user.id),
+                        )
+                        store._record_event(
+                            conn,
+                            scope=f"business:{business}/app",
+                            business_slug=business,
+                            event_type="app.checkout.create",
+                            payload={
+                                "plan_key": plan_key,
+                                "intent_id": intent_id,
+                                "external_side_effects": "suppressed",
+                                "entitlement_granted": False,
+                            },
+                        )
+                        return tool_result(
+                            {
+                                "success": True,
+                                "business": business,
+                                "mode": "test",
+                                "plan_key": plan_key,
+                                "checkout_intent_id": intent_id,
+                                "stripe_checkout_session_id": None,
+                                "checkout_url": checkout_url,
+                                "url": checkout_url,
+                                "client_reference_id": client_reference_id,
+                                "external_side_effects": "suppressed",
+                                "entitlement_granted": False,
+                                "entitlement": {"granted": False, "reason": "test_mode_no_grant"},
+                            }
+                        )
+
+                    params: dict[str, Any] = {
+                        "mode": mode,
+                        "line_items[0][price]": plan["stripe_price_id"],
+                        "line_items[0][quantity]": 1,
+                        "success_url": success_url,
+                        "cancel_url": cancel_url,
+                        "client_reference_id": client_reference_id,
+                        "metadata[business]": business,
+                        "metadata[plan_key]": plan_key,
+                        "metadata[checkout_intent_id]": intent_id,
+                        "metadata[source]": "takyon_app",
                     }
-            if not test_mode:
-                plan = _ensure_stripe_price(conn, business, plan, str(business_row.get("name") or business))
-            mode = "payment" if plan.get("billing_interval") == "one_time" else "subscription"
-            intent_id = uuid.uuid4().hex
-            client_reference_id = uuid.uuid4().hex
-            now = _now()
-            metadata_column = "metadata" if isinstance(conn, _PGConn) else "metadata_json"
-            conn.execute(
-                f"INSERT INTO app_checkout_intents (id, business_slug, app_user_id, plan_key, status, client_reference_id, customer_email, {metadata_column}, created_at, updated_at) VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?, ?)",
-                (intent_id, business, args.get("app_user_id"), plan_key, client_reference_id, customer_email, _json_dumps(checkout_metadata), now, now),
-            )
-            params: dict[str, Any] = {
-                "mode": mode,
-                "line_items[0][price]": plan["stripe_price_id"],
-                "line_items[0][quantity]": 1,
-                "success_url": success_url,
-                "cancel_url": cancel_url,
-                "client_reference_id": client_reference_id,
-                "metadata[business]": business,
-                "metadata[plan_key]": plan_key,
-                "metadata[checkout_intent_id]": intent_id,
-                "metadata[source]": "takyon_app",
-            }
-            if customer_email:
-                params["customer_email"] = customer_email
-            if mode == "subscription":
-                params["subscription_data[metadata][business]"] = business
-                params["subscription_data[metadata][plan_key]"] = plan_key
-                params["subscription_data[metadata][checkout_intent_id]"] = intent_id
-                params["subscription_data[metadata][source]"] = "takyon_app"
-            else:
-                params["payment_intent_data[metadata][business]"] = business
-                params["payment_intent_data[metadata][plan_key]"] = plan_key
-                params["payment_intent_data[metadata][checkout_intent_id]"] = intent_id
-                params["payment_intent_data[metadata][source]"] = "takyon_app"
-            if test_mode:
-                checkout_url = _test_app_checkout_url(
-                    business=business,
-                    intent_id=intent_id,
-                    origin=args.get("origin"),
-                )
-                # A test checkout does NOT grant any entitlement. The former fake `source="test"`
-                # grant was removed: an active test grant confers real paid access if the business is
-                # later flipped to live (the runtime access gate does not look at `source`). Test
-                # billing is exercised end-to-end through Stripe TEST mode on the real
-                # checkout->webhook->grant path instead. The intent is recorded as `test_local` (no
-                # payment, no grant) so the flow stays visible without minting access.
-                entitlement_grant = {"granted": False, "reason": "test_mode_no_grant"}
-                granted = False
-                conn.execute(
-                    "UPDATE app_checkout_intents SET status = 'test_local', checkout_url = ?, updated_at = ? WHERE id = ?",
-                    (checkout_url, _now(), intent_id),
-                )
-                receipt_rel = f"metrics/receipts/app-checkout/{intent_id}.json"
-                _atomic_write_text(store._business_root(business) / receipt_rel, _json_dumps({
-                    "id": intent_id,
-                    "business": business,
-                    "mode": "test",
-                    "plan_key": plan_key,
-                    "customer_email": customer_email,
-                    "external_side_effects": "suppressed",
-                    "stripe_called": False,
-                    "checkout_url": checkout_url,
-                    "success_url": success_url,
-                    "cancel_url": cancel_url,
-                    "client_reference_id": client_reference_id,
-                    "entitlement_granted": granted,
-                    "entitlement": entitlement_grant,
-                    "created_at": now,
-                }) + "\n")
-                store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "external_side_effects": "suppressed", "entitlement_granted": granted, "receipt": receipt_rel})
-                store._rewrite_app_files(conn, business)
-                return tool_result({
+                    if customer_email:
+                        params["customer_email"] = customer_email
+                    if mode == "subscription":
+                        params["subscription_data[metadata][business]"] = business
+                        params["subscription_data[metadata][plan_key]"] = plan_key
+                        params["subscription_data[metadata][checkout_intent_id]"] = intent_id
+                        params["subscription_data[metadata][source]"] = "takyon_app"
+                    else:
+                        params["payment_intent_data[metadata][business]"] = business
+                        params["payment_intent_data[metadata][plan_key]"] = plan_key
+                        params["payment_intent_data[metadata][checkout_intent_id]"] = intent_id
+                        params["payment_intent_data[metadata][source]"] = "takyon_app"
+                    try:
+                        session = safebox.stripe_request("checkout/sessions", params, method="POST")
+                    except Exception as exc:
+                        raise TakyonError(f"Stripe checkout failed: {exc}") from exc
+                    session_id = str(session.get("id") or "").strip()
+                    checkout_url = str(session.get("url") or "").strip()
+                    if not session_id or not checkout_url:
+                        raise TakyonError("Stripe checkout returned no session URL")
+                    conn.execute(
+                        "UPDATE app_checkout_intents SET status = 'pending', stripe_checkout_session_id = ?, "
+                        "checkout_url = ?, updated_at = now() "
+                        "WHERE id = ? AND business_slug = ? AND app_user_id = ?",
+                        (session_id, checkout_url, intent_id, business, user.id),
+                    )
+                    store._record_event(
+                        conn,
+                        scope=f"business:{business}/app",
+                        business_slug=business,
+                        event_type="app.checkout.create",
+                        payload={
+                            "plan_key": plan_key,
+                            "intent_id": intent_id,
+                            "stripe_checkout_session_id": session_id,
+                        },
+                    )
+            return tool_result(
+                {
                     "success": True,
                     "business": business,
-                    "mode": "test",
                     "plan_key": plan_key,
                     "checkout_intent_id": intent_id,
-                    "stripe_checkout_session_id": None,
+                    "stripe_checkout_session_id": session_id,
                     "checkout_url": checkout_url,
                     "url": checkout_url,
                     "client_reference_id": client_reference_id,
-                    "external_side_effects": "suppressed",
-                    "entitlement_granted": granted,
-                    "entitlement": entitlement_grant,
-                    "openmeter_sync": openmeter_sync,
-                })
-            session = _stripe_request("checkout/sessions", params)
-            conn.execute(
-                "UPDATE app_checkout_intents SET status = 'pending', stripe_checkout_session_id = ?, checkout_url = ?, updated_at = ? WHERE id = ?",
-                (session.get("id"), session.get("url"), _now(), intent_id),
+                }
             )
-            store._record_event(conn, scope=f"business:{business}/app", business_slug=business, event_type="app.checkout.create", payload={"plan_key": plan_key, "intent_id": intent_id, "stripe_checkout_session_id": session.get("id")})
-            store._rewrite_app_files(conn, business)
-        payload = {
-            "success": True,
-            "business": business,
-            "plan_key": plan_key,
-            "checkout_intent_id": intent_id,
-            "stripe_checkout_session_id": session.get("id"),
-            "checkout_url": session.get("url"),
-            "url": session.get("url"),
-            "client_reference_id": client_reference_id,
-        }
-        if openmeter_sync is not None:
-            payload["openmeter_sync"] = openmeter_sync
-        return tool_result(payload)
+        raise TakyonError("app checkout requires app-plane database login")
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -23559,6 +24004,7 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
 
 
 def handle_business_record_app_usage(args: dict, **_: Any) -> str:
+    store = _store()
     operation = {
         "action": "app.usage.record",
         "business": args.get("business"),
@@ -23577,6 +24023,27 @@ def handle_business_record_app_usage(args: dict, **_: Any) -> str:
         "metadata": args.get("metadata") or {},
         "error": args.get("error"),
     }
+    if store._database_plane == "app":
+        try:
+            business = _resolved_business_slug(args, required=True)
+            estimated = int(float(args.get("estimated_cost_microusd") or 0))
+            actual = int(float(args.get("actual_cost_microusd") or 0))
+            if estimated > 0 or actual > 0:
+                raise TakyonError("priced app usage must flow through metered server brokers")
+            app_user_id = str(args.get("app_user_id") or "").strip()
+            if not app_user_id:
+                raise TakyonError("app_user_id is required")
+            return tool_result(
+                {
+                    "success": True,
+                    "business": business,
+                    "app_user_id": app_user_id,
+                    "recorded": False,
+                    "reason": "self_reported_app_usage_disabled_on_app_plane",
+                }
+            )
+        except Exception as exc:
+            return tool_error(str(exc), success=False)
     # The /usage route validates the customer session before recording (the op carries the
     # validated app_user_id), so this is a customer-plane write, not an operator action.
     return _commit_tool(args, operation, principal=({"kind": "session"} if args.get("app_user_id") else None))
@@ -25878,8 +26345,6 @@ def handle_business_ugc_ad_write(args: dict, **_: Any) -> str:
             raise TakyonError("idempotency_key is required")
 
         record = _ugc_ad_record(args)
-        # Exact provider cost from the canonical pricing table (gpt-image-2 still +
-        # Kling v3 Pro per-second video) — a truthful receipt, no fabricated number.
         record["provider_cost_usd"] = _ugc_provider_cost_usd(record.get("seconds"))
         asset_path = store._resolve_business_file(business, record["path"])
         publication_dir = asset_path.parent
@@ -26429,8 +26894,6 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 "spends real provider money and is not stubbed in test mode"
             )
 
-        # Operator-owned brand context (name/category/tone). The skill reads
-        # business state first and passes it; name defaults to the slug.
         raw_context = (
             args.get("business_context")
             if isinstance(args.get("business_context"), Mapping)
@@ -26458,10 +26921,6 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
             "created_at": _now(),
         }
 
-        # Two-half shape: preflight credit gate here in the handler; the real
-        # transaction (key resolution + provider call + reserve/commit) lives in
-        # the creative_gateway logo-render authority route. budget_bucket="" is
-        # brand-level (no channel), so the gate checks only the overall balance.
         gateway_result = _creative_credit_preflight_gate(
             business,
             action="logo_generate",
@@ -26531,22 +26990,11 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
                 }
             )
 
-        # The gateway logo-render route ALREADY published the PNG into the live product site in its
-        # own process, while the freshly written bytes were guaranteed present in the local cache
-        # mirror (see creative_gateway.logo_render). Read the publish outcome straight from the
-        # gateway response — do NOT re-read/re-publish here. The previous cross-process re-read
-        # resolved the business file again, which re-materialized the cache mirror with
-        # delete_local=True and returned EMPTY bytes, so the publish silently no-op'd and the receipt
-        # recorded published_to_site=False (monogram persisted, /brand-logo.png 404) even though 2
-        # credits were charged.
         published_asset_rel = gateway_result.get("asset_path") or asset_rel
         published_to_site = bool(gateway_result.get("published_to_site"))
         site_logo_url = str(gateway_result.get("site_logo_url") or "").strip()
         if published_to_site and not site_logo_url:
             site_logo_url = _PUBLISHED_BRAND_LOGO_URL
-        # Harden: a successful generation that did NOT reach the live site must record an explicit
-        # reason on the receipt so we never silently charge credits for an unserved logo. Prefer the
-        # gateway's exact publish_skipped_reason; fall back to a generic marker.
         publish_skipped_reason = str(gateway_result.get("publish_skipped_reason") or "").strip()
         if not published_to_site and not publish_skipped_reason:
             publish_skipped_reason = "publish_not_reported_by_gateway"
@@ -26581,15 +27029,6 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
         store._sync_business_workspace_remote(business)
-        # The render above wrote product/site/public/brand-logo.png and repointed the WORKSPACE
-        # index.html, but the LIVE site serves the built dist/, where the favicon <link> and the
-        # header brandLogoUrl are baked at BUILD time — so without a rebuild+republish the live site
-        # keeps the seeded "ST" monogram favicon/header even though the real logo was generated.
-        # Chain the canonical refresh->publish (it self-defers to the worker, same as
-        # business_refresh_product_surface) so the next build regenerates surface-context.js
-        # (brandLogoUrl=/brand-logo.png) and re-runs _inject_favicon_links (favicon -> /brand-logo.png),
-        # wiring the generated logo into BOTH the favicon and the header. Fail-soft: a publish blocker
-        # must never reverse the already-charged, already-rendered logo.
         logo_republish: dict[str, Any] = {"status": "skipped", "detail": "logo not published to site"}
         if receipt.get("published_to_site"):
             try:
@@ -26654,7 +27093,7 @@ _GSC_META_MARKER = "google-site-verification"
 def _resolve_gsc_service_account_json() -> str:
     """Resolve the Google Search Console service-account JSON from safebox-backed aliases.
 
-    Authority-route ONLY (GOAL_RULES §7): the business runtime never reads the raw key from
+    Authority-route ONLY (GOAL_RULES section 7): the business runtime never reads the raw key from
     os.environ. Returns "" when no alias is provisioned so the caller fails closed with
     blocked_search_console_unconfigured before any provider work."""
     try:
@@ -26673,13 +27112,8 @@ def _inject_search_console_meta_tag(site_root: Path, verification_token: str) ->
     token = str(verification_token or "").strip()
     if not token:
         return False
-    # Google's siteVerification getToken (META method) returns a FULL meta tag, and the scaffold
-    # already bakes one. Extract the bare content value so we never wrap a tag inside a tag — a
-    # nested ``content="<meta ... />"`` is invalid HTML and fails the Vite build (parse5
-    # missing-whitespace-between-attributes). Mirrors _resolve_gsc_verification_meta_tag /
-    # _await_search_console_token_live, and lets the idempotency check below match the baked tag.
-    _m = re.search(r'content="([^"]+)"', token)
-    token = (_m.group(1) if _m else token).strip()
+    match = re.search(r'content="([^"]+)"', token)
+    token = (match.group(1) if match else token).strip()
     if not token:
         return False
     index_path = site_root / "index.html"
@@ -26710,10 +27144,10 @@ def _await_search_console_token_live(
 ) -> bool:
     """Poll the live public page until Google would find the google-site-verification token.
 
-    The META tag reaches the Cloudflare R2 edge asynchronously (object-overwrite consistency or the
-    next publish), so a verify call fired the instant after injection 400s with "token could not be
-    found". Poll the cache-busted live URL until the token's content value is actually served,
-    bounded so a never-live token blocks rather than hangs. Returns True once reachable."""
+    The META tag reaches the Cloudflare R2 edge asynchronously, so a verify call fired immediately
+    after injection can fail because the token is not yet served. Poll the cache-busted live URL
+    until the token content is actually visible, bounded so a never-live token blocks rather than
+    hanging forever."""
     import re as _re
     import time as _time
     import urllib.parse as _urlparse
@@ -26753,14 +27187,12 @@ _GSC_VERIFICATION_META_CACHE: list[str] = []
 
 
 def _resolve_gsc_verification_meta_tag() -> str:
-    """The platform service-account's google-site-verification META tag, resolved via the GSC
-    authority route. The META token is service-account-scoped (identical for every coscale.app
-    site), so baking it into the scaffold index.html at seed time makes EVERY build carry it from
-    the first publish — the bootstrap verify then always finds it on the live R2 edge regardless
-    of which build is served, eliminating the build-pointer/propagation race. Cached for the
-    process (only a successful, non-empty resolve is cached, so a transient outage retries).
-    Fail-soft: returns "" when the GSC service account or the google client libraries are
-    unavailable, in which case the GSC tool's own live injection remains the fallback."""
+    """Resolve the shared google-site-verification META tag for the operator service account.
+
+    The token is service-account-scoped, so baking it into the scaffold index at seed time lets
+    every build carry it from first publish. Fail-soft: returns "" when the service account or
+    google client libraries are unavailable, in which case the explicit GSC tool remains the
+    fallback."""
     if _GSC_VERIFICATION_META_CACHE:
         return _GSC_VERIFICATION_META_CACHE[0]
     tag = ""
@@ -26801,9 +27233,8 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
 
     Mechanism: URL-prefix property verified via a google-site-verification META tag injected on the
     live landing page. Key-behind-TK: the service-account JSON is resolved ONLY through the safebox
-    authority route (never os.environ). Fails closed with ``blocked_search_console_unconfigured`` when
-    the key (or the google client libraries) is unavailable, recording a receipt at
-    ``product/seo/search-console/<slug>/receipt.json`` and never fabricating a verification."""
+    authority route. Fails closed with blocked_search_console_unconfigured when the key or the
+    google client libraries are unavailable."""
     store = _store()
     try:
         business = _resolved_business_slug(args, required=True)
@@ -26840,8 +27271,6 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
         source_path = _canonical_product_surface_source_path(
             str((args.get("source_path") or "product/site"))
         )
-        # The public site URL is the URL-prefix property to register. Prefer an explicit override,
-        # else the published surface public_url recorded on the business.
         site_url = str(args.get("site_url") or "").strip()
         if not site_url:
             try:
@@ -26889,8 +27318,6 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 "pass site_url explicitly",
             )
 
-        # Authority route ONLY: resolve the service-account JSON via the safebox. Fail closed before
-        # any provider work when the key is not provisioned.
         sa_json = _resolve_gsc_service_account_json()
         if not sa_json:
             return _blocked(
@@ -26907,9 +27334,6 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 f"Search Console service-account key is not valid JSON: {exc}",
             )
 
-        # Lazy provider-client imports: the google client libraries are an optional dependency. If
-        # they are not installed in this runtime, fail closed (guarded/disabled path) rather than
-        # fabricating a verification.
         try:
             from google.oauth2 import service_account as _gsc_service_account  # type: ignore
             from googleapiclient import discovery as _gsc_discovery  # type: ignore
@@ -26924,7 +27348,6 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
             credentials = _gsc_service_account.Credentials.from_service_account_info(
                 sa_info, scopes=list(_GSC_OAUTH_SCOPES)
             )
-            # Pass credentials explicitly to each discovery client (never via os.environ / ADC).
             site_verification = _gsc_discovery.build(
                 "siteVerification", "v1", credentials=credentials, cache_discovery=False
             )
@@ -26932,7 +27355,6 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 "searchconsole", "v1", credentials=credentials, cache_discovery=False
             )
 
-            # 1) Obtain the META-tag verification token for the URL-prefix property.
             token_resp = (
                 site_verification.webResource()
                 .getToken(
@@ -26950,25 +27372,10 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                     "Search Console did not return a META verification token",
                 )
 
-            # 2) Inject the token META tag so Google can fetch it from the LIVE landing page.
-            #    Inject into BOTH the SOURCE index.html (the vite entry template — so a later
-            #    rebuild/republish, e.g. bootstrap's 2b appkit pass, carries the tag forward into the
-            #    next dist instead of dropping it) AND the currently-published LIVE dist index.html
-            #    (so Google's verify fetch below sees the tag immediately, without waiting for the next
-            #    publish). This makes the call idempotent and ordering-independent: it works whether it
-            #    runs right after the landing publish (2a) or after the final appkit publish (2b).
             site_root = store._resolve_business_file(business, source_path)
             source_injected = _inject_search_console_meta_tag(site_root, verification_token)
             live_root = _product_live_current_root(business)
             live_injected = _inject_search_console_meta_tag(live_root, verification_token)
-            # <slug>.coscale.app is served from the Cloudflare R2 edge: it resolves the
-            # <slug>/current pointer to a build_id and serves <slug>/<build_id>/index.html with NO
-            # origin fallback, so the VPS-dist injection above is invisible there. Overwrite the
-            # EXACT object the edge currently serves — read the live <slug>/current pointer and PUT
-            # the meta-injected index.html under that same build_id (no pointer flip, so it cannot
-            # race the bootstrap's own publishes). The verify below is then gated on a live-page
-            # poll. When R2 is unconfigured the VPS dist IS the live surface, so the plain injection
-            # already suffices (edge_synced stays True).
             edge_synced = True
             if live_injected:
                 try:
@@ -27000,15 +27407,12 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                         )
             meta_injected = bool(source_injected and live_injected)
             if not meta_injected:
-                # The verify fetch needs the tag on the LIVE page; the source injection alone is not
-                # enough. Surface exactly which side failed so the operator/CEO knows whether to
-                # republish (live missing) vs investigate the source template (source missing).
                 return _blocked(
                     "blocked_search_console_meta_inject_failed",
                     "could not place the google-site-verification META tag on the LIVE landing page "
                     "before verification; publish the landing page first, then retry"
                     + (
-                        " (the live published dist/index.html was not found — the site must be "
+                        " (the live published dist/index.html was not found - the site must be "
                         "published before Search Console can verify it)"
                         if not live_injected
                         else (
@@ -27024,21 +27428,16 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                     edge_synced=bool(edge_synced),
                 )
 
-            # The META tag reaches the R2 edge asynchronously (overwrite consistency or the next
-            # publish), so a verify fired the instant after the write 400s with "token could not be
-            # found". Poll the live page until Google would actually find the token, then verify.
             if not _await_search_console_token_live(site_url, verification_token):
                 return _blocked(
                     "blocked_search_console_token_not_live",
                     "the google-site-verification META tag was injected but did not become reachable "
                     f"on the live page {site_url} within the propagation window; it is in the source "
-                    "and will go live on the next publish — retry registration then",
+                    "and will go live on the next publish - retry registration then",
                     verification_token=verification_token,
                     edge_synced=bool(edge_synced),
                 )
 
-            # 3) Verify the URL-prefix property (Google fetches the META tag from the live page),
-            #    then register/add the property to Search Console.
             verify_resp = (
                 site_verification.webResource()
                 .insert(
@@ -27049,8 +27448,6 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
             )
             search_console.sites().add(siteUrl=site_url).execute()
         except Exception as exc:
-            # Provider rejected the call (token mismatch, fetch not yet live, permission). Record the
-            # exact blocker and continue — never fabricate a verified property.
             return _blocked(
                 "blocked_search_console_verification_failed",
                 f"Search Console verification/registration failed: {exc}",

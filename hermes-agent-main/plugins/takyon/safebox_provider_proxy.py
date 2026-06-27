@@ -9,9 +9,9 @@ Tavily with the stock SDK against a STATIC key. Its purpose is twofold:
      never holds a raw key (the response is always KEY-FREE).
   2. AUTHORITATIVE money gate: EVERY call presents a capability and the safebox reserves -> settles the
      OPERATOR's control-plane budget (``billing.py``, the Takyon-user -> platform rail) keyed on the
-     verified operator scope, BEFORE/AFTER resolving the key. There is NO ungated path — even the
-     transitional internal-token path is metered. "Everything gated by usage/credits authoritatively on
-     the safebox, no gating outside the safebox."
+     verified operator scope, BEFORE/AFTER resolving the key. There is NO ungated path, and the shared
+     Safebox transport token is never accepted as spend authority. "Everything gated by usage/credits
+     authoritatively on the safebox, no gating outside the safebox."
 
 Scope after the creative-credit gate cutover: only the Anthropic (streaming) and Tavily proxy routes
 live here. The ungated Gemini-image / OpenAI-image / FAL routes were DELETED — those creative providers
@@ -38,17 +38,10 @@ Per-call money flow on every route:
   - Fail closed: if the operator is out of budget the call is REFUSED (clear error / SSE error event)
     BEFORE any provider key is resolved or any upstream call is made.
 
-TRANSITIONAL internal-token path: these routes STILL accept the shared ``TAKYON_SAFEBOX_TOKEN`` so the
-live CEO agent / worker do not break before they mint a session capability — BUT the internal-token path
-is STILL money-gated: it reserves/settles against a PLATFORM operator budget (resolved from
-``TAKYON_PLATFORM_OPERATOR_USER_ID`` / ``TAKYON_OPERATOR_USER_ID``). There is NO path that spends without
-a safebox-side reserve/settle. This acceptance is the transitional path to REMOVE once all operator
-clients mint session capabilities.
-
 Hard invariants for every route here:
 
-- Auth: a valid session-scoped operator capability (preferred) OR a per-action capability OR the
-  transitional internal token. A wrong/absent credential fails closed with 401 before any work.
+- Auth: a valid session-scoped operator capability (preferred) OR a per-action capability. A wrong,
+  absent, or bare shared-token credential fails closed with 401 before any work.
 - Money: every call reserves -> (stream|call) -> settles on the operator rail. Out of budget -> 402 /
   SSE error BEFORE any upstream call. There is no ungated spend.
 - Resolve the real key LOCALLY on the safebox; if it is empty -> 503 ``<provider>_unconfigured`` AFTER
@@ -118,16 +111,13 @@ def _presented_credential(authorization: str | None, x_api_key: str | None) -> s
     return auth
 
 
-# ── Operator-plane authorization (capability OR transitional internal token) ──────────────────────
+# ── Operator-plane authorization (capability only) ────────────────────────────────────────────────
 class _ProxyAuth:
     """The outcome of authorizing an operator proxy call: the AUTHORITATIVE scope to meter against,
     plus a hard per-call ceiling and whether the ceiling must be enforced.
 
-    ``scope`` is a ``CapabilityScope`` keyed on the operator's ``takyon_user_id`` (the rail key). For a
-    capability it is the verified scope; for the transitional internal token it is a synthetic
-    PLATFORM-operator scope. ``ceiling_microusd`` is the per-call cost ceiling; ``enforce_ceiling`` is
-    True for a capability (the signed ``max_cost_microusd`` is a hard cap) and False for the internal
-    token (fully trusted — metered but not ceiling-capped)."""
+    ``scope`` is a verified ``CapabilityScope`` keyed on the operator's ``takyon_user_id`` (the rail
+    key). ``ceiling_microusd`` is the signed per-call cost ceiling, enforced for every capability."""
 
     __slots__ = ("scope", "ceiling_microusd", "enforce_ceiling", "via")
 

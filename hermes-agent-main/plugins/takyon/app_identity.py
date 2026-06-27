@@ -88,6 +88,34 @@ def _normalize_email(value: str) -> str:
     return email
 
 
+def _first_col(row, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return next(iter(row.values()), default)
+    return row[0] if len(row) else default
+
+
+def _row_item(row, index: int, key: str, default=None):
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return row[index] if len(row) > index else default
+
+
+def _current_user(conn) -> str:
+    try:
+        row = conn.execute("select current_user").fetchone()
+    except Exception:
+        return ""
+    return str(_first_col(row, "") or "").strip()
+
+
+def _is_app_runtime_user(conn) -> bool:
+    return _current_user(conn) in {"takyon_app", "takyon_app_runtime"}
+
+
 def _normalize_status(value: str | None) -> str:
     status = str(value or "active").strip().lower()
     if status not in _VALID_APP_USER_STATUSES:
@@ -97,12 +125,12 @@ def _normalize_status(value: str | None) -> str:
 
 def _app_user_from_row(row) -> AppUser:
     return AppUser(
-        id=str(row[0]),
-        business_slug=str(row[1]),
-        email=str(row[2]),
-        name=None if row[3] is None else str(row[3]),
-        status=str(row[4]),
-        tier=str(row[5]),
+        id=str(_row_item(row, 0, "id", _row_item(row, 0, "app_user_id"))),
+        business_slug=str(_row_item(row, 1, "business_slug")),
+        email=str(_row_item(row, 2, "email")),
+        name=None if _row_item(row, 3, "name") is None else str(_row_item(row, 3, "name")),
+        status=str(_row_item(row, 4, "status")),
+        tier=str(_row_item(row, 5, "tier")),
     )
 
 
@@ -213,6 +241,81 @@ def start_session(
     return session, raw_session
 
 
+def start_supabase_session(
+    conn,
+    business_slug: str,
+    supabase_user_id: str,
+    email: str | None,
+    *,
+    name: str | None = None,
+    session_ttl_days: int = _DEFAULT_SESSION_TTL_DAYS,
+) -> tuple[AppUser, AppSession, str]:
+    """Bind a verified Supabase identity and mint one Takyon app session.
+
+    On the final app plane, the login role has no broad DML on app_users/app_sessions. It calls the
+    bounded SECURITY DEFINER port instead, passing only the session hash so the raw bearer token is
+    returned to the browser once and never stored.
+    """
+    sub = str(supabase_user_id or "").strip()
+    if not sub:
+        raise ValueError("supabase_user_id is required")
+    if not isinstance(session_ttl_days, int) or session_ttl_days <= 0:
+        raise ValueError("session_ttl_days must be a positive integer")
+    raw_session = _random_token()
+    if _is_app_runtime_user(conn):
+        row = conn.execute(
+            "select app_user_id, business_slug, email, name, status, tier, session_id, session_expires_at "
+            "from takyon_app_bind_supabase_session(%s, %s, %s, %s, %s, %s)",
+            (
+                business_slug,
+                sub,
+                _normalize_email(email) if email else None,
+                name,
+                _hash_token(raw_session),
+                session_ttl_days,
+            ),
+        ).fetchone()
+        if row is None:
+            raise AppIdentityError("supabase session bind returned no row")
+        user = _app_user_from_row(row)
+        session = AppSession(
+            id=str(_row_item(row, 6, "session_id")),
+            business_slug=str(_row_item(row, 1, "business_slug")),
+            app_user_id=str(_row_item(row, 0, "app_user_id")),
+            expires_at=_row_item(row, 7, "session_expires_at"),
+        )
+        return user, session, raw_session
+
+    user = upsert_app_user_by_supabase_id(
+        conn,
+        business_slug,
+        sub,
+        email,
+        name=name,
+    )
+    try:
+        from plugins.takyon import app_entitlements
+
+        tier = app_entitlements.resolve_user_tier(conn, business_slug, user.id)
+        user = AppUser(
+            id=user.id,
+            business_slug=user.business_slug,
+            email=user.email,
+            name=user.name,
+            status=user.status,
+            tier=tier,
+        )
+    except Exception:
+        pass
+    session, raw_session = start_session(
+        conn,
+        business_slug,
+        user.id,
+        session_ttl_days=session_ttl_days,
+    )
+    return user, session, raw_session
+
+
 def upsert_app_user_by_supabase_id(
     conn,
     business_slug: str,
@@ -267,6 +370,13 @@ def validate_session(conn, business_slug: str, raw_session_token: str) -> AppUse
     token = str(raw_session_token or "").strip()
     if not token:
         return None
+    if _is_app_runtime_user(conn):
+        row = conn.execute(
+            "select app_user_id, business_slug, email, name, status, tier "
+            "from takyon_app_validate_session(%s, %s)",
+            (business_slug, _hash_token(token)),
+        ).fetchone()
+        return None if row is None else _app_user_from_row(row)
     row = conn.execute(
         f"select {', '.join('u.' + c for c in _APP_USER_COLUMNS.split(', '))} "
         "from app_sessions s join app_users u on u.id = s.app_user_id "
@@ -284,6 +394,12 @@ def revoke_session(conn, business_slug: str, raw_session_token: str) -> bool:
     token = str(raw_session_token or "").strip()
     if not token:
         return False
+    if _is_app_runtime_user(conn):
+        row = conn.execute(
+            "select takyon_app_revoke_session(%s, %s)",
+            (business_slug, _hash_token(token)),
+        ).fetchone()
+        return bool(_first_col(row, False))
     with conn.transaction():
         row = conn.execute(
             "update app_sessions set revoked_at = now() "

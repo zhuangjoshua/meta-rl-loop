@@ -147,11 +147,12 @@ wait_for_remote_runtime_idle() {
         env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
           '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from plugins.takyon.core import load_takyon_env
-from plugins.takyon.runtime_app import resolve_database_url
+from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
 import psycopg
 
 load_takyon_env()
-with psycopg.connect(resolve_database_url(), autocommit=True, prepare_threshold=None) as conn:
+with psycopg.connect(resolve_database_url(plane="operator"), autocommit=True, prepare_threshold=None) as conn:
+    assert_takyon_pg_role(conn, "operator")
     with conn.cursor() as cur:
         cur.execute(
             \"\"\"
@@ -216,11 +217,16 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   # auth state once, then keep it owned by the service user.
   if [ -e /root/.xurl ] && [ ! -e /opt/takyon/.xurl ]; then cp -a /root/.xurl /opt/takyon/.xurl; fi
   if [ -e /opt/takyon/.xurl ]; then chown -R takyon:takyon /opt/takyon/.xurl; fi
-  if ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
-    && ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
-    echo 'TAKYON_SAFEBOX_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
-    exit 1
-  fi
+	  if ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
+	    && ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
+	    echo 'TAKYON_SAFEBOX_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
+	    exit 1
+	  fi
+	  if ! grep -q '^TAKYON_SAFEBOX_OPERATOR_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
+	    && ! grep -q '^TAKYON_SAFEBOX_OPERATOR_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
+	    echo 'TAKYON_SAFEBOX_OPERATOR_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
+	    exit 1
+	  fi
   # A /usr/local/bin/xurl SYMLINK into /root/.local is unreachable for the service under
   # ProtectHome=true — replace it with a real copy once.
   if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then
@@ -262,14 +268,13 @@ PY
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from plugins.takyon.core import load_takyon_env
 from plugins.takyon.db.runner import run_migrations
+from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
 import psycopg
-import os
 
 load_takyon_env()
-migration_database_url = os.getenv('MIGRATION_DATABASE_URL') or os.getenv('TAKYON_MIGRATION_DATABASE_URL')
-if not migration_database_url:
-    raise SystemExit('MIGRATION_DATABASE_URL is required for deploy-time migrations')
+migration_database_url = resolve_database_url(plane="migration")
 with psycopg.connect(migration_database_url, autocommit=True, prepare_threshold=None) as conn:
+    assert_takyon_pg_role(conn, "migration")
     conn.execute('select set_config(\$\$statement_timeout\$\$, \$\$0\$\$, false)')
     run_migrations(conn)
 PY

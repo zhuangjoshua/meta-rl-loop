@@ -20,9 +20,9 @@ Config keys this provider responds to::
       crawl_backend: "tavily"      # explicit per-capability
       backend: "tavily"            # shared fallback for all three
 
-Env vars::
+Secret config::
 
-    TAVILY_API_KEY=...           # https://app.tavily.com/home (required)
+    TAVILY_API_KEY=...           # https://app.tavily.com/home (Safebox/local authority only)
     TAVILY_BASE_URL=...          # optional override of https://api.tavily.com
 
 Auth note: Tavily uses ``api_key`` in the JSON body for /search and
@@ -54,6 +54,11 @@ def _use_remote_authority(safebox: Any) -> bool:
         return False
 
 
+def _local_tavily_api_key(safebox: Any) -> str:
+    """Resolve the Tavily key only on a local/Safebox authority plane."""
+    return str(safebox.first_env_backed_value("TAVILY_API_KEY") or "").strip()
+
+
 def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """POST to the Tavily API and return the parsed JSON response.
 
@@ -61,17 +66,16 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     when ``TAVILY_API_KEY`` is unset; the caller catches and surfaces as
     a typed error response.
 
-    Secret boundary: on a runtime plane (a host with a remote safebox
-    configured — ``safebox._use_remote_authority()`` is True) the raw
-    ``TAVILY_API_KEY`` is NOT read here. Instead the call goes through the
-    safebox provider PROXY (``/v1/proxy/tavily/<op>``): the safebox resolves
-    the key locally, calls Tavily, and returns the KEY-FREE Tavily JSON (the
-    same shape the normalizers expect). The proxy fails closed
-    (``RemoteSafeboxError`` / ``SafeboxAuthorityUnavailable``) and never falls
-    back to a raw key. On the safebox host itself / local dev
-    (``not _use_remote_authority()``) — that host IS the authority — the
-    existing direct call below resolves ``TAVILY_API_KEY`` locally unchanged
-    (the proxy route itself runs there).
+    Secret boundary: on a runtime plane (a host with a remote safebox configured —
+    ``safebox._use_remote_authority()`` is True) the raw ``TAVILY_API_KEY`` is NOT
+    read here. This generic web-provider chokepoint does not carry the required
+    business-owner identity needed to mint an ``operator.session`` capability, so
+    it fails closed instead of sending the shared Safebox transport token to the
+    operator proxy. Product sub-user Tavily/search uses the app AI gateway broker,
+    not this operator web plugin. On the safebox host itself / local dev
+    (``not _use_remote_authority()``) — that host IS the authority — the direct
+    call below resolves ``TAVILY_API_KEY`` through the safebox/local config helper,
+    not from this plugin's process env.
     """
     op = endpoint.strip("/").lower()
     payload = dict(payload)  # don't mutate caller's dict
@@ -79,19 +83,17 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     from plugins.takyon import safebox
 
     if _use_remote_authority(safebox):
-        # Runtime plane: broker the call through the safebox proxy — the raw key
-        # never reaches this process. Only search/extract have proxy routes; an
-        # unrouted op (e.g. crawl) gets a clean fail-closed proxy error rather
-        # than silently reading a raw key on the runtime plane.
-        logger.info("Tavily %s via safebox proxy", op)
-        return safebox.proxy_request("tavily", op, payload)
+        raise safebox.SafeboxAuthorityUnavailable(
+            "Tavily operator web provider requires a caller-bound operator.session capability on "
+            "remote runtime planes; refusing to use the shared Safebox transport token as authority"
+        )
 
     import httpx
 
-    api_key = os.getenv("TAVILY_API_KEY")
+    api_key = _local_tavily_api_key(safebox)
     if not api_key:
         raise ValueError(
-            "TAVILY_API_KEY environment variable not set. "
+            "TAVILY_API_KEY is not configured on the local Safebox authority. "
             "Get your API key at https://app.tavily.com/home"
         )
 
@@ -187,13 +189,17 @@ class TavilyWebSearchProvider(WebSearchProvider):
         return "Tavily"
 
     def is_available(self) -> bool:
-        """Available when the local key is set OR the safebox proxy can broker the
-        call (runtime plane: the raw key lives on the safebox, not in os.environ)."""
-        if bool(os.getenv("TAVILY_API_KEY", "").strip()):
-            return True
+        """Available only on a local/Safebox authority plane with a configured key.
+
+        Remote runtime planes cannot use this generic provider because it has no
+        caller-bound operator.session capability. Product sub-user search uses
+        the app AI gateway broker instead.
+        """
         try:
             from plugins.takyon import safebox
-            return _use_remote_authority(safebox)
+            if _use_remote_authority(safebox):
+                return False
+            return bool(_local_tavily_api_key(safebox))
         except Exception:
             return False
 

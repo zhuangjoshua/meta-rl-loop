@@ -38,6 +38,7 @@ from plugins.takyon.safebox_capability import verify_capability
 
 _SIGNING_KEY = "safebox-only-signing-key-not-on-any-client"
 _TOKEN = "secret-internal-token"
+_OPERATOR_TOKEN = "operator-route-token-not-on-subuser"
 _REAL_KEY = "sk-REAL-PROVIDER-KEY-CANARY-do-not-leak"
 
 
@@ -115,6 +116,8 @@ def ledger(monkeypatch):
 def client(monkeypatch):
     monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
     monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, _SIGNING_KEY)
+    monkeypatch.setenv(safebox_app._OPERATOR_TOKEN_ENV, _OPERATOR_TOKEN)
+    monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "testclient")
 
     @contextlib.contextmanager
     def _fake_conn():
@@ -133,7 +136,7 @@ def client(monkeypatch):
 
 
 def _auth():
-    return {"Authorization": f"Bearer {_TOKEN}"}
+    return {"Authorization": f"Bearer {_TOKEN}", "X-Takyon-Operator-Token": _OPERATOR_TOKEN}
 
 
 def _reserve(client, *, action="creative.logo", operator="owner_A", units=None, key="rk-1"):
@@ -363,6 +366,8 @@ class _FakeResponse:
 class _FakeHttpxClient:
     sent: list[dict] = []
     response = None
+    post_responses: list = []
+    get_responses: list = []
 
     def __init__(self, *a, **k):
         pass
@@ -374,7 +379,19 @@ class _FakeHttpxClient:
         return False
 
     def post(self, url, *, headers=None, json=None):
-        _FakeHttpxClient.sent.append({"url": url, "headers": dict(headers or {}), "json": json})
+        _FakeHttpxClient.sent.append(
+            {"method": "POST", "url": url, "headers": dict(headers or {}), "json": json}
+        )
+        if _FakeHttpxClient.post_responses:
+            return _FakeHttpxClient.post_responses.pop(0)
+        return _FakeHttpxClient.response
+
+    def get(self, url, *, headers=None):
+        _FakeHttpxClient.sent.append(
+            {"method": "GET", "url": url, "headers": dict(headers or {}), "json": None}
+        )
+        if _FakeHttpxClient.get_responses:
+            return _FakeHttpxClient.get_responses.pop(0)
         return _FakeHttpxClient.response
 
 
@@ -382,6 +399,8 @@ def test_openai_gate_resolves_key_local_and_forwards_key_free(client, ledger, mo
     import httpx
 
     _FakeHttpxClient.sent = []
+    _FakeHttpxClient.post_responses = []
+    _FakeHttpxClient.get_responses = []
     _FakeHttpxClient.response = _FakeResponse(200, {"data": [{"b64_json": "AAAA"}]})
     monkeypatch.setattr(httpx, "Client", _FakeHttpxClient)
     monkeypatch.setattr(safebox_app, "_openai_image_key", lambda: _REAL_KEY)
@@ -407,30 +426,109 @@ def test_fal_gate_resolves_key_local_and_forwards_key_free(client, ledger, monke
     import httpx
 
     _FakeHttpxClient.sent = []
-    _FakeHttpxClient.response = _FakeResponse(200, {"video": {"url": "https://x/v.mp4"}})
+    _FakeHttpxClient.response = None
+    _FakeHttpxClient.post_responses = [
+        _FakeResponse(
+            200,
+            {
+                "status_url": "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video/requests/r1/status",
+                "response_url": "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video/requests/r1",
+            },
+        )
+    ]
+    _FakeHttpxClient.get_responses = [
+        _FakeResponse(200, {"status": "COMPLETED"}),
+        _FakeResponse(200, {"video": {"url": "https://x/v.mp4"}}),
+    ]
     monkeypatch.setattr(httpx, "Client", _FakeHttpxClient)
     monkeypatch.setattr(safebox_app, "_fal_key", lambda: _REAL_KEY)
+    monkeypatch.setattr(safebox_app, "_FAL_QUEUE_POLL_INTERVAL_S", 0)
 
     resp = _reserve(client, action="creative.ugc", key="rk-ugc2")
     assert resp.status_code == 200
     token = resp.json()["token"]
     presp = client.post(
-        "/v1/providers/fal/fal-ai/kling-video/v3/pro/image-to-video",
+        "/v1/providers/fal/kling-image-to-video",
         headers=_auth(),
         json={"token": token, "payload": {"prompt": "p"}},
     )
     assert presp.status_code == 200, presp.text
     assert presp.json()["video"]["url"] == "https://x/v.mp4"
     assert _REAL_KEY not in presp.text  # KEY-FREE
-    sent = _FakeHttpxClient.sent[-1]
-    assert sent["url"] == "https://fal.run/fal-ai/kling-video/v3/pro/image-to-video"
-    assert sent["headers"]["Authorization"] == f"Key {_REAL_KEY}"
+    submit, poll, result = _FakeHttpxClient.sent
+    assert submit["method"] == "POST"
+    assert submit["url"] == "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+    assert submit["headers"]["Authorization"] == f"Key {_REAL_KEY}"
+    assert poll["url"].startswith("https://queue.fal.run/")
+    assert result["url"].startswith("https://queue.fal.run/")
+
+
+def test_fal_gate_has_no_arbitrary_path_route_before_upstream(client, ledger, monkeypatch):
+    import httpx
+
+    _FakeHttpxClient.sent = []
+    _FakeHttpxClient.post_responses = []
+    _FakeHttpxClient.get_responses = []
+    monkeypatch.setattr(httpx, "Client", _FakeHttpxClient)
+    monkeypatch.setattr(safebox_app, "_fal_key", lambda: pytest.fail("FAL key resolved for bad path"))
+
+    resp = _reserve(client, action="creative.ugc", key="rk-bad-fal-path")
+    token = resp.json()["token"]
+    presp = client.post(
+        "/v1/providers/fal/http://169.254.169.254/latest",
+        headers=_auth(),
+        json={"token": token, "payload": {"prompt": "p"}},
+    )
+    assert presp.status_code == 404
+    assert _FakeHttpxClient.sent == []
+
+
+def test_fal_queue_rejects_callback_url_before_followup_socket(client, ledger, monkeypatch):
+    import httpx
+
+    _FakeHttpxClient.sent = []
+    _FakeHttpxClient.response = None
+    _FakeHttpxClient.post_responses = [
+        _FakeResponse(
+            200,
+            {
+                "status_url": "http://169.254.169.254/latest/meta-data",
+                "response_url": "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video/requests/r1",
+            },
+        )
+    ]
+    _FakeHttpxClient.get_responses = [
+        _FakeResponse(200, {"this": "must not be fetched"}),
+    ]
+    monkeypatch.setattr(httpx, "Client", _FakeHttpxClient)
+    monkeypatch.setattr(safebox_app, "_fal_key", lambda: _REAL_KEY)
+    monkeypatch.setattr(safebox_app, "_FAL_QUEUE_POLL_INTERVAL_S", 0)
+
+    resp = _reserve(client, action="creative.ugc", key="rk-bad-fal-callback")
+    token = resp.json()["token"]
+    presp = client.post(
+        "/v1/providers/fal/kling-image-to-video",
+        headers=_auth(),
+        json={"token": token, "payload": {"prompt": "p"}},
+    )
+    assert presp.status_code == 502
+    assert presp.json()["detail"] == "provider_error"
+    assert _FakeHttpxClient.sent == [
+        {
+            "method": "POST",
+            "url": "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video",
+            "headers": {"Authorization": f"Key {_REAL_KEY}", "content-type": "application/json"},
+            "json": {"prompt": "p"},
+        }
+    ]
 
 
 def test_openai_gate_unconfigured_is_503_before_upstream(client, ledger, monkeypatch):
     import httpx
 
     _FakeHttpxClient.sent = []
+    _FakeHttpxClient.post_responses = []
+    _FakeHttpxClient.get_responses = []
     monkeypatch.setattr(httpx, "Client", _FakeHttpxClient)
     monkeypatch.setattr(safebox_app, "_openai_image_key", lambda: "")  # unconfigured
     resp = _reserve(client, action="creative.static_ad", key="rk-s")
@@ -465,7 +563,7 @@ def test_creative_gateway_handlers_use_safebox_gate_not_client_reserve():
 
     logo = _slice("def logo_render(", "def _create_reddit_structured_post(")
     ugc = _slice("def ugc_render(", "@router.post(\"/static-render\")")
-    static = _slice("def static_render(", "@router.post(\"/meta-launch\")")
+    static = _slice("def static_render(", "@router.post(\"/reddit-launch\")")
 
     for name, handler in (("logo", logo), ("ugc", ugc), ("static", static)):
         # No client-side reserve/commit/release of creative credits in these handlers.
@@ -484,6 +582,8 @@ def test_ungated_creative_proxy_routes_are_deleted_and_unreachable(client):
     assert "/v1/proxy/gemini/image" not in paths
     assert "/v1/proxy/openai/images" not in paths
     assert "/v1/proxy/fal/{path:path}" not in paths
+    assert "/v1/providers/fal/{fal_path:path}" not in paths
+    assert "/v1/providers/fal/kling-image-to-video" in paths
     for route in ("/v1/proxy/gemini/image", "/v1/proxy/openai/images", "/v1/proxy/fal/fal-ai/x"):
         resp = client.post(route, headers=_auth(), json={"prompt": "x"})
         assert resp.status_code == 404, (route, resp.status_code)

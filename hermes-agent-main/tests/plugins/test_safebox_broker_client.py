@@ -19,6 +19,7 @@ def _clear_env(monkeypatch):
         "TAKYON_SAFEBOX_URL",
         "TAKYON_HOST_ROLE",
         "TAKYON_SAFEBOX_TOKEN",
+        "TAKYON_SAFEBOX_OPERATOR_TOKEN",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -114,6 +115,161 @@ def test_remote_json_maps_unreachable_to_504(monkeypatch):
         safebox._remote_json("POST", "/v1/providers/anthropic/messages", {"x": 1}, timeout=5)
     assert ei.value.status_code == 504
     assert ei.value.payload.get("detail") == "safebox_unreachable"
+
+
+def test_remote_json_adds_operator_token_only_for_operator_routes(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    seen: list[tuple[str, str | None]] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def _capture(req, timeout=None):
+        seen.append((req.full_url, req.get_header("X-takyon-operator-token")))
+        return _Resp()
+
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", _capture)
+
+    safebox._remote_json("POST", "/v1/operator/session-token", {"x": 1}, timeout=5)
+    safebox._remote_json("POST", "/v1/postmark/send", {"x": 1}, timeout=5)
+    safebox._remote_json("POST", "/v1/providers/anthropic/messages", {"x": 1}, timeout=5)
+
+    assert seen[0] == ("http://10.0.0.2:8000/v1/operator/session-token", "operator-route-token")
+    assert seen[1] == ("http://10.0.0.2:8000/v1/postmark/send", "operator-route-token")
+    assert seen[2] == ("http://10.0.0.2:8000/v1/providers/anthropic/messages", None)
+
+
+def test_remote_json_operator_route_requires_operator_token(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", lambda *a, **k: pytest.fail("opened socket"))
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable):
+        safebox._remote_json("POST", "/v1/operator/session-token", {"x": 1}, timeout=5)
+
+
+def test_meta_graph_forward_rejects_caller_chosen_host_before_socket(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", lambda *a, **k: pytest.fail("opened socket"))
+
+    with pytest.raises(ValueError, match="meta_graph_host_not_allowed"):
+        safebox.meta_graph_forward(
+            method="GET",
+            path="/me",
+            params={"fields": "id"},
+            host="169.254.169.254",
+        )
+
+
+def test_remote_env_mutation_disabled_before_socket(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", lambda *a, **k: pytest.fail("opened socket"))
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable, match="remote env mutation is disabled"):
+        safebox.save_env_backed_value("OPENAI_API_KEY", "sk-nope")
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable, match="remote env mutation is disabled"):
+        safebox.remove_env_backed_value("OPENAI_API_KEY")
+
+
+def test_proxy_request_requires_operator_capability_before_socket(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", lambda *a, **k: pytest.fail("opened socket"))
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable, match="signed operator capability"):
+        safebox.proxy_request("tavily", "search", {"query": "x"})
+
+
+def test_proxy_request_sends_operator_capability_as_x_api_key(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def _capture(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["authorization"] = req.get_header("Authorization")
+        seen["x_api_key"] = req.get_header("X-api-key")
+        seen["body"] = req.data
+        return _Resp()
+
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", _capture)
+
+    out = safebox.proxy_request(
+        "tavily",
+        "search",
+        {"query": "x"},
+        token="operator-session-capability",
+        timeout=5,
+    )
+
+    assert out == {"ok": True}
+    assert seen["url"] == "http://10.0.0.2:8000/v1/proxy/tavily/search"
+    assert seen["authorization"] == "Bearer shared-transport-token"
+    assert seen["x_api_key"] == "operator-session-capability"
+    assert b'"query": "x"' in seen["body"]
+
+
+def test_stripe_catalog_remote_request_uses_operator_token_but_checkout_does_not(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    seen: list[tuple[str, str | None]] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def _capture(req, timeout=None):
+        seen.append((req.full_url, req.get_header("X-takyon-operator-token")))
+        return _Resp()
+
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", _capture)
+
+    safebox.stripe_request("products", {"metadata[business]": "climblog"}, method="POST")
+    safebox.stripe_request("checkout/sessions", {"metadata[business]": "climblog"}, method="POST")
+
+    assert seen == [
+        ("http://10.0.0.2:8000/v1/stripe/request", "operator-route-token"),
+        ("http://10.0.0.2:8000/v1/stripe/request", None),
+    ]
+
+
+def test_stripe_catalog_remote_request_requires_operator_token(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-transport-token")
+    monkeypatch.setattr(safebox.urllib.request, "urlopen", lambda *a, **k: pytest.fail("opened socket"))
+
+    with pytest.raises(safebox.SafeboxAuthorityUnavailable):
+        safebox.stripe_request("prices", {"metadata[business]": "climblog"}, method="POST")
 
 
 # ── Operator session-token mint (POST /v1/operator/session-token) ────────────────────────────────────

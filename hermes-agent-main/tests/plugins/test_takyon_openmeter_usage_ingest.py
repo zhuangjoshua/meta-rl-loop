@@ -71,10 +71,8 @@ def test_ingest_usage_event_idempotent_id_is_stable(monkeypatch):
     assert ids[0] == ids[1]
 
 
-def test_business_openmeter_authoritative_flag_defaults_off():
-    """The per-business OpenMeter-authority flag is OFF unless metadata.openmeter_authority is truthy,
-    so every existing business (coscale, wandr, ...) stays on the Stripe-authoritative rail with no
-    migration and no backfill."""
+def test_business_openmeter_authoritative_flag_is_ignored():
+    """OpenMeter is mirror-only: metadata.openmeter_authority cannot promote it to access authority."""
     from plugins.takyon import core
 
     assert core._business_openmeter_authoritative(None) is False
@@ -82,5 +80,5 @@ def test_business_openmeter_authoritative_flag_defaults_off():
     assert core._business_openmeter_authoritative({"metadata": None}) is False
     assert core._business_openmeter_authoritative({"metadata": {}}) is False
     assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": False}}) is False
-    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": True}}) is True
-    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": 1}}) is True
+    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": True}}) is False
+    assert core._business_openmeter_authoritative({"metadata": {"openmeter_authority": 1}}) is False

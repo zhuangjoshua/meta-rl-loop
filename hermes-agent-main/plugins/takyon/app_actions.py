@@ -1017,6 +1017,7 @@ def _resolve_pg_action_usage_limit(
     business_slug: str,
     app_user_id: str | None,
     app_user_tier: str | None,
+    session_token: str | None = None,
 ) -> tuple[str | None, int]:
     """Resolve ``(tier, per_user_limit_microusd)`` for a billable action reserve.
 
@@ -1026,16 +1027,37 @@ def _resolve_pg_action_usage_limit(
     with no active paid entitlement raises ``ActionBudgetExceeded`` (subscription_required); an
     entitled caller resolves to its paid plan's ``included_ai_budget_microusd``."""
     resolved_user_tier = str(app_user_tier or "").strip() or None
+    token = str(session_token or "").strip()
+    if token:
+        try:
+            from .core import _hash_token
+        except Exception:
+            from plugins.takyon.core import _hash_token
+
+        with store._leaf_conn(conn) as raw:
+            row = raw.execute(
+                "select app_user_id, tier, plan_key, included_ai_budget_microusd "
+                "from takyon_app_action_usage_limit(%s, %s)",
+                (business_slug, _hash_token(token)),
+            ).fetchone()
+        if row is None:
+            raise ActionBudgetExceeded(
+                "subscription_required: no active paid entitlement for billable action"
+            )
+        resolved_id = str(row[0] or "").strip()
+        if app_user_id and resolved_id and resolved_id != str(app_user_id):
+            raise ActionBudgetExceeded("session_user_mismatch: action user does not match session")
+        try:
+            from . import ai_gateway
+        except Exception:
+            from plugins.takyon import ai_gateway
+
+        monthly_limit = max(0, int(row[3] or 0))
+        weekly_limit = monthly_limit * ai_gateway._USAGE_WINDOW_DAYS // ai_gateway._PLAN_FUNDING_PERIOD_DAYS
+        return str(row[1] or resolved_user_tier or "") or None, weekly_limit
 
     leaves = store._app_leaves()
     with store._leaf_conn(conn) as raw:
-        app_user = (
-            leaves["identity"].get_app_user(raw, business_slug, app_user_id=app_user_id)
-            if app_user_id
-            else None
-        )
-        if app_user is not None:
-            resolved_user_tier = resolved_user_tier or str(getattr(app_user, "tier", "") or "").strip() or None
         entitlement = (
             leaves["entitlements"].get_active_entitlement(raw, business_slug, app_user_id)
             if app_user_id
@@ -1266,6 +1288,7 @@ def invoke_action(
     usage_business = business_slug
     app_user_id = str((principal.get("user") or {}).get("id") or "") or None
     app_user_tier = str((principal.get("user") or {}).get("tier") or "") or None
+    app_session_token = str(principal.get("session_token") or "").strip()
     # Run lock keyed per (business, customer) so one customer's action cannot block another's (see
     # _acquire_business_run). Service / scheduled runs (no app_user_id) share a per-kind key.
     run_lock_key = f"{business_slug}\x1f{app_user_id or ('service:' + str(principal.get('kind') or 'service'))}"
@@ -1339,6 +1362,7 @@ def invoke_action(
             reservation_key=reservation_key,
             app_user_id=app_user_id,
             app_user_tier=app_user_tier,
+            session_token=app_session_token,
             estimate_microusd=estimate,
             route=f"/api/takyon/apps/{business_slug}/actions/{action_name}",
             metadata={"trigger": trigger, "principal": str(principal.get("kind") or "session")},
@@ -1358,6 +1382,7 @@ def invoke_action(
             usage_business,
             reservation_key=reservation_key,
             actual_microusd=estimate,
+            session_token=app_session_token,
             metadata={"action": action_name, "trigger": trigger},
         )
         receipt = {
@@ -1402,6 +1427,7 @@ def invoke_action(
                 usage_business,
                 reservation_key=reservation_key,
                 error=str(exc),
+                session_token=app_session_token,
                 metadata={"action": action_name, "trigger": trigger},
             )
             failure_receipt = {
@@ -1528,6 +1554,7 @@ def _reserve_usage(
     reservation_key: str,
     app_user_id: str | None,
     app_user_tier: str | None,
+    session_token: str | None = None,
     estimate_microusd: int,
     route: str,
     metadata: Mapping[str, Any],
@@ -1555,6 +1582,7 @@ def _reserve_usage(
                             business_slug=business_slug,
                             app_user_id=app_user_id,
                             app_user_tier=app_user_tier,
+                            session_token=session_token,
                         )
                     else:
                         resolved_user_tier = str(app_user_tier or "").strip() or None
@@ -1568,6 +1596,7 @@ def _reserve_usage(
                             app_user_id=app_user_id,
                             user_monthly_limit_microusd=user_monthly_limit_microusd,
                             app_user_tier=resolved_user_tier,
+                            session_token=session_token,
                             purpose=purpose,
                             route=route,
                             metadata=dict(metadata),
@@ -1652,6 +1681,7 @@ def _settle_usage(
     reservation_key: str,
     actual_microusd: int,
     metadata: Mapping[str, Any],
+    session_token: str | None = None,
 ) -> None:
     try:
         from .core import _PGConn, _json_dumps, _now
@@ -1663,12 +1693,17 @@ def _settle_usage(
     with store._connect() as conn:
         if isinstance(conn, _PGConn):
             with store._leaf_conn(conn) as raw:
+                settle_kwargs = {
+                    "actual_cost_microusd": actual_microusd,
+                    "metadata": dict(metadata),
+                }
+                if session_token:
+                    settle_kwargs["session_token"] = session_token
                 app_usage.settle_usage(
                     raw,
                     business_slug,
                     reservation_key,
-                    actual_cost_microusd=actual_microusd,
-                    metadata=dict(metadata),
+                    **settle_kwargs,
                 )
         else:
             conn.execute(
@@ -1685,6 +1720,7 @@ def _release_usage(
     reservation_key: str,
     error: str,
     metadata: Mapping[str, Any],
+    session_token: str | None = None,
 ) -> None:
     try:
         from .core import _PGConn, _json_dumps, _now
@@ -1697,12 +1733,17 @@ def _release_usage(
         with store._connect() as conn:
             if isinstance(conn, _PGConn):
                 with store._leaf_conn(conn) as raw:
+                    release_kwargs = {
+                        "error": error,
+                        "metadata": dict(metadata),
+                    }
+                    if session_token:
+                        release_kwargs["session_token"] = session_token
                     app_usage.release_usage(
                         raw,
                         business_slug,
                         reservation_key,
-                        error=error,
-                        metadata=dict(metadata),
+                        **release_kwargs,
                     )
             else:
                 conn.execute(

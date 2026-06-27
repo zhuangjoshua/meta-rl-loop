@@ -55,6 +55,17 @@ is_safebox_only_key() {
   esac
 }
 
+is_operator_safebox_key() {
+  case "${1:-}" in
+    TAKYON_SAFEBOX_OPERATOR_TOKEN)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 encode_base64() {
   printf '%s' "$1" | base64 | tr -d '\n'
 }
@@ -207,15 +218,15 @@ if [[ ! -f "$TAKYON_SAFEBOX_VPS_KEY" ]]; then
   exit 1
 fi
 
-if is_safebox_only_key "$key_name"; then
-  echo "Skipping local workspace env mirrors for Safebox-only key $key_name"
+if is_safebox_only_key "$key_name" || is_operator_safebox_key "$key_name"; then
+  echo "Skipping local workspace env mirrors for authority key $key_name"
 else
   "$UPSERT_SCRIPT" upsert-file "$LOCAL_WORKSPACE_SECRETS" "$key_name"
   "$UPSERT_SCRIPT" upsert-file "$LOCAL_WORKSPACE_HOME_ENV" "$key_name"
 fi
 "$UPSERT_SCRIPT" upsert-file "$LOCAL_DEV_SAFEBOX_ENV" "$key_name"
 
-if is_safebox_only_key "$key_name"; then
+if is_safebox_only_key "$key_name" && ! is_operator_safebox_key "$key_name"; then
   echo "Skipping operator host env mirrors for Safebox-only key $key_name"
 else
   remote_upsert_files \
@@ -235,7 +246,9 @@ remote_upsert_files \
 
 refresh_live_remote_safebox "$key_name"
 
-if is_safebox_only_key "$key_name"; then
+if is_operator_safebox_key "$key_name"; then
+  echo "Provisioned $key_name across operator source files, Safebox source files, and the live remote Safebox authority."
+elif is_safebox_only_key "$key_name"; then
   echo "Provisioned $key_name across the Safebox source files and live remote Safebox authority."
 else
   echo "Provisioned $key_name across local files, operator source files, Safebox source files, and the live remote Safebox authority."

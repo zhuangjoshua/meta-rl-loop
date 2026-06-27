@@ -39,6 +39,27 @@ def test_request_brokers_through_safebox_when_remote(monkeypatch):
     assert params == [["toolkit_slugs", "twitter"]]
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "https://169.254.169.254/latest/meta-data",
+        "http://localhost:8000/admin",
+        "//backend.composio.dev/api/v3.1/connected_accounts",
+        "../connected_accounts",
+        ".",
+        "",
+    ],
+)
+def test_request_rejects_non_relative_paths_before_broker(monkeypatch, path):
+    monkeypatch.setattr(cd.safebox, "_use_remote_authority", lambda: True)
+    monkeypatch.setattr(cd.safebox, "composio_forward", _boom)
+    monkeypatch.setattr(cd, "_api_key", _boom)
+    monkeypatch.setattr(cd, "_load_httpx", _boom)
+
+    with pytest.raises(cd.ComposioDistributionError, match="relative"):
+        cd._request("GET", path)
+
+
 def test_request_direct_when_local_on_safebox_host(monkeypatch):
     monkeypatch.setattr(cd.safebox, "_use_remote_authority", lambda: False)
     # On the safebox host the broker client must NOT be used (would recurse).
@@ -62,3 +83,13 @@ def test_request_direct_when_local_on_safebox_host(monkeypatch):
 
     out = cd._request("GET", "connected_accounts")
     assert out == {"ok": True}
+
+
+def test_local_safebox_request_rejects_absolute_path_before_socket(monkeypatch):
+    monkeypatch.setattr(cd.safebox, "_use_remote_authority", lambda: False)
+    monkeypatch.setattr(cd.safebox, "composio_forward", _boom)
+    monkeypatch.setattr(cd, "_api_key", _boom)
+    monkeypatch.setattr(cd, "_load_httpx", _boom)
+
+    with pytest.raises(cd.ComposioDistributionError, match="relative"):
+        cd._request("GET", "http://127.0.0.1:8000/internal")

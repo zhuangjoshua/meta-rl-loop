@@ -665,6 +665,14 @@ def test_remote_safebox_app_checkout_reconcile_delegates_to_service(monkeypatch)
     ]
 
 
+def test_remote_safebox_app_checkout_reconcile_requires_expected_context(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    monkeypatch.setattr(safebox, "_remote_json", lambda *a, **k: pytest.fail("remote called"))
+
+    with pytest.raises(ValueError, match="expected business and app user/email context"):
+        safebox.reconcile_app_checkout_session(None, session_id="cs_paid_1")
+
+
 def test_pg_checkout_recovery_uses_safebox_reconcile_when_remote(monkeypatch):
     class _Rows:
         def __init__(self, *, one=None, many=None):

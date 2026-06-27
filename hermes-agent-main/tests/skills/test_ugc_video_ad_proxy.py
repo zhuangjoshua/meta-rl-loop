@@ -6,9 +6,9 @@ plane. With the gateway-injected creative-gate env set
 (``TAKYON_CREATIVE_VIA_PROXY=1`` + ``TAKYON_SAFEBOX_URL`` +
 ``TAKYON_CREATIVE_CAPABILITY_TOKEN``, plus an OPTIONAL ``TAKYON_SAFEBOX_TOKEN``),
 the OpenAI image call and the FAL Kling call route through the GATED creative
-routes (``/v1/providers/openai/images``, ``/v1/providers/fal/{path}``), presenting
+routes (``/v1/providers/openai/images``, ``/v1/providers/fal/kling-image-to-video``), presenting
 the creative capability in the request body; without that env, the local path is
-unchanged.
+explicit-key only.
 
 Hermetic: stdlib + pytest + monkeypatch, NO network. The ``urllib`` POST is stubbed
 and we assert the gate was hit (with the capability in the body) AND that the
@@ -18,6 +18,7 @@ raw-key env was never read.
 from __future__ import annotations
 
 import base64
+import os
 import sys
 from pathlib import Path
 
@@ -50,8 +51,8 @@ def proxy_env(monkeypatch):
     # A raw key in the env must NEVER be consulted on the proxy path; if it is, the test fails.
     monkeypatch.setattr(
         pipeline,
-        "require_env",
-        lambda name: pytest.fail(f"require_env({name!r}) read a raw key on the proxy path"),
+        "require_explicit_secret",
+        lambda name, value: pytest.fail(f"require_explicit_secret({name!r}) ran on the proxy path"),
     )
     return _PROXY_ENV
 
@@ -164,8 +165,8 @@ def test_upload_image_passes_through_urls(proxy_env):
     assert pipeline.upload_image("data:image/png;base64,AAAA") == "data:image/png;base64,AAAA"
 
 
-def test_generate_clip_uses_fal_proxy_on_runtime_plane(proxy_env, monkeypatch):
-    """Runtime plane → POST /v1/providers/fal/<endpoint> through the GATED creative
+def test_generate_clip_uses_fixed_fal_proxy_on_runtime_plane(proxy_env, monkeypatch):
+    """Runtime plane → POST /v1/providers/fal/kling-image-to-video through the GATED creative
     route; the verbatim FAL JSON ({"video":{"url":...}}) is read for the URL and no
     FAL_KEY is consulted."""
     calls = []
@@ -187,9 +188,28 @@ def test_generate_clip_uses_fal_proxy_on_runtime_plane(proxy_env, monkeypatch):
     assert url == "https://fal-cdn/out.mp4"
     assert len(calls) == 1
     route, payload = calls[0]
-    assert route == "/v1/providers/fal/fal-ai/kling-video/v3/pro/image-to-video"
+    assert route == "/v1/providers/fal/kling-image-to-video"
     assert payload["start_image_url"] == "data:image/png;base64,AAAA"
     assert payload["duration"] == "7"
+
+
+def test_generate_clip_proxy_ignores_caller_supplied_endpoint(proxy_env, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        pipeline,
+        "_proxy_post",
+        lambda route, payload: calls.append((route, payload)) or {"video": {"url": "https://fal-cdn/out.mp4"}},
+    )
+    _no_fal_client_import(monkeypatch)
+
+    pipeline.generate_clip(
+        "data:image/png;base64,AAAA",
+        "speak",
+        5,
+        endpoint="http://169.254.169.254/latest/meta-data",
+    )
+
+    assert calls[0][0] == "/v1/providers/fal/kling-image-to-video"
 
 
 def test_generate_clip_proxy_no_video_url_raises(proxy_env, monkeypatch):
@@ -228,11 +248,11 @@ def test_proxy_http_error_surfaces(proxy_env, monkeypatch, tmp_path):
 # ─── local path unchanged (proxy env absent) ──────────────────────────────────
 
 
-def test_local_path_reads_openai_key_when_no_proxy(monkeypatch, tmp_path):
-    """No proxy env → the direct OpenAI httpx path runs, reading OPENAI_API_KEY."""
+def test_local_path_uses_explicit_openai_key_when_no_proxy(monkeypatch, tmp_path):
+    """No proxy env -> the direct OpenAI httpx path requires an explicit key."""
     for k in _PROXY_ENV:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-must-not-be-read")
 
     posted = {}
 
@@ -266,7 +286,32 @@ def test_local_path_reads_openai_key_when_no_proxy(monkeypatch, tmp_path):
     )
 
     out = tmp_path / "ref.png"
-    pipeline.generate_image("p", str(out))
+    pipeline.generate_image("p", str(out), api_key="sk-local-explicit")
     assert out.read_bytes() == b"\x89PNG\r\n\x1a\nUGCREF"
     assert posted["url"].endswith("/images/generations")
-    assert posted["auth"] == "Bearer sk-local"
+    assert posted["auth"] == "Bearer sk-local-explicit"
+
+
+def test_local_path_does_not_read_openai_key_env(monkeypatch, tmp_path):
+    for k in _PROXY_ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-must-not-be-read")
+    with pytest.raises(RuntimeError, match="explicit local key file"):
+        pipeline.generate_image("p", str(tmp_path / "ref.png"))
+
+
+def test_load_dotenv_skips_provider_secret_env(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OPENAI_API_KEY=sk-env-must-not-load\nFAL_KEY=fal-must-not-load\nOPENAI_BASE_URL=https://example.test/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    pipeline.load_dotenv(str(env_file))
+
+    assert "OPENAI_API_KEY" not in os.environ
+    assert "FAL_KEY" not in os.environ
+    assert os.environ["OPENAI_BASE_URL"] == "https://example.test/v1"

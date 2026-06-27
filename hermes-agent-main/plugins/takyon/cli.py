@@ -1258,16 +1258,12 @@ def _operator_create_balance_finalize(
     if not reservation_key:
         return
 
-    import psycopg
-
     try:
         from . import billing
-        from .runtime_app import resolve_database_url
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
         from plugins.takyon import billing
-        from plugins.takyon.runtime_app import resolve_database_url
 
-    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    conn = _connect_operator_postgres()
     try:
         if settle:
             charge_cents = int(create_charge.get("charge_cents") or 0)
@@ -1287,6 +1283,28 @@ def _business_bootstrap_free_credits() -> int:
     return safebox.business_bootstrap_free_credits()
 
 
+def _connect_operator_postgres():
+    """Open a Postgres connection for operator-owned control-plane work only."""
+    import psycopg
+
+    try:
+        from .runtime_app import assert_takyon_pg_role, resolve_database_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
+
+    conn = psycopg.connect(
+        resolve_database_url(plane="operator"),
+        autocommit=True,
+        prepare_threshold=None,
+    )
+    try:
+        assert_takyon_pg_role(conn, "operator")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 def _seed_business_free_credits(slug: str, *, operator_user_id: str | None = None) -> None:
     """Open the business creative-credit account and grant the free starter pack on create.
 
@@ -1301,24 +1319,15 @@ def _seed_business_free_credits(slug: str, *, operator_user_id: str | None = Non
     if not business_slug or not user_id or _db_backend() != "postgres":
         return  # no creative-credit ledger to seed (dev / non-Postgres)
 
-    import psycopg
-
     try:
         from . import safebox
-        from .runtime_app import resolve_database_url
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
         from plugins.takyon import safebox
-        from plugins.takyon.runtime_app import resolve_database_url
-
-    conn = psycopg.connect(resolve_database_url(), autocommit=True)
-    try:
-        safebox.grant_business_bootstrap_credits(
-            conn,
-            business_slug,
-            user_id,
-        )
-    finally:
-        conn.close()
+    safebox.grant_business_bootstrap_credits(
+        None,
+        business_slug,
+        user_id,
+    )
 
 
 def _try_seed_business_free_credits(
@@ -1356,20 +1365,16 @@ def _operator_budget_reserve(
     if not user_id or _db_backend() != "postgres":
         return ("", 0)
 
-    import psycopg
-
     try:
         from . import billing
-        from .runtime_app import resolve_database_url
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
         from plugins.takyon import billing
-        from plugins.takyon.runtime_app import resolve_database_url
 
     amount = _operator_turn_estimate_cents() if estimate_cents is None else max(0, int(estimate_cents))
     if amount <= 0:
         return ("", 0)
 
-    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    conn = _connect_operator_postgres()
     try:
         res = billing.reserve(
             conn,
@@ -1402,16 +1407,12 @@ def _operator_budget_finalize(
     if not user_id or not reservation_key or reserved_cents <= 0 or _db_backend() != "postgres":
         return ""
 
-    import psycopg
-
     try:
         from . import billing
-        from .runtime_app import resolve_database_url
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
         from plugins.takyon import billing
-        from plugins.takyon.runtime_app import resolve_database_url
 
-    conn = psycopg.connect(resolve_database_url(), autocommit=True)
+    conn = _connect_operator_postgres()
     warning = ""
     try:
         actual = max(0, int(actual_cents or 0))

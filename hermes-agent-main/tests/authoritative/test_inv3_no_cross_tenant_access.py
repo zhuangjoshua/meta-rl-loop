@@ -64,7 +64,7 @@ from pathlib import Path
 
 import pytest
 
-from plugins.takyon import app_payments, core, policy
+from plugins.takyon import ai_gateway, app_actions, app_connections, app_directory, app_email, app_identity, app_media, app_payments, app_usage, core, policy, safebox_app
 from plugins.takyon.control_plane import ResolvedPrincipal
 
 # --------------------------------------------------------------------------------------
@@ -77,11 +77,82 @@ _CONTROL_API_SRC = _CONTROL_API_PATH.read_text(encoding="utf-8")
 _RLS_MIGRATION_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0027_app_plane_rls.sql"
 )
+_RLS_BYPASS_HARDENING_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0043_harden_rls_bypass_role_gate.sql"
+)
+_AUTHORITY_SPLIT_ROLES_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0044_authority_split_login_roles.sql"
+)
+_APP_RUNTIME_IDENTITY_PORTS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0045_app_runtime_identity_ports.sql"
+)
+_REVOKE_LEGACY_CROSS_PLANE_MEMBERSHIPS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0046_revoke_legacy_cross_plane_role_memberships.sql"
+)
+_APP_RUNTIME_MONEY_READ_PORTS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0047_app_runtime_money_read_ports.sql"
+)
+_APP_RUNTIME_SESSION_USAGE_PORTS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0048_app_runtime_session_usage_ports.sql"
+)
+_REVOKE_APP_CHECKOUT_SESSIONS_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0049_revoke_app_checkout_session_direct_access.sql"
+)
+_IGNORE_APP_USER_ID_GUC_FOR_APP_ROLES_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0050_ignore_app_user_id_guc_for_app_roles.sql"
+)
+_SESSION_BOUND_APP_MEDIA_USAGE_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0051_session_bound_app_media_usage.sql"
+)
 
 # Identity kwargs that, if accepted from the caller, would let an EVIL user assert a
 # different owner than the one the slug resolves to. None of these may appear as a
 # *caller-supplied* parameter on a tenant-resolving tool/endpoint/spend path.
 _CALLER_SUPPLIED_OWNER_TOKENS = frozenset({"owner_user_id", "user_id", "owner_id"})
+
+
+class _FakeSQLResult:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeRoleCursor:
+    def __init__(self, raw):
+        self.raw = raw
+
+    def execute(self, sql, params=None):
+        return self.raw.execute(sql, params)
+
+    def close(self):
+        self.raw.closed_cursors += 1
+
+
+class _FakeRoleRaw:
+    def __init__(self, *, session_user: str, current_user: str):
+        self.session_user = session_user
+        self.current_user = current_user
+        self.statements: list[tuple[str, object]] = []
+        self.closed_cursors = 0
+
+    def execute(self, sql, params=None):
+        self.statements.append((str(sql), params))
+        normalized = str(sql).lower()
+        if "session_user::text" in normalized and "current_user::text" in normalized:
+            return _FakeSQLResult({"session_user": self.session_user, "current_user": self.current_user})
+        if "current_setting" in normalized:
+            return _FakeSQLResult(("",))
+        return _FakeSQLResult((None,))
+
+    def cursor(self):
+        return _FakeRoleCursor(self)
+
+
+class _FakePGConn:
+    def __init__(self, *, session_user: str, current_user: str):
+        self._pg = _FakeRoleRaw(session_user=session_user, current_user=current_user)
 
 
 # ── 1. Owner resolved SERVER-SIDE from the slug (operator CEO-tool plane) ─────────────
@@ -244,14 +315,92 @@ def test_rls_policies_scope_every_op_by_business_slug_and_default_bypass_off():
         assert verb in sql, verb
 
 
+def test_rls_bypass_requires_allowed_current_user_not_guc_alone():
+    """An app role setting takyon.rls_bypass=1 must not become operator authority."""
+    assert _RLS_BYPASS_HARDENING_PATH.exists(), _RLS_BYPASS_HARDENING_PATH
+    sql = _RLS_BYPASS_HARDENING_PATH.read_text(encoding="utf-8").lower()
+
+    assert "create or replace function takyon_rls_bypass()" in sql
+    assert "current_user in" in sql
+    for allowed in (
+        "takyon_runtime",
+        "takyon_operator_runtime",
+        "takyon_safebox_authority",
+        "takyon_migration",
+    ):
+        assert f"'{allowed}'" in sql
+    assert "'takyon_app'" not in sql.split("current_user in", 1)[1].split(")", 1)[0]
+    assert "'takyon_app_runtime'" not in sql.split("current_user in", 1)[1].split(")", 1)[0]
+    assert "current_setting('takyon.rls_bypass', true)" in sql
+    assert " and coalesce(nullif(current_setting('takyon.rls_bypass', true), ''), '0')" in sql
+
+
+def test_app_roles_cannot_self_select_app_user_by_guc():
+    """App roles may bind a session hash, but not claim another customer by setting app_user_id."""
+    assert _IGNORE_APP_USER_ID_GUC_FOR_APP_ROLES_PATH.exists(), _IGNORE_APP_USER_ID_GUC_FOR_APP_ROLES_PATH
+    sql = _IGNORE_APP_USER_ID_GUC_FOR_APP_ROLES_PATH.read_text(encoding="utf-8").lower()
+
+    assert "create or replace function takyon_rls_bound_app_user_id()" in sql
+    assert "current_user in ('takyon_app', 'takyon_app_runtime')" in sql
+    assert "then null::uuid" in sql
+    assert "else nullif(current_setting('takyon.rls_app_user_id', true), '')::uuid" in sql
+
+
+def test_authority_split_roles_do_not_create_cross_plane_memberships():
+    """The target login roles must be separate authorities, not SET ROLE wrappers around each other."""
+    assert _AUTHORITY_SPLIT_ROLES_PATH.exists(), _AUTHORITY_SPLIT_ROLES_PATH
+    assert _REVOKE_LEGACY_CROSS_PLANE_MEMBERSHIPS_PATH.exists(), _REVOKE_LEGACY_CROSS_PLANE_MEMBERSHIPS_PATH
+    sql = _AUTHORITY_SPLIT_ROLES_PATH.read_text(encoding="utf-8").lower()
+    revoke_sql = _REVOKE_LEGACY_CROSS_PLANE_MEMBERSHIPS_PATH.read_text(encoding="utf-8").lower()
+
+    for role in (
+        "takyon_operator_runtime",
+        "takyon_app_runtime",
+        "takyon_safebox_authority",
+        "takyon_migration",
+    ):
+        assert f"create role {role} login" in sql
+
+    forbidden_memberships = (
+        "grant takyon_app to takyon_operator_runtime",
+        "grant takyon_operator_runtime to takyon_app_runtime",
+        "grant takyon_safebox_authority to takyon_app_runtime",
+        "grant takyon_operator_runtime to takyon_safebox_authority",
+        "grant takyon_app_runtime to takyon_operator_runtime",
+    )
+    for grant in forbidden_memberships:
+        assert grant not in sql
+
+    assert "revoke %i from %i" in revoke_sql
+    for parent, member in (
+        ("takyon_app", "takyon_runtime"),
+        ("takyon_app", "takyon_operator_runtime"),
+        ("takyon_app_runtime", "takyon_operator_runtime"),
+        ("takyon_operator_runtime", "takyon_app_runtime"),
+        ("takyon_safebox_authority", "takyon_operator_runtime"),
+    ):
+        assert f"('{parent}', '{member}')" in revoke_sql
+
+    assert "revoke insert, update, delete on\n    app_usage_events,\n    app_entitlements,\n    app_revenue_events\n    from takyon_app_runtime" in sql
+    assert "revoke insert, update, delete on\n    billing_accounts" in sql
+
+
 def test_pg_app_scope_flips_bypass_off_and_binds_request_scope():
-    """The app-facing runtime scope explicitly turns RLS bypass OFF for the request and
-    binds the live business plus the app-user / session hash, so the DB enforces the same
-    customer boundary as the runtime. Internal operator code keeps bypass (full authority);
-    app routes deliberately drop it."""
+    """The app-facing runtime scope explicitly turns RLS bypass OFF for the request and binds the live
+    business plus the app-user / session hash, so the DB enforces the same customer boundary as the
+    runtime. It must not demote an operator-capable session with SET ROLE; app traffic starts on the
+    app DB login or fails closed."""
     src = inspect.getsource(core.TakyonStore._pg_app_scope)
     # Bypass is set to '0' for the duration of the app request.
     assert "set_config('takyon.rls_bypass', '0', true)" in src
+    # Direct app-plane login roles use the app scope without creating an operator->app SET ROLE bridge;
+    # leaked or non-app role state is refused before binding request GUCs.
+    assert 'assert_takyon_pg_role(raw, "app")' in src
+    assert "app scope requires an app-plane database login" in src
+    assert "set local role" not in src.lower()
+    assert "set role" not in src.lower()
+    assert "reset role" not in src.lower()
+    assert "used_set_role" not in src
     # The slug is bound from the argument (server-chosen), and the customer identity is the
     # app_user_id / hashed session token — not a free-form owner id.
     assert "takyon.rls_business_slug" in src
@@ -262,6 +411,600 @@ def test_pg_app_scope_flips_bypass_off_and_binds_request_scope():
     params = list(inspect.signature(core.TakyonStore._pg_app_scope).parameters)
     # self, conn, business_slug, app_user_id, session_token — no owner/user override.
     assert not (_CALLER_SUPPLIED_OWNER_TOKENS & set(params)), params
+
+    usage_src = inspect.getsource(app_usage._ledger_gate_scope)
+    assert "plane: str" in usage_src
+    assert "assert_takyon_pg_role(raw, expected_plane)" in usage_src
+    assert "usage ledger gate requires a" in usage_src
+    assert "set role" not in usage_src.lower()
+    assert "reset role" not in usage_src.lower()
+    assert "used_set_role" not in usage_src
+
+
+def test_store_app_plane_connections_do_not_request_rls_bypass():
+    src = inspect.getsource(core.TakyonStore._connect_postgres)
+
+    assert 'configure_takyon_pg_session(conn, bypass=self._database_plane != "app")' in src
+    assert "configure_takyon_pg_session(conn, bypass=True)" not in src
+
+
+def test_pg_app_scope_rejects_operator_session_without_role_change(monkeypatch):
+    monkeypatch.setattr(core, "_PGConn", _FakePGConn)
+    store = core.TakyonStore.__new__(core.TakyonStore)
+    conn = _FakePGConn(
+        session_user="takyon_operator_runtime",
+        current_user="takyon_operator_runtime",
+    )
+
+    with pytest.raises(core.TakyonError, match="app-plane database login"):
+        with store._pg_app_scope(conn, "acme", app_user_id="u_1"):
+            raise AssertionError("scope should fail before yielding")
+
+    sql = "\n".join(statement.lower() for statement, _ in conn._pg.statements)
+    assert "set role" not in sql
+    assert "set local role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_business_slug" not in sql
+
+
+def test_pg_app_scope_binds_direct_app_session_without_role_change(monkeypatch):
+    monkeypatch.setattr(core, "_PGConn", _FakePGConn)
+    store = core.TakyonStore.__new__(core.TakyonStore)
+    conn = _FakePGConn(
+        session_user="takyon_app_runtime",
+        current_user="takyon_app_runtime",
+    )
+
+    with store._pg_app_scope(conn, "acme", session_token="session-secret"):
+        pass
+
+    sql = "\n".join(statement.lower() for statement, _ in conn._pg.statements)
+    assert "set role" not in sql
+    assert "set local role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_bypass" in sql
+    assert "takyon.rls_business_slug" in sql
+    assert "takyon.rls_session_hash" in sql
+
+
+def test_pg_app_scope_rejects_legacy_app_role_by_default(monkeypatch):
+    monkeypatch.delenv("TAKYON_ALLOW_LEGACY_DB_ROLES", raising=False)
+    monkeypatch.setattr(core, "_PGConn", _FakePGConn)
+    store = core.TakyonStore.__new__(core.TakyonStore)
+    conn = _FakePGConn(
+        session_user="takyon_app",
+        current_user="takyon_app",
+    )
+
+    with pytest.raises(core.TakyonError, match="app-plane database login"):
+        with store._pg_app_scope(conn, "acme", session_token="session-secret"):
+            raise AssertionError("scope should fail before yielding")
+
+    sql = "\n".join(statement.lower() for statement, _ in conn._pg.statements)
+    assert "set role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_business_slug" not in sql
+
+
+def test_pg_app_scope_accepts_legacy_app_role_only_with_cutover_opt_in(monkeypatch):
+    monkeypatch.setenv("TAKYON_ALLOW_LEGACY_DB_ROLES", "1")
+    monkeypatch.setattr(core, "_PGConn", _FakePGConn)
+    store = core.TakyonStore.__new__(core.TakyonStore)
+    conn = _FakePGConn(
+        session_user="takyon_app",
+        current_user="takyon_app",
+    )
+
+    with store._pg_app_scope(conn, "acme", session_token="session-secret"):
+        pass
+
+    sql = "\n".join(statement.lower() for statement, _ in conn._pg.statements)
+    assert "set role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_business_slug" in sql
+
+
+def test_usage_ledger_gate_rejects_operator_session_without_role_change():
+    raw = _FakeRoleRaw(
+        session_user="takyon_operator_runtime",
+        current_user="takyon_operator_runtime",
+    )
+
+    with pytest.raises(RuntimeError, match="app database login"):
+        with app_usage._ledger_gate_scope(raw, plane="app"):
+            raise AssertionError("scope should fail before yielding")
+
+    sql = "\n".join(statement.lower() for statement, _ in raw.statements)
+    assert "set role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_bypass" not in sql
+
+
+def test_usage_ledger_gate_binds_direct_app_session_without_role_change():
+    raw = _FakeRoleRaw(
+        session_user="takyon_app_runtime",
+        current_user="takyon_app_runtime",
+    )
+
+    with app_usage._ledger_gate_scope(raw, plane="app"):
+        pass
+
+    sql = "\n".join(statement.lower() for statement, _ in raw.statements)
+    assert "set role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_bypass" in sql
+    assert raw.closed_cursors == 1
+
+
+def test_usage_ledger_gate_rejects_legacy_app_role_by_default(monkeypatch):
+    monkeypatch.delenv("TAKYON_ALLOW_LEGACY_DB_ROLES", raising=False)
+    raw = _FakeRoleRaw(
+        session_user="takyon_app",
+        current_user="takyon_app",
+    )
+
+    with pytest.raises(RuntimeError, match="app database login"):
+        with app_usage._ledger_gate_scope(raw, plane="app"):
+            raise AssertionError("scope should fail before yielding")
+
+    sql = "\n".join(statement.lower() for statement, _ in raw.statements)
+    assert "set_config('takyon.rls_bypass'" not in sql
+
+
+def test_usage_ledger_gate_accepts_legacy_app_role_only_with_cutover_opt_in(monkeypatch):
+    monkeypatch.setenv("TAKYON_ALLOW_LEGACY_DB_ROLES", "1")
+    raw = _FakeRoleRaw(
+        session_user="takyon_app",
+        current_user="takyon_app",
+    )
+
+    with app_usage._ledger_gate_scope(raw, plane="app"):
+        pass
+
+    sql = "\n".join(statement.lower() for statement, _ in raw.statements)
+    assert "set role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_bypass" in sql
+
+
+def test_usage_ledger_gate_binds_direct_safebox_session_without_role_change():
+    raw = _FakeRoleRaw(
+        session_user="takyon_safebox_authority",
+        current_user="takyon_safebox_authority",
+    )
+
+    with app_usage._ledger_gate_scope(raw, plane="safebox"):
+        pass
+
+    sql = "\n".join(statement.lower() for statement, _ in raw.statements)
+    assert "set role" not in sql
+    assert "reset role" not in sql
+    assert "takyon.rls_bypass" in sql
+    assert raw.closed_cursors == 1
+
+
+def test_subuser_host_plain_store_refuses_default_operator_plane(monkeypatch):
+    """A subuser/product process must not fall back to the operator store when a route forgets
+    to bind the app plane. The app route context is the only allowed way to construct the
+    shared store on that host."""
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "subuser")
+
+    with pytest.raises(core.TakyonError, match="subuser host cannot open the default operator store"):
+        core._store()
+
+    with core.app_runtime_database_plane():
+        store = core._store()
+
+    assert isinstance(store, core.TakyonStore)
+    assert store._database_plane == "app"
+
+
+def test_app_runtime_identity_session_ports_are_bounded():
+    sql = _APP_RUNTIME_IDENTITY_PORTS_PATH.read_text(encoding="utf-8").lower()
+    money_sql = _APP_RUNTIME_MONEY_READ_PORTS_PATH.read_text(encoding="utf-8").lower()
+    usage_sql = _APP_RUNTIME_SESSION_USAGE_PORTS_PATH.read_text(encoding="utf-8").lower()
+    checkout_sql = _REVOKE_APP_CHECKOUT_SESSIONS_PATH.read_text(encoding="utf-8").lower()
+    media_usage_sql = _SESSION_BOUND_APP_MEDIA_USAGE_PATH.read_text(encoding="utf-8").lower()
+    identity_src = inspect.getsource(app_identity.start_supabase_session)
+    revoke_src = inspect.getsource(app_identity.revoke_session)
+    supabase_login_src = inspect.getsource(core.handle_business_supabase_login)
+    profile_src = inspect.getsource(core.handle_business_read_app_profile)
+
+    assert "takyon_app_bind_supabase_session" in sql
+    assert "takyon_app_validate_session" in sql
+    assert "takyon_app_revoke_session" in sql
+    assert "takyon_app_runtime_business" in sql
+    assert "takyon_app_control_blocker" in sql
+    assert "takyon_app_record_event" in sql
+    assert "takyon_app_media_usage" in sql
+    assert "takyon_app_service_email_recipient" in sql
+    assert "takyon_app_service_email_sends_today" in sql
+    assert "takyon_app_visible_directory_entries" in sql
+    assert "takyon_app_visible_directory_entry" in sql
+    assert "security definer" in sql
+    assert "p_session_hash" in sql
+    assert "p_service_session_hash" in sql
+    assert "source <> 'openmeter'" in sql
+    assert "grant execute on function takyon_app_bind_supabase_session" in sql
+    assert "grant execute on function takyon_app_validate_session" in sql
+    assert "grant execute on function takyon_app_service_email_recipient" in sql
+    assert "grant execute on function takyon_app_service_email_sends_today" in sql
+    assert "grant execute on function takyon_app_visible_directory_entries" in sql
+    assert "grant execute on function takyon_app_visible_directory_entry" in sql
+    assert "grant execute on function takyon_app_record_event" in sql
+    assert "grant execute on function takyon_app_media_usage" in sql
+    assert "grant execute on function takyon_app_resolve_tier" not in sql
+    assert "to takyon_app_runtime, takyon_app" in sql
+    media_usage_body = media_usage_sql.split("as $$", 1)[1].split("$$;", 1)[0]
+    assert "p_session_hash text" in media_usage_sql
+    assert "p_app_user_id" not in media_usage_body
+    assert "from app_sessions s" in media_usage_sql
+    assert "join app_users u" in media_usage_sql
+    assert "and s.token_hash = v_session_hash" in media_usage_sql
+    assert "and s.revoked_at is null" in media_usage_sql
+    assert "and s.expires_at > now()" in media_usage_sql
+    assert "and u.status = 'active'" in media_usage_sql
+    assert "raise exception 'app_session_required'" in media_usage_sql
+    assert "revoke select on app_users, app_sessions\n    from takyon_app_runtime, takyon_app" in sql
+    assert "v_scope <> ('business:' || v_business_slug || '/app')" in sql
+    assert "v_event_type = '' or v_event_type not like 'app.%'" in sql
+    assert "drop policy if exists takyon_app_media_write on app_media" in sql
+    assert "app_user_id = coalesce(takyon_rls_effective_app_user_id()::text, '')" in sql
+    assert "drop policy if exists takyon_app_checkout_intents_write on app_checkout_intents" in sql
+    assert "app_user_id = takyon_rls_effective_app_user_id()" in sql
+    assert "grant select on businesses" not in sql
+    assert "grant insert" not in sql
+    assert "grant update" not in sql
+    assert "grant delete" not in sql
+    for fn in (
+        "takyon_app_account_entitlements",
+        "takyon_app_account_usage_summary",
+        "takyon_app_account_revenue_summary",
+        "takyon_app_action_usage_limit",
+    ):
+        assert f"create or replace function {fn}" in money_sql
+        assert "security definer" in money_sql
+    assert "revoke select on app_entitlements, app_usage_events, app_revenue_events" in money_sql
+    assert "p_session_hash" in money_sql
+    assert "from app_sessions s" in money_sql
+    assert "join app_users u" in money_sql
+    assert "and s.token_hash = p_session_hash" in money_sql
+    assert "and s.revoked_at is null" in money_sql
+    assert "and s.expires_at > now()" in money_sql
+    for fn in (
+        "takyon_app_session_plan",
+        "takyon_app_reserve_usage",
+        "takyon_app_settle_usage",
+        "takyon_app_release_usage",
+    ):
+        assert f"create or replace function {fn}" in usage_sql
+        assert "security definer" in usage_sql
+    assert "revoke execute on function safebox_reserve_usage" in usage_sql
+    assert "revoke execute on function safebox_settle_usage" in usage_sql
+    assert "revoke execute on function safebox_release_usage" in usage_sql
+    assert "revoke execute on function safebox_reconcile_held_usage" in usage_sql
+    assert "from takyon_app_runtime, takyon_app" in usage_sql
+    assert "p_expected_app_user_id <> v_user_id" in usage_sql
+    assert "e.reservation_key = p_reservation_key" in usage_sql
+    assert "source <> 'openmeter'" in usage_sql
+    assert "takyon_app_session_plan" in inspect.getsource(ai_gateway._resolve_plan_for_session)
+    assert "takyon_app_reserve_usage" in inspect.getsource(app_usage.reserve_usage)
+    assert "takyon_app_settle_usage" in inspect.getsource(app_usage.settle_usage)
+    assert "takyon_app_release_usage" in inspect.getsource(app_usage.release_usage)
+    assert "revoke select, insert, update, delete on app_checkout_sessions" in checkout_sql
+    assert "from takyon_app_runtime, takyon_app" in checkout_sql
+
+    assert "takyon_app_bind_supabase_session" in identity_src
+    assert "_hash_token(raw_session)" in identity_src
+    assert "raw_session" not in sql
+    assert "takyon_app_validate_session" in inspect.getsource(app_identity.validate_session)
+    assert "_hash_token(token)" in inspect.getsource(app_identity.validate_session)
+    assert "takyon_app_revoke_session" in revoke_src
+    assert "_hash_token(token)" in revoke_src
+    assert "takyon_app_runtime_business" in inspect.getsource(core.TakyonStore._business)
+    assert "takyon_app_control_blocker" in inspect.getsource(core.TakyonStore._control_blocker)
+    assert "with store._pg_app_scope(conn, business, session_token=session_token)" in supabase_login_src
+    assert "app_user_id=None if session_token else resolved.user.id" in profile_src
+    assert "takyon_app_record_event" in inspect.getsource(core.TakyonStore._record_event)
+
+    roles_sql = _AUTHORITY_SPLIT_ROLES_PATH.read_text(encoding="utf-8").lower()
+    app_grant_block = roles_sql.split("-- operator runtime:", 1)[0]
+    assert "app_sessions" not in app_grant_block
+    assert "app_users" not in app_grant_block
+    assert "app_budgets" not in sql.split("grant select on", 1)[1]
+
+
+def test_app_plane_customer_write_handlers_do_not_use_generic_commit_path_first():
+    """Product-host customer writes must run as app-plane leaf calls from the start.
+
+    Operator/admin tools may still use the generic commit path outside the product app plane, but
+    customer-session writes must fail before that path if the handler is not already on the app DB
+    plane.
+    """
+    handlers = [
+        core.handle_business_upsert_app_profile,
+        core.handle_business_upsert_app_directory_entry,
+        core.handle_business_disable_app_directory_entry,
+        core.handle_business_act_on_app_connection,
+        core.handle_business_upsert_app_record,
+        core.handle_business_delete_app_record,
+    ]
+    for handler in handlers:
+        src = inspect.getsource(handler)
+        assert 'if store._database_plane == "app":' in src, handler.__name__
+        assert "_require_app_plane_session_token(args)" in src, handler.__name__
+        assert "session_token=session_token" in src, handler.__name__
+        assert "_app_plane_customer_write_context" in src, handler.__name__
+        assert "requires app-plane database login" in src, handler.__name__
+        assert src.index('if store._database_plane == "app":') < src.index("_commit_tool_data"), handler.__name__
+
+
+def test_app_plane_account_read_does_not_reconcile_checkout():
+    src = inspect.getsource(core._maybe_reconcile_pg_completed_checkout)
+    account_src = inspect.getsource(core.handle_business_read_app_account)
+    money_sql = _APP_RUNTIME_MONEY_READ_PORTS_PATH.read_text(encoding="utf-8").lower()
+    assert 'if store._database_plane == "app":' in src
+    assert "app_plane_read_does_not_reconcile_checkout" in src
+    assert "checkout_reconciliation_requires_safebox" in src
+    assert "stripe_util" not in src
+    assert src.index('if store._database_plane == "app":') < src.index("app_checkout_intents")
+    account_validation_branch = account_src.split(
+        'if isinstance(conn, _PGConn) and store._database_plane == "app":',
+        1,
+    )[1].split("\n            else:", 1)[0]
+    account_summary_branch = account_src.split(
+        'if isinstance(conn, _PGConn) and store._database_plane == "app":',
+        2,
+    )[2].split("\n            else:", 1)[0]
+    assert "validate_session(leaf, business, session_token)" in account_validation_branch
+    assert "app_sessions" not in account_validation_branch
+    assert "SELECT * FROM app_users" not in account_validation_branch
+    assert "takyon_app_account_entitlements" in account_summary_branch
+    assert "takyon_app_account_usage_summary" in account_summary_branch
+    assert "takyon_app_account_revenue_summary" in account_summary_branch
+    assert "SELECT * FROM app_entitlements" not in account_summary_branch
+    assert "FROM app_usage_events" not in account_summary_branch
+    assert "FROM app_revenue_events" not in account_summary_branch
+    assert "revoke select on app_entitlements, app_usage_events, app_revenue_events" in money_sql
+    assert "_require_app_database_plane_for_pg(store, conn, action=\"app account session read\")" in account_src
+    assert "else:\n                with (" in account_src
+
+
+def test_app_plane_self_reported_usage_does_not_write_ledger():
+    src = inspect.getsource(core.handle_business_record_app_usage)
+    assert 'if store._database_plane == "app":' in src
+    assert "priced app usage must flow through metered server brokers" in src
+    assert "self_reported_app_usage_disabled_on_app_plane" in src
+    assert src.index('if store._database_plane == "app":') < src.index("_commit_tool")
+
+
+def test_app_media_binds_rls_scope_for_customer_row_writes():
+    upload_src = inspect.getsource(core.handle_business_upload_app_media)
+    delete_handler_src = inspect.getsource(core.handle_business_delete_app_media)
+    store_src = inspect.getsource(app_media.store_media)
+    uploader_src = inspect.getsource(app_media._resolve_uploader)
+    insert_src = inspect.getsource(app_media._insert_media_row)
+    read_src = inspect.getsource(app_media._media_row)
+    delete_src = inspect.getsource(app_media._delete_media_row)
+    session_src = inspect.getsource(app_media._session_user_id)
+    usage_src = inspect.getsource(app_media._usage_totals)
+
+    assert "validate_session(leaf, business, session_token)" in upload_src
+    assert "app_user_email=user_email" in upload_src
+    assert "app_user_tier=user_tier" in upload_src
+    assert "if app_user_email or app_user_tier:" in store_src
+    assert "session_token=session_token" in store_src
+    assert "validate_session(leaf, business_slug, session_token)" in uploader_src
+    assert "app_user_id=None if session_token else app_user_id" in uploader_src
+    assert "_require_app_database_plane_for_pg(store, conn, action=\"app media upload\")" in upload_src
+    assert "session_token=session_token" in insert_src
+    assert "session_token=session_token" in read_src
+    assert "session_token=session_token" in delete_src
+    assert "app_user_id=None if session_token else app_user_id" in insert_src
+    assert "app_user_id=None if session_token else app_user_id" in read_src
+    assert "app_user_id=None if session_token else app_user_id" in delete_src
+    assert "_pg_app_scope(conn, business_slug, session_token=session_token)" in session_src
+    assert "_require_app_database_plane_for_pg" in insert_src
+    assert "_require_app_database_plane_for_pg" in read_src
+    assert "_require_app_database_plane_for_pg" in delete_src
+    assert "_require_app_database_plane_for_pg" in session_src
+    assert "takyon_app_media_usage" in usage_src
+    assert "session_token=session_token" in usage_src
+    assert "app_user_id=None if session_token else app_user_id" in usage_src
+    assert "_hash_token(str(session_token))" in usage_src
+    assert "session_token is required" in usage_src
+    assert "_usage_totals(\n        store," in store_src
+    assert "_insert_media_row(\n            store," in store_src
+    assert "_app_actions._release_usage(" in store_src
+    assert "_app_actions._settle_usage(" in store_src
+    assert store_src.count("session_token=session_token") >= 4
+    assert "session_token=session_token" in delete_handler_src
+
+
+def test_app_directory_uses_visible_projection_ports_on_app_runtime():
+    list_src = inspect.getsource(app_directory.list_visible_entries)
+    read_src = inspect.getsource(app_directory.get_visible_entry)
+    handler_src = inspect.getsource(core.handle_business_read_app_directory_entry)
+
+    assert "app_identity._is_app_runtime_user(conn)" in list_src
+    assert "takyon_app_visible_directory_entries" in list_src
+    assert "app_identity._hash_token(session_token)" in list_src
+    assert "app_identity._is_app_runtime_user(conn)" in read_src
+    assert "takyon_app_visible_directory_entry" in read_src
+    assert "target_email" in read_src
+    assert "target_user = leaves[\"identity\"].get_app_user" not in handler_src
+
+
+def test_app_connections_use_visible_target_port_on_app_runtime():
+    setter_src = inspect.getsource(app_connections.set_connection)
+    list_src = inspect.getsource(app_connections.list_connections)
+    helper_src = inspect.getsource(app_connections._visible_target_for_session)
+
+    assert "app_identity._is_app_runtime_user(conn)" in setter_src
+    assert "_visible_target_for_session" in setter_src
+    assert "normalized_action in {\"like\", \"pass\"}" in setter_src
+    app_runtime_branch = setter_src.split(
+        "if session_token is not None and app_identity._is_app_runtime_user(conn):",
+        1,
+    )[1].split("\n    else:\n        target = app_identity.get_app_user", 1)[0]
+    assert "app_identity.get_app_user" not in app_runtime_branch
+    assert "_target_placeholder" in app_runtime_branch
+    assert "app_directory.get_visible_entry" in helper_src
+    assert "session_token=session_token" in helper_src
+    assert "if session_token is not None and app_identity._is_app_runtime_user(conn):" in list_src
+    list_app_runtime_branch = list_src.split(
+        "if session_token is not None and app_identity._is_app_runtime_user(conn):",
+        1,
+    )[1].split('\n    if list_state == "matches":', 1)[0]
+    assert "app_users" not in list_app_runtime_branch
+    assert "app_directory.get_visible_entry" in list_app_runtime_branch
+
+
+def test_app_plane_checkout_uses_session_bound_user_and_safebox_stripe():
+    src = inspect.getsource(core.handle_business_create_app_checkout)
+    web_src = (Path(core.__file__).parents[2] / "takyon_cli" / "web_server.py").read_text(encoding="utf-8")
+
+    assert 'if store._database_plane == "app":' in src
+    assert "_require_app_plane_session_token(args)" in src
+    assert "validate_session(raw, business, session_token)" in src
+    assert "customer_email = str(user.email or \"\")" in src
+    assert "app plan is not configured for Stripe checkout" in src
+    assert "safebox.stripe_request(\"checkout/sessions\"" in src
+    assert "_stripe_request(\"checkout/sessions\"" not in src
+    assert "checkout_url = success_url" in src
+    assert src.index('if store._database_plane == "app":') < src.index("safebox.stripe_request")
+    assert 'raise TakyonError("app checkout requires app-plane database login")' in src
+    assert src.index('"client_reference_id": client_reference_id,') < src.index(
+        'raise TakyonError("app checkout requires app-plane database login")'
+    )
+    assert "\"session_token\": token" in web_src
+
+
+def test_safebox_app_checkout_recovery_requires_product_context_before_stripe():
+    safebox_src = Path(core.__file__).with_name("safebox.py").read_text(encoding="utf-8")
+    safebox_app_src = Path(core.__file__).with_name("safebox_app.py").read_text(encoding="utf-8")
+
+    assert "checkout recovery requires expected business and app user/email context" in safebox_src
+    assert "checkout_context_required" in safebox_app_src
+    assert "if not expected_business or (not expected_user and not expected_email):" in safebox_app_src
+    assert safebox_app_src.index("checkout_context_required") < safebox_app_src.index(
+        'safebox.stripe_request(f"checkout/sessions/{session_id}"'
+    )
+
+
+def test_safebox_stripe_catalog_mutation_requires_operator_authority():
+    safebox_src = Path(core.__file__).with_name("safebox.py").read_text(encoding="utf-8")
+    safebox_app_src = Path(core.__file__).with_name("safebox_app.py").read_text(encoding="utf-8")
+
+    assert '_STRIPE_CATALOG_MUTATION_PATHS = frozenset({"products", "prices"})' in safebox_app_src
+    assert "path in _STRIPE_CATALOG_MUTATION_PATHS" in safebox_app_src
+    assert "_require_operator_client(request)" in safebox_app_src
+    assert 'stripe_path in {"products", "prices"}' in safebox_src
+    assert "operator_authority=operator_authority" in safebox_src
+
+
+def test_generic_stripe_route_does_not_read_billing_objects():
+    safebox_app_src = Path(core.__file__).with_name("safebox_app.py").read_text(encoding="utf-8")
+    normalize_src = inspect.getsource(safebox_app._normalize_stripe_request)
+
+    assert "checkout/sessions" in normalize_src
+    assert "products" in normalize_src and "prices" in normalize_src
+    assert "subscriptions" not in normalize_src
+    assert "stripe_method == \"GET\"" not in normalize_src
+    assert 'safebox.stripe_request(f"checkout/sessions/{session_id}"' in safebox_app_src
+    assert 'f"subscriptions/{subscription_id}"' in safebox_app_src
+
+
+def test_app_plane_subscription_cancel_uses_safebox_authority():
+    handler_src = inspect.getsource(core.handle_business_cancel_app_subscription)
+    safebox_src = Path(core.__file__).with_name("safebox.py").read_text(encoding="utf-8")
+    safebox_app_src = Path(core.__file__).with_name("safebox_app.py").read_text(encoding="utf-8")
+
+    assert 'if store._database_plane == "app":' in handler_src
+    assert "validate_session(leaf, business, session_token)" in handler_src
+    assert "safebox.cancel_app_subscription" in handler_src
+    assert "session_token=session_token" in handler_src
+    assert "stripe_util" not in handler_src
+    assert 'raise TakyonError("app subscription cancellation requires app-plane database login")' in handler_src
+    assert "def cancel_app_subscription(" in safebox_src
+    assert "session_token: str" in safebox_src
+    assert '"session_token": token' in safebox_src
+    assert "app_identity.validate_session(payment_conn, business, token)" in safebox_src
+    assert "app_session_user_mismatch" in safebox_src
+    assert '"/v1/stripe/app-subscription/cancel"' in safebox_src
+    assert '@app.post("/v1/stripe/app-subscription/cancel")' in safebox_app_src
+    assert "session_token: str | None = None" in safebox_app_src
+    assert "app_identity.validate_session(conn, business, session_token)" in safebox_app_src
+    assert "app_session_user_mismatch" in safebox_app_src
+    assert safebox_app_src.index("app_identity.validate_session(conn, business, session_token)") < safebox_app_src.index(
+        "app_payments.cancel_subscription"
+    )
+    assert "app_payments.cancel_subscription" in safebox_app_src
+
+
+def test_app_plane_service_email_uses_service_session_ports():
+    handler_src = inspect.getsource(core.handle_business_send_app_email)
+    email_src = inspect.getsource(app_email)
+
+    assert 'if getattr(store, "_database_plane", "") == "app":' in handler_src
+    assert "_require_app_plane_session_token(args)" in handler_src
+    assert "_app_plane_customer_write_context(store, conn, business, action=\"app.email.send\")" in handler_src
+    assert "with store._pg_app_scope(conn, business, session_token=session_token)" in handler_src
+    assert "validate_session(leaf, business, session_token)" in handler_src
+    assert "service_session_token=session_token or None" in handler_src
+    assert "takyon_app_service_email_recipient" in email_src
+    assert "takyon_app_service_email_sends_today" in email_src
+    assert "with store._pg_app_scope(conn, business_slug, session_token=service_session_token)" in email_src
+    assert "safebox.send_postmark_email" in email_src
+    assert "safebox.provider_broker_enabled()" in email_src
+    assert "live service email requires the Safebox provider broker" in email_src
+    assert "safebox.broker_provider_call(" in email_src
+    assert '"recipient_app_user_id": recipient_app_user_id' in email_src
+    assert '"to_email": to_email' not in email_src
+    assert '"postmark.send"' in email_src
+
+
+def test_safebox_postmark_product_email_uses_broker_not_legacy_route():
+    safebox_src = Path(core.__file__).with_name("safebox.py").read_text(encoding="utf-8")
+    safebox_app_src = Path(core.__file__).with_name("safebox_app.py").read_text(encoding="utf-8")
+
+    assert '_POSTMARK_SEND_AUDIENCE = "postmark.send"' in safebox_app_src
+    assert '("postmark", "send"): "/v1/providers/postmark/send"' in safebox_src
+    assert '@app.post("/v1/providers/postmark/send")' in safebox_app_src
+    assert "_postmark_authorize_service_send(" in safebox_app_src
+    assert "recipient_app_user_id_required" in safebox_app_src
+    assert '"to_email": resolved["recipient_email"]' in safebox_app_src
+    assert 'ledger=_UsageLedgerAdapter(provider="postmark", purpose="email_send", route="email")' in safebox_app_src
+    assert "@app.post(\"/v1/postmark/send\")" in safebox_app_src
+    assert "_require_operator_client(request)" in safebox_app_src
+
+
+def test_app_plane_action_invocation_binds_scope_before_runner():
+    src = inspect.getsource(core.handle_business_invoke_app_action)
+    reserve_limit_src = inspect.getsource(app_actions._resolve_pg_action_usage_limit)
+    reserve_src = inspect.getsource(app_actions._reserve_usage)
+    settle_src = inspect.getsource(app_actions._settle_usage)
+    release_src = inspect.getsource(app_actions._release_usage)
+    invoke_src = inspect.getsource(app_actions.invoke_action)
+
+    assert 'if getattr(store, "_database_plane", "") == "app":' in src
+    assert "session_token is required" in src
+    assert "_app_plane_customer_write_context(store, conn, business, action=\"app.action.invoke\")" in src
+    assert "with store._pg_app_scope(conn, business, session_token=session_token)" in src
+    assert "validate_session(leaf, business, session_token)" in src
+    assert src.index("with store._pg_app_scope(conn, business, session_token=session_token)") < src.index(
+        "takyon_app_actions.invoke_action"
+    )
+    assert "takyon_app_action_usage_limit" in reserve_limit_src
+    assert "_hash_token(token)" in reserve_limit_src
+    assert "get_active_entitlement" in reserve_limit_src
+    assert reserve_limit_src.index("takyon_app_action_usage_limit") < reserve_limit_src.index("get_active_entitlement")
+    assert "session_token=session_token" in reserve_src
+    assert 'settle_kwargs["session_token"] = session_token' in settle_src
+    assert 'release_kwargs["session_token"] = session_token' in release_src
+    assert "session_token=app_session_token" in invoke_src
+    assert "app_session_token = str(principal.get(\"session_token\")" in invoke_src
+    assert "get_app_user" not in reserve_limit_src
 
 
 # ── 4. No tool / endpoint accepts a caller-supplied owner identity ────────────────────

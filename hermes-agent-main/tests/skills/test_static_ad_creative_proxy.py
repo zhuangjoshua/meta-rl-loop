@@ -9,7 +9,7 @@ optional), ``get_backend`` returns a proxy backend that POSTs the OpenAI body to
 the GATED route ``/v1/providers/openai/images`` wrapped as
 ``{"token": <capability>, "payload": <provider body>}`` (presenting the credit
 capability the safebox verifies); without it the local SDK backend (reading
-``OPENAI_API_KEY``) is unchanged.
+an explicit ``--api-key-file`` value) is unchanged.
 
 Hermetic: stdlib + pytest + monkeypatch, NO network. The ``urllib`` POST is stubbed
 and we assert the raw-key env / OpenAI SDK is never used on the gated path.
@@ -168,13 +168,13 @@ def test_get_backend_local_when_no_proxy(monkeypatch):
     assert not isinstance(backend, backends.ProxyOpenAIImageBackend)
 
 
-def test_local_backend_reads_openai_key(monkeypatch):
-    """No proxy env → the SDK backend resolves OPENAI_API_KEY (local dev path)."""
+def test_local_backend_uses_explicit_api_key_only(monkeypatch):
+    """No proxy env -> the SDK backend accepts only an explicit local-dev key."""
     for k in _PROXY_ENV:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-local")
-    backend = backends.OpenAIImageBackend()
-    # _client resolves the key from env; build a fake OpenAI to avoid the real SDK.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-must-not-be-read")
+    backend = backends.OpenAIImageBackend(api_key="sk-explicit")
+    # _client uses the explicit key; build a fake OpenAI to avoid the real SDK.
     import types
 
     captured = {}
@@ -194,4 +194,13 @@ def test_local_backend_reads_openai_key(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", _fake_import)
     backend._client()
-    assert captured["api_key"] == "sk-local"
+    assert captured["api_key"] == "sk-explicit"
+
+
+def test_local_backend_does_not_read_openai_key_env(monkeypatch):
+    for k in _PROXY_ENV:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-must-not-be-read")
+    backend = backends.OpenAIImageBackend()
+    with pytest.raises(RuntimeError, match="pass --api-key-file"):
+        backend._client()

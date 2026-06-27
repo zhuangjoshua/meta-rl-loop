@@ -102,10 +102,10 @@ def _gate_cell(row, index: int):
 
 
 # The migration-0038 SECURITY DEFINER functions (safebox_credits_*) are the only sanctioned writers
-# of the creative-credit ledger once the runtime runs as the demoted `takyon_runtime` role. The
-# mutating ops below invoke those functions under the restricted role (ledger_gate); the function
-# bodies are a verbatim port of the former in-Python row ops (FOR UPDATE locks, idempotency,
-# balance math). Result composite columns, in order:
+# of the creative-credit ledger from live request paths. The mutating ops below invoke those functions
+# only from a Safebox authority DB login via ledger_gate; runtime planes do not demote into a
+# money-writing role. Function bodies are a verbatim port of the former in-Python row ops (FOR UPDATE
+# locks, idempotency, balance math). Result composite columns, in order:
 #   0 refusal   1 fig_requested_credits   2 fig_available_credits   3 business_slug
 #   4 balance_credits   5 reserved_credits   6 reserved_credits_out
 
@@ -284,7 +284,7 @@ def commit_credits(
         raise ValueError("reservation_key is required")
     # Pre-check the actual-credits preconditions in Python (ValueErrors, not ledger refusals) so the
     # spend>=0 + spend<=reserved invariants are enforced BEFORE the gate writes — exactly as before.
-    # The reserve-amount read is a pure SELECT (still permitted under the demoted role). Unknown
+    # The reserve-amount read is a pure SELECT on the Safebox authority connection. Unknown
     # reservation is decided inside the gate function, but checking here keeps the ValueError ordering
     # for a present reservation with a bad actual_credits.
     if actual_credits is not None:

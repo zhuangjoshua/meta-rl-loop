@@ -32,7 +32,7 @@ def broker_on(monkeypatch):
     """Enable the broker path and stub every non-broker seam so the focus is the cutover branch."""
     monkeypatch.setattr(ai_gateway.safebox, "provider_broker_enabled", lambda: True)
     monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: _FakeUser())
-    monkeypatch.setattr(ai_gateway, "_resolve_plan_for_user", lambda c, b, u: (object(), _Plan()))
+    monkeypatch.setattr(ai_gateway, "_resolve_plan_for_user", lambda c, b, u, **_: (object(), _Plan()))
     monkeypatch.setattr(ai_gateway, "_check_app_ai_rate_limit", lambda c, u: None)
     # A local reserve/settle on the broker path would DOUBLE-CHARGE — make them explode if reached.
     def _boom(*a, **k):

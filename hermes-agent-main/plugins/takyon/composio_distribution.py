@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -60,6 +61,21 @@ def _base_url() -> str:
     return (_env_value("COMPOSIO_BASE_URL") or _COMPOSIO_BASE_URL_DEFAULT).rstrip("/")
 
 
+def _relative_api_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        raise ComposioDistributionError("Composio API path must be relative")
+    if "\\" in raw or raw.startswith("//"):
+        raise ComposioDistributionError("Composio API path must be relative")
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme or parsed.netloc:
+        raise ComposioDistributionError("Composio API path must be relative")
+    parts = [part for part in raw.lstrip("/").split("/") if part]
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise ComposioDistributionError("Composio API path must be relative")
+    return "/".join(parts)
+
+
 def _request(
     method: str,
     path: str,
@@ -68,6 +84,7 @@ def _request(
     params: Mapping[str, Any] | Iterable[tuple[str, Any]] | None = None,
     timeout: float = 60.0,
 ) -> dict[str, Any]:
+    relative_path = _relative_api_path(path)
     if safebox._use_remote_authority():
         # COMPOSIO_API_KEY is a provider secret the safebox holds and refuses to egress over
         # /v1/env, so a runtime plane cannot resolve it (os.environ is empty there). Broker the WHOLE
@@ -81,13 +98,13 @@ def _request(
             norm_params = [[str(k), v] for k, v in pairs]
         return safebox.composio_forward(
             method=method,
-            path=path,
+            path=relative_path,
             json_body=(dict(json_body) if json_body is not None else None),
             params=norm_params,
             timeout=timeout,
         )
     httpx = _load_httpx()
-    url = path if path.startswith("http://") or path.startswith("https://") else f"{_base_url()}/{path.lstrip('/')}"
+    url = f"{_base_url()}/{relative_path}"
     try:
         response = httpx.request(
             method.upper(),

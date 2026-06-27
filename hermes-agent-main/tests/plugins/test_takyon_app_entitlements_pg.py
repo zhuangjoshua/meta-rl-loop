@@ -587,37 +587,32 @@ def test_project_openmeter_access_inactive_only_retires_openmeter_rows(pg_conn):
     assert ("openmeter", "cancelled") in statuses
 
 
-def test_project_openmeter_access_degraded_preserves_when_authoritative(pg_conn):
-    """Fail-OPEN grace (OpenMeter-AUTHORITATIVE business): an OpenMeter-ONLY paid customer (no Stripe
-    backstop) must NOT lose access when OpenMeter is unreachable. A degraded read with
-    authoritative=True preserves the last-known-good openmeter row; an AUTHORITATIVE inactive read
-    (degraded=False) retires it."""
+def test_project_openmeter_access_never_confers_access_by_itself(pg_conn):
+    """OpenMeter is a mirror only: even with the old authoritative=True argument, an OpenMeter-only
+    projection cannot become the active entitlement or cached product tier."""
     slug = _business(pg_conn, _owner(pg_conn))
     user_id = _user(pg_conn, slug)
     app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
-    app_entitlements.project_openmeter_access(
+    projected, effective = app_entitlements.project_openmeter_access(
         pg_conn, slug, user_id, active=True, authoritative=True, tier="paid", plan_key="pro",
         metadata={"openmeter_customer_key": "om_customer"},
     )
+    assert projected is not None and projected.source == "openmeter"
+    assert effective == app_identity.UNENTITLED_TIER
     active = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
-    assert active is not None and active.source == "openmeter"
+    assert active is None
 
-    # Degraded (OpenMeter unreachable, OR a 200 that can't prove no-access) on an AUTHORITATIVE
-    # business MUST NOT retire the sole conferring row.
-    projected, effective = app_entitlements.project_openmeter_access(
+    tier_row = pg_conn.execute(
+        "select tier from app_users where business_slug = %s and id = %s",
+        (slug, user_id),
+    ).fetchone()
+    assert tier_row is not None and tier_row[0] == app_identity.UNENTITLED_TIER
+
+    projected_after, effective_after = app_entitlements.project_openmeter_access(
         pg_conn, slug, user_id, active=False, degraded=True, authoritative=True,
         metadata={"openmeter_customer_key": "om_customer"},
     )
-    assert projected is None
-    assert effective == "paid"
-    still = app_entitlements.get_active_entitlement(pg_conn, slug, user_id)
-    assert still is not None and still.source == "openmeter" and still.status == "active"
-
-    # An AUTHORITATIVE inactive read (not degraded) DOES retire it.
-    _, effective_after = app_entitlements.project_openmeter_access(
-        pg_conn, slug, user_id, active=False, degraded=False, authoritative=True,
-        metadata={"openmeter_customer_key": "om_customer"},
-    )
+    assert projected_after is None
     assert effective_after == app_identity.UNENTITLED_TIER
     assert app_entitlements.get_active_entitlement(pg_conn, slug, user_id) is None
 

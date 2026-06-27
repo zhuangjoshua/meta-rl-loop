@@ -187,3 +187,60 @@ def test_live_mode_sends_through_provider(tmp_path, monkeypatch):
     assert result["provider_message_id"] == "pm-123"
     assert sent == [{"to": "casey@example.com", "subject": "You have a new match", "html": "<p>hi</p>"}]
     assert _events(store)[0]["status"] == "completed"
+
+
+def test_live_mode_uses_safebox_broker_when_enabled(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    calls = []
+
+    monkeypatch.setattr("plugins.takyon.safebox.provider_broker_enabled", lambda: True)
+
+    def fake_broker(provider, op, payload, *, estimate_microusd, business, action, session_token, timeout=180.0):
+        calls.append(
+            {
+                "provider": provider,
+                "op": op,
+                "payload": payload,
+                "estimate_microusd": estimate_microusd,
+                "business": business,
+                "action": action,
+                "session_token": session_token,
+            }
+        )
+        return {"message_id": "pm-broker-123", "provider": "postmark", "status": "sent"}
+
+    monkeypatch.setattr("plugins.takyon.safebox.broker_provider_call", fake_broker)
+
+    result = _send(store, test_mode=False, service_session_token="svc-session")
+
+    assert result["brokered"] is True
+    assert result["provider_message_id"] == "pm-broker-123"
+    assert calls == [
+        {
+            "provider": "postmark",
+            "op": "send",
+            "payload": {
+                "recipient_app_user_id": "u1",
+                "subject": "You have a new match",
+                "text_body": "Someone liked you back.",
+                "html_body": None,
+                "message_stream": None,
+            },
+            "estimate_microusd": 1500,
+            "business": "biz",
+            "action": "postmark.send",
+            "session_token": "svc-session",
+        }
+    ]
+    assert _events(store) == []
+
+
+def test_live_service_session_email_requires_broker(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    monkeypatch.setattr("plugins.takyon.safebox.provider_broker_enabled", lambda: False)
+    monkeypatch.setattr(app_email, "_send_postmark", lambda *a, **k: pytest.fail("legacy postmark called"))
+
+    with pytest.raises(app_email.AppEmailError, match="requires the Safebox provider broker"):
+        _send(store, test_mode=False, service_session_token="svc-session")
+
+    assert _events(store) == []

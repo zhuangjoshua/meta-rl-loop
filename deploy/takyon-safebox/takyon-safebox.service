@@ -25,6 +25,10 @@ Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=safebox
+# Operator/infrastructure-only routes require this exact client allowlist in addition to the shared
+# transport token and TAKYON_SAFEBOX_OPERATOR_TOKEN. Do not widen to 10.116.0.0/20; the sub-user host is
+# 10.116.0.3 and must not mint operator capabilities or touch private workspace/provider infrastructure.
+Environment=TAKYON_SAFEBOX_OPERATOR_CLIENTS=10.116.0.18
 # Bind the VPC interface only (10.116.0.2 is this host's private address — the same address the
 # operator/subuser planes are pointed at via TAKYON_SAFEBOX_URL). Never bind 0.0.0.0: the public
 # interface must not expose the secret authority even with token auth in front of it.

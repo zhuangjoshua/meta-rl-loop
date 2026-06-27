@@ -140,14 +140,13 @@ PY
       '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from plugins.takyon.core import load_takyon_env
 from plugins.takyon.db.runner import run_migrations
+from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
 import psycopg
-import os
 
 load_takyon_env()
-migration_database_url = os.getenv('MIGRATION_DATABASE_URL') or os.getenv('TAKYON_MIGRATION_DATABASE_URL')
-if not migration_database_url:
-    raise SystemExit('MIGRATION_DATABASE_URL is required for deploy-time migrations')
+migration_database_url = resolve_database_url(plane="migration")
 with psycopg.connect(migration_database_url, autocommit=True, prepare_threshold=None) as conn:
+    assert_takyon_pg_role(conn, "migration")
     conn.execute('select set_config(\$\$statement_timeout\$\$, \$\$0\$\$, false)')
     run_migrations(conn)
 PY

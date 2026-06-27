@@ -129,10 +129,10 @@ class BillingBalances:
 
 
 # The mutating ops route their writes through the migration-0038 SECURITY DEFINER functions
-# (safebox_billing_*), which are the ONLY sanctioned writers of the billing ledger once the runtime
-# runs as the demoted `takyon_runtime` role. Each runs under the restricted role (ledger_gate) so a
-# forged direct write is DENIED at the DB; the function still executes its row ops with the owner's
-# privileges, so the money math (FOR UPDATE locks, idempotency, balance arithmetic) is unchanged.
+# (safebox_billing_*), which are the ONLY sanctioned writers of the billing ledger from live request
+# paths. The shared ledger gate requires a Safebox authority DB login; runtime planes do not demote into
+# a money-writing role. The function still executes its row ops with the owner's privileges, so the
+# money math (FOR UPDATE locks, idempotency, balance arithmetic) is unchanged.
 # The result composite columns, in order:
 #   0 refusal   1 fig_estimate_cents   2 fig_allowance_available_cents   3 allowance_cents
 #   4 included_cents
@@ -269,7 +269,7 @@ def settle(conn, reservation_key: str, actual_cents: int) -> None:
     rk = reservation_key
     # Pre-check the actual<=reserved invariant in Python (a ValueError, not a ledger refusal) so the
     # custody-of-real-money guarantee is enforced BEFORE the gate writes — exactly as before. The
-    # reserved-amount read is a pure SELECT (still permitted under the demoted role).
+    # reserved-amount read is a pure SELECT on the Safebox authority connection.
     resv = conn.execute(
         "select bucket, amount_cents from billing_entries "
         "where reservation_key = %s and kind = 'reserve'",

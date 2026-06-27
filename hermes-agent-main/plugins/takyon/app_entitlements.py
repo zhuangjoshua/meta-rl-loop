@@ -466,8 +466,11 @@ def _insert_entitlement_gate(
 
 
 def _sync_user_tier(conn, business_slug: str, app_user_id: str) -> str:
-    """Resolve the effective tier from active/trialing grants (highest rank) and cache it onto
-    app_users.tier. Mirrors the SQLite `_sync_user_tier`. Caller already holds a transaction."""
+    """Resolve the effective tier from authoritative active/trialing grants and cache it.
+
+    OpenMeter rows are mirror rows only; they never confer access or set the cached product tier.
+    Caller already holds a transaction.
+    """
     status_placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
     tier_placeholders = ", ".join(["%s"] * len(_UNENTITLING_TIERS))
     rank_case = (
@@ -478,6 +481,7 @@ def _sync_user_tier(conn, business_slug: str, app_user_id: str) -> str:
         "select tier from app_entitlements "
         f"where business_slug = %s and app_user_id = %s and status in ({status_placeholders}) "
         f"  and lower(tier) not in ({tier_placeholders}) "
+        "  and source <> 'openmeter' "
         f"order by {rank_case} asc, updated_at desc limit 1",
         (business_slug, app_user_id, *_ACTIVE_STATUSES, *_UNENTITLING_TIERS),
     ).fetchone()
@@ -587,9 +591,9 @@ def list_entitlements(
 def get_active_entitlement(conn, business_slug: str, app_user_id: str) -> Entitlement | None:
     """The entitlement currently conferring access to this sub-user, or None.
 
-    Mirrors the effective-tier resolution order: only active/trialing grants count, lower tier
-    rank wins, and the newest row breaks ties. This gives runtime callers the exact grant whose
-    plan_key/metadata should be treated as authoritative right now."""
+    Mirrors the effective-tier resolution order: only authoritative active/trialing grants count,
+    lower tier rank wins, and the newest row breaks ties. OpenMeter rows are reporting mirrors and
+    are deliberately excluded from access authority."""
     status_placeholders = ", ".join(["%s"] * len(_ACTIVE_STATUSES))
     tier_placeholders = ", ".join(["%s"] * len(_UNENTITLING_TIERS))
     rank_case = (
@@ -600,6 +604,7 @@ def get_active_entitlement(conn, business_slug: str, app_user_id: str) -> Entitl
         f"select {_ENT_COLUMNS} from app_entitlements "
         f"where business_slug = %s and app_user_id = %s and status in ({status_placeholders}) "
         f"  and lower(tier) not in ({tier_placeholders}) "
+        "  and source <> 'openmeter' "
         f"order by {rank_case} asc, updated_at desc limit 1",
         (business_slug, app_user_id, *_ACTIVE_STATUSES, *_UNENTITLING_TIERS),
     ).fetchone()
@@ -698,13 +703,13 @@ def project_openmeter_access(
 ) -> tuple[Entitlement | None, str]:
     """Project OpenMeter access into the local entitlement rail.
 
-    OpenMeter is a downstream usage MIRROR, NOT the access authority — Stripe (via the webhook-backed
-    `app_entitlements`) governs access (CLAUDE.md). This helper translates one vendor access snapshot
-    into a parallel `source='openmeter'` mirror row, without ever voiding Stripe's authoritative rows:
+    OpenMeter is a downstream usage MIRROR, NOT the access authority. Stripe plus local ledger-backed
+    entitlements govern access. This helper translates one vendor access snapshot into a parallel
+    `source='openmeter'` mirror row, without ever voiding Stripe's authoritative rows:
 
     * only prior `source='openmeter'` rows stop conferring access; `source='stripe'` rows are left
       intact (a broken/degraded OpenMeter can never cancel a paid Stripe subscription)
-    * an active vendor snapshot adds one fresh `source='openmeter'` entitlement row
+    * an active vendor snapshot adds one fresh `source='openmeter'` mirror row
     * an inactive/degraded vendor snapshot leaves any Stripe entitlement untouched
     * `app_users.tier` is resynced atomically in the same transaction (an active Stripe row still
       confers the paid tier even when OpenMeter reports no access)
@@ -712,32 +717,11 @@ def project_openmeter_access(
     Manual/operator-only grants are intentionally left alone; this replaces the recurring billing
     path, not every possible non-billing override.
 
-    Fail-OPEN grace (OpenMeter-AUTHORITATIVE businesses only): when `degraded` is True the vendor
-    access could NOT be authoritatively read (OpenMeter unreachable / 404 / a 200 with no explicit
-    access decision) AND `authoritative` is True (this business runs on OpenMeter as the access
-    authority, so the source='openmeter' row may be the customer's ONLY conferring row), NOTHING is
-    mutated — no row retired, none inserted — so a transient outage can never lapse a paying customer.
-    For Stripe-authoritative (flag-OFF) businesses the source='openmeter' row is a mere MIRROR and the
-    Stripe row governs, so a degraded read falls through to the normal path (the mirror is retired per
-    `active`) and correctly follows a Stripe cancel rather than stranding stale access.
+    `authoritative` is accepted for older callers but ignored. OpenMeter rows are never authoritative.
     """
-    if degraded and authoritative:
-        with conn.transaction():
-            exists = conn.execute(
-                "select 1 from app_users where business_slug = %s and id = %s",
-                (business_slug, app_user_id),
-            ).fetchone()
-            if exists is None:
-                raise AppUserNotFound(str(app_user_id))
-            effective = _sync_user_tier(conn, business_slug, app_user_id)
-        return None, effective
+    authoritative = False
     meta = dict(metadata or {})
-    patch = _json_dumps(
-        {
-            **meta,
-            "billing_authority": "openmeter",
-        }
-    )
+    patch = _json_dumps({**meta, "mirror_source": "openmeter"})
     with conn.transaction():
         exists = conn.execute(
             "select 1 from app_users where business_slug = %s and id = %s",
@@ -770,7 +754,7 @@ def project_openmeter_access(
                 current_period_end=current_period_end,
                 metadata={
                     **meta,
-                    "billing_authority": "openmeter",
+                    "mirror_source": "openmeter",
                 },
             )
         effective = _sync_user_tier(conn, business_slug, app_user_id)

@@ -21,9 +21,9 @@ the turn's true model cost (from the agent's own usage accounting) as ``actual_c
 settle is correct whenever an estimate was reserved; with no estimate the turn runs unmetered and the
 reported cost is simply ignored by ``run_one``. No second money path — this reuses flow-A unchanged.
 
-Invariant #8 (no silent fallback): starting the loop with no DATABASE_URL configured raises loudly
-via ``resolve_database_url`` — it never half-starts against a phantom queue, and never quietly falls
-back to SQLite (there is no SQLite worker; jobs/wakes are Postgres-only).
+Invariant #8 (no silent fallback): starting the loop with no operator-plane database URL configured
+raises loudly via ``resolve_database_url`` — it never half-starts against a phantom queue, and never
+quietly falls back to SQLite (there is no SQLite worker; jobs/wakes are Postgres-only).
 
 INERT until deliberately run: importing this module starts nothing, and the tracked
 ``deploy/argon-alpha-14/takyon-worker.service`` exists but is NOT enabled on the VPS. Recurring wake
@@ -2500,14 +2500,17 @@ def run_worker_loop(
     import psycopg
 
     from .core import load_takyon_env
-    from .runtime_app import resolve_database_url
+    from .runtime_app import assert_takyon_pg_role, resolve_database_url
 
     load_takyon_env()
     # Mark this process as the worker plane: core's worker-deferral dispatcher must run tools INLINE
     # here (the surrounding job is already durable; deferring again would starve the drain threads
     # waiting on their own sub-jobs).
     os.environ["TAKYON_WORKER_PROCESS"] = "1"
-    resolved_url = resolve_database_url(database_url)  # invariant #8: raises if unconfigured
+    resolved_url = resolve_database_url(
+        database_url,
+        plane=None if database_url else "operator",
+    )  # invariant #8: raises if unconfigured
     worker_id = worker_id or f"worker-{socket.gethostname()}-{os.getpid()}"
     interval = poll_interval if poll_interval is not None else _env_float(
         "TAKYON_WORKER_POLL_SECONDS", _DEFAULT_POLL_SECONDS
@@ -2534,9 +2537,17 @@ def run_worker_loop(
 
         total_drained = 0
         while not stop.is_set():
+            conn = None
             try:
                 conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+                if not database_url:
+                    assert_takyon_pg_role(conn, "operator")
             except Exception as exc:  # noqa: BLE001 — transient DB outage must not crash the daemon
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
                 _log.warning(
                     "worker[%s]: DB connect failed (%s); retrying in %.0fs",
                     thread_worker_id,

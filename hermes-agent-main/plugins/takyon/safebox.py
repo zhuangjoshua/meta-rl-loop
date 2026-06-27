@@ -63,6 +63,7 @@ _EXACT_SENSITIVE_ENV_KEYS = frozenset(
         "AUTH0_CLIENT_SECRET",
         "AUTH0_SECRET",
         "DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
         # DataForSEO authenticates with a login/password pair. The password matches
         # the _PASSWORD suffix, but the login does not end in a sensitive suffix, so
         # we keep it behind the Safebox gate explicitly (no os.getenv side door) the
@@ -73,6 +74,11 @@ _EXACT_SENSITIVE_ENV_KEYS = frozenset(
         "GOOGLE_ADS_CLIENT_ID",
         "POSTGRES_PRISMA_URL",
         "POSTGRES_URL",
+        "POSTGRES_URL_NON_POOLING",
+        "TAKYON_APP_DATABASE_URL",
+        "TAKYON_MIGRATION_DATABASE_URL",
+        "TAKYON_OPERATOR_DATABASE_URL",
+        "TAKYON_SAFEBOX_DATABASE_URL",
     }
 )
 
@@ -96,6 +102,7 @@ _USER_API_KEYS_STATE_VERSION = 1
 _USER_API_KEYS_MUTEX = threading.RLock()
 _SAFEBOX_REMOTE_URL_ENV = "TAKYON_SAFEBOX_URL"
 _SAFEBOX_REMOTE_TOKEN_ENV = "TAKYON_SAFEBOX_TOKEN"
+_SAFEBOX_OPERATOR_TOKEN_ENV = "TAKYON_SAFEBOX_OPERATOR_TOKEN"
 _HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _SAFEBOX_HOST_ROLE = "safebox"
 _MANAGED_SECRET_COMMAND_ENV = "TAKYON_MANAGED_SECRET_COMMAND"
@@ -194,24 +201,67 @@ def _use_remote_authority() -> bool:
     return _authority_mode() == "remote"
 
 
-def _remote_headers(*, with_json: bool = False) -> dict[str, str]:
+_OPERATOR_AUTH_EXACT_PATHS = frozenset(
+    {
+        "/v1/billing/accounts/open",
+        "/v1/billing/starter-allowance",
+        "/v1/billing/operator-subscription/sync",
+        "/v1/cloudflare/product-edge-route",
+        "/v1/custody/accounts/open",
+        "/v1/vercel/domain/delete",
+    }
+)
+_OPERATOR_AUTH_PATH_PREFIXES = (
+    "/v1/auth0/",
+    "/v1/creative/",
+    "/v1/creative-credits/",
+    "/v1/operator/",
+    "/v1/postmark/",
+    "/v1/providers/composio/",
+    "/v1/providers/meta/",
+    "/v1/storage/",
+    "/v1/user-api-keys/",
+)
+
+
+def _remote_path_requires_operator_authority(path: str) -> bool:
+    route = "/" + str(path or "").strip().lstrip("/")
+    return route in _OPERATOR_AUTH_EXACT_PATHS or route.startswith(_OPERATOR_AUTH_PATH_PREFIXES)
+
+
+def _remote_headers(*, with_json: bool = False, operator_authority: bool = False) -> dict[str, str]:
     headers: dict[str, str] = {"Accept": "application/json"}
     token = str(os.environ.get(_SAFEBOX_REMOTE_TOKEN_ENV) or "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if operator_authority:
+        operator_token = str(os.environ.get(_SAFEBOX_OPERATOR_TOKEN_ENV) or "").strip()
+        if not operator_token:
+            raise SafeboxAuthorityUnavailable(
+                f"operator Safebox route requires {_SAFEBOX_OPERATOR_TOKEN_ENV}; not set on this plane"
+            )
+        headers["X-Takyon-Operator-Token"] = operator_token
     if with_json:
         headers["Content-Type"] = "application/json"
     return headers
 
 
 def _remote_json(
-    method: str, path: str, payload: dict[str, Any] | None = None, *, timeout: float = 10.0
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float = 10.0,
+    operator_authority: bool = False,
 ) -> dict[str, Any]:
     base = _remote_base_url()
     if not base:
         raise RuntimeError("Safebox remote URL is not configured")
     body: bytes | None = None
-    headers = _remote_headers(with_json=payload is not None)
+    headers = _remote_headers(
+        with_json=payload is not None,
+        operator_authority=operator_authority or _remote_path_requires_operator_authority(path),
+    )
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(f"{base}{path}", data=body, method=method.upper(), headers=headers)
@@ -361,11 +411,13 @@ def stripe_request(path: str, params: dict[str, Any] | None = None, *, method: s
     if not stripe_path:
         raise ValueError("stripe path is required")
     if _remote_enabled() and not _local_authority_enabled():
+        operator_authority = stripe_method == "POST" and stripe_path in {"products", "prices"}
         payload = _remote_json(
             "POST",
             "/v1/stripe/request",
             {"path": stripe_path, "params": dict(params or {}), "method": stripe_method},
             timeout=35.0,
+            operator_authority=operator_authority,
         )
         return payload if isinstance(payload, dict) else {}
     from . import stripe_util
@@ -649,6 +701,7 @@ _PROVIDER_BROKER_PATHS = {
     ("anthropic", "messages"): "/v1/providers/anthropic/messages",
     ("tavily", "search"): "/v1/providers/tavily/search",
     ("gemini", "image"): "/v1/providers/gemini/image",
+    ("postmark", "send"): "/v1/providers/postmark/send",
 }
 # Provider calls (Anthropic / Gemini) routinely exceed the 10s env-read timeout; give the broker round
 # trip room for the upstream provider latency plus the reserve/settle.
@@ -792,23 +845,29 @@ def proxy_request(
     path: str,
     payload: dict[str, Any],
     *,
+    token: str | None = None,
     stream: bool = False,
     timeout: float = _PROVIDER_PROXY_TIMEOUT_S,
 ):
     """Call the operator/platform provider PROXY at ``/v1/proxy/<provider>/<path>`` and return the
     KEY-FREE result.
 
-    Non-streaming: POSTs JSON via the existing internal-token transport (``_remote_json``) and returns
-    the parsed JSON dict. Streaming (``stream=True``): yields raw response bytes (the verbatim SSE
-    stream) so a caller can re-emit the provider event stream.
+    Non-streaming: POSTs JSON with the caller-bound operator capability as ``x-api-key`` and returns the
+    parsed JSON dict. Streaming (``stream=True``): yields raw response bytes (the verbatim SSE stream)
+    so a caller can re-emit the provider event stream.
 
-    The provider KEY never reaches this process: the safebox resolves it locally and forwards. Fails
-    closed (``RemoteSafeboxError`` / ``SafeboxAuthorityUnavailable``) — it NEVER falls back to a raw key.
+    The provider KEY never reaches this process: the safebox resolves it locally and forwards. The shared
+    ``TAKYON_SAFEBOX_TOKEN`` is only transport reachability; a signed ``operator.session`` or per-action
+    capability is required before any request opens. Fails closed (``RemoteSafeboxError`` /
+    ``SafeboxAuthorityUnavailable``) — it NEVER falls back to a raw key.
     """
     prov = str(provider or "").strip().strip("/")
     sub = str(path or "").strip().strip("/")
+    capability = str(token or "").strip()
     if not prov:
         raise ValueError("provider is required")
+    if not capability:
+        raise SafeboxAuthorityUnavailable("operator provider proxy requires a signed operator capability")
     route = f"/v1/proxy/{prov}" + (f"/{sub}" if sub else "")
     base = _remote_base_url()
     if not base:
@@ -817,15 +876,41 @@ def proxy_request(
             f"provider proxy requires {_SAFEBOX_REMOTE_URL_ENV}; not set on this plane"
         )
     if not stream:
-        return _remote_json("POST", route, dict(payload or {}), timeout=timeout)
-    return _proxy_stream_bytes(base + route, dict(payload or {}), timeout=timeout)
+        headers = _remote_headers(with_json=True)
+        headers["x-api-key"] = capability
+        body = json.dumps(dict(payload or {})).encode("utf-8")
+        req = urllib.request.Request(base + route, data=body, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw.strip() or exc.reason
+            try:
+                parsed = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                parsed = {"detail": detail}
+            raise RemoteSafeboxError(
+                f"Safebox proxy POST {route} failed: {parsed}",
+                status_code=exc.code,
+                payload=parsed if isinstance(parsed, dict) else {"detail": detail},
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise RemoteSafeboxError(
+                f"Safebox proxy POST {route} unreachable: {exc}",
+                status_code=504,
+                payload={"detail": "safebox_unreachable"},
+            ) from exc
+    return _proxy_stream_bytes(base + route, dict(payload or {}), token=capability, timeout=timeout)
 
 
-def _proxy_stream_bytes(url: str, payload: dict[str, Any], *, timeout: float):
+def _proxy_stream_bytes(url: str, payload: dict[str, Any], *, token: str, timeout: float):
     """Yield the verbatim response bytes from a streaming proxy POST (e.g. the Anthropic SSE stream),
-    using the same internal-token bearer as ``_remote_json``. Fails closed as ``RemoteSafeboxError`` on
-    an HTTP error status or a transport failure — never falls back to a raw key."""
+    using a caller-bound operator capability. Fails closed as ``RemoteSafeboxError`` on an HTTP error
+    status or a transport failure — never falls back to a raw key."""
     headers = _remote_headers(with_json=True)
+    headers["x-api-key"] = str(token or "").strip()
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST", headers=headers)
     try:
@@ -877,15 +962,16 @@ def _creative_credit_conn(conn=None):
     if conn is not None:
         yield conn
         return
-    from .runtime_app import resolve_database_url
+    from .runtime_app import assert_takyon_pg_role, resolve_database_url
     import psycopg
 
     raw_conn = psycopg.connect(
-        resolve_database_url(),
+        resolve_database_url(plane="safebox"),
         autocommit=True,
         prepare_threshold=None,
     )
     try:
+        assert_takyon_pg_role(raw_conn, "safebox")
         yield raw_conn
     finally:
         raw_conn.close()
@@ -1921,6 +2007,8 @@ def reconcile_app_checkout_session(
     expected_user = str(app_user_id or "").strip()
     expected_email = str(customer_email or "").strip()
     if _use_remote_authority():
+        if not expected_slug or (not expected_user and not expected_email):
+            raise ValueError("checkout recovery requires expected business and app user/email context")
         try:
             payload = _remote_json(
                 "POST",
@@ -1974,6 +2062,68 @@ def reconcile_app_checkout_session(
         "processed": result,
         "subscription": subscription_result,
     }
+
+
+def cancel_app_subscription(
+    *,
+    business_slug: str,
+    app_user_id: str,
+    session_token: str,
+    cancel_at_period_end: bool = True,
+) -> dict[str, Any]:
+    """Cancel one product-app Stripe subscription through Safebox authority."""
+    business = str(business_slug or "").strip()
+    user = str(app_user_id or "").strip()
+    token = str(session_token or "").strip()
+    if not business:
+        raise ValueError("business_slug is required")
+    if not user:
+        raise ValueError("app_user_id is required")
+    if not token:
+        raise ValueError("session_token is required")
+    if _use_remote_authority():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/stripe/app-subscription/cancel",
+                {
+                    "business_slug": business,
+                    "app_user_id": user,
+                    "session_token": token,
+                    "cancel_at_period_end": bool(cancel_at_period_end),
+                },
+                timeout=35.0,
+            )
+        except RemoteSafeboxError as exc:
+            detail = _remote_error_detail(exc)
+            message = str(detail.get("error") or detail.get("detail") or str(exc)).strip() or str(exc)
+            if exc.status_code == 404:
+                raise LookupError(message) from exc
+            if exc.status_code == 400:
+                raise ValueError(message) from exc
+            if exc.status_code == 503:
+                raise RuntimeError(message) from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+
+    from . import app_identity, app_payments, stripe_util
+
+    with _creative_credit_conn(None) as payment_conn:
+        session_user = app_identity.validate_session(payment_conn, business, token)
+        if session_user is None:
+            raise PermissionError("app_session_invalid")
+        if str(session_user.id) != user:
+            raise PermissionError("app_session_user_mismatch")
+        return app_payments.cancel_subscription(
+            payment_conn,
+            business,
+            app_user_id=user,
+            cancel_at_period_end=bool(cancel_at_period_end),
+            subscription_updater=lambda subscription_id, should_cancel_at_period_end: stripe_util.stripe_request(
+                f"subscriptions/{subscription_id}",
+                {"cancel_at_period_end": "true" if should_cancel_at_period_end else "false"},
+            ),
+        )
 
 
 def get_business_credit_balances(conn, business_slug: str) -> CreativeCreditBalances:
@@ -2667,13 +2817,19 @@ def meta_graph_forward(
 
     Forwards method/path/params to the safebox ``/v1/providers/meta/graph`` route, which re-resolves
     the real Meta system-user token LOCALLY and returns the key-free upstream JSON. The token never
-    leaves the safebox. Retained for diagnostics/compatibility; production v2 launch/control/read
-    calls use the official Meta MCP broker instead."""
+    leaves the safebox. The upstream host is fixed to graph.facebook.com; the ``host`` parameter is
+    retained only to fail closed on stale callers that try to pick a host. Retained for
+    diagnostics/compatibility; production v2 launch/control/read calls use the official Meta MCP
+    broker instead."""
+    from . import meta_graph
+
+    requested_host = str(host or meta_graph._GRAPH_HOST).strip().lower()
+    if requested_host != meta_graph._GRAPH_HOST:
+        raise ValueError("meta_graph_host_not_allowed")
     payload: dict = {
         "method": str(method or "GET"),
         "path": str(path or ""),
         "params": dict(params or {}),
-        "host": str(host or "graph.facebook.com"),
         "timeout": float(timeout),
     }
     if _use_remote_authority():
@@ -2684,8 +2840,6 @@ def meta_graph_forward(
             timeout=max(20.0, float(timeout) + 10.0),
         )
         return result if isinstance(result, dict) else {}
-
-    from . import meta_graph
 
     token = _local_meta_graph_token()
     if not token:
@@ -2700,7 +2854,7 @@ def meta_graph_forward(
         dict(params or {}),
         token=token,
         version=_local_meta_graph_version(),
-        host=str(host or "graph.facebook.com"),
+        host=meta_graph._GRAPH_HOST,
         timeout=float(timeout),
     )
 
@@ -2939,10 +3093,9 @@ def meta_mcp_list_tools(*, timeout: float = 60.0) -> dict:
 def first_env_backed_value(*keys: str) -> str:
     """Return the first non-empty env-backed value across explicit aliases.
 
-    Sensitive keys still flow through the normal Safebox authority gate. For authenticated internal
-    callers that request a short allowlist of public aliases (for example Supabase browser config),
-    this also falls back to the local env file on the Safebox host instead of failing closed on the
-    sensitive-only reader.
+    On remote runtime planes this is a read-only, deny-by-default public-config rail; provider keys,
+    DB authority, and self-authority secrets are not vendable. On the Safebox host itself, sensitive
+    authority code may still resolve local secrets from the process env / local env file.
     """
     if _use_remote_authority():
         payload = _remote_json(
@@ -2967,11 +3120,10 @@ def first_env_backed_value(*keys: str) -> str:
         try:
             value = read_env_backed_value(name)
         except KeyError:
-            # Non-sensitive public alias (for example DATABASE_URL): the
-            # sensitive reader refuses it. Resolve from the process env first —
-            # which systemd loads from .env and _save_env_value_direct keeps in
-            # sync — then the parsed file, so resolution survives an unreadable
-            # .env rather than collapsing to "" and breaking DB-URL lookup.
+            # Non-sensitive public alias (for example Supabase browser config):
+            # the sensitive reader refuses it. Resolve from the process env first,
+            # then the parsed local file. DB authority names are blocked from
+            # remote egress by the Safebox app allowlist before this local branch.
             value = str(os.environ.get(name) or env_values.get(name) or "").strip()
         if value:
             return value
@@ -3314,12 +3466,9 @@ def auth0_verify_session(*, session_token: str, now: int | None = None) -> dict[
 def save_env_backed_value(key: str, value: str) -> None:
     """Persist one sensitive env-backed value through the Safebox authority."""
     if _use_remote_authority():
-        _remote_json(
-            "POST",
-            f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
-            {"value": value},
+        raise SafeboxAuthorityUnavailable(
+            "remote env mutation is disabled; provision Safebox secrets/config out-of-band on the authority host"
         )
-        return
     name = _require_sensitive(key)
     if _managed_secret_applies(name):
         raise ManagedSecretLookupError(
@@ -3334,11 +3483,9 @@ def save_env_backed_value(key: str, value: str) -> None:
 def remove_env_backed_value(key: str) -> bool:
     """Remove one sensitive env-backed value through the Safebox authority."""
     if _use_remote_authority():
-        payload = _remote_json(
-            "DELETE",
-            f"/v1/env/{urllib.parse.quote(_require_sensitive(key), safe='')}",
+        raise SafeboxAuthorityUnavailable(
+            "remote env mutation is disabled; provision Safebox secrets/config out-of-band on the authority host"
         )
-        return bool(payload.get("removed"))
     name = _require_sensitive(key)
     if _managed_secret_applies(name):
         raise ManagedSecretLookupError(

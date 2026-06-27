@@ -1,9 +1,9 @@
-"""Phase 2 cutover-prep routes on the safebox service app (TASK B).
+"""Safebox broker routes.
 
 Pins that the safebox app still imports + boots with the new action-shaped routes registered, and that
 the /v1/token/mint route runs the authoritative two-tier validation and returns a capability token that
-verifies back to the SAME scope the safebox derived (mint -> verify roundtrip). The env routes stay
-intact (Codex STEP E deletes them later), so we also assert one of them is still mounted.
+verifies back to the SAME scope the safebox derived (mint -> verify roundtrip). The remaining env route
+assertion pins the read-only public-config compatibility surface.
 
 No live DB / no live provider: the safebox's own connection is stubbed and the identity reads are
 monkeypatched, exactly as the safebox_authz unit test does. The point here is route wiring + the
@@ -17,11 +17,12 @@ import types
 import pytest
 from starlette.testclient import TestClient
 
-from plugins.takyon import app_entitlements, app_identity, business_credits, safebox_app
+from plugins.takyon import app_entitlements, app_identity, app_payments, business_credits, safebox_app
 from plugins.takyon.safebox_capability import verify_capability
 
 _SIGNING_KEY = "safebox-only-signing-key-not-on-any-client"
 _TOKEN = "secret-internal-token"
+_OPERATOR_TOKEN = "operator-route-token-not-on-subuser"
 
 
 class _OwnerCursor:
@@ -48,6 +49,8 @@ class _OwnerConn:
 def client(monkeypatch):
     monkeypatch.setenv(safebox_app._SAFEBOX_TOKEN_ENV, _TOKEN)
     monkeypatch.setenv(safebox_app._CAP_SIGNING_KEY_ENV, _SIGNING_KEY)
+    monkeypatch.setenv(safebox_app._OPERATOR_TOKEN_ENV, _OPERATOR_TOKEN)
+    monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "testclient")
 
     # Stub the safebox's own DB connection so authorize_*_call can resolve the business owner without a
     # live Postgres. yield the same fake conn the authz reads run against.
@@ -59,8 +62,11 @@ def client(monkeypatch):
     return TestClient(safebox_app.build_safebox_app())
 
 
-def _auth():
-    return {"Authorization": f"Bearer {_TOKEN}"}
+def _auth(*, operator: bool = True):
+    headers = {"Authorization": f"Bearer {_TOKEN}"}
+    if operator:
+        headers["X-Takyon-Operator-Token"] = _OPERATOR_TOKEN
+    return headers
 
 
 def test_app_imports_and_boots(client):
@@ -78,7 +84,8 @@ def test_new_routes_are_registered_alongside_env_routes():
     assert "/v1/providers/anthropic/messages" in paths
     assert "/v1/providers/tavily/search" in paths
     assert "/v1/providers/gemini/image" in paths
-    # ...and the legacy env egress route is STILL intact (Codex STEP E removes it later, not now).
+    assert "/v1/providers/postmark/send" in paths
+    # ...and the public-config env read compatibility route remains mounted.
     assert "/v1/env/{key}" in paths
 
 
@@ -114,6 +121,53 @@ def test_operator_session_token_roundtrips_to_validated_scope(client, monkeypatc
     assert nonce and exp > 0
 
 
+def test_operator_session_token_needs_operator_client_authority(client, monkeypatch):
+    monkeypatch.delenv(safebox_app._OPERATOR_CLIENTS_ENV, raising=False)
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "operator_client_allowlist_unconfigured"
+
+
+def test_operator_session_token_needs_operator_route_token(client, monkeypatch):
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(operator=False),
+        json={
+            "business": "climblog",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
+
+
+def test_operator_session_token_refuses_non_allowlisted_client(client, monkeypatch):
+    monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "192.0.2.10")
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "operator_client_not_allowed"
+
+
 def test_generic_mint_refuses_operator_identity(client):
     resp = client.post(
         "/v1/token/mint",
@@ -140,6 +194,22 @@ def test_generic_mint_refuses_creative_audiences(client):
             "session_token": "sess-abc",
         },
     )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "unmappable_action"
+
+
+def test_generic_mint_refuses_postmark_audience(client):
+    resp = client.post(
+        "/v1/token/mint",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "postmark.send",
+            "max_cost_microusd": 1500,
+            "session_token": "sess-abc",
+        },
+    )
+
     assert resp.status_code == 400
     assert resp.json()["detail"] == "unmappable_action"
 
@@ -344,6 +414,307 @@ def test_generic_stripe_route_requires_takyon_app_scope(client, monkeypatch):
     assert resp.json()["detail"] == "stripe_scope_required"
 
 
+def test_generic_stripe_catalog_mutation_requires_operator_route_token(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", lambda *a, **k: pytest.fail("stripe called"))
+
+    resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(operator=False),
+        json={
+            "path": "products",
+            "method": "POST",
+            "params": {
+                "name": "Climblog Monthly",
+                "metadata[business]": "climblog",
+                "metadata[plan_key]": "monthly",
+                "metadata[source]": "takyon_app",
+            },
+        },
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
+
+
+def test_generic_stripe_catalog_mutation_allows_operator_route_token(client, monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def _stripe(path, params=None, *, method="POST"):
+        calls.append((path, method))
+        return {"id": "prod_123", "metadata": {"business": "climblog", "source": "takyon_app"}}
+
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(),
+        json={
+            "path": "products",
+            "method": "POST",
+            "params": {
+                "name": "Climblog Monthly",
+                "metadata[business]": "climblog",
+                "metadata[plan_key]": "monthly",
+                "metadata[source]": "takyon_app",
+            },
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert calls == [("products", "POST")]
+    assert resp.json()["id"] == "prod_123"
+
+
+def test_generic_stripe_route_cannot_mutate_subscriptions(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", lambda *a, **k: pytest.fail("stripe called"))
+    resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(),
+        json={
+            "path": "subscriptions/sub_123",
+            "method": "POST",
+            "params": {"cancel_at_period_end": "true"},
+        },
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "stripe_path_not_allowed"
+
+
+def test_generic_stripe_route_cannot_read_subscription_or_checkout_objects(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", lambda *a, **k: pytest.fail("stripe called"))
+
+    subscription_resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(operator=False),
+        json={"path": "subscriptions/sub_123", "method": "GET", "params": {}},
+    )
+    checkout_resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(operator=False),
+        json={"path": "checkout/sessions/cs_123", "method": "GET", "params": {}},
+    )
+
+    assert subscription_resp.status_code == 403
+    assert subscription_resp.json()["detail"] == "stripe_path_not_allowed"
+    assert checkout_resp.status_code == 403
+    assert checkout_resp.json()["detail"] == "stripe_path_not_allowed"
+
+
+def test_app_subscription_cancel_requires_app_session(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda *a, **k: pytest.fail("stripe called"),
+    )
+    resp = client.post(
+        "/v1/stripe/app-subscription/cancel",
+        headers=_auth(operator=False),
+        json={"business_slug": "climblog", "app_user_id": "cust_X"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "app_session_required"
+
+
+def test_app_subscription_cancel_requires_session_user_match(client, monkeypatch):
+    monkeypatch.setattr(
+        app_identity,
+        "validate_session",
+        lambda c, b, t: types.SimpleNamespace(id="other_user"),
+    )
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda *a, **k: pytest.fail("stripe called"),
+    )
+
+    resp = client.post(
+        "/v1/stripe/app-subscription/cancel",
+        headers=_auth(operator=False),
+        json={
+            "business_slug": "climblog",
+            "app_user_id": "cust_X",
+            "session_token": "sess-for-other-user",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "app_session_user_mismatch"
+
+
+def test_app_subscription_cancel_uses_session_bound_user(client, monkeypatch):
+    calls: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        app_identity,
+        "validate_session",
+        lambda c, b, t: types.SimpleNamespace(id="cust_X"),
+    )
+
+    def _cancel(conn, business, *, app_user_id, cancel_at_period_end, subscription_updater):
+        calls.append((business, app_user_id, bool(cancel_at_period_end)))
+        return {
+            "business_slug": business,
+            "app_user_id": app_user_id,
+            "stripe_subscription_id": "sub_123",
+            "cancel_at_period_end": bool(cancel_at_period_end),
+        }
+
+    monkeypatch.setattr(app_payments, "cancel_subscription", _cancel)
+
+    resp = client.post(
+        "/v1/stripe/app-subscription/cancel",
+        headers=_auth(operator=False),
+        json={
+            "business_slug": "climblog",
+            "app_user_id": "cust_X",
+            "session_token": "sess-for-cust-x",
+            "cancel_at_period_end": False,
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert calls == [("climblog", "cust_X", False)]
+    assert resp.json()["stripe_subscription_id"] == "sub_123"
+
+
+def test_app_checkout_reconcile_requires_expected_context(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda *a, **k: pytest.fail("stripe called without checkout context"),
+    )
+
+    resp = client.post(
+        "/v1/stripe/app-checkout/reconcile",
+        headers=_auth(operator=False),
+        json={"session_id": "cs_paid_123"},
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "checkout_context_required"
+
+
+class _CheckoutConn:
+    def __init__(self, intent_row):
+        self.intent_row = intent_row
+
+    def execute(self, sql, params=None):
+        sql_text = str(sql).lower()
+        if "from businesses" in sql_text:
+            return _OwnerCursor((1,))
+        if "from app_checkout_intents" in sql_text:
+            return _OwnerCursor(self.intent_row)
+        return _OwnerCursor(None)
+
+
+def _checkout_request(price_id: str = "price_123", intent_id: str = "intent_123") -> dict:
+    return {
+        "path": "checkout/sessions",
+        "method": "POST",
+        "params": {
+            "mode": "subscription",
+            "line_items[0][price]": price_id,
+            "line_items[0][quantity]": 1,
+            "success_url": "https://climblog.coscale.app/app?checkout=success",
+            "cancel_url": "https://climblog.coscale.app/app?checkout=cancel",
+            "customer_email": "customer@example.com",
+            "metadata[business]": "climblog",
+            "metadata[plan_key]": "monthly",
+            "metadata[checkout_intent_id]": intent_id,
+            "metadata[source]": "takyon_app",
+        },
+    }
+
+
+def test_generic_stripe_checkout_requires_recorded_intent(client, monkeypatch):
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutConn(None)
+
+    calls: list[str] = []
+
+    def _stripe(path, params=None, *, method="POST"):
+        calls.append(path)
+        if path == "prices/price_123":
+            return {"metadata": {"business": "climblog", "source": "takyon_app"}}
+        pytest.fail("checkout session must not be created without a recorded app intent")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "stripe_checkout_intent_required"
+    assert calls == ["prices/price_123"]
+
+
+def test_generic_stripe_checkout_requires_intent_plan_price_match(client, monkeypatch):
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutConn(("cust_X", "customer@example.com", "created", "price_expected"))
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda path, params=None, *, method="POST": (
+            {"metadata": {"business": "climblog", "source": "takyon_app"}}
+            if path == "prices/price_123"
+            else pytest.fail("checkout session must not be created for the wrong plan price")
+        ),
+    )
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "stripe_price_scope_mismatch"
+
+
+def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypatch):
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutConn(("cust_X", "customer@example.com", "created", "price_123"))
+
+    calls: list[str] = []
+
+    def _stripe(path, params=None, *, method="POST"):
+        calls.append(path)
+        if path == "prices/price_123":
+            return {"metadata": {"business": "climblog", "source": "takyon_app"}}
+        if path == "checkout/sessions":
+            return {"id": "cs_test_123", "url": "https://checkout.stripe.test/cs_test_123"}
+        pytest.fail(f"unexpected stripe path: {path}")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == "cs_test_123"
+    assert calls == ["prices/price_123", "checkout/sessions"]
+
+
+def test_generic_stripe_checkout_rejects_off_business_redirects(client, monkeypatch):
+    calls: list[str] = []
+
+    def _stripe(path, params=None, *, method="POST"):
+        calls.append(path)
+        return {"metadata": {"business": "climblog", "source": "takyon_app"}}
+
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    request = _checkout_request()
+    request["params"]["success_url"] = "https://evil.example/app?checkout=success"
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=request)
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == "stripe_redirect_not_allowed"
+    assert calls == []
+
+
 def test_postmark_route_is_magic_link_only(client, monkeypatch):
     monkeypatch.setattr(
         safebox_app.safebox, "send_postmark_email", lambda **kwargs: pytest.fail("postmark called")
@@ -359,6 +730,23 @@ def test_postmark_route_is_magic_link_only(client, monkeypatch):
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "postmark_scope_required"
+
+
+def test_postmark_legacy_route_requires_operator_route_token(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox, "send_postmark_email", lambda **kwargs: pytest.fail("postmark called")
+    )
+    resp = client.post(
+        "/v1/postmark/send",
+        headers=_auth(operator=False),
+        json={
+            "to_email": "customer@example.com",
+            "subject": "Sign in to Climblog",
+            "text_body": "This link expires in 15 minutes and can be used once. https://climblog.coscale.app/app",
+        },
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
 
 
 def test_vercel_domain_delete_refuses_non_product_domain(client, monkeypatch):
@@ -383,6 +771,31 @@ def test_storage_routes_require_business_scoped_prefix(client, monkeypatch):
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "storage_scope_required"
+
+
+def test_storage_routes_need_operator_client_authority(client, monkeypatch):
+    monkeypatch.delenv(safebox_app._OPERATOR_CLIENTS_ENV, raising=False)
+    monkeypatch.setattr(safebox_app.safebox, "storage_get", lambda *a, **k: pytest.fail("storage called"))
+    resp = client.post(
+        "/v1/storage/get",
+        headers=_auth(),
+        json={"provider": "supabase_s3", "key": "climblog/__takyon/workspace/manifests/1.json"},
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "operator_client_allowlist_unconfigured"
+
+
+def test_storage_routes_need_operator_route_token(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "storage_get", lambda *a, **k: pytest.fail("storage called"))
+    resp = client.post(
+        "/v1/storage/get",
+        headers=_auth(operator=False),
+        json={"provider": "supabase_s3", "key": "climblog/__takyon/workspace/manifests/1.json"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
 
 
 def test_storage_list_unknown_business_is_empty_for_bootstrap(client, monkeypatch):
@@ -509,6 +922,146 @@ def test_provider_route_action_audience_mismatch_is_400(client):
     )
     assert resp.status_code == 400
     assert resp.json()["detail"] == "action_audience_mismatch"
+
+
+def test_tavily_provider_route_rejects_unsupported_endpoint_before_reserve(client, monkeypatch):
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_X"))
+    monkeypatch.setattr(
+        app_entitlements, "get_active_entitlement", lambda c, b, u: types.SimpleNamespace(tier="pro")
+    )
+    monkeypatch.setattr(
+        safebox_app._UsageLedgerAdapter,
+        "reserve",
+        lambda self, scope, est: pytest.fail("reserved before endpoint validation"),
+    )
+
+    resp = client.post(
+        "/v1/providers/tavily/search",
+        headers=_auth(),
+        json={
+            "business": "climblog",
+            "action": "tavily.search",
+            "session_token": "sess-abc",
+            "payload": {"endpoint": "crawl", "operation": "search", "url": "https://example.com"},
+            "estimate_microusd": 8_000,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "invalid_provider_payload"
+
+
+def test_provider_postmark_route_reserves_and_sends_key_free(client, monkeypatch):
+    reserved: list[tuple[str, int]] = []
+    settled: list[int] = []
+    provider_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        safebox_app,
+        "_postmark_authorize_service_send",
+        lambda *, business, session_token, recipient_app_user_id: {
+            "owner_user_id": "user_A",
+            "service_app_user_id": "svc_X",
+            "recipient_app_user_id": recipient_app_user_id,
+            "recipient_email": "customer@example.com",
+            "recipient_tier": "pro",
+        },
+    )
+    monkeypatch.setattr(safebox_app._PgNonceStore, "claim", lambda self, nonce, expires_at, now: True)
+    monkeypatch.setattr(
+        safebox_app._UsageLedgerAdapter,
+        "reserve",
+        lambda self, scope, est: reserved.append((scope.app_user_id, int(est))) or {"reservation": "r1"},
+    )
+    monkeypatch.setattr(
+        safebox_app._UsageLedgerAdapter,
+        "settle",
+        lambda self, reservation, actual: settled.append(int(actual)),
+    )
+    monkeypatch.setattr(
+        safebox_app._UsageLedgerAdapter,
+        "release",
+        lambda self, reservation: pytest.fail("postmark send should settle, not release"),
+    )
+    monkeypatch.setattr(safebox_app, "_postmark_key_resolver", lambda scope: "pm-secret")
+    monkeypatch.setattr(safebox_app, "_postmark_estimate", lambda payload: (lambda scope: 1500))
+
+    def _caller(payload):
+        def _call(scope, key):
+            provider_calls.append((scope.app_user_id, key))
+            return {"message_id": "pm_123", "provider": "postmark", "status": "sent"}, 1500
+
+        return _call
+
+    monkeypatch.setattr(safebox_app, "_postmark_provider_caller", _caller)
+
+    resp = client.post(
+        "/v1/providers/postmark/send",
+        headers=_auth(operator=False),
+        json={
+            "business": "climblog",
+            "action": "postmark.send",
+            "session_token": "sess-abc",
+            "estimate_microusd": 1500,
+            "payload": {
+                "recipient_app_user_id": "cust_X",
+                "subject": "You have a new match",
+                "text_body": "Someone liked you back.",
+            },
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"message_id": "pm_123", "provider": "postmark", "status": "sent"}
+    assert reserved == [("cust_X", 1500)]
+    assert settled == [1500]
+    assert provider_calls == [("cust_X", "pm-secret")]
+
+
+def test_provider_postmark_route_rejects_caller_supplied_email_without_recipient(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app._UsageLedgerAdapter,
+        "reserve",
+        lambda self, scope, est: pytest.fail("must not reserve without safebox-resolved recipient"),
+    )
+
+    resp = client.post(
+        "/v1/providers/postmark/send",
+        headers=_auth(operator=False),
+        json={
+            "business": "climblog",
+            "action": "postmark.send",
+            "session_token": "sess-abc",
+            "estimate_microusd": 1500,
+            "payload": {
+                "to_email": "attacker-chosen@example.com",
+                "subject": "You have a new match",
+                "text_body": "Someone liked you back.",
+            },
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "recipient_app_user_id_required"
+
+
+def test_provider_postmark_route_rejects_pre_minted_token(client):
+    resp = client.post(
+        "/v1/providers/postmark/send",
+        headers=_auth(operator=False),
+        json={
+            "token": "cap.pre.minted",
+            "estimate_microusd": 1500,
+            "payload": {
+                "recipient_app_user_id": "cust_X",
+                "subject": "You have a new match",
+                "text_body": "Someone liked you back.",
+            },
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "postmark_requires_service_session"
 
 
 def test_provider_route_malformed_payload_is_400_not_500(client, monkeypatch):

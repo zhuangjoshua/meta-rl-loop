@@ -155,6 +155,8 @@ def test_project_customer_access_reads_plan_metadata(monkeypatch):
     assert snapshot.subscription_id == "sub_123"
     assert snapshot.plan_version == 3
     assert snapshot.degraded is False
+    assert snapshot.metadata["projection"] == "openmeter"
+    assert "authority" not in snapshot.metadata
 
 
 # --- OpenMeter-first migration: billing anchor + subscription correlation + fail-open grace ---
@@ -236,7 +238,7 @@ def test_ensure_subscription_carries_stripe_subscription_id(monkeypatch):
 
 def test_project_customer_access_degraded_when_unreadable_and_no_subscription(monkeypatch):
     """Fail-OPEN grace: a 404 on entitlement-access with NO active subscription is NOT an
-    authoritative 'no access' — it is degraded, so the projection must preserve last-known-good."""
+    explicit 'no access' — it is degraded, so the projection must preserve last-known-good."""
     monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
     monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
     monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)
@@ -246,11 +248,13 @@ def test_project_customer_access_degraded_when_unreadable_and_no_subscription(mo
     snapshot = openmeter_backend.project_customer_access(business_slug="acme", app_user_id="user-123")
     assert snapshot.degraded is True
     assert snapshot.has_access is False
+    assert snapshot.metadata["projection"] == "openmeter"
+    assert "authority" not in snapshot.metadata
 
 
-def test_project_customer_access_active_subscription_is_authoritative_access(monkeypatch):
-    """An active subscription confers access even if entitlement-access 404s — and that is an
-    authoritative positive, NOT degraded."""
+def test_project_customer_access_active_subscription_is_definitive_access(monkeypatch):
+    """An active subscription mirrors access even if entitlement-access 404s — and that is a
+    definitive positive, NOT degraded."""
     monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
     monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
     monkeypatch.setattr(
@@ -267,7 +271,7 @@ def test_project_customer_access_active_subscription_is_authoritative_access(mon
 def test_project_customer_access_degraded_on_200_without_explicit_access(monkeypatch):
     """Fail-OPEN grace covers more than 404: a 200 that does NOT carry an explicit access decision
     for this feature (empty body, or an envelope missing the feature — the live Kong-misroute case)
-    is NON-authoritative => degraded=True, preserve last-known-good. (raw_access is {} here, not None.)"""
+    is non-definitive => degraded=True, preserve last-known-good. (raw_access is {} here, not None.)"""
     monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
     monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
     monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)
@@ -277,8 +281,8 @@ def test_project_customer_access_degraded_on_200_without_explicit_access(monkeyp
     assert snap.has_access is False
 
 
-def test_project_customer_access_explicit_no_access_is_authoritative(monkeypatch):
-    """A 200 that explicitly says has_access=false IS authoritative (degraded=False) — safe to retire."""
+def test_project_customer_access_explicit_no_access_is_definitive(monkeypatch):
+    """A 200 that explicitly says has_access=false IS definitive (degraded=False) — safe to retire."""
     monkeypatch.setattr(openmeter_backend, "_require_enabled", lambda: None)
     monkeypatch.setattr(openmeter_backend, "_customer_by_key", lambda key: {"id": "cust_1", "key": key})
     monkeypatch.setattr(openmeter_backend, "current_subscription", lambda **kw: None)

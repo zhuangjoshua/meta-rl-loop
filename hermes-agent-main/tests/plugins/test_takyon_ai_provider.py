@@ -7,7 +7,9 @@ from plugins.takyon.ai_provider import (
     anthropic_payload,
     anthropic_env,
     anthropic_key,
+    call_tavily,
     microusd_cost,
+    normalize_tavily_endpoint_operation,
     tavily_request_microusd,
     TavilyPricingUnavailable,
 )
@@ -78,3 +80,23 @@ def test_tavily_request_microusd_uses_exact_catalog_entries():
 def test_tavily_request_microusd_blocks_unknown_operation():
     with pytest.raises(TavilyPricingUnavailable):
         tavily_request_microusd("imaginary")
+
+
+def test_tavily_endpoint_operation_is_fixed_to_search_or_extract():
+    assert normalize_tavily_endpoint_operation("search", "search") == ("search", "search")
+    assert normalize_tavily_endpoint_operation("search", "search_advanced") == (
+        "search",
+        "search_advanced",
+    )
+    assert normalize_tavily_endpoint_operation("extract", "extract") == ("extract", "extract")
+    with pytest.raises(ValueError):
+        normalize_tavily_endpoint_operation("crawl", "crawl")
+
+
+def test_call_tavily_rejects_unsupported_endpoint_before_socket(monkeypatch):
+    monkeypatch.setattr(
+        "plugins.takyon.ai_provider.urllib.request.urlopen",
+        lambda *a, **k: pytest.fail("opened socket"),
+    )
+    with pytest.raises(ValueError, match="unsupported_tavily_operation"):
+        call_tavily("crawl", {"url": "https://example.com", "operation": "crawl"}, "tvly-key")

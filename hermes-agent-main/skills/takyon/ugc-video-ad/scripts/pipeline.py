@@ -14,25 +14,28 @@ functions that need them so the live build can fail only when a provider-backed 
 
 Provider credentials: on a RUNTIME plane the creative gateway injects the safebox proxy env
 (TAKYON_CREATIVE_VIA_PROXY=1 + TAKYON_SAFEBOX_URL + TAKYON_SAFEBOX_TOKEN); the OpenAI image and FAL
-Kling calls then route through the safebox PROXY and the raw OPENAI_API_KEY / FAL_KEY is NEVER read
-on that plane (see _proxy_base_and_token). In local dev (proxy env absent) the keys are read from
-the environment / a local .env ONLY (never hardcoded): OPENAI_API_KEY for gpt-image-2, FAL_KEY for
-Kling via fal.ai.
+Kling calls then route through the safebox creative gate and the raw OPENAI_API_KEY / FAL_KEY is NEVER read
+on that plane (see _proxy_base_and_token). Direct local-provider debugging requires explicit key
+values passed by the caller; this module does not read provider keys from ambient env or local .env.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 
-# fal endpoint for Kling v3 Pro image-to-video. Override with $FAL_KLING_ENDPOINT.
+# fal endpoint for local-dev Kling v3 Pro image-to-video. Production proxy mode ignores overrides and
+# calls the fixed Safebox route instead of passing arbitrary FAL paths through authority.
 KLING_ENDPOINT = os.environ.get(
     "FAL_KLING_ENDPOINT", "fal-ai/kling-video/v3/pro/image-to-video"
 )
+KLING_PROXY_ROUTE = "/v1/providers/fal/kling-image-to-video"
 # 9:16 portrait size accepted by gpt-image-2 (matches app/service.py _ASPECT_SIZES).
 IMAGE_SIZE_9_16 = "864x1536"
+PROVIDER_SECRET_ENV_NAMES = {"OPENAI_API_KEY", "FAL_KEY", "FAL_API_KEY"}
 
 
 # ---------------------------------------------------------------------------
@@ -207,11 +210,14 @@ def compile_clip_prompt(beats: list[Beat], persona: Persona) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Credentials: env / local .env only. Never hardcode keys.
+# Local config. Provider keys are explicit values only; never ambient env.
 # ---------------------------------------------------------------------------
 def load_dotenv(path: str = ".env") -> None:
-    """Populate os.environ from a local .env (KEY=VALUE) without overwriting
-    anything already set. No-op if the file is absent."""
+    """Populate os.environ from a local .env for non-secret knobs only.
+
+    Provider secrets stay out of the process env for this business skill; live
+    renders use the Safebox gate and direct local debugging passes explicit keys.
+    """
     if not os.path.isfile(path):
         return
     with open(path, "r", encoding="utf-8") as f:
@@ -221,18 +227,32 @@ def load_dotenv(path: str = ".env") -> None:
                 continue
             k, v = line.split("=", 1)
             k, v = k.strip(), v.strip().strip('"').strip("'")
+            if k in PROVIDER_SECRET_ENV_NAMES:
+                continue
             if k and k not in os.environ:
                 os.environ[k] = v
 
 
-def require_env(name: str) -> str:
-    val = os.environ.get(name)
+def require_explicit_secret(name: str, value: str | None) -> str:
+    val = str(value or "").strip()
     if not val:
         raise RuntimeError(
-            f"{name} is not set. Put it in the environment or a local .env "
-            f"(never hardcode it in source)."
+            f"{name} is not available. Use business_ugc_ad_generate for live Takyon renders "
+            "or pass an explicit local key file for direct provider debugging."
         )
     return val
+
+
+@contextlib.contextmanager
+def explicit_fal_key_env(fal_key: str | None):
+    """Temporarily expose an explicit local FAL key for fal_client only."""
+    key = require_explicit_secret("FAL_KEY", fal_key)
+    os.environ.pop("FAL_KEY", None)
+    os.environ["FAL_KEY"] = key
+    try:
+        yield
+    finally:
+        os.environ.pop("FAL_KEY", None)
 
 
 # ---------------------------------------------------------------------------
@@ -246,15 +266,15 @@ def require_env(name: str) -> str:
 # TAKYON_CREATIVE_VIA_PROXY=1 + TAKYON_SAFEBOX_URL + TAKYON_SAFEBOX_TOKEN). When
 # the flag + URL + capability are present, the OpenAI image call and the FAL
 # Kling call route through the GATED provider routes (/v1/providers/openai/images,
-# /v1/providers/fal/{path}) presenting that capability in the request body; the
+# /v1/providers/fal/kling-image-to-video) presenting that capability in the request body; the
 # safebox VERIFIES the capability, resolves the real provider key LOCALLY, and
 # forwards, so the raw OPENAI_API_KEY / FAL_KEY is NEVER read on this plane. The
 # gated route returns the verbatim provider JSON, so the rest of this file
 # handles the SAME response shapes as the direct path.
 #
 # Fail closed: when the gate env is set, a failure surfaces — there is no raw-key
-# fallback. The direct os.environ / fal_client path runs ONLY in local dev (gate
-# env absent), where this host is its own authority.
+# fallback. The direct provider path is explicit-key only and intended for local
+# debugging (gate env absent).
 # ---------------------------------------------------------------------------
 _VIA_PROXY_ENV = "TAKYON_CREATIVE_VIA_PROXY"
 _SAFEBOX_URL_ENV = "TAKYON_SAFEBOX_URL"
@@ -336,13 +356,14 @@ def generate_image(
     quality: str = "high",
     model: str = "gpt-image-2",
     output_format: str = "png",
+    api_key: str | None = None,
 ) -> str:
     """Generate one reference still and write it to out_path. Returns out_path.
 
     On a runtime plane (safebox proxy env injected by the gateway) the OpenAI
-    image call routes through the safebox PROXY (no raw key on this plane); in
-    local dev it calls OpenAI directly with OPENAI_API_KEY. Both paths return the
-    same OpenAI JSON shape, so decoding is shared."""
+    image call routes through the safebox PROXY (no raw key on this plane); direct
+    local debugging requires an explicit key value. Both paths return the same
+    OpenAI JSON shape, so decoding is shared."""
     import base64
 
     body = {
@@ -375,7 +396,7 @@ def generate_image(
 
     import httpx
 
-    api_key = require_env("OPENAI_API_KEY")
+    api_key = require_explicit_secret("OPENAI_API_KEY", api_key)
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
     with httpx.Client(timeout=300) as client:
@@ -417,21 +438,21 @@ def _file_to_data_uri(path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def upload_image(src: str) -> str:
+def upload_image(src: str, *, fal_key: str | None = None) -> str:
     """Return an image reference FAL can consume. Passes through http(s) URLs.
 
     On a runtime plane (safebox proxy env set) a local file is encoded as a
     base64 data URI (FAL accepts data URIs as image inputs) so we never need the
-    raw FAL key for a CDN upload. In local dev the file is uploaded via
-    fal_client with FAL_KEY."""
+    raw FAL key for a CDN upload. Direct local debugging uploads via fal_client
+    with an explicit key value."""
     if src.startswith(("http://", "https://", "data:")):
         return src
     if _proxy_base_and_token() is not None:
         return _file_to_data_uri(src)
     import fal_client
 
-    require_env("FAL_KEY")
-    return fal_client.upload_file(src)
+    with explicit_fal_key_env(fal_key):
+        return fal_client.upload_file(src)
 
 
 def generate_clip(
@@ -444,15 +465,16 @@ def generate_clip(
     end_image_url: str | None = None,
     endpoint: str = KLING_ENDPOINT,
     extra_args: dict | None = None,
+    fal_key: str | None = None,
 ) -> str:
     """Run one Kling i2v generation. Returns the resulting video URL.
 
     On a credit-gated plane (safebox gate env set) the call routes through the
-    GATED safebox route (POST /v1/providers/fal/<endpoint>) presenting the
-    creative capability; the safebox forwards to https://fal.run/<endpoint> with
+    GATED safebox route (POST /v1/providers/fal/kling-image-to-video) presenting the
+    creative capability; the safebox forwards to its fixed Kling upstream with
     the real key and returns the verbatim FAL JSON ({"video": {"url": ...}}) — the
-    SAME shape fal_client.subscribe returns. In local dev it calls
-    fal_client.subscribe directly with FAL_KEY."""
+    SAME shape fal_client.subscribe returns. Direct local debugging calls
+    fal_client.subscribe with an explicit key value."""
     args: dict = {
         "prompt": prompt,
         "start_image_url": image_url,
@@ -466,15 +488,14 @@ def generate_clip(
         args.update(extra_args)
 
     if _proxy_base_and_token() is not None:
-        # The gated safebox FAL route forwards to the synchronous fal.run/<path> endpoint, which
-        # returns the final result directly (no client-side queue polling). Raw FAL_KEY is never read
-        # here.
-        result = _proxy_post(f"/v1/providers/fal/{endpoint}", args)
+        # The gated safebox FAL route is deliberately model-specific; do not pass `endpoint` through
+        # the authority boundary. Raw FAL_KEY is never read here.
+        result = _proxy_post(KLING_PROXY_ROUTE, args)
     else:
         import fal_client
 
-        require_env("FAL_KEY")
-        result = fal_client.subscribe(endpoint, arguments=args)
+        with explicit_fal_key_env(fal_key):
+            result = fal_client.subscribe(endpoint, arguments=args)
     url = ((result or {}).get("video") or {}).get("url")
     if not url:
         raise RuntimeError(f"fal returned no video url. Raw response: {result}")

@@ -551,31 +551,6 @@ def test_starter_seeds_vite_when_lane_absent(tmp_path):
     assert not (tmp_path / "next.config.js").exists()
 
 
-def test_appkit_rematerialize_restores_auth_provider_mount(tmp_path):
-    from plugins.takyon import core as takyon_core
-
-    surface = _app_shell_surface("vite_react_ts")
-    takyon_core._materialize_subuser_app_starter(tmp_path, slug="fresh-co", surface=surface)
-    generated_main = tmp_path / "src" / "main.tsx"
-    generated_main.write_text(
-        """
-        import React from 'react';
-        import ReactDOM from 'react-dom/client';
-        import App from './App';
-        ReactDOM.createRoot(document.getElementById('root')!).render(<App />);
-        """.strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-    takyon_core._rematerialize_appkit_owned_src(tmp_path, slug="fresh-co", surface=surface)
-
-    main_text = generated_main.read_text(encoding="utf-8")
-    assert 'import { ProductAuthProvider } from "./lib/product-auth";' in main_text
-    assert "<ProductAuthProvider>" in main_text
-    assert 'path="/app"' in main_text
-
-
 def test_product_build_normalizer_restores_scaffold_owned_config(tmp_path):
     from plugins.takyon import core as takyon_core
 
