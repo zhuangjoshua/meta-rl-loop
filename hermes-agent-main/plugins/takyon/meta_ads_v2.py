@@ -201,12 +201,25 @@ def _read_receipt_if_done(receipt_abs: Path, idempotency_key: str) -> dict[str, 
 def _write_receipt(business: str, receipt_rel: str, receipt: Mapping[str, Any]) -> None:
     store = core._store()
     abs_path = store._resolve_business_file(business, receipt_rel)
-    core._atomic_write_text(abs_path, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+    receipt_text = json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"
+    core._atomic_write_text(abs_path, receipt_text)
     # Re-read what we wrote before any success is claimed (truthful-receipt rule).
     reread = json.loads(abs_path.read_text(encoding="utf-8"))
     if reread.get("idempotency_key") != receipt.get("idempotency_key"):
         raise core.TakyonError(f"receipt write verification failed for {receipt_rel}")
-    store._sync_business_workspace_remote(business)
+    plan_rel = str(receipt.get("plan_path") or "").strip()
+    plan_text = ""
+    if plan_rel:
+        plan_abs = store._resolve_business_file(business, plan_rel, sync=False)
+        if plan_abs.is_file():
+            plan_text = plan_abs.read_text(encoding="utf-8")
+
+    def _reassert_written_files(root: Path) -> None:
+        if plan_rel and plan_text:
+            core._atomic_write_text(root / plan_rel, plan_text)
+        core._atomic_write_text(root / receipt_rel, receipt_text)
+
+    store._sync_business_workspace_remote(business, before_attempt=_reassert_written_files)
 
 
 def _is_test_mode(store: Any, business: str) -> bool:
@@ -257,6 +270,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
     """
     business = ""
     receipt_rel = ""
+    plan_rel = ""
     created_ids: dict[str, str] = {}
     reservation_key = ""
     credit_metadata: dict[str, Any] = {}
@@ -602,6 +616,8 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                     **base,
                     "idempotency_key": str(args.get("idempotency_key") or ""),
                     "business": business,
+                    "slug": str(args.get("slug") or base.get("slug") or ""),
+                    "plan_path": plan_rel or base.get("plan_path"),
                     "success": False,
                     "status": "partial_failed",
                     "external_side_effects": "partial",
@@ -611,10 +627,7 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                     "credits_released": credits_released,
                     "updated_at": core._now(),
                 }
-                core._atomic_write_text(
-                    receipt_abs, json.dumps(partial, ensure_ascii=False, indent=2) + "\n"
-                )
-                store._sync_business_workspace_remote(business)
+                _write_receipt(business, receipt_rel, partial)
             except Exception:
                 pass
         return core.tool_error(str(exc), success=False, ids=created_ids or None)
