@@ -182,6 +182,17 @@ def _storage_business_slug(path: str) -> str:
     return _require_existing_business(raw.split("/", 1)[0])
 
 
+def _require_safe_media_id(value: str) -> str:
+    media_id = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", media_id):
+        raise HTTPException(status_code=403, detail="unsafe_media_id")
+    return media_id
+
+
+def _app_media_storage_key(business: str, media_id: str) -> str:
+    return f"media/{_require_safe_slug(business)}/{_require_safe_media_id(media_id)}"
+
+
 def _domain_business_slug(domain: str) -> str:
     name = str(domain or "").strip().lower().strip(".")
     base = str(
@@ -871,6 +882,22 @@ class _StorageListBody(BaseModel):
     prefix: str
 
 
+class _AppMediaPutBody(BaseModel):
+    provider: str
+    business: str
+    session_token: str
+    media_id: str
+    data_b64: str
+    digest: str
+
+
+class _AppMediaKeyBody(BaseModel):
+    provider: str
+    business: str
+    session_token: str
+    media_id: str
+
+
 class _OpenCustodyAccountBody(BaseModel):
     user_id: str
     currency: str | None = "usd"
@@ -1235,6 +1262,57 @@ def _first_env_egress_value(names: Iterable[str]) -> str:
         if value:
             return value
     return ""
+
+
+def _authorize_app_media_session(*, business: str, session_token: str) -> str:
+    from . import app_identity
+
+    business = _require_safe_slug(business)
+    token = str(session_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=403, detail="product_session_token_required")
+    with _safebox_db_conn() as conn:
+        user = app_identity.validate_session(conn, business, token)
+    if user is None:
+        raise HTTPException(status_code=403, detail="invalid_session")
+    app_user_id = str(getattr(user, "id", "") or "").strip()
+    if not app_user_id:
+        raise HTTPException(status_code=403, detail="invalid_session")
+    return app_user_id
+
+
+def _authorize_app_media_row(*, business: str, session_token: str, media_id: str) -> str:
+    from . import app_identity
+
+    business = _require_safe_slug(business)
+    media_id = _require_safe_media_id(media_id)
+    token = str(session_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=403, detail="product_session_token_required")
+    with _safebox_db_conn() as conn:
+        user = app_identity.validate_session(conn, business, token)
+        if user is None:
+            raise HTTPException(status_code=403, detail="invalid_session")
+        app_user_id = str(getattr(user, "id", "") or "").strip()
+        if not app_user_id:
+            raise HTTPException(status_code=403, detail="invalid_session")
+        row = conn.execute(
+            """
+            select app_user_id, storage_key
+              from app_media
+             where business_slug = %s
+               and media_id = %s
+             limit 1
+            """,
+            (business, media_id),
+        ).fetchone()
+    if row is None or str(_db_row_value(row, 0, "app_user_id") or "") != app_user_id:
+        raise HTTPException(status_code=404, detail="media_not_found")
+    key = str(_db_row_value(row, 1, "storage_key") or "").strip()
+    expected = _app_media_storage_key(business, media_id)
+    if key != expected:
+        raise HTTPException(status_code=403, detail="app_media_storage_scope_mismatch")
+    return expected
 
 
 def _cloudflare_aig_config() -> tuple[str, str, str] | None:
@@ -2662,6 +2740,73 @@ def build_safebox_app() -> FastAPI:
             return safebox.storage_put(provider, body.key, data, digest=body.digest)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/app-media/put")
+    def app_media_put(
+        body: _AppMediaPutBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        business = _require_safe_slug(body.business)
+        media_id = _require_safe_media_id(body.media_id)
+        _authorize_app_media_session(business=business, session_token=body.session_token)
+        try:
+            data = base64.b64decode(str(body.data_b64 or ""), validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid_base64") from exc
+        try:
+            safebox.storage_put(provider, _app_media_storage_key(business, media_id), data, digest=body.digest)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"provider": provider, "business": business, "media_id": media_id, "stored": True}
+
+    @app.post("/v1/app-media/get")
+    def app_media_get(
+        body: _AppMediaKeyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        business = _require_safe_slug(body.business)
+        media_id = _require_safe_media_id(body.media_id)
+        key = _authorize_app_media_row(
+            business=business,
+            session_token=body.session_token,
+            media_id=media_id,
+        )
+        try:
+            data = safebox.storage_get(provider, key)
+        except Exception as exc:
+            if type(exc).__name__ == "ObjectNotFound":
+                raise HTTPException(status_code=404, detail="object_not_found") from exc
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "provider": provider,
+            "business": business,
+            "media_id": media_id,
+            "data_b64": base64.b64encode(data).decode("ascii"),
+        }
+
+    @app.post("/v1/app-media/delete")
+    def app_media_delete(
+        body: _AppMediaKeyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        provider = _storage_provider(body.provider)
+        business = _require_safe_slug(body.business)
+        media_id = _require_safe_media_id(body.media_id)
+        key = _authorize_app_media_row(
+            business=business,
+            session_token=body.session_token,
+            media_id=media_id,
+        )
+        try:
+            safebox.storage_delete(provider, key)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"provider": provider, "business": business, "media_id": media_id, "deleted": True}
 
     @app.post("/v1/providers/composio/forward")
     def provider_composio_forward(

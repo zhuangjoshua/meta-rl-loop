@@ -668,6 +668,115 @@ def storage_delete(provider: str, key: str) -> dict[str, Any]:
     return {"provider": str(provider or ""), "key": safe_key, "deleted": True}
 
 
+def _app_media_component(value: str, *, field: str) -> str:
+    text = str(value or "").strip()
+    if (
+        not text
+        or len(text) > 128
+        or not text[0].isalnum()
+        or any(not (ch.isalnum() or ch in {"_", "-"}) for ch in text)
+    ):
+        raise ValueError(f"unsafe {field}")
+    return text
+
+
+def _app_media_storage_key(business: str, media_id: str) -> str:
+    return (
+        "media/"
+        + _app_media_component(business.lower(), field="business")
+        + "/"
+        + _app_media_component(media_id, field="media_id")
+    )
+
+
+def app_media_put(
+    provider: str,
+    *,
+    business: str,
+    session_token: str,
+    media_id: str,
+    data: bytes,
+    digest: str,
+) -> dict[str, Any]:
+    """Store product media through the app-session-scoped Safebox route.
+
+    Unlike generic ``/v1/storage/*``, this path never sends operator authority and never lets the
+    caller supply an object key. The safebox validates the product session and constructs
+    ``media/<business>/<media_id>`` itself.
+    """
+    business_value = _app_media_component(business.lower(), field="business")
+    media_value = _app_media_component(media_id, field="media_id")
+    if len(data or b"") > 256 * 1024 * 1024:
+        raise ValueError("storage object too large")
+    if _remote_enabled() and not _local_authority_enabled():
+        return _remote_json(
+            "POST",
+            "/v1/app-media/put",
+            {
+                "provider": str(provider or ""),
+                "business": business_value,
+                "session_token": str(session_token or ""),
+                "media_id": media_value,
+                "data_b64": base64.b64encode(data or b"").decode("ascii"),
+                "digest": str(digest or ""),
+            },
+            timeout=120.0,
+        )
+    key = _app_media_storage_key(business_value, media_value)
+    _storage_backend(provider).put(key, data or b"", digest=str(digest or ""))
+    return {"provider": str(provider or ""), "business": business_value, "media_id": media_value, "stored": True}
+
+
+def app_media_get(
+    provider: str,
+    *,
+    business: str,
+    session_token: str,
+    media_id: str,
+) -> bytes:
+    business_value = _app_media_component(business.lower(), field="business")
+    media_value = _app_media_component(media_id, field="media_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/app-media/get",
+            {
+                "provider": str(provider or ""),
+                "business": business_value,
+                "session_token": str(session_token or ""),
+                "media_id": media_value,
+            },
+            timeout=120.0,
+        )
+        return base64.b64decode(str(payload.get("data_b64") or ""))
+    return _storage_backend(provider).get(_app_media_storage_key(business_value, media_value))
+
+
+def app_media_delete(
+    provider: str,
+    *,
+    business: str,
+    session_token: str,
+    media_id: str,
+) -> dict[str, Any]:
+    business_value = _app_media_component(business.lower(), field="business")
+    media_value = _app_media_component(media_id, field="media_id")
+    if _remote_enabled() and not _local_authority_enabled():
+        return _remote_json(
+            "POST",
+            "/v1/app-media/delete",
+            {
+                "provider": str(provider or ""),
+                "business": business_value,
+                "session_token": str(session_token or ""),
+                "media_id": media_value,
+            },
+            timeout=35.0,
+        )
+    _storage_backend(provider).delete(_app_media_storage_key(business_value, media_value))
+    return {"provider": str(provider or ""), "business": business_value, "media_id": media_value, "deleted": True}
+
+
 def storage_list_digests(provider: str, prefix: str) -> dict[str, str]:
     if _remote_enabled() and not _local_authority_enabled():
         payload = _remote_json(

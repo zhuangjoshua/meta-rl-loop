@@ -141,11 +141,15 @@ def test_remote_json_adds_operator_token_only_for_operator_routes(monkeypatch):
 
     safebox._remote_json("POST", "/v1/operator/session-token", {"x": 1}, timeout=5)
     safebox._remote_json("POST", "/v1/postmark/send", {"x": 1}, timeout=5)
+    safebox._remote_json("POST", "/v1/storage/put", {"x": 1}, timeout=5)
+    safebox._remote_json("POST", "/v1/app-media/put", {"x": 1}, timeout=5)
     safebox._remote_json("POST", "/v1/providers/anthropic/messages", {"x": 1}, timeout=5)
 
     assert seen[0] == ("http://10.0.0.2:8000/v1/operator/session-token", "operator-route-token")
     assert seen[1] == ("http://10.0.0.2:8000/v1/postmark/send", "operator-route-token")
-    assert seen[2] == ("http://10.0.0.2:8000/v1/providers/anthropic/messages", None)
+    assert seen[2] == ("http://10.0.0.2:8000/v1/storage/put", "operator-route-token")
+    assert seen[3] == ("http://10.0.0.2:8000/v1/app-media/put", None)
+    assert seen[4] == ("http://10.0.0.2:8000/v1/providers/anthropic/messages", None)
 
 
 def test_remote_json_operator_route_requires_operator_token(monkeypatch):

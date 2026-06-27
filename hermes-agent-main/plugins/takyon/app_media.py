@@ -15,9 +15,11 @@ from typing import Any, Mapping
 
 try:
     from . import app_actions as _app_actions
+    from . import safebox as _safebox
     from . import storage as _storage
 except Exception:  # pragma: no cover - import shape depends on caller
     from plugins.takyon import app_actions as _app_actions
+    from plugins.takyon import safebox as _safebox
     from plugins.takyon import storage as _storage
 
 is_service_email = _app_actions.is_service_email
@@ -71,6 +73,81 @@ def _now() -> str:
 
 def _backend(store: Any):
     return store._workspace_storage_backend()
+
+
+def _safebox_media_provider(backend: Any) -> str | None:
+    if isinstance(backend, _storage.SafeboxStorageBackend):
+        return str(getattr(backend, "name", "") or "") or None
+    return None
+
+
+def _put_media_blob(
+    store: Any,
+    *,
+    business_slug: str,
+    session_token: str | None,
+    media_id: str,
+    content: bytes,
+    digest: str,
+) -> None:
+    backend = _backend(store)
+    provider = _safebox_media_provider(backend)
+    if provider:
+        if not str(session_token or "").strip():
+            raise AppMediaError("app session required for remote media storage")
+        _safebox.app_media_put(
+            provider,
+            business=business_slug,
+            session_token=str(session_token or ""),
+            media_id=media_id,
+            data=content,
+            digest=digest,
+        )
+        return
+    backend.put(f"media/{business_slug}/{media_id}", content, digest=digest)
+
+
+def _get_media_blob(
+    store: Any,
+    *,
+    business_slug: str,
+    session_token: str,
+    media_id: str,
+    storage_key: str,
+) -> bytes:
+    backend = _backend(store)
+    provider = _safebox_media_provider(backend)
+    if provider:
+        return _safebox.app_media_get(
+            provider,
+            business=business_slug,
+            session_token=session_token,
+            media_id=media_id,
+        )
+    return backend.get(storage_key)
+
+
+def _delete_media_blob(
+    store: Any,
+    *,
+    business_slug: str,
+    session_token: str | None,
+    media_id: str,
+    storage_key: str,
+) -> None:
+    backend = _backend(store)
+    provider = _safebox_media_provider(backend)
+    if provider:
+        if not str(session_token or "").strip():
+            raise AppMediaError("app session required for remote media storage")
+        _safebox.app_media_delete(
+            provider,
+            business=business_slug,
+            session_token=str(session_token or ""),
+            media_id=media_id,
+        )
+        return
+    backend.delete(storage_key)
 
 
 def _resolve_uploader(
@@ -453,7 +530,14 @@ def store_media(
     try:
         if not test_mode:
             digest = hashlib.sha256(content).hexdigest()
-            _backend(store).put(storage_key, content, digest=digest)
+            _put_media_blob(
+                store,
+                business_slug=business_slug,
+                session_token=session_token,
+                media_id=media_id,
+                content=content,
+                digest=digest,
+            )
         _insert_media_row(
             store,
             business_slug=business_slug,
@@ -541,7 +625,13 @@ def get_media(store: Any, *, business_slug: str, media_id: str, session_token: s
             raise AppMediaError("media not found")
         if str(row_dict.get("app_user_id") or "") != str((getattr(user, "id", None) or user.get("id") or "")):
             raise AppMediaError("media not found")
-    content = _backend(store).get(str(row_dict["storage_key"]))
+    content = _get_media_blob(
+        store,
+        business_slug=business_slug,
+        session_token=token,
+        media_id=str(media_id or "").strip(),
+        storage_key=str(row_dict["storage_key"]),
+    )
     return {"content": content, "mime": str(row_dict["mime"]), "size_bytes": int(row_dict["size_bytes"])}
 
 
@@ -565,7 +655,13 @@ def delete_media(
     if str(row["app_user_id"]) != str(app_user_id):
         raise AppMediaError("only the uploader can delete this media")
     try:
-        _backend(store).delete(str(row["storage_key"]))
+        _delete_media_blob(
+            store,
+            business_slug=business_slug,
+            session_token=session_token,
+            media_id=str(media_id),
+            storage_key=str(row["storage_key"]),
+        )
     except Exception:
         pass  # row deletion is authoritative; orphaned bytes are swept separately
     _delete_media_row(

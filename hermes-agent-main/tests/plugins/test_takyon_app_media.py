@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.takyon import app_media
+from plugins.takyon import app_media, safebox, storage
 from plugins.takyon.core import _hash_token, _now
 
 
@@ -131,6 +131,45 @@ def test_store_with_session_token_resolves_uploader(tmp_path):
     assert row["app_user_id"] == "u1"
 
 
+def test_safebox_backend_uses_app_media_route_not_generic_storage(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store._backend = storage.SafeboxStorageBackend("supabase_s3")
+    now = _now()
+    store._conn.execute(
+        "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, revoked_at, created_at) "
+        "VALUES ('s1', 'biz', 'u1', ?, ?, NULL, ?)",
+        (_hash_token("tok-u1"), "2099-01-01T00:00:00+00:00", now),
+    )
+    store._conn.commit()
+    calls = {}
+
+    def fail_generic(*_args, **_kwargs):
+        raise AssertionError("generic storage route must not be used for app media")
+
+    def fake_app_media_put(provider, *, business, session_token, media_id, data, digest):
+        calls["put"] = {
+            "provider": provider,
+            "business": business,
+            "session_token": session_token,
+            "media_id": media_id,
+            "data": data,
+            "digest": digest,
+        }
+        return {"stored": True}
+
+    monkeypatch.setattr(safebox, "storage_put", fail_generic)
+    monkeypatch.setattr(safebox, "app_media_put", fake_app_media_put)
+
+    result = _upload(store, session_token="tok-u1")
+
+    assert calls["put"]["provider"] == "supabase_s3"
+    assert calls["put"]["business"] == "biz"
+    assert calls["put"]["session_token"] == "tok-u1"
+    assert calls["put"]["media_id"] == result["media_id"]
+    assert calls["put"]["data"] == PNG
+    assert calls["put"]["digest"]
+
+
 def test_test_mode_suppresses_backend_write(tmp_path):
     store = _store(tmp_path)
     result = _upload(store, test_mode=True)
@@ -201,6 +240,50 @@ def test_get_media_returns_bytes_and_mime(tmp_path):
 
     assert fetched["mime"] == "image/png"
     assert fetched["content"] == PNG
+
+
+def test_safebox_backend_get_and_delete_use_app_media_routes(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store._backend = storage.SafeboxStorageBackend("supabase_s3")
+    now = _now()
+    store._conn.execute(
+        "INSERT INTO app_sessions (id, business_slug, app_user_id, token_hash, expires_at, revoked_at, created_at) "
+        "VALUES ('s1', 'biz', 'u1', ?, ?, NULL, ?)",
+        (_hash_token("tok-u1"), "2099-01-01T00:00:00+00:00", now),
+    )
+    store._conn.execute(
+        "INSERT INTO app_media (id, business_slug, app_user_id, media_id, filename, mime, size_bytes, storage_key, created_at) "
+        "VALUES ('row1', 'biz', 'u1', 'm1', 'pic.png', 'image/png', ?, 'media/biz/m1', ?)",
+        (len(PNG), now),
+    )
+    store._conn.commit()
+    calls = []
+
+    def fail_generic(*_args, **_kwargs):
+        raise AssertionError("generic storage route must not be used for app media")
+
+    def fake_app_media_get(provider, *, business, session_token, media_id):
+        calls.append(("get", provider, business, session_token, media_id))
+        return b"remote-image"
+
+    def fake_app_media_delete(provider, *, business, session_token, media_id):
+        calls.append(("delete", provider, business, session_token, media_id))
+        return {"deleted": True}
+
+    monkeypatch.setattr(safebox, "storage_get", fail_generic)
+    monkeypatch.setattr(safebox, "storage_delete", fail_generic)
+    monkeypatch.setattr(safebox, "app_media_get", fake_app_media_get)
+    monkeypatch.setattr(safebox, "app_media_delete", fake_app_media_delete)
+
+    fetched = app_media.get_media(store, business_slug="biz", media_id="m1", session_token="tok-u1")
+    deleted = app_media.delete_media(store, business_slug="biz", media_id="m1", app_user_id="u1", session_token="tok-u1")
+
+    assert fetched["content"] == b"remote-image"
+    assert deleted["deleted"] is True
+    assert calls == [
+        ("get", "supabase_s3", "biz", "tok-u1", "m1"),
+        ("delete", "supabase_s3", "biz", "tok-u1", "m1"),
+    ]
 
 
 def test_get_media_rejects_other_users_session(tmp_path):

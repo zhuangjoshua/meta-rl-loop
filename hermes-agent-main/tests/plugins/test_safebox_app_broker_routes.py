@@ -11,13 +11,14 @@ mint->verify identity roundtrip, not the SECURITY DEFINER ledger (that is exerci
 test against a FakeLedger)."""
 from __future__ import annotations
 
+import base64
 import contextlib
 import types
 
 import pytest
 from starlette.testclient import TestClient
 
-from plugins.takyon import app_entitlements, app_identity, app_payments, business_credits, safebox_app
+from plugins.takyon import app_entitlements, app_identity, app_payments, business_credits, safebox, safebox_app
 from plugins.takyon.safebox_capability import verify_capability
 
 _SIGNING_KEY = "safebox-only-signing-key-not-on-any-client"
@@ -85,6 +86,9 @@ def test_new_routes_are_registered_alongside_env_routes():
     assert "/v1/providers/tavily/search" in paths
     assert "/v1/providers/gemini/image" in paths
     assert "/v1/providers/postmark/send" in paths
+    assert "/v1/app-media/put" in paths
+    assert "/v1/app-media/get" in paths
+    assert "/v1/app-media/delete" in paths
     # ...and the public-config env read compatibility route remains mounted.
     assert "/v1/env/{key}" in paths
 
@@ -166,6 +170,123 @@ def test_operator_session_token_refuses_non_allowlisted_client(client, monkeypat
 
     assert resp.status_code == 403
     assert resp.json()["detail"] == "operator_client_not_allowed"
+
+
+def test_generic_storage_stays_operator_only(client):
+    resp = client.post(
+        "/v1/storage/put",
+        headers=_auth(operator=False),
+        json={
+            "provider": "supabase_s3",
+            "key": "climblog/private.txt",
+            "data_b64": base64.b64encode(b"secret").decode("ascii"),
+            "digest": "digest",
+        },
+    )
+
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
+
+
+def test_app_media_put_uses_app_session_not_operator_token(client, monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_X"))
+
+    def fake_storage_put(provider, key, data, *, digest):
+        captured.update({"provider": provider, "key": key, "data": data, "digest": digest})
+        return {"stored": True, "key": key}
+
+    monkeypatch.setattr(safebox, "storage_put", fake_storage_put)
+
+    resp = client.post(
+        "/v1/app-media/put",
+        headers=_auth(operator=False),
+        json={
+            "provider": "supabase_s3",
+            "business": "climblog",
+            "session_token": "sess-abc",
+            "media_id": "m_1",
+            "data_b64": base64.b64encode(b"image-bytes").decode("ascii"),
+            "digest": "sha256",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "provider": "supabase_s3",
+        "business": "climblog",
+        "media_id": "m_1",
+        "stored": True,
+    }
+    assert captured == {
+        "provider": "supabase_s3",
+        "key": "media/climblog/m_1",
+        "data": b"image-bytes",
+        "digest": "sha256",
+    }
+
+
+class _MediaConn:
+    def __init__(self, *, app_user_id: str = "cust_X", storage_key: str = "media/climblog/m_1"):
+        self._app_user_id = app_user_id
+        self._storage_key = storage_key
+
+    def execute(self, sql, params=None):
+        if "from app_media" in str(sql):
+            return _OwnerCursor({"app_user_id": self._app_user_id, "storage_key": self._storage_key})
+        return _OwnerCursor({"owner_user_id": "user_A"})
+
+
+def test_app_media_get_uses_row_ownership_and_hides_storage_key(client, monkeypatch):
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _MediaConn()
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_X"))
+    monkeypatch.setattr(safebox, "storage_get", lambda provider, key: b"stored-image")
+
+    resp = client.post(
+        "/v1/app-media/get",
+        headers=_auth(operator=False),
+        json={
+            "provider": "supabase_s3",
+            "business": "climblog",
+            "session_token": "sess-abc",
+            "media_id": "m_1",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["business"] == "climblog"
+    assert body["media_id"] == "m_1"
+    assert "key" not in body
+    assert base64.b64decode(body["data_b64"]) == b"stored-image"
+
+
+def test_app_media_get_refuses_cross_user_session(client, monkeypatch):
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _MediaConn(app_user_id="cust_X")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(app_identity, "validate_session", lambda c, b, t: types.SimpleNamespace(id="cust_Y"))
+
+    resp = client.post(
+        "/v1/app-media/get",
+        headers=_auth(operator=False),
+        json={
+            "provider": "supabase_s3",
+            "business": "climblog",
+            "session_token": "sess-other",
+            "media_id": "m_1",
+        },
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "media_not_found"
 
 
 def test_generic_mint_refuses_operator_identity(client):
