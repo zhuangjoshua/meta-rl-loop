@@ -21,6 +21,8 @@ WorkingDirectory=/opt/takyon/hermes-agent-main
 # file. Provision TAKYON_SAFEBOX_TOKEN there before deploying this unit.
 EnvironmentFile=-/opt/takyon/.takyon/.env
 EnvironmentFile=-/opt/takyon/secrets/.env
+UnsetEnvironment=DATABASE_URL POSTGRES_URL POSTGRES_PRISMA_URL POSTGRES_URL_NON_POOLING
+UnsetEnvironment=TAKYON_OPERATOR_DATABASE_URL TAKYON_APP_DATABASE_URL TAKYON_MIGRATION_DATABASE_URL MIGRATION_DATABASE_URL
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
