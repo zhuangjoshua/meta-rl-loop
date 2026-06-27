@@ -24,6 +24,13 @@ if [[ $# -eq 0 ]]; then
   set -- /opt/takyon/.takyon/.env /opt/takyon/secrets/.env
 fi
 
+errors=0
+
+record_error() {
+  echo "$1" >&2
+  errors=1
+}
+
 is_valid_key_name() {
   [[ "${1:-}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
 }
@@ -79,8 +86,7 @@ has_key() {
 require_key() {
   local key="$1"
   if ! has_key "$key" "$@"; then
-    echo "missing required authority env: $key" >&2
-    exit 1
+    record_error "missing required authority env: $key"
   fi
 }
 
@@ -93,15 +99,13 @@ require_one_of() {
       return 0
     fi
   done
-  echo "missing required authority env: $label" >&2
-  exit 1
+  record_error "missing required authority env: $label"
 }
 
 reject_key() {
   local key="$1"
   if has_key "$key" "$@"; then
-    echo "forbidden authority env present on $plane host: $key" >&2
-    exit 1
+    record_error "forbidden authority env present on $plane host: $key"
   fi
 }
 
@@ -146,5 +150,9 @@ case "$plane" in
     exit 1
     ;;
 esac
+
+if [[ "$errors" -ne 0 ]]; then
+  exit 1
+fi
 
 echo "Validated authority env for $plane"

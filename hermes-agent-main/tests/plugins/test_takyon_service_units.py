@@ -196,3 +196,37 @@ def test_authority_env_validator_rejects_legacy_database_url_aliases(tmp_path):
     assert result.returncode != 0
     assert "DATABASE_URL" in combined
     assert "legacy-secret" not in combined
+
+
+def test_authority_env_validator_reports_all_errors_without_values(tmp_path):
+    script = ROOT / "deploy/shared/validate-authority-env.sh"
+    env_file = tmp_path / "subuser.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DATABASE_URL=postgres://legacy-secret",
+                "TAKYON_OPERATOR_DATABASE_URL=postgres://operator-secret",
+                "TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token-secret",
+            ]
+        )
+        + "\n"
+    )
+
+    result = subprocess.run(
+        ["bash", str(script), "subuser", str(env_file)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "forbidden authority env present on subuser host: DATABASE_URL" in combined
+    assert "missing required authority env: TAKYON_APP_DATABASE_URL" in combined
+    assert "missing required authority env: TAKYON_MIGRATION_DATABASE_URL or MIGRATION_DATABASE_URL" in combined
+    assert "missing required authority env: TAKYON_SAFEBOX_TOKEN" in combined
+    assert "forbidden authority env present on subuser host: TAKYON_OPERATOR_DATABASE_URL" in combined
+    assert "forbidden authority env present on subuser host: TAKYON_SAFEBOX_OPERATOR_TOKEN" in combined
+    for secret in ("legacy-secret", "operator-secret", "operator-token-secret"):
+        assert secret not in combined
