@@ -131,6 +131,39 @@ function pickFirstInt(...values: unknown[]) {
   return null;
 }
 
+function clampChannelBudgetAllocations(
+  allocations: Record<ChannelBudgetKey, number>,
+  floors: Record<ChannelBudgetKey, number>,
+  capacity: number,
+): Record<ChannelBudgetKey, number> {
+  const next = { ...allocations };
+  let used = 0;
+  for (const key of CHANNEL_BUDGET_KEYS) {
+    const floor = Math.max(0, floors[key] || 0);
+    next[key] = Math.max(floor, Math.round(next[key] || 0));
+    used += next[key];
+  }
+  if (used <= capacity) return next;
+
+  let excess = used - capacity;
+  for (const key of CHANNEL_BUDGET_KEYS) {
+    if (excess <= 0) break;
+    const floor = Math.max(0, floors[key] || 0);
+    const reducible = Math.max(0, next[key] - floor);
+    const reduction = Math.min(reducible, excess);
+    next[key] -= reduction;
+    excess -= reduction;
+  }
+  return next;
+}
+
+function channelBudgetAllocationsEqual(
+  left: Record<ChannelBudgetKey, number>,
+  right: Record<ChannelBudgetKey, number>,
+) {
+  return CHANNEL_BUDGET_KEYS.every((key) => left[key] === right[key]);
+}
+
 function statusLabel(value: unknown) {
   const status = asText(value).toLowerCase();
   if (!status) return "idle";
@@ -774,34 +807,51 @@ function ChannelBudget({
   const defaultBuyCredits = Math.max(100, minimumCheckoutCreditsValue || 1);
   const [buyCreditsInput, setBuyCreditsInput] = useState(String(defaultBuyCredits));
   const syncedBusinessRef = useRef(businessSlug);
-  const hasChanges = CHANNEL_BUDGET_KEYS.some((key) => draftAllocations[key] !== savedAllocations[key]);
   const buyCreditsValue = readInt(buyCreditsInput) || 0;
   const hasMinimumCheckout = minimumCheckoutCreditsValue !== null;
   const canCheckoutChosenAmount = buyCreditsValue > 0 && (!hasMinimumCheckout || buyCreditsValue >= minimumCheckoutCreditsValue);
   const estimatedCheckoutAmountCents = checkoutPriceCents !== null ? buyCreditsValue * checkoutPriceCents : null;
-
-  useEffect(() => {
-    if (syncedBusinessRef.current !== businessSlug) {
-      syncedBusinessRef.current = businessSlug;
-      setDraftAllocations(savedAllocations);
-      setBuyCreditsInput(String(defaultBuyCredits));
-      setSaveError("");
-      setBuyError("");
-      return;
-    }
-    if (!saving && !hasChanges) {
-      setDraftAllocations(savedAllocations);
-      setSaveError("");
-    }
-  }, [businessSlug, defaultBuyCredits, hasChanges, savedAllocations, saving]);
-
   const budgetCapacity = Math.max(
     readInt(creativeCredits?.budget_capacity_credits) || 0,
     ...CHANNEL_BUDGET_KEYS.map((key) => rowFloors[key]),
     ...CHANNEL_BUDGET_KEYS.map((key) => draftAllocations[key]),
   );
+  const normalizedSavedAllocations = useMemo(
+    () => clampChannelBudgetAllocations(savedAllocations, rowFloors, budgetCapacity),
+    [budgetCapacity, rowFloors, savedAllocations],
+  );
+  const normalizedDraftAllocations = useMemo(
+    () => clampChannelBudgetAllocations(draftAllocations, rowFloors, budgetCapacity),
+    [budgetCapacity, draftAllocations, rowFloors],
+  );
+  const hasChanges = !channelBudgetAllocationsEqual(normalizedDraftAllocations, normalizedSavedAllocations);
+
+  useEffect(() => {
+    if (syncedBusinessRef.current !== businessSlug) {
+      syncedBusinessRef.current = businessSlug;
+      setDraftAllocations(normalizedSavedAllocations);
+      setBuyCreditsInput(String(defaultBuyCredits));
+      setSaveError("");
+      setBuyError("");
+      return;
+    }
+    if (!saving) {
+      setDraftAllocations((current) => {
+        const normalizedCurrent = clampChannelBudgetAllocations(current, rowFloors, budgetCapacity);
+        if (!hasChanges) {
+          return channelBudgetAllocationsEqual(current, normalizedSavedAllocations)
+            ? current
+            : normalizedSavedAllocations;
+        }
+        return channelBudgetAllocationsEqual(normalizedCurrent, current) ? current : normalizedCurrent;
+      });
+      if (!hasChanges) {
+        setSaveError("");
+      }
+    }
+  }, [businessSlug, budgetCapacity, defaultBuyCredits, hasChanges, normalizedSavedAllocations, rowFloors, saving]);
   const spendableCredits = readInt(creativeCredits?.balance_credits) || 0;
-  const totalAllocated = CHANNEL_BUDGET_KEYS.reduce((sum, key) => sum + draftAllocations[key], 0);
+  const totalAllocated = CHANNEL_BUDGET_KEYS.reduce((sum, key) => sum + normalizedDraftAllocations[key], 0);
   const unallocatedCredits = Math.max(0, budgetCapacity - totalAllocated);
   const sliderMax = Math.max(1, budgetCapacity, totalAllocated);
   const canEdit = Boolean(creativeCredits?.available && businessSlug);
@@ -813,7 +863,7 @@ function ChannelBudget({
       key: "x",
       label: "X",
       color: "#1d9bf0",
-      value: draftAllocations.x,
+      value: normalizedDraftAllocations.x,
       used: readInt(xBudget.used_credits) || 0,
       reserved: readInt(xBudget.reserved_credits) || 0,
       stat: channelStatLine("x", xChannel),
@@ -822,7 +872,7 @@ function ChannelBudget({
       key: "meta",
       label: "Meta ads",
       color: "#1d6ff0",
-      value: draftAllocations.meta,
+      value: normalizedDraftAllocations.meta,
       used: readInt(metaBudget.used_credits) || 0,
       reserved: readInt(metaBudget.reserved_credits) || 0,
       stat: channelStatLine("meta", metaChannel),
@@ -831,7 +881,7 @@ function ChannelBudget({
       key: "reddit",
       label: "Reddit ads",
       color: "#fb8024",
-      value: draftAllocations.reddit,
+      value: normalizedDraftAllocations.reddit,
       used: readInt(redditBudget.used_credits) || 0,
       reserved: readInt(redditBudget.reserved_credits) || 0,
       stat: channelStatLine("reddit", redditChannel),
@@ -840,13 +890,14 @@ function ChannelBudget({
 
   const setAllocation = useCallback((key: ChannelBudgetKey, nextRaw: number) => {
     setDraftAllocations((current) => {
+      const currentNormalized = clampChannelBudgetAllocations(current, rowFloors, budgetCapacity);
       const minimum = rowFloors[key];
       const otherTotal = CHANNEL_BUDGET_KEYS.reduce((sum, bucket) => (
-        bucket === key ? sum : sum + current[bucket]
+        bucket === key ? sum : sum + currentNormalized[bucket]
       ), 0);
       const maxForBucket = Math.max(minimum, budgetCapacity - otherTotal);
       return {
-        ...current,
+        ...currentNormalized,
         [key]: Math.max(minimum, Math.min(Math.round(nextRaw), maxForBucket)),
       };
     });
@@ -860,13 +911,13 @@ function ChannelBudget({
     setSaveError("");
     setBuyError("");
     try {
-      await onSaveChannelCreditBudgets(businessSlug, draftAllocations);
+      await onSaveChannelCreditBudgets(businessSlug, normalizedDraftAllocations);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "Failed to save channel budgets.");
     } finally {
       setSaving(false);
     }
-  }, [businessSlug, canEdit, draftAllocations, hasChanges, onSaveChannelCreditBudgets, saving]);
+  }, [businessSlug, canEdit, hasChanges, normalizedDraftAllocations, onSaveChannelCreditBudgets, saving]);
 
   const buyCredits = useCallback(async () => {
     if (!businessSlug || buying) return;
