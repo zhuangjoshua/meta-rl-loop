@@ -19702,6 +19702,12 @@ def _queue_openmeter_sync_job(
 ) -> dict[str, Any] | None:
     if not _openmeter_enabled():
         return None
+    if str(getattr(store, "_database_plane", "") or "").strip().lower() == "app":
+        # Product app requests run on the app-only DB role and must never reach for the operator
+        # jobs queue. Re-entering the app store while a session-mint transaction is open can reuse
+        # the same pooled connection; a fail-soft enqueue rollback would then roll back the freshly
+        # minted app session. OpenMeter is only a downstream mirror, so app-plane callers skip this.
+        return None
     target = (
         _file_slug(str(plan_key or ""), "plan")
         if scope == "plan"

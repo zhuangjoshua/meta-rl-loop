@@ -763,6 +763,8 @@ def test_app_runtime_identity_session_ports_are_bounded():
     assert "with store._pg_app_scope(conn, business, session_token=session_token)" in supabase_login_src
     assert "session_token=session_token, display_name=user_record.name" in supabase_login_src
     assert "app_user_id=user_record.id, display_name=user_record.name" not in supabase_login_src
+    assert 'getattr(store, "_database_plane", "")' in inspect.getsource(core._queue_openmeter_sync_job)
+    assert '== "app"' in inspect.getsource(core._queue_openmeter_sync_job)
     assert "app_user_id=None if session_token else resolved.user.id" in profile_src
     assert "takyon_app_record_event" in inspect.getsource(core.TakyonStore._record_event)
 
