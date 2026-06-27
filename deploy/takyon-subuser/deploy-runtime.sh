@@ -155,9 +155,9 @@ from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_u
 import psycopg
 
 load_takyon_env()
-migration_database_url = resolve_database_url(plane="migration")
+migration_database_url = resolve_database_url(plane='migration')
 with psycopg.connect(migration_database_url, autocommit=True, prepare_threshold=None) as conn:
-    assert_takyon_pg_role(conn, "migration")
+    assert_takyon_pg_role(conn, 'migration')
     conn.execute('select set_config(\$\$statement_timeout\$\$, \$\$0\$\$, false)')
     run_migrations(conn)
 PY
