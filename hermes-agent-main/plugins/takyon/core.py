@@ -11002,23 +11002,64 @@ def _copy_node_modules_tree(src: Path, dst: Path) -> bool:
     """Copy a prebaked node_modules tree into a workspace, preferring hardlinks for speed/space.
 
     Hardlinks make the per-business seed near-instant and share inodes with the prebake; falls back
-    to a full copy when the destination is on a different filesystem (cross-device link error)."""
+    to a full copy when the destination is on a different filesystem (cross-device link error).
+    Preserve npm's .bin symlinks: following them turns .bin/vite into a regular file whose relative
+    imports resolve from node_modules/.bin instead of node_modules/vite/bin."""
     try:
         if dst.exists():
             return True
         try:
-            shutil.copytree(src, dst, copy_function=os.link, dirs_exist_ok=False)
+            shutil.copytree(src, dst, copy_function=os.link, dirs_exist_ok=False, symlinks=True)
             return True
         except (OSError, shutil.Error):
             # Cross-device or partial-hardlink failure: clean up and do a plain copy.
             if dst.exists():
                 shutil.rmtree(dst, ignore_errors=True)
-            shutil.copytree(src, dst, dirs_exist_ok=False)
+            shutil.copytree(src, dst, dirs_exist_ok=False, symlinks=True)
             return True
     except Exception:
         if dst.exists():
             shutil.rmtree(dst, ignore_errors=True)
         return False
+
+
+def _repair_node_modules_bin_links(root: Path) -> list[str]:
+    """Repair npm .bin entries that were accidentally materialized as regular files.
+
+    A prior warm-copy bug followed symlinks, so node_modules/.bin/vite became a hardlinked copy of
+    node_modules/vite/bin/vite.js. Vite's own bin imports ../dist/node/cli.js relative to its file
+    location, so the regular-file copy tries node_modules/dist/node/cli.js and every build fails.
+    """
+    nm = root / "node_modules"
+    bin_dir = nm / ".bin"
+    if not bin_dir.is_dir():
+        return []
+    repairs: list[str] = []
+    expected = {
+        "vite": Path("vite/bin/vite.js"),
+        "tsc": Path("typescript/bin/tsc"),
+        "tsserver": Path("typescript/bin/tsserver"),
+    }
+    for name, target_rel in expected.items():
+        target = nm / target_rel
+        link = bin_dir / name
+        if not target.is_file():
+            continue
+        desired = Path("..") / target_rel
+        if link.is_symlink():
+            try:
+                if Path(os.readlink(link)) == desired:
+                    continue
+            except OSError:
+                pass
+        try:
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(desired)
+            repairs.append(f"relinked node_modules/.bin/{name}")
+        except OSError:
+            continue
+    return repairs
 
 
 def _warm_node_modules_safe_for_docker_consumer() -> bool:
@@ -11484,6 +11525,9 @@ def _refresh_product_surface_path(
                 return result
         else:
             result["warnings"].append("dependency install skipped because no package manager is available; using existing node_modules")
+    bin_link_repairs = _repair_node_modules_bin_links(root)
+    if bin_link_repairs:
+        result["repairs"].extend(bin_link_repairs)
     if "build" not in scripts:
         result.update({
             "status": "blocked",

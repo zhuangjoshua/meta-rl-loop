@@ -155,3 +155,38 @@ def test_sweep_removes_old_partials_keeps_fresh_and_real(tmp_path):
     assert not old.exists()   # stale orphan from a prior kill reclaimed
     assert fresh.exists()     # in-flight concurrent staging preserved (age-guarded)
     assert real.exists()      # real spot untouched
+
+
+def test_copy_node_modules_preserves_bin_symlinks(tmp_path):
+    src = tmp_path / "src" / "node_modules"
+    vite_bin = src / "vite" / "bin"
+    vite_bin.mkdir(parents=True)
+    (vite_bin / "vite.js").write_text("import('../dist/node/cli.js')\n")
+    bin_dir = src / ".bin"
+    bin_dir.mkdir()
+    (bin_dir / "vite").symlink_to("../vite/bin/vite.js")
+
+    dst = tmp_path / "dst" / "node_modules"
+    assert core._copy_node_modules_tree(src, dst)
+
+    copied = dst / ".bin" / "vite"
+    assert copied.is_symlink()
+    assert os.readlink(copied) == "../vite/bin/vite.js"
+
+
+def test_repair_node_modules_bin_links_relinks_broken_regular_file(tmp_path):
+    root = tmp_path / "site"
+    vite_bin = root / "node_modules" / "vite" / "bin"
+    vite_bin.mkdir(parents=True)
+    (vite_bin / "vite.js").write_text("import('../dist/node/cli.js')\n")
+    (root / "node_modules" / "vite" / "dist" / "node").mkdir(parents=True)
+    (root / "node_modules" / "vite" / "dist" / "node" / "cli.js").write_text("")
+    bin_dir = root / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "vite").write_text("import('../dist/node/cli.js')\n")
+
+    repairs = core._repair_node_modules_bin_links(root)
+
+    assert "relinked node_modules/.bin/vite" in repairs
+    assert (bin_dir / "vite").is_symlink()
+    assert os.readlink(bin_dir / "vite") == "../vite/bin/vite.js"
