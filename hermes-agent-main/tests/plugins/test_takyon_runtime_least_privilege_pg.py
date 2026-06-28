@@ -268,3 +268,63 @@ def test_operator_role_retains_select_on_money_tables(pg_conn):
         pg_conn.execute("select count(*) from business_creative_credit_accounts")
     finally:
         pg_conn.execute("reset role")
+
+
+def test_migration_role_can_create_tracked_schema_objects(pg_conn):
+    row = pg_conn.execute(
+        "select has_schema_privilege(%s, %s, %s)",
+        ("takyon_migration", "public", "CREATE"),
+    ).fetchone()
+    assert row[0] is True
+
+
+def test_operator_delete_helper_detaches_business_slug_without_money_write_grants(pg_conn):
+    uid = _owner(pg_conn)
+    slug = _business(pg_conn, uid)
+    billing.open_billing_account(pg_conn, uid)
+    custody.open_custody_account(pg_conn, uid)
+    pg_conn.execute(
+        "insert into billing_entries (user_id, business_slug, bucket, kind, amount_cents, "
+        "balance_after_cents, idempotency_key) values (%s, %s, 'allowance', 'reserve', 100, 100, %s)",
+        (uid, slug, f"{slug}-billing"),
+    )
+    pg_conn.execute(
+        "insert into custody_entries (user_id, business_slug, kind, gross_cents, fee_cents, "
+        "net_cents, idempotency_key) values (%s, %s, 'accrual', 500, 50, 450, %s)",
+        (uid, slug, f"{slug}-custody"),
+    )
+
+    pg_conn.execute("set role takyon_operator_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "update billing_entries set amount_cents = 0 where business_slug = %s",
+                (slug,),
+            )
+    finally:
+        pg_conn.execute("reset role")
+
+    pg_conn.execute("set role takyon_operator_runtime")
+    try:
+        preview = pg_conn.execute(
+            "select ledger_table, affected from takyon_business_delete_money_ledger_touch(%s, false)",
+            (slug,),
+        ).fetchall()
+        applied = pg_conn.execute(
+            "select ledger_table, affected from takyon_business_delete_money_ledger_touch(%s, true)",
+            (slug,),
+        ).fetchall()
+    finally:
+        pg_conn.execute("reset role")
+
+    assert dict(preview) == {"billing_entries": 1, "custody_entries": 1}
+    assert dict(applied) == {"billing_entries": 1, "custody_entries": 1}
+    assert pg_conn.execute(
+        "select amount_cents, business_slug from billing_entries where idempotency_key = %s",
+        (f"{slug}-billing",),
+    ).fetchone() == (100, None)
+    assert pg_conn.execute(
+        "select gross_cents, fee_cents, net_cents, business_slug "
+        "from custody_entries where idempotency_key = %s",
+        (f"{slug}-custody",),
+    ).fetchone() == (500, 50, 450, None)

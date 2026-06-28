@@ -15,6 +15,20 @@ def test_workspace_api_supports_boot_view_reads():
     assert '`/api/takyon/businesses/${encodeURIComponent(slug)}/home`' in source
 
 
+def test_dashboard_company_x_uses_operator_delete_api():
+    api_source = API_SOURCE.read_text(encoding="utf-8")
+    hook_source = HOOK_SOURCE.read_text(encoding="utf-8")
+    app_source = (REPO_ROOT / "web" / "src" / "litebulb" / "App.tsx").read_text(encoding="utf-8")
+    companies_source = (REPO_ROOT / "web" / "src" / "litebulb" / "app" / "companies.tsx").read_text(encoding="utf-8")
+
+    assert "deleteTakyonBusiness: (slug: string) =>" in api_source
+    assert "`/api/takyon/businesses/${encodeURIComponent(slug)}`" in api_source
+    assert '{ method: "DELETE" }' in api_source
+    assert "await api.deleteTakyonBusiness(businessSlug);" in hook_source
+    assert "onDelete={deleteBusiness}" in app_source
+    assert "onClick={(e) => { e.stopPropagation(); void handleDelete(c.slug, c.name); }}" in companies_source
+
+
 def test_open_business_boots_shell_before_full_workspace_refresh():
     source = HOOK_SOURCE.read_text(encoding="utf-8")
 

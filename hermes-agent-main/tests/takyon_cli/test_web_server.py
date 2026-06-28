@@ -6340,6 +6340,79 @@ def test_wake_now_enqueues_money_gated_ceo_wake(monkeypatch):
     assert captured["payload"]["trigger"] == "dashboard_wake_now"
 
 
+def test_dashboard_delete_uses_canonical_business_delete(monkeypatch):
+    import plugins.takyon.core as core
+    import takyon_cli.web_server as web_server
+
+    captured = {}
+
+    class _DeleteFakeStore:
+        def __init__(self, *args, **kwargs):
+            captured["store_args"] = args
+            captured["store_kwargs"] = kwargs
+
+        def commit(self, *, scope, operations, idempotency_key, reason, actor):
+            captured.update(
+                scope=scope,
+                operations=operations,
+                idempotency_key=idempotency_key,
+                reason=reason,
+                actor=actor,
+            )
+            return {
+                "success": True,
+                "results": [
+                    {
+                        "business": "alpha",
+                        "database": {
+                            "deleted": {
+                                "businesses": 1,
+                                "billing_entries_detached": 2,
+                                "custody_entries_detached": 0,
+                            }
+                        },
+                        "still_serving": False,
+                        "still_serving_reasons": [],
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _r: _wake_now_principal(("alpha",)))
+    monkeypatch.setattr(web_server, "_dashboard_principal_owns_business", lambda _r, _p, _slug: True)
+    monkeypatch.setattr(web_server, "_request_runtime_database_url", lambda _r: "postgres://runtime")
+    monkeypatch.setattr(core, "_db_backend", lambda: "postgres")
+    monkeypatch.setattr(core, "TakyonStore", _DeleteFakeStore)
+
+    request = types.SimpleNamespace(state=types.SimpleNamespace(auth0_user={"sub": "x"}))
+    result = asyncio.run(web_server.delete_takyon_business(request, "alpha"))
+
+    assert result == {
+        "success": True,
+        "slug": "alpha",
+        "deleted_rows": 3,
+        "still_serving": False,
+        "still_serving_reasons": [],
+    }
+    assert captured["store_kwargs"] == {
+        "database_url": "postgres://runtime",
+        "operator_user_id": "user-123",
+    }
+    assert captured["scope"] == "business:alpha"
+    assert captured["operations"] == [
+        {
+            "action": "business.delete",
+            "business": "alpha",
+            "confirm": True,
+            "delete_files": True,
+            "delete_cron": True,
+            "delete_domains": False,
+            "subdomains": [],
+        }
+    ]
+    assert captured["idempotency_key"].startswith("dashboard-delete:alpha:")
+    assert captured["actor"] == "dashboard"
+
+
 def test_wake_now_dedups_already_pending_wake(monkeypatch):
     import plugins.takyon.core as core
     import plugins.takyon.jobs as jobs

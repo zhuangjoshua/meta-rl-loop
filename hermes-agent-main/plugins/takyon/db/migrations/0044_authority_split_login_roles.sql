@@ -147,6 +147,7 @@ begin
 end $$;
 
 -- migration role: DDL-only deployment identity, never a live service DSN
+grant create on schema public to takyon_migration;
 grant all privileges on all tables in schema public to takyon_migration;
 grant all privileges on all sequences in schema public to takyon_migration;
 grant all privileges on all functions in schema public to takyon_migration;
