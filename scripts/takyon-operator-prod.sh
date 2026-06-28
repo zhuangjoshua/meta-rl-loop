@@ -324,8 +324,10 @@ cmd_console() {
   echo
   cd "$ROOT"
   if [[ -n "$business" ]]; then
+    echo "Opening operator shell for $business..."
     "$TAKYON_ENTRY" --logs shell "$business"
   else
+    echo "Opening operator shell..."
     "$TAKYON_ENTRY" --logs shell
   fi
 }
