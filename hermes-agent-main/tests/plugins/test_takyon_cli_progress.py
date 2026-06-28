@@ -108,3 +108,26 @@ def test_raw_hermes_events_print_tool_args_and_results():
     assert '"business": "homework-solver"' in output
     assert "hermes.raw tool_result" in output
     assert '"result": "{\\"success\\":true,\\"business\\":{\\"slug\\":\\"homework-solver\\"}}"' in output
+
+
+def test_hermes_turn_prints_existing_interim_assistant_text_only_once():
+    read_fd, write_fd = os.pipe()
+    progress = cli._ShellProgress(False)
+    progress.fd = write_fd
+
+    try:
+        progress.hermes_turn("I am checking the current business state.", already_streamed=False)
+        progress.hermes_turn("This was already streamed.", already_streamed=True)
+        os.close(write_fd)
+        progress.fd = None
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        progress.close()
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert "— Hermes —" in output
+    assert "I am checking the current business state." in output
+    assert "This was already streamed." not in output

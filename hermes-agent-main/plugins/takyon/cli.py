@@ -2939,6 +2939,15 @@ class _ShellProgress:
         body = _truncate_raw_hermes(_shell_json_dump(payload), self.raw_max_chars)
         self._write(f"{_color('hermes.raw', _THEME['warning'])} {label}\n{body}\n")
 
+    def hermes_turn(self, text: str, *, already_streamed: bool = False) -> None:
+        if self.fd is None or already_streamed:
+            return
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        self.finish_stream()
+        self._write(f"{_color('— Hermes —', _THEME['primary'])}\n{clean}\n")
+
     def stream_delta(self, delta: Any) -> None:
         if delta is None:
             self.finish_stream()
@@ -3840,6 +3849,7 @@ def _run_agent_with_meta(
                 "tool_start_callback": progress.tool_started if progress.enabled else None,
                 "tool_gen_callback": progress.tool_generating if progress.enabled else None,
                 "tool_complete_callback": progress.tool_completed if progress.enabled else None,
+                "interim_assistant_callback": progress.hermes_turn if progress.enabled else None,
             },
         )
         agent_box["agent"] = agent
