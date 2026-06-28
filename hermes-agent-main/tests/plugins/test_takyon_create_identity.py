@@ -9,6 +9,7 @@ from plugins.takyon.cli import (
     _derive_name_from_goal_with_llm,
     _resolve_create_identity,
     _resolve_dashboard_create_identity,
+    run_takyon_command,
 )
 
 
@@ -24,6 +25,19 @@ def test_resolve_create_identity_supports_double_dash_name_separator():
 
     assert name == "Longer"
     assert slug == "longer"
+
+
+def test_resolve_create_identity_strips_inline_markdown_section_from_pasted_brief():
+    brief = """RoomRemix ## 1. AI Room Redesign / Virtual Staging -- roomgpt.io, interiorai.com
+
+*Input & upload*
+- Upload via drag-drop zone, file picker, and mobile camera capture.
+- Before image preview with crop/rotate/remove."""
+
+    name, slug = _resolve_create_identity("", brief)
+
+    assert name == "RoomRemix"
+    assert slug == "roomremix"
 
 
 def test_resolve_create_identity_falls_back_to_humanized_slug_hint():
@@ -261,3 +275,25 @@ def test_resolve_dashboard_create_identity_preserves_budget_exhaustion(monkeypat
             "Longer -- a men's health app",
             operator_user_id="user-1",
         )
+
+
+def test_confirmed_delete_uses_fresh_idempotency_key(monkeypatch):
+    captured: list[str] = []
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def commit(self, *, idempotency_key, **kwargs):
+            captured.append(idempotency_key)
+            return {"success": True}
+
+    monkeypatch.setattr("plugins.takyon.cli.load_takyon_env", lambda: None)
+    monkeypatch.setattr("plugins.takyon.cli.TakyonStore", FakeStore)
+    monkeypatch.setattr("plugins.takyon.cli._resolved_operator_user_id", lambda _operator_user_id=None: "user-1")
+
+    run_takyon_command(["delete", "roomremix", "--confirm", "--no-domains"])
+    run_takyon_command(["delete", "roomremix", "--confirm", "--no-domains"])
+
+    assert len(captured) == 2
+    assert captured[0] != captured[1]

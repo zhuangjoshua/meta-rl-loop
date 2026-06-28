@@ -697,6 +697,11 @@ def _extract_create_name_candidate(raw: Any) -> str:
         if isinstance(data, dict):
             text = str(data.get("name") or "").strip()
     text = text.splitlines()[0].strip()
+    text = re.sub(r"^\s{0,3}#{1,6}\s+", "", text).strip()
+    inline_heading = re.split(r"\s+#{1,6}\s+", text, maxsplit=1)
+    if len(inline_heading) > 1 and inline_heading[0].strip():
+        text = inline_heading[0].strip()
+    text = re.sub(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", "", text).strip()
     if ":" in text:
         prefix, suffix = text.split(":", 1)
         if prefix.strip().lower() in {"name", "business name", "company name", "product name"}:
@@ -709,6 +714,21 @@ def _extract_create_name_candidate(raw: Any) -> str:
     text = text.strip("`\"' ")
     text = re.sub(r"[.。,:;!?]+$", "", text).strip()
     return _collapse_whitespace(text)
+
+
+def _explicit_create_name_from_goal(goal: str) -> str:
+    candidate = _extract_create_name_candidate(goal)
+    if not candidate:
+        return ""
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_+-]*", candidate)
+    if not tokens:
+        return ""
+    first = tokens[0].lower()
+    if first in (_CREATE_NAME_LEADING_VERBS | _CREATE_NAME_LEADING_FILLERS | _CREATE_NAME_GENERIC_NOUNS):
+        return ""
+    if len(tokens) > 4:
+        return ""
+    return candidate
 
 
 def _create_name_call_estimate_cents() -> int:
@@ -818,6 +838,9 @@ def _derive_name_from_goal_with_llm(goal: str, *, operator_user_id: str | None =
 
 
 def _derive_name_from_goal(goal: str) -> str:
+    explicit = _explicit_create_name_from_goal(goal)
+    if explicit:
+        return explicit
     text = _collapse_whitespace(goal)
     if not text:
         raise TakyonError("business name or goal is required")
@@ -860,7 +883,7 @@ def _resolve_create_identity(name: str, goal: str, slug_hint: str = "") -> tuple
         return explicit_name, _preferred_public_business_slug(explicit_name)
     goal_text = _collapse_whitespace(goal)
     if goal_text:
-        resolved_name = _derive_name_from_goal(goal_text)
+        resolved_name = _derive_name_from_goal(goal)
         return resolved_name, _preferred_public_business_slug(resolved_name)
     slug_seed = _collapse_whitespace(slug_hint)
     if slug_seed:
@@ -4314,18 +4337,21 @@ def run_takyon_command(
     if command == "delete":
         parsed_delete = _parse_business_delete_args(argv)
         slug = str(parsed_delete["business"])
+        delete_key_parts = [
+            "operator-business-delete-v1",
+            slug,
+            parsed_delete["confirm"],
+            parsed_delete["delete_files"],
+            parsed_delete["delete_cron"],
+            parsed_delete["delete_domains"],
+            ",".join(parsed_delete["subdomains"]),
+        ]
+        if parsed_delete["confirm"]:
+            delete_key_parts.append(uuid.uuid4().hex)
         return store.commit(
             scope=_scope_for_business(slug),
             operations=[{"action": "business.delete", **parsed_delete}],
-            idempotency_key=_idempotency_key(
-                "operator-business-delete-v1",
-                slug,
-                parsed_delete["confirm"],
-                parsed_delete["delete_files"],
-                parsed_delete["delete_cron"],
-                parsed_delete["delete_domains"],
-                ",".join(parsed_delete["subdomains"]),
-            ),
+            idempotency_key=_idempotency_key(*delete_key_parts),
             reason="operator requested business deletion" if parsed_delete["confirm"] else "operator previewed business deletion",
             actor="operator",
         )
