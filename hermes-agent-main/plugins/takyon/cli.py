@@ -2598,11 +2598,162 @@ def _parse_tool_json_result(result: Any) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _shell_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _shell_money_cents(value: Any) -> str:
+    cents = _shell_int(value)
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    return f"{sign}${cents // 100}.{cents % 100:02d}"
+
+
+def _shell_metric_value(stats: dict[str, Any], *names: str) -> int | None:
+    for name in names:
+        if name not in stats:
+            continue
+        value = stats.get(name)
+        if isinstance(value, dict):
+            for key in ("value", "count", "total"):
+                if key in value:
+                    return _shell_int(value.get(key))
+            continue
+        return _shell_int(value)
+    return None
+
+
+def _shell_analytics_line(analytics: dict[str, Any], *, prefix: str = "traffic") -> str:
+    if not analytics:
+        return f"{prefix} -> unavailable"
+    if not analytics.get("configured"):
+        reason = str(analytics.get("reason") or "not configured").strip()
+        return f"{prefix} -> not configured ({reason})"
+    if analytics.get("ok") is False:
+        reason = str(analytics.get("reason") or "provider unavailable").strip()
+        return f"{prefix} -> unavailable ({reason})"
+    stats = analytics.get("stats") if isinstance(analytics.get("stats"), dict) else {}
+    visitors = _shell_metric_value(stats, "visitors", "uniques", "unique_visitors")
+    visits = _shell_metric_value(stats, "visits", "sessions")
+    pageviews = _shell_metric_value(stats, "pageviews", "views")
+    days = _shell_int(analytics.get("window_days") or analytics.get("days") or 0)
+    window = f"{days}d " if days else ""
+    parts = []
+    if visitors is not None:
+        parts.append(f"visitors={visitors}")
+    if visits is not None:
+        parts.append(f"visits={visits}")
+    if pageviews is not None:
+        parts.append(f"pageviews={pageviews}")
+    if not parts:
+        return f"{prefix} -> {window}configured, no counted stats"
+    return f"{prefix} -> {window}{' '.join(parts)}"
+
+
+def _read_business_progress_lines(data: dict[str, Any], args: dict[str, Any]) -> list[str]:
+    business = data.get("business") if isinstance(data.get("business"), dict) else {}
+    app = data.get("app") if isinstance(data.get("app"), dict) else {}
+    slug = str(
+        business.get("slug")
+        or data.get("business")
+        or args.get("business")
+        or ""
+    ).strip()
+    name = str(business.get("name") or slug or "business").strip()
+    lines: list[str] = []
+    if slug or name:
+        lines.append(f"state -> {name}{f' ({slug})' if slug and slug != name else ''}")
+
+    product = app.get("product_surface") if isinstance(app.get("product_surface"), dict) else {}
+    surface = app.get("surface_contract") if isinstance(app.get("surface_contract"), dict) else {}
+    publish_status = str(product.get("publish_status") or surface.get("publish_status") or "").strip()
+    public_url = str(product.get("public_url") or surface.get("publish_target") or "").strip()
+    if publish_status or public_url:
+        details = " ".join(part for part in (publish_status, public_url) if part)
+        lines.append(f"product -> {details}")
+
+    users = app.get("customers") if isinstance(app.get("customers"), list) else []
+    entitlements = app.get("entitlements") if isinstance(app.get("entitlements"), list) else []
+    paid = sum(
+        1
+        for item in entitlements
+        if isinstance(item, dict)
+        and str(item.get("status") or "").lower() in {"active", "trialing"}
+        and str(item.get("tier") or "").lower() in {"paid", "pro", "team", "owner"}
+    )
+    revenue = app.get("revenue") if isinstance(app.get("revenue"), dict) else {}
+    usage = app.get("usage_this_period") if isinstance(app.get("usage_this_period"), dict) else {}
+    if users or entitlements or revenue or usage:
+        lines.append(
+            "app -> "
+            f"users={len(users)} paid={paid} "
+            f"revenue={_shell_money_cents(revenue.get('amount_paid_cents'))} "
+            f"usage_events={_shell_int(usage.get('events'))}"
+        )
+
+    jobs = data.get("jobs") if isinstance(data.get("jobs"), list) else []
+    if jobs:
+        queued = sum(1 for item in jobs if isinstance(item, dict) and str(item.get("status") or "").lower() == "queued")
+        latest = next((item for item in jobs if isinstance(item, dict)), {})
+        latest_kind = str(latest.get("kind") or latest.get("job_type") or latest.get("type") or "job").strip()
+        latest_status = str(latest.get("status") or "unknown").strip()
+        lines.append(f"jobs -> queued={queued} latest={latest_kind}:{latest_status}")
+
+    controls = data.get("controls") if isinstance(data.get("controls"), list) else []
+    wake_state = next(
+        (
+            str(item.get("state") or item.get("status") or "").strip()
+            for item in controls
+            if isinstance(item, dict) and str(item.get("scope") or "").startswith(f"business:{slug}")
+        ),
+        "",
+    )
+    if wake_state:
+        lines.append(f"controls -> {wake_state}")
+    return lines
+
+
+def _pulse_progress_lines(data: dict[str, Any]) -> list[str]:
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    state = data.get("current_state") if isinstance(data.get("current_state"), dict) else {}
+    product = state.get("product_surface") if isinstance(state.get("product_surface"), dict) else {}
+    lines = [
+        "pulse -> "
+        f"users={_shell_int(summary.get('users'))} "
+        f"paid={_shell_int(summary.get('paid_customers'))} "
+        f"mrr={_shell_money_cents(summary.get('mrr_cents'))}/mo "
+        f"revenue={_shell_money_cents(summary.get('revenue_cents'))} "
+        f"usage_events={_shell_int(summary.get('usage_events'))} "
+        f"queued_jobs={_shell_int(summary.get('queued_jobs'))} "
+        f"unresolved={_shell_int(summary.get('unresolved_inbound'))}"
+    ]
+    publish_status = str(product.get("publish_status") or product.get("status") or "").strip()
+    public_url = str(product.get("public_url") or "").strip()
+    blocker = str(product.get("publish_blocker") or "").strip()
+    if publish_status or public_url:
+        lines.append(f"product -> {' '.join(part for part in (publish_status, public_url) if part)}")
+    if blocker and blocker.lower() not in {"none", "null"}:
+        lines.append(f"blocker -> {blocker}")
+    analytics = data.get("web_analytics") if isinstance(data.get("web_analytics"), dict) else {}
+    if analytics:
+        lines.append(_shell_analytics_line(analytics))
+    return lines
+
+
 def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[str]:
     if not str(name or "").startswith("business_"):
         return []
     config = _shell_progress_config()
     data = _parse_tool_json_result(result)
+    if str(name or "") == "business_read_business":
+        return _read_business_progress_lines(data, args)
+    if str(name or "") == "business_calculate_pulse":
+        return _pulse_progress_lines(data)
+    if str(name or "") == "business_read_app_analytics":
+        return [_shell_analytics_line(data)]
     results = data.get("results") if isinstance(data.get("results"), list) else []
     if not results and data.get("action"):
         results = [data]
@@ -2766,6 +2917,8 @@ class _ShellProgress:
 
     def activity(self, desc: str) -> None:
         text = str(desc or "").strip()
+        if text == "receiving stream response":
+            return
         if not text or text == self._last_activity:
             return
         self._last_activity = text
