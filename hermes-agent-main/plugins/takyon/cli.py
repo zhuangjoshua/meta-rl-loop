@@ -260,6 +260,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="Print raw JSON")
     parser.add_argument("--model", default="", help="Optional model override for natural-language runs")
     parser.add_argument("--max-turns", type=int, default=30, help="Maximum agent loop iterations")
+    parser.add_argument(
+        "--logs",
+        "--follow-logs",
+        dest="follow_logs",
+        action="store_true",
+        help="Tail agent.log inline while CEO-backed commands run",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1038,6 +1045,20 @@ def _parse_business_start_args(
     return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
 
 
+def _strip_log_follow_flags(argv: list[str], *, default: bool = False) -> tuple[list[str], bool]:
+    """Remove CLI log-follow flags from arbitrary Takyon command args."""
+    follow_logs = bool(default)
+    clean: list[str] = []
+    for token in argv:
+        if token in {"--logs", "--follow-logs"}:
+            follow_logs = True
+        elif token == "--no-logs":
+            follow_logs = False
+        else:
+            clean.append(token)
+    return clean, follow_logs
+
+
 def _parse_business_delete_args(argv: list[str]) -> dict[str, Any]:
     usage = "usage: takyon delete <business> [--confirm] [--no-files] [--no-cron] [--no-domains] [--domain <subdomain>]"
     tokens = list(argv[1:])
@@ -1785,6 +1806,71 @@ def _agent_log_path() -> Path | None:
     return candidate if candidate.exists() else None
 
 
+class _AgentLogTail:
+    """Best-effort read-only tail of agent.log for CLI operator visibility."""
+
+    def __init__(self, *, enabled: bool, prefix: str = "  · ") -> None:
+        self.enabled = bool(enabled)
+        self.prefix = prefix
+        self.path: Path | None = None
+        self.offset = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._out: Any = None
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        self.path = _agent_log_path()
+        if self.path is None:
+            print("[logs] agent.log not found; continuing without live log tail.", flush=True)
+            self.enabled = False
+            return self
+        try:
+            self.offset = self.path.stat().st_size
+            self._out = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8", errors="replace")
+        except OSError:
+            self.enabled = False
+            return self
+        print(f"[logs] following {self.path} (Ctrl-C stops the command)", file=self._out, flush=True)
+        self._thread = threading.Thread(target=self._run, name="takyon-agent-log-tail", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        if not self.enabled:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+        self._drain_once()
+        if self._out is not None:
+            try:
+                self._out.close()
+            except OSError:
+                pass
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.5):
+            self._drain_once()
+
+    def _drain_once(self) -> None:
+        path = self.path
+        out = self._out
+        if path is None or out is None:
+            return
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(self.offset)
+                chunk = handle.read()
+                self.offset = handle.tell()
+        except OSError:
+            return
+        for line in chunk.splitlines():
+            if line.strip():
+                print(f"{self.prefix}{line}", file=out, flush=True)
+
+
 def _follow_bootstrap_job(
     store: TakyonStore,
     slug: str,
@@ -1950,6 +2036,8 @@ Takyon control commands come from plugins/takyon/harness/settings.json:
 Scoped CEO:
   {prefix} <natural language operator command>
   {prefix} ceo
+  takyon --logs shell        # interactive shell with inline agent.log tail
+  takyon run <business> <instruction> --logs
 
 Takyon skills through Takyon:
   {prefix} <skill-name> <instruction>
@@ -2969,7 +3057,13 @@ def _seed_platform_owner_at_startup(store: TakyonStore) -> None:
         )
 
 
-def _interactive_shell(*, initial_business: str | None, model: str, max_turns: int) -> None:
+def _interactive_shell(
+    *,
+    initial_business: str | None,
+    model: str,
+    max_turns: int,
+    follow_logs: bool = False,
+) -> None:
     store = TakyonStore()
     _seed_platform_owner_at_startup(store)
     current_business = _slugify(initial_business) if initial_business else None
@@ -3002,6 +3096,7 @@ def _interactive_shell(*, initial_business: str | None, model: str, max_turns: i
                 model=model,
                 max_turns=max_turns,
                 shell_history=shell_history,
+                follow_logs=follow_logs,
             )
             if output:
                 print(output)
@@ -3029,6 +3124,7 @@ def _handle_shell_line(
     max_turns: int,
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
+    follow_logs: bool = False,
 ) -> tuple[str, str | None]:
     is_slash = line.startswith("/")
     raw = line.lstrip("/") if is_slash else line
@@ -3073,6 +3169,7 @@ def _handle_shell_line(
             show_indicator=True,
             shell_history=shell_history,
             operator_user_id=operator_user_id,
+            follow_logs=follow_logs,
         )
         if isinstance(result, dict) and result.get("bootstrap_job"):
             return (
@@ -3097,6 +3194,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             current_business=business,
+            follow_logs=follow_logs,
         ), current_business
 
     if command in _local_command_names() and command != "ceo":
@@ -3109,6 +3207,7 @@ def _handle_shell_line(
             show_indicator=True,
             shell_history=shell_history,
             operator_user_id=operator_user_id,
+            follow_logs=follow_logs,
         )
         next_business = current_business
         if normalized and normalized[0].lower() == "delete":
@@ -3148,6 +3247,7 @@ def _handle_shell_line(
                 shell_history=shell_history,
                 operator_user_id=operator_user_id,
                 current_business=current_business,
+                follow_logs=follow_logs,
             ), current_business
         return f"Unknown slash command: /{command}. Use /commands.", current_business
 
@@ -3161,6 +3261,7 @@ def _handle_shell_line(
         shell_history=shell_history,
         operator_user_id=operator_user_id,
         current_business=current_business,
+        follow_logs=follow_logs,
     ), current_business
 
 
@@ -3330,6 +3431,7 @@ def _run_agent_with_meta(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     current_business: str | None = None,
+    follow_logs: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     load_takyon_env()
     from takyon_cli.runtime_provider import resolve_runtime_provider
@@ -3462,12 +3564,13 @@ def _run_agent_with_meta(
                     )
                 except Exception:
                     session_context_tokens = []
-            if show_agent_activity:
-                result, actual_cents = invoke()
-            else:
-                with _thinking_indicator(show_indicator and not progress.enabled):
-                    with _silence_process_stdio():
-                        result, actual_cents = invoke()
+            with _AgentLogTail(enabled=follow_logs):
+                if show_agent_activity:
+                    result, actual_cents = invoke()
+                else:
+                    with _thinking_indicator(show_indicator and not progress.enabled):
+                        with _silence_process_stdio():
+                            result, actual_cents = invoke()
         if reservation_key:
             billing_warning = _operator_budget_finalize(
                 operator_user_id=resolved_operator_user_id,
@@ -3531,6 +3634,7 @@ def _run_agent(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     current_business: str | None = None,
+    follow_logs: bool = False,
 ) -> str:
     response, _meta = _run_agent_with_meta(
         message,
@@ -3541,6 +3645,7 @@ def _run_agent(
         shell_history=shell_history,
         operator_user_id=operator_user_id,
         current_business=current_business,
+        follow_logs=follow_logs,
     )
     return response
 
@@ -3579,10 +3684,12 @@ def run_takyon_command(
     show_indicator: bool = False,
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
+    follow_logs: bool = False,
 ) -> Any:
     load_takyon_env()
     from .core import operator_identity_mode
 
+    argv, follow_logs = _strip_log_follow_flags(list(argv), default=follow_logs)
     resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
     store = TakyonStore(operator_user_id=resolved_operator_user_id)
 
@@ -3617,6 +3724,7 @@ def run_takyon_command(
             initial_business=argv[1] if len(argv) >= 2 else None,
             model=model or os.getenv("TAKYON_MODEL", ""),
             max_turns=int(max_turns or 30),
+            follow_logs=follow_logs,
         )
         return None
 
@@ -4064,6 +4172,7 @@ def run_takyon_command(
             shell_history=shell_history,
             operator_user_id=resolved_operator_user_id,
             current_business=slug,
+            follow_logs=follow_logs,
         )
 
     if command in {"run", "goal", "/goal"}:
@@ -4080,6 +4189,7 @@ def run_takyon_command(
             shell_history=shell_history,
             operator_user_id=resolved_operator_user_id,
             current_business=slug,
+            follow_logs=follow_logs,
         )
 
     if command == "gc":
@@ -4104,6 +4214,7 @@ def run_takyon_command(
         show_indicator=show_indicator,
         shell_history=shell_history,
         operator_user_id=resolved_operator_user_id,
+        follow_logs=follow_logs,
     )
 
 
@@ -4117,6 +4228,7 @@ def takyon_command(args) -> None:
             model=getattr(args, "model", "") or os.getenv("TAKYON_MODEL", ""),
             max_turns=int(getattr(args, "max_turns", 30) or 30),
             show_indicator=not raw_json,
+            follow_logs=bool(getattr(args, "follow_logs", False)),
         )
         _print(result, raw_json=raw_json)
     except SystemExit:
