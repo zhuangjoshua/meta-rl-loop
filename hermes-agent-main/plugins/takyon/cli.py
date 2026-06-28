@@ -428,18 +428,7 @@ def _format_cli_value(value: Any) -> str:
         for item in businesses:
             slug = item.get("slug") or item.get("business") or "<unknown>"
             name = item.get("name") or slug
-            goal = item.get("goal") or ""
-            status = item.get("status") or "active"
-            raw_mode = item.get("mode") or "live"
-            mode = "live" if str(raw_mode).strip().lower() != "live" else "live"
-            focus = item.get("work_focus") or "all"
-            focus_text = f"/{focus}" if focus != "all" else ""
-            lines.append(f"  {slug} [{status}/{mode}{focus_text}] {name}{f' - {goal}' if goal else ''}")
-        controls = value.get("controls") or []
-        if controls:
-            lines.append("Controls:")
-            for item in controls[:12]:
-                lines.append(f"  {item.get('scope')} -> {item.get('state')} {item.get('reason') or ''}".rstrip())
+            lines.append(f"  {slug} - {name}")
         return "\n".join(lines)
 
     if "business" in value and "workspaces" in value:

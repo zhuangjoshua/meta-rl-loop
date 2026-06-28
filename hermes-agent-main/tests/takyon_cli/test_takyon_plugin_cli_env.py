@@ -166,3 +166,39 @@ def test_agent_log_tail_filters_to_shell_business():
     assert not tail._should_print_line(
         "INFO [20260628_160240_69990c] agent.tool_executor: tool business_read_file completed session=other"
     )
+
+
+def test_business_list_formats_as_short_picker():
+    import plugins.takyon.cli as takyon_cli
+
+    rendered = takyon_cli._format_cli_value(
+        {
+            "scope": "global",
+            "businesses": [
+                {
+                    "slug": "homework-solver",
+                    "name": "Homework Solver",
+                    "status": "active",
+                    "mode": "live",
+                    "goal": "Long goal text should not show in the picker.",
+                    "work_focus": "all",
+                },
+                {
+                    "slug": "simple",
+                    "name": "Simple",
+                    "goal": "Another long goal that should stay hidden.",
+                },
+            ],
+            "controls": [
+                {
+                    "scope": "business:homework-solver",
+                    "state": "active",
+                    "reason": "operator-only diagnostic detail",
+                }
+            ],
+        }
+    )
+
+    assert rendered == "Businesses:\n  homework-solver - Homework Solver\n  simple - Simple"
+    assert "Long goal text" not in rendered
+    assert "Controls:" not in rendered
