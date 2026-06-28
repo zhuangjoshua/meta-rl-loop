@@ -16490,17 +16490,13 @@ class TakyonStore:
         scope_like = f"{scope}/%"
         counts: dict[str, int] = {}
         for table in self._business_delete_direct_fk_tables(conn):
+            if table in {"billing_entries", "custody_entries"}:
+                continue
             key = "slug" if table == "businesses" else "business_slug"
             counts[table] = int(
                 conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {key} = ?", (business,)).fetchone()["count"]
             )
-        for table in ("billing_entries", "custody_entries"):
-            counts[table] = int(
-                conn.execute(
-                    f"SELECT COUNT(*) AS count FROM {table} WHERE business_slug = ?",
-                    (business,),
-                ).fetchone()["count"]
-            )
+        counts.update(self._business_delete_money_ledger_touch(conn, business, apply=False))
         for table in (self._work_requests_table(), "ledger_entries", "events"):
             counts[table] = int(
                 conn.execute(
@@ -16522,6 +16518,34 @@ class TakyonStore:
         )
         return counts
 
+    def _business_delete_money_ledger_touch(
+        self,
+        conn: sqlite3.Connection,
+        slug: str,
+        *,
+        apply: bool,
+    ) -> dict[str, int]:
+        business = _slugify(slug)
+        suffix = "_detached" if apply else ""
+        try:
+            rows = conn.execute(
+                "SELECT ledger_table, affected FROM takyon_business_delete_money_ledger_touch(?, ?)",
+                (business, bool(apply)),
+            ).fetchall()
+        except Exception as exc:  # noqa: BLE001 - reword DB-specific errors for the operator delete rail
+            raise TakyonError(
+                "business delete requires migration 0056_business_delete_money_ledger_touch; "
+                "the runtime role must not directly edit billing/custody ledgers"
+            ) from exc
+        touched = {f"billing_entries{suffix}": 0, f"custody_entries{suffix}": 0}
+        for row in rows:
+            table = str(row["ledger_table"] if isinstance(row, Mapping) else row[0])
+            if table not in {"billing_entries", "custody_entries"}:
+                continue
+            value = row["affected"] if isinstance(row, Mapping) else row[1]
+            touched[f"{table}{suffix}"] = int(value or 0)
+        return touched
+
     def _delete_business_db_rows(
         self,
         conn: sqlite3.Connection,
@@ -16538,13 +16562,10 @@ class TakyonStore:
         # Preserve historical money-ledger rows, but detach them from the business before the
         # business row itself is removed. Postgres keeps `billing_entries.business_slug` and
         # `custody_entries.business_slug` as nullable FKs for auditability; deleting the business
-        # first would fail the FK and strand the operator-facing delete rail.
-        for table in ("billing_entries", "custody_entries"):
-            cursor = conn.execute(
-                f"UPDATE {table} SET business_slug = NULL WHERE business_slug = ?",
-                (business,),
-            )
-            deleted[f"{table}_detached"] = int(cursor.rowcount or 0)
+        # first would fail the FK and strand the operator-facing delete rail. The runtime role is
+        # intentionally not allowed to update money ledgers directly, so this goes through a narrow
+        # SECURITY DEFINER helper instead of broadening table grants.
+        deleted.update(self._business_delete_money_ledger_touch(conn, business, apply=True))
 
         for table in ("agent_runs", "control_states"):
             cursor = conn.execute(f"DELETE FROM {table} WHERE scope = ? OR scope LIKE ?", (scope, scope_like))
