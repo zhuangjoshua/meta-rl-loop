@@ -7408,6 +7408,12 @@ def test_business_x_publish_outreach_sets_x_defaults_in_test_mode(tmp_path, monk
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
     assert receipt_payload["channel"] == "x"
     assert receipt_payload["provider"] == "x"
+    assert receipt_payload["destination_url"] == takyon_core._channel_tracked_link(
+        _product_publish_target("jobtailor"),
+        source="x",
+        medium="social",
+        campaign_key="jobtailor",
+    )
 
 
 def test_business_x_publish_outreach_test_mode_records_media_paths_without_provider_calls(tmp_path, monkeypatch):
@@ -7580,6 +7586,16 @@ def test_business_publish_test_outreach_canonicalizes_product_url(tmp_path, monk
     receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
     assert receipt_payload["metadata"]["canonical_product_url"] == "https://latexflow.coscale.app/"
     assert receipt_payload["metadata"]["canonicalized_product_links"]
+
+
+def test_canonicalize_business_product_links_preserves_whole_hyphenated_host():
+    preview, replacements = _canonicalize_business_product_links(
+        "https://slug.co-scale.app",
+        business="slug",
+        canonical_url="https://slug.co-scale.app/",
+    )
+    assert preview == "https://slug.co-scale.app"
+    assert replacements == []
 
 
 def test_business_publish_test_outreach_records_intended_destination(tmp_path, monkeypatch):

@@ -1585,3 +1585,47 @@ def test_x_publish_outreach_handler_skips_link_reply_when_link_already_in_body(m
         "TWITTER_CREATION_OF_A_POST",
         "TWITTER_USER_LOOKUP_ME",
     ]
+
+
+def test_x_publish_outreach_handler_posts_link_reply_when_body_only_contains_destination_prefix(monkeypatch, tmp_path):
+    _stub_x_credits(monkeypatch)
+    calls: list[dict[str, Any]] = []
+    responses = iter(
+        (
+            {"data": {"id": "tweet-root"}},
+            {"data": {"id": "tweet-link"}},
+            {"data": {"username": "sharedacct"}},
+        )
+    )
+
+    def _fake_twitter_execute(tool_slug, *, arguments=None, timeout=0.0, **_kwargs):
+        calls.append({"tool_slug": tool_slug, "arguments": dict(arguments or {}), "timeout": timeout})
+        return next(responses)
+
+    monkeypatch.setattr(worker.composio_distribution, "twitter_execute_tool", _fake_twitter_execute)
+    monkeypatch.setattr(
+        worker,
+        "_record_x_publish_result",
+        lambda slug, **kwargs: {"artifact": "a.md", "receipt": "r.json"},
+    )
+    monkeypatch.setattr(worker, "_update_work_request", lambda *args, **kwargs: None)
+
+    worker.x_publish_outreach_handler(
+        SimpleNamespace(
+            id="job-prefix-only",
+            business_slug="acme",
+            payload={
+                "body": "Check it out https://acme.example.com/offer",
+                "provider": "x",
+                "destination_url": "https://acme.example.com/?utm_source=x&utm_medium=social&utm_campaign=acme",
+            },
+        )
+    )
+
+    assert [c["tool_slug"] for c in calls] == [
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_CREATION_OF_A_POST",
+        "TWITTER_USER_LOOKUP_ME",
+    ]
+    assert calls[1]["arguments"]["text"] == "https://acme.example.com/?utm_source=x&utm_medium=social&utm_campaign=acme"
+    assert calls[1]["arguments"]["reply_in_reply_to_tweet_id"] == "tweet-root"

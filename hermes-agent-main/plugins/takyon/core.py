@@ -12921,14 +12921,14 @@ def _canonicalize_business_product_links(body: str, *, business: str, canonical_
     replacements: list[dict[str, str]] = []
     business_re = re.escape(_slugify(business))
     pattern = re.compile(
-        rf"(?<![\w.-])(?P<url>(?:https?://)?(?:www\.)?{business_re}\.(?:io|com|co|app|dev)(?P<path>/[^\s)\]]*)?)",
+        rf"(?<![\w.-])(?P<url>(?:https?://)?(?:www\.)?{business_re}\.(?:io|com|co|app|dev)(?P<tail>(?:[/?#][^\s)\]]*)?))(?=$|[\s)\],.!?:;])",
         re.IGNORECASE,
     )
 
     def replace(match: re.Match[str]) -> str:
         old = match.group("url")
-        path = match.group("path") or ""
-        new = canonical if not path or canonical.endswith(path) else f"{canonical_base}{path}"
+        tail = match.group("tail") or ""
+        new = canonical if not tail or canonical.endswith(tail) else f"{canonical_base}{tail}"
         if old != new:
             replacements.append({"from": old, "to": new})
         return new
@@ -24331,17 +24331,10 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
         if media_paths:
             metadata["media_paths"] = list(media_paths)
 
-        canonical_args = dict(args)
-        canonical_args["business"] = business
-        canonical_args["body"] = body
-        canonical_args["metadata"] = metadata
-        canonical_args["media_paths"] = list(media_paths)
-        if business_mode == "test":
-            return handle_business_publish_test_outreach(canonical_args)
-
         channel = str(args.get("channel") or args.get("provider") or "outreach").strip()
         provider = str(args.get("provider") or channel).strip()
         target = args.get("target") or args.get("recipient")
+        is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
         destination_url = _outreach_destination_url(
             channel=channel,
             provider=provider,
@@ -24350,20 +24343,26 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
             metadata=metadata,
         )
         destination_label = str(args.get("destination_label") or metadata.get("destination_label") or "").strip()
-        # Acquisition rail: an X post with no link to the product cannot drive traffic. When the
-        # caller did not pin a destination, default it to the business's canonical product URL,
-        # then UTM-tag it so referred sessions can be attributed back to X. The worker posts this
-        # link as a reply to the thread tail (the takyon-x skill keeps links out of the body).
-        if not destination_url:
+        if is_x_outreach and not destination_url:
             destination_url = _normalize_destination_url(canonical_product_url)
-        if destination_url:
+        if is_x_outreach and destination_url:
             destination_url = _channel_tracked_link(
                 destination_url,
                 source="x",
                 medium="social",
                 campaign_key=business,
             )
-        is_x_outreach = _is_x_provider_name(provider) or _is_x_provider_name(channel)
+        canonical_args = dict(args)
+        canonical_args["business"] = business
+        canonical_args["body"] = body
+        canonical_args["channel"] = channel
+        canonical_args["provider"] = provider
+        canonical_args["destination_url"] = destination_url
+        canonical_args["destination_label"] = destination_label
+        canonical_args["metadata"] = metadata
+        canonical_args["media_paths"] = list(media_paths)
+        if business_mode == "test":
+            return handle_business_publish_test_outreach(canonical_args)
         if not is_x_outreach:
             raise TakyonError(
                 "business_x_publish_outreach only supports X; use takyon-x for X posts, "

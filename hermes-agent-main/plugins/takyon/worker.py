@@ -1711,8 +1711,19 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
         link_already_posted = any(
             isinstance(seg, dict) and seg.get("kind") == "link" for seg in thread_posts
         )
-        destination_bare = destination_url.split("?", 1)[0].rstrip("/")
-        link_in_body = bool(destination_bare) and destination_bare in body
+        body_urls = {
+            normalized
+            for normalized in (
+                takyon_core._normalize_destination_url(raw.rstrip(".,!?;:"))
+                for raw in re.findall(r"https?://[^\s<>()\[\]{}\"']+", body)
+            )
+            if normalized
+        }
+        destination_root = takyon_core._normalize_destination_url(
+            destination_url.split("?", 1)[0].split("#", 1)[0]
+        )
+        destination_candidates = {candidate for candidate in (destination_url, destination_root) if candidate}
+        link_in_body = any(candidate in body_urls for candidate in destination_candidates)
         if destination_url and current_reply_to and not link_already_posted and not link_in_body:
             link_text = _compose_x_link_reply(
                 destination_url,
