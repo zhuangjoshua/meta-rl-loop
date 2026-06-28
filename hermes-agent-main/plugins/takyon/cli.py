@@ -171,7 +171,7 @@ def _scope_label(current_business: str | None) -> str:
 
 def _input_prompt_label(current_business: str | None) -> str:
     scope = _color(_scope_label(current_business), _THEME["secondary"]) if current_business else _dim("global")
-    return f"{_color('takyon', _THEME['brand'])}{_dim('/')}{scope}"
+    return f"{_color('coscale', _THEME['brand'])}{_dim('/')}{scope}"
 
 
 def _input_bar_top(current_business: str | None) -> str:
@@ -185,7 +185,7 @@ def _input_bar_top(current_business: str | None) -> str:
 
 def _input_prompt(current_business: str | None) -> str:
     if not sys.stdout.isatty():
-        return f"takyon/{_scope_label(current_business)} > "
+        return f"coscale/{_scope_label(current_business)} > "
     return "> "
 
 
@@ -2819,7 +2819,7 @@ def _thinking_indicator(enabled: bool):
 
 def _read_shell_line(current_business: str | None, entries: list[dict[str, Any]]) -> str:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        return input(f"takyon/{current_business or 'global'} > ")
+        return input(f"coscale/{current_business or 'global'} > ")
     try:
         return _read_shell_line_prompt_toolkit(current_business, entries)
     except (ImportError, ModuleNotFoundError):
