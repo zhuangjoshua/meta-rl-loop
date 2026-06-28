@@ -5697,13 +5697,32 @@ class _FakeGscSites:
         return _Exec()
 
 
+class _FakeGscSitemaps:
+    def __init__(self, submitted: list[tuple[str, str]]):
+        self._submitted = submitted
+
+    def submit(self, siteUrl: str, feedpath: str):
+        outer = self
+
+        class _Exec:
+            def execute(self):
+                outer._submitted.append((siteUrl, feedpath))
+                return {}
+
+        return _Exec()
+
+
 class _FakeGscService:
     def __init__(self, sites: list[dict[str, Any]]):
         self._sites = sites
         self.added: list[str] = []
+        self.submitted_sitemaps: list[tuple[str, str]] = []
 
     def sites(self):
         return _FakeGscSites(self._sites, self.added)
+
+    def sitemaps(self):
+        return _FakeGscSitemaps(self.submitted_sitemaps)
 
 
 def test_seo_add_gsc_property_registers_subdomain_under_owner_parent():
@@ -5746,6 +5765,17 @@ def test_seo_add_gsc_property_requires_http_scheme():
     )
     with pytest.raises(TakyonError):
         takyon_core._seo_add_gsc_property(service, "ftp://acme.coscale.app/")
+
+
+def test_search_console_submit_default_sitemap_targets_root_sitemap():
+    service = _FakeGscService([])
+    submitted = takyon_core._search_console_submit_default_sitemap(
+        service, "https://acme.coscale.app"
+    )
+    assert submitted == "https://acme.coscale.app/sitemap.xml"
+    assert service.submitted_sitemaps == [
+        ("https://acme.coscale.app", "https://acme.coscale.app/sitemap.xml")
+    ]
 
 
 def test_handle_business_seo_add_property_requires_site_url():

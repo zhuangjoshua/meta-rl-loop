@@ -146,8 +146,10 @@ clarity) sit on top.
   otherwise). Assume the subdomain's URL-prefix property already exists — it is registered
   at bootstrap / website creation, not by this skill — so query it directly (e.g.
   `https://<slug>.coscale.app/`) for isolated metrics rather than the parent domain
-  property, which mixes all subdomains together. If `gsc-sites` shows the property is
-  missing, treat that as a bootstrap gap to report, not something to fix here. (2) Or an
+  property, which mixes all subdomains together. Bootstrap registration also submits the
+  site's `sitemap.xml`; this skill owns making that sitemap real when the source still ships
+  a stub or has drifted from the route map. If `gsc-sites` shows the property is missing,
+  treat that as a bootstrap gap to report, not something to fix here. (2) Or an
   `mcp-gsc` / `google-search-console-mcp` server. Unlocks striking-distance (positions
   11-20), position-aware CTR gaps, opportunity scoring, cannibalization, and decline alerts.
 - **Google Keyword Planner data via DataForSEO.** The built-in `business_seo_query_data`
@@ -485,10 +487,12 @@ count on existing pages unless absolutely necessary.
 
 **Technical** — confirm key pages are indexable (not accidentally noindex/blocked);
 robots.txt doesn't block important paths, CSS, or JS; canonical present where the
-framework supports it; OG/Twitter present; valid XML sitemap of canonical 200 URLs
-referenced from robots.txt; no broken internal links or redirect chains introduced;
-changed pages build; generated schema is valid JSON-LD. Don't bump `dateModified`
-without a real change.
+framework supports it; OG/Twitter present; a real XML sitemap enumerates every canonical
+indexable route from `extract-routes.ts` (never leave the seeded single-URL scaffold stub)
+and is referenced from robots.txt; no broken internal links or redirect chains introduced;
+changed pages build; generated schema is valid JSON-LD. Regenerating the sitemap to match
+the route map is technical hygiene and does **not** count against the 1-5 change budget.
+Don't bump `dateModified` without a real change.
 
 **Schema (JSON-LD, server-rendered, matches visible content)** — add only what fits:
 `Organization`, `WebSite`, `SoftwareApplication`, `Product` (only with real product
@@ -529,6 +533,7 @@ Before finishing, run what the repo provides and confirm the rest:
 - **validate JSON-LD** with `scripts/validate-jsonld.ts` (no `invalid` blocks)
 - **re-run `check-metadata.ts`**: every changed/created page has title, meta, and one H1
 - **re-run `check-internal-links.ts`**: no new broken links; intended pages aren't orphans
+- confirm **`sitemap.xml` matches the actual canonical route map** (not just `/`)
 - confirm **no unsupported factual claims** and **no page is pure fluff**
 - confirm the **diff is small enough to review** (1-5 changes)
 

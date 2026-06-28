@@ -27270,6 +27270,21 @@ def _await_search_console_token_live(
     return False
 
 
+def _search_console_default_sitemap_url(site_url: str) -> str:
+    normalized = str(site_url or "").strip()
+    if not normalized:
+        raise TakyonError("site_url is required")
+    if not normalized.endswith("/"):
+        normalized += "/"
+    return urllib.parse.urljoin(normalized, "sitemap.xml")
+
+
+def _search_console_submit_default_sitemap(service: Any, site_url: str) -> str:
+    sitemap_url = _search_console_default_sitemap_url(site_url)
+    service.sitemaps().submit(siteUrl=site_url, feedpath=sitemap_url).execute()
+    return sitemap_url
+
+
 _GSC_VERIFICATION_META_CACHE: list[str] = []
 
 
@@ -27534,6 +27549,7 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 .execute()
             )
             search_console.sites().add(siteUrl=site_url).execute()
+            sitemap_url = _search_console_submit_default_sitemap(search_console, site_url)
         except Exception as exc:
             return _blocked(
                 "blocked_search_console_verification_failed",
@@ -27550,6 +27566,8 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
             "verification_method": "META",
             "verification_token": verification_token,
             "meta_injected": True,
+            "sitemap_submitted": True,
+            "sitemap_url": sitemap_url,
             "verified_resource": (verify_resp or {}).get("id") if isinstance(verify_resp, Mapping) else None,
         }
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
