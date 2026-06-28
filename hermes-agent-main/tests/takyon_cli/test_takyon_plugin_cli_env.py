@@ -72,3 +72,18 @@ def test_shell_command_accepts_trailing_logs_flag(monkeypatch):
     assert result is None
     assert captured["initial_business"] == "homework-solver"
     assert captured["follow_logs"] is True
+
+
+def test_platform_owner_seed_skips_when_session_user_bound(monkeypatch, capsys):
+    import plugins.takyon.cli as takyon_cli
+
+    class _Store:
+        def seed_platform_owner(self):
+            raise AssertionError("session-bound operator shell must not seed platform owner")
+
+    monkeypatch.setenv("TAKYON_SESSION_USER_ID", "150e4213-4006-4dc1-9cf3-ca7ab3b4696f")
+
+    takyon_cli._seed_platform_owner_at_startup(_Store())
+
+    captured = capsys.readouterr()
+    assert "platform-owner seed skipped" not in captured.err

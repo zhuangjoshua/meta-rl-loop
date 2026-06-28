@@ -3044,6 +3044,8 @@ def _seed_platform_owner_at_startup(store: TakyonStore) -> None:
     hiccup is surfaced to stderr (a later ``/create`` would block with its own actionable reason)
     rather than crashing the operator's session. The one-time raw API key is minted only on the very
     first Postgres startup and shown exactly once."""
+    if str(os.getenv("TAKYON_SESSION_USER_ID") or "").strip():
+        return
     try:
         _user_id, raw_key = store.seed_platform_owner()
     except Exception as exc:  # noqa: BLE001 - never block the shell on a startup seed failure
