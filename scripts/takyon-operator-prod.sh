@@ -61,6 +61,7 @@ import sys
 keys = {
     'TAKYON_OPERATOR_DATABASE_URL',
     'TAKYON_SAFEBOX_TOKEN',
+    'TAKYON_SAFEBOX_OPERATOR_TOKEN',
     'TAKYON_STORAGE_BACKEND',
     'SUPABASE_S3_ENDPOINT',
     'SUPABASE_S3_REGION',
@@ -90,7 +91,15 @@ for part in data:
     if name in keys:
         env[name] = value.decode('utf-8', errors='replace')
 
-missing = [key for key in ('TAKYON_OPERATOR_DATABASE_URL', 'TAKYON_SAFEBOX_TOKEN') if not env.get(key)]
+missing = [
+    key
+    for key in (
+        'TAKYON_OPERATOR_DATABASE_URL',
+        'TAKYON_SAFEBOX_TOKEN',
+        'TAKYON_SAFEBOX_OPERATOR_TOKEN',
+    )
+    if not env.get(key)
+]
 if missing:
     raise SystemExit('missing required operator env: ' + ', '.join(missing))
 
