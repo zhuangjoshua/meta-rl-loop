@@ -10369,10 +10369,19 @@ def cmd_worker(args):
     from plugins.takyon.worker import run_worker_loop
 
     try:
+        kinds = [
+            str(kind).strip()
+            for kind in (getattr(args, "kinds", None) or [])
+            if str(kind).strip()
+        ]
+        min_queue_age = getattr(args, "min_queue_age", None)
+        if min_queue_age is not None:
+            os.environ["TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS"] = str(max(0.0, float(min_queue_age)))
         drained = run_worker_loop(
             worker_id=getattr(args, "worker_id", None),
             poll_interval=getattr(args, "poll_interval", None),
             dispatch=not getattr(args, "no_dispatch", False),
+            kinds=kinds or None,
             once=getattr(args, "once", False),
             max_jobs=getattr(args, "max_jobs", None),
         )
@@ -13250,6 +13259,26 @@ Examples:
         "--no-dispatch",
         action="store_true",
         help="Drain only; do not enqueue due CEO wakes (use when pg_cron owns dispatch).",
+    )
+    worker_parser.add_argument(
+        "--kind",
+        dest="kinds",
+        action="append",
+        default=None,
+        help=(
+            "Claim only this job kind; repeat for multiple lanes, e.g. "
+            "--kind ceo_bootstrap --kind claude.agent_task. When omitted, drain all kinds."
+        ),
+    )
+    worker_parser.add_argument(
+        "--min-queue-age",
+        dest="min_queue_age",
+        type=float,
+        default=None,
+        help=(
+            "Claim only queued jobs at least this many seconds old. Use this for fallback workers "
+            "so a primary local worker gets first chance to claim fresh work."
+        ),
     )
     worker_parser.add_argument(
         "--poll-interval",

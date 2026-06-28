@@ -2436,7 +2436,11 @@ def drain_tick(
     }
 
     if dispatch:
-        counts["dispatched"] = wakes.dispatch_due_wakes(conn) + _dispatch_due_action_jobs(conn)
+        enabled_kinds = {str(kind).strip() for kind in (kinds or []) if str(kind).strip()}
+        if not enabled_kinds or "ceo_wake" in enabled_kinds:
+            counts["dispatched"] += wakes.dispatch_due_wakes(conn)
+        if not enabled_kinds or "product_action" in enabled_kinds:
+            counts["dispatched"] += _dispatch_due_action_jobs(conn)
     counts["requeued"] = jobs.requeue_stale(conn, older_than_seconds=_STALE_SECONDS, worker_id=worker_id)
     if _conn_is_safebox_authority(conn):
         counts["usage_holds_released"] = app_usage.reconcile_held_usage(

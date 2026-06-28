@@ -6,9 +6,9 @@
 # keeps recurring PG wake schedules draining on the same deploy rail as the dashboard without
 # requiring a second manual activation step.
 #
-# Only ONE worker should run per deployment (jobs are claimed FOR UPDATE SKIP LOCKED, so extra
-# workers are safe but redundant). With the worker self-dispatching due wakes, pg_cron is OPTIONAL;
-# pass --no-dispatch here if pg_cron owns dispatch instead.
+# The operator VPS worker is fallback compute. The operator's Mac worker claims fresh jobs first;
+# this service waits a short queue-age grace period before claiming, so bootstrap/build/wake work runs
+# locally by default when the Mac worker is on, while the VPS still drains everything if the Mac is off.
 
 [Unit]
 Description=Takyon Worker (Postgres job drain + CEO wake dispatch)
@@ -68,7 +68,7 @@ Environment=TERMINAL_CONTAINER_PERSISTENT=false
 # remains the in-process fallback. The worker is inherently Postgres (jobs/wake_schedules are PG-only);
 # it does NOT consult TAKYON_DB_BACKEND, and it raises loudly (invariant #8) if no operator-plane
 # database URL is configured.
-ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli worker
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli worker --min-queue-age 180
 Restart=always
 RestartSec=5
 # Give the worker time to finish the in-flight CEO turn on stop. If it overruns and is SIGKILLed,

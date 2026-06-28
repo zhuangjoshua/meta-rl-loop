@@ -243,8 +243,7 @@ Common flow:
   # Terminal 1: keep private Safebox reachable from this Mac.
   scripts/takyon-operator-prod.sh tunnel
 
-  # Terminal 2: stop VPS compute, then run Mac worker pool.
-  scripts/takyon-operator-prod.sh vps-worker stop
+  # Terminal 2: run Mac worker pool. The VPS worker stays on as delayed fallback.
   scripts/takyon-operator-prod.sh worker 10
 
   # Terminal 3: local operator shell against the same prod state as app.fourmanifold.com.

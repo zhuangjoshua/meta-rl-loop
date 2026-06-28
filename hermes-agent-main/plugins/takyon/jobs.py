@@ -250,23 +250,35 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
         f"  and {_LANE_SQL.format(a='r')} = {_LANE_SQL.format(a='j')}"
         ") "
     )
+    min_queue_age_seconds = max(0.0, float(os.getenv("TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS") or 0.0))
+    age_gate = ""
+    if min_queue_age_seconds > 0:
+        age_gate = "and j.created_at <= (now() - (%s::double precision * interval '1 second')) "
+
     with conn.transaction():
         if kinds:
+            params: tuple[Any, ...] = (
+                (list(kinds), min_queue_age_seconds) if min_queue_age_seconds > 0 else (list(kinds),)
+            )
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' and j.kind = any(%s) "
+                + age_gate
                 + lane_gate
                 + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1",
-                (list(kinds),),
+                params,
             ).fetchone()
         else:
+            params = (min_queue_age_seconds,) if min_queue_age_seconds > 0 else ()
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' "
+                + age_gate
                 + lane_gate
                 + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
-                "for update skip locked limit 1"
+                "for update skip locked limit 1",
+                params,
             ).fetchone()
         if picked is None:
             return None
