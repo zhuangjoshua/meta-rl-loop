@@ -87,3 +87,57 @@ def test_platform_owner_seed_skips_when_session_user_bound(monkeypatch, capsys):
 
     captured = capsys.readouterr()
     assert "platform-owner seed skipped" not in captured.err
+
+
+def test_shell_logs_tail_for_full_session(monkeypatch):
+    import plugins.takyon.cli as takyon_cli
+
+    events: list[object] = []
+
+    class _Store:
+        pass
+
+    class _Tail:
+        def __init__(self, *, enabled, prefix="  · "):
+            events.append(("init", enabled, prefix))
+
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            events.append("exit")
+
+    monkeypatch.setattr(takyon_cli, "TakyonStore", _Store)
+    monkeypatch.setattr(takyon_cli, "_seed_platform_owner_at_startup", lambda _store: None)
+    monkeypatch.setattr(takyon_cli, "_business_exists", lambda _store, _slug: True)
+    monkeypatch.setattr(takyon_cli, "_slash_entries", lambda: [])
+    monkeypatch.setattr(takyon_cli, "_startup_graphic", lambda _business: "ready")
+    monkeypatch.setattr(takyon_cli, "_read_shell_line", lambda _business, _entries: "exit")
+    monkeypatch.setattr(takyon_cli, "_AgentLogTail", _Tail)
+
+    takyon_cli._interactive_shell(
+        initial_business="homework-solver",
+        model="",
+        max_turns=1,
+        follow_logs=True,
+    )
+
+    assert events == [("init", True, "  · "), "enter", "exit"]
+
+
+def test_agent_log_tail_nested_context_does_not_duplicate(monkeypatch, tmp_path):
+    import plugins.takyon.cli as takyon_cli
+
+    log_path = tmp_path / "agent.log"
+    log_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(takyon_cli, "_agent_log_path", lambda: log_path)
+    takyon_cli._AgentLogTail._active = 0
+
+    with takyon_cli._AgentLogTail(enabled=True) as outer:
+        with takyon_cli._AgentLogTail(enabled=True) as inner:
+            assert outer.enabled is True
+            assert inner.enabled is False
+            assert takyon_cli._AgentLogTail._active == 1
+
+    assert takyon_cli._AgentLogTail._active == 0

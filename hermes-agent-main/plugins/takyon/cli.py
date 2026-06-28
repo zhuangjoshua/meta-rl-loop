@@ -1809,6 +1809,9 @@ def _agent_log_path() -> Path | None:
 class _AgentLogTail:
     """Best-effort read-only tail of agent.log for CLI operator visibility."""
 
+    _lock = threading.Lock()
+    _active = 0
+
     def __init__(self, *, enabled: bool, prefix: str = "  · ") -> None:
         self.enabled = bool(enabled)
         self.prefix = prefix
@@ -1817,20 +1820,26 @@ class _AgentLogTail:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._out: Any = None
+        self._owns_active = False
 
     def __enter__(self):
         if not self.enabled:
+            return self
+        if not self._claim_active_tail():
+            self.enabled = False
             return self
         self.path = _agent_log_path()
         if self.path is None:
             print("[logs] agent.log not found; continuing without live log tail.", flush=True)
             self.enabled = False
+            self._release_active_tail()
             return self
         try:
             self.offset = self.path.stat().st_size
             self._out = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8", errors="replace")
         except OSError:
             self.enabled = False
+            self._release_active_tail()
             return self
         print(f"[logs] following {self.path} (Ctrl-C stops the command)", file=self._out, flush=True)
         self._thread = threading.Thread(target=self._run, name="takyon-agent-log-tail", daemon=True)
@@ -1838,17 +1847,35 @@ class _AgentLogTail:
         return self
 
     def __exit__(self, _exc_type, _exc, _tb) -> None:
-        if not self.enabled:
+        try:
+            if not self.enabled:
+                return
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=2.0)
+            self._drain_once()
+            if self._out is not None:
+                try:
+                    self._out.close()
+                except OSError:
+                    pass
+        finally:
+            self._release_active_tail()
+
+    def _claim_active_tail(self) -> bool:
+        with self._lock:
+            if self.__class__._active:
+                return False
+            self.__class__._active += 1
+            self._owns_active = True
+            return True
+
+    def _release_active_tail(self) -> None:
+        if not self._owns_active:
             return
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-        self._drain_once()
-        if self._out is not None:
-            try:
-                self._out.close()
-            except OSError:
-                pass
+        with self._lock:
+            self.__class__._active = max(0, self.__class__._active - 1)
+        self._owns_active = False
 
     def _run(self) -> None:
         while not self._stop.wait(0.5):
@@ -3076,45 +3103,46 @@ def _interactive_shell(
     print(_startup_graphic(current_business))
     shell_history: list[dict[str, str]] = []
 
-    while True:
-        try:
-            line = _read_shell_line(current_business, entries)
-        except EOFError:
-            print()
-            return
-        except KeyboardInterrupt:
-            print()
-            continue
-        line = line.strip()
-        if not line:
-            continue
-        if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
-            return
-        try:
-            output, current_business = _handle_shell_line(
-                line,
-                current_business=current_business,
-                store=store,
-                model=model,
-                max_turns=max_turns,
-                shell_history=shell_history,
-                follow_logs=follow_logs,
-            )
-            if output:
-                print(output)
-            _record_shell_turn(shell_history, line, output)
-            entries = _slash_entries()
-        except SystemExit as exc:
-            if str(exc):
-                output = f"Takyon: {exc}"
+    with _AgentLogTail(enabled=follow_logs):
+        while True:
+            try:
+                line = _read_shell_line(current_business, entries)
+            except EOFError:
+                print()
+                return
+            except KeyboardInterrupt:
+                print()
+                continue
+            line = line.strip()
+            if not line:
+                continue
+            if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
+                return
+            try:
+                output, current_business = _handle_shell_line(
+                    line,
+                    current_business=current_business,
+                    store=store,
+                    model=model,
+                    max_turns=max_turns,
+                    shell_history=shell_history,
+                    follow_logs=follow_logs,
+                )
+                if output:
+                    print(output)
+                _record_shell_turn(shell_history, line, output)
+                entries = _slash_entries()
+            except SystemExit as exc:
+                if str(exc):
+                    output = f"Takyon: {exc}"
+                    print(output)
+                    _record_shell_turn(shell_history, line, output)
+            except KeyboardInterrupt:
+                print("Takyon: interrupted")
+            except Exception as exc:
+                output = f"Takyon error: {exc}"
                 print(output)
                 _record_shell_turn(shell_history, line, output)
-        except KeyboardInterrupt:
-            print("Takyon: interrupted")
-        except Exception as exc:
-            output = f"Takyon error: {exc}"
-            print(output)
-            _record_shell_turn(shell_history, line, output)
 
 
 def _handle_shell_line(
