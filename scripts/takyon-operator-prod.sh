@@ -140,6 +140,26 @@ EOF
   exit 1
 }
 
+tunnel_healthy() {
+  curl --silent --fail --max-time 2 "$LOCAL_SAFEBOX_URL/healthz" >/dev/null 2>&1
+}
+
+wait_for_tunnel() {
+  local log_file="$1"
+  for _ in $(seq 1 30); do
+    if tunnel_healthy; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "Safebox tunnel did not become healthy at $LOCAL_SAFEBOX_URL" >&2
+  if [[ -f "$log_file" ]]; then
+    echo "Tunnel log tail:" >&2
+    tail -40 "$log_file" >&2 || true
+  fi
+  return 1
+}
+
 require_docker_for_worker() {
   if [[ "${TERMINAL_ENV:-docker}" != "docker" ]]; then
     return 0
@@ -178,6 +198,42 @@ cmd_shell_quiet() {
   exec "$TAKYON_ENTRY" shell "$@"
 }
 
+cmd_overview() {
+  load_operator_env
+  require_tunnel
+  cd "$ROOT"
+  local json_payload
+  json_payload="$("$TAKYON_ENTRY" --json businesses)"
+  TAKYON_OVERVIEW_JSON="$json_payload" "$RUNTIME_DIR/.venv/bin/python" - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["TAKYON_OVERVIEW_JSON"])
+if not payload.get("success"):
+    raise SystemExit(json.dumps(payload, indent=2))
+
+controls = {}
+for item in payload.get("controls") or []:
+    scope = str(item.get("scope") or "")
+    if scope:
+        controls[scope] = item
+
+businesses = payload.get("businesses") or []
+print("Businesses")
+print(f"{'state':<16} {'slug':<32} name")
+print(f"{'-' * 16} {'-' * 32} {'-' * 24}")
+for item in businesses:
+    slug = str(item.get("slug") or item.get("business") or "").strip()
+    name = str(item.get("name") or slug).strip()
+    state = str((controls.get(f"business:{slug}") or {}).get("state") or item.get("status") or "active")
+    app_state = str((controls.get(f"business:{slug}/app") or {}).get("state") or "")
+    label = state
+    if app_state and app_state != state:
+        label = f"{state}/app:{app_state}"
+    print(f"{label:<16.16} {slug:<32.32} {name}")
+PY
+}
+
 cmd_worker() {
   local concurrency="${1:-10}"
   if ! [[ "$concurrency" =~ ^[0-9]+$ ]] || [[ "$concurrency" -lt 1 ]]; then
@@ -198,6 +254,71 @@ cmd_worker_once() {
   require_docker_for_worker
   cd "$RUNTIME_DIR"
   exec "$TAKYON_CLI_BIN" worker --once --worker-id "mac-operator-$(hostname -s)-once-$$"
+}
+
+cmd_console() {
+  local concurrency="10"
+  local business=""
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    concurrency="$1"
+    shift || true
+  fi
+  business="${1:-}"
+
+  require_files
+  mkdir -p "$LOCAL_PROD_ROOT/logs"
+
+  local tunnel_pid=""
+  local worker_pid=""
+  local timestamp
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  local tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
+  local worker_log="$LOCAL_PROD_ROOT/logs/worker-$timestamp.log"
+
+  cleanup() {
+    if [[ -n "$worker_pid" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
+      kill "$worker_pid" >/dev/null 2>&1 || true
+      wait "$worker_pid" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$tunnel_pid" ]] && kill -0 "$tunnel_pid" >/dev/null 2>&1; then
+      kill "$tunnel_pid" >/dev/null 2>&1 || true
+      wait "$tunnel_pid" >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup EXIT INT TERM
+
+  if tunnel_healthy; then
+    echo "Safebox tunnel: already healthy at $LOCAL_SAFEBOX_URL"
+  else
+    echo "Starting Safebox tunnel in background..."
+    "$0" tunnel >"$tunnel_log" 2>&1 &
+    tunnel_pid="$!"
+    wait_for_tunnel "$tunnel_log"
+  fi
+
+  load_operator_env
+  require_docker_for_worker
+  echo "Starting local worker pool: concurrency=$concurrency (log: $worker_log)"
+  "$0" worker "$concurrency" >"$worker_log" 2>&1 &
+  worker_pid="$!"
+  sleep 1
+  if ! kill -0 "$worker_pid" >/dev/null 2>&1; then
+    echo "Local worker exited immediately." >&2
+    tail -80 "$worker_log" >&2 || true
+    exit 1
+  fi
+
+  cmd_overview
+  echo
+  echo "Worker log: $worker_log"
+  echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
+  echo
+  cd "$ROOT"
+  if [[ -n "$business" ]]; then
+    "$TAKYON_ENTRY" --logs shell "$business"
+  else
+    "$TAKYON_ENTRY" --logs shell
+  fi
 }
 
 cmd_vps_worker() {
@@ -232,6 +353,8 @@ usage() {
   cat <<EOF
 Usage:
   scripts/takyon-operator-prod.sh tunnel
+  scripts/takyon-operator-prod.sh console [concurrency] [business]
+  scripts/takyon-operator-prod.sh overview
   scripts/takyon-operator-prod.sh shell [business]
   scripts/takyon-operator-prod.sh quiet [business]
   scripts/takyon-operator-prod.sh worker [concurrency]
@@ -248,6 +371,9 @@ Common flow:
 
   # Terminal 3: local operator shell against the same prod state as app.fourmanifold.com.
   scripts/takyon-operator-prod.sh shell homework-solver
+
+One-terminal flow:
+  scripts/takyon-operator-prod.sh console 10 homework-solver
 EOF
 }
 
@@ -260,6 +386,14 @@ case "$command" in
   shell)
     shift || true
     cmd_shell "$@"
+    ;;
+  console)
+    shift || true
+    cmd_console "$@"
+    ;;
+  overview|businesses)
+    shift || true
+    cmd_overview "$@"
     ;;
   quiet|shell-quiet|--no-logs)
     shift || true
