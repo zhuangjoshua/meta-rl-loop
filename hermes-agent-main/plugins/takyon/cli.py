@@ -226,12 +226,11 @@ def _read_mascot_lines() -> list[str]:
 def _startup_graphic(current_business: str | None) -> str:
     width = max(92, min(_shell_width(), 112))
     wordmark = [
-        " _____     _                      ",
-        "|_   _|_ _| | ___   _  ___  _ __  ",
-        "  | |/ _` | |/ / | | |/ _ \\| '_ \\ ",
-        "  | | (_| |   <| |_| | (_) | | | |",
-        "  |_|\\__,_|_|\\_\\\\__, |\\___/|_| |_|",
-        "                |___/             ",
+        r"   ______      _____           __        ",
+        r"  / ____/___  / ___/________ _/ /__      ",
+        r" / /   / __ \ \__ \/ ___/ __ `/ / _ \    ",
+        r"/ /___/ /_/ /___/ / /__/ /_/ / /  __/    ",
+        r"\____/\____//____/\___/\__,_/_/\___/     ",
     ]
     mascot = _read_mascot_lines()
     rows = [_frame_line(width)]
@@ -241,9 +240,9 @@ def _startup_graphic(current_business: str | None) -> str:
         rows.append(_framed_text(f"{_render_pixel_mascot_line(line)}", width))
     rows.extend([
         _framed_text("", width),
-        _framed_text(f"{_bold('Takyon shell')} {_color('ready', _THEME['success'])}  {_dim(str(Path.cwd()))}", width),
-        _framed_text(f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}    {_color('plain text', _THEME['primary'])} goes to the scoped CEO", width),
-        _framed_text(f"{_color('/', _THEME['primary'])} shows controls and skills    {_color('/use', _THEME['primary'])} switches business scope    {_color('/commands', _THEME['primary'])} lists capabilities", width),
+        _framed_text(f"{_bold('CoScale operator')} {_color('ready', _THEME['success'])}  {_dim(str(Path.cwd()))}", width),
+        _framed_text(f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}    {_color('plain text', _THEME['primary'])} talks to this company CEO", width),
+        _framed_text(f"{_color('/wake', _THEME['primary'])} calls the CEO    {_color('/use', _THEME['primary'])} switches company    {_color('/commands', _THEME['primary'])} lists capabilities", width),
     ])
     rows.append(_frame_line(width))
     return "\n".join(rows)

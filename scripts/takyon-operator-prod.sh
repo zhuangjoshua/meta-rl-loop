@@ -122,8 +122,10 @@ load_operator_env() {
   export TAKYON_SAFEBOX_URL="$LOCAL_SAFEBOX_URL"
   export TAKYON_PROVIDER_BROKER="${TAKYON_PROVIDER_BROKER:-1}"
   export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
-  # Host-side provider calls use the localhost tunnel. Dockerized Claude workers need the
-  # Mac host address from inside Docker Desktop, so they get the container-reachable proxy URL.
+  # The host-side operator shell talks to the localhost tunnel. Dockerized business workers need the
+  # container-reachable host alias. Keep both explicit so CEO chat and Docker compute do not fight over
+  # one Safebox broker URL.
+  export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$LOCAL_SAFEBOX_URL"
   if [[ "$TERMINAL_ENV" == "docker" ]]; then
     export TAKYON_CLAUDE_AGENT_BROKER_URL="$CONTAINER_SAFEBOX_URL"
   else

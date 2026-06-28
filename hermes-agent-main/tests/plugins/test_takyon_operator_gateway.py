@@ -118,6 +118,21 @@ def test_anthropic_broker_runtime_uses_safebox_root_and_session_token(monkeypatc
     assert minted == {"business": "latexflow", "operator_user_id": "owner-1"}
 
 
+def test_anthropic_broker_runtime_prefers_host_gateway_url_over_docker_worker_url(monkeypatch):
+    monkeypatch.setattr(og, "_operator_anthropic_broker_lockdown", lambda: True)
+    monkeypatch.setattr(og, "_resolve_operator_owner_user_id", lambda context: "owner-1")
+    monkeypatch.setenv("TAKYON_OPERATOR_GATEWAY_BROKER_URL", "http://127.0.0.1:8765")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BROKER_URL", "http://host.docker.internal:8765")
+    from plugins.takyon import safebox
+
+    monkeypatch.setattr(safebox, "mint_operator_session_token", lambda *a, **k: "operator-session-token-xyz")
+
+    runtime = _resolve_runtime_for_request(_anthropic_context(), {"model": "claude-opus-4-8"})
+
+    assert runtime["base_url"] == "http://127.0.0.1:8765"
+    assert runtime["api_key"] == "operator-session-token-xyz"
+
+
 def test_anthropic_broker_runtime_fails_closed_when_owner_missing(monkeypatch):
     monkeypatch.setattr(og, "_operator_anthropic_broker_lockdown", lambda: True)
     monkeypatch.setattr(og, "_resolve_operator_owner_user_id", lambda context: "")

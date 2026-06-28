@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _PLACEHOLDER_API_KEY = "takyon-operator-gateway"
 _OPENAI_GATEWAY_BASE_URL = "https://operator-gateway.local/v1"
 _ANTHROPIC_GATEWAY_BASE_URL = "https://operator-gateway.local"
+_OPERATOR_GATEWAY_BROKER_URL_ENV = "TAKYON_OPERATOR_GATEWAY_BROKER_URL"
 _SUPPORTED_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages"}
 _HOP_BY_HOP_HEADERS = {
     "authorization",
@@ -308,6 +309,23 @@ def _operator_anthropic_broker_lockdown() -> bool:
     return bool(takyon_core._claude_agent_broker_lockdown_enabled())
 
 
+def _operator_anthropic_broker_url() -> str:
+    """Safebox proxy root for host-side operator gateway calls.
+
+    The coding worker may need a Docker-reachable URL such as ``host.docker.internal``, while the
+    interactive CLI gateway runs on the Mac host and needs the localhost tunnel. Keep that host override
+    separate so local operator chat does not inherit a container-only name.
+    """
+    import os
+
+    override = str(os.getenv(_OPERATOR_GATEWAY_BROKER_URL_ENV, "") or "").strip().rstrip("/")
+    if override:
+        return override
+    from plugins.takyon import core as takyon_core
+
+    return str(takyon_core._claude_agent_broker_url() or "").strip().rstrip("/")
+
+
 def _resolve_anthropic_broker_runtime(
     context: OperatorGatewayContext,
     body: dict[str, Any],
@@ -319,14 +337,14 @@ def _resolve_anthropic_broker_runtime(
     call against THAT owner's control-plane billing allowance. Fails CLOSED (raises) when the proxy URL or
     the owner cannot be resolved or the mint is refused, so the CEO turn refuses rather than falling back
     to a raw key."""
-    from plugins.takyon import core as takyon_core
     from plugins.takyon import safebox
 
-    broker_base_url = str(takyon_core._claude_agent_broker_url() or "").strip().rstrip("/")
+    broker_base_url = _operator_anthropic_broker_url()
     if not broker_base_url:
         raise RuntimeError(
             "operator anthropic broker lockdown is on but no safebox proxy URL is configured "
-            "(set TAKYON_CLAUDE_AGENT_BROKER_URL or TAKYON_SAFEBOX_URL to the safebox ROOT)"
+            f"(set {_OPERATOR_GATEWAY_BROKER_URL_ENV}, TAKYON_CLAUDE_AGENT_BROKER_URL, or "
+            "TAKYON_SAFEBOX_URL to the safebox ROOT)"
         )
     business_slug = str(context.business_slug or "").strip()
     operator_user_id = _resolve_operator_owner_user_id(context)
