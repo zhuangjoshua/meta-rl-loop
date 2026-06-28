@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Operator-only convenience launcher for the live Takyon CLI on argon-alpha-14.
+# Installed only by deploy/argon-alpha-14/deploy-runtime.sh. It never grants power by itself:
+# the operator host's locked-down service env and SSH boundary remain the authority boundary.
+
+RUNTIME_DIR="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
+TAKYON_HOME_DIR="${TAKYON_HOME:-/opt/takyon/.takyon}"
+TAKYON_SERVICE="${TAKYON_OPERATOR_SERVICE:-takyon-dashboard.service}"
+DEFAULT_OPERATOR_USER_ID="${TAKYON_DEFAULT_OPERATOR_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
+
+usage() {
+  cat <<'EOF'
+usage:
+  takyon-op [business]
+  takyon-op shell [business]
+  takyon-op --no-logs [business]
+  takyon-op -- <raw takyon args...>
+
+Starts the operator Takyon shell on the operator VPS with logs scoped to the active business.
+Inside the shell:
+  /businesses          list businesses
+  /use <business>      switch business scope
+  /commands            show controls
+  exit                 leave the shell
+EOF
+}
+
+die() {
+  echo "takyon-op: $*" >&2
+  exit 1
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+[[ -x "$RUNTIME_DIR/takyon" ]] || die "runtime CLI not found at $RUNTIME_DIR/takyon"
+[[ "$(id -u)" == "0" ]] || die "run as root on the operator VPS"
+command -v systemctl >/dev/null 2>&1 || die "systemctl is required; this wrapper is for the operator VPS"
+id -u takyon >/dev/null 2>&1 || die "takyon service user missing; this wrapper is for the operator VPS"
+
+unit_env="$(systemctl show "$TAKYON_SERVICE" -p Environment --value 2>/dev/null || true)"
+if [[ "$unit_env" != *"TAKYON_HOST_ROLE=operator"* ]]; then
+  die "$TAKYON_SERVICE is not an operator service; refusing to start operator CLI"
+fi
+if systemctl cat takyon-subuser.service >/dev/null 2>&1; then
+  die "sub-user service is present on this host; refusing to expose operator CLI"
+fi
+
+dashboard_pid="$(systemctl show -p MainPID --value "$TAKYON_SERVICE" 2>/dev/null || true)"
+if [[ -z "$dashboard_pid" || "$dashboard_pid" == "0" || ! -r "/proc/$dashboard_pid/environ" ]]; then
+  die "$TAKYON_SERVICE is not running or its env is unreadable"
+fi
+
+service_env_value() {
+  tr '\0' '\n' <"/proc/$dashboard_pid/environ" | awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}'
+}
+
+safe_url="$(service_env_value TAKYON_SAFEBOX_URL)"
+safe_token="$(service_env_value TAKYON_SAFEBOX_TOKEN)"
+[[ -n "$safe_url" ]] || die "TAKYON_SAFEBOX_URL missing from $TAKYON_SERVICE env"
+[[ -n "$safe_token" ]] || die "TAKYON_SAFEBOX_TOKEN missing from $TAKYON_SERVICE env"
+
+logs=1
+args=("$@")
+if [[ "${args[0]:-}" == "--no-logs" ]]; then
+  logs=0
+  args=("${args[@]:1}")
+fi
+
+if [[ "${args[0]:-}" == "--" ]]; then
+  args=("${args[@]:1}")
+else
+  if [[ "${args[0]:-}" == "shell" ]]; then
+    args=("${args[@]:1}")
+  fi
+  business="${args[0]:-}"
+  args=("shell")
+  if [[ -n "$business" ]]; then
+    args+=("$business")
+  fi
+fi
+
+if [[ "$logs" == "1" ]]; then
+  args=("--logs" "${args[@]}")
+fi
+
+export TAKYON_HOME="$TAKYON_HOME_DIR"
+export HOME=/opt/takyon
+export TAKYON_HOST_ROLE=operator
+export TAKYON_SAFEBOX_URL="$safe_url"
+export TAKYON_SAFEBOX_TOKEN="$safe_token"
+export TAKYON_SESSION_USER_ID="${TAKYON_SESSION_USER_ID:-$DEFAULT_OPERATOR_USER_ID}"
+
+exec runuser -u takyon -- "$RUNTIME_DIR/takyon" "${args[@]}"

@@ -15,6 +15,17 @@ deploy/argon-alpha-14/bootstrap-host.sh
 deploy/argon-alpha-14/deploy-runtime.sh
 ```
 
+After deploy, the operator VPS exposes a root-only convenience launcher:
+
+```bash
+takyon-op homework-solver
+```
+
+It starts the existing Takyon shell with logs scoped to the active business.
+Use `/businesses` to list companies and `/use <slug>` to switch inside the
+shell. This wrapper is installed only by the operator deploy rail; do not copy
+it to the sub-user host or treat it as product-app capability.
+
 Repair legacy product-service drift on the activation host with:
 
 ```bash

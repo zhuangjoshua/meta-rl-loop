@@ -11,6 +11,7 @@ VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
+OPERATOR_CLI_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-op"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -57,6 +58,11 @@ fi
 
 if [[ ! -f "$DOCKER_BROKER_SERVICE_FILE" ]]; then
   echo "docker broker service file not found: $DOCKER_BROKER_SERVICE_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$OPERATOR_CLI_FILE" ]]; then
+  echo "operator CLI wrapper not found: $OPERATOR_CLI_FILE" >&2
   exit 1
 fi
 
@@ -130,6 +136,10 @@ scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$DOCKER_BROKER_SERVICE_FILE" \
   "$TAKYON_VPS_HOST:$TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE"
+
+scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  "$OPERATOR_CLI_FILE" \
+  "$TAKYON_VPS_HOST:/tmp/takyon-op"
 
 if ! TARGET_HOST="$TAKYON_VPS_HOST" \
   TARGET_KEY="$TAKYON_VPS_KEY" \
@@ -228,6 +238,8 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   # auth state once, then keep it owned by the service user.
   if [ -e /root/.xurl ] && [ ! -e /opt/takyon/.xurl ]; then cp -a /root/.xurl /opt/takyon/.xurl; fi
   if [ -e /opt/takyon/.xurl ]; then chown -R takyon:takyon /opt/takyon/.xurl; fi
+  install -o root -g root -m 0750 /tmp/takyon-op /usr/local/bin/takyon-op
+  rm -f /tmp/takyon-op
 	  if ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/.takyon/.env 2>/dev/null \
 	    && ! grep -q '^TAKYON_SAFEBOX_TOKEN=' /opt/takyon/secrets/.env 2>/dev/null; then
 	    echo 'TAKYON_SAFEBOX_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
