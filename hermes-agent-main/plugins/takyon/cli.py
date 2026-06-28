@@ -266,6 +266,11 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Tail agent.log inline while CEO-backed commands run",
     )
+    parser.add_argument(
+        "--raw-hermes",
+        action="store_true",
+        help="Print raw Hermes tool-call args/results while CEO-backed commands run",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2553,6 +2558,35 @@ def _shell_progress_config() -> dict[str, Any]:
     }
 
 
+def _raw_hermes_default() -> bool:
+    return _config_bool(os.getenv("TAKYON_SHELL_RAW_HERMES"), default=False)
+
+
+def _raw_hermes_max_chars() -> int:
+    raw = str(os.getenv("TAKYON_SHELL_RAW_MAX_CHARS") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 12000
+
+
+def _shell_json_dump(value: Any) -> str:
+    try:
+        return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:
+        return str(value)
+
+
+def _truncate_raw_hermes(text: str, max_chars: int) -> str:
+    clean = str(text or "")
+    if max_chars <= 0 or len(clean) <= max_chars:
+        return clean
+    omitted = len(clean) - max_chars
+    return f"{clean[:max_chars].rstrip()}\n... [truncated {omitted} chars; set TAKYON_SHELL_RAW_MAX_CHARS=0 for full raw output]"
+
+
 def _trim_shell_history_text(text: str, max_chars: int) -> str:
     clean = str(text or "").strip()
     if len(clean) <= max_chars:
@@ -2861,7 +2895,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
 
 
 class _ShellProgress:
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, *, raw_hermes: bool = False):
         config = _shell_progress_config()
         self.enabled = bool(enabled and config["enabled"])
         self.max_lines = int(config["max_lines"])
@@ -2870,6 +2904,8 @@ class _ShellProgress:
         self._last_tool_generating = ""
         self._stream_open = False
         self.streamed_chars = 0
+        self.raw_hermes = bool(raw_hermes)
+        self.raw_max_chars = _raw_hermes_max_chars()
 
     def close(self) -> None:
         if self.fd is not None:
@@ -2895,6 +2931,13 @@ class _ShellProgress:
             return
         self.finish_stream()
         self._write(f"{_color('->', _THEME['secondary'])} {line}\n")
+
+    def raw_event(self, label: str, payload: Any) -> None:
+        if self.fd is None or not self.raw_hermes:
+            return
+        self.finish_stream()
+        body = _truncate_raw_hermes(_shell_json_dump(payload), self.raw_max_chars)
+        self._write(f"{_color('hermes.raw', _THEME['warning'])} {label}\n{body}\n")
 
     def stream_delta(self, delta: Any) -> None:
         if delta is None:
@@ -2936,9 +2979,13 @@ class _ShellProgress:
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
 
+    def tool_started(self, tool_id: str, name: str, args: dict[str, Any]) -> None:
+        self.raw_event("tool_call", {"id": tool_id, "name": name, "args": args})
+
     def tool_completed(self, _tool_id: str, name: str, args: dict[str, Any], result: Any) -> None:
         if self.fd is None:
             return
+        self.raw_event("tool_result", {"id": _tool_id, "name": name, "args": args, "result": result})
         for line in _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)[: self.max_lines]:
             self.emit(line)
 
@@ -3310,6 +3357,7 @@ def _interactive_shell(
     model: str,
     max_turns: int,
     follow_logs: bool = False,
+    raw_hermes: bool = False,
 ) -> None:
     store = TakyonStore()
     _seed_platform_owner_at_startup(store)
@@ -3321,6 +3369,7 @@ def _interactive_shell(
     print(_startup_graphic(current_business))
     shell_history: list[dict[str, str]] = []
     log_scope = {"business": current_business}
+    raw_hermes_enabled = bool(raw_hermes or _raw_hermes_default())
 
     with _AgentLogTail(enabled=follow_logs, business_filter=lambda: log_scope.get("business")):
         while True:
@@ -3337,6 +3386,23 @@ def _interactive_shell(
                 continue
             if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
                 return
+            raw_tokens = shlex.split(line.lstrip("/")) if line.lstrip("/") else []
+            if raw_tokens and raw_tokens[0].lower() == "raw":
+                mode = raw_tokens[1].lower() if len(raw_tokens) >= 2 else "status"
+                if mode in {"on", "true", "1", "yes"}:
+                    raw_hermes_enabled = True
+                elif mode in {"off", "false", "0", "no"}:
+                    raw_hermes_enabled = False
+                elif mode in {"status", ""}:
+                    pass
+                else:
+                    print("usage: /raw [on|off|status]")
+                    continue
+                state = "on" if raw_hermes_enabled else "off"
+                limit = _raw_hermes_max_chars()
+                limit_text = "full" if limit <= 0 else f"{limit} chars/event"
+                print(f"Raw Hermes: {state} ({limit_text})")
+                continue
             try:
                 output, current_business = _handle_shell_line(
                     line,
@@ -3346,6 +3412,7 @@ def _interactive_shell(
                     max_turns=max_turns,
                     shell_history=shell_history,
                     follow_logs=follow_logs,
+                    raw_hermes=raw_hermes_enabled,
                 )
                 if output:
                     print(output)
@@ -3375,6 +3442,7 @@ def _handle_shell_line(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     follow_logs: bool = False,
+    raw_hermes: bool = False,
 ) -> tuple[str, str | None]:
     is_slash = line.startswith("/")
     raw = line.lstrip("/") if is_slash else line
@@ -3420,6 +3488,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
         )
         if isinstance(result, dict) and result.get("bootstrap_job"):
             return (
@@ -3445,6 +3514,7 @@ def _handle_shell_line(
             operator_user_id=operator_user_id,
             current_business=business,
             follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
         ), current_business
 
     if command in _local_command_names() and command != "ceo":
@@ -3458,6 +3528,7 @@ def _handle_shell_line(
             shell_history=shell_history,
             operator_user_id=operator_user_id,
             follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
         )
         next_business = current_business
         if normalized and normalized[0].lower() == "delete":
@@ -3498,6 +3569,7 @@ def _handle_shell_line(
                 operator_user_id=operator_user_id,
                 current_business=current_business,
                 follow_logs=follow_logs,
+                raw_hermes=raw_hermes,
             ), current_business
         return f"Unknown slash command: /{command}. Use /commands.", current_business
 
@@ -3512,6 +3584,7 @@ def _handle_shell_line(
         operator_user_id=operator_user_id,
         current_business=current_business,
         follow_logs=follow_logs,
+        raw_hermes=raw_hermes,
     ), current_business
 
 
@@ -3682,6 +3755,7 @@ def _run_agent_with_meta(
     operator_user_id: str | None = None,
     current_business: str | None = None,
     follow_logs: bool = False,
+    raw_hermes: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     load_takyon_env()
     from takyon_cli.runtime_provider import resolve_runtime_provider
@@ -3718,7 +3792,7 @@ def _run_agent_with_meta(
         "business tool returned success or a concrete receipt exists. Never fake product behavior; use Hermes rails or keep unavailable features out of customer-facing debug states."
     )
 
-    progress = _ShellProgress(show_indicator and not show_agent_activity)
+    progress = _ShellProgress(show_indicator and not show_agent_activity, raw_hermes=raw_hermes)
     resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
     reservation_key = ""
     reserved_cents = 0
@@ -3763,6 +3837,7 @@ def _run_agent_with_meta(
                 "platform": "takyon",
                 "quiet_mode": not show_agent_activity,
                 "tool_progress_callback": progress.tool_progress if progress.enabled else None,
+                "tool_start_callback": progress.tool_started if progress.enabled else None,
                 "tool_gen_callback": progress.tool_generating if progress.enabled else None,
                 "tool_complete_callback": progress.tool_completed if progress.enabled else None,
             },
@@ -3890,6 +3965,7 @@ def _run_agent(
     operator_user_id: str | None = None,
     current_business: str | None = None,
     follow_logs: bool = False,
+    raw_hermes: bool = False,
 ) -> str:
     response, _meta = _run_agent_with_meta(
         message,
@@ -3901,6 +3977,7 @@ def _run_agent(
         operator_user_id=operator_user_id,
         current_business=current_business,
         follow_logs=follow_logs,
+        raw_hermes=raw_hermes,
     )
     return response
 
@@ -3940,6 +4017,7 @@ def run_takyon_command(
     shell_history: list[dict[str, str]] | None = None,
     operator_user_id: str | None = None,
     follow_logs: bool = False,
+    raw_hermes: bool = False,
 ) -> Any:
     load_takyon_env()
     from .core import operator_identity_mode
@@ -3980,6 +4058,7 @@ def run_takyon_command(
             model=model or os.getenv("TAKYON_MODEL", ""),
             max_turns=int(max_turns or 30),
             follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
         )
         return None
 
@@ -4428,6 +4507,7 @@ def run_takyon_command(
             operator_user_id=resolved_operator_user_id,
             current_business=slug,
             follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
         )
 
     if command in {"run", "goal", "/goal"}:
@@ -4445,6 +4525,7 @@ def run_takyon_command(
             operator_user_id=resolved_operator_user_id,
             current_business=slug,
             follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
         )
 
     if command == "gc":
@@ -4470,6 +4551,7 @@ def run_takyon_command(
         shell_history=shell_history,
         operator_user_id=resolved_operator_user_id,
         follow_logs=follow_logs,
+        raw_hermes=raw_hermes,
     )
 
 
@@ -4484,6 +4566,7 @@ def takyon_command(args) -> None:
             max_turns=int(getattr(args, "max_turns", 30) or 30),
             show_indicator=not raw_json,
             follow_logs=bool(getattr(args, "follow_logs", False)),
+            raw_hermes=bool(getattr(args, "raw_hermes", False)),
         )
         _print(result, raw_json=raw_json)
     except SystemExit:

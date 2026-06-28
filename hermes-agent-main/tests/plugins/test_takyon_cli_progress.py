@@ -1,4 +1,5 @@
 import json
+import os
 
 from plugins.takyon import cli
 
@@ -76,3 +77,34 @@ def test_pulse_progress_summarizes_metrics_and_traffic():
     ) in lines
     assert "product -> published https://homework-solver.coscale.app/" in lines
     assert "traffic -> 7d visitors=10 visits=12 pageviews=25" in lines
+
+
+def test_raw_hermes_events_print_tool_args_and_results():
+    read_fd, write_fd = os.pipe()
+    progress = cli._ShellProgress(False, raw_hermes=True)
+    progress.fd = write_fd
+    progress.raw_max_chars = 0
+
+    try:
+        progress.tool_started("call_1", "business_read_business", {"business": "homework-solver"})
+        progress.tool_completed(
+            "call_1",
+            "business_read_business",
+            {"business": "homework-solver"},
+            '{"success":true,"business":{"slug":"homework-solver"}}',
+        )
+        os.close(write_fd)
+        progress.fd = None
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        progress.close()
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert "hermes.raw tool_call" in output
+    assert '"name": "business_read_business"' in output
+    assert '"business": "homework-solver"' in output
+    assert "hermes.raw tool_result" in output
+    assert '"result": "{\\"success\\":true,\\"business\\":{\\"slug\\":\\"homework-solver\\"}}"' in output
