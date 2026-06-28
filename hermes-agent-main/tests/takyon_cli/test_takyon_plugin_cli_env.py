@@ -98,8 +98,9 @@ def test_shell_logs_tail_for_full_session(monkeypatch):
         pass
 
     class _Tail:
-        def __init__(self, *, enabled, prefix="  · "):
+        def __init__(self, *, enabled, prefix="  · ", business_filter=None):
             events.append(("init", enabled, prefix))
+            events.append(("business_filter", business_filter()))
 
         def __enter__(self):
             events.append("enter")
@@ -123,7 +124,12 @@ def test_shell_logs_tail_for_full_session(monkeypatch):
         follow_logs=True,
     )
 
-    assert events == [("init", True, "  · "), "enter", "exit"]
+    assert events == [
+        ("init", True, "  · "),
+        ("business_filter", "homework-solver"),
+        "enter",
+        "exit",
+    ]
 
 
 def test_agent_log_tail_nested_context_does_not_duplicate(monkeypatch, tmp_path):
@@ -141,3 +147,22 @@ def test_agent_log_tail_nested_context_does_not_duplicate(monkeypatch, tmp_path)
             assert takyon_cli._AgentLogTail._active == 1
 
     assert takyon_cli._AgentLogTail._active == 0
+
+
+def test_agent_log_tail_filters_to_shell_business():
+    import plugins.takyon.cli as takyon_cli
+
+    tail = takyon_cli._AgentLogTail(enabled=True, business_filter="homework-solver")
+
+    assert not tail._should_print_line(
+        "INFO [20260628_160240_69990c] conversation turn: session=other msg='CEO wakeup for business:agaagv'"
+    )
+    assert tail._should_print_line(
+        "INFO [20260628_160240_111111] conversation turn: session=mine msg='CEO wakeup for business:homework-solver'"
+    )
+    assert tail._should_print_line(
+        "INFO [20260628_160240_111111] agent.tool_executor: tool business_read_file completed session=mine"
+    )
+    assert not tail._should_print_line(
+        "INFO [20260628_160240_69990c] agent.tool_executor: tool business_read_file completed session=other"
+    )

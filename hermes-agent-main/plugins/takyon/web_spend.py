@@ -1,11 +1,11 @@
-"""Takyon business-budget implementation of the core web spend seam (agent/web_spend_meter.py).
+"""Takyon operator-budget implementation of the core web spend seam (agent/web_spend_meter.py).
 
 This is the trusted side of the split: the core web tools resolve which provider actually runs and
-hand this meter a server-owned `pricing_key`; the meter resolves the business scope from the trusted
+hand this meter a server-owned `pricing_key`; the meter resolves the business owner from the trusted
 session, prices the call from `agent/usage_pricing.py`, and reserves / settles / releases against the
-business app_budget (`app_usage`, the same rail the product runtime meters through). Registered on
-plugin load (`plugins/takyon/__init__.py`), so every paid web provider call the operator makes inside
-a business is gated. Unpriced / unknown pricing and an exhausted/inactive budget FAIL CLOSED.
+owner's operator billing rail. Registered on plugin load (`plugins/takyon/__init__.py`), so every paid
+web provider call the operator makes inside a business is gated. Unpriced / unknown pricing and an
+exhausted billing account FAIL CLOSED.
 
 Nothing the user/model supplies (query, urls, depth) reaches this module — only the resolved provider
 name, the `(namespace, op)` pricing key, and server-computed units/usage.
@@ -56,10 +56,11 @@ def _microusd_to_cents_ceiling(microusd: int) -> int:
 class _Reservation:
     """Opaque handle threaded back from reserve() to settle()/release().
 
-    Carries BOTH money rails so settle/release can finalize each consistently:
-    - ``business_slug`` / ``reservation_key`` finalize the per-business ``app_usage`` audit row.
+    Carries the operator billing hold, plus an optional Safebox-authored ``app_usage`` audit row when
+    the meter is running on the Safebox DB plane:
     - ``owner_user_id`` / ``billing_reserved_cents`` finalize the operator billing hold
-      (``billing.py``) — the authority gate that actually decrements the operator ceiling.
+      (``billing.py``) — the authority gate that decrements the operator ceiling.
+    - ``usage_reserved`` means a Safebox app-usage audit row also exists and should be finalized.
       ``owner_user_id`` is empty / ``billing_reserved_cents`` is 0 when no billing hold was taken
       (a zero-cost call, or — defensively — a missing billing account), so settle/release skip it."""
 
@@ -72,6 +73,7 @@ class _Reservation:
         "reserved_microusd",
         "owner_user_id",
         "billing_reserved_cents",
+        "usage_reserved",
     )
 
     def __init__(
@@ -84,6 +86,7 @@ class _Reservation:
         reserved_microusd,
         owner_user_id="",
         billing_reserved_cents=0,
+        usage_reserved=False,
     ):
         self.business_slug = business_slug
         self.reservation_key = reservation_key
@@ -93,6 +96,7 @@ class _Reservation:
         self.reserved_microusd = reserved_microusd
         self.owner_user_id = owner_user_id
         self.billing_reserved_cents = billing_reserved_cents
+        self.usage_reserved = bool(usage_reserved)
 
 
 def _resolve_owner_user_id(raw, business: str) -> str:
@@ -111,7 +115,7 @@ def _resolve_owner_user_id(raw, business: str) -> str:
 
 
 class BusinessBudgetSpendMeter:
-    """Reserve/settle/release a paid web call against the active business AI budget."""
+    """Reserve/settle/release a paid web call against the business owner's operator budget."""
 
     def reserve(self, *, pricing_key, provider, op, units, usage, purpose) -> Optional[_Reservation]:
         # Lazy import: core is heavy and imports plenty; importing it at module load would risk a
@@ -191,35 +195,39 @@ class BusinessBudgetSpendMeter:
                             f"allowance {exc.allowance_available_cents} cents"
                         )
                     billing_reserved_cents = int(resv.total_cents)
-                try:
-                    usage_leaf.reserve_usage(
-                        raw,
-                        business,
-                        estimated_cost_microusd=cost,
-                        reservation_key=key,
-                        purpose=str(purpose),
-                        route="ceo_tool",
-                        provider=str(provider),
-                        model=model,
-                        metadata={"op": op, "pricing_key": [pricing_key[0], pricing_key[1]]},
-                    )
-                except usage_leaf.AppBudgetExceeded:
-                    # The per-business pool cap (if an operator set one) refused — release the
-                    # billing hold we just took so it does not leak, then fail closed.
-                    if billing_reserved_cents:
-                        billing.refund(raw, key)
-                    raise web_spend_meter.SpendBlocked(
-                        f"business {business!r} is out of AI budget; {op} blocked"
-                    )
-                except usage_leaf.AppBudgetInactive:
-                    if billing_reserved_cents:
-                        billing.refund(raw, key)
-                    raise web_spend_meter.SpendBlocked(
-                        f"business {business!r} AI budget is inactive; {op} blocked"
-                    )
+                usage_reserved = False
+                if str(getattr(store, "_database_plane", "") or "").strip().lower() == "safebox":
+                    try:
+                        usage_leaf.reserve_usage(
+                            raw,
+                            business,
+                            estimated_cost_microusd=cost,
+                            reservation_key=key,
+                            purpose=str(purpose),
+                            route="ceo_tool",
+                            provider=str(provider),
+                            model=model,
+                            metadata={"op": op, "pricing_key": [pricing_key[0], pricing_key[1]]},
+                        )
+                        usage_reserved = True
+                    except usage_leaf.AppBudgetExceeded:
+                        # The per-business pool cap (if an operator set one) refused — release the
+                        # billing hold we just took so it does not leak, then fail closed.
+                        if billing_reserved_cents:
+                            billing.refund(raw, key)
+                        raise web_spend_meter.SpendBlocked(
+                            f"business {business!r} is out of AI budget; {op} blocked"
+                        )
+                    except usage_leaf.AppBudgetInactive:
+                        if billing_reserved_cents:
+                            billing.refund(raw, key)
+                        raise web_spend_meter.SpendBlocked(
+                            f"business {business!r} AI budget is inactive; {op} blocked"
+                        )
         return _Reservation(
             business, key, pricing_key, str(provider), model, cost,
             owner_user_id=owner_user_id, billing_reserved_cents=billing_reserved_cents,
+            usage_reserved=usage_reserved,
         )
 
     def settle(self, handle: Optional[_Reservation], *, units, usage) -> None:
@@ -237,14 +245,15 @@ class BusinessBudgetSpendMeter:
                 return
             usage_leaf = store._app_leaves()["usage"]
             with store._leaf_conn(conn) as raw:
-                usage_leaf.settle_usage(
-                    raw,
-                    handle.business_slug,
-                    handle.reservation_key,
-                    actual_cost_microusd=int(cost),
-                    provider=handle.provider,
-                    model=handle.model,
-                )
+                if handle.usage_reserved:
+                    usage_leaf.settle_usage(
+                        raw,
+                        handle.business_slug,
+                        handle.reservation_key,
+                        actual_cost_microusd=int(cost),
+                        provider=handle.provider,
+                        model=handle.model,
+                    )
                 # Finalize the operator billing hold: held → spent. ``billing.settle`` asserts
                 # actual ≤ reserved (it is custody of real money), so clamp the actual cents to the
                 # held cents — the held estimate was rounded UP, so the true cost can only be ≤ it
@@ -269,12 +278,13 @@ class BusinessBudgetSpendMeter:
                 return
             usage_leaf = store._app_leaves()["usage"]
             with store._leaf_conn(conn) as raw:
-                usage_leaf.release_usage(
-                    raw,
-                    handle.business_slug,
-                    handle.reservation_key,
-                    error=(str(error)[:500] if error else None),
-                )
+                if handle.usage_reserved:
+                    usage_leaf.release_usage(
+                        raw,
+                        handle.business_slug,
+                        handle.reservation_key,
+                        error=(str(error)[:500] if error else None),
+                    )
                 # Return the whole operator billing hold to the authority (no spend recorded).
                 # Idempotent: a replayed/already-finalized refund is a no-op.
                 if handle.owner_user_id and handle.billing_reserved_cents:

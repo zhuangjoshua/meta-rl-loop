@@ -15,7 +15,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .core import (
     TakyonError,
@@ -1812,15 +1812,26 @@ class _AgentLogTail:
     _lock = threading.Lock()
     _active = 0
 
-    def __init__(self, *, enabled: bool, prefix: str = "  · ") -> None:
+    _SESSION_RE = re.compile(r"\bsession=([A-Za-z0-9_.:-]+)")
+    _BUSINESS_RE = re.compile(r"\bbusiness(?:_slug)?[:=]([A-Za-z0-9][A-Za-z0-9_-]{0,160})\b")
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        prefix: str = "  · ",
+        business_filter: str | Callable[[], str | None] | None = None,
+    ) -> None:
         self.enabled = bool(enabled)
         self.prefix = prefix
+        self.business_filter = business_filter
         self.path: Path | None = None
         self.offset = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._out: Any = None
         self._owns_active = False
+        self._session_business: dict[str, str] = {}
 
     def __enter__(self):
         if not self.enabled:
@@ -1841,7 +1852,15 @@ class _AgentLogTail:
             self.enabled = False
             self._release_active_tail()
             return self
-        print(f"[logs] following {self.path} (Ctrl-C stops the command)", file=self._out, flush=True)
+        scope = self._current_business_filter()
+        if scope:
+            print(
+                f"[logs] following {self.path} for business:{scope} (Ctrl-C stops the shell)",
+                file=self._out,
+                flush=True,
+            )
+        else:
+            print(f"[logs] following {self.path} (Ctrl-C stops the command)", file=self._out, flush=True)
         self._thread = threading.Thread(target=self._run, name="takyon-agent-log-tail", daemon=True)
         self._thread.start()
         return self
@@ -1894,8 +1913,42 @@ class _AgentLogTail:
         except OSError:
             return
         for line in chunk.splitlines():
-            if line.strip():
+            if self._should_print_line(line):
                 print(f"{self.prefix}{line}", file=out, flush=True)
+
+    def _current_business_filter(self) -> str:
+        raw = self.business_filter
+        if callable(raw):
+            try:
+                raw = raw()
+            except Exception:
+                raw = None
+        return _slugify(str(raw or "").strip()) if raw else ""
+
+    def _line_session(self, line: str) -> str:
+        match = self._SESSION_RE.search(line)
+        return match.group(1) if match else ""
+
+    def _line_business(self, line: str) -> str:
+        match = self._BUSINESS_RE.search(line)
+        return _slugify(match.group(1)) if match else ""
+
+    def _should_print_line(self, line: str) -> bool:
+        if not line.strip():
+            return False
+        scope = self._current_business_filter()
+        if not scope:
+            return True
+
+        session_id = self._line_session(line)
+        line_business = self._line_business(line)
+        if session_id and line_business:
+            self._session_business[session_id] = line_business
+        if line_business:
+            return line_business == scope
+        if session_id and session_id in self._session_business:
+            return self._session_business[session_id] == scope
+        return scope in line.lower()
 
 
 def _follow_bootstrap_job(
@@ -3102,8 +3155,9 @@ def _interactive_shell(
     entries = _slash_entries()
     print(_startup_graphic(current_business))
     shell_history: list[dict[str, str]] = []
+    log_scope = {"business": current_business}
 
-    with _AgentLogTail(enabled=follow_logs):
+    with _AgentLogTail(enabled=follow_logs, business_filter=lambda: log_scope.get("business")):
         while True:
             try:
                 line = _read_shell_line(current_business, entries)
@@ -3130,6 +3184,7 @@ def _interactive_shell(
                 )
                 if output:
                     print(output)
+                log_scope["business"] = current_business
                 _record_shell_turn(shell_history, line, output)
                 entries = _slash_entries()
             except SystemExit as exc:

@@ -26,7 +26,7 @@ def register(ctx) -> None:
     # Fail-closed metering for the operator agent's paid web tools (web_search/web_extract/
     # web_crawl) and their summarizer LLM. The spend boundary lives in tools/web_tools.py, where the
     # ACTUAL provider is known: free backends never reserve; a paid backend reserves before egress
-    # and settles the real cost or releases the hold. This installs the business-budget
+    # and settles the real cost or releases the hold. This installs the operator-budget
     # implementation of that seam (agent/web_spend_meter.py) — no pre/post tool-call hook guesswork.
     web_spend.register()
     ctx.register_cli_command(
