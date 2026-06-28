@@ -4,6 +4,10 @@ import os
 from plugins.takyon import cli
 
 
+class _FakeStore:
+    pass
+
+
 def test_read_business_progress_summarizes_snapshot():
     result = {
         "success": True,
@@ -131,3 +135,58 @@ def test_hermes_turn_prints_existing_interim_assistant_text_only_once():
     assert "— Hermes —" in output
     assert "I am checking the current business state." in output
     assert "This was already streamed." not in output
+
+
+def test_stream_delta_uses_natural_text_writer(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    progress = cli._ShellProgress(False)
+    progress.fd = write_fd
+    progress.typewriter_enabled = True
+    progress.typewriter_cps = 12000
+    progress.typewriter_chunk_chars = 3
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+
+    try:
+        progress.stream_delta("abcdef")
+        progress.finish_stream()
+        os.close(write_fd)
+        progress.fd = None
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        progress.close()
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert output == "abcdef\n"
+
+
+def test_use_without_args_switches_to_global(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+
+    output, business = cli._handle_shell_line(
+        "/use",
+        current_business="homework-solver",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "Using global scope"
+    assert business is None
+
+
+def test_use_global_alias_switches_to_global(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+
+    output, business = cli._handle_shell_line(
+        "/use global",
+        current_business="homework-solver",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "Using global scope"
+    assert business is None

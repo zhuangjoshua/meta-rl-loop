@@ -2572,6 +2572,28 @@ def _raw_hermes_max_chars() -> int:
     return 12000
 
 
+def _shell_typewriter_config() -> dict[str, Any]:
+    settings = _load_harness_settings()
+    ui = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
+    typewriter = ui.get("typewriter") if isinstance(ui.get("typewriter"), dict) else {}
+    enabled = _config_bool(os.getenv("TAKYON_SHELL_TYPEWRITER"), default=_config_bool(typewriter.get("enabled"), default=True))
+    cps_raw = os.getenv("TAKYON_SHELL_TYPEWRITER_CPS") or typewriter.get("charsPerSecond") or 1800
+    try:
+        cps = int(cps_raw)
+    except (TypeError, ValueError):
+        cps = 1800
+    chunk_raw = os.getenv("TAKYON_SHELL_TYPEWRITER_CHUNK") or typewriter.get("chunkChars") or 9
+    try:
+        chunk_chars = int(chunk_raw)
+    except (TypeError, ValueError):
+        chunk_chars = 9
+    return {
+        "enabled": bool(enabled),
+        "chars_per_second": max(200, min(cps, 12000)),
+        "chunk_chars": max(1, min(chunk_chars, 80)),
+    }
+
+
 def _shell_json_dump(value: Any) -> str:
     try:
         return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, default=str)
@@ -2897,6 +2919,7 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
 class _ShellProgress:
     def __init__(self, enabled: bool, *, raw_hermes: bool = False):
         config = _shell_progress_config()
+        typewriter = _shell_typewriter_config()
         self.enabled = bool(enabled and config["enabled"])
         self.max_lines = int(config["max_lines"])
         self.fd: int | None = os.dup(1) if self.enabled else None
@@ -2906,6 +2929,9 @@ class _ShellProgress:
         self.streamed_chars = 0
         self.raw_hermes = bool(raw_hermes)
         self.raw_max_chars = _raw_hermes_max_chars()
+        self.typewriter_enabled = bool(typewriter["enabled"] and sys.stdout.isatty())
+        self.typewriter_cps = int(typewriter["chars_per_second"])
+        self.typewriter_chunk_chars = int(typewriter["chunk_chars"])
 
     def close(self) -> None:
         if self.fd is not None:
@@ -2919,6 +2945,22 @@ class _ShellProgress:
             os.write(self.fd, text.encode("utf-8", errors="replace"))
         except OSError:
             self.close()
+
+    def _write_natural_text(self, text: str) -> None:
+        if self.fd is None:
+            return
+        if not self.typewriter_enabled:
+            self._write(text)
+            return
+        import time
+
+        chunk = max(1, self.typewriter_chunk_chars)
+        delay = chunk / max(1, self.typewriter_cps)
+        for index in range(0, len(text), chunk):
+            self._write(text[index : index + chunk])
+            if self.fd is None:
+                return
+            time.sleep(delay)
 
     def finish_stream(self) -> None:
         if not self._stream_open:
@@ -2946,7 +2988,8 @@ class _ShellProgress:
         if not clean:
             return
         self.finish_stream()
-        self._write(f"{_color('— Hermes —', _THEME['primary'])}\n{clean}\n")
+        self._write(f"{_color('— Hermes —', _THEME['primary'])}\n")
+        self._write_natural_text(f"{clean}\n")
 
     def stream_delta(self, delta: Any) -> None:
         if delta is None:
@@ -2957,7 +3000,7 @@ class _ShellProgress:
             return
         self.streamed_chars += len(text)
         self._stream_open = True
-        self._write(text)
+        self._write_natural_text(text)
 
     def tool_generating(self, name: str) -> None:
         if not name:
@@ -3470,8 +3513,10 @@ def _handle_shell_line(
 
     if command == "use":
         if len(tokens) < 2:
-            raise SystemExit("usage: /use <business>")
+            return "Using global scope", None
         slug = _slugify(tokens[1])
+        if slug in {"global", "root", "coscale", "operator"}:
+            return "Using global scope", None
         if not _business_exists(store, slug):
             raise SystemExit(f"business:{slug} does not exist yet. Use /create {slug} <goal>.")
         return f"Using business:{slug}", slug
