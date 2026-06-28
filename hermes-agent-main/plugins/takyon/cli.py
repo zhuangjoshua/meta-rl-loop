@@ -2717,20 +2717,44 @@ class _ShellProgress:
         self.fd: int | None = os.dup(1) if self.enabled else None
         self._last_activity = ""
         self._last_tool_generating = ""
+        self._stream_open = False
+        self.streamed_chars = 0
 
     def close(self) -> None:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
 
-    def emit(self, line: str) -> None:
+    def _write(self, text: str) -> None:
         if self.fd is None:
             return
-        text = f"{_color('->', _THEME['secondary'])} {line}\n"
         try:
             os.write(self.fd, text.encode("utf-8", errors="replace"))
         except OSError:
             self.close()
+
+    def finish_stream(self) -> None:
+        if not self._stream_open:
+            return
+        self._write("\n")
+        self._stream_open = False
+
+    def emit(self, line: str) -> None:
+        if self.fd is None:
+            return
+        self.finish_stream()
+        self._write(f"{_color('->', _THEME['secondary'])} {line}\n")
+
+    def stream_delta(self, delta: Any) -> None:
+        if delta is None:
+            self.finish_stream()
+            return
+        text = str(delta or "")
+        if not text:
+            return
+        self.streamed_chars += len(text)
+        self._stream_open = True
+        self._write(text)
 
     def tool_generating(self, name: str) -> None:
         if not name:
@@ -3597,8 +3621,11 @@ def _run_agent_with_meta(
         agent.suppress_status_output = not show_agent_activity
         result = agent.run_conversation(
             prompt,
-            stream_callback=None if show_agent_activity else (lambda _delta: None),
+            stream_callback=None
+            if show_agent_activity
+            else (progress.stream_delta if progress.enabled else (lambda _delta: None)),
         )
+        progress.finish_stream()
         actual_cents = max(
             0,
             int(round(float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0) * 100)),
@@ -3653,7 +3680,9 @@ def _run_agent_with_meta(
                 actual_cents=actual_cents,
             )
         final_response = str(result.get("final_response") or "")
-        if billing_warning:
+        if progress.streamed_chars:
+            final_response = f"[Budget warning] {billing_warning}" if billing_warning else ""
+        elif billing_warning:
             final_response = (
                 final_response.rstrip()
                 + ("\n\n" if final_response.strip() else "")
