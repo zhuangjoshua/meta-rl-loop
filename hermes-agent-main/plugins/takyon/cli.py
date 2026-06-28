@@ -964,6 +964,108 @@ def _resolve_dashboard_create_identity(
     return fallback_name, _final_slug(fallback_slug)
 
 
+_SHELL_CREATE_COMMANDS = {"create", "build", "init"}
+_SHELL_CREATE_FLAGS_NO_VALUE = {"--live", "--auto", "--no-auto", "--manual", "--follow", "-f"}
+_SHELL_CREATE_FLAGS_WITH_VALUE = {"--mode", "--name", "--schedule", "--slug"}
+_SHELL_EXPLICIT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,79}$")
+
+
+def _looks_like_create_goal_text(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if "\n" in text or "\r" in text:
+        return True
+    if text[:1] in {"-", "*", "•"}:
+        return True
+    if re.search(r"[.:;!?]", text):
+        return True
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'/_+-]*", text)
+    if len(words) >= 3:
+        return True
+    if words and words[0].lower() in (_CREATE_NAME_LEADING_VERBS | _CREATE_NAME_LEADING_FILLERS):
+        return True
+    return False
+
+
+def _split_shell_command(raw: str) -> tuple[str, str]:
+    clean = str(raw or "").strip()
+    if not clean:
+        return "", ""
+    command, sep, rest = clean.partition(" ")
+    return command.strip().lower(), rest.strip() if sep else ""
+
+
+def _shell_create_rest_prefers_goal(rest: str) -> bool:
+    text = str(rest or "").strip()
+    if not text:
+        return False
+    first = text.split(None, 1)[0].strip()
+    if not first:
+        return False
+    if first[:1].isupper() or first[:1] in {"-", "*", "•"}:
+        return True
+    lowered = first.strip(".,:;!?").lower()
+    if lowered in (_CREATE_NAME_LEADING_VERBS | _CREATE_NAME_LEADING_FILLERS):
+        return True
+    return False
+
+
+def _shell_create_argv(command: str, raw_args: str) -> list[str]:
+    """Parse an interactive shell create command without shell-quoting the brief.
+
+    The terminal shell still owns quoting for top-level `takyon create ...`. Inside
+    the CoScale shell, `/create` is closer to the dashboard's text box: after any
+    leading flags and optional explicit slug, the rest of the line is plain product
+    brief text. That keeps natural apostrophes and unbalanced quotes from turning
+    into syntax errors.
+    """
+    normalized_command = "create" if command in _SHELL_CREATE_COMMANDS else command
+    rest = str(raw_args or "").strip()
+    argv = [normalized_command]
+    if not rest:
+        return argv
+
+    while rest:
+        token, sep, after = rest.partition(" ")
+        if token == "--":
+            rest = after.strip()
+            break
+        if token in _SHELL_CREATE_FLAGS_NO_VALUE:
+            argv.append(token)
+            rest = after.strip() if sep else ""
+            continue
+        if token in _SHELL_CREATE_FLAGS_WITH_VALUE:
+            argv.append(token)
+            rest = after.strip() if sep else ""
+            if not rest:
+                return argv
+            value, sep, after = rest.partition(" ")
+            argv.append(value.strip())
+            rest = after.strip() if sep else ""
+            continue
+        break
+
+    if not rest:
+        return argv
+
+    if "--slug" in argv:
+        argv.extend(["--", rest])
+        return argv
+
+    first, sep, after = rest.partition(" ")
+    explicit_slug = bool(
+        sep
+        and _SHELL_EXPLICIT_SLUG_RE.fullmatch(first)
+        and not _shell_create_rest_prefers_goal(rest)
+    )
+    if explicit_slug:
+        argv.extend([first, "--", after.strip()])
+    else:
+        argv.extend(["--goal-only", "--", rest])
+    return argv
+
+
 @contextlib.contextmanager
 def _business_workspace_execution_context(
     slug: str,
@@ -993,6 +1095,9 @@ def _parse_business_start_args(
     mode: str | None = None
     schedule: str | None = None
     explicit_name: str | None = None
+    slug_override: str | None = None
+    goal_only = False
+    parse_flags = True
     auto_start = auto_default
     no_auto = False
     follow = False
@@ -1000,37 +1105,70 @@ def _parse_business_start_args(
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token == "--test":
+        if parse_flags and token == "--":
+            parse_flags = False
+        elif parse_flags and token == "--goal-only":
+            goal_only = True
+        elif parse_flags and token == "--test":
             raise SystemExit("test mode is disabled; remove --test. All businesses run live.")
-        elif token == "--live":
+        elif parse_flags and token == "--live":
             mode = "live"
-        elif token == "--auto":
+        elif parse_flags and token == "--auto":
             auto_start = True
             no_auto = False
-        elif token in {"--no-auto", "--manual"}:
+        elif parse_flags and token in {"--no-auto", "--manual"}:
             auto_start = False
             no_auto = True
-        elif token in {"--follow", "-f"}:
+        elif parse_flags and token in {"--follow", "-f"}:
             follow = True
-        elif token == "--schedule":
+        elif parse_flags and token == "--schedule":
             index += 1
             if index >= len(tokens):
                 raise SystemExit(usage)
             schedule = tokens[index]
-        elif token == "--name":
+        elif parse_flags and token == "--name":
             index += 1
             if index >= len(tokens):
                 raise SystemExit(usage)
             explicit_name = str(tokens[index] or "").strip() or None
-        elif token in {"-h", "--help", "help"}:
+        elif parse_flags and token == "--slug":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            slug_override = str(tokens[index] or "").strip() or None
+        elif parse_flags and token in {"-h", "--help", "help"}:
             raise SystemExit(usage)
-        elif token.startswith("--"):
+        elif parse_flags and token.startswith("--"):
             raise SystemExit(f"unknown create flag {token!r}\n{usage}")
         else:
             clean.append(token)
         index += 1
-    if not clean:
+    if not clean and not slug_override:
         raise SystemExit(usage)
+
+    if goal_only or (
+        auto_default
+        and not slug_override
+        and not explicit_name
+        and len(clean) == 1
+        and _looks_like_create_goal_text(clean[0])
+    ):
+        goal = " ".join(clean).strip()
+        if not goal and not slug_override and not explicit_name:
+            raise SystemExit(usage)
+        if slug_override:
+            slug = _slugify(slug_override)
+            raw_name = explicit_name or _display_name_from_slug(slug)
+        else:
+            raw_name, slug = _resolve_create_identity(explicit_name or "", goal, "")
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
+
+    if slug_override:
+        slug = _slugify(slug_override)
+        raw_name = explicit_name or _display_name_from_slug(slug)
+        goal = " ".join(clean).strip()
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
+
     slug_token = clean[0]
     raw_name = explicit_name or slug_token
     slug = _slugify(slug_token)
@@ -3438,7 +3576,10 @@ def _interactive_shell(
                 continue
             if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
                 return
-            raw_tokens = shlex.split(line.lstrip("/")) if line.lstrip("/") else []
+            try:
+                raw_tokens = shlex.split(line.lstrip("/")) if line.lstrip("/") else []
+            except ValueError:
+                raw_tokens = []
             if raw_tokens and raw_tokens[0].lower() == "raw":
                 mode = raw_tokens[1].lower() if len(raw_tokens) >= 2 else "status"
                 if mode in {"on", "true", "1", "yes"}:
@@ -3500,37 +3641,20 @@ def _handle_shell_line(
     raw = line.lstrip("/") if is_slash else line
     if is_slash and not raw.strip():
         return _render_slash_palette(_slash_entries(), "/", current_business), current_business
-    tokens = shlex.split(raw)
-    if not tokens:
+    command, raw_args = _split_shell_command(raw)
+    if not command:
         return "", current_business
-    command = tokens[0].lower()
     local_answer = _local_shell_help_answer(raw, current_business=current_business)
     if local_answer:
         return local_answer, current_business
 
-    if is_slash and command == "ceo":
-        return _format_ceo_focus(current_business, store, model), current_business
-
-    if command == "use":
-        if len(tokens) < 2:
-            return "Using global scope", None
-        slug = _slugify(tokens[1])
-        if slug in {"global", "root", "coscale", "operator"}:
-            return "Using global scope", None
-        if not _business_exists(store, slug):
-            raise SystemExit(f"business:{slug} does not exist yet. Use /create {slug} <goal>.")
-        return f"Using business:{slug}", slug
-
-    if command in {"help", "commands", "skills", "harness"}:
-        return _format_harness_commands(), current_business
-
-    if command in {"create", "build", "init"}:
-        if len(tokens) < 2:
-            raise SystemExit('usage: /create [--live] [--no-auto] [--schedule "every 6h"] <business> [goal]')
-        command_argv = ["create", *tokens[1:]]
+    if command in _SHELL_CREATE_COMMANDS:
+        command_argv = _shell_create_argv(command, raw_args)
+        if len(command_argv) < 2:
+            raise SystemExit('usage: /create [--live] [--no-auto] [--follow] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]')
         slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--live] [--no-auto] [--follow] [--schedule "every 6h"] <business> [goal]',
+            usage='usage: /create [--live] [--no-auto] [--follow] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -3551,6 +3675,46 @@ def _handle_shell_line(
                 slug,
             )
         return _format_cli_value(result), slug
+
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        if is_slash:
+            raise SystemExit(
+                f"{exc}. For /create, paste the brief directly after the slug or use /create --slug <slug> <brief>."
+            ) from exc
+        message = _operator_context_message(line, current_business)
+        return _run_agent(
+            message,
+            model=model or os.getenv("TAKYON_MODEL", ""),
+            max_turns=max_turns,
+            show_activity=False,
+            show_indicator=True,
+            shell_history=shell_history,
+            operator_user_id=operator_user_id,
+            current_business=current_business,
+            follow_logs=follow_logs,
+            raw_hermes=raw_hermes,
+        ), current_business
+    if not tokens:
+        return "", current_business
+    command = tokens[0].lower()
+
+    if is_slash and command == "ceo":
+        return _format_ceo_focus(current_business, store, model), current_business
+
+    if command == "use":
+        if len(tokens) < 2:
+            return "Using global scope", None
+        slug = _slugify(tokens[1])
+        if slug in {"global", "root", "coscale", "operator"}:
+            return "Using global scope", None
+        if not _business_exists(store, slug):
+            raise SystemExit(f"business:{slug} does not exist yet. Use /create {slug} <goal>.")
+        return f"Using business:{slug}", slug
+
+    if command in {"help", "commands", "skills", "harness"}:
+        return _format_harness_commands(), current_business
 
     harness_command = _get_harness_command(command)
     if harness_command:

@@ -190,3 +190,104 @@ def test_use_global_alias_switches_to_global(monkeypatch):
 
     assert output == "Using global scope"
     assert business is None
+
+
+def test_shell_create_preserves_raw_brief_after_explicit_slug():
+    argv = cli._shell_create_argv(
+        "create",
+        "homework-solver No-signup trial: don't block on an unfinished \"quote",
+    )
+
+    assert argv == [
+        "create",
+        "homework-solver",
+        "--",
+        'No-signup trial: don\'t block on an unfinished "quote',
+    ]
+
+    slug, raw_name, goal, *_rest = cli._parse_business_start_args(
+        argv,
+        usage="usage",
+        auto_default=True,
+    )
+
+    assert slug == "homework-solver"
+    assert raw_name == "homework-solver"
+    assert goal == 'No-signup trial: don\'t block on an unfinished "quote'
+
+
+def test_shell_create_goal_only_derives_business_from_pasted_brief():
+    argv = cli._shell_create_argv(
+        "create",
+        "Build a mobile-first AI study app that doesn't fake billing",
+    )
+
+    assert argv == [
+        "create",
+        "--goal-only",
+        "--",
+        "Build a mobile-first AI study app that doesn't fake billing",
+    ]
+
+    slug, raw_name, goal, *_rest = cli._parse_business_start_args(
+        argv,
+        usage="usage",
+        auto_default=True,
+    )
+
+    assert slug == "mobile-first-ai-study"
+    assert raw_name == "Mobile-First AI Study"
+    assert goal == "Build a mobile-first AI study app that doesn't fake billing"
+
+
+def test_shell_create_accepts_slug_flag_for_raw_pasted_brief():
+    argv = cli._shell_create_argv(
+        "create",
+        "--slug study-sprint Build a study app that doesn't require shell quotes",
+    )
+
+    assert argv == [
+        "create",
+        "--slug",
+        "study-sprint",
+        "--",
+        "Build a study app that doesn't require shell quotes",
+    ]
+
+    slug, raw_name, goal, *_rest = cli._parse_business_start_args(
+        argv,
+        usage="usage",
+        auto_default=True,
+    )
+
+    assert slug == "study-sprint"
+    assert raw_name == "Study Sprint"
+    assert goal == "Build a study app that doesn't require shell quotes"
+
+
+def test_handle_shell_create_does_not_shlex_pasted_brief(monkeypatch):
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+
+    def fake_run_takyon_command(argv, **_kwargs):  # noqa: ANN001
+        captured["argv"] = argv
+        return {"success": True}
+
+    monkeypatch.setattr(cli, "run_takyon_command", fake_run_takyon_command)
+
+    output, business = cli._handle_shell_line(
+        '/create homework-solver No-signup trial: don\'t block on an unfinished "quote',
+        current_business=None,
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert business == "homework-solver"
+    assert output == '{\n  "success": true\n}'
+    assert captured["argv"] == [
+        "create",
+        "homework-solver",
+        "--",
+        'No-signup trial: don\'t block on an unfinished "quote',
+    ]
