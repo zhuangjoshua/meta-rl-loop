@@ -12956,6 +12956,18 @@ def _ensure_product_edge_route(slug: str) -> None:
         log.warning("ensure product edge route failed (publish unaffected): slug=%s err=%s", slug, exc)
 
 
+def _publish_target_requires_r2(publish_target: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(str(publish_target or "").strip())
+    except Exception:
+        return False
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        return False
+    base = _company_base_domain()
+    return host == base or host.endswith(f".{base}")
+
+
 def _publish_product_surface_path(
     *,
     business_root: Path,
@@ -13014,13 +13026,18 @@ def _publish_product_surface_path(
     artifact_prefix = storage.build_object_prefix(slug, build_id)
     storage.write_build_artifact(backend, slug, build_id, publish_source)
 
-    # Best-effort mirror of the finished static build into the PUBLIC Cloudflare R2 bucket so the
-    # edge can serve <slug>.coscale.app without the VPS. This is non-blocking and fail-soft: if
-    # R2 is unconfigured we no-op, and any mirror error is logged but never fails the publish (the
-    # Supabase artifact above remains the source of truth and the VPS static fallback still serves).
+    r2_required = _publish_target_requires_r2(publish_target)
+    if r2_required and not storage.r2_configured():
+        result["blocker"] = "r2_unconfigured_for_product_edge"
+        return result
+
+    # Mirror the finished static build into the PUBLIC Cloudflare R2 bucket so the edge can serve
+    # <slug>.coscale.app. For current product hosts this is required: the Cloudflare Worker serves
+    # static bytes only from R2 and has no origin fallback for missing pointers.
     if storage.r2_configured():
         try:
             mirror = storage.write_public_site_to_r2(slug, build_id, publish_source)
+            result["r2_mirror"] = mirror
             logging.getLogger("takyon.r2").info(
                 "mirrored product site to R2: slug=%s build_id=%s files=%d",
                 _slugify(slug),
@@ -13028,6 +13045,9 @@ def _publish_product_surface_path(
                 len(mirror.get("files") or {}),
             )
         except Exception as exc:  # pragma: no cover - best-effort edge mirror
+            if r2_required:
+                result["blocker"] = f"r2_mirror_failed: {exc}"
+                return result
             logging.getLogger("takyon.r2").warning(
                 "R2 product-site mirror failed (publish still succeeded via Supabase): "
                 "slug=%s build_id=%s err=%s",
