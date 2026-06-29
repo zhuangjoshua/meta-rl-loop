@@ -78,9 +78,11 @@ def test_wake_prompt_routes_daily_summary_to_business_metrics(tmp_path):
 
 
 def test_wake_prompt_toolsets_include_skills_and_web(tmp_path):
-    # Wake is a user-turn wrapper over ceo.md, NOT a skill: toolsets give analytics/distribution/X
-    # access via the skills + web toolsets.
-    assert _store(tmp_path)._ceo_cron_toolsets() == ["takyon", "web", "skills", "todo"]
+    # Wake is a user-turn wrapper over ceo.md, NOT a skill: it carries the authority toolset (the CEO
+    # role owns the spendful business tools) plus skills + web for analytics/distribution/X. The
+    # autonomous-wake product/destructive ban is enforced per-handler (_refuse_on_autonomous_wake),
+    # not by dropping a toolset, so the toolset list is unchanged.
+    assert _store(tmp_path)._ceo_cron_toolsets() == ["takyon", "takyon-authority", "web", "skills", "todo"]
 
 
 # ── PST last-wake-of-day computation ──────────────────────────────────────────────────────────

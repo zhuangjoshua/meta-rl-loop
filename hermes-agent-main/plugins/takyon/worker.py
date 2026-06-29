@@ -1203,7 +1203,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     from gateway.session_context import clear_session_vars, set_session_vars
 
     from .cli import _business_workspace_execution_context, _load_ceo_prompt
-    from .core import TakyonStore
+    from .core import TakyonStore, _bound_operator_task_context
 
     slug = job.business_slug
     store = TakyonStore()
@@ -1245,16 +1245,22 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                 user_id=owner_user_id,
                 workspace_root=str(workspace_home or ""),
                 business_slug=slug,
+                task_kind="ceo_wake",
             )
-            final_response, cost_usd, cost_status, _turn_completed = _run_ceo_turn(
-                slug=slug,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                toolsets=toolsets,
-                max_turns=max_turns,
-                inactivity_limit=inactivity_limit,
-                progress=progress,
-            )
+            # Mark the steady-state wake turn so product/destructive tool handlers fail closed
+            # (_refuse_on_autonomous_wake). Bootstrap sets "ceo_bootstrap" and chat sets nothing,
+            # so neither is refused. The marker is read in this turn, before any worker job is
+            # enqueued, so a wake-spawned edit is refused at source.
+            with _bound_operator_task_context(task_kind="ceo_wake"):
+                final_response, cost_usd, cost_status, _turn_completed = _run_ceo_turn(
+                    slug=slug,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    toolsets=toolsets,
+                    max_turns=max_turns,
+                    inactivity_limit=inactivity_limit,
+                    progress=progress,
+                )
     except Exception as exc:
         _record_runtime_event(
             slug,

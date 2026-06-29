@@ -8013,6 +8013,55 @@ def _blocks_session_bound_authority_op() -> bool:
     return bool(_session_business_slug()) and not _is_worker_process()
 
 
+def _active_operator_task_kind() -> str:
+    """Normalized task kind for the current CEO turn ('ceo_wake' | 'ceo_bootstrap' | '').
+
+    Mirrors the resolution used by handle_business_invoke_app_action: the session env carries it
+    across the worker-deferral boundary, the ContextVar covers in-process turns. Worker.py sets it
+    per handler (ceo_wake_handler -> 'ceo_wake', ceo_bootstrap_handler -> 'ceo_bootstrap')."""
+    try:
+        from gateway.session_context import get_session_env
+
+        raw = get_session_env("TAKYON_SESSION_TASK_KIND", "")
+    except Exception:
+        raw = os.getenv("TAKYON_SESSION_TASK_KIND", "")
+    return str(raw or _ACTIVE_OPERATOR_TASK_KIND.get() or "").strip().lower()
+
+
+def _is_autonomous_wake_turn() -> bool:
+    """True on a steady-state scheduled/manual CEO wake (worker.py ceo_wake_handler).
+
+    Product edits and other destructive/durable business changes are policy-banned on autonomous
+    wakes: they happen only at create/bootstrap or on an explicit operator chat request. The marker
+    is set in the wake turn and read here BEFORE any worker job is enqueued, so a wake-spawned edit
+    is refused at source while a legitimate chat-initiated edit (no marker) still proceeds. Bootstrap
+    runs under 'ceo_bootstrap', so its product build is never refused."""
+    return _active_operator_task_kind() == "ceo_wake"
+
+
+def _refuse_on_autonomous_wake(action: str) -> None:
+    """Fail closed when an autonomous wake attempts a banned product/destructive op."""
+    if _is_autonomous_wake_turn():
+        raise TakyonError(
+            f"{action}: not available on autonomous CEO wakes; record a recommendation "
+            "(research/strategy.md or metrics/wake-history.md) and let the operator request the "
+            "change in chat — the only path that may make it"
+        )
+
+
+def _refuse_product_file_edit_on_autonomous_wake(path: Any) -> None:
+    """Block product-SOURCE writes (product/site/...) on a wake. Research/metrics/memory writes and
+    distribution/creative receipts + assets (product/public-assets, product/brand, product/static-ads,
+    ...) stay allowed — wakes own distribution. Normalizes ./, //, leading /, backslashes, and case so
+    a raw-prefix string can't dodge the guard."""
+    if not _is_autonomous_wake_turn():
+        return
+    parts = [p for p in str(path or "").strip().replace("\\", "/").split("/") if p not in ("", ".")]
+    rel = "/".join(parts).casefold()
+    if rel == "product/site" or rel.startswith("product/site/"):
+        _refuse_on_autonomous_wake("product source edits")
+
+
 def _resolved_business_slug(args: Mapping[str, Any] | None = None, *, required: bool = False) -> str:
     args = args or {}
     requested = str(args.get("business") or args.get("business_slug") or "").strip()
@@ -19856,7 +19905,7 @@ class TakyonStore:
             "If unresolved inbound exists, inspect the actual conversation threads before deciding whether to reply or post. "
             "Advance the outreach lifecycle: if no distribution campaign exists, start distribution/campaign/; if the current distribution campaign is incomplete, continue missing lanes, touches, or files; if complete but unreviewed, review distribution files, conversation mirrors, blockers, replies, elapsed time, and audit receipts only as needed; if replies exist, inspect X threads directly with takyon-x when the channel is clear, handle broader non-X discussion-thread work in takyon-distribution when the channel is clear, or load takyon-conversation-followup to compress them into follow-up decisions; if no replies after review, choose the next campaign, angle, lane, or offer change. "
             "If the next move is X-native, use takyon-x; for a top-level X post, read current research/ state and use it to choose the audience, promise, objection, and hook. "
-            "Advance product maturity when product work is in focus: read the current product state (product/surface.md, business_read_business). If /app is still only the create-time auth + subscription landing shell with no real in-app workflow or action files, the highest-impact product move is to load takyon-product and build the real gated MVP under /app; once a real workflow exists, takyon-product also owns surgical follow-up iterations. Treat the landing+shell as a starting point, not a finished product. "
+            "Product edits are NOT available on autonomous wakes: building or iterating the product, changing the app surface, pricing/plans, entitlements, mode, or destructive controls happen only at create/bootstrap or on an explicit operator chat request, and the underlying tools will refuse here. If /app is still only the create-time shell, or you judge a product/pricing change is warranted, do NOT attempt it on this wake — record the recommendation in research/strategy.md (and note it in metrics/wake-history.md) so the operator can request the change in chat. Spend this wake on distribution, research, metrics, and outreach instead. "
             "Do not narrate private setup with phrases like 'Good, I have the full business context' or 'Now I will'. "
             "Think holistically about whether the business or current strategy has gotten stale from wake cadence, "
             "elapsed time, and traction movement; if stale, make a drastic strategic change instead of continuing "
@@ -20963,6 +21012,7 @@ def handle_business_upsert_business(args: dict, **_: Any) -> str:
 
 
 def handle_business_delete_business(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("business deletions")
     operation = {
         "action": "business.delete",
         "business": args.get("business"),
@@ -20977,6 +21027,7 @@ def handle_business_delete_business(args: dict, **_: Any) -> str:
 
 
 def handle_business_set_mode(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("mode changes")
     operation = {
         "action": "business.mode.set",
         "business": args.get("business"),
@@ -20995,6 +21046,7 @@ def handle_business_set_work_focus(args: dict, **_: Any) -> str:
 
 
 def handle_business_create_workspace(args: dict, **_: Any) -> str:
+    _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     operation = {
         "action": "workspace.upsert",
         "business": args.get("business"),
@@ -21073,6 +21125,7 @@ def _verified_business_file_mutation_response(
 
 
 def handle_business_write_file(args: dict, **_: Any) -> str:
+    _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
@@ -21113,6 +21166,7 @@ def handle_business_write_instant_landing(args: dict, **_: Any) -> str:
     — which is what lets the publish gate accept it and ship a branded first-paint in ~2-3 minutes.
     Writing the brief (not the files) is deliberate: the refresh re-materializes the scaffold and
     would clobber any pre-written landing, so the render must happen inside the refresh."""
+    _refuse_on_autonomous_wake("product edits")
     business = _resolved_business_slug(args, required=True)
     features = args.get("features") if isinstance(args.get("features"), list) else []
     norm_features = []
@@ -21155,6 +21209,7 @@ def handle_business_write_instant_landing(args: dict, **_: Any) -> str:
 
 
 def handle_business_patch_file(args: dict, **_: Any) -> str:
+    _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
     _, file_path = _resolved_business_output_path_for_action(
@@ -21221,6 +21276,7 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
 
 
 def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("product surface changes")
     operation = {
         "action": "app.surface.upsert",
         "business": args.get("business"),
@@ -21456,6 +21512,7 @@ def _product_surface_refresh_operations(
 def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
     store = _store()
     try:
+        _refuse_on_autonomous_wake("product publishes")
         if _blocks_session_bound_authority_op():
             raise TakyonError("trusted product surface refresh is available only on the authority tool surface")
         deferred = _defer_product_surface_refresh_to_worker(args)
@@ -21519,6 +21576,7 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
 
 
 def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("subscription/plan changes")
     operation = {
         "action": "app.plan.upsert",
         "business": args.get("business"),
@@ -22144,6 +22202,7 @@ def handle_business_upsert_app_profile(args: dict, **_: Any) -> str:
 
 
 def handle_business_grant_app_entitlement(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("entitlement grants")
     operation = {
         "action": "app.entitlement.upsert",
         "business": args.get("business"),
@@ -25855,6 +25914,7 @@ def _creative_credit_budget_payload(allocations: Mapping[str, Any]) -> str:
 
 def handle_business_set_channel_credit_budgets(args: dict, **_: Any) -> str:
     try:
+        _refuse_on_autonomous_wake("credit budget changes")
         business = _resolved_business_slug(args, required=True)
         idempotency_key = str(args.get("idempotency_key") or "").strip()
         if not idempotency_key:
@@ -30348,6 +30408,7 @@ def handle_business_record_agent(args: dict, **_: Any) -> str:
 
 
 def handle_business_set_control(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("control changes")
     operation = {
         "action": "control.set",
         "scope": args.get("scope"),
@@ -30367,6 +30428,7 @@ def handle_business_schedule_ceo_wakeup(args: dict, **_: Any) -> str:
 
 
 def handle_business_gc(args: dict, **_: Any) -> str:
+    _refuse_on_autonomous_wake("garbage collection")
     operation = {
         "action": "maintenance.gc",
         "older_than_days": args.get("older_than_days") or 90,
@@ -30561,6 +30623,8 @@ def upgrade_businesses(
 def handle_business_upgrade_businesses(args: dict, **_: Any) -> str:
     try:
         dry_run = not bool(args.get("apply") or args.get("confirm"))
+        if not dry_run:
+            _refuse_on_autonomous_wake("business upgrades")
         businesses = args.get("businesses") or args.get("business")
         if isinstance(businesses, str):
             businesses = [businesses] if businesses.strip() else []
@@ -31053,6 +31117,7 @@ def _workspace_durability_mismatch_summary(verification: Mapping[str, Any]) -> s
 
 def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
     """Run a general Claude Agent SDK worker inside one business filesystem."""
+    _refuse_on_autonomous_wake("product edits")
     store = _store()
     business = ""
     workspace_rel = "."
