@@ -2124,6 +2124,7 @@ class _RuntimeEventTail:
         self._seen: set[str] = set()
         self._scope = ""
         self._stream_open = False
+        self._stream_business = ""
 
     def __enter__(self):
         if not self.enabled:
@@ -2171,8 +2172,6 @@ class _RuntimeEventTail:
         self._finish_stream()
         self._scope = scope
         self._seen.clear()
-        if not scope:
-            return
         try:
             rows = self._runtime_event_rows(scope, limit=200)
         except Exception:
@@ -2184,18 +2183,32 @@ class _RuntimeEventTail:
 
     def _runtime_event_rows(self, scope: str, *, limit: int = 300) -> list[dict[str, Any]]:
         with self.store._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM (
-                  SELECT * FROM events
-                  WHERE business_slug = ? AND event_type = 'dashboard.run.output'
-                  ORDER BY created_at DESC, id DESC
-                  LIMIT ?
-                ) recent
-                ORDER BY created_at ASC, id ASC
-                """,
-                (scope, max(1, min(int(limit or 300), 500))),
-            ).fetchall()
+            if scope:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM (
+                      SELECT * FROM events
+                      WHERE business_slug = ? AND event_type = 'dashboard.run.output'
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT ?
+                    ) recent
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (scope, max(1, min(int(limit or 300), 500))),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM (
+                      SELECT * FROM events
+                      WHERE business_slug IS NOT NULL AND event_type = 'dashboard.run.output'
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT ?
+                    ) recent
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (max(1, min(int(limit or 300), 500)),),
+                ).fetchall()
         return [self.store._row_to_dict(row) for row in rows]
 
     def _drain_once(self) -> None:
@@ -2204,8 +2217,6 @@ class _RuntimeEventTail:
         scope = self._current_business_filter()
         if scope != self._scope:
             self._prime_scope(scope)
-            return
-        if not scope:
             return
         try:
             rows = self._runtime_event_rows(scope)
@@ -2217,26 +2228,35 @@ class _RuntimeEventTail:
                 continue
             self._seen.add(eid)
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if str(payload.get("source") or "") == "operator_shell_direct":
+                continue
             stream = str(payload.get("stream") or "").strip()
             if stream == "message_delta":
-                self._write_delta(str(payload.get("line") or payload.get("detail") or ""))
+                business = "" if scope else str(event.get("business_slug") or "").strip()
+                self._write_delta(str(payload.get("line") or payload.get("detail") or ""), business=business)
             elif stream == "message_flush":
                 self._finish_stream()
 
-    def _write_delta(self, text: str) -> None:
+    def _write_delta(self, text: str, *, business: str = "") -> None:
         if self._out is None or not text:
             return
+        if business and self._stream_business and business != self._stream_business:
+            self._finish_stream()
         if not self._stream_open:
-            print("\n— CEO —", file=self._out, flush=True)
+            label = f"— CEO:{business} —" if business else "— CEO —"
+            print(f"\n{label}", file=self._out, flush=True)
             self._stream_open = True
+            self._stream_business = business
         print(text, end="", file=self._out, flush=True)
 
     def _finish_stream(self) -> None:
         if self._out is None or not self._stream_open:
             self._stream_open = False
+            self._stream_business = ""
             return
         print("", file=self._out, flush=True)
         self._stream_open = False
+        self._stream_business = ""
 
 
 def _follow_bootstrap_job(
@@ -3405,6 +3425,118 @@ class _ShellProgress:
             self.emit(line)
 
 
+def _record_shell_runtime_event(
+    store: TakyonStore,
+    slug: str,
+    *,
+    status: str,
+    detail: str = "",
+    line: str = "",
+    command: str = "shell.turn",
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "kind": "operator_shell",
+        "status": status,
+        "detail": detail,
+        "line": line,
+        "command": command,
+    }
+    if extra:
+        payload.update({str(key): value for key, value in extra.items() if value not in (None, [], {})})
+    try:
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{slug}/runtime",
+                business_slug=slug,
+                event_type=f"dashboard.run.{status}",
+                payload=payload,
+            )
+    except Exception:
+        pass
+
+
+class _ShellRuntimeStream:
+    def __init__(
+        self,
+        *,
+        progress: _ShellProgress,
+        store: TakyonStore,
+        business_slug: str | None,
+        command: str = "shell.turn",
+    ) -> None:
+        self.progress = progress
+        self.store = store
+        self.business_slug = _slugify(business_slug or "") if business_slug else ""
+        self.command = command
+        self._stream_buffer = ""
+        self._stream_last_emit = 0.0
+
+    def _record(self, *, status: str, detail: str = "", line: str = "", extra: dict[str, Any] | None = None) -> None:
+        if not self.business_slug:
+            return
+        _record_shell_runtime_event(
+            self.store,
+            self.business_slug,
+            status=status,
+            detail=detail,
+            line=line,
+            command=self.command,
+            extra={"source": "operator_shell_direct", **(extra or {})},
+        )
+
+    def _flush_stream_buffer(self) -> None:
+        if not self._stream_buffer:
+            return
+        import time
+
+        chunk = self._stream_buffer
+        self._stream_buffer = ""
+        self._stream_last_emit = time.monotonic()
+        self._record(
+            status="output",
+            detail=chunk,
+            line=chunk,
+            extra={"stream": "message_delta"},
+        )
+
+    def finish_stream(self) -> None:
+        self._flush_stream_buffer()
+        self.progress.finish_stream()
+        self._record(status="output", extra={"stream": "message_flush"})
+
+    def stream_delta(self, delta: Any) -> None:
+        if delta is None:
+            self.finish_stream()
+            return
+        text = str(delta or "")
+        if not text:
+            return
+        self.progress.stream_delta(text)
+        self._stream_buffer += text
+        import time
+
+        now = time.monotonic()
+        if "\n" in self._stream_buffer or len(self._stream_buffer) >= 80 or now - self._stream_last_emit >= 0.35:
+            self._flush_stream_buffer()
+
+    def hermes_turn(self, text: str, *, already_streamed: bool = False) -> None:
+        if already_streamed:
+            return
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        self.progress.hermes_turn(clean, already_streamed=False)
+        self._record(
+            status="output",
+            detail=clean,
+            line=clean,
+            extra={"stream": "message_delta"},
+        )
+        self._record(status="output", extra={"stream": "message_flush"})
+
+
 @contextlib.contextmanager
 def _thinking_indicator(enabled: bool):
     if not enabled or not sys.stdout.isatty():
@@ -4208,7 +4340,8 @@ def _run_agent_with_meta(
     from takyon_cli.runtime_provider import resolve_runtime_provider
 
     ceo_prompt = _load_ceo_prompt()
-    model_config = _read_model_config(TakyonStore())
+    store = TakyonStore()
+    model_config = _read_model_config(store)
     resolved_model = _require_agent_model_config(model_config, model_override=model)
     provider = model_config.get("provider", "")
     response_style = model_config.get("response_style", "").strip().lower()
@@ -4240,6 +4373,11 @@ def _run_agent_with_meta(
     )
 
     progress = _ShellProgress(show_indicator and not show_agent_activity, raw_hermes=raw_hermes)
+    stream = _ShellRuntimeStream(
+        progress=progress,
+        store=store,
+        business_slug=current_business,
+    )
     resolved_operator_user_id = _resolved_operator_user_id(operator_user_id)
     reservation_key = ""
     reserved_cents = 0
@@ -4287,7 +4425,7 @@ def _run_agent_with_meta(
                 "tool_start_callback": progress.tool_started if progress.enabled else None,
                 "tool_gen_callback": progress.tool_generating if progress.enabled else None,
                 "tool_complete_callback": progress.tool_completed if progress.enabled else None,
-                "interim_assistant_callback": progress.hermes_turn if progress.enabled else None,
+                "interim_assistant_callback": stream.hermes_turn if progress.enabled else None,
             },
         )
         agent_box["agent"] = agent
@@ -4299,9 +4437,9 @@ def _run_agent_with_meta(
             prompt,
             stream_callback=None
             if show_agent_activity
-            else (progress.stream_delta if progress.enabled else (lambda _delta: None)),
+            else (stream.stream_delta if progress.enabled else (lambda _delta: None)),
         )
-        progress.finish_stream()
+        stream.finish_stream()
         actual_cents = max(
             0,
             int(round(float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0) * 100)),
