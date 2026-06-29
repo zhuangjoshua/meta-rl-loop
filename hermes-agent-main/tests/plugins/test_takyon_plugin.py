@@ -1615,7 +1615,6 @@ def test_bundled_claude_design_guidance_skills_exist():
         "claude-design-openai",
         "claude-design-stripe",
         "claude-design-superhuman",
-        "claude-design-vibrant",
         "claude-design-doodle",
     }
     found = {path.parent.name for path in skills_root.glob("*/SKILL.md")}

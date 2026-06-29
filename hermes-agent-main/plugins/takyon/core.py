@@ -257,7 +257,6 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-openai": ("When To Use", "Visual Direction", "Typography", "Layout and Width", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-stripe": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-superhuman": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
-    "claude-design-vibrant": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
 }
 _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
@@ -278,13 +277,6 @@ _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
         "Typography Rules",
         "Layout Principles",
         "Do's and Don'ts",
-    ),
-    "claude-design-vibrant": (
-        "Visual Theme & Atmosphere",
-        "Typography",
-        "Spacing & Grid",
-        "Layout & Composition",
-        "Anti-patterns",
     ),
     "claude-design-doodle": (
         "Visual Theme & Atmosphere",
@@ -33650,7 +33642,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus the shared style packs (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-vibrant, claude-design-doodle) when you want Claude to choose one coherent visual direction from the brief. When omitted, the runtime does not inject design guidance automatically."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus the shared style packs (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-doodle) when you want Claude to choose one coherent visual direction from the brief. When omitted, the runtime does not inject design guidance automatically."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-opus-4-8; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},

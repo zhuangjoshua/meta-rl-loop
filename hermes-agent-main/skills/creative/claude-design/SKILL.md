@@ -15,7 +15,6 @@ Use this skill for outward-facing `product/site` work when visual quality matter
 - `claude-design-openai`
 - `claude-design-stripe`
 - `claude-design-superhuman`
-- `claude-design-vibrant`
 - `claude-design-doodle`
 
 Do not mix multiple style skills in the same worker run.
@@ -36,7 +35,6 @@ Choose one coherent visual direction from the available style packs before build
 - `claude-design-openai`: calm serious for AI tools, prosumer software, research/productivity surfaces
 - `claude-design-stripe`: premium commercial, fintech, infra, or polished B2B marketing
 - `claude-design-superhuman`: premium productivity, speed, focus, executive-feeling software
-- `claude-design-vibrant`: fun consumer, colorful prosumer, energetic but still clean
 - `claude-design-doodle`: whimsical playful consumer, pets, kids, casual social, deliberately lighthearted products
 
 ## Workflow
