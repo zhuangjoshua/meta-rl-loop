@@ -25601,7 +25601,10 @@ def _dashboard_runtime_base_url() -> str:
 
 def _dashboard_session_token_value() -> str:
     load_takyon_env()
-    token = safebox.read_env_backed_value("TAKYON_DASHBOARD_SESSION_TOKEN")
+    try:
+        token = safebox.read_env_backed_value("TAKYON_DASHBOARD_SESSION_TOKEN")
+    except (safebox.RemoteSafeboxError, safebox.SafeboxAuthorityUnavailable):
+        token = ""
     if token:
         return token
     token_path = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser() / "dashboard_session_token"

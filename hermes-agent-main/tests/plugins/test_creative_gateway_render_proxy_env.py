@@ -26,6 +26,25 @@ def _gw():
     return gw
 
 
+def test_dashboard_session_token_falls_back_to_local_file_when_safebox_refuses_env(monkeypatch, tmp_path):
+    from plugins.takyon import core
+
+    token_path = tmp_path / "dashboard_session_token"
+    token_path.write_text("dash-token\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    def _deny(_key: str) -> str:
+        raise core.safebox.RemoteSafeboxError(
+            "not_vendable",
+            status_code=403,
+            payload={"detail": "not_vendable"},
+        )
+
+    monkeypatch.setattr(core.safebox, "read_env_backed_value", _deny)
+
+    assert core._dashboard_session_token_value() == "dash-token"
+
+
 _CAP = "cap-token-abc"
 
 
