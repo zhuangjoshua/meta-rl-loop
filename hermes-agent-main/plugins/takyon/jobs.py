@@ -506,6 +506,16 @@ def run_one(
                 try:
                     heartbeat(conn, job.id, worker_id=worker_id)
                 except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
+                    if heartbeat_conn_factory is not None:
+                        try:
+                            hb_conn = heartbeat_conn_factory()
+                            try:
+                                heartbeat(hb_conn, job.id, worker_id=worker_id)
+                                continue
+                            finally:
+                                hb_conn.close()
+                        except Exception:
+                            pass
                     _log.warning(
                         "jobs: heartbeat could not refresh claim for job %s (kind=%s, non-fatal; "
                         "handler still running): %s",
