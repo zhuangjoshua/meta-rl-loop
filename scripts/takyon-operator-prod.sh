@@ -211,6 +211,39 @@ require_docker_for_worker() {
   fi
 }
 
+local_worker_pids() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  pgrep -f "$TAKYON_CLI_BIN worker --worker-id mac-operator-" 2>/dev/null || true
+}
+
+stop_local_workers() {
+  local pids=()
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    [[ "$pid" != "$$" ]] || continue
+    pids+=("$pid")
+  done < <(local_worker_pids)
+
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "Stopping existing local worker pool(s): ${pids[*]}" >&2
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  sleep 1
+
+  local alive=()
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      alive+=("$pid")
+    fi
+  done
+  if [[ "${#alive[@]}" -gt 0 ]]; then
+    kill -KILL "${alive[@]}" >/dev/null 2>&1 || true
+  fi
+}
+
 cmd_safebox_tunnel() {
   require_files
   echo "Opening Safebox tunnel: $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT via $SSH_HOST" >&2
@@ -308,6 +341,7 @@ cmd_worker() {
   load_operator_env
   require_tunnel
   require_docker_for_worker
+  stop_local_workers
   export TAKYON_WORKER_CONCURRENCY="$concurrency"
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-5}"
   cd "$RUNTIME_DIR"
@@ -344,15 +378,15 @@ cmd_console() {
   local worker_log="$LOCAL_PROD_ROOT/logs/worker-$timestamp.log"
 
   cleanup() {
-    if [[ -n "$worker_pid" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
+    if [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
       kill "$worker_pid" >/dev/null 2>&1 || true
       wait "$worker_pid" >/dev/null 2>&1 || true
     fi
-    if [[ -n "$tunnel_pid" ]] && kill -0 "$tunnel_pid" >/dev/null 2>&1; then
+    if [[ -n "${tunnel_pid:-}" ]] && kill -0 "$tunnel_pid" >/dev/null 2>&1; then
       kill "$tunnel_pid" >/dev/null 2>&1 || true
       wait "$tunnel_pid" >/dev/null 2>&1 || true
     fi
-    if [[ -n "$dashboard_tunnel_pid" ]] && kill -0 "$dashboard_tunnel_pid" >/dev/null 2>&1; then
+    if [[ -n "${dashboard_tunnel_pid:-}" ]] && kill -0 "$dashboard_tunnel_pid" >/dev/null 2>&1; then
       kill "$dashboard_tunnel_pid" >/dev/null 2>&1 || true
       wait "$dashboard_tunnel_pid" >/dev/null 2>&1 || true
     fi
@@ -395,13 +429,17 @@ cmd_console() {
   echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
   echo
   cd "$ROOT"
+  local shell_status=0
   if [[ -n "$business" ]]; then
     echo "Opening operator shell for $business..."
-    "$TAKYON_ENTRY" --logs shell "$business"
+    "$TAKYON_ENTRY" --logs shell "$business" || shell_status="$?"
   else
     echo "Opening operator shell..."
-    "$TAKYON_ENTRY" --logs shell
+    "$TAKYON_ENTRY" --logs shell || shell_status="$?"
   fi
+  cleanup
+  trap - EXIT INT TERM
+  return "$shell_status"
 }
 
 cmd_vps_worker() {
@@ -430,6 +468,9 @@ cmd_status() {
   echo "Docker broker URL: $CONTAINER_SAFEBOX_URL"
   echo "Safebox tunnel:    $(if safebox_tunnel_healthy; then echo ok; else echo missing; fi)"
   echo "Dashboard tunnel:  $(if dashboard_tunnel_healthy; then echo ok; else echo missing; fi)"
+  local pids
+  pids="$(local_worker_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  echo "Local workers:     ${pids:-none}"
   echo "VPS worker:"
   cmd_vps_worker status | sed 's/^/  /'
 }
@@ -446,6 +487,7 @@ Usage:
   scripts/takyon-operator-prod.sh quiet [business]
   scripts/takyon-operator-prod.sh worker [concurrency]
   scripts/takyon-operator-prod.sh worker-once
+  scripts/takyon-operator-prod.sh stop-workers
   scripts/takyon-operator-prod.sh vps-worker {status|stop|start}
   scripts/takyon-operator-prod.sh status
 
@@ -501,6 +543,10 @@ case "$command" in
   worker-once)
     shift || true
     cmd_worker_once "$@"
+    ;;
+  stop-workers|workers-stop)
+    shift || true
+    stop_local_workers "$@"
     ;;
   vps-worker)
     shift || true

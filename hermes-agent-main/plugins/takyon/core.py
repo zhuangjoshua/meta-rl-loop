@@ -13493,9 +13493,13 @@ class TakyonStore:
                 prepare_threshold=None,
             )
         )
-        configure_takyon_pg_session(conn, bypass=self._database_plane != "app")
-        if not self._database_url:
-            assert_takyon_pg_role(conn, self._database_plane)
+        try:
+            configure_takyon_pg_session(conn, bypass=self._database_plane != "app")
+            if not self._database_url:
+                assert_takyon_pg_role(conn, self._database_plane)
+        except Exception:
+            pool.release(conn, discard=True)
+            raise
         return _PGConn(conn, release=pool.release)
 
     def seed_platform_owner(self) -> tuple[str | None, str | None]:
