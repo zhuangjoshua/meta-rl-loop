@@ -153,6 +153,27 @@ if ! TARGET_HOST="$TAKYON_VPS_HOST" \
   echo "warning: xurl auth seed failed; continuing deploy" >&2
 fi
 
+run_remote_migrations() {
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+    "set -euo pipefail
+    if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
+      env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+        '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from plugins.takyon.core import load_takyon_env
+from plugins.takyon.db.runner import run_migrations
+from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
+import psycopg
+
+load_takyon_env()
+migration_database_url = resolve_database_url(plane='migration')
+with psycopg.connect(migration_database_url, autocommit=True, prepare_threshold=None) as conn:
+    assert_takyon_pg_role(conn, 'migration')
+    conn.execute('select set_config(\$\$statement_timeout\$\$, \$\$0\$\$, false)')
+    run_migrations(conn)
+PY
+    fi"
+}
+
 wait_for_remote_runtime_idle() {
   if ! ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
     "grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null"; then
@@ -204,10 +225,11 @@ PY"
   done
 }
 
+run_remote_migrations
 wait_for_remote_runtime_idle
 
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
-TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+  TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
 TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
 TAKYON_STOP_CORE_SERVICES=1 \
   "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
@@ -286,22 +308,6 @@ if result.get('user_modified'):
 PY
   env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/root PYTHONUNBUFFERED=1 TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
     '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' '$TAKYON_REMOTE_RUNTIME/scripts/verify-supabase-auth-runtime.py'
-  if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
-    env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
-      '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from plugins.takyon.core import load_takyon_env
-from plugins.takyon.db.runner import run_migrations
-from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
-import psycopg
-
-load_takyon_env()
-migration_database_url = resolve_database_url(plane='migration')
-with psycopg.connect(migration_database_url, autocommit=True, prepare_threshold=None) as conn:
-    assert_takyon_pg_role(conn, 'migration')
-    conn.execute('select set_config(\$\$statement_timeout\$\$, \$\$0\$\$, false)')
-    run_migrations(conn)
-PY
-  fi
   systemctl stop takyon-activation-broker.service >/dev/null 2>&1 || true
   systemctl disable takyon-activation-broker.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/takyon-activation-broker.service
