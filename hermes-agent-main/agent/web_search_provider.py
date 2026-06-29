@@ -129,6 +129,15 @@ class WebSearchProvider(abc.ABC):
         """
         return False
 
+    def authority_gates_spend(self) -> bool:
+        """Return True when the provider implementation performs its own authoritative spend gate.
+
+        The shared web tool wrapper uses this to avoid double-reserving money for providers that call
+        a trusted broker/proxy which already reserves and settles before egress. Default False: paid
+        providers remain metered by the shared web-spend seam.
+        """
+        return False
+
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Execute a web search.
 

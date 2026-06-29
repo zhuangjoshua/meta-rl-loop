@@ -1,12 +1,16 @@
 """Tavily web search + content extraction + crawl — plugin form.
 
 Subclasses :class:`agent.web_search_provider.WebSearchProvider`. Three
-capabilities advertised:
+capabilities advertised on a local/Safebox authority plane:
 
 - ``supports_search()``  -> True (Tavily ``/search``)
 - ``supports_extract()`` -> True (Tavily ``/extract``)
 - ``supports_crawl()``   -> True (Tavily ``/crawl``) — sync HTTP crawl;
   Firecrawl also advertises ``supports_crawl=True`` (async)
+
+On remote runtime planes, search/extract are routed through the Safebox operator
+provider proxy and crawl is not advertised because that proxy intentionally
+exposes only the priced search/extract operations.
 
 All three are sync — the underlying call is ``httpx.post(...)``. The
 dispatcher in :func:`tools.web_tools.web_crawl_tool` (which is itself
@@ -55,8 +59,17 @@ def _use_remote_authority(safebox: Any) -> bool:
 
 
 def _local_tavily_api_key(safebox: Any) -> str:
-    """Resolve the Tavily key only on a local/Safebox authority plane."""
-    return str(safebox.first_env_backed_value("TAVILY_API_KEY") or "").strip()
+    """Resolve the Tavily key only off the remote runtime plane.
+
+    Production runtime planes never reach this helper because ``_use_remote_authority`` is true and
+    the request goes through the Safebox proxy. On the Safebox authority host, resolve through the
+    Safebox helper. In hermetic local-dev/test mode with no Safebox authority configured, preserve the
+    generic web plugin's legacy ``TAVILY_API_KEY`` env behavior.
+    """
+    try:
+        return str(safebox.first_env_backed_value("TAVILY_API_KEY") or "").strip()
+    except safebox.SafeboxAuthorityUnavailable:
+        return str(os.getenv("TAVILY_API_KEY") or "").strip()
 
 
 def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -68,11 +81,10 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
     Secret boundary: on a runtime plane (a host with a remote safebox configured —
     ``safebox._use_remote_authority()`` is True) the raw ``TAVILY_API_KEY`` is NOT
-    read here. This generic web-provider chokepoint does not carry the required
-    business-owner identity needed to mint an ``operator.session`` capability, so
-    it fails closed instead of sending the shared Safebox transport token to the
-    operator proxy. Product sub-user Tavily/search uses the app AI gateway broker,
-    not this operator web plugin. On the safebox host itself / local dev
+    read here. The provider mints a caller-bound ``operator.session`` capability
+    for the active business owner and calls the Safebox Tavily proxy, which gates
+    money before resolving the key. Product sub-user Tavily/search uses the app
+    AI gateway broker, not this operator web plugin. On the safebox host itself / local dev
     (``not _use_remote_authority()``) — that host IS the authority — the direct
     call below resolves ``TAVILY_API_KEY`` through the safebox/local config helper,
     not from this plugin's process env.
@@ -83,10 +95,12 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     from plugins.takyon import safebox
 
     if _use_remote_authority(safebox):
-        raise safebox.SafeboxAuthorityUnavailable(
-            "Tavily operator web provider requires a caller-bound operator.session capability on "
-            "remote runtime planes; refusing to use the shared Safebox transport token as authority"
-        )
+        if op not in {"search", "extract"}:
+            raise safebox.SafeboxAuthorityUnavailable(
+                f"Tavily {op} is not exposed through the operator provider proxy"
+            )
+        token = _operator_session_token(safebox)
+        return safebox.proxy_request("tavily", op, payload, token=token)
 
     import httpx
 
@@ -109,6 +123,31 @@ def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     response = httpx.post(url, json=payload, headers=headers, timeout=60)
     response.raise_for_status()
     return response.json()
+
+
+def _operator_session_token(safebox: Any) -> str:
+    """Mint the caller-bound operator.session token for this business-scoped web call."""
+    from plugins.takyon import core
+
+    business = core._session_business_slug()
+    if not business:
+        raise safebox.SafeboxAuthorityUnavailable(
+            "Tavily operator web provider requires a business-scoped operator.session capability"
+        )
+    store = core.TakyonStore()
+    try:
+        with store._connect() as conn:
+            row = store._ensure_business(conn, business)
+    except Exception as exc:
+        raise safebox.SafeboxAuthorityUnavailable(
+            f"Tavily operator web provider could not resolve owner for business:{business}"
+        ) from exc
+    owner = str((row or {}).get("owner_user_id") or "").strip()
+    if not owner:
+        raise safebox.SafeboxAuthorityUnavailable(
+            f"Tavily operator web provider requires owner_user_id for business:{business}"
+        )
+    return safebox.mint_operator_session_token(business, owner)
 
 
 def _normalize_tavily_search_results(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -189,17 +228,22 @@ class TavilyWebSearchProvider(WebSearchProvider):
         return "Tavily"
 
     def is_available(self) -> bool:
-        """Available only on a local/Safebox authority plane with a configured key.
+        """Available on remote runtime planes through the Safebox proxy, or locally with a key.
 
-        Remote runtime planes cannot use this generic provider because it has no
-        caller-bound operator.session capability. Product sub-user search uses
-        the app AI gateway broker instead.
+        Product sub-user search uses the app AI gateway broker instead.
         """
         try:
             from plugins.takyon import safebox
             if _use_remote_authority(safebox):
-                return False
+                return bool(safebox.provider_proxy_base_url())
             return bool(_local_tavily_api_key(safebox))
+        except Exception:
+            return False
+
+    def authority_gates_spend(self) -> bool:
+        try:
+            from plugins.takyon import safebox
+            return _use_remote_authority(safebox)
         except Exception:
             return False
 
@@ -210,6 +254,12 @@ class TavilyWebSearchProvider(WebSearchProvider):
         return True
 
     def supports_crawl(self) -> bool:
+        try:
+            from plugins.takyon import safebox
+            if _use_remote_authority(safebox):
+                return False
+        except Exception:
+            pass
         return True
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:

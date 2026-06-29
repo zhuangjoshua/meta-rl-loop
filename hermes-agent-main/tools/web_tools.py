@@ -130,6 +130,15 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _provider_authority_gates_spend(provider: Any) -> bool:
+    """True when provider egress goes through its own authoritative broker gate."""
+    marker = getattr(provider, "authority_gates_spend", None)
+    try:
+        return bool(marker()) if callable(marker) else bool(marker)
+    except Exception:
+        return False
+
+
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _has_env(name: str) -> bool:
@@ -919,7 +928,11 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 provider.name, query, limit,
             )
             # Spend boundary: the provider is now resolved, so we know whether this call bills.
-            billing_mode, namespace = provider_billing(provider.name)
+            billing_mode, namespace = (
+                ("free", None)
+                if _provider_authority_gates_spend(provider)
+                else provider_billing(provider.name)
+            )
             if billing_mode == "free":
                 response_data = provider.search(query, limit)
             else:
@@ -1100,7 +1113,11 @@ async def web_extract_tool(
                 return await asyncio.to_thread(provider.extract, safe_urls, format=format)
 
             # Spend boundary: provider resolved, URLs validated — meter per safe URL if it bills.
-            billing_mode, namespace = provider_billing(provider.name)
+            billing_mode, namespace = (
+                ("free", None)
+                if _provider_authority_gates_spend(provider)
+                else provider_billing(provider.name)
+            )
             if billing_mode == "free":
                 results = await _run_extract()
             else:
@@ -1402,7 +1419,11 @@ async def web_crawl_tool(
                 return await asyncio.to_thread(crawl_provider.crawl, url, **crawl_kwargs)
 
             # Spend boundary: crawl provider resolved — meter the call if it bills.
-            crawl_billing_mode, crawl_namespace = provider_billing(crawl_provider.name)
+            crawl_billing_mode, crawl_namespace = (
+                ("free", None)
+                if _provider_authority_gates_spend(crawl_provider)
+                else provider_billing(crawl_provider.name)
+            )
             if crawl_billing_mode == "free":
                 response = await _run_crawl()
             else:
