@@ -293,7 +293,7 @@ def upsert_plan_policy(
     if interval == "month":
         cap = _monthly_plan_price_cap_microusd(price)
         if budget > cap:
-            raise InvalidPlan("included_ai_budget_microusd must be between 0 and the monthly plan price")
+            budget = cap
     quota = int(included_action_quota if included_action_quota is not None else 0)
     if quota < 0:
         raise InvalidPlan("included_action_quota must be non-negative")

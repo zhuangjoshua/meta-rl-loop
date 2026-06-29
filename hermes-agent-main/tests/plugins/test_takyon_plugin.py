@@ -4084,7 +4084,7 @@ def test_pg_test_mode_checkout_creates_intent_on_postgres(tmp_path, monkeypatch)
     assert checkout["url"] == checkout["checkout_url"]
 
 
-def test_monthly_plan_upsert_rejects_included_ai_budget_above_price(tmp_path, monkeypatch):
+def test_monthly_plan_upsert_clamps_included_ai_budget_above_price(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -4112,11 +4112,11 @@ def test_monthly_plan_upsert_rejects_included_ai_budget_above_price(tmp_path, mo
         "budgetcap-plan",
     )["results"][0]
 
-    assert result["success"] is False
-    assert "included_ai_budget_microusd must be between 0 and the monthly plan price" in result["error"]
+    assert result["success"] is True
+    assert result["plan"]["included_ai_budget_microusd"] == 19_000_000
 
 
-def test_monthly_plan_price_drop_requires_existing_budget_to_fit_new_price(tmp_path, monkeypatch):
+def test_monthly_plan_price_drop_clamps_existing_budget_to_new_price(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
     _commit(
@@ -4161,8 +4161,8 @@ def test_monthly_plan_price_drop_requires_existing_budget_to_fit_new_price(tmp_p
         "budgetsync-price-drop",
     )["results"][0]
 
-    assert result["success"] is False
-    assert "included_ai_budget_microusd must be between 0 and the monthly plan price" in result["error"]
+    assert result["success"] is True
+    assert result["plan"]["included_ai_budget_microusd"] == 3_000_000
 
 
 def test_test_app_checkout_url_prefers_same_origin_http_url():

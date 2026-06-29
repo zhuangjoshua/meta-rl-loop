@@ -305,8 +305,8 @@ def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
     with conn.transaction():
         updated = conn.execute(
             "update jobs set locked_at = now(), updated_at = now() "
-            "where id = %s and status = 'running' and locked_by = %s",
-            (job_id, worker_id),
+            "where id = %s and status = 'running'",
+            (job_id,),
         ).rowcount
     if updated == 0:
         raise JobNotRunning(job_id)

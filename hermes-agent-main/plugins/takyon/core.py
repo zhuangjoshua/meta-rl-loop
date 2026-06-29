@@ -11718,7 +11718,7 @@ def _normalize_included_ai_budget_microusd(
     if interval == "month":
         cap = _monthly_plan_price_cap_microusd(price_cents)
         if budget > cap:
-            raise TakyonError("included_ai_budget_microusd must be between 0 and the monthly plan price")
+            return cap
     return budget
 
 
