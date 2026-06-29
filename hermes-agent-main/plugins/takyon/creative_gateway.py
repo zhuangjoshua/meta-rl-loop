@@ -47,7 +47,10 @@ def _core():
 
 
 def _expected_session_token() -> str:
-    token = safebox.read_env_backed_value("TAKYON_DASHBOARD_SESSION_TOKEN")
+    try:
+        token = safebox.read_env_backed_value("TAKYON_DASHBOARD_SESSION_TOKEN")
+    except (safebox.RemoteSafeboxError, safebox.SafeboxAuthorityUnavailable):
+        token = ""
     if token:
         return token
     home = Path(os.getenv("TAKYON_HOME") or (Path.home() / ".takyon"))

@@ -45,6 +45,27 @@ def test_dashboard_session_token_falls_back_to_local_file_when_safebox_refuses_e
     assert core._dashboard_session_token_value() == "dash-token"
 
 
+def test_gateway_session_token_falls_back_to_local_file_when_safebox_refuses_env(
+    monkeypatch, tmp_path
+):
+    gw = _gw()
+
+    token_path = tmp_path / "dashboard_session_token"
+    token_path.write_text("dash-token\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    def _deny(_key: str) -> str:
+        raise gw.safebox.RemoteSafeboxError(
+            "not_vendable",
+            status_code=403,
+            payload={"detail": "not_vendable"},
+        )
+
+    monkeypatch.setattr(gw.safebox, "read_env_backed_value", _deny)
+
+    assert gw._expected_session_token() == "dash-token"
+
+
 _CAP = "cap-token-abc"
 
 
