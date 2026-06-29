@@ -300,7 +300,7 @@ PY
   if ! (cd '$TAKYON_REMOTE_RUNTIME' && '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from tools.lazy_deps import feature_missing
 
-raise SystemExit(1 if feature_missing("image.logo_postprocess") else 0)
+raise SystemExit(1 if feature_missing('image.logo_postprocess') else 0)
 PY
   )
   then
