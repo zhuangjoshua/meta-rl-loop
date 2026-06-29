@@ -12166,6 +12166,7 @@ def _sync_remote_product_source_cache(
     label: str,
 ) -> dict[str, Any]:
     remote_path = _remote_product_source_cache_path(slug, remote_home)
+    remote_business_root = remote_path.parents[1]
     summary = {"target": target, "path": str(remote_path), "plane": label}
     rsync = shutil.which("rsync")
     ssh = shutil.which("ssh")
@@ -12201,7 +12202,9 @@ def _sync_remote_product_source_cache(
                 *ssh_base,
                 target,
                 "install -d -o takyon -g takyon -- "
-                f"{shlex.quote(str(remote_path.parent))} {shlex.quote(str(remote_path))}",
+                f"{shlex.quote(str(remote_business_root))} "
+                f"{shlex.quote(str(remote_path.parent))} "
+                f"{shlex.quote(str(remote_path))}",
             ],
             capture_output=True,
             text=True,
@@ -12241,7 +12244,7 @@ def _sync_remote_product_source_cache(
                 "error": (rsync_proc.stderr or rsync_proc.stdout or f"rsync exited {rsync_proc.returncode}").strip(),
             }
         chown_proc = subprocess.run(
-            [*ssh_base, target, f"chown -R takyon:takyon -- {shlex.quote(str(remote_path))}"],
+            [*ssh_base, target, f"chown -R takyon:takyon -- {shlex.quote(str(remote_business_root))}"],
             capture_output=True,
             text=True,
             timeout=30,
