@@ -150,7 +150,7 @@ def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path,
     assert payload["timeoutMs"] == 1200000
     assert payload["maxBudgetUsd"] == 8.0
     assert payload["effort"] == "medium"
-    assert payload["model"] == "claude-sonnet-4-6"
+    assert payload["model"] == "claude-opus-4-8"
 
 
 def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, monkeypatch):
