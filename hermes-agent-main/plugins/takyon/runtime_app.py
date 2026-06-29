@@ -26,7 +26,7 @@ import platform
 from pathlib import Path
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from fastapi import FastAPI
 
 from .ai_gateway import build_ai_gateway_router, get_gateway_conn
@@ -60,8 +60,10 @@ _DATABASE_PLANE_ALIASES = {
     "migrate": "migration",
     "deploy": "migration",
 }
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 _ALLOW_POSTGRES_OUTSIDE_VPS_ENV = "TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"
 _ALLOW_LEGACY_DB_ROLES_ENV = "TAKYON_ALLOW_LEGACY_DB_ROLES"
+_CONNECT_TIMEOUT_ENV = "TAKYON_POSTGRES_CONNECT_TIMEOUT_SECONDS"
 _HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _HOST_ROLE_ALIASES = {
     "": "",
@@ -204,6 +206,23 @@ def _conninfo_is_local_only(value: str) -> bool:
     return True
 
 
+def _with_database_connect_timeout(value: str) -> str:
+    try:
+        info = conninfo_to_dict(value)
+    except Exception:
+        return value
+    if str(info.get("connect_timeout") or "").strip():
+        return value
+    raw_timeout = str(
+        os.getenv(_CONNECT_TIMEOUT_ENV) or _DEFAULT_CONNECT_TIMEOUT_SECONDS
+    ).strip()
+    try:
+        timeout = max(1, int(float(raw_timeout)))
+    except (TypeError, ValueError):
+        timeout = _DEFAULT_CONNECT_TIMEOUT_SECONDS
+    return make_conninfo(value, connect_timeout=str(timeout))
+
+
 def _approved_remote_postgres_runtime() -> bool:
     if platform.system().lower() != "linux":
         return False
@@ -216,6 +235,7 @@ def _approved_remote_postgres_runtime() -> bool:
 
 
 def _enforce_database_url_policy(value: str) -> str:
+    value = _with_database_connect_timeout(value)
     if _env_truthy(_ALLOW_POSTGRES_OUTSIDE_VPS_ENV):
         return value
     system = platform.system().lower()

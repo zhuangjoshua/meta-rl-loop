@@ -2527,6 +2527,7 @@ def drain_tick(
     dispatch: bool = True,
     stop: threading.Event | None = None,
     max_jobs: int | None = None,
+    heartbeat_conn_factory=None,
 ) -> dict[str, int]:
     """One drain tick on an open autocommit connection: optionally dispatch due wakes, reclaim stale
     claims, then drain queued jobs through ``jobs.run_one`` until the queue is empty (or ``stop`` is
@@ -2566,7 +2567,11 @@ def drain_tick(
 
     while stop is None or not stop.is_set():
         outcome: JobOutcome | None = jobs.run_one(
-            conn, worker_id=worker_id, handlers=handlers, kinds=kinds
+            conn,
+            worker_id=worker_id,
+            handlers=handlers,
+            kinds=kinds,
+            heartbeat_conn_factory=heartbeat_conn_factory,
         )
         if outcome is None:
             break
@@ -2668,6 +2673,13 @@ def run_worker_loop(
     def _run_loop(*, thread_worker_id: str, allow_dispatch: bool) -> int:
         import psycopg
 
+        def _heartbeat_conn_factory():
+            hb_conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+            if not database_url:
+                assert_takyon_pg_role(hb_conn, "operator")
+                configure_takyon_pg_session(hb_conn, bypass=True)
+            return hb_conn
+
         total_drained = 0
         while not stop.is_set():
             conn = None
@@ -2698,6 +2710,7 @@ def run_worker_loop(
                     dispatch=allow_dispatch,
                     stop=stop,
                     max_jobs=max_jobs,
+                    heartbeat_conn_factory=_heartbeat_conn_factory,
                 )
                 total_drained += counts["drained"]
             except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon

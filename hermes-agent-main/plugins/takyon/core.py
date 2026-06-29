@@ -12197,7 +12197,12 @@ def _sync_remote_product_source_cache(
     excludes.extend(["--exclude", "._*", "--exclude", ".DS_Store", "--exclude", ".env", "--exclude", "*.pyc"])
     try:
         mkdir_proc = subprocess.run(
-            [*ssh_base, target, f"mkdir -p -- {shlex.quote(str(remote_path.parent))}"],
+            [
+                *ssh_base,
+                target,
+                "install -d -o takyon -g takyon -- "
+                f"{shlex.quote(str(remote_path.parent))} {shlex.quote(str(remote_path))}",
+            ],
             capture_output=True,
             text=True,
             timeout=30,
@@ -12246,9 +12251,9 @@ def _sync_remote_product_source_cache(
         if chown_proc.returncode != 0:
             return {
                 **summary,
-                "synced": True,
-                "status": "synced_chown_failed",
-                "warning": (chown_proc.stderr or chown_proc.stdout or f"ssh chown exited {chown_proc.returncode}").strip(),
+                "synced": False,
+                "status": "failed",
+                "error": (chown_proc.stderr or chown_proc.stdout or f"ssh chown exited {chown_proc.returncode}").strip(),
             }
     except Exception as exc:
         return {**summary, "synced": False, "status": "failed", "error": str(exc)}

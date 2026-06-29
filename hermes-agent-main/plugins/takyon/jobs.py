@@ -410,6 +410,7 @@ def run_one(
     handlers: Mapping[str, Handler],
     kinds: list[str] | tuple[str, ...] | None = None,
     heartbeat_interval_seconds: float = 15.0,
+    heartbeat_conn_factory: Callable[[], Any] | None = None,
 ) -> JobOutcome | None:
     """Claim one job and run it under the full contract; returns its outcome, or None if the queue is
     empty. The pipeline, each step its own transaction on the autocommit conn:
@@ -461,6 +462,15 @@ def run_one(
             )
             return JobOutcome(job.id, job.kind, "blocked", reason="budget_exhausted")
 
+    def _lifecycle_conn():
+        if heartbeat_conn_factory is None:
+            return conn, False
+        return heartbeat_conn_factory(), True
+
+    def _close_lifecycle_conn(lifecycle_conn, should_close: bool) -> None:
+        if should_close:
+            lifecycle_conn.close()
+
     try:
         wait_timeout = (
             heartbeat_interval_seconds
@@ -491,7 +501,14 @@ def run_one(
                 # heartbeat failure: keep waiting for the handler, and let the TERMINAL transition be
                 # the single authority on the outcome.
                 try:
-                    heartbeat(conn, job.id, worker_id=worker_id)
+                    if heartbeat_conn_factory is None:
+                        heartbeat(conn, job.id, worker_id=worker_id)
+                    else:
+                        hb_conn = heartbeat_conn_factory()
+                        try:
+                            heartbeat(hb_conn, job.id, worker_id=worker_id)
+                        finally:
+                            hb_conn.close()
                 except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
                     _log.warning(
                         "jobs: heartbeat could not refresh claim for job %s (kind=%s, non-fatal; "
@@ -502,18 +519,22 @@ def run_one(
                     )
         assert run_result is not None
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
-        if estimate_cents > 0:
-            billing.refund(conn, reservation_key)
+        lifecycle_conn, close_lifecycle = _lifecycle_conn()
         try:
-            status = fail(conn, job.id, error=str(exc), retryable=True)
-        except JobNotRunning:
-            _log.warning(
-                "jobs: handler failed after job %s (kind=%s) lost its running claim; "
-                "continuing drain without wedging the worker",
-                job.id,
-                job.kind,
-            )
-            status = "failed"
+            if estimate_cents > 0:
+                billing.refund(lifecycle_conn, reservation_key)
+            try:
+                status = fail(lifecycle_conn, job.id, error=str(exc), retryable=True)
+            except JobNotRunning:
+                _log.warning(
+                    "jobs: handler failed after job %s (kind=%s) lost its running claim; "
+                    "continuing drain without wedging the worker",
+                    job.id,
+                    job.kind,
+                )
+                status = "failed"
+        finally:
+            _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
         return JobOutcome(
             job.id, job.kind, status, reserved_cents=reserved, reason="handler_error"
         )
@@ -526,17 +547,18 @@ def run_one(
     # release our own hold so no reservation leaks, log it, and report completion. A genuine bug (double
     # complete of a truly-terminal row) is the same harmless idempotent no-op here.
     actual = 0
+    lifecycle_conn, close_lifecycle = _lifecycle_conn()
     try:
         if estimate_cents > 0:
             actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
-            billing.settle(conn, reservation_key, actual)
-        complete(conn, job.id, result=run_result.result)
+            billing.settle(lifecycle_conn, reservation_key, actual)
+        complete(lifecycle_conn, job.id, result=run_result.result)
     except JobNotRunning:
         # Our claim was reclaimed mid-build (the build outran the stale window). Don't requeue a
         # finished, side-effect-complete job. Release our hold idempotently so the refund isn't lost.
         if estimate_cents > 0:
             try:
-                billing.refund(conn, reservation_key)
+                billing.refund(lifecycle_conn, reservation_key)
             except Exception:  # noqa: BLE001 — best-effort; the sibling attempt reconciles the hold too
                 pass
         _log.warning(
@@ -548,6 +570,8 @@ def run_one(
         return JobOutcome(
             job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=0
         )
+    finally:
+        _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
     return JobOutcome(
         job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=actual
     )

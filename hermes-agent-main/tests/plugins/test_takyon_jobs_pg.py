@@ -378,6 +378,100 @@ def test_run_one_heartbeats_while_handler_is_running(pg_conn, monkeypatch):
     assert heartbeat_calls and heartbeat_calls[0][1] == "w1"
 
 
+def test_run_one_uses_isolated_heartbeat_connection(pg_conn, monkeypatch):
+    slug, _uid = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")
+    release = threading.Event()
+    heartbeat_calls: list[str] = []
+    closed: list[bool] = []
+
+    class _HeartbeatConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, *args, **kwargs):
+            return self._inner.execute(*args, **kwargs)
+
+        def transaction(self, *args, **kwargs):
+            return self._inner.transaction(*args, **kwargs)
+
+        def close(self) -> None:
+            closed.append(True)
+
+    def _factory():
+        return _HeartbeatConn(pg_conn)
+
+    original_heartbeat = jobs.heartbeat
+
+    def _wrapped_heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+        assert isinstance(conn, _HeartbeatConn)
+        heartbeat_calls.append(job_id)
+        release.set()
+        original_heartbeat(conn, job_id, worker_id=worker_id)
+
+    monkeypatch.setattr(jobs, "heartbeat", _wrapped_heartbeat)
+
+    class _WaitingHandler:
+        def __call__(self, job: jobs.Job) -> jobs.JobRunResult:
+            release.wait(1.0)
+            return jobs.JobRunResult(result={"ok": job.business_slug}, actual_cost_cents=0)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_wake": _WaitingHandler()},
+        heartbeat_interval_seconds=0.05,
+        heartbeat_conn_factory=_factory,
+    )
+
+    assert outcome is not None and outcome.status == "completed"
+    assert heartbeat_calls
+    assert closed
+
+
+def test_run_one_uses_isolated_lifecycle_connection_for_completion(pg_conn, monkeypatch):
+    slug, _uid = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")
+    closed: list[bool] = []
+    completion_conn_used: list[bool] = []
+
+    class _LifecycleConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, *args, **kwargs):
+            return self._inner.execute(*args, **kwargs)
+
+        def transaction(self, *args, **kwargs):
+            return self._inner.transaction(*args, **kwargs)
+
+        def close(self) -> None:
+            closed.append(True)
+
+    def _factory():
+        return _LifecycleConn(pg_conn)
+
+    original_complete = jobs.complete
+
+    def _wrapped_complete(conn, job_id: str, *, result=None) -> None:
+        assert isinstance(conn, _LifecycleConn)
+        completion_conn_used.append(True)
+        original_complete(conn, job_id, result=result)
+
+    monkeypatch.setattr(jobs, "complete", _wrapped_complete)
+
+    outcome = jobs.run_one(
+        pg_conn,
+        worker_id="w1",
+        handlers={"ceo_wake": _RecordingHandler(result={"ok": True})},
+        heartbeat_conn_factory=_factory,
+    )
+
+    assert outcome is not None and outcome.status == "completed"
+    assert completion_conn_used
+    assert closed
+
+
 def test_run_one_refreshes_lifecycle_session_after_handler_mutates_guc(pg_conn):
     slug, _uid = _provision_business(pg_conn)
     jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")
