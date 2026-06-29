@@ -27695,30 +27695,13 @@ def _resolve_gsc_verification_meta_tag() -> str:
         return _GSC_VERIFICATION_META_CACHE[0]
     tag = ""
     try:
-        sa_json = _resolve_gsc_service_account_json()
-        if sa_json:
-            from google.oauth2 import service_account as _gsc_sa  # type: ignore
-            from googleapiclient import discovery as _gsc_disc  # type: ignore
-
-            creds = _gsc_sa.Credentials.from_service_account_info(
-                json.loads(sa_json), scopes=list(_GSC_OAUTH_SCOPES)
-            )
-            sv = _gsc_disc.build(
-                "siteVerification", "v1", credentials=creds, cache_discovery=False
-            )
-            site = f"https://{_company_base_domain()}/"
-            resp = (
-                sv.webResource()
-                .getToken(
-                    body={"verificationMethod": "META", "site": {"type": "SITE", "identifier": site}}
-                )
-                .execute()
-            )
-            raw = str((resp or {}).get("token") or "").strip()
-            match = re.search(r'content="([^"]+)"', raw)
-            value = (match.group(1) if match else raw).strip()
-            if value:
-                tag = f'<meta name="google-site-verification" content="{value}" />'
+        site = f"https://{_company_base_domain()}/"
+        resp = safebox.gsc_verification_token(site)
+        raw = str((resp or {}).get("verification_token") or "").strip()
+        match = re.search(r'content="([^"]+)"', raw)
+        value = (match.group(1) if match else raw).strip()
+        if value:
+            tag = f'<meta name="google-site-verification" content="{value}" />'
     except Exception:
         tag = ""
     if tag:
@@ -27816,54 +27799,9 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 "pass site_url explicitly",
             )
 
-        sa_json = _resolve_gsc_service_account_json()
-        if not sa_json:
-            return _blocked(
-                "blocked_search_console_unconfigured",
-                "Google Search Console service-account key is not provisioned in the safebox "
-                "(alias TAKYON_GSC_SERVICE_ACCOUNT_KEY)",
-            )
-
         try:
-            sa_info = json.loads(sa_json)
-        except Exception as exc:
-            return _blocked(
-                "blocked_search_console_unconfigured",
-                f"Search Console service-account key is not valid JSON: {exc}",
-            )
-
-        try:
-            from google.oauth2 import service_account as _gsc_service_account  # type: ignore
-            from googleapiclient import discovery as _gsc_discovery  # type: ignore
-        except Exception as exc:
-            return _blocked(
-                "blocked_search_console_unconfigured",
-                "Google API client libraries (google-auth, google-api-python-client) are not "
-                f"available in this runtime: {exc}",
-            )
-
-        try:
-            credentials = _gsc_service_account.Credentials.from_service_account_info(
-                sa_info, scopes=list(_GSC_OAUTH_SCOPES)
-            )
-            site_verification = _gsc_discovery.build(
-                "siteVerification", "v1", credentials=credentials, cache_discovery=False
-            )
-            search_console = _gsc_discovery.build(
-                "searchconsole", "v1", credentials=credentials, cache_discovery=False
-            )
-
-            token_resp = (
-                site_verification.webResource()
-                .getToken(
-                    body={
-                        "verificationMethod": "META",
-                        "site": {"type": "SITE", "identifier": site_url},
-                    }
-                )
-                .execute()
-            )
-            verification_token = str((token_resp or {}).get("token") or "").strip()
+            token_resp = safebox.gsc_verification_token(site_url)
+            verification_token = str((token_resp or {}).get("verification_token") or "").strip()
             if not verification_token:
                 return _blocked(
                     "blocked_search_console_unconfigured",
@@ -27936,16 +27874,8 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                     edge_synced=bool(edge_synced),
                 )
 
-            verify_resp = (
-                site_verification.webResource()
-                .insert(
-                    verificationMethod="META",
-                    body={"site": {"type": "SITE", "identifier": site_url}},
-                )
-                .execute()
-            )
-            search_console.sites().add(siteUrl=site_url).execute()
-            sitemap_url = _search_console_submit_default_sitemap(search_console, site_url)
+            verify_resp = safebox.gsc_verify_and_submit(site_url, submit_sitemap=True)
+            sitemap_url = str((verify_resp or {}).get("sitemap_url") or "")
         except Exception as exc:
             return _blocked(
                 "blocked_search_console_verification_failed",
@@ -27964,7 +27894,7 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
             "meta_injected": True,
             "sitemap_submitted": True,
             "sitemap_url": sitemap_url,
-            "verified_resource": (verify_resp or {}).get("id") if isinstance(verify_resp, Mapping) else None,
+            "verified_resource": (verify_resp or {}).get("verified_resource") if isinstance(verify_resp, Mapping) else None,
         }
         _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
         store.commit(

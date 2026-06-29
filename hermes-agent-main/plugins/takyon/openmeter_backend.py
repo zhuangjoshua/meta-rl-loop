@@ -552,6 +552,23 @@ def _request_json(
 ) -> dict[str, Any] | list[Any] | None:
     allow = set(allow_status or set())
     expected = set(expected_status or {200})
+    try:
+        if safebox._remote_enabled() and not safebox._local_authority_enabled():
+            proxied = safebox.openmeter_request(
+                method,
+                path,
+                payload=payload,
+                query=query,
+                allow_status=sorted(allow),
+                expected_status=sorted(expected),
+                timeout=20.0,
+            )
+            if int(proxied.get("status") or 0) in allow and proxied.get("body") is None:
+                return None
+            body = proxied.get("body")
+            return body if isinstance(body, (dict, list)) else {}
+    except Exception as exc:
+        raise OpenMeterAPIError(str(exc)) from exc
     encoded_query = urllib.parse.urlencode(query or {}, doseq=True)
     url = f"{_base_url()}{path}"
     if encoded_query:

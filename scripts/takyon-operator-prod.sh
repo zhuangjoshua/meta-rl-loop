@@ -362,17 +362,21 @@ try:
     except Exception as exc:  # noqa: BLE001
         add("fail", "operator AI broker session", str(exc))
 
-    optional_checks = (
-        ("Google Search Console", ("TAKYON_GSC_SERVICE_ACCOUNT_KEY",)),
-        ("OpenMeter mirror URL", ("TAKYON_OPENMETER_URL", "OPENMETER_URL", "OPENMETER_API_URL")),
-        ("OpenMeter mirror token", ("OPENMETER_API_TOKEN", "TAKYON_OPENMETER_API_TOKEN")),
-    )
-    for label, keys in optional_checks:
-        try:
-            value = safebox.first_env_backed_value(*keys)
-            add("ok" if value else "warn", label, "available" if value else "not configured", required=False)
-        except Exception as exc:  # noqa: BLE001
-            add("warn", label, str(exc), required=False)
+    try:
+        gsc = safebox.gsc_verification_token("https://coscale.app/")
+        add("ok" if gsc.get("verification_token") else "warn", "Google Search Console", "operator broker reachable" if gsc.get("verification_token") else "empty verification token", required=False)
+    except Exception as exc:  # noqa: BLE001
+        add("warn", "Google Search Console", str(exc), required=False)
+
+    try:
+        from plugins.takyon import openmeter_backend
+        if not openmeter_backend.enabled():
+            add("warn", "OpenMeter mirror", "not configured", required=False)
+        else:
+            safebox.openmeter_request("GET", "/openmeter/customers", query={"limit": 1})
+            add("ok", "OpenMeter mirror", "operator broker reachable", required=False)
+    except Exception as exc:  # noqa: BLE001
+        add("warn", "OpenMeter mirror", str(exc), required=False)
 except Exception as exc:  # noqa: BLE001
     add("fail", "preflight imports/checks", str(exc))
 

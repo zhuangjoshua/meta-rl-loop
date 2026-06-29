@@ -97,13 +97,31 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
 from tools.lazy_deps import ensure
 
-# Logo rendering and official Meta MCP calls run inside Safebox and need their provider/client
+# Logo rendering, GSC, and official Meta MCP calls run inside Safebox and need their provider/client
 # SDKs present before the service starts.
 ensure('image.gemini', prompt=False)
 ensure('image.logo_postprocess', prompt=False)
 
 import numpy  # noqa: F401
 from PIL import Image  # noqa: F401
+try:
+    import googleapiclient  # noqa: F401
+    import google.oauth2.service_account  # noqa: F401
+except Exception:
+    import subprocess
+    import sys
+
+    subprocess.check_call([
+        sys.executable,
+        '-m',
+        'pip',
+        'install',
+        'google-api-python-client==2.194.0',
+        'google-auth-oauthlib==1.3.1',
+        'google-auth-httplib2==0.3.1',
+    ])
+    import googleapiclient  # noqa: F401
+    import google.oauth2.service_account  # noqa: F401
 try:
     import mcp  # noqa: F401
 except Exception:

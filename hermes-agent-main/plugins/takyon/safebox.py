@@ -219,6 +219,8 @@ _OPERATOR_AUTH_PATH_PREFIXES = (
     "/v1/auth0/",
     "/v1/creative/",
     "/v1/creative-credits/",
+    "/v1/gsc/",
+    "/v1/openmeter/",
     "/v1/operator/",
     "/v1/postmark/",
     "/v1/providers/composio/",
@@ -3024,6 +3026,58 @@ def composio_forward(
         "POST",
         "/v1/providers/composio/forward",
         payload,
+        timeout=max(15.0, float(timeout) + 10.0),
+    )
+
+
+def gsc_verification_token(site_url: str) -> dict:
+    """Return a Google Search Console META verification token without vending the service account."""
+    return _remote_json(
+        "POST",
+        "/v1/gsc/verification-token",
+        {"site_url": str(site_url or "")},
+        timeout=60.0,
+    )
+
+
+def gsc_verify_and_submit(site_url: str, *, submit_sitemap: bool = True) -> dict:
+    """Verify a GSC URL-prefix property and optionally submit sitemap.xml, all on the safebox."""
+    return _remote_json(
+        "POST",
+        "/v1/gsc/verify",
+        {"site_url": str(site_url or ""), "submit_sitemap": bool(submit_sitemap)},
+        timeout=90.0,
+    )
+
+
+def openmeter_request(
+    method: str,
+    path: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+    allow_status: list[int] | None = None,
+    expected_status: list[int] | None = None,
+    timeout: float = 20.0,
+) -> dict:
+    """Broker one OpenMeter mirror HTTP request through the safebox.
+
+    OpenMeter is non-authoritative, but its API token is still a bearer credential. Runtime planes
+    should not fetch it over /v1/env; they send key-free request metadata here and the safebox performs
+    the reporting call locally.
+    """
+    return _remote_json(
+        "POST",
+        "/v1/openmeter/request",
+        {
+            "method": str(method or "GET"),
+            "path": str(path or ""),
+            "payload": payload,
+            "query": query,
+            "allow_status": list(allow_status or []),
+            "expected_status": list(expected_status or []),
+            "timeout": float(timeout),
+        },
         timeout=max(15.0, float(timeout) + 10.0),
     )
 

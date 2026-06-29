@@ -708,6 +708,25 @@ class _ComposioForwardBody(BaseModel):
     timeout: float = 60.0
 
 
+class _GscTokenBody(BaseModel):
+    site_url: str
+
+
+class _GscVerifyBody(BaseModel):
+    site_url: str
+    submit_sitemap: bool = True
+
+
+class _OpenMeterRequestBody(BaseModel):
+    method: str = "GET"
+    path: str = ""
+    payload: dict[str, Any] | None = None
+    query: dict[str, Any] | None = None
+    allow_status: list[int] = []
+    expected_status: list[int] = []
+    timeout: float = 20.0
+
+
 class _MetaGraphBody(BaseModel):
     method: str
     path: str
@@ -2840,6 +2859,152 @@ def build_safebox_app() -> FastAPI:
             )
         except _cd.ComposioDistributionError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    def _gsc_credentials():
+        sa_json = str(safebox.first_env_backed_value("TAKYON_GSC_SERVICE_ACCOUNT_KEY") or "").strip()
+        if not sa_json:
+            raise HTTPException(status_code=404, detail="gsc_unconfigured")
+        try:
+            sa_info = json.loads(sa_json)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"gsc_key_invalid_json: {exc}") from exc
+        try:
+            from google.oauth2 import service_account as _gsc_service_account  # type: ignore
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"gsc_client_missing: {exc}") from exc
+        scopes = (
+            "https://www.googleapis.com/auth/siteverification",
+            "https://www.googleapis.com/auth/webmasters",
+        )
+        return _gsc_service_account.Credentials.from_service_account_info(sa_info, scopes=list(scopes))
+
+    def _gsc_build(api: str, version: str):
+        try:
+            from googleapiclient import discovery as _gsc_discovery  # type: ignore
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"gsc_client_missing: {exc}") from exc
+        return _gsc_discovery.build(
+            api,
+            version,
+            credentials=_gsc_credentials(),
+            cache_discovery=False,
+        )
+
+    @app.post("/v1/gsc/verification-token")
+    def gsc_verification_token(
+        request: Request,
+        body: _GscTokenBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, str]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        site_url = str(body.site_url or "").strip()
+        if not site_url:
+            raise HTTPException(status_code=400, detail="site_url_required")
+        service = _gsc_build("siteVerification", "v1")
+        resp = (
+            service.webResource()
+            .getToken(
+                body={
+                    "verificationMethod": "META",
+                    "site": {"type": "SITE", "identifier": site_url},
+                }
+            )
+            .execute()
+        )
+        token = str((resp or {}).get("token") or "").strip()
+        if not token:
+            raise HTTPException(status_code=502, detail="gsc_empty_token")
+        return {"verification_token": token}
+
+    @app.post("/v1/gsc/verify")
+    def gsc_verify(
+        request: Request,
+        body: _GscVerifyBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        site_url = str(body.site_url or "").strip()
+        if not site_url:
+            raise HTTPException(status_code=400, detail="site_url_required")
+        site_verification = _gsc_build("siteVerification", "v1")
+        search_console = _gsc_build("searchconsole", "v1")
+        verify_resp = (
+            site_verification.webResource()
+            .insert(
+                verificationMethod="META",
+                body={"site": {"type": "SITE", "identifier": site_url}},
+            )
+            .execute()
+        )
+        search_console.sites().add(siteUrl=site_url).execute()
+        sitemap_url = ""
+        if body.submit_sitemap:
+            normalized = site_url if site_url.endswith("/") else f"{site_url}/"
+            sitemap_url = urllib.parse.urljoin(normalized, "sitemap.xml")
+            search_console.sitemaps().submit(siteUrl=site_url, feedpath=sitemap_url).execute()
+        return {
+            "verified_resource": (verify_resp or {}).get("id") if isinstance(verify_resp, dict) else None,
+            "sitemap_url": sitemap_url,
+        }
+
+    @app.post("/v1/openmeter/request")
+    def openmeter_request(
+        request: Request,
+        body: _OpenMeterRequestBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        base_url = str(
+            safebox.first_env_backed_value("TAKYON_OPENMETER_URL", "OPENMETER_URL", "OPENMETER_API_URL")
+            or ""
+        ).strip().rstrip("/")
+        if not base_url:
+            raise HTTPException(status_code=404, detail="openmeter_unconfigured")
+        token = str(
+            safebox.first_env_backed_value("OPENMETER_API_TOKEN", "TAKYON_OPENMETER_API_TOKEN") or ""
+        ).strip()
+        raw_path = str(body.path or "").strip()
+        parsed_path = urllib.parse.urlparse(raw_path)
+        if parsed_path.scheme or parsed_path.netloc or not raw_path.startswith("/"):
+            raise HTTPException(status_code=400, detail="openmeter_path_must_be_relative")
+        query = urllib.parse.urlencode(body.query or {}, doseq=True)
+        url = f"{base_url}{raw_path}"
+        if query:
+            url = f"{url}?{query}"
+        expected = set(int(x) for x in (body.expected_status or [200]))
+        allow = set(int(x) for x in (body.allow_status or []))
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        data = None
+        if body.payload is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body.payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method=str(body.method or "GET").upper())
+        try:
+            with urllib.request.urlopen(req, timeout=float(body.timeout or 20.0)) as resp:
+                status = int(getattr(resp, "status", 200) or 200)
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            if exc.code in allow:
+                return {"status": exc.code, "body": None}
+            raise HTTPException(status_code=502, detail=f"OpenMeter {body.method.upper()} {raw_path} failed: {exc.code} {raw}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"OpenMeter {body.method.upper()} {raw_path} failed: {exc}") from exc
+        if status not in expected and status not in allow:
+            raise HTTPException(status_code=502, detail=f"OpenMeter {body.method.upper()} {raw_path} returned {status}: {raw}")
+        if not raw.strip():
+            parsed: Any = {}
+        else:
+            try:
+                parsed = json.loads(raw)
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"OpenMeter {body.method.upper()} {raw_path} returned invalid JSON") from exc
+        return {"status": status, "body": parsed if isinstance(parsed, (dict, list)) else {}}
 
     @app.post("/v1/providers/meta/config")
     def provider_meta_config(
