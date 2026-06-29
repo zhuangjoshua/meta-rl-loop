@@ -1,7 +1,8 @@
 import json
 import os
+import sqlite3
 
-from plugins.takyon import cli
+from plugins.takyon import cli, worker
 
 
 class _FakeStore:
@@ -160,6 +161,102 @@ def test_stream_delta_uses_natural_text_writer(monkeypatch):
             pass
 
     assert output == "abcdef\n"
+
+
+def test_runtime_progress_records_ceo_stream_deltas(monkeypatch):
+    recorded = []
+
+    def fake_record(slug, **kwargs):
+        recorded.append({"slug": slug, **kwargs})
+
+    monkeypatch.setattr(worker, "_record_runtime_event", fake_record)
+    progress = worker._RuntimeProgress(slug="demo", kind="ceo_bootstrap", command="/create demo")
+
+    progress.stream_delta("Hello ")
+    progress.stream_delta("world")
+    progress.finish_stream()
+
+    delta_events = [item for item in recorded if item.get("extra", {}).get("stream") == "message_delta"]
+    assert "".join(str(item.get("line") or "") for item in delta_events) == "Hello world"
+    assert recorded[-1]["extra"]["stream"] == "message_flush"
+
+
+def test_runtime_event_tail_prints_ceo_stream_only():
+    class Store:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE events (
+                  id TEXT,
+                  business_slug TEXT,
+                  event_type TEXT,
+                  payload_json TEXT,
+                  created_at TEXT
+                );
+                """
+            )
+
+        def _connect(self):
+            return self.conn
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload) if payload else {}
+            return data
+
+    store = Store()
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-1",
+            "demo",
+            "dashboard.run.output",
+            json.dumps({"stream": "message_delta", "line": "CEO text"}),
+            "2026-06-28T12:00:00Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-2",
+            "demo",
+            "dashboard.run.output",
+            json.dumps({"line": "tool started -> business_read_business"}),
+            "2026-06-28T12:00:01Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-3",
+            "demo",
+            "dashboard.run.output",
+            json.dumps({"stream": "message_flush"}),
+            "2026-06-28T12:00:02Z",
+        ),
+    )
+    store.conn.commit()
+
+    read_fd, write_fd = os.pipe()
+    tail = cli._RuntimeEventTail(store=store, enabled=True, business_filter="demo")
+    tail._out = os.fdopen(write_fd, "w", buffering=1, encoding="utf-8")
+    tail._scope = "demo"
+    try:
+        tail._drain_once()
+        tail._out.close()
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert "— CEO —" in output
+    assert "CEO text" in output
+    assert "tool started" not in output
 
 
 def test_use_without_args_switches_to_global(monkeypatch):

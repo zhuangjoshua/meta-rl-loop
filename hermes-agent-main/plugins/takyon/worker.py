@@ -539,6 +539,7 @@ def _record_runtime_event(
     line: str = "",
     command: str = "",
     trace: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> None:
     from .core import TakyonStore
 
@@ -555,6 +556,14 @@ def _record_runtime_event(
             for key, value in trace.items()
             if value not in (None, "", [], {})
         }
+    if isinstance(extra, Mapping) and extra:
+        payload.update(
+            {
+                str(key): value
+                for key, value in extra.items()
+                if value not in (None, [], {})
+            }
+        )
     try:
         store = TakyonStore()
         with store._connect() as conn:
@@ -779,6 +788,9 @@ class _RuntimeProgress:
         self.command = command
         self._last_activity = ""
         self._last_tool_generating = ""
+        self._stream_buffer = ""
+        self._stream_open = False
+        self._stream_last_emit = 0.0
 
     def _record_trace(
         self,
@@ -816,6 +828,7 @@ class _RuntimeProgress:
         text = str(line or "").strip()
         if not text:
             return
+        self.finish_stream()
         _record_runtime_event(
             self.slug,
             kind=self.kind,
@@ -824,6 +837,50 @@ class _RuntimeProgress:
             line=text,
             command=self.command,
         )
+
+    def stream_delta(self, delta: Any) -> None:
+        if delta is None:
+            self.finish_stream()
+            return
+        text = str(delta or "")
+        if not text:
+            return
+        self._stream_open = True
+        self._stream_buffer += text
+        now = time.monotonic()
+        if "\n" in self._stream_buffer or len(self._stream_buffer) >= 80 or now - self._stream_last_emit >= 0.35:
+            self._flush_stream_buffer()
+
+    def _flush_stream_buffer(self) -> None:
+        if not self._stream_buffer:
+            return
+        chunk = self._stream_buffer
+        self._stream_buffer = ""
+        self._stream_last_emit = time.monotonic()
+        _record_runtime_event(
+            self.slug,
+            kind=self.kind,
+            status="output",
+            detail=chunk,
+            line=chunk,
+            command=self.command,
+            extra={"stream": "message_delta"},
+        )
+
+    def finish_stream(self) -> None:
+        if not self._stream_open:
+            return
+        self._flush_stream_buffer()
+        _record_runtime_event(
+            self.slug,
+            kind=self.kind,
+            status="output",
+            detail="",
+            line="",
+            command=self.command,
+            extra={"stream": "message_flush"},
+        )
+        self._stream_open = False
 
     def tool_generating(self, name: str) -> None:
         if not name or name == self._last_tool_generating:
@@ -1002,7 +1059,8 @@ def _run_ceo_turn(
     limit = inactivity_limit if inactivity_limit and inactivity_limit > 0 else None
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     ctx = contextvars.copy_context()
-    future = pool.submit(ctx.run, agent.run_conversation, user_prompt)
+    run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}
+    future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
     timed_out = False
     try:
         if limit is None:
@@ -1024,6 +1082,8 @@ def _run_ceo_turn(
                     timed_out = True
                     break
     finally:
+        if progress is not None:
+            progress.finish_stream()
         pool.shutdown(wait=False, cancel_futures=True)
 
     if timed_out:

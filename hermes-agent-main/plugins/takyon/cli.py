@@ -2105,6 +2105,140 @@ class _AgentLogTail:
         return scope in line.lower()
 
 
+class _RuntimeEventTail:
+    """Best-effort read-only tail of live CEO text deltas recorded by worker jobs."""
+
+    def __init__(
+        self,
+        *,
+        store: TakyonStore,
+        enabled: bool,
+        business_filter: str | Callable[[], str | None] | None = None,
+    ) -> None:
+        self.store = store
+        self.enabled = bool(enabled)
+        self.business_filter = business_filter
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._out: Any = None
+        self._seen: set[str] = set()
+        self._scope = ""
+        self._stream_open = False
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        try:
+            self._out = os.fdopen(os.dup(1), "w", buffering=1, encoding="utf-8", errors="replace")
+        except OSError:
+            self.enabled = False
+            return self
+        self._thread = threading.Thread(target=self._run, name="takyon-runtime-event-tail", daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        try:
+            if not self.enabled:
+                return
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=2.0)
+            self._drain_once()
+            self._finish_stream()
+            if self._out is not None:
+                try:
+                    self._out.close()
+                except OSError:
+                    pass
+        finally:
+            self._out = None
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.35):
+            self._drain_once()
+
+    def _current_business_filter(self) -> str:
+        raw = self.business_filter
+        if callable(raw):
+            try:
+                raw = raw()
+            except Exception:
+                raw = None
+        return _slugify(str(raw or "").strip()) if raw else ""
+
+    def _prime_scope(self, scope: str) -> None:
+        self._finish_stream()
+        self._scope = scope
+        self._seen.clear()
+        if not scope:
+            return
+        try:
+            rows = self._runtime_event_rows(scope, limit=200)
+        except Exception:
+            return
+        for event in rows:
+            eid = str(event.get("id") or "")
+            if eid:
+                self._seen.add(eid)
+
+    def _runtime_event_rows(self, scope: str, *, limit: int = 300) -> list[dict[str, Any]]:
+        with self.store._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM (
+                  SELECT * FROM events
+                  WHERE business_slug = ? AND event_type = 'dashboard.run.output'
+                  ORDER BY created_at DESC, id DESC
+                  LIMIT ?
+                ) recent
+                ORDER BY created_at ASC, id ASC
+                """,
+                (scope, max(1, min(int(limit or 300), 500))),
+            ).fetchall()
+        return [self.store._row_to_dict(row) for row in rows]
+
+    def _drain_once(self) -> None:
+        if self._out is None:
+            return
+        scope = self._current_business_filter()
+        if scope != self._scope:
+            self._prime_scope(scope)
+            return
+        if not scope:
+            return
+        try:
+            rows = self._runtime_event_rows(scope)
+        except Exception:
+            return
+        for event in rows:
+            eid = str(event.get("id") or "")
+            if not eid or eid in self._seen:
+                continue
+            self._seen.add(eid)
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            stream = str(payload.get("stream") or "").strip()
+            if stream == "message_delta":
+                self._write_delta(str(payload.get("line") or payload.get("detail") or ""))
+            elif stream == "message_flush":
+                self._finish_stream()
+
+    def _write_delta(self, text: str) -> None:
+        if self._out is None or not text:
+            return
+        if not self._stream_open:
+            print("\n— CEO —", file=self._out, flush=True)
+            self._stream_open = True
+        print(text, end="", file=self._out, flush=True)
+
+    def _finish_stream(self) -> None:
+        if self._out is None or not self._stream_open:
+            self._stream_open = False
+            return
+        print("", file=self._out, flush=True)
+        self._stream_open = False
+
+
 def _follow_bootstrap_job(
     store: TakyonStore,
     slug: str,
@@ -2131,6 +2265,8 @@ def _follow_bootstrap_job(
     terminal = {"completed", "blocked", "failed"}
 
     seen_events: set[str] = set()
+    seen_runtime_events: set[str] = set()
+    stream_open = False
     # Prime with already-recorded turns so --follow shows only narration produced from now on.
     try:
         for event in store.read_ceo_turn_events(slug, limit=200):
@@ -2138,6 +2274,27 @@ def _follow_bootstrap_job(
             if eid:
                 seen_events.add(eid)
     except Exception:  # noqa: BLE001 - best-effort priming
+        pass
+    try:
+        with store._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM events
+                WHERE business_slug = ? AND event_type = 'dashboard.run.output'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 200
+                """,
+                (slug,),
+            ).fetchall()
+        for row in rows:
+            try:
+                event = store._row_to_dict(row)
+                eid = str(event.get("id") or "")
+            except Exception:
+                eid = ""
+            if eid:
+                seen_runtime_events.add(eid)
+    except Exception:  # noqa: BLE001 - runtime stream is display-only
         pass
 
     log_path = _agent_log_path()
@@ -2168,6 +2325,48 @@ def _follow_bootstrap_job(
             if text:
                 print(f"\n— CEO —\n{text}\n", flush=True)
 
+    def _finish_stream() -> None:
+        nonlocal stream_open
+        if stream_open:
+            print("", flush=True)
+        stream_open = False
+
+    def _drain_new_runtime_stream() -> None:
+        nonlocal stream_open
+        try:
+            with store._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM (
+                      SELECT * FROM events
+                      WHERE business_slug = ? AND event_type = 'dashboard.run.output'
+                      ORDER BY created_at DESC, id DESC
+                      LIMIT 300
+                    ) recent
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (slug,),
+                ).fetchall()
+        except Exception:  # noqa: BLE001 - runtime stream is display-only
+            return
+        for row in rows:
+            event = store._row_to_dict(row)
+            eid = str(event.get("id") or "")
+            if not eid or eid in seen_runtime_events:
+                continue
+            seen_runtime_events.add(eid)
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            stream = str(payload.get("stream") or "").strip()
+            if stream == "message_delta":
+                text = str(payload.get("line") or payload.get("detail") or "")
+                if text:
+                    if not stream_open:
+                        print("\n— CEO —", flush=True)
+                        stream_open = True
+                    print(text, end="", flush=True)
+            elif stream == "message_flush":
+                _finish_stream()
+
     def _drain_new_logs() -> None:
         nonlocal log_offset, log_path
         if log_path is None:
@@ -2195,6 +2394,7 @@ def _follow_bootstrap_job(
     record = None
     try:
         while True:
+            _drain_new_runtime_stream()
             _drain_new_logs()
             _drain_new_chat()
             try:
@@ -2229,6 +2429,8 @@ def _follow_bootstrap_job(
     except KeyboardInterrupt:
         print("\n[bootstrap] detached (the build keeps running on the worker).", flush=True)
     # Final sweep for trailing narration / log lines written just before the terminal status.
+    _drain_new_runtime_stream()
+    _finish_stream()
     _drain_new_logs()
     _drain_new_chat()
     return {
@@ -3584,7 +3786,11 @@ def _interactive_shell(
     log_scope = {"business": current_business}
     raw_hermes_enabled = bool(raw_hermes or _raw_hermes_default())
 
-    with _AgentLogTail(enabled=follow_logs, business_filter=lambda: log_scope.get("business")):
+    with _AgentLogTail(enabled=follow_logs, business_filter=lambda: log_scope.get("business")), _RuntimeEventTail(
+        store=store,
+        enabled=follow_logs,
+        business_filter=lambda: log_scope.get("business"),
+    ):
         while True:
             try:
                 line = _read_shell_line(current_business, entries)
