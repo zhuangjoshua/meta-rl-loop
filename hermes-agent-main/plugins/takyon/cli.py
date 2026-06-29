@@ -623,7 +623,8 @@ def _format_operation_result(item: Any) -> str:
         where = f" -> {_business_artifact_path(business, path)}" if path else ""
         return f"conversation state for business:{business}{where}"
     if action == "cron.ensure_ceo_wakeup":
-        return f"recurring wake schedule for business:{business or item.get('business')}: {item.get('schedule') or item.get('cron_job')}"
+        state = "enabled" if item.get("enabled") else "paused"
+        return f"recurring wake schedule {state} for business:{business or item.get('business')}: {item.get('schedule') or item.get('cron_job')}"
     if action == "cron.trigger_ceo_wakeup":
         target = business or item.get("business")
         job = item.get("job") if isinstance(item.get("job"), dict) else {}
@@ -3377,7 +3378,8 @@ def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[s
                 lines.append(f"business:{business} work focus -> {item.get('work_focus') or 'all'}")
         elif action == "cron.ensure_ceo_wakeup":
             if business:
-                lines.append(f"wake schedule -> business:{business} {item.get('schedule') or item.get('cron_job')}")
+                state = "enabled" if item.get("enabled") else "paused"
+                lines.append(f"wake schedule {state} -> business:{business} {item.get('schedule') or item.get('cron_job')}")
         elif action == "job.enqueue":
             if business:
                 lines.append(f"job queued -> business:{business} {item.get('job') or item.get('id') or ''}".rstrip())

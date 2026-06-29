@@ -58,12 +58,28 @@ def store(pg_store_dsn, tmp_path):
 
 def test_in_floor_cadence_is_written(store, pg_store_dsn, monkeypatch):
     # Active subscription -> default plan "PRO" (floor 3h). A 6h cadence is at/above the floor.
+    # New recurring wakes default paused; they must be explicitly enabled later.
     monkeypatch.setenv("TAKYON_OPERATOR_DEFAULT_PLAN_NAME", "PRO")
     slug = _seed_business(pg_store_dsn, subscription_status="active")
 
     result = store._ensure_ceo_cron(slug, schedule="every 6h", reason="test")
 
     assert result["interval_seconds"] == 6 * 3600
+    assert result["enabled"] is False
+    row = _wake_row(pg_store_dsn, slug)
+    assert row is not None
+    assert row.interval_seconds == 6 * 3600
+    assert row.enabled is False
+
+
+def test_in_floor_cadence_can_be_explicitly_enabled(store, pg_store_dsn, monkeypatch):
+    monkeypatch.setenv("TAKYON_OPERATOR_DEFAULT_PLAN_NAME", "PRO")
+    slug = _seed_business(pg_store_dsn, subscription_status="active")
+
+    result = store._ensure_ceo_cron(slug, schedule="every 6h", reason="test", enabled=True)
+
+    assert result["interval_seconds"] == 6 * 3600
+    assert result["enabled"] is True
     row = _wake_row(pg_store_dsn, slug)
     assert row is not None
     assert row.interval_seconds == 6 * 3600

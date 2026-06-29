@@ -19717,6 +19717,7 @@ class TakyonStore:
                 schedule=str(op.get("schedule") or "every 6h"),
                 reason=reason,
                 defer_first_run=bool(op.get("defer_first_run")),
+                enabled=op.get("enabled"),
             )
             self._record_event(conn, scope=f"business:{slug}", business_slug=slug, event_type=action, payload=result)
             return {"action": action, "business": slug, **result}
@@ -19907,6 +19908,7 @@ class TakyonStore:
         schedule: str,
         reason: str,
         defer_first_run: bool = False,
+        enabled: Any = None,
     ) -> dict[str, Any]:
         blocker: dict[str, Any] | None
         with self._connect() as conn:
@@ -19962,13 +19964,20 @@ class TakyonStore:
                             "Upgrade the subscription or choose a slower cadence."
                         )
                     existing = wakes.get_wake_schedule(raw, slug)
+                    # New recurring CEO wake schedules default paused. This prevents newly-created
+                    # businesses from autonomously waking after bootstrap; existing schedules keep
+                    # their current state unless the caller explicitly asks to enable/disable.
+                    if enabled is None:
+                        schedule_enabled = bool(existing.enabled) if existing is not None else False
+                    else:
+                        schedule_enabled = bool(enabled)
                     scheduled = wakes.upsert_wake_schedule(
                         raw,
                         slug,
                         interval_seconds=interval_seconds,
                         next_run_at=first_run_at if (defer_first_run and existing is None) else None,
                         kind="ceo_wake",
-                        enabled=True,
+                        enabled=schedule_enabled,
                         payload={"estimate_cents": expensive_threshold_cents()},
                     )
             return {
@@ -19977,6 +19986,7 @@ class TakyonStore:
                 "updated": existing is not None,
                 "interval_seconds": interval_seconds,
                 "defer_first_run": bool(defer_first_run),
+                "enabled": bool(scheduled.enabled),
                 "next_run_at": (
                     scheduled.next_run_at.isoformat()
                     if isinstance(scheduled.next_run_at, datetime)
@@ -19991,6 +20001,10 @@ class TakyonStore:
         prompt = self._ceo_cron_prompt(slug)
         enabled_toolsets = self._ceo_cron_toolsets()
         existing = next((job for job in list_jobs(include_disabled=True) if job.get("name") == name), None)
+        if enabled is None:
+            schedule_enabled = bool(existing.get("enabled", True)) if existing else False
+        else:
+            schedule_enabled = bool(enabled)
         if existing:
             updated = update_job(
                 existing["id"],
@@ -19999,8 +20013,8 @@ class TakyonStore:
                     "schedule": schedule,
                     "skills": [],
                     "enabled_toolsets": enabled_toolsets,
-                    "enabled": True,
-                    "state": "scheduled",
+                    "enabled": schedule_enabled,
+                    "state": "scheduled" if schedule_enabled else "paused",
                 },
             )
             return {
@@ -20008,6 +20022,7 @@ class TakyonStore:
                 "schedule": updated.get("schedule_display"),
                 "updated": True,
                 "defer_first_run": bool(defer_first_run),
+                "enabled": bool(updated.get("enabled")),
                 "next_run_at": str(updated.get("next_run_at") or ""),
             }
         job = create_job(
@@ -20021,11 +20036,16 @@ class TakyonStore:
         )
         if first_run_at is not None:
             job = update_job(job["id"], {"next_run_at": first_run_at.isoformat()}) or job
+        if not schedule_enabled:
+            from cron.jobs import pause_job
+
+            job = pause_job(job["id"], "new recurring CEO wake schedules default paused") or job
         return {
             "cron_job": job["id"],
             "schedule": job.get("schedule_display"),
             "updated": False,
             "defer_first_run": bool(defer_first_run),
+            "enabled": bool(job.get("enabled")),
             "next_run_at": str(job.get("next_run_at") or ""),
             "reason": reason,
         }

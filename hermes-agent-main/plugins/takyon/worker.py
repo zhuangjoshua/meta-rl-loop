@@ -1475,12 +1475,26 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 reason="bootstrap completed and enabled CEO wake loop",
                 actor="worker",
             )
+            wake_state = "enabled"
+            try:
+                wake_items = wake_result.get("results") if isinstance(wake_result, dict) else []
+                wake_item = next(
+                    (
+                        item
+                        for item in (wake_items or [])
+                        if isinstance(item, dict) and item.get("action") == "cron.ensure_ceo_wakeup"
+                    ),
+                    {},
+                )
+                wake_state = "enabled" if wake_item.get("enabled") else "paused"
+            except Exception:
+                wake_state = "unknown"
             _record_runtime_event(
                 slug,
                 kind="ceo_bootstrap",
                 status="output",
-                detail=f"wake schedule -> business:{slug} {schedule}",
-                line=f"wake schedule -> business:{slug} {schedule}",
+                detail=f"wake schedule {wake_state} -> business:{slug} {schedule}",
+                line=f"wake schedule {wake_state} -> business:{slug} {schedule}",
                 command=command,
             )
         except Exception as exc:  # noqa: BLE001 - wake scheduling must never requeue a finished build
