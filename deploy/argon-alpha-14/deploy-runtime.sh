@@ -297,6 +297,9 @@ if getattr(backend, 'name', '') != 'supabase_s3':
     raise SystemExit('unexpected storage backend: %r' % (getattr(backend, 'name', ''),))
 PY
   fi
+  if ! '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -c 'import numpy, PIL' >/dev/null 2>&1; then
+    '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' -m pip install 'Pillow>=10.4,<12' 'numpy==2.4.3'
+  fi
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   env TAKYON_HOME='$TAKYON_REMOTE_HOME' HOME=/opt/takyon TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1 \
     '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
