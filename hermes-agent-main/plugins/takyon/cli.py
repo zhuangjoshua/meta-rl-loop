@@ -2111,7 +2111,7 @@ class _AgentLogTail:
             return line_business == scope
         if session_id and session_id in self._session_business:
             return self._session_business[session_id] == scope
-        return scope in line.lower()
+        return bool(re.search(rf"(?<![A-Za-z0-9_-]){re.escape(scope)}(?![A-Za-z0-9_-])", line.lower()))
 
 
 class _RuntimeEventTail:
