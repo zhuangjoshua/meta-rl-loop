@@ -150,6 +150,24 @@ load_operator_env() {
   export TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE="${TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE:-true}"
   export TERMINAL_CONTAINER_PERSISTENT="${TERMINAL_CONTAINER_PERSISTENT:-false}"
   unset TAKYON_DOCKER_BINARY TAKYON_DOCKER_BROKER_URL TAKYON_DOCKER_BROKER_TOKEN
+  unset_raw_runtime_authority_env
+}
+
+unset_raw_runtime_authority_env() {
+  # Local prod compute must use Safebox brokers/tunnels, not accidental caller shell secrets.
+  unset \
+    ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN \
+    OPENAI_API_KEY OPENAI_KEY AZURE_OPENAI_API_KEY AZURE_OPENAI_KEY \
+    GEMINI_API_KEY GOOGLE_API_KEY TAKYON_GEMINI_API_KEY \
+    FAL_KEY FAL_API_KEY REPLICATE_API_TOKEN \
+    TAVILY_API_KEY FIRECRAWL_API_KEY PARALLEL_API_KEY XAI_API_KEY \
+    COMPOSIO_API_KEY META_MCP_OAUTH_TOKEN META_SYSTEM_USER_ACCESS_TOKEN META_ACCESS_TOKEN META_CAPI_TOKEN \
+    STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET STRIPE_BILLING_WEBHOOK_SECRET \
+    POSTMARK_SERVER_TOKEN AUTH0_SECRET AUTH0_CLIENT_SECRET \
+    VERCEL_TOKEN CLOUDFLARE_API_TOKEN \
+    SUPABASE_S3_ACCESS_KEY_ID SUPABASE_S3_SECRET_ACCESS_KEY \
+    R2_S3_ACCESS_KEY_ID R2_S3_SECRET_ACCESS_KEY \
+    SUPABASE_SERVICE_ROLE_KEY TAKYON_CAP_SIGNING_KEY
 }
 
 require_tunnel() {
@@ -212,6 +230,164 @@ require_docker_for_worker() {
   if ! docker version >/dev/null 2>&1; then
     die "Docker is not reachable; start Docker Desktop before running the local worker pool"
   fi
+}
+
+cmd_preflight() {
+  load_operator_env
+  require_tunnel
+  cd "$ROOT"
+  PYTHONPATH="$RUNTIME_DIR" "$RUNTIME_DIR/.venv/bin/python" - <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+REQUIRED_ENV = (
+    "TAKYON_OPERATOR_DATABASE_URL",
+    "TAKYON_SAFEBOX_TOKEN",
+    "TAKYON_SAFEBOX_OPERATOR_TOKEN",
+    "TAKYON_SAFEBOX_URL",
+    "TAKYON_DASHBOARD_URL",
+    "TAKYON_STORAGE_BACKEND",
+    "SUPABASE_S3_ENDPOINT",
+    "SUPABASE_S3_REGION",
+    "TAKYON_STORAGE_BUCKET",
+    "R2_S3_ENDPOINT",
+    "R2_BUCKET",
+    "PUBLIC_COMPANY_BASE_DOMAIN",
+    "CLOUDFLARE_ZONE_NAME",
+    "TAKYON_PROVIDER_BROKER",
+    "TAKYON_OPERATOR_GATEWAY_BROKER_URL",
+    "TAKYON_CLAUDE_AGENT_BROKER_URL",
+)
+
+FORBIDDEN_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "TAKYON_GEMINI_API_KEY",
+    "FAL_KEY",
+    "FAL_API_KEY",
+    "TAVILY_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "PARALLEL_API_KEY",
+    "XAI_API_KEY",
+    "COMPOSIO_API_KEY",
+    "META_MCP_OAUTH_TOKEN",
+    "META_SYSTEM_USER_ACCESS_TOKEN",
+    "META_ACCESS_TOKEN",
+    "META_CAPI_TOKEN",
+    "STRIPE_SECRET_KEY",
+    "POSTMARK_SERVER_TOKEN",
+    "VERCEL_TOKEN",
+    "CLOUDFLARE_API_TOKEN",
+    "SUPABASE_S3_ACCESS_KEY_ID",
+    "SUPABASE_S3_SECRET_ACCESS_KEY",
+    "R2_S3_ACCESS_KEY_ID",
+    "R2_S3_SECRET_ACCESS_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "TAKYON_CAP_SIGNING_KEY",
+)
+
+rows: list[tuple[str, str, str, bool]] = []
+
+
+def add(status: str, surface: str, detail: str = "", *, required: bool = True) -> None:
+    rows.append((status, surface, detail, required))
+
+
+def env_present(name: str, *, required: bool = True) -> None:
+    add("ok" if os.environ.get(name) else "fail", f"env:{name}", "present" if os.environ.get(name) else "missing", required=required)
+
+
+def http_get(url: str) -> tuple[bool, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            return 200 <= int(getattr(resp, "status", 200) or 200) < 300, f"http {getattr(resp, 'status', 200)}"
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        return False, str(exc)
+
+
+for key in REQUIRED_ENV:
+    env_present(key)
+
+if os.environ.get("TAKYON_STORAGE_BACKEND") != "supabase_s3":
+    add("fail", "storage backend", f"expected supabase_s3, got {os.environ.get('TAKYON_STORAGE_BACKEND')!r}")
+else:
+    add("ok", "storage backend", "supabase_s3")
+
+if os.environ.get("TAKYON_PROVIDER_BROKER") != "1":
+    add("fail", "provider broker", f"expected 1, got {os.environ.get('TAKYON_PROVIDER_BROKER')!r}")
+else:
+    add("ok", "provider broker", "enabled")
+
+leaked = [name for name in FORBIDDEN_ENV if os.environ.get(name)]
+add("fail" if leaked else "ok", "raw paid/provider/storage secrets in local process", ", ".join(leaked) if leaked else "none")
+
+ok, detail = http_get(os.environ["TAKYON_SAFEBOX_URL"].rstrip("/") + "/healthz")
+add("ok" if ok else "fail", "Safebox tunnel", detail)
+ok, detail = http_get(os.environ["TAKYON_DASHBOARD_URL"].rstrip("/") + "/healthz")
+add("ok" if ok else "fail", "operator dashboard/creative tunnel", detail)
+
+try:
+    from plugins.takyon import safebox, storage
+
+    if storage.r2_configured():
+        add("ok", "R2 public publish config", "configured through Safebox storage authority")
+    else:
+        add("fail", "R2 public publish config", "missing R2_S3_ENDPOINT or R2_BUCKET")
+
+    for provider in ("supabase_s3", "r2"):
+        try:
+            safebox.storage_list_digests(provider, "homework-solver/__takyon-preflight__/")
+            add("ok", f"Safebox storage broker:{provider}", "list-digests authorized")
+        except Exception as exc:  # noqa: BLE001
+            add("fail", f"Safebox storage broker:{provider}", str(exc))
+
+    try:
+        token = safebox.mint_operator_session_token(
+            "homework-solver",
+            os.environ.get("TAKYON_SESSION_USER_ID", ""),
+            max_cost_microusd=1,
+            ttl_seconds=60,
+        )
+        add("ok" if token else "fail", "operator AI broker session", "minted scoped operator.session token" if token else "empty token")
+    except Exception as exc:  # noqa: BLE001
+        add("fail", "operator AI broker session", str(exc))
+
+    optional_checks = (
+        ("Google Search Console", ("TAKYON_GSC_SERVICE_ACCOUNT_KEY",)),
+        ("OpenMeter mirror URL", ("TAKYON_OPENMETER_URL", "OPENMETER_URL", "OPENMETER_API_URL")),
+        ("OpenMeter mirror token", ("OPENMETER_API_TOKEN", "TAKYON_OPENMETER_API_TOKEN")),
+    )
+    for label, keys in optional_checks:
+        try:
+            value = safebox.first_env_backed_value(*keys)
+            add("ok" if value else "warn", label, "available" if value else "not configured", required=False)
+        except Exception as exc:  # noqa: BLE001
+            add("warn", label, str(exc), required=False)
+except Exception as exc:  # noqa: BLE001
+    add("fail", "preflight imports/checks", str(exc))
+
+width = max([len(surface) for _, surface, _, _ in rows] + [7])
+print("Operator prod parity preflight")
+print(f"{'status':<6} {'surface':<{width}} detail")
+print(f"{'-' * 6} {'-' * width} {'-' * 40}")
+failed = False
+for status, surface, detail, required in rows:
+    if status == "fail" and required:
+        failed = True
+    print(f"{status:<6} {surface:<{width}} {detail}")
+if failed:
+    sys.exit(1)
+PY
 }
 
 local_worker_pids() {
@@ -300,6 +476,14 @@ cmd_shell_quiet() {
   exec "$TAKYON_ENTRY" shell "$@"
 }
 
+cmd_run() {
+  load_operator_env
+  require_tunnel
+  cmd_preflight
+  cd "$ROOT"
+  exec "$TAKYON_ENTRY" "$@"
+}
+
 cmd_overview() {
   load_operator_env
   require_tunnel
@@ -343,6 +527,7 @@ cmd_worker() {
   fi
   load_operator_env
   require_tunnel
+  cmd_preflight
   require_docker_for_worker
   stop_local_workers
   export TAKYON_WORKER_CONCURRENCY="$concurrency"
@@ -354,6 +539,7 @@ cmd_worker() {
 cmd_worker_once() {
   load_operator_env
   require_tunnel
+  cmd_preflight
   require_docker_for_worker
   cd "$RUNTIME_DIR"
   exec "$TAKYON_CLI_BIN" worker --once --worker-id "mac-operator-$(hostname -s)-once-$$"
@@ -415,6 +601,7 @@ cmd_console() {
   fi
 
   load_operator_env
+  cmd_preflight
   require_docker_for_worker
   echo "Starting local worker pool: concurrency=$concurrency (log: $worker_log)"
   "$0" worker "$concurrency" >"$worker_log" 2>&1 &
@@ -485,9 +672,11 @@ Usage:
   scripts/takyon-operator-prod.sh safebox-tunnel
   scripts/takyon-operator-prod.sh dashboard-tunnel
   scripts/takyon-operator-prod.sh console [concurrency] [business]
+  scripts/takyon-operator-prod.sh preflight
   scripts/takyon-operator-prod.sh overview
   scripts/takyon-operator-prod.sh shell [business]
   scripts/takyon-operator-prod.sh quiet [business]
+  scripts/takyon-operator-prod.sh run <takyon args...>
   scripts/takyon-operator-prod.sh worker [concurrency]
   scripts/takyon-operator-prod.sh worker-once
   scripts/takyon-operator-prod.sh stop-workers
@@ -531,6 +720,10 @@ case "$command" in
     shift || true
     cmd_console "$@"
     ;;
+  preflight)
+    shift || true
+    cmd_preflight "$@"
+    ;;
   overview|businesses)
     shift || true
     cmd_overview "$@"
@@ -538,6 +731,10 @@ case "$command" in
   quiet|shell-quiet|--no-logs)
     shift || true
     cmd_shell_quiet "$@"
+    ;;
+  run|exec)
+    shift || true
+    cmd_run "$@"
     ;;
   worker)
     shift || true

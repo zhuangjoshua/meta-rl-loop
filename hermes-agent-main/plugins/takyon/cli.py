@@ -41,6 +41,43 @@ _TAKYON_SKILL_ALIASES = {
 }
 _TAKYON_SKILL_PREFIX = "takyon-"
 _DEFAULT_BOOTSTRAP_MAX_TURNS = 30
+_WORKFLOW_BOOTSTRAP_MAX_TURNS = 60
+_BOOTSTRAP_WORKFLOW_REQUEST_RE = re.compile(
+    r"\b("
+    r"real\s+(?:customer\s+)?ai\s+workflow|"
+    r"customer\s+ai\s+workflow|"
+    r"in-?app\s+workflow|"
+    r"product\s+workflow|"
+    r"app\s+action|"
+    r"backend\s+action|"
+    r"signed-?in\s+(?:subscriber|user|customer)\s+enters?|"
+    r"receives?\s+(?:five|[0-9]+)\s+"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _bootstrap_goal_requests_product_workflow(goal: str) -> bool:
+    return bool(_BOOTSTRAP_WORKFLOW_REQUEST_RE.search(str(goal or "")))
+
+
+def _bootstrap_turn_cap_for_goal(goal: str) -> int:
+    if _bootstrap_goal_requests_product_workflow(goal):
+        return _WORKFLOW_BOOTSTRAP_MAX_TURNS
+    return _DEFAULT_BOOTSTRAP_MAX_TURNS
+
+
+def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
+    cap = _bootstrap_turn_cap_for_goal(goal)
+    try:
+        raw = int(value or cap)
+    except (TypeError, ValueError):
+        raw = cap
+    if cap > _DEFAULT_BOOTSTRAP_MAX_TURNS and raw <= _DEFAULT_BOOTSTRAP_MAX_TURNS:
+        raw = cap
+    return max(1, min(raw, cap))
+
+
 _CREATE_NAME_LLM_PROMPT = (
     "Choose the canonical initial product or company name from the user's idea. "
     "If the user explicitly gives or strongly implies a name, use that exact name. "
@@ -1639,6 +1676,7 @@ def _business_bootstrap_instruction(
     business_name: str = "",
 ) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
+    workflow_requested = _bootstrap_goal_requests_product_workflow(goal_text)
     effective_mode = "live" if str(active_mode or "").strip().lower() != "live" else "live"
     lines = [
         f"Bootstrap business:{slug} now.",
@@ -1649,6 +1687,7 @@ def _business_bootstrap_instruction(
         f"Canonical business name: {business_name or slug}",
         f"Business goal: {goal_text}",
         f"Mode: {effective_mode}",
+        f"Explicit product workflow requested: {'yes' if workflow_requested else 'no'}",
         "",
         "## Execution rules",
         "",
@@ -1681,6 +1720,7 @@ def _business_bootstrap_instruction(
         "- source_path: product/site",
         "- runtime_features: auth, account, profile, checkout",
         "- routes: / (landing page), /app (sign-in + subscription gate), and /app/profile (account page)",
+        "- If `Explicit product workflow requested: yes`, do NOT try to declare `generate` directly here. The product worker must implement the workflow as real `product/site/actions/<name>.ts` files and UI calls; the refresh pass derives the actions/generate rails from the source.",
         "",
         "This seeds the COMPLETE app kit up front (landing, the /app access shell, the /app/profile account page, support, and the shared auth/checkout/account rails). The two build passes below only change WHEN each screen is customized and published; they never change the final fileset. The end state must be the same complete app kit as a single-pass build.",
         "",
@@ -1734,7 +1774,7 @@ def _business_bootstrap_instruction(
         "- Do not edit `src/screens/landing.tsx` again unless a small correction is required to keep it consistent with the brand; 2a already published it.",
         "- Do not spend bootstrap time editing `src/screens/support.tsx` unless explicitly asked.",
         "- Keep the shared Vite route skeleton intact unless a small route-level correction is required for correctness.",
-        "- Stop once `/`, `/app`, and `/app/profile` are truthful and publishable; do not spend first-pass time inventing the real product workflow.",
+        "- Stop once `/`, `/app`, and `/app/profile` are truthful and publishable; do not spend this access-shell pass inventing the real product workflow. If `Explicit product workflow requested: yes`, build that workflow in step 2c immediately after this pass publishes.",
         "",
         "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell.",
         'Do not leave generic copy such as "membership pricing", "what is included", "simple pricing", "offer", or similar starter text anywhere customer-visible.',
@@ -1754,7 +1794,7 @@ def _business_bootstrap_instruction(
         "- You may restyle and refine those surfaces so they match the landing page brand.",
         "- Keep access decisions on the shared `src/lib/hooks.ts` helpers; prefer `useViewerAccess()` and `resolveViewerCta()` over screen-local subscription parsing.",
         "- Treat runtime account truth as `user` plus `entitlements[]`; do not gate from legacy fields like `has_active_subscription`, nested `subscription.status`, or bespoke `client.account()` adapters in the screens.",
-        "- Do not invent product-specific tabs, custom product workflows, domain objects, or unsupported backend capabilities.",
+        "- Do not invent product-specific tabs, custom product workflows, domain objects, or unsupported backend capabilities. If `Explicit product workflow requested: yes`, the requested workflow is not invented; it is required, but it still must use the shared product action/generate rails and real receipts.",
         "- Do not fake persistence, fake synced records, fake AI results, or fake customer data.",
         "",
         "Implementation bias:",
@@ -1774,6 +1814,23 @@ def _business_bootstrap_instruction(
         "If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there.",
         "Do not paraphrase a different platform diagnosis and do not continue to X as if the product build completed.",
         "",
+        "#### 2c. Build the requested real in-app workflow, when explicitly requested",
+        "If `Explicit product workflow requested: no`, skip this step.",
+        "If `Explicit product workflow requested: yes`, this step is REQUIRED before Search Console, market research, X, or final completion. The access shell is not enough.",
+        "Use the business goal as the source of truth for the customer workflow. Example shape: a signed-in subscribed customer enters the requested input, triggers a real product action, and receives the requested AI output.",
+        "First call business_upsert_app_surface_contract again with the same source_path/routes and runtime_features `auth, account, profile, checkout` only; do not directly declare `generate` on the Vite scaffold. Then call business_claude_agent_task with:",
+        "- workspace: product/site",
+        "- instruction: Build the real post-sign-in subscribed customer workflow requested in the Business goal. Keep the landing, sign-in gate, checkout, and profile/account rails intact. Implement the backend behavior as one or more real `product/site/actions/<name>.ts` files that default-export async `(payload, ctx) => result` and call `ctx.generate(...)` for AI output; call the action from `/app` through the shared runtime client (`createActionRunner`/`invokeAction`). Do not use provider SDKs, provider env vars, direct provider URLs, mock outputs, fixtures, static canned AI responses, browser-only fake generation, localStorage as authority, or unsupported server routes. Render honest loading, success, and error states; on budget/entitlement errors, show the runtime-provided path to subscribe/upgrade instead of retrying or faking success.",
+        '- guidance_skills: pass the SAME two design packs used for 2a/2b — "claude-design" plus the one style pack you selected — so the real workflow matches the brand.',
+        "- model: claude-opus-4-8",
+        "- effort: high",
+        "- max_turns: 90",
+        "- budget_usd: 25.0",
+        "- timeout_ms: 1800000",
+        "- refresh_surface: true",
+        "Inspect the structured result. Trust only its exact success/blocker and surface_refresh publish status.",
+        "Then verify the action rail before continuing: call business_check_runtime_capabilities for the business, then call business_invoke_app_action with a small realistic payload matching the requested workflow, and read the returned receipt/result. If either verification fails or the invoked result is missing the requested real AI output shape, record the exact blocker in research/strategy.md and stop bootstrap there. Do not proceed to X or final completion with a placeholder workflow.",
+        "",
         "Once the product site is published, register its public URL with the operator's Search Console service account so the new site is owned and trackable from day one:",
         f"- Call business_seo_add_property with site_url \"https://{slug}.{_company_base_domain()}/\".",
         "- This is internal plumbing: never mention search console, indexing, ownership, or the tool name in any customer-visible sentence, and do not give it its own milestone card.",
@@ -1792,7 +1849,7 @@ def _business_bootstrap_instruction(
         "## Constraints",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable.",
-        "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked.",
+        "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked. If the operator explicitly asked for one, build and verify it in step 2c before launch/distribution.",
         "Missing credentials, budget authority, or provider gates are blockers; hard-fail instead of creating fake receipts.",
         "If any business_* tool says the business does not exist, stop immediately and report a platform provisioning failure.",
         "Do not retry business_write_file, and do not call business_create_workspace to paper over a missing business row.",
@@ -1801,7 +1858,8 @@ def _business_bootstrap_instruction(
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
         "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
-        "When the landing page and /app access shell are up and unblocked, close by naming the next business move in warm, customer-facing language: the landing + access shell is a real starting point, and the next step is to build out the real in-app product experience customers get after they sign in. Do NOT name any internal skill or tool; describe the work, not the runtime.",
+        "If `Explicit product workflow requested: yes`, the final response must include the action name and the business_invoke_app_action verification result or the exact blocker. Never say the real workflow is \"coming soon\" after marking bootstrap complete.",
+        "If `Explicit product workflow requested: no` and only the landing + access shell were required, close by naming the next business move in warm, customer-facing language: the live site is a real starting point, and the next step is to build out the post-sign-in product experience. If `Explicit product workflow requested: yes`, close on the verified live workflow instead. Do NOT name any internal skill or tool; describe the work, not the runtime.",
     ]
     return "\n".join(lines)
 
@@ -1841,7 +1899,7 @@ def _ceo_bootstrap_turn_config(
         "load_soul_identity": False,
         "skip_memory": True,
         "skip_context_files": True,
-        "max_turns": _DEFAULT_BOOTSTRAP_MAX_TURNS,
+        "max_turns": _bootstrap_turn_cap_for_goal(goal),
     }
 
 
@@ -5036,7 +5094,7 @@ def run_takyon_command(
                 goal=goal,
                 mode=active_mode,
                 schedule=schedule if should_schedule else None,
-                max_turns=max(1, min(int(max_turns or _DEFAULT_BOOTSTRAP_MAX_TURNS), _DEFAULT_BOOTSTRAP_MAX_TURNS)),
+                max_turns=_clamp_bootstrap_max_turns(goal, max_turns),
             )
             # Free starter creative-credit seed is useful, but it must never sit between the durable
             # business row and the durable bootstrap job. If the creative-credit ledger is temporarily

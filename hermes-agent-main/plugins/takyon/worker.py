@@ -714,7 +714,25 @@ def _refresh_business_surface_after_bootstrap(
             published_at=published_at,
         )
     ):
-        return None
+        return {
+            "status": "passed",
+            "source_path": source_path,
+            "publish": {
+                "status": "published",
+                "public_url": str(
+                    publish_state.get("public_url")
+                    or surface.get("public_url")
+                    or f"https://{slug}.coscale.app/"
+                ).strip(),
+                "publish_target": str(
+                    publish_state.get("publish_target")
+                    or surface.get("publish_target")
+                    or f"{slug}.coscale.app"
+                ).strip(),
+                "published_at": published_at,
+            },
+            "note": "already_published_no_source_changes",
+        }
 
     tokens: list[object] = []
     try:

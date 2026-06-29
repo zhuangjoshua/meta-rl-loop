@@ -35,6 +35,7 @@ import logging
 import concurrent.futures
 import contextvars
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -174,12 +175,19 @@ def _row_to_job(row: tuple) -> Job:
 
 
 def _resolve_owner_user_id(conn, business_slug: str) -> str:
-    row = conn.execute(
-        "select owner_user_id from businesses where slug = %s", (business_slug,)
-    ).fetchone()
-    if row is None or row[0] is None:
+    last_row = None
+    for attempt in range(10):
+        row = conn.execute(
+            "select owner_user_id from businesses where slug = %s", (business_slug,)
+        ).fetchone()
+        last_row = row
+        if row is not None and row[0] is not None:
+            return str(row[0])
+        if attempt < 9:
+            time.sleep(0.5)
+    if last_row is None or last_row[0] is None:
         raise BusinessOwnerMissing(business_slug)
-    return str(row[0])
+    return str(last_row[0])
 
 
 # ── enqueue / read ─────────────────────────────────────────────────────────────────────────────────

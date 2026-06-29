@@ -12032,6 +12032,213 @@ def _subuser_product_site_summary(slug: str) -> dict[str, Any]:
     }
 
 
+def _operator_vps_ssh_target() -> str:
+    host = str(os.getenv("TAKYON_OPERATOR_VPS_HOST") or os.getenv("TAKYON_VPS_HOST") or "").strip()
+    user = str(os.getenv("TAKYON_OPERATOR_VPS_USER") or os.getenv("TAKYON_VPS_USER") or "").strip() or "root"
+    if host:
+        return host if "@" in host else f"{user}@{host}"
+    return f"{user}@137.184.75.57"
+
+
+def _operator_vps_ssh_key_path() -> Path:
+    raw = str(
+        os.getenv("TAKYON_OPERATOR_VPS_SSH_KEY")
+        or os.getenv("TAKYON_OPERATOR_VPS_KEY")
+        or os.getenv("TAKYON_VPS_KEY")
+        or ""
+    ).strip()
+    return Path(raw).expanduser() if raw else (Path.home() / ".ssh" / "takyon_argon_alpha14")
+
+
+def _operator_remote_home() -> PurePosixPath:
+    raw = str(os.getenv("TAKYON_OPERATOR_REMOTE_HOME") or os.getenv("TAKYON_REMOTE_HOME") or "").strip()
+    path = PurePosixPath(raw or "/opt/takyon/.takyon")
+    if not path.is_absolute():
+        raise TakyonError("TAKYON_OPERATOR_REMOTE_HOME must be an absolute path")
+    return path
+
+
+def _remote_product_source_cache_path(slug: str, remote_home: PurePosixPath) -> PurePosixPath:
+    root = remote_home / "cache" / "businesses"
+    target = root / _slugify(slug) / "product" / "site"
+    if root not in (target, *target.parents):
+        raise TakyonError("remote product source cache escaped cache/businesses root")
+    return target
+
+
+def _local_product_source_cache_path(slug: str) -> Path:
+    root = (get_takyon_home() / "cache" / "businesses").resolve()
+    target = (root / _slugify(slug) / "product" / "site").resolve()
+    if root not in (target, *target.parents):
+        raise TakyonError("local product source cache escaped cache/businesses root")
+    return target
+
+
+_PRODUCT_SOURCE_CACHE_EXCLUDES = {
+    ".cache",
+    ".git",
+    ".next",
+    "__pycache__",
+    "build",
+    "builds",
+    "dist",
+    "node_modules",
+    "secrets",
+}
+
+
+def _product_source_cache_ignore(_directory: str, names: list[str]) -> set[str]:
+    return {
+        name
+        for name in names
+        if name in _PRODUCT_SOURCE_CACHE_EXCLUDES
+        or name.endswith(".pyc")
+        or name.startswith("._")
+        or name == ".DS_Store"
+        or name == ".env"
+    }
+
+
+def _sync_local_product_source_cache(slug: str, source_root: Path) -> dict[str, Any]:
+    target = _local_product_source_cache_path(slug)
+    summary = {"target": "local", "path": str(target)}
+    source = source_root.resolve()
+    if not source.is_dir():
+        return {**summary, "synced": False, "status": "missing_source", "error": f"product source not found: {source}"}
+    if source == target:
+        return {**summary, "synced": True, "status": "already_current"}
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _replace_directory_tree_atomic(source, target, ignore=_product_source_cache_ignore)
+    except Exception as exc:
+        return {**summary, "synced": False, "status": "failed", "error": str(exc)}
+    return {**summary, "synced": True, "status": "synced"}
+
+
+def _sync_remote_product_source_cache(
+    *,
+    slug: str,
+    source_root: Path,
+    target: str,
+    ssh_key: Path,
+    remote_home: PurePosixPath,
+    label: str,
+) -> dict[str, Any]:
+    remote_path = _remote_product_source_cache_path(slug, remote_home)
+    summary = {"target": target, "path": str(remote_path), "plane": label}
+    rsync = shutil.which("rsync")
+    ssh = shutil.which("ssh")
+    if not rsync:
+        return {**summary, "synced": False, "status": "blocked", "error": "rsync is unavailable"}
+    if not ssh:
+        return {**summary, "synced": False, "status": "blocked", "error": "ssh is unavailable"}
+    if not ssh_key.exists():
+        return {**summary, "synced": False, "status": "blocked", "error": f"ssh key not found: {ssh_key}"}
+    source = source_root.resolve()
+    if not source.is_dir():
+        return {**summary, "synced": False, "status": "missing_source", "error": f"product source not found: {source}"}
+    ssh_base = [
+        ssh,
+        "-i",
+        str(ssh_key),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+    ]
+    excludes: list[str] = []
+    for name in sorted(_PRODUCT_SOURCE_CACHE_EXCLUDES):
+        excludes.extend(["--exclude", name])
+    excludes.extend(["--exclude", "._*", "--exclude", ".DS_Store", "--exclude", ".env", "--exclude", "*.pyc"])
+    try:
+        mkdir_proc = subprocess.run(
+            [*ssh_base, target, f"mkdir -p -- {shlex.quote(str(remote_path.parent))}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=_runtime_env(),
+        )
+        if mkdir_proc.returncode != 0:
+            return {
+                **summary,
+                "synced": False,
+                "status": "failed",
+                "error": (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip(),
+            }
+        rsync_proc = subprocess.run(
+            [
+                rsync,
+                "-az",
+                "--delete",
+                *excludes,
+                "-e",
+                " ".join(shlex.quote(part) for part in ssh_base),
+                f"{source}/",
+                f"{target}:{shlex.quote(str(remote_path))}/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+            env=_runtime_env(),
+        )
+        if rsync_proc.returncode != 0:
+            return {
+                **summary,
+                "synced": False,
+                "status": "failed",
+                "error": (rsync_proc.stderr or rsync_proc.stdout or f"rsync exited {rsync_proc.returncode}").strip(),
+            }
+        chown_proc = subprocess.run(
+            [*ssh_base, target, f"chown -R takyon:takyon -- {shlex.quote(str(remote_path))}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=_runtime_env(),
+        )
+        if chown_proc.returncode != 0:
+            return {
+                **summary,
+                "synced": True,
+                "status": "synced_chown_failed",
+                "warning": (chown_proc.stderr or chown_proc.stdout or f"ssh chown exited {chown_proc.returncode}").strip(),
+            }
+    except Exception as exc:
+        return {**summary, "synced": False, "status": "failed", "error": str(exc)}
+    return {**summary, "synced": True, "status": "synced"}
+
+
+def _sync_product_source_caches(slug: str, source_root: Path) -> dict[str, Any]:
+    """Keep product-app runtime source caches in step with the just-published product source."""
+    result: dict[str, Any] = {"local": _sync_local_product_source_cache(slug, source_root)}
+    result["subuser"] = _sync_remote_product_source_cache(
+        slug=slug,
+        source_root=source_root,
+        target=_subuser_vps_ssh_target(),
+        ssh_key=_subuser_vps_ssh_key_path(),
+        remote_home=_subuser_remote_home(),
+        label="subuser",
+    )
+    # Local production compute runs outside the operator VPS. Sync the operator cache too so a later
+    # tracked sub-user deploy does not copy stale operator cache state back over the product runtime.
+    if _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"):
+        result["operator"] = _sync_remote_product_source_cache(
+            slug=slug,
+            source_root=source_root,
+            target=_operator_vps_ssh_target(),
+            ssh_key=_operator_vps_ssh_key_path(),
+            remote_home=_operator_remote_home(),
+            label="operator",
+        )
+    return result
+
+
 def _sync_subuser_product_site(slug: str, live_root: Path) -> dict[str, Any]:
     """Sync one already-built live product site to the sub-user VPS."""
     summary = _subuser_product_site_summary(slug)
@@ -13082,6 +13289,23 @@ def _publish_product_surface_path(
         ).encode("utf-8")
     ).hexdigest()[:32]
     artifact_prefix = storage.build_object_prefix(slug, build_id)
+
+    source_cache_sync = _sync_product_source_caches(slug, source_root)
+    result["source_cache_sync"] = source_cache_sync
+    has_runtime_actions = (source_root / "actions").is_dir()
+    critical_planes = ["subuser"]
+    if _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"):
+        critical_planes.append("operator")
+    failed_cache_sync = [
+        f"{plane}: {sync.get('error') or sync.get('status')}"
+        for plane in critical_planes
+        for sync in [source_cache_sync.get(plane) if isinstance(source_cache_sync.get(plane), Mapping) else {}]
+        if has_runtime_actions and not sync.get("synced")
+    ]
+    if failed_cache_sync:
+        result["blocker"] = "product source cache sync failed: " + "; ".join(failed_cache_sync)
+        return result
+
     storage.write_build_artifact(backend, slug, build_id, publish_source)
 
     r2_required = _publish_target_requires_r2(publish_target)
@@ -13153,6 +13377,7 @@ def _publish_product_surface_path(
             "live_probe_detail": "",
             "artifact_prefix": artifact_prefix,
             "source_revision": int(source_revision or 0),
+            "source_cache_sync": source_cache_sync,
             "blocker": "",
         }
     )
@@ -17982,6 +18207,24 @@ class TakyonStore:
                 except leaves["entitlements"].EntitlementError as exc:
                     raise TakyonError(str(exc)) from exc
                 plan_key = policy.plan_key
+                persisted_plan = self._row_to_dict(
+                    conn.execute(
+                        "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",
+                        (slug, plan_key),
+                    ).fetchone()
+                )
+                if (
+                    _effective_business_mode(op.get("business_mode")) == "live"
+                    and int(persisted_plan.get("price_cents") or 0) > 0
+                    and not str(persisted_plan.get("stripe_price_id") or "").strip()
+                ):
+                    business = self._ensure_business(conn, slug)
+                    persisted_plan = _ensure_stripe_price(
+                        conn,
+                        slug,
+                        persisted_plan,
+                        str(business.get("name") or slug),
+                    )
             else:
                 warnings = _plan_validation_warnings(
                     plan_key, tier, included_action_quota, metadata
@@ -18045,8 +18288,11 @@ class TakyonStore:
                     ),
                 )
             self._rewrite_app_files(conn, slug)
-            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload={"plan_key": plan_key, "price_cents": price_cents})
-            return {"action": action, "business": slug, "plan_key": plan_key}
+            event_payload = {"plan_key": plan_key, "price_cents": price_cents}
+            if _db_backend() == "postgres" and "persisted_plan" in locals():
+                event_payload["stripe_price_id"] = persisted_plan.get("stripe_price_id")
+            self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload=event_payload)
+            return {"action": action, "business": slug, "plan_key": plan_key, **({"stripe_price_id": persisted_plan.get("stripe_price_id")} if _db_backend() == "postgres" and "persisted_plan" in locals() else {})}
 
         if action == "app.customer.upsert":
             email = _normalize_email(str(op.get("email") or ""))
