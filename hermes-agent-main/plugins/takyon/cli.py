@@ -589,6 +589,14 @@ def _format_operation_result(item: Any) -> str:
         return f"recurring wake schedule for business:{business or item.get('business')}: {item.get('schedule') or item.get('cron_job')}"
     if action == "cron.trigger_ceo_wakeup":
         target = business or item.get("business")
+        job = item.get("job") if isinstance(item.get("job"), dict) else {}
+        follow = item.get("follow") if isinstance(item.get("follow"), dict) else {}
+        job_id = str(job.get("job_id") or follow.get("job_id") or "").strip()
+        job_status = str(follow.get("status") or job.get("status") or "").strip()
+        if job_id or job_status:
+            status = job_status or "queued"
+            suffix = f" ({job_id})" if job_id else ""
+            return f"CEO wake for business:{target} worker job {status}{suffix}"
         cron_job = item.get("cron_job") or "unknown"
         if item.get("triggered"):
             ran = item.get("tick_ran")
@@ -1837,7 +1845,7 @@ def _ceo_bootstrap_turn_config(
     }
 
 
-def _run_pg_ceo_wake_once(store: TakyonStore, slug: str) -> dict[str, Any]:
+def _run_pg_ceo_wake_once(store: TakyonStore, slug: str, *, run_inline: bool = True) -> dict[str, Any]:
     try:
         from . import jobs, worker
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
@@ -1859,19 +1867,20 @@ def _run_pg_ceo_wake_once(store: TakyonStore, slug: str) -> dict[str, Any]:
             )
             outcome = None
             record = jobs.get_job(raw, job.id)
-            for _ in range(20):
-                if record is not None and record.status in {"completed", "blocked", "failed"}:
-                    break
-                outcome = jobs.run_one(
-                    raw,
-                    worker_id=worker_id,
-                    handlers=worker.HANDLERS,
-                    kinds=["ceo_wake"],
-                )
+            if run_inline:
+                for _ in range(20):
+                    if record is not None and record.status in {"completed", "blocked", "failed"}:
+                        break
+                    outcome = jobs.run_one(
+                        raw,
+                        worker_id=worker_id,
+                        handlers=worker.HANDLERS,
+                        kinds=["ceo_wake"],
+                    )
+                    record = jobs.get_job(raw, job.id)
+                    if outcome is None and record is not None and record.status in {"queued", "running"}:
+                        continue
                 record = jobs.get_job(raw, job.id)
-                if outcome is None and record is not None and record.status in {"queued", "running"}:
-                    continue
-            record = jobs.get_job(raw, job.id)
 
     return {
         "action": "ceo_wake.run",
@@ -2259,21 +2268,23 @@ class _RuntimeEventTail:
         self._stream_business = ""
 
 
-def _follow_bootstrap_job(
+def _follow_worker_job(
     store: TakyonStore,
     slug: str,
     job_id: str,
     *,
+    label: str = "job",
+    tail_logs: bool = True,
     poll_seconds: float = 2.0,
     max_seconds: float = 1800.0,
 ) -> dict[str, Any]:
-    """Stream a create-time ``ceo_bootstrap`` run live to stdout for ``takyon create --follow``.
+    """Stream a worker-owned business job live to stdout.
 
     Tails three read-only feeds until the job is terminal: the business CEO-turn chat mirror
     (the same narration the dashboard renders), new ``agent.log`` lines (full runtime
-    visibility on-box), and the job status transitions. This is PURE OBSERVATION — it never
+    visibility on-box when requested), and the job status transitions. This is PURE OBSERVATION: it never
     claims, runs, or mutates the job (the worker service owns execution), so it changes no
-    creation/billing/identity authority and detaching (Ctrl-C) leaves the build running.
+    billing/identity authority and detaching (Ctrl-C) leaves the job running.
     """
     import time
 
@@ -2317,7 +2328,7 @@ def _follow_bootstrap_job(
     except Exception:  # noqa: BLE001 - runtime stream is display-only
         pass
 
-    log_path = _agent_log_path()
+    log_path = _agent_log_path() if tail_logs else None
     log_offset = 0
     if log_path is not None:
         try:
@@ -2404,8 +2415,8 @@ def _follow_bootstrap_job(
                 print(f"  · {line}", flush=True)
 
     print(
-        f"[bootstrap] following job {job_id} for business:{slug} "
-        "(Ctrl-C to detach; the build keeps running)",
+        f"[{label}] following job {job_id} for business:{slug} "
+        "(Ctrl-C to detach; the worker job keeps running)",
         flush=True,
     )
     last_status = ""
@@ -2422,43 +2433,62 @@ def _follow_bootstrap_job(
                     with store._leaf_conn(conn) as raw:
                         record = jobs.get_job(raw, job_id)
             except Exception as exc:  # noqa: BLE001 - follow is best-effort observation
-                print(f"[bootstrap] status read failed: {exc}", flush=True)
+                print(f"[{label}] status read failed: {exc}", flush=True)
                 record = None
             status = str((record.status if record else "") or "queued")
             if status != last_status:
-                print(f"[bootstrap] {last_status or 'queued'} -> {status}", flush=True)
+                print(f"[{label}] {last_status or 'queued'} -> {status}", flush=True)
                 last_status = status
             if status in terminal:
                 break
             elapsed = time.monotonic() - started
             if status == "queued" and not queued_warned and elapsed > 30:
                 print(
-                    "[bootstrap] still queued after 30s — confirm a worker is draining the "
+                    f"[{label}] still queued after 30s; confirm a worker is draining the "
                     "queue (e.g. `systemctl is-active takyon-worker.service`)",
                     flush=True,
                 )
                 queued_warned = True
             if elapsed > max_seconds:
                 print(
-                    f"[bootstrap] detaching after {int(max_seconds)}s; job still {status}. "
+                    f"[{label}] detaching after {int(max_seconds)}s; job still {status}. "
                     "Re-attach with `takyon logs -f`.",
                     flush=True,
                 )
                 break
             time.sleep(poll_seconds)
     except KeyboardInterrupt:
-        print("\n[bootstrap] detached (the build keeps running on the worker).", flush=True)
+        print(f"\n[{label}] detached (the worker job keeps running).", flush=True)
     # Final sweep for trailing narration / log lines written just before the terminal status.
     _drain_new_runtime_stream()
     _finish_stream()
     _drain_new_logs()
     _drain_new_chat()
     return {
+        "action": f"{label}.follow",
         "job_id": str(job_id),
         "status": last_status or "queued",
         "result": (record.result if record else None),
         "error": (record.error if record else None),
     }
+
+
+def _follow_bootstrap_job(
+    store: TakyonStore,
+    slug: str,
+    job_id: str,
+    *,
+    poll_seconds: float = 2.0,
+    max_seconds: float = 1800.0,
+) -> dict[str, Any]:
+    return _follow_worker_job(
+        store,
+        slug,
+        job_id,
+        label="bootstrap",
+        poll_seconds=poll_seconds,
+        max_seconds=max_seconds,
+    )
 
 
 def _control(store: TakyonStore, scope: str, state: str, reason: str) -> dict[str, Any]:
@@ -4013,7 +4043,7 @@ def _handle_shell_line(
         command_argv = _shell_create_argv(command, raw_args)
         if len(command_argv) < 2:
             raise SystemExit('usage: /create [--live] [--no-auto] [--follow] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]')
-        slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow = _parse_business_start_args(
+        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow = _parse_business_start_args(
             command_argv,
             usage='usage: /create [--live] [--no-auto] [--follow] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]',
             auto_default=True,
@@ -4029,13 +4059,19 @@ def _handle_shell_line(
             follow_logs=follow_logs,
             raw_hermes=raw_hermes,
         )
-        if isinstance(result, dict) and result.get("bootstrap_job"):
-            return (
-                f"Create started for business:{slug}. Refresh status or open the business after a moment "
-                "to see files, blockers, and deliverables.",
-                slug,
+        actual_slug = requested_slug
+        if isinstance(result, dict):
+            bootstrap_job = result.get("bootstrap_job") if isinstance(result.get("bootstrap_job"), dict) else {}
+            actual_slug = (
+                str(result.get("business") or bootstrap_job.get("business") or requested_slug).strip()
+                or requested_slug
             )
-        return _format_cli_value(result), slug
+        if isinstance(result, dict) and result.get("bootstrap_job"):
+            follow_result = result.get("follow") if isinstance(result.get("follow"), dict) else {}
+            bootstrap_job = result.get("bootstrap_job") if isinstance(result.get("bootstrap_job"), dict) else {}
+            status = str(follow_result.get("status") or bootstrap_job.get("status") or "queued")
+            return f"Create {status} for business:{actual_slug}.", actual_slug
+        return _format_cli_value(result), actual_slug
 
     try:
         tokens = shlex.split(raw)
@@ -4861,9 +4897,17 @@ def run_takyon_command(
             "tick_ran": 0,
         }
         if store._work_requests_table() == "business_work_requests":
-            wake_result = _run_pg_ceo_wake_once(store, slug)
+            wake_result = _run_pg_ceo_wake_once(store, slug, run_inline=not follow_logs)
             trigger_result["triggered"] = wake_result.get("status") in {"completed", "blocked", "failed", "running", "queued"}
             trigger_result["job"] = wake_result
+            if follow_logs and str(wake_result.get("job_id") or "").strip():
+                trigger_result["follow"] = _follow_worker_job(
+                    store,
+                    slug,
+                    str(wake_result["job_id"]).strip(),
+                    label="wake",
+                    tail_logs=False,
+                )
             if wake_result.get("status") not in {"completed", "queued", "running"} and wake_result.get("error"):
                 trigger_result["error"] = wake_result.get("error")
         elif cron_job:
@@ -5002,14 +5046,19 @@ def run_takyon_command(
                 slug,
                 operator_user_id=resolved_operator_user_id,
             )
-            # `--follow`: read-only live tail of the create-time bootstrap (CEO chat mirror +
-            # agent.log + job status) until the worker-run job is terminal. Pure observation —
-            # it never claims or runs the job, so it changes no creation/billing/identity
-            # authority and the build keeps running if the operator detaches.
+            # `--follow` or console/log mode: read-only live tail of the create-time bootstrap
+            # until the worker-run job is terminal. Pure observation: it never claims or runs
+            # the job, so it changes no creation/billing/identity authority and the build keeps
+            # running if the operator detaches.
             follow_result = None
-            if follow and str(bootstrap_job.get("job_id") or "").strip():
-                follow_result = _follow_bootstrap_job(
-                    store, slug, str(bootstrap_job["job_id"]).strip()
+            should_follow = follow or follow_logs
+            if should_follow and str(bootstrap_job.get("job_id") or "").strip():
+                follow_result = _follow_worker_job(
+                    store,
+                    slug,
+                    str(bootstrap_job["job_id"]).strip(),
+                    label="bootstrap",
+                    tail_logs=not follow_logs,
                 )
             return {
                 "success": True,
