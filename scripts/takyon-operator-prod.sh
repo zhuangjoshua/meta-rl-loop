@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Local production operator rail.
 #
-# This is NOT local-dev and NOT a dashboard tunnel. It runs the operator shell/worker on this Mac
-# against the same production control plane as app.fourmanifold.com, while reaching the private
-# Safebox through an explicit SSH tunnel. Product/sub-user serving stays on the sub-user plane.
+# This is NOT local-dev and not a local dashboard. It runs the operator shell/worker on this Mac
+# against the same production control plane as app.fourmanifold.com, while reaching private
+# Safebox and localhost-only operator creative routes through explicit SSH tunnels.
+# Product/sub-user serving stays on the sub-user plane.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="$ROOT/hermes-agent-main"
@@ -18,6 +19,10 @@ SAFEBOX_PRIVATE_HOST="${TAKYON_REMOTE_SAFEBOX_PRIVATE_HOST:-10.116.0.2}"
 SAFEBOX_PRIVATE_PORT="${TAKYON_REMOTE_SAFEBOX_PRIVATE_PORT:-8000}"
 LOCAL_SAFEBOX_PORT="${TAKYON_LOCAL_SAFEBOX_PORT:-8765}"
 LOCAL_SAFEBOX_URL="${TAKYON_LOCAL_SAFEBOX_URL:-http://127.0.0.1:${LOCAL_SAFEBOX_PORT}}"
+REMOTE_DASHBOARD_HOST="${TAKYON_REMOTE_DASHBOARD_HOST:-127.0.0.1}"
+REMOTE_DASHBOARD_PORT="${TAKYON_REMOTE_DASHBOARD_PORT:-9119}"
+LOCAL_DASHBOARD_PORT="${TAKYON_LOCAL_DASHBOARD_PORT:-9129}"
+LOCAL_DASHBOARD_URL="${TAKYON_LOCAL_DASHBOARD_URL:-http://127.0.0.1:${LOCAL_DASHBOARD_PORT}}"
 CONTAINER_SAFEBOX_URL="${TAKYON_CONTAINER_SAFEBOX_URL:-http://host.docker.internal:${LOCAL_SAFEBOX_PORT}}"
 LOCAL_PROD_ROOT="${TAKYON_OPERATOR_PROD_ROOT:-$HOME/.takyon-fourmanifold-operator-prod}"
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
@@ -46,6 +51,10 @@ ensure_home() {
     elif [[ -f "$ROOT/.takyon/config.yaml" ]]; then
       cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
     fi
+  fi
+  if ssh_base "test -f /opt/takyon/.takyon/dashboard_session_token"; then
+    ssh_base "cat /opt/takyon/.takyon/dashboard_session_token" >"$OPERATOR_HOME/dashboard_session_token"
+    chmod 600 "$OPERATOR_HOME/dashboard_session_token"
   fi
 }
 
@@ -121,6 +130,7 @@ load_operator_env() {
   export TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1
   export TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS=1
   export TAKYON_SAFEBOX_URL="$LOCAL_SAFEBOX_URL"
+  export TAKYON_DASHBOARD_URL="$LOCAL_DASHBOARD_URL"
   export TAKYON_PROVIDER_BROKER="${TAKYON_PROVIDER_BROKER:-1}"
   export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
   # The host-side operator shell talks to the localhost tunnel. Dockerized business workers need the
@@ -140,11 +150,18 @@ load_operator_env() {
 }
 
 require_tunnel() {
-  if curl --silent --fail --max-time 2 "$LOCAL_SAFEBOX_URL/healthz" >/dev/null 2>&1; then
+  if tunnel_healthy; then
     return 0
   fi
+  local missing=()
+  if ! safebox_tunnel_healthy; then
+    missing+=("Safebox $LOCAL_SAFEBOX_URL")
+  fi
+  if ! dashboard_tunnel_healthy; then
+    missing+=("dashboard $LOCAL_DASHBOARD_URL")
+  fi
   cat >&2 <<EOF
-Safebox tunnel is not reachable at $LOCAL_SAFEBOX_URL.
+Required local production tunnel is not reachable: ${missing[*]}.
 
 Start it in another terminal:
   scripts/takyon-operator-prod.sh tunnel
@@ -152,19 +169,29 @@ EOF
   exit 1
 }
 
-tunnel_healthy() {
+safebox_tunnel_healthy() {
   curl --silent --fail --max-time 2 "$LOCAL_SAFEBOX_URL/healthz" >/dev/null 2>&1
 }
 
-wait_for_tunnel() {
-  local log_file="$1"
+dashboard_tunnel_healthy() {
+  curl --silent --fail --max-time 2 "$LOCAL_DASHBOARD_URL/healthz" >/dev/null 2>&1
+}
+
+tunnel_healthy() {
+  safebox_tunnel_healthy && dashboard_tunnel_healthy
+}
+
+wait_for_url() {
+  local name="$1"
+  local url="$2"
+  local log_file="$3"
   for _ in $(seq 1 30); do
-    if tunnel_healthy; then
+    if curl --silent --fail --max-time 2 "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.5
   done
-  echo "Safebox tunnel did not become healthy at $LOCAL_SAFEBOX_URL" >&2
+  echo "$name tunnel did not become healthy at $url" >&2
   if [[ -f "$log_file" ]]; then
     echo "Tunnel log tail:" >&2
     tail -40 "$log_file" >&2 || true
@@ -184,7 +211,7 @@ require_docker_for_worker() {
   fi
 }
 
-cmd_tunnel() {
+cmd_safebox_tunnel() {
   require_files
   echo "Opening Safebox tunnel: $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT via $SSH_HOST" >&2
   exec ssh \
@@ -193,6 +220,33 @@ cmd_tunnel() {
     -o StrictHostKeyChecking=accept-new \
     -N \
     -L "127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}" \
+    "$SSH_HOST"
+}
+
+cmd_dashboard_tunnel() {
+  require_files
+  echo "Opening operator dashboard tunnel: $LOCAL_DASHBOARD_URL -> $REMOTE_DASHBOARD_HOST:$REMOTE_DASHBOARD_PORT via $SSH_HOST" >&2
+  exec ssh \
+    -i "$SSH_KEY" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -N \
+    -L "127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}" \
+    "$SSH_HOST"
+}
+
+cmd_tunnel() {
+  require_files
+  echo "Opening Safebox + operator dashboard tunnels:" >&2
+  echo "  $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT" >&2
+  echo "  $LOCAL_DASHBOARD_URL -> $REMOTE_DASHBOARD_HOST:$REMOTE_DASHBOARD_PORT" >&2
+  exec ssh \
+    -i "$SSH_KEY" \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -N \
+    -L "127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}" \
+    -L "127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}" \
     "$SSH_HOST"
 }
 
@@ -281,10 +335,12 @@ cmd_console() {
   mkdir -p "$LOCAL_PROD_ROOT/logs"
 
   local tunnel_pid=""
+  local dashboard_tunnel_pid=""
   local worker_pid=""
   local timestamp
   timestamp="$(date +%Y%m%d-%H%M%S)"
   local tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
+  local dashboard_tunnel_log="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.log"
   local worker_log="$LOCAL_PROD_ROOT/logs/worker-$timestamp.log"
 
   cleanup() {
@@ -296,16 +352,29 @@ cmd_console() {
       kill "$tunnel_pid" >/dev/null 2>&1 || true
       wait "$tunnel_pid" >/dev/null 2>&1 || true
     fi
+    if [[ -n "$dashboard_tunnel_pid" ]] && kill -0 "$dashboard_tunnel_pid" >/dev/null 2>&1; then
+      kill "$dashboard_tunnel_pid" >/dev/null 2>&1 || true
+      wait "$dashboard_tunnel_pid" >/dev/null 2>&1 || true
+    fi
   }
   trap cleanup EXIT INT TERM
 
-  if tunnel_healthy; then
+  if safebox_tunnel_healthy; then
     echo "Safebox tunnel: already healthy at $LOCAL_SAFEBOX_URL"
   else
     echo "Starting Safebox tunnel in background..."
-    "$0" tunnel >"$tunnel_log" 2>&1 &
+    "$0" safebox-tunnel >"$tunnel_log" 2>&1 &
     tunnel_pid="$!"
-    wait_for_tunnel "$tunnel_log"
+    wait_for_url "Safebox" "$LOCAL_SAFEBOX_URL/healthz" "$tunnel_log"
+  fi
+
+  if dashboard_tunnel_healthy; then
+    echo "Operator dashboard tunnel: already healthy at $LOCAL_DASHBOARD_URL"
+  else
+    echo "Starting operator dashboard tunnel in background..."
+    "$0" dashboard-tunnel >"$dashboard_tunnel_log" 2>&1 &
+    dashboard_tunnel_pid="$!"
+    wait_for_url "Operator dashboard" "$LOCAL_DASHBOARD_URL/healthz" "$dashboard_tunnel_log"
   fi
 
   load_operator_env
@@ -357,8 +426,10 @@ cmd_status() {
   echo "Local prod root:   $LOCAL_PROD_ROOT"
   echo "Operator home:     $OPERATOR_HOME"
   echo "Safebox URL:       $LOCAL_SAFEBOX_URL"
+  echo "Dashboard URL:     $LOCAL_DASHBOARD_URL"
   echo "Docker broker URL: $CONTAINER_SAFEBOX_URL"
-  echo "Tunnel health:     $(if curl --silent --fail --max-time 2 "$LOCAL_SAFEBOX_URL/healthz" >/dev/null 2>&1; then echo ok; else echo missing; fi)"
+  echo "Safebox tunnel:    $(if safebox_tunnel_healthy; then echo ok; else echo missing; fi)"
+  echo "Dashboard tunnel:  $(if dashboard_tunnel_healthy; then echo ok; else echo missing; fi)"
   echo "VPS worker:"
   cmd_vps_worker status | sed 's/^/  /'
 }
@@ -367,6 +438,8 @@ usage() {
   cat <<EOF
 Usage:
   scripts/takyon-operator-prod.sh tunnel
+  scripts/takyon-operator-prod.sh safebox-tunnel
+  scripts/takyon-operator-prod.sh dashboard-tunnel
   scripts/takyon-operator-prod.sh console [concurrency] [business]
   scripts/takyon-operator-prod.sh overview
   scripts/takyon-operator-prod.sh shell [business]
@@ -377,7 +450,7 @@ Usage:
   scripts/takyon-operator-prod.sh status
 
 Common flow:
-  # Terminal 1: keep private Safebox reachable from this Mac.
+  # Terminal 1: keep Safebox + operator creative gateway reachable from this Mac.
   scripts/takyon-operator-prod.sh tunnel
 
   # Terminal 2: run Mac worker pool. The VPS worker stays on as delayed fallback.
@@ -396,6 +469,14 @@ case "$command" in
   tunnel)
     shift || true
     cmd_tunnel "$@"
+    ;;
+  safebox-tunnel)
+    shift || true
+    cmd_safebox_tunnel "$@"
+    ;;
+  dashboard-tunnel)
+    shift || true
+    cmd_dashboard_tunnel "$@"
     ;;
   shell)
     shift || true
