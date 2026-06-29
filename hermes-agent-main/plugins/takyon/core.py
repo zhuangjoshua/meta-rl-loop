@@ -6770,6 +6770,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, continue, or open app.",
         "- The shared account rail returns canonical account truth as `user` plus `entitlements[]`; if a screen needs subscription/access state, derive it from those helpers instead of reviving legacy `has_active_subscription`, nested `subscription.status`, or custom `client.account()` field guesses.",
         "- Do not hand-roll subscription gates inside `src/screens/app-home.tsx` or `src/screens/profile.tsx` when the shared hooks already answer whether the viewer should subscribe, continue, update billing, or open the app.",
+        "- Never return `null` for anonymous or unentitled viewers on `/app` or `/app/profile`; render a visible sign-in/subscribe/account gate wired to `useProductAuth()` and `resolveViewerCta()`.",
         "- Any starter source already present in `src/` is just route and runtime plumbing. Replace or flesh out the screens themselves.",
         "- Do not spend bootstrap/design time rebuilding runtime plumbing that the kit already wires.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
@@ -9515,6 +9516,21 @@ _SCAFFOLD_BYTE_IDENTICAL_GATED_SCREEN_PATHS: frozenset[str] = frozenset(
     {"src/screens/landing.tsx"}
 )
 _SCAFFOLD_VISIBLE_SCREEN_SENTINEL = "data-takyon-scaffold"
+_APP_ACCESS_GATE_NULL_PATTERN = re.compile(
+    r"""
+    if\s*\(\s*!\s*
+    (?:
+        access|appState|viewer|viewerAccess
+    )
+    \s*\.\s*
+    (?:
+        entitled|authenticated
+    )
+    \s*\)
+    \s*\{?\s*return\s+null\s*;?
+    """,
+    re.IGNORECASE | re.VERBOSE | re.DOTALL,
+)
 
 
 def _scaffold_placeholder_tokens_marker(root: Path) -> dict[str, Any] | None:
@@ -9571,6 +9587,30 @@ def _scaffold_visible_shell_markers(root: Path) -> list[dict[str, Any]]:
     return markers
 
 
+def _app_access_gate_null_markers(root: Path) -> list[dict[str, Any]]:
+    """Detect app screens that blank the customer surface instead of showing the access gate."""
+    markers: list[dict[str, Any]] = []
+    for rel in ("src/screens/app-home.tsx", "src/screens/profile.tsx"):
+        path = root / rel
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        match = _APP_ACCESS_GATE_NULL_PATTERN.search(text)
+        if not match:
+            continue
+        markers.append(
+            {
+                "path": rel,
+                "issue": "app_access_gate_returns_null",
+                "snippet": _truncate_text(match.group(0).strip(), 220),
+            }
+        )
+    return markers
+
+
 def _scaffold_theme_unfinished_blocker(refresh: dict[str, Any]) -> str:
     """Do-not-publish gate: a build that still ships the scaffold's placeholder theme is unfinished.
 
@@ -9609,6 +9649,23 @@ def _scaffold_visible_shell_unfinished_blocker(refresh: dict[str, Any]) -> str:
                 f"{path}: "
                 + (snippet or "rewrite the core bootstrap routes before publish")
                 + " — rewrite `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile` into truthful customer-facing UI before publish"
+            )
+    return ""
+
+
+def _app_access_gate_null_unfinished_blocker(refresh: dict[str, Any]) -> str:
+    """Do-not-publish gate: app routes blank unauthenticated/unentitled viewers."""
+    if not isinstance(refresh, dict):
+        return ""
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
+    markers = inventory.get("risk_markers") if isinstance(inventory.get("risk_markers"), list) else []
+    for marker in markers:
+        if isinstance(marker, dict) and str(marker.get("issue") or "").strip() == "app_access_gate_returns_null":
+            path = str(marker.get("path") or "").strip() or "src/screens/app-home.tsx"
+            return (
+                "product app route can render blank for unauthenticated or unentitled viewers at "
+                f"{path}: replace the null return with a visible sign-in/subscribe gate wired to "
+                "`useProductAuth()` and `resolveViewerCta()`"
             )
     return ""
 
@@ -9978,6 +10035,7 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
             if placeholder_marker:
                 risk_markers.append(placeholder_marker)
             risk_markers.extend(_scaffold_visible_shell_markers(root))
+            risk_markers.extend(_app_access_gate_null_markers(root))
     except Exception as exc:
         risk_markers.append({"path": source_rel, "issue": "stack_gate_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
 
@@ -20959,6 +21017,7 @@ def _finalize_product_surface_refresh(
     for blocker in (
         _scaffold_theme_unfinished_blocker(refresh),
         _scaffold_visible_shell_unfinished_blocker(refresh),
+        _app_access_gate_null_unfinished_blocker(refresh),
     ):
         if blocker:
             refresh = _merge_surface_refresh_blocker(refresh, blocker)

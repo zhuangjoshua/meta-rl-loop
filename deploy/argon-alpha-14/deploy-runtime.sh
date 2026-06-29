@@ -272,6 +272,18 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 	    echo 'TAKYON_SAFEBOX_OPERATOR_TOKEN missing from both /opt/takyon/.takyon/.env and /opt/takyon/secrets/.env' >&2
 	    exit 1
 	  fi
+	  for key in R2_S3_ENDPOINT R2_BUCKET; do
+	    if ! grep -q \"^\${key}=\" /opt/takyon/.takyon/.env 2>/dev/null \
+	      && ! grep -q \"^\${key}=\" /opt/takyon/secrets/.env 2>/dev/null; then
+	      echo \"\${key} missing from operator env; product edge publish will not mirror to R2\" >&2
+	      exit 1
+	    fi
+	  done
+	  if grep -q '^R2_S3_ACCESS_KEY_ID=' /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null \
+	    || grep -q '^R2_S3_SECRET_ACCESS_KEY=' /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null; then
+	    echo 'R2 write credentials must live only on Safebox, not on the operator host' >&2
+	    exit 1
+	  fi
   # A /usr/local/bin/xurl SYMLINK into /root/.local is unreachable for the service under
   # ProtectHome=true — replace it with a real copy once.
   if [ -L /usr/local/bin/xurl ] && [ -x /root/.local/bin/xurl ]; then

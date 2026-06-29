@@ -500,6 +500,63 @@ def test_scaffold_visible_shell_blocks_publish():
     assert "/privacy" in blocker
 
 
+def test_app_access_gate_null_markers_flag_blank_app_routes(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    site = tmp_path / "product" / "site"
+    (site / "src" / "screens").mkdir(parents=True)
+    (site / "src" / "screens" / "app-home.tsx").write_text(
+        "export function AppHomeScreen() {\n"
+        "  const access = useViewerAccess();\n"
+        "  if (!access.entitled) {\n"
+        "    return null;\n"
+        "  }\n"
+        "  return <main>Ready</main>;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (site / "src" / "screens" / "profile.tsx").write_text(
+        "export function ProfileScreen() {\n"
+        "  const viewerAccess = useViewerAccess();\n"
+        "  if (!viewerAccess.authenticated) return null;\n"
+        "  return <main>Profile</main>;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    markers = takyon_core._app_access_gate_null_markers(site)
+
+    assert [marker["path"] for marker in markers] == [
+        "src/screens/app-home.tsx",
+        "src/screens/profile.tsx",
+    ]
+    assert all(marker["issue"] == "app_access_gate_returns_null" for marker in markers)
+
+
+def test_app_access_gate_null_blocks_publish():
+    from plugins.takyon import core as takyon_core
+
+    passed_refresh = {
+        "status": "passed",
+        "inventory": {
+            "risk_markers": [
+                {
+                    "path": "src/screens/app-home.tsx",
+                    "issue": "app_access_gate_returns_null",
+                    "snippet": "if (!access.entitled) { return null;",
+                }
+            ]
+        },
+    }
+
+    blocker = takyon_core._app_access_gate_null_unfinished_blocker(passed_refresh)
+
+    assert "render blank" in blocker
+    assert "src/screens/app-home.tsx" in blocker
+    assert "useProductAuth()" in blocker
+    assert "resolveViewerCta()" in blocker
+
+
 def test_kit_materialization_excludes_scaffold_and_artifacts(tmp_path):
     from plugins.takyon import core as takyon_core
 
