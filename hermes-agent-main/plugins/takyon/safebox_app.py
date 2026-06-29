@@ -175,11 +175,14 @@ def _require_existing_business(slug: str) -> str:
     return business
 
 
-def _storage_business_slug(path: str) -> str:
+def _storage_business_slug(path: str, *, require_existing: bool = True) -> str:
     raw = str(path or "").strip().strip("/")
     if not raw:
         raise HTTPException(status_code=403, detail="storage_scope_required")
-    return _require_existing_business(raw.split("/", 1)[0])
+    business = _require_safe_slug(raw.split("/", 1)[0])
+    if require_existing:
+        return _require_existing_business(business)
+    return business
 
 
 def _require_safe_media_id(value: str) -> str:
@@ -2750,7 +2753,7 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         _require_operator_client(request)
         provider = _storage_provider(body.provider)
-        _storage_business_slug(body.key)
+        _storage_business_slug(body.key, require_existing=False)
         try:
             data = base64.b64decode(str(body.data_b64 or ""), validate=True)
         except Exception as exc:
@@ -2948,6 +2951,32 @@ def build_safebox_app() -> FastAPI:
             "verified_resource": (verify_resp or {}).get("id") if isinstance(verify_resp, dict) else None,
             "sitemap_url": sitemap_url,
         }
+
+    @app.post("/v1/gsc/add-property")
+    def gsc_add_property(
+        request: Request,
+        body: _GscTokenBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        site_url = str(body.site_url or "").strip()
+        if not site_url:
+            raise HTTPException(status_code=400, detail="site_url_required")
+        if not site_url.endswith("/"):
+            site_url = f"{site_url}/"
+        service = _gsc_build("webmasters", "v3")
+        sites_resp = service.sites().list().execute()
+        entries = sites_resp.get("siteEntry", []) if isinstance(sites_resp, dict) else []
+        existing_urls = {
+            str(entry.get("siteUrl") or "").strip()
+            for entry in entries
+            if isinstance(entry, dict)
+        }
+        if site_url in existing_urls:
+            return {"success": True, "site_url": site_url, "already_existed": True}
+        service.sites().add(siteUrl=site_url).execute()
+        return {"success": True, "site_url": site_url, "already_existed": False}
 
     @app.post("/v1/openmeter/request")
     def openmeter_request(
@@ -3238,7 +3267,7 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         _require_operator_client(request)
         provider = _storage_provider(body.provider)
-        _storage_business_slug(body.key)
+        _storage_business_slug(body.key, require_existing=False)
         try:
             data = safebox.storage_get(provider, body.key)
         except Exception as exc:
@@ -3256,7 +3285,7 @@ def build_safebox_app() -> FastAPI:
         _require_internal_token(authorization)
         _require_operator_client(request)
         provider = _storage_provider(body.provider)
-        _storage_business_slug(body.key)
+        _storage_business_slug(body.key, require_existing=False)
         try:
             return safebox.storage_delete(provider, body.key)
         except Exception as exc:

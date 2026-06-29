@@ -3050,6 +3050,16 @@ def gsc_verify_and_submit(site_url: str, *, submit_sitemap: bool = True) -> dict
     )
 
 
+def gsc_add_property(site_url: str) -> dict:
+    """Add an already-verifiable GSC URL-prefix property without vending the service-account key."""
+    return _remote_json(
+        "POST",
+        "/v1/gsc/add-property",
+        {"site_url": str(site_url or "")},
+        timeout=60.0,
+    )
+
+
 def openmeter_request(
     method: str,
     path: str,

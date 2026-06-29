@@ -27901,7 +27901,11 @@ def handle_business_register_search_console(args: dict, **_: Any) -> str:
                 if _takyon_storage.r2_configured():
                     edge_synced = False
                     try:
-                        backend = _takyon_storage.R2StorageBackend()
+                        backend = (
+                            _takyon_storage.SafeboxStorageBackend("r2")
+                            if _takyon_storage._remote_storage_authority_enabled()
+                            else _takyon_storage.R2StorageBackend()
+                        )
                         served_build_id = (
                             backend.get(_takyon_storage.public_site_pointer_key(slug))
                             .decode("utf-8")
@@ -32062,8 +32066,34 @@ def handle_business_seo_add_property(args: dict, **_: Any) -> str:
         site_url = str(args.get("site_url") or "").strip()
         if not site_url:
             raise TakyonError("site_url is required")
-        service = _seo_build_search_console_service_rw()
-        result = _seo_add_gsc_property(service, site_url)
+        business = _resolved_business_slug(args, required=False)
+        if business:
+            idem = hashlib.sha256(
+                f"business-seo-add-property:{business}:{site_url.rstrip('/') + '/'}".encode("utf-8")
+            ).hexdigest()
+            result = json.loads(
+                handle_business_register_search_console(
+                    {
+                        "business": business,
+                        "site_url": site_url,
+                        "idempotency_key": f"business-seo-add-property:{idem}",
+                        "reason": args.get("reason") or "register search console property",
+                        "actor": args.get("actor") or "agent",
+                    }
+                )
+            )
+            return tool_result(
+                {
+                    "success": bool(result.get("success")),
+                    "site_url": site_url.rstrip("/") + "/",
+                    "business": business,
+                    "registered_via": "business_register_search_console",
+                    "receipt": result.get("receipt"),
+                    "status": result.get("status"),
+                    "value": result.get("value") or result,
+                }
+            )
+        result = safebox.gsc_add_property(site_url)
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)

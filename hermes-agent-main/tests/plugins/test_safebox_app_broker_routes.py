@@ -88,6 +88,7 @@ def test_new_routes_are_registered_alongside_env_routes():
     assert "/v1/providers/postmark/send" in paths
     assert "/v1/app-media/put" in paths
     assert "/v1/app-media/get" in paths
+    assert "/v1/gsc/add-property" in paths
     assert "/v1/app-media/delete" in paths
     # ...and the public-config env read compatibility route remains mounted.
     assert "/v1/env/{key}" in paths
@@ -186,6 +187,62 @@ def test_generic_storage_stays_operator_only(client):
 
     assert resp.status_code == 401
     assert resp.json()["detail"] == "operator_unauthorized"
+
+
+def test_operator_storage_put_allows_safe_new_business_namespace(client, monkeypatch):
+    class _MissingBusinessConn:
+        def execute(self, sql, params=None):
+            return _OwnerCursor(None)
+
+    @contextlib.contextmanager
+    def _missing_business_conn():
+        yield _MissingBusinessConn()
+
+    captured = {}
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _missing_business_conn)
+
+    def fake_storage_put(provider, key, data, *, digest):
+        captured.update({"provider": provider, "key": key, "data": data, "digest": digest})
+        return {"provider": provider, "key": key, "stored": True}
+
+    monkeypatch.setattr(safebox, "storage_put", fake_storage_put)
+
+    resp = client.post(
+        "/v1/storage/put",
+        headers=_auth(),
+        json={
+            "provider": "supabase_s3",
+            "key": "fresh-bootstrap/product/site/index.html",
+            "data_b64": base64.b64encode(b"<html></html>").decode("ascii"),
+            "digest": "sha256",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["stored"] is True
+    assert captured == {
+        "provider": "supabase_s3",
+        "key": "fresh-bootstrap/product/site/index.html",
+        "data": b"<html></html>",
+        "digest": "sha256",
+    }
+
+
+def test_operator_storage_put_still_rejects_unsafe_namespace(client, monkeypatch):
+    monkeypatch.setattr(safebox, "storage_put", lambda *a, **k: pytest.fail("storage called"))
+    resp = client.post(
+        "/v1/storage/put",
+        headers=_auth(),
+        json={
+            "provider": "supabase_s3",
+            "key": "../escape.txt",
+            "data_b64": base64.b64encode(b"bad").decode("ascii"),
+            "digest": "sha256",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "unsafe_slug"
 
 
 def test_app_media_put_uses_app_session_not_operator_token(client, monkeypatch):

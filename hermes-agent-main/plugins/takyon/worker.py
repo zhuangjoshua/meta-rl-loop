@@ -58,7 +58,7 @@ _DEFAULT_TURN_TIMEOUT = 600.0
 # Default queue poll cadence when a tick drains nothing. Drain itself is tight (run_one in a loop).
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker (matches jobs.requeue_stale's own default).
-_STALE_SECONDS = 900
+_STALE_SECONDS = 14_400
 # Release product-AI usage holds whose provider call crashed before settle/release.
 _APP_USAGE_HOLD_TTL_SECONDS = 3600
 _X_POST_CHAR_LIMIT = 280
@@ -2550,7 +2550,11 @@ def drain_tick(
             counts["dispatched"] += wakes.dispatch_due_wakes(conn)
         if not enabled_kinds or "product_action" in enabled_kinds:
             counts["dispatched"] += _dispatch_due_action_jobs(conn)
-    counts["requeued"] = jobs.requeue_stale(conn, older_than_seconds=_STALE_SECONDS, worker_id=worker_id)
+    counts["requeued"] = jobs.requeue_stale(
+        conn,
+        older_than_seconds=_env_int("TAKYON_WORKER_STALE_SECONDS", _STALE_SECONDS),
+        worker_id=worker_id,
+    )
     if _conn_is_safebox_authority(conn):
         counts["usage_holds_released"] = app_usage.reconcile_held_usage(
             conn,
