@@ -309,6 +309,9 @@ def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
             (job_id,),
         ).rowcount
     if updated == 0:
+        row = conn.execute("select status from jobs where id = %s", (job_id,)).fetchone()
+        if row is not None and str(row[0]) == "running":
+            return
         raise JobNotRunning(job_id)
 
 
