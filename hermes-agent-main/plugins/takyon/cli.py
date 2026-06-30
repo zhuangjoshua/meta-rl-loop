@@ -15,7 +15,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .core import (
     TakyonError,
@@ -92,6 +92,73 @@ _CREATE_NAME_LLM_PROMPT = (
     "Only invent a concise new name when the idea does not already imply one. "
     "Return only the name text, with no quotes, JSON, explanation, or extra words."
 )
+
+
+def _runtime_event_rows_for_business(
+    store: TakyonStore,
+    business_slug: str,
+    *,
+    limit: int = 300,
+) -> list[dict[str, Any]]:
+    slug = _slugify(str(business_slug or "").strip())
+    if not slug:
+        return []
+    with store._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM (
+              SELECT * FROM events
+              WHERE business_slug = ? AND event_type LIKE 'dashboard.run.%'
+              ORDER BY created_at DESC, id DESC
+              LIMIT ?
+            ) recent
+            ORDER BY created_at ASC, id ASC
+            """,
+            (slug, max(1, min(int(limit or 300), 500))),
+        ).fetchall()
+    return [store._row_to_dict(row) for row in rows]
+
+
+def _runtime_event_tail_entry(event: Mapping[str, Any] | dict[str, Any] | None) -> dict[str, str] | None:
+    if not isinstance(event, dict):
+        return None
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if str(payload.get("source") or "") == "operator_shell_direct":
+        return None
+    stream = str(payload.get("stream") or "").strip()
+    if stream == "message_delta":
+        text = str(payload.get("line") or payload.get("detail") or "")
+        if not text:
+            return None
+        return {
+            "mode": "ceo_stream",
+            "text": text,
+            "business": str(event.get("business_slug") or "").strip(),
+        }
+    if stream == "message_flush":
+        return {"mode": "ceo_flush"}
+    status = str(payload.get("status") or event.get("event_type") or "").replace("dashboard.run.", "").strip().lower()
+    if status == "heartbeat":
+        return None
+    command = str(payload.get("command") or "").strip()
+    kind = str(payload.get("kind") or "").strip().lower()
+    if not (command.startswith("Claude worker ->") or kind in {"claude_agent_sdk", "task"}):
+        return None
+    text = str(payload.get("line") or payload.get("detail") or "").strip()
+    if not text:
+        return None
+    return {
+        "mode": "worker_note",
+        "status": status or "output",
+        "text": text,
+    }
+
+
+def _runtime_event_tail_label(entry: Mapping[str, Any] | dict[str, Any]) -> str:
+    status = str(entry.get("status") or "").strip().lower()
+    if not status or status == "output":
+        return "— Claude worker —"
+    return f"— Claude worker:{status} —"
 
 
 _CLI_ONLY_COMMANDS = {
@@ -2323,23 +2390,7 @@ class _RuntimeEventTail:
                 self._seen.add(eid)
 
     def _runtime_event_rows(self, scope: str, *, limit: int = 300) -> list[dict[str, Any]]:
-        if not scope:
-            return []
-        with self.store._connect() as conn:
-            if scope:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM (
-                      SELECT * FROM events
-                      WHERE business_slug = ? AND event_type = 'dashboard.run.output'
-                      ORDER BY created_at DESC, id DESC
-                      LIMIT ?
-                    ) recent
-                    ORDER BY created_at ASC, id ASC
-                    """,
-                    (scope, max(1, min(int(limit or 300), 500))),
-                ).fetchall()
-        return [self.store._row_to_dict(row) for row in rows]
+        return _runtime_event_rows_for_business(self.store, scope, limit=limit)
 
     def _drain_once(self) -> None:
         if self._out is None:
@@ -2357,15 +2408,17 @@ class _RuntimeEventTail:
             if not eid or eid in self._seen:
                 continue
             self._seen.add(eid)
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            if str(payload.get("source") or "") == "operator_shell_direct":
+            entry = _runtime_event_tail_entry(event)
+            if not entry:
                 continue
-            stream = str(payload.get("stream") or "").strip()
-            if stream == "message_delta":
-                business = "" if scope else str(event.get("business_slug") or "").strip()
-                self._write_delta(str(payload.get("line") or payload.get("detail") or ""), business=business)
-            elif stream == "message_flush":
+            mode = str(entry.get("mode") or "")
+            if mode == "ceo_stream":
+                business = "" if scope else str(entry.get("business") or "")
+                self._write_delta(str(entry.get("text") or ""), business=business)
+            elif mode == "ceo_flush":
                 self._finish_stream()
+            elif mode == "worker_note":
+                self._write_worker_note(str(entry.get("text") or ""), status=str(entry.get("status") or "output"))
 
     def _write_delta(self, text: str, *, business: str = "") -> None:
         if self._out is None or not text:
@@ -2387,6 +2440,14 @@ class _RuntimeEventTail:
         print("", file=self._out, flush=True)
         self._stream_open = False
         self._stream_business = ""
+
+    def _write_worker_note(self, text: str, *, status: str = "output") -> None:
+        if self._out is None or not text:
+            return
+        self._finish_stream()
+        label = _runtime_event_tail_label({"status": status})
+        print(f"\n{label}", file=self._out, flush=True)
+        print(text, file=self._out, flush=True)
 
 
 def _follow_worker_job(
@@ -2428,22 +2489,8 @@ def _follow_worker_job(
     except Exception:  # noqa: BLE001 - best-effort priming
         pass
     try:
-        with store._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id FROM events
-                WHERE business_slug = ? AND event_type = 'dashboard.run.output'
-                ORDER BY created_at DESC, id DESC
-                LIMIT 200
-                """,
-                (slug,),
-            ).fetchall()
-        for row in rows:
-            try:
-                event = store._row_to_dict(row)
-                eid = str(event.get("id") or "")
-            except Exception:
-                eid = ""
+        for event in _runtime_event_rows_for_business(store, slug, limit=200):
+            eid = str(event.get("id") or "")
             if eid:
                 seen_runtime_events.add(eid)
     except Exception:  # noqa: BLE001 - runtime stream is display-only
@@ -2486,38 +2533,31 @@ def _follow_worker_job(
     def _drain_new_runtime_stream() -> None:
         nonlocal stream_open
         try:
-            with store._connect() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM (
-                      SELECT * FROM events
-                      WHERE business_slug = ? AND event_type = 'dashboard.run.output'
-                      ORDER BY created_at DESC, id DESC
-                      LIMIT 300
-                    ) recent
-                    ORDER BY created_at ASC, id ASC
-                    """,
-                    (slug,),
-                ).fetchall()
+            rows = _runtime_event_rows_for_business(store, slug, limit=300)
         except Exception:  # noqa: BLE001 - runtime stream is display-only
             return
-        for row in rows:
-            event = store._row_to_dict(row)
+        for event in rows:
             eid = str(event.get("id") or "")
             if not eid or eid in seen_runtime_events:
                 continue
             seen_runtime_events.add(eid)
-            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            stream = str(payload.get("stream") or "").strip()
-            if stream == "message_delta":
-                text = str(payload.get("line") or payload.get("detail") or "")
+            entry = _runtime_event_tail_entry(event)
+            if not entry:
+                continue
+            mode = str(entry.get("mode") or "")
+            if mode == "ceo_stream":
+                text = str(entry.get("text") or "")
                 if text:
                     if not stream_open:
                         print("\n— CEO —", flush=True)
                         stream_open = True
                     print(text, end="", flush=True)
-            elif stream == "message_flush":
+            elif mode == "ceo_flush":
                 _finish_stream()
+            elif mode == "worker_note":
+                _finish_stream()
+                print(f"\n{_runtime_event_tail_label(entry)}", flush=True)
+                print(str(entry.get("text") or ""), flush=True)
 
     def _drain_new_logs() -> None:
         nonlocal log_offset, log_path

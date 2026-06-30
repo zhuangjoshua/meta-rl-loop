@@ -278,6 +278,120 @@ def test_runtime_event_tail_prints_ceo_stream_only():
     assert "tool started" not in output
 
 
+def test_runtime_event_tail_prints_claude_worker_runtime_events():
+    class Store:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE events (
+                  id TEXT,
+                  business_slug TEXT,
+                  event_type TEXT,
+                  payload_json TEXT,
+                  created_at TEXT
+                );
+                """
+            )
+
+        def _connect(self):
+            return self.conn
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload) if payload else {}
+            return data
+
+    store = Store()
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-1",
+            "demo",
+            "dashboard.run.started",
+            json.dumps(
+                {
+                    "kind": "claude_agent_sdk",
+                    "status": "started",
+                    "detail": "Claude worker started for product/site.",
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:00Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-2",
+            "demo",
+            "dashboard.run.running",
+            json.dumps(
+                {
+                    "kind": "task",
+                    "status": "running",
+                    "detail": "Generating the landing page.",
+                    "line": "Generating the landing page.",
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:01Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-3",
+            "demo",
+            "dashboard.run.completed",
+            json.dumps(
+                {
+                    "kind": "claude_agent_sdk",
+                    "status": "completed",
+                    "detail": "Worker finished cleanly.",
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:02Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-4",
+            "demo",
+            "dashboard.run.output",
+            json.dumps({"line": "tool started -> business_read_business"}),
+            "2026-06-28T12:00:03Z",
+        ),
+    )
+    store.conn.commit()
+
+    read_fd, write_fd = os.pipe()
+    tail = cli._RuntimeEventTail(store=store, enabled=True, business_filter="demo")
+    tail._out = os.fdopen(write_fd, "w", buffering=1, encoding="utf-8")
+    tail._scope = "demo"
+    try:
+        tail._drain_once()
+        tail._out.close()
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert "— Claude worker:started —" in output
+    assert "Claude worker started for product/site." in output
+    assert "— Claude worker:running —" in output
+    assert "Generating the landing page." in output
+    assert "— Claude worker:completed —" in output
+    assert "Worker finished cleanly." in output
+    assert "tool started -> business_read_business" not in output
+
+
 def test_runtime_event_tail_stays_silent_in_global_scope(tmp_path):
     class Store:
         def __init__(self):
