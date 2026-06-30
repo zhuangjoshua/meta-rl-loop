@@ -134,13 +134,15 @@ _ANSI = {
     "gray": "\x1b[90m",
     "blue": "\x1b[94m",
     "magenta": "\x1b[95m",
-    "electric": "\x1b[38;2;0;176;255m",
+    "electric": "\x1b[38;2;255;215;0m",  # gold — CoScale brand (was electric blue #00B0FF)
+    "amber": "\x1b[38;2;255;191;0m",
+    "bronze": "\x1b[38;2;205;127;50m",
 }
 _THEME = {
     "brand": _ANSI["electric"],
     "primary": _ANSI["electric"],
-    "secondary": _ANSI["cyan"],
-    "skill": _ANSI["cyan"],
+    "secondary": _ANSI["amber"],
+    "skill": _ANSI["amber"],
     "control": _ANSI["gray"],
     "muted": _ANSI["gray"],
     "success": _ANSI["green"],
@@ -261,18 +263,27 @@ def _read_mascot_lines() -> list[str]:
 
 
 def _startup_graphic(current_business: str | None) -> str:
-    width = max(92, min(_shell_width(), 112))
+    width = max(92, min(_shell_width(), 116))
+    # CoScale wordmark — figlet "ANSI Shadow" (generated via an online figlet tool, not hand-drawn).
     wordmark = [
-        r"   ______      _____           __        ",
-        r"  / ____/___  / ___/________ _/ /__      ",
-        r" / /   / __ \ \__ \/ ___/ __ `/ / _ \    ",
-        r"/ /___/ /_/ /___/ / /__/ /_/ / /  __/    ",
-        r"\____/\____//____/\___/\__,_/_/\___/     ",
+        " ██████╗ ██████╗ ███████╗ ██████╗ █████╗ ██╗     ███████╗",
+        "██╔════╝██╔═══██╗██╔════╝██╔════╝██╔══██╗██║     ██╔════╝",
+        "██║     ██║   ██║███████╗██║     ███████║██║     █████╗  ",
+        "██║     ██║   ██║╚════██║██║     ██╔══██║██║     ██╔══╝  ",
+        "╚██████╗╚██████╔╝███████║╚██████╗██║  ██║███████╗███████╗",
+        " ╚═════╝ ╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝",
+    ]
+    # Gold → amber → bronze vertical gradient (mirrors the HERMES-AGENT logo treatment).
+    wordmark_tints = [
+        _ANSI["electric"], _ANSI["electric"],
+        _ANSI["amber"], _ANSI["amber"],
+        _ANSI["bronze"], _ANSI["bronze"],
     ]
     mascot = _read_mascot_lines()
     rows = [_frame_line(width)]
     for index, line in enumerate(wordmark):
-        rows.append(_framed_text(f"{_render_pixel_mascot_line(mascot[index] if index < len(mascot) else '')}  {_color(line, _THEME['brand'])}", width))
+        tint = wordmark_tints[index] if index < len(wordmark_tints) else _THEME["brand"]
+        rows.append(_framed_text(f"{_render_pixel_mascot_line(mascot[index] if index < len(mascot) else '')}  {_color(line, tint)}", width))
     for line in mascot[len(wordmark) :]:
         rows.append(_framed_text(f"{_render_pixel_mascot_line(line)}", width))
     rows.extend([
