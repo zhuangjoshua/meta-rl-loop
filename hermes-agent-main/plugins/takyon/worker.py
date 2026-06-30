@@ -2592,6 +2592,11 @@ def drain_tick(
             outcome.actual_cents,
             f" reason={outcome.reason}" if outcome.reason else "",
         )
+        if heartbeat_conn_factory is not None:
+            # Long handlers keep the claim connection idle while heartbeats use a separate short-lived
+            # connection. Do not reuse that stale claim socket for the next claim; the outer worker loop
+            # opens a fresh connection on the next tick.
+            break
         if max_jobs is not None and counts["drained"] >= max_jobs:
             break
 

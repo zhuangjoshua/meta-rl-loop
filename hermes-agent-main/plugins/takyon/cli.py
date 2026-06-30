@@ -1830,7 +1830,7 @@ def _business_bootstrap_instruction(
         "- timeout_ms: 1800000",
         "- refresh_surface: true",
         "Inspect the structured result. Trust only its exact success/blocker and surface_refresh publish status.",
-        "Then verify the action rail before continuing: call business_check_runtime_capabilities for the business, then call business_invoke_app_action with a small realistic payload matching the requested workflow, and read the returned receipt/result. If either verification fails or the invoked result is missing the requested real AI output shape, record the exact blocker in research/strategy.md and stop bootstrap there. Do not proceed to X or final completion with a placeholder workflow.",
+        "Then verify only the declared action rail before continuing: call business_check_runtime_capabilities for the business and confirm the requested action is exposed. Do NOT call business_invoke_app_action during ceo_bootstrap; app action execution requires a real signed-in subscribed product-user session and is verified immediately after bootstrap completes. If the action is missing, record the exact blocker in research/strategy.md and stop bootstrap there. Do not proceed to X or final completion with a placeholder workflow.",
         "",
         "Once the product site is published, register its public URL with the operator's Search Console service account so the new site is owned and trackable from day one:",
         f"- Call business_seo_add_property with site_url \"https://{slug}.{_company_base_domain()}/\".",
@@ -1859,7 +1859,7 @@ def _business_bootstrap_instruction(
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
         "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
-        "If `Explicit product workflow requested: yes`, the final response must include the action name and the business_invoke_app_action verification result or the exact blocker. Never say the real workflow is \"coming soon\" after marking bootstrap complete.",
+        "If `Explicit product workflow requested: yes`, the final response must include the action name and the capability-check result or the exact blocker. Never say the real workflow is \"coming soon\" after marking bootstrap complete; note that live action execution is the post-bootstrap signed-in subscriber verification step.",
         "If `Explicit product workflow requested: no` and only the landing + access shell were required, close by naming the next business move in warm, customer-facing language: the live site is a real starting point, and the next step is to build out the post-sign-in product experience. If `Explicit product workflow requested: yes`, close on the verified live workflow instead. Do NOT name any internal skill or tool; describe the work, not the runtime.",
     ]
     return "\n".join(lines)

@@ -293,9 +293,10 @@ def test_handler_error_lost_claim_does_not_wedge_worker(pg_conn, monkeypatch):
     outcome = jobs.run_one(pg_conn, worker_id="w1", handlers={"ceo_wake": handler})
 
     assert outcome is not None
-    assert outcome.status == "failed"
+    assert outcome.status == "queued"
     assert outcome.reason == "handler_error"
     assert len(handler.calls) == 1
+    assert jobs.get_job(pg_conn, outcome.job_id).status == "queued"
     bal = billing.get_billing_balances(pg_conn, uid)
     assert bal.reserved_cents == 0
     assert bal.allowance_used_cents == 0

@@ -379,6 +379,45 @@ def fail(conn, job_id: str, *, error: str, retryable: bool = True) -> str:
     return "failed"
 
 
+def fail_if_still_owned(
+    conn,
+    job_id: str,
+    *,
+    worker_id: str,
+    error: str,
+    retryable: bool = True,
+) -> str | None:
+    """Best-effort failure finalizer for a stale lifecycle connection.
+
+    Only touches the row if it is still running under the same worker claim. If a sibling worker has
+    reclaimed it, leave that live attempt alone.
+    """
+    err = json.dumps({"reason": "handler_error", "error": error})
+    _refresh_job_lifecycle_session(conn)
+    with conn.transaction():
+        row = conn.execute(
+            "select attempts, max_attempts from jobs "
+            "where id = %s and status = 'running' and locked_by = %s for update",
+            (job_id, worker_id),
+        ).fetchone()
+        if row is None:
+            return None
+        attempts, max_attempts = int(row[0]), int(row[1])
+        if retryable and attempts < max_attempts:
+            conn.execute(
+                "update jobs set status = 'queued', error = %s::jsonb, "
+                "locked_by = null, locked_at = null, updated_at = now() where id = %s",
+                (err, job_id),
+            )
+            return "queued"
+        conn.execute(
+            "update jobs set status = 'failed', error = %s::jsonb, "
+            "locked_by = null, locked_at = null, updated_at = now() where id = %s",
+            (err, job_id),
+        )
+    return "failed"
+
+
 def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reaper") -> int:
     """Crash recovery (mediationplan: worker crash mid-job → safe retry). A worker that dies leaves its
     job 'running' with a stale locked_at; claim_one only picks 'queued', so without this the job is
@@ -569,13 +608,21 @@ def run_one(
             try:
                 status = fail(lifecycle_conn, job.id, error=str(exc), retryable=True)
             except JobNotRunning:
+                repaired_status = fail_if_still_owned(
+                    lifecycle_conn,
+                    job.id,
+                    worker_id=worker_id,
+                    error=str(exc),
+                    retryable=True,
+                )
                 _log.warning(
                     "jobs: handler failed after job %s (kind=%s) lost its running claim; "
-                    "continuing drain without wedging the worker",
+                    "continuing drain without wedging the worker%s",
                     job.id,
                     job.kind,
+                    f" ({repaired_status})" if repaired_status else "",
                 )
-                status = "failed"
+                status = repaired_status or "failed"
         finally:
             _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
         return JobOutcome(
