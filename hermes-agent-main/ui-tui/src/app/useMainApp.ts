@@ -23,7 +23,7 @@ import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import { terminalParityHints } from '../lib/terminalParity.js'
 import { buildToolTrailLine, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
-import type { Msg, PanelSection, SlashCatalog } from '../types.js'
+import type { CommandResult, Msg, PanelSection, SlashCatalog } from '../types.js'
 
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createSlashHandler } from './createSlashHandler.js'
@@ -320,6 +320,11 @@ export function useMainApp(gw: GatewayClient) {
   const panel = useCallback(
     (title: string, sections: PanelSection[]) =>
       appendMessage({ kind: 'panel', panelData: { sections, title }, role: 'system', text: '' }),
+    [appendMessage]
+  )
+
+  const result = useCallback(
+    (r: CommandResult) => appendMessage({ kind: 'result', result: r, role: 'system', text: '' }),
     [appendMessage]
   )
 
@@ -656,7 +661,7 @@ export function useMainApp(gw: GatewayClient) {
           setSessionStartedAt
         },
         slashFlightRef,
-        transcript: { page, panel, send, setHistoryItems, sys, trimLastExchange: session.trimLastExchange },
+        transcript: { page, panel, result, send, setHistoryItems, sys, trimLastExchange: session.trimLastExchange },
         voice: { setVoiceEnabled, setVoiceRecordKey }
       }),
     [
@@ -670,6 +675,7 @@ export function useMainApp(gw: GatewayClient) {
       page,
       panel,
       paste,
+      result,
       selection,
       send,
       session,

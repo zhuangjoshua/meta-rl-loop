@@ -13230,6 +13230,125 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     return ""
 
 
+def _rl_cell(text, tone: str | None = None, mono: bool = False) -> dict:
+    cell: dict = {"text": "" if text is None else str(text)}
+    if tone:
+        cell["tone"] = tone
+    if mono:
+        cell["mono"] = True
+    return cell
+
+
+_RL_STATUS_TONE = {"proven": "ok", "candidate": "warn", "retired": "muted"}
+
+
+def _structured_slash_result(session: dict, base: str, arg: str) -> dict | None:
+    """Build a structured CommandResult for the read-only RL observability commands so the TUI
+    renders them as components, not a flattened string. Source of truth = the SAME store methods
+    the CLI uses (no re-derivation, no fabrication). Returns a {result, output} payload, or None
+    to fall through to the normal slash worker (plain-text path unchanged)."""
+    if base != "rl":
+        return None
+    try:
+        from plugins.takyon.cli import _slugify
+        store = _takyon_store(session)
+    except Exception:
+        return None
+    parts = (arg or "").split()
+    sub = parts[0].lower() if parts else "status"
+    cur = str((session or {}).get("takyon_current_business") or "").strip() or None
+    try:
+        if sub == "status":
+            biz = _slugify(parts[1]) if len(parts) > 1 else cur
+            d = store.rl_status(biz)
+            by = d.get("lessons_by_status") or {}
+            pairs = [
+                ["business", _rl_cell(d.get("business"))],
+                ["episodes (open)", _rl_cell(d.get("episodes_opened"))],
+                ["episodes (settled)", _rl_cell(d.get("episodes_settled"))],
+                ["lessons total", _rl_cell(d.get("lessons_total"))],
+                ["  proven", _rl_cell(by.get("proven", 0), "ok")],
+                ["  candidate", _rl_cell(by.get("candidate", 0), "warn")],
+                ["  retired", _rl_cell(by.get("retired", 0), "muted")],
+                ["rewarded episodes", _rl_cell(d.get("rewarded_episodes"))],
+                ["last episode", _rl_cell(d.get("last_episode_at") or "—")],
+                ["last state-of-mind", _rl_cell(d.get("last_state_of_mind_at") or "—")],
+            ]
+            res = {"kind": "kv", "title": f"RL status · {d.get('business')}", "pairs": pairs}
+            return {"result": res, "output": f"{d.get('business')}: {d.get('episodes_opened')} episodes, {d.get('lessons_total')} lessons"}
+        if sub in ("lessons", "lesson"):
+            action = parts[1].lower() if len(parts) > 1 else ""
+            if action in ("approve", "reject"):
+                if len(parts) < 3:
+                    return {"result": {"kind": "error", "title": "usage", "markdown": f"`rl lessons {action} <lesson-id> [reason]`"}, "output": "usage error"}
+                d = store.rl_review_lesson(parts[2], action, reason=" ".join(parts[3:]))
+                res = {"kind": "kv", "title": f"lesson {action}d", "pairs": [
+                    ["lesson", _rl_cell(d.get("lesson_id"), mono=True)],
+                    ["new status", _rl_cell(d.get("new_status"), "ok" if action == "approve" else "muted")],
+                ]}
+                return {"result": res, "output": f"{action}d {d.get('lesson_id')} -> {d.get('new_status')}"}
+            biz = None
+            scope = None
+            status = None
+            i = 1
+            while i < len(parts):
+                tok = parts[i]
+                if tok == "--scope" and i + 1 < len(parts):
+                    scope = parts[i + 1].lower(); i += 2; continue
+                if tok == "--status" and i + 1 < len(parts):
+                    status = parts[i + 1].lower(); i += 2; continue
+                if tok in ("pending", "review"):
+                    status = "candidate"; i += 1; continue
+                if not tok.startswith("--"):
+                    biz = _slugify(tok)
+                i += 1
+            d = store.rl_lessons(biz or cur, scope=scope, status=status)
+            lessons = d.get("lessons") or []
+            rows = []
+            for ln in lessons:
+                st = str(ln.get("status") or "candidate")
+                rows.append([
+                    _rl_cell(st, _RL_STATUS_TONE.get(st, "muted")),
+                    _rl_cell(ln.get("scope")),
+                    _rl_cell(ln.get("claim") or ""),
+                    _rl_cell(str(ln.get("id") or "")[:8], mono=True),
+                ])
+            res = {"kind": "table", "title": f"lessons ({d.get('count', len(lessons))})",
+                   "columns": ["status", "scope", "claim", "id"], "rows": rows,
+                   "footer": "approve: rl lessons approve <id>   ·   reject: rl lessons reject <id>"}
+            return {"result": res, "output": f"{len(lessons)} lessons"}
+        if sub == "why":
+            if len(parts) < 2:
+                return {"result": {"kind": "error", "title": "usage", "markdown": "`rl why <episode-id>`"}, "output": "usage error"}
+            d = store.rl_why(parts[1])
+            bet = d.get("bet") or {}
+            ctx = d.get("context_before") or {}
+            pairs = [
+                ["business", _rl_cell(d.get("business"))],
+                ["hypothesis", _rl_cell(bet.get("hypothesis"))],
+                ["channel", _rl_cell(bet.get("channel") or "—")],
+                ["opened", _rl_cell(bet.get("opened_at"))],
+                ["identity (then)", _rl_cell(ctx.get("identity") or "—")],
+                ["left off (then)", _rl_cell(ctx.get("state_of_mind") or "—")],
+                ["settled", _rl_cell("yes" if d.get("settled") else "no", "ok" if d.get("settled") else "muted")],
+            ]
+            res = {"kind": "kv", "title": f"why · {parts[1][:8]}", "pairs": pairs}
+            if d.get("outcome"):
+                res["footer"] = f"outcome: {d.get('outcome')}"
+            return {"result": res, "output": f"why {parts[1]}"}
+        if sub == "policy":
+            biz = _slugify(parts[1]) if len(parts) > 1 else cur
+            if not biz:
+                return {"result": {"kind": "error", "title": "usage", "markdown": "`rl policy <business>`"}, "output": "usage error"}
+            d = store.rl_policy(biz)
+            md = d.get("injected_text") or "_(empty — no identity, state-of-mind, or learnings recorded yet)_"
+            res = {"kind": "markdown", "title": f"policy · {biz} (what the CEO sees each wake)", "markdown": md}
+            return {"result": res, "output": f"policy {biz}"}
+    except Exception as e:
+        return {"result": {"kind": "error", "title": "rl error", "markdown": str(e)}, "output": f"error: {e}"}
+    return None
+
+
 @method("slash.exec")
 def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
@@ -13294,6 +13413,11 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"output": str(result or "(no output)")})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
+
+    # Structured observability commands (rl …) render as components, not a flattened string.
+    structured = _structured_slash_result(session, _cmd_base, _cmd_arg)
+    if structured is not None:
+        return _ok(rid, structured)
 
     worker = session.get("slash_worker")
     if not worker:

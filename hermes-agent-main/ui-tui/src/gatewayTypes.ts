@@ -1,4 +1,4 @@
-import type { SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
+import type { CommandResult, SessionInfo, SlashCategory, SubagentStatus, Usage } from './types.js'
 
 export interface GatewaySkin {
   banner_hero?: string
@@ -39,6 +39,9 @@ export interface CompletionResponse {
 }
 
 export interface SlashExecResponse {
+  // Structured result when the command produced one (rendered richly); `output` stays as the
+  // guaranteed plain-text fallback so any not-yet-structured command still works unchanged.
+  result?: CommandResult
   output?: string
   warning?: string
 }

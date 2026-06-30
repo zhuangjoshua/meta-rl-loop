@@ -110,8 +110,9 @@ export interface ClarifyReq {
 
 export interface Msg {
   info?: SessionInfo
-  kind?: 'diff' | 'intro' | 'panel' | 'slash' | 'trail'
+  kind?: 'diff' | 'intro' | 'panel' | 'result' | 'slash' | 'trail'
   panelData?: PanelData
+  result?: CommandResult
   role: Role
   text: string
   thinking?: string
@@ -194,6 +195,46 @@ export interface PanelSection {
   items?: string[]
   rows?: [string, string][]
   text?: string
+  title?: string
+}
+
+// ── Structured command results (the keystone: commands return shape, not a flattened string) ──
+// Semantic tone → theme status colors (resolved in components/commandResult.tsx). Never a raw hex.
+export type Tone = 'accent' | 'bad' | 'muted' | 'ok' | 'warn'
+
+export interface CommandCell {
+  href?: string
+  mono?: boolean
+  text: string
+  tone?: Tone
+}
+
+export interface CommandResultSection {
+  pairs?: [string, CommandCell][]
+  title?: string
+}
+
+export interface CommandMeter {
+  label: string
+  pct: number
+  tone?: Tone
+}
+
+// One discriminated shape the TUI renders richly. `kind` selects the layout; the matching
+// payload field carries the data. Producers (Python gateway) build this from canonical state;
+// the renderer never truncates the substance (anti-hide).
+export interface CommandResult {
+  columns?: string[]
+  diff?: string
+  footer?: string
+  items?: CommandCell[]
+  kind: 'diff' | 'error' | 'kv' | 'list' | 'log' | 'markdown' | 'status' | 'table'
+  lines?: { text: string; tone?: Tone }[]
+  markdown?: string
+  meters?: CommandMeter[]
+  pairs?: [string, CommandCell][]
+  rows?: CommandCell[][]
+  sections?: CommandResultSection[]
   title?: string
 }
 

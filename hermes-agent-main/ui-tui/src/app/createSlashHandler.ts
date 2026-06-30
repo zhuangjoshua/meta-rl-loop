@@ -10,7 +10,7 @@ import { getUiState } from './uiStore.js'
 export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => boolean {
   const { gw } = ctx.gateway
   const { catalog } = ctx.local
-  const { page, send, sys } = ctx.transcript
+  const { page, result, send, sys } = ctx.transcript
 
   const handler = (cmd: string): boolean => {
     const flight = ++ctx.slashFlightRef.current
@@ -77,6 +77,16 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
     gw.request<SlashExecResponse>('slash.exec', { command: cmd.slice(1), session_id: sid })
       .then(r => {
         if (stale()) {
+          return
+        }
+
+        // Structured result → rich renderer; otherwise fall back to the plain-text path unchanged.
+        if (r?.result) {
+          if (r.warning) {
+            sys(`warning: ${r.warning}`)
+          }
+          result(r.result)
+
           return
         }
 

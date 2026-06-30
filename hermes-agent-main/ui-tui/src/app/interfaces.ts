@@ -10,6 +10,7 @@ import type { Theme } from '../theme.js'
 import type {
   ApprovalReq,
   ClarifyReq,
+  CommandResult,
   ConfirmReq,
   DetailsMode,
   Msg,
@@ -288,6 +289,7 @@ export interface SlashHandlerContext {
   transcript: {
     page: (text: string, title?: string) => void
     panel: (title: string, sections: PanelSection[]) => void
+    result: (r: CommandResult) => void
     send: (text: string) => void
     setHistoryItems: StateSetter<Msg[]>
     sys: (text: string) => void

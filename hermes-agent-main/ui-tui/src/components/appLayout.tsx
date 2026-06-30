@@ -21,6 +21,7 @@ import { AgentsOverlay } from './agentsOverlay.js'
 import { GoodVibesHeart, StatusRule, StickyPromptTracker, TranscriptScrollbar } from './appChrome.js'
 import { FloatingOverlays, PromptZone } from './appOverlays.js'
 import { Banner, Panel, SessionPanel } from './branding.js'
+import { CommandResultView } from './commandResult.js'
 import { FpsOverlay } from './fpsOverlay.js'
 import { HelpHint } from './helpHint.js'
 import { MessageLine } from './messageLine.js'
@@ -118,6 +119,8 @@ const TranscriptPane = memo(function TranscriptPane({
                 </Box>
               ) : row.msg.kind === 'panel' && row.msg.panelData ? (
                 <Panel sections={row.msg.panelData.sections} t={ui.theme} title={row.msg.panelData.title} />
+              ) : row.msg.kind === 'result' && row.msg.result ? (
+                <CommandResultView cols={composer.cols} result={row.msg.result} t={ui.theme} />
               ) : (
                 <MessageLine
                   cols={composer.cols}
