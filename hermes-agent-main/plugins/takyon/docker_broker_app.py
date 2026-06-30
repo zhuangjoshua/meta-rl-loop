@@ -8,9 +8,11 @@ access to the host Docker daemon.
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -44,6 +46,8 @@ _RUN_FLAG_WITH_ARG = {
 _EXEC_FLAG_NOARG = {"-i"}
 _EXEC_FLAG_WITH_ARG = {"-e"}
 _REMOVE_FLAG_NOARG = {"-f"}
+_DOCKER_IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@-]*$")
+_DOCKER_CONTAINER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
 class _DockerCommandBody(BaseModel):
@@ -82,8 +86,38 @@ def _require_internal_token(authorization: str | None = Header(default=None)) ->
     if not expected:
         raise HTTPException(status_code=401, detail="docker broker token not configured")
     presented = str(authorization or "").strip()
-    if presented != f"Bearer {expected}":
+    expected_header = f"Bearer {expected}"
+    if not hmac.compare_digest(presented.encode(), expected_header.encode()):
         raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def _validated_image(image: str) -> str:
+    value = str(image or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="image is required")
+    if value.startswith("-") or any(ch.isspace() for ch in value):
+        raise HTTPException(status_code=400, detail="invalid docker image")
+    if not _DOCKER_IMAGE_RE.fullmatch(value):
+        raise HTTPException(status_code=400, detail="invalid docker image")
+    return value
+
+
+def _validated_container_id(container_id: str) -> str:
+    value = str(container_id or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="container_id is required")
+    if value.startswith("-") or any(ch.isspace() for ch in value):
+        raise HTTPException(status_code=400, detail="invalid container_id")
+    if not _DOCKER_CONTAINER_ID_RE.fullmatch(value):
+        raise HTTPException(status_code=400, detail="invalid container_id")
+    return value
+
+
+def _validated_container_ids(container_ids: list[str]) -> list[str]:
+    values = [_validated_container_id(container_id) for container_id in container_ids]
+    if not values:
+        raise HTTPException(status_code=400, detail="container_ids is required")
+    return values
 
 
 def _validated_args(args: list[str], allowed_noarg: set[str], allowed_with_arg: set[str]) -> list[str]:
@@ -245,7 +279,7 @@ def build_docker_broker_app() -> FastAPI:
     def create_container(body: _DockerCommandBody, authorization: str | None = Header(default=None)) -> dict[str, str | int]:
         _require_internal_token(authorization)
         args = _validated_args(body.args, set(), _RUN_FLAG_WITH_ARG)
-        cmd = [_docker_binary(), "create", *args, body.image, *body.command]
+        cmd = [_docker_binary(), "create", *args, _validated_image(body.image), *body.command]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
         return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
 
@@ -253,7 +287,7 @@ def build_docker_broker_app() -> FastAPI:
     def run_detached(body: _DockerCommandBody, authorization: str | None = Header(default=None)) -> dict[str, str | int]:
         _require_internal_token(authorization)
         args = _validated_args(body.args, _RUN_FLAG_NOARG, _RUN_FLAG_WITH_ARG)
-        cmd = [_docker_binary(), "run", *args, body.image, *body.command]
+        cmd = [_docker_binary(), "run", *args, _validated_image(body.image), *body.command]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
         return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
 
@@ -261,7 +295,7 @@ def build_docker_broker_app() -> FastAPI:
     def run_attached(body: _DockerCommandBody, authorization: str | None = Header(default=None)) -> StreamingResponse:
         _require_internal_token(authorization)
         args = _validated_args(body.args, _RUN_FLAG_NOARG, _RUN_FLAG_WITH_ARG)
-        cmd = [_docker_binary(), "run", *args, body.image, *body.command]
+        cmd = [_docker_binary(), "run", *args, _validated_image(body.image), *body.command]
         return StreamingResponse(
             _stream_process(cmd, _decode_stdin(body.stdin_b64)),
             media_type="application/x-ndjson",
@@ -271,7 +305,7 @@ def build_docker_broker_app() -> FastAPI:
     def exec_attached(body: _DockerExecBody, authorization: str | None = Header(default=None)) -> StreamingResponse:
         _require_internal_token(authorization)
         args = _validated_args(body.args, _EXEC_FLAG_NOARG, _EXEC_FLAG_WITH_ARG)
-        cmd = [_docker_binary(), "exec", *args, body.container_id, *body.command]
+        cmd = [_docker_binary(), "exec", *args, _validated_container_id(body.container_id), *body.command]
         return StreamingResponse(
             _stream_process(cmd, _decode_stdin(body.stdin_b64)),
             media_type="application/x-ndjson",
@@ -281,7 +315,7 @@ def build_docker_broker_app() -> FastAPI:
     def stop_container(body: _ContainerIdBody, authorization: str | None = Header(default=None)) -> dict[str, str | int]:
         _require_internal_token(authorization)
         result = subprocess.run(
-            [_docker_binary(), "stop", body.container_id],
+            [_docker_binary(), "stop", _validated_container_id(body.container_id)],
             capture_output=True,
             text=True,
             timeout=65,
@@ -294,7 +328,7 @@ def build_docker_broker_app() -> FastAPI:
         _require_internal_token(authorization)
         args = _validated_args(body.args, _REMOVE_FLAG_NOARG, set())
         result = subprocess.run(
-            [_docker_binary(), "rm", *args, *body.container_ids],
+            [_docker_binary(), "rm", *args, *_validated_container_ids(body.container_ids)],
             capture_output=True,
             text=True,
             timeout=30,

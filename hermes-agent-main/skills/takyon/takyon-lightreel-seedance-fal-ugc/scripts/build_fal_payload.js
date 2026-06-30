@@ -8,8 +8,17 @@ function usage() {
   process.exit(1);
 }
 
+function resolveWithinCwd(filePath) {
+  const root = path.resolve(process.cwd());
+  const resolved = path.resolve(root, filePath);
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    throw new Error(`Refusing to read path outside working directory: ${filePath}`);
+  }
+  return resolved;
+}
+
 function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(path.resolve(filePath), "utf8"));
+  return JSON.parse(fs.readFileSync(resolveWithinCwd(filePath), "utf8"));
 }
 
 function main() {

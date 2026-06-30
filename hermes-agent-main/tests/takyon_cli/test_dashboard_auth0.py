@@ -64,6 +64,15 @@ def test_public_app_host_redirects_spa_to_auth0_login(auth0_env):
     assert resp.headers["location"].startswith("/auth/login?")
 
 
+def test_public_app_host_redirects_root_to_auth0_login(auth0_env):
+    client = _client(auth0_env)
+
+    resp = client.get("/", follow_redirects=False)
+
+    assert resp.status_code == 302
+    assert resp.headers["location"].startswith("/auth/login?")
+
+
 def test_localhost_dashboard_is_not_forced_through_auth0(auth0_env):
     client = TestClient(auth0_env.app, base_url="http://localhost:9119")
 
@@ -160,6 +169,38 @@ def test_auth0_callback_sets_dashboard_session_for_fourmanifold_email(
 
     status = client.get("/api/status")
     assert status.status_code == 200
+
+
+def test_public_app_host_authenticated_html_omits_session_token(auth0_env):
+    client = _client(auth0_env)
+    client.cookies.set(
+        "takyon_dashboard_auth",
+        _signed_session(
+            {
+                "sub": "auth0|html",
+                "email": "operator@fourmanifold.com",
+                "email_verified": True,
+                "name": "Operator Html",
+            }
+        ),
+    )
+
+    resp = client.get("/chat")
+
+    assert resp.status_code == 200
+    assert "__TAKYON_SESSION_TOKEN__" not in resp.text
+
+
+def test_public_app_host_shared_session_header_cannot_access_local_only_admin_api(auth0_env):
+    client = _client(auth0_env)
+
+    resp = client.get(
+        "/api/env",
+        headers={"X-Takyon-Session-Token": auth0_env._SESSION_TOKEN},
+    )
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not Found"
 
 
 def test_auth0_me_reports_current_dashboard_user(auth0_env, monkeypatch):

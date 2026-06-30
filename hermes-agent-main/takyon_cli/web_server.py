@@ -994,7 +994,7 @@ def _auth0_public_path(path: str) -> bool:
         return True
     if path == "/api/product-tls/ask":
         return True
-    if path in {"/", "/chat", "/skill-lab", "/index.html", "/favicon.ico", "/robots.txt"}:
+    if path in {"/favicon.ico", "/robots.txt"}:
         return True
     return path.startswith((
         "/assets/",
@@ -1092,6 +1092,66 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/plugins",
     "/api/dashboard/plugins/rescan",
 })
+
+_AUTH0_PUBLIC_HOST_LOCAL_ONLY_API_EXACT_PATHS: frozenset[str] = frozenset({
+    "/api/gateway/restart",
+    "/api/takyon/update",
+    "/api/config",
+    "/api/config/raw",
+    "/api/model/options",
+    "/api/model/auxiliary",
+    "/api/model/set",
+    "/api/env",
+    "/api/env/reveal",
+    "/api/logs",
+    "/api/dashboard/theme",
+    "/api/dashboard/plugins/hub",
+    "/api/dashboard/plugin-providers",
+})
+
+_AUTH0_PUBLIC_HOST_LOCAL_ONLY_API_PREFIXES: tuple[str, ...] = (
+    "/api/actions/",
+    "/api/sessions",
+    "/api/providers/oauth",
+    "/api/cron/",
+    "/api/profiles",
+    "/api/skills",
+    "/api/tools/",
+    "/api/analytics/",
+    "/api/dashboard/agent-plugins/",
+    "/api/dashboard/plugins/",
+    "/api/plugins/",
+)
+
+
+def _auth0_public_host_local_only_api_path(path: str) -> bool:
+    if path in _AUTH0_PUBLIC_HOST_LOCAL_ONLY_API_EXACT_PATHS:
+        return True
+    if path == "/api/cron/jobs" or path == "/api/dashboard/agent-plugins/install":
+        return True
+    if path == "/api/sessions":
+        return True
+    if path == "/api/sessions/search":
+        return True
+    if path.startswith("/api/sessions/") and not path.endswith("/latest-descendant"):
+        return True
+    return path.startswith(_AUTH0_PUBLIC_HOST_LOCAL_ONLY_API_PREFIXES)
+
+
+def _has_valid_auth0_dashboard_session(headers: Any) -> bool:
+    try:
+        cfg = _auth0_config()
+    except Auth0ConfigError:
+        return False
+    if not cfg:
+        return False
+    return _session_from_cookie_header(headers.get("cookie", ""), cfg) is not None
+
+
+def _request_has_dashboard_api_auth(request: Request) -> bool:
+    if _auth0_required_for_host(request.headers):
+        return _has_valid_auth0_dashboard_session(request.headers)
+    return _has_valid_session_token(request)
 
 _HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _HOST_ROLE_COMBINED = "combined"
@@ -1289,11 +1349,22 @@ async def host_header_middleware(request: Request, call_next):
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
     path = request.url.path
+    if _auth0_required_for_host(request.headers) and _auth0_public_host_local_only_api_path(path):
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Not Found"},
+        )
     if path.startswith("/api/") and not _is_public_api_path(path):
-        if not _has_valid_session_token(request):
+        if not _request_has_dashboard_api_auth(request):
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Unauthorized"},
+                content={
+                    "detail": (
+                        "Auth0 login required"
+                        if _auth0_required_for_host(request.headers)
+                        else "Unauthorized"
+                    )
+                },
             )
     return await call_next(request)
 
@@ -1307,6 +1378,8 @@ async def auth0_middleware(request: Request, call_next):
         return await call_next(request)
 
     path = request.url.path
+    if _auth0_public_host_local_only_api_path(path):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
     if _auth0_public_path(path):
         return await call_next(request)
 
@@ -1610,14 +1683,39 @@ def _resolve_dashboard_ws_principal(ws: "WebSocket") -> Any | None:
     )
     if principal is not None:
         return principal
-    token = str(ws.query_params.get("token", "") or "")
-    if token and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        local = _resolve_local_dashboard_principal()
-        if local is not None:
-            return local
+    if not _auth0_required_for_host(ws.headers):
+        token = str(ws.query_params.get("token", "") or "")
+        if token and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+            local = _resolve_local_dashboard_principal()
+            if local is not None:
+                return local
     if _auth0_required_for_host(ws.headers):
         return None
     return _resolve_local_dashboard_principal()
+
+
+def _dashboard_ws_browser_token_ok(ws: "WebSocket") -> bool:
+    token = str(ws.query_params.get("token", "") or "")
+    return bool(token) and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
+
+
+def _dashboard_ws_browser_authorized(ws: "WebSocket") -> bool:
+    if _auth0_required_for_host(ws.headers):
+        return _has_valid_auth0_dashboard_session(ws.headers)
+    return _dashboard_ws_browser_token_ok(ws)
+
+
+def _dashboard_ws_browser_reject_reason(ws: "WebSocket") -> str:
+    if _auth0_required_for_host(ws.headers):
+        if _has_valid_auth0_dashboard_session(ws.headers):
+            return ""
+        return _ws_auth0_reject_reason(ws) or "auth0_cookie_missing"
+    token = str(ws.query_params.get("token", "") or "")
+    if not token:
+        return "missing_token"
+    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
+        return "bad_token"
+    return ""
 
 
 def _resolve_dashboard_request_principal(request: Request) -> Any | None:
@@ -1628,11 +1726,11 @@ def _resolve_dashboard_request_principal(request: Request) -> Any | None:
     )
     if principal is not None:
         return principal
-    # A valid dashboard session token (incl. ?token= for media/site-preview that an
-    # <img>/<video>/iframe cannot header-authenticate) authenticates as the local
-    # dashboard operator even when Auth0 is otherwise required for the host.
-    if _has_valid_session_token(request):
-        local = _resolve_local_dashboard_principal(runtime_database_url=runtime_database_url)
+    # Public Auth0 hosts never fall back to the dashboard session token: the
+    # cookie-backed user is the operator identity, and the legacy local token
+    # must not authenticate public-browser requests.
+    if not _auth0_required_for_host(request.headers) and _has_valid_session_token(request):
+        local = _resolve_local_dashboard_principal()
         if local is not None:
             return local
     if _auth0_required_for_host(request.headers):
@@ -8805,7 +8903,7 @@ def _materialize_product_site_from_storage(business: str, build_id: str) -> Path
 
 
 def _hydrate_missing_build_asset_from_storage(
-    slug: str, build_id: str, rel: str, target: Path, root: Path
+    slug: str, build_id: str, rel: str, target: Path, site_root: Path
 ) -> Path | None:
     """Fetch one missing build asset from the remote build artifact and cache it locally.
 
@@ -8819,7 +8917,7 @@ def _hydrate_missing_build_asset_from_storage(
     if not normalized_build_id:
         return None
     target = target.resolve()
-    if root not in (target, *target.parents):
+    if site_root not in (target, *target.parents):
         return None
     try:
         from plugins.takyon.storage import (
@@ -9079,15 +9177,15 @@ async def _serve_product_site_file(business: str, full_path: str = "", *, reques
     target = (site_root / rel).resolve()
     if target.is_dir():
         target = target / "index.html"
-    if root in (target, *target.parents) and target.is_file():
+    if site_root in (target, *target.parents) and target.is_file():
         return _product_site_file_response(target)
     if not Path(rel).suffix:
         for candidate in (target / "index.html", target.with_suffix(".html")):
             candidate = candidate.resolve()
-            if root in (candidate, *candidate.parents) and candidate.is_file():
+            if site_root in (candidate, *candidate.parents) and candidate.is_file():
                 return _product_site_file_response(candidate)
         spa_index = (site_root / "index.html").resolve()
-        if root in (spa_index, *spa_index.parents) and spa_index.is_file():
+        if site_root in (spa_index, *spa_index.parents) and spa_index.is_file():
             return _product_site_file_response(spa_index)
     else:
         # The build is materialized locally (index.html present) so a full re-materialize
@@ -9097,7 +9195,7 @@ async def _serve_product_site_file(business: str, full_path: str = "", *, reques
         # the remote build artifact, write it into the local materialized build (so subsequent
         # requests are fast), and serve it. Only suffixed files take this path; integrity is
         # checked against the stored digest.
-        hydrated = _hydrate_missing_build_asset_from_storage(slug, build_id, rel, target, root)
+        hydrated = _hydrate_missing_build_asset_from_storage(slug, build_id, rel, target, site_root)
         if hydrated is not None:
             return _product_site_file_response(hydrated)
     detail = {
@@ -9133,6 +9231,7 @@ class _HeldPtySession:
     bridge: "PtyBridge"
     keys: tuple[str, ...]
     channel: Optional[str]
+    principal_user_id: Optional[str] = None
     attached: bool = True
     expiry_handle: Optional[asyncio.TimerHandle] = None
 
@@ -9198,6 +9297,7 @@ async def _attach_held_pty(
     keys: tuple[str, ...],
     *,
     requested_channel: Optional[str] = None,
+    principal_user_id: Optional[str] = None,
 ) -> Optional[_HeldPtySession]:
     if not keys:
         return None
@@ -9208,6 +9308,8 @@ async def _attach_held_pty(
                 continue
             if held.attached or not held.bridge.is_alive():
                 _drop_held_pty_locked(held)
+                continue
+            if held.principal_user_id and held.principal_user_id != principal_user_id:
                 continue
             held.attached = True
             if held.expiry_handle is not None:
@@ -9327,13 +9429,7 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
     # --- auth + loopback check (before accept so we can close cleanly) ---
-    token = ws.query_params.get("token", "")
-    expected = _SESSION_TOKEN
-    if not hmac.compare_digest(token.encode(), expected.encode()):
-        await ws.close(code=4401)
-        return
-
-    if not _ws_auth0_session_is_allowed(ws):
+    if not _dashboard_ws_browser_authorized(ws):
         await ws.close(code=4401)
         return
 
@@ -9342,6 +9438,7 @@ async def pty_ws(ws: WebSocket) -> None:
         return
 
     principal = _resolve_dashboard_headers_principal(ws.headers)
+    principal_user_id = str(getattr(principal, "user_id", "") or "").strip() or None
 
     await ws.accept()
 
@@ -9362,7 +9459,11 @@ async def pty_ws(ws: WebSocket) -> None:
     channel = _channel_or_close_code(ws)
     sidecar_url = _build_sidecar_url(channel) if channel else None
     reconnect_keys = _pty_reconnect_keys(resume=resume, channel=channel)
-    held = await _attach_held_pty(reconnect_keys, requested_channel=channel)
+    held = await _attach_held_pty(
+        reconnect_keys,
+        requested_channel=channel,
+        principal_user_id=principal_user_id,
+    )
     if held is None:
         try:
             argv, cwd, env = _resolve_chat_argv(resume=resume, sidecar_url=sidecar_url)
@@ -9389,7 +9490,12 @@ async def pty_ws(ws: WebSocket) -> None:
             await ws.send_text(f"\r\n\x1b[31mChat failed to start: {exc}\x1b[0m\r\n")
             await ws.close(code=1011)
             return
-        held = _HeldPtySession(bridge=bridge, keys=reconnect_keys, channel=channel)
+        held = _HeldPtySession(
+            bridge=bridge,
+            keys=reconnect_keys,
+            channel=channel,
+            principal_user_id=principal_user_id,
+        )
     else:
         bridge = held.bridge
 
@@ -9467,17 +9573,9 @@ async def gateway_ws(ws: WebSocket) -> None:
         await _ws_reject(ws, "/api/ws", 4403, "embedded_chat_disabled")
         return
 
-    token = ws.query_params.get("token", "")
-    if not token:
-        await _ws_reject(ws, "/api/ws", 4401, "missing_token")
-        return
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await _ws_reject(ws, "/api/ws", 4401, "bad_token")
-        return
-
-    auth0_reason = _ws_auth0_reject_reason(ws)
-    if auth0_reason:
-        await _ws_reject(ws, "/api/ws", 4401, auth0_reason)
+    browser_auth_reason = _dashboard_ws_browser_reject_reason(ws)
+    if browser_auth_reason:
+        await _ws_reject(ws, "/api/ws", 4401, browser_auth_reason)
         return
 
     if not _ws_client_is_allowed(ws):
@@ -9608,17 +9706,9 @@ async def events_ws(ws: WebSocket) -> None:
         await _ws_reject(ws, "/api/events", 4403, "embedded_chat_disabled")
         return
 
-    token = ws.query_params.get("token", "")
-    if not token:
-        await _ws_reject(ws, "/api/events", 4401, "missing_token")
-        return
-    if not hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode()):
-        await _ws_reject(ws, "/api/events", 4401, "bad_token")
-        return
-
-    auth0_reason = _ws_auth0_reject_reason(ws)
-    if auth0_reason:
-        await _ws_reject(ws, "/api/events", 4401, auth0_reason)
+    browser_auth_reason = _dashboard_ws_browser_reject_reason(ws)
+    if browser_auth_reason:
+        await _ws_reject(ws, "/api/events", 4401, browser_auth_reason)
         return
 
     if not _ws_client_is_allowed(ws):
@@ -9710,7 +9800,7 @@ def mount_spa(application: FastAPI):
         WEB_DIST / "litebulb" / "index.html",
     )
 
-    def _serve_litebulb_index(prefix: str = ""):
+    def _serve_litebulb_index(request: Request, prefix: str = ""):
         """Serve the Coscale (Litebulb) operator workspace as the top-level
         document. This is the ONLY served UI.
 
@@ -9741,11 +9831,12 @@ def mount_spa(application: FastAPI):
             if adapter_path.is_file()
             else "0"
         )
-        token_script = (
-            f'<script>window.__TAKYON_SESSION_TOKEN__="{_SESSION_TOKEN}";'
-            f"window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
-            f'window.__TAKYON_BASE_PATH__="{prefix}";</script>'
-        )
+        token_parts: list[str] = []
+        if not _auth0_required_for_host(request.headers):
+            token_parts.append(f"window.__TAKYON_SESSION_TOKEN__={json.dumps(_SESSION_TOKEN)};")
+        token_parts.append(f"window.__TAKYON_DASHBOARD_EMBEDDED_CHAT__={chat_js};")
+        token_parts.append(f"window.__TAKYON_BASE_PATH__={json.dumps(prefix)};")
+        token_script = f"<script>{''.join(token_parts)}</script>"
         # Served at ``/`` the page's relative ``./takyon-adapter.js`` would
         # resolve to ``/takyon-adapter.js``; point it at the real static path
         # (honouring any reverse-proxy prefix).
@@ -9823,7 +9914,7 @@ def mount_spa(application: FastAPI):
         # host and every non-asset route renders it directly (no iframe, no
         # legacy dashboard SPA shell). Client-side routing inside Coscale is
         # hash-based, so a single index document serves all routes.
-        return _serve_litebulb_index(prefix)
+        return _serve_litebulb_index(request, prefix)
 
 
 # ---------------------------------------------------------------------------

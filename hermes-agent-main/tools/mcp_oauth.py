@@ -266,7 +266,11 @@ class TakyonTokenStorage:
         try:
             return OAuthToken.model_validate(data)
         except (ValueError, TypeError, KeyError) as exc:
-            logger.warning("Corrupt tokens at %s -- ignoring: %s", self._tokens_path(), exc)
+            logger.warning(
+                "Corrupt OAuth token file at %s -- ignoring (%s)",
+                self._tokens_path(),
+                type(exc).__name__,
+            )
             return None
 
     async def set_tokens(self, tokens: "OAuthToken") -> None:

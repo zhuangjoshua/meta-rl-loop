@@ -113,14 +113,14 @@ def _resolve_credential(api_key: Any,
             token = token_provider()
             return (str(token) if token else None), "entra_id"
         except Exception as exc:
-            logger.debug("azure_detect: token_provider failed: %s", exc)
+            logger.debug("azure_detect: token_provider failed: %s", type(exc).__name__)
             return None, "entra_id"
     if callable(api_key) and not isinstance(api_key, str):
         try:
             token = api_key()
             return (str(token) if token else None), "entra_id"
         except Exception as exc:
-            logger.debug("azure_detect: api_key callable failed: %s", exc)
+            logger.debug("azure_detect: api_key callable failed: %s", type(exc).__name__)
             return None, "entra_id"
     # API-key path.
     if isinstance(api_key, str) and api_key:

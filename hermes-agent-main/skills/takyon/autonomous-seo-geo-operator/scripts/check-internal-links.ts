@@ -142,21 +142,48 @@ function collectRoutes(files: string[]): Set<string> {
   return routes;
 }
 
-function buildDynamicMatchers(routes: Set<string>): RegExp[] {
-  const matchers: RegExp[] = [];
+type SegmentKind = "literal" | "param" | "catchAll";
+interface RouteMatcher {
+  segments: { kind: SegmentKind; value: string }[];
+}
+
+/** Build segment-based matchers (no dynamic RegExp; avoids ReDoS by construction). */
+function buildDynamicMatchers(routes: Set<string>): RouteMatcher[] {
+  const matchers: RouteMatcher[] = [];
   for (const r of routes) {
     if (!/[\[:]/.test(r)) continue;
-    const pattern = r
-      .split("/")
-      .map((seg) => {
-        if (/^\[\.\.\..+\]$/.test(seg)) return ".*"; // catch-all
-        if (/^\[.+\]$/.test(seg) || /^:.+$/.test(seg)) return "[^/]+";
-        return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      })
-      .join("/");
-    matchers.push(new RegExp("^" + pattern + "$"));
+    const segments = r.split("/").map((seg) => {
+      if (/^\[\.\.\..+\]$/.test(seg)) return { kind: "catchAll" as const, value: seg };
+      if (/^\[.+\]$/.test(seg) || /^:.+$/.test(seg)) return { kind: "param" as const, value: seg };
+      return { kind: "literal" as const, value: seg };
+    });
+    matchers.push({ segments });
   }
   return matchers;
+}
+
+/** Match a candidate path against a segment-based matcher without RegExp. */
+function matchesRoute(candidate: string, matcher: RouteMatcher): boolean {
+  const path = candidate.split("/");
+  const segs = matcher.segments;
+  let i = 0;
+  for (let s = 0; s < segs.length; s++) {
+    const seg = segs[s];
+    if (seg.kind === "catchAll") {
+      // Catch-all consumes the remainder; trailing segments after it (if any)
+      // are not expressible in these route conventions, so accept the rest.
+      return true;
+    }
+    if (i >= path.length) return false;
+    if (seg.kind === "literal") {
+      if (path[i] !== seg.value) return false;
+    } else if (path[i].length === 0) {
+      // param requires a non-empty segment ([^/]+).
+      return false;
+    }
+    i++;
+  }
+  return i === path.length;
 }
 
 function extractLinks(content: string): string[] {
@@ -236,7 +263,7 @@ function main() {
       inbound.set(candidate, (inbound.get(candidate) || 0) + 1);
       const matched =
         staticRoutes.has(candidate) ||
-        dynamicMatchers.some((re) => re.test(candidate)) ||
+        dynamicMatchers.some((m) => matchesRoute(candidate, m)) ||
         publicHasFile(t);
       if (!matched) broken.push({ link: t, from });
     }

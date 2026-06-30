@@ -44,6 +44,26 @@ MARKER = 'LINUX = sys.platform.startswith("linux")'
 REPLACEMENT = 'LINUX = sys.platform.startswith(("linux", "android"))'
 
 
+def _safe_extractall(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract a tar archive, rejecting members that escape ``dest``.
+
+    Guards against path traversal (CVE-2007-4559) by resolving each
+    member's destination and ensuring it stays within ``dest`` before
+    extraction. Python 3.12+ ``filter='data'`` is used when available.
+    """
+    dest = dest.resolve()
+    for member in tar.getmembers():
+        target = (dest / member.name).resolve()
+        if target != dest and dest not in target.parents:
+            sys.exit(f"refusing to extract unsafe path from tar: {member.name!r}")
+    try:
+        tar.extractall(dest, filter="data")  # type: ignore[call-arg]
+    except TypeError:
+        # Python < 3.12 lacks the ``filter`` argument; members are
+        # already validated above.
+        tar.extractall(dest)
+
+
 def _resolve_install_cmd(pip_arg: str | None, prefer_uv: bool) -> list[str]:
     if pip_arg:
         return pip_arg.split()
@@ -83,7 +103,7 @@ def main() -> int:
         archive = tmp_path / "psutil.tar.gz"
         urllib.request.urlretrieve(PSUTIL_URL, archive)
         with tarfile.open(archive) as tar:
-            tar.extractall(tmp_path)
+            _safe_extractall(tar, tmp_path)
 
         try:
             src_root = next(

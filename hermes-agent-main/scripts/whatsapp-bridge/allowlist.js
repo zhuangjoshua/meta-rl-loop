@@ -19,7 +19,21 @@ export function parseAllowedUsers(rawValue) {
 }
 
 function readMappingFile(sessionDir, identifier, suffix = '') {
-  const filePath = path.join(sessionDir, `lid-mapping-${identifier}${suffix}.json`);
+  // Guard against path traversal: identifiers are embedded directly into the
+  // mapping filename, so reject anything that isn't a plain WhatsApp id
+  // (digits, with the JID forms already stripped by normalizeWhatsAppIdentifier).
+  const safeIdentifier = String(identifier || '');
+  if (!/^[A-Za-z0-9]+$/.test(safeIdentifier)) {
+    return null;
+  }
+
+  const fileName = `lid-mapping-${safeIdentifier}${suffix}.json`;
+  const resolvedDir = path.resolve(sessionDir);
+  const filePath = path.resolve(resolvedDir, fileName);
+  // Ensure the resolved path stays inside the session directory.
+  if (filePath !== path.join(resolvedDir, fileName)) {
+    return null;
+  }
   if (!existsSync(filePath)) {
     return null;
   }

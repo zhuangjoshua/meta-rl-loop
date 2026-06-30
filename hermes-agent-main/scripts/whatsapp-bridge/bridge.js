@@ -25,7 +25,7 @@ import pino from 'pino';
 import path from 'path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
 import { randomBytes } from 'crypto';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
 import qrcode from 'qrcode-terminal';
 import { matchesAllowedUser, parseAllowedUsers } from './allowlist.js';
@@ -575,6 +575,24 @@ function inferMediaType(ext) {
   return 'document';
 }
 
+// Allowed roots for /send-media. The Python gateway writes media into the
+// Takyon cache directories (and may stage transient files under the system
+// temp dir). Confining requested paths to these roots prevents a path
+// traversal where a crafted `filePath` reads arbitrary files off disk.
+const ALLOWED_MEDIA_ROOTS = [
+  IMAGE_CACHE_DIR,
+  DOCUMENT_CACHE_DIR,
+  AUDIO_CACHE_DIR,
+  tmpdir(),
+].map(root => path.resolve(root));
+
+function isWithinAllowedMediaRoot(candidatePath) {
+  const resolved = path.resolve(candidatePath);
+  return ALLOWED_MEDIA_ROOTS.some(root => {
+    return resolved === root || resolved.startsWith(root + path.sep);
+  });
+}
+
 // Send media (image, video, document) natively
 app.post('/send-media', async (req, res) => {
   if (!sock || connectionState !== 'connected') {
@@ -586,13 +604,19 @@ app.post('/send-media', async (req, res) => {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
 
+  if (typeof filePath !== 'string' || !isWithinAllowedMediaRoot(filePath)) {
+    return res.status(400).json({ error: 'filePath is outside the allowed media directories' });
+  }
+
+  const safeFilePath = path.resolve(filePath);
+
   try {
-    if (!existsSync(filePath)) {
-      return res.status(404).json({ error: `File not found: ${filePath}` });
+    if (!existsSync(safeFilePath)) {
+      return res.status(404).json({ error: `File not found: ${safeFilePath}` });
     }
 
-    const buffer = readFileSync(filePath);
-    const ext = filePath.toLowerCase().split('.').pop();
+    const buffer = readFileSync(safeFilePath);
+    const ext = safeFilePath.toLowerCase().split('.').pop();
     const type = mediaType || inferMediaType(ext);
     let msgPayload;
 
@@ -614,8 +638,9 @@ app.post('/send-media', async (req, res) => {
         if (needsConversion) {
           tmpPath = path.join(tmpdir(), `takyon_voice_${randomBytes(6).toString('hex')}.ogg`);
           try {
-            execSync(
-              `ffmpeg -y -i ${JSON.stringify(filePath)} -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
+            execFileSync(
+              'ffmpeg',
+              ['-y', '-i', safeFilePath, '-ar', '48000', '-ac', '1', '-c:a', 'libopus', tmpPath],
               { timeout: 30000, stdio: 'pipe' }
             );
             audioBuffer = readFileSync(tmpPath);
@@ -635,7 +660,7 @@ app.post('/send-media', async (req, res) => {
       default:
         msgPayload = {
           document: buffer,
-          fileName: fileName || path.basename(filePath),
+          fileName: fileName || path.basename(safeFilePath),
           caption: caption || undefined,
           mimetype: MIME_MAP[ext] || 'application/octet-stream',
         };
