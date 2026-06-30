@@ -168,6 +168,19 @@ def test_agent_log_tail_filters_to_shell_business():
     )
 
 
+def test_agent_log_tail_stays_silent_in_global_scope():
+    import plugins.takyon.cli as takyon_cli
+
+    tail = takyon_cli._AgentLogTail(enabled=True, business_filter=None)
+
+    assert not tail._should_print_line(
+        "INFO [20260628_160240_111111] conversation turn: session=mine msg='CEO wakeup for business:homework-solver'"
+    )
+    assert not tail._should_print_line(
+        "2026-06-30 09:20:39,682 INFO takyon.worker: worker[mac-operator-Anuradhas-MacBook-Pro-85887]: starting (dispatch=True poll=5s concurrency=10)"
+    )
+
+
 def test_business_list_formats_as_short_picker():
     import plugins.takyon.cli as takyon_cli
 

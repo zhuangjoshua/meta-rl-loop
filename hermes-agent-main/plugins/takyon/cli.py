@@ -278,9 +278,17 @@ def _startup_graphic(current_business: str | None) -> str:
     rows.extend([
         _framed_text("", width),
         _framed_text(f"{_bold('CoScale operator')} {_color('ready', _THEME['success'])}  {_dim(str(Path.cwd()))}", width),
-        _framed_text(f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}    {_color('plain text', _THEME['primary'])} talks to this company CEO", width),
-        _framed_text(f"{_color('/wake', _THEME['primary'])} calls the CEO    {_color('/use', _THEME['primary'])} switches company    {_color('/commands', _THEME['primary'])} lists capabilities", width),
     ])
+    if current_business:
+        rows.extend([
+            _framed_text(f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}    {_color('plain text', _THEME['primary'])} talks to this company CEO", width),
+            _framed_text(f"{_color('/wake', _THEME['primary'])} calls the CEO    {_color('/use', _THEME['primary'])} switches company    {_color('/commands', _THEME['primary'])} lists capabilities", width),
+        ])
+    else:
+        rows.extend([
+            _framed_text(f"{_dim('scope')} {_color(_scope_label(current_business), _THEME['secondary'])}    {_color('plain text', _THEME['warning'])} disabled until /use <business>", width),
+            _framed_text(f"{_color('/create', _THEME['primary'])} starts company    {_color('/use', _THEME['primary'])} enters company    {_color('/commands', _THEME['primary'])} lists capabilities", width),
+        ])
     rows.append(_frame_line(width))
     return "\n".join(rows)
 
@@ -2082,7 +2090,11 @@ class _AgentLogTail:
                 flush=True,
             )
         else:
-            print(f"[logs] following {self.path} (Ctrl-C stops the command)", file=self._out, flush=True)
+            print(
+                f"[logs] following {self.path} (live tails activate after /use <business>)",
+                file=self._out,
+                flush=True,
+            )
         self._thread = threading.Thread(target=self._run, name="takyon-agent-log-tail", daemon=True)
         self._thread.start()
         return self
@@ -2160,7 +2172,7 @@ class _AgentLogTail:
             return False
         scope = self._current_business_filter()
         if not scope:
-            return True
+            return False
 
         session_id = self._line_session(line)
         line_business = self._line_business(line)
@@ -2250,6 +2262,8 @@ class _RuntimeEventTail:
                 self._seen.add(eid)
 
     def _runtime_event_rows(self, scope: str, *, limit: int = 300) -> list[dict[str, Any]]:
+        if not scope:
+            return []
         with self.store._connect() as conn:
             if scope:
                 rows = conn.execute(
@@ -2263,19 +2277,6 @@ class _RuntimeEventTail:
                     ORDER BY created_at ASC, id ASC
                     """,
                     (scope, max(1, min(int(limit or 300), 500))),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM (
-                      SELECT * FROM events
-                      WHERE business_slug IS NOT NULL AND event_type = 'dashboard.run.output'
-                      ORDER BY created_at DESC, id DESC
-                      LIMIT ?
-                    ) recent
-                    ORDER BY created_at ASC, id ASC
-                    """,
-                    (max(1, min(int(limit or 300), 500)),),
                 ).fetchall()
         return [self.store._row_to_dict(row) for row in rows]
 
@@ -3744,6 +3745,10 @@ def _operator_context_message(message: str, current_business: str | None) -> str
     )
 
 
+def _global_plain_text_disabled_message() -> str:
+    return "Plain text is disabled in global scope. Use /commands, /create, or /use <business>."
+
+
 def _format_ceo_focus(current_business: str | None, store: TakyonStore, model: str = "") -> str:
     config = _read_model_config(store)
     resolved_model = model or os.getenv("TAKYON_MODEL", "") or config.get("model") or "(not set)"
@@ -3760,7 +3765,7 @@ def _format_ceo_focus(current_business: str | None, store: TakyonStore, model: s
         except Exception:
             pass
     else:
-        lines.append("Plain text will operate at the global Takyon account scope; use /use <business> to enter a business.")
+        lines.append("Plain text is disabled in global scope; use /use <business> to enter a business.")
     lines.extend([
         f"Model: {resolved_model}",
         f"Provider: {provider}",
@@ -4140,6 +4145,8 @@ def _handle_shell_line(
             raise SystemExit(
                 f"{exc}. For /create, paste the brief directly after the slug or use /create --slug <slug> <brief>."
             ) from exc
+        if not current_business:
+            return _global_plain_text_disabled_message(), current_business
         message = _operator_context_message(line, current_business)
         return _run_agent(
             message,
@@ -4247,6 +4254,9 @@ def _handle_shell_line(
                 raw_hermes=raw_hermes,
             ), current_business
         return f"Unknown slash command: /{command}. Use /commands.", current_business
+
+    if not current_business:
+        return _global_plain_text_disabled_message(), current_business
 
     message = _operator_context_message(line, current_business)
     return _run_agent(

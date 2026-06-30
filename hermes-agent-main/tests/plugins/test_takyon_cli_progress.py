@@ -259,6 +259,63 @@ def test_runtime_event_tail_prints_ceo_stream_only():
     assert "tool started" not in output
 
 
+def test_runtime_event_tail_stays_silent_in_global_scope(tmp_path):
+    class Store:
+        def __init__(self):
+            self.root = tmp_path
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute(
+                """
+                CREATE TABLE events (
+                    id TEXT PRIMARY KEY,
+                    business_slug TEXT,
+                    event_type TEXT,
+                    payload_json TEXT,
+                    created_at TEXT
+                )
+                """
+            )
+
+        def _connect(self):
+            return self.conn
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload) if payload else {}
+            return data
+
+    store = Store()
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-1",
+            "demo",
+            "dashboard.run.output",
+            json.dumps({"stream": "message_delta", "line": "CEO text"}),
+            "2026-06-28T12:00:00Z",
+        ),
+    )
+    store.conn.commit()
+
+    read_fd, write_fd = os.pipe()
+    tail = cli._RuntimeEventTail(store=store, enabled=True, business_filter=None)
+    tail._out = os.fdopen(write_fd, "w", buffering=1, encoding="utf-8")
+    tail._scope = ""
+    try:
+        tail._drain_once()
+        tail._out.close()
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert output == ""
+
+
 def test_use_without_args_switches_to_global(monkeypatch):
     monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
 
@@ -287,6 +344,44 @@ def test_use_global_alias_switches_to_global(monkeypatch):
 
     assert output == "Using global scope"
     assert business is None
+
+
+def test_global_plain_text_is_rejected_without_running_agent(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+
+    def fail_run_agent(*_args, **_kwargs):  # noqa: ANN001
+        raise AssertionError("_run_agent should not be called in global scope for plain text")
+
+    monkeypatch.setattr(cli, "_run_agent", fail_run_agent)
+
+    output, business = cli._handle_shell_line(
+        "hello",
+        current_business=None,
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "Plain text is disabled in global scope. Use /commands, /create, or /use <business>."
+    assert business is None
+
+
+def test_startup_graphic_disables_plain_text_in_global_scope():
+    rendered = cli._startup_graphic(None)
+
+    assert "plain text" in rendered
+    assert "disabled until /use <business>" in rendered
+    assert "/create" in rendered
+    assert "talks to this company CEO" not in rendered
+
+
+def test_ceo_focus_reports_global_plain_text_disabled(monkeypatch):
+    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {})
+
+    rendered = cli._format_ceo_focus(None, _FakeStore(), "")
+
+    assert "Scope: global" in rendered
+    assert "Plain text is disabled in global scope" in rendered
 
 
 def test_shell_create_preserves_raw_brief_after_explicit_slug():
