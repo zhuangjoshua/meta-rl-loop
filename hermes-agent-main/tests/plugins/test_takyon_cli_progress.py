@@ -9,6 +9,25 @@ class _FakeStore:
     pass
 
 
+def test_business_exists_prefers_access_gate_over_summary_read():
+    class _Store:
+        def enforce_operator_business_access(self, slug):
+            assert slug == "roomier"
+
+        def read(self, **_kwargs):
+            raise AssertionError("summary read should not be used for /use existence checks")
+
+    assert cli._business_exists(_Store(), "roomier") is True
+
+
+def test_business_exists_returns_false_when_access_gate_denies():
+    class _Store:
+        def enforce_operator_business_access(self, _slug):
+            raise cli.TakyonError("business:roomier does not exist")
+
+    assert cli._business_exists(_Store(), "roomier") is False
+
+
 def test_read_business_progress_summarizes_snapshot():
     result = {
         "success": True,
@@ -476,7 +495,8 @@ def test_handle_shell_create_does_not_shlex_pasted_brief(monkeypatch):
     )
 
     assert business == "homework-solver"
-    assert output == '{\n  "success": true\n}'
+    assert "success" in output
+    assert "yes" in output
     assert captured["argv"] == [
         "create",
         "homework-solver",

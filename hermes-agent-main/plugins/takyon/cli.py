@@ -3781,12 +3781,22 @@ def _read_shell_line(current_business: str | None, entries: list[dict[str, Any]]
 
 
 def _business_exists(store: TakyonStore, slug: str) -> bool:
+    slug = _slugify(slug)
+    if not slug:
+        return False
+    enforce_access = getattr(store, "enforce_operator_business_access", None)
+    if callable(enforce_access):
+        try:
+            enforce_access(slug)
+            return True
+        except TakyonError:
+            return False
     try:
         data = store.read(scope=_scope_for_business(slug), query="summary")
     except TakyonError:
         return False
     business = (data.get("business") or {}) if isinstance(data, dict) else {}
-    return str(business.get("slug") or "").strip() == _slugify(slug)
+    return str(business.get("slug") or "").strip() == slug
 
 
 def _require_current_business(current_business: str | None) -> str:
