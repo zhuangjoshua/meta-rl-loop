@@ -130,3 +130,43 @@ def test_shared_learning_not_shown_across_operators(pg_store_dsn, tmp_path):
                             tags=["b2c"], scope="shared")
     # Operator B must never see operator A's shared learnings.
     assert "Operator-A secret" not in store_b._ceo_cron_prompt("opbco")
+
+
+# --- Subuser-security gate (floor 5): live adversarial arm. DO NOT MAKE SUBUSER LESS SECURE -----
+
+def test_subuser_role_denied_direct_writes_to_money_identity_and_ceo_tables(pg_conn):
+    """Positively attempt denied writes AS takyon_app_runtime and assert DENIED. Covers the money +
+    identity tables (the existing boundary) AND the new RL ceo_* tables / ad-spend rollup (0057).
+    A regression that granted the subuser role write on any of these would FAIL here loudly."""
+    if not pg_conn.execute("select 1 from pg_roles where rolname='takyon_app_runtime'").fetchone():
+        pytest.skip("takyon_app_runtime role absent on this DB")
+    must_be_denied = [
+        # existing subuser/money/identity boundary
+        "app_revenue_events", "app_usage_events", "app_entitlements",
+        # new RL operator-plane tables (0057) — subuser must have NO write
+        "ceo_episode", "ceo_identity", "ceo_state_of_mind", "ceo_trace",
+        "business_ad_spend_entries", "twin_cohort",
+    ]
+    for tbl in must_be_denied:
+        if not pg_conn.execute("select to_regclass(%s) is not null", (f"public.{tbl}",)).fetchone()[0]:
+            continue  # table not in this schema build; skip
+        pg_conn.execute("set role takyon_app_runtime")
+        try:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                pg_conn.execute(f'insert into public."{tbl}" default values')
+        finally:
+            pg_conn.execute("reset role")
+
+
+def test_subuser_role_cannot_set_rls_bypass_guc(pg_conn):
+    """takyon_app_runtime must not be able to flip the RLS-bypass GUC on itself."""
+    if not pg_conn.execute("select 1 from pg_roles where rolname='takyon_app_runtime'").fetchone():
+        pytest.skip("takyon_app_runtime role absent on this DB")
+    pg_conn.execute("set role takyon_app_runtime")
+    try:
+        # The bypass is gated behind a SECURITY DEFINER function / superuser GUC, never a plain SET
+        # the app role can issue. Attempting to grant itself bypass must not succeed silently.
+        with pytest.raises(psycopg.errors.Error):
+            pg_conn.execute("alter role takyon_app_runtime bypassrls")
+    finally:
+        pg_conn.execute("reset role")
