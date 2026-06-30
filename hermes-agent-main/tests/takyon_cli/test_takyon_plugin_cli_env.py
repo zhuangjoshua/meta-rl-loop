@@ -89,7 +89,7 @@ def test_platform_owner_seed_skips_when_session_user_bound(monkeypatch, capsys):
     assert "platform-owner seed skipped" not in captured.err
 
 
-def test_shell_logs_tail_for_full_session(monkeypatch):
+def test_shell_does_not_attach_ambient_log_tail(monkeypatch):
     import plugins.takyon.cli as takyon_cli
 
     events: list[object] = []
@@ -124,12 +124,7 @@ def test_shell_logs_tail_for_full_session(monkeypatch):
         follow_logs=True,
     )
 
-    assert events == [
-        ("init", True, "  · "),
-        ("business_filter", "homework-solver"),
-        "enter",
-        "exit",
-    ]
+    assert events == []
 
 
 def test_agent_log_tail_nested_context_does_not_duplicate(monkeypatch, tmp_path):

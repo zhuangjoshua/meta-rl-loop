@@ -4173,75 +4173,68 @@ def _interactive_shell(
     entries = _slash_entries()
     print(_startup_graphic(current_business))
     shell_history: list[dict[str, str]] = []
-    log_scope = {"business": current_business}
     raw_hermes_enabled = bool(raw_hermes or _raw_hermes_default())
 
-    with _AgentLogTail(enabled=follow_logs, business_filter=lambda: log_scope.get("business")), _RuntimeEventTail(
-        store=store,
-        enabled=follow_logs,
-        business_filter=lambda: log_scope.get("business"),
-    ):
-        while True:
-            try:
-                line = _read_shell_line(current_business, entries)
-            except EOFError:
-                print()
-                return
-            except KeyboardInterrupt:
-                print()
+    while True:
+        try:
+            line = _read_shell_line(current_business, entries)
+        except EOFError:
+            print()
+            return
+        except KeyboardInterrupt:
+            print()
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
+            return
+        try:
+            raw_tokens = shlex.split(line.lstrip("/")) if line.lstrip("/") else []
+        except ValueError:
+            raw_tokens = []
+        if raw_tokens and raw_tokens[0].lower() == "raw":
+            mode = raw_tokens[1].lower() if len(raw_tokens) >= 2 else "status"
+            if mode in {"on", "true", "1", "yes"}:
+                raw_hermes_enabled = True
+            elif mode in {"off", "false", "0", "no"}:
+                raw_hermes_enabled = False
+            elif mode in {"status", ""}:
+                pass
+            else:
+                print("usage: /raw [on|off|status]")
                 continue
-            line = line.strip()
-            if not line:
-                continue
-            if line in {"/exit", "exit", "/quit", "quit"} or line.lstrip("/") in {"exit", "quit"}:
-                return
-            try:
-                raw_tokens = shlex.split(line.lstrip("/")) if line.lstrip("/") else []
-            except ValueError:
-                raw_tokens = []
-            if raw_tokens and raw_tokens[0].lower() == "raw":
-                mode = raw_tokens[1].lower() if len(raw_tokens) >= 2 else "status"
-                if mode in {"on", "true", "1", "yes"}:
-                    raw_hermes_enabled = True
-                elif mode in {"off", "false", "0", "no"}:
-                    raw_hermes_enabled = False
-                elif mode in {"status", ""}:
-                    pass
-                else:
-                    print("usage: /raw [on|off|status]")
-                    continue
-                state = "on" if raw_hermes_enabled else "off"
-                limit = _raw_hermes_max_chars()
-                limit_text = "full" if limit <= 0 else f"{limit} chars/event"
-                print(f"Raw Hermes: {state} ({limit_text})")
-                continue
-            try:
-                output, current_business = _handle_shell_line(
-                    line,
-                    current_business=current_business,
-                    store=store,
-                    model=model,
-                    max_turns=max_turns,
-                    shell_history=shell_history,
-                    follow_logs=follow_logs,
-                    raw_hermes=raw_hermes_enabled,
-                )
-                if output:
-                    print(output)
-                log_scope["business"] = current_business
-                _record_shell_turn(shell_history, line, output)
-                entries = _slash_entries()
-            except SystemExit as exc:
-                if str(exc):
-                    output = f"Takyon: {exc}"
-                    print(output)
-                    _record_shell_turn(shell_history, line, output)
-            except KeyboardInterrupt:
-                print("Takyon: interrupted")
-            except Exception as exc:
-                output = f"Takyon error: {exc}"
+            state = "on" if raw_hermes_enabled else "off"
+            limit = _raw_hermes_max_chars()
+            limit_text = "full" if limit <= 0 else f"{limit} chars/event"
+            print(f"Raw Hermes: {state} ({limit_text})")
+            continue
+        try:
+            output, current_business = _handle_shell_line(
+                line,
+                current_business=current_business,
+                store=store,
+                model=model,
+                max_turns=max_turns,
+                shell_history=shell_history,
+                follow_logs=follow_logs,
+                raw_hermes=raw_hermes_enabled,
+            )
+            if output:
+                print(output)
+            _record_shell_turn(shell_history, line, output)
+            entries = _slash_entries()
+        except SystemExit as exc:
+            if str(exc):
+                output = f"Takyon: {exc}"
                 print(output)
                 _record_shell_turn(shell_history, line, output)
+        except KeyboardInterrupt:
+            print("Takyon: interrupted")
+        except Exception as exc:
+            output = f"Takyon error: {exc}"
+            print(output)
+            _record_shell_turn(shell_history, line, output)
 
 
 def _handle_shell_line(
