@@ -60,10 +60,29 @@ function usage() {
   process.exit(1);
 }
 
+function safeResolveWithinCwd(targetPath) {
+  // Constrain the user-supplied output path to the current working directory so
+  // a crafted `../` argument cannot redirect the refusal write to an arbitrary
+  // file. Returns null when the path would escape the CWD.
+  const base = path.resolve(process.cwd());
+  const resolved = path.resolve(base, targetPath);
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+    return null;
+  }
+  return resolved;
+}
+
 function emitRefusal(outputPath) {
   const serialized = JSON.stringify(GATE_REFUSAL, null, 2);
   if (outputPath) {
-    fs.writeFileSync(path.resolve(outputPath), serialized);
+    const resolved = safeResolveWithinCwd(outputPath);
+    if (resolved) {
+      fs.writeFileSync(resolved, serialized);
+    } else {
+      console.error(
+        `Refusing to write refusal output to '${outputPath}': path escapes the working directory.`,
+      );
+    }
   }
   // Surface on stderr so wrappers and operators see the refusal reason, and exit
   // non-zero so no downstream step treats a missing conversation as success.

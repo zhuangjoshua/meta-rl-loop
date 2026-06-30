@@ -226,7 +226,15 @@ else
         done
         [ "$_skip" = false ] && _SAFE_EXTRAS+=("$_e")
     done
-    _SAFE_SPEC=".[$(IFS=,; echo "${_SAFE_EXTRAS[*]}")]"
+    _SAFE_JOINED=""
+    for _e in "${_SAFE_EXTRAS[@]}"; do
+        if [ -z "$_SAFE_JOINED" ]; then
+            _SAFE_JOINED="$_e"
+        else
+            _SAFE_JOINED="$_SAFE_JOINED,$_e"
+        fi
+    done
+    _SAFE_SPEC=".[$_SAFE_JOINED]"
     _try_install() {
         $UV_CMD pip install -e ".[all]" \
             || $UV_CMD pip install -e "$_SAFE_SPEC" \

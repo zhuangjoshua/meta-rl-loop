@@ -3542,11 +3542,11 @@ wheels = [
 
 [[package]]
 name = "python-multipart"
-version = "0.0.27"
+version = "0.0.30"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/69/9b/f23807317a113dc36e74e75eb265a02dd1a4d9082abc3c1064acd22997c4/python_multipart-0.0.27.tar.gz", hash = "sha256:9870a6a8c5a20a5bf4f07c017bd1489006ff8836cff097b6933355ee2b49b602", size = 44043, upload-time = "2026-04-27T10:51:26.649Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/dc/9b8d2e22f6fe6856a677ce5b9c2d36a85c44d2d9bbf2e2b15c00ddec4ad0/python_multipart-0.0.30.tar.gz", hash = "sha256:c2759b7b976ef3937214dfb592446b59dfaa5f04682a076f78b117c94776d87a", size = 44216, upload-time = "2026-06-13T19:09:34.836Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/78/4126abcbdbd3c559d43e0db7f7b9173fc6befe45d39a2856cc0b8ec2a5a6/python_multipart-0.0.27-py3-none-any.whl", hash = "sha256:6fccfad17a27334bd0193681b369f476eda3409f17381a2d65aa7df3f7275645", size = 29254, upload-time = "2026-04-27T10:51:24.997Z" },
+    { url = "https://files.pythonhosted.org/packages/14/de/9b9c5d6a3318fab958377ce8c1455c33d6a8eae3d2e848b7c34d3f12d7ad/python_multipart-0.0.30-py3-none-any.whl", hash = "sha256:1848ad5dd71fd213b6c4a47c7c0a1d6b34c1e3f124e2cc7d2d51d51c4f70e8e5", size = 19272, upload-time = "2026-06-13T19:09:33.428Z" },
 ]
 
 [[package]]

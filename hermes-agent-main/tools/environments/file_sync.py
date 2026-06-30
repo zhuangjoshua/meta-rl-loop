@@ -324,7 +324,17 @@ class FileSyncManager:
 
             with tempfile.TemporaryDirectory(prefix="takyon-sync-back-") as staging:
                 with tarfile.open(tf.name) as tar:
-                    tar.extractall(staging, filter="data")
+                    staging_root = os.path.realpath(staging)
+                    for member in tar.getmembers():
+                        dest = os.path.realpath(os.path.join(staging, member.name))
+                        if dest != staging_root and not dest.startswith(
+                            staging_root + os.sep
+                        ):
+                            raise ValueError(
+                                f"sync_back: refusing to extract member outside "
+                                f"staging dir: {member.name!r}"
+                            )
+                        tar.extract(member, staging, filter="data")
 
                 applied = 0
                 for dirpath, _dirnames, filenames in os.walk(staging):

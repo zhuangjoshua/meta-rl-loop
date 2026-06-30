@@ -2721,12 +2721,22 @@ class FeishuAdapter(BasePlatformAdapter):
         self._card_action_tokens[token] = now
         return False
 
+    @staticmethod
+    def _redact_card_action_token(token: str) -> str:
+        """Return a non-sensitive fingerprint of a card action token for logging."""
+        if not token:
+            return "<empty>"
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
     async def _handle_card_action_event(self, data: Any) -> None:
         """Route Feishu interactive card button clicks as synthetic COMMAND events."""
         event = getattr(data, "event", None)
         token = str(getattr(event, "token", "") or "")
         if token and self._is_card_action_duplicate(token):
-            logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
+            logger.debug(
+                "[Feishu] Dropping duplicate card action token (fingerprint=%s)",
+                self._redact_card_action_token(token),
+            )
             return
 
         context = getattr(event, "context", None)
