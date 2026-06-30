@@ -49,6 +49,42 @@ import takyon_cli.main
 PY
 }
 
+bootstrap_takyon_cli_runtime() {
+  echo "Bootstrapping local Takyon runtime into $RUNTIME_DIR/.venv ..." >&2
+  if command -v uv >/dev/null 2>&1; then
+    (
+      cd "$RUNTIME_DIR"
+      uv venv "$RUNTIME_DIR/.venv"
+      UV_PROJECT_ENVIRONMENT="$RUNTIME_DIR/.venv" uv pip install -e ".[all,postgres]"
+    ) || die "failed to bootstrap Takyon runtime into $RUNTIME_DIR/.venv with uv"
+    return 0
+  fi
+  local bootstrap_python=""
+  if command -v python3 >/dev/null 2>&1; then
+    bootstrap_python="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    bootstrap_python="$(command -v python)"
+  else
+    die "takyon CLI missing: expected $TAKYON_CLI_BIN or runnable fallback via $TAKYON_CLI_PYTHON -m takyon_cli.main; install uv or Python 3 with venv support"
+  fi
+  (
+    cd "$RUNTIME_DIR"
+    "$bootstrap_python" -m venv "$RUNTIME_DIR/.venv"
+    "$RUNTIME_DIR/.venv/bin/python" -m pip install -e ".[all,postgres]"
+  ) || die "failed to bootstrap Takyon runtime into $RUNTIME_DIR/.venv with $bootstrap_python"
+}
+
+ensure_takyon_cli_runtime() {
+  if takyon_cli_shim_ready || takyon_cli_fallback_ready; then
+    return 0
+  fi
+  bootstrap_takyon_cli_runtime
+  if takyon_cli_shim_ready || takyon_cli_fallback_ready; then
+    return 0
+  fi
+  die "takyon CLI missing after bootstrap: expected $TAKYON_CLI_BIN or runnable fallback via $TAKYON_CLI_PYTHON -m takyon_cli.main"
+}
+
 run_takyon_cli() {
   if takyon_cli_shim_ready; then
     "$TAKYON_CLI_BIN" "$@"
@@ -82,9 +118,7 @@ ensure_operator_runtime_deps() {
 
 require_files() {
   [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
-  if ! takyon_cli_shim_ready && ! takyon_cli_fallback_ready; then
-    die "takyon CLI missing: expected $TAKYON_CLI_BIN or runnable fallback via $TAKYON_CLI_PYTHON -m takyon_cli.main"
-  fi
+  ensure_takyon_cli_runtime
   [[ -f "$SSH_KEY" ]] || die "SSH key missing: $SSH_KEY"
 }
 
