@@ -18,8 +18,9 @@ export const TAKYON_BASE_PATH = readBasePath();
 const BASE = TAKYON_BASE_PATH;
 
 
-// Ephemeral session token for protected endpoints.
-// Injected into index.html by the server — never fetched via API.
+// Local/dashboard hosts inject an ephemeral session token for browser calls that cannot rely on
+// cookie auth (for example URL/query-param fallbacks and local-only admin surfaces). Public/Auth0
+// hosts authenticate normal browser API calls with the same-origin session cookie instead.
 declare global {
   interface Window {
     __TAKYON_SESSION_TOKEN__?: string;
@@ -41,13 +42,18 @@ function setSessionHeader(headers: Headers, token: string): void {
 }
 
 export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  // Inject the session token into all /api/ requests.
+  // Normal browser API calls should work on both local/session-token hosts and public/Auth0-cookie
+  // hosts. Send the legacy session header only when it exists, and always allow same-origin cookies.
   const headers = new Headers(init?.headers);
   const token = window.__TAKYON_SESSION_TOKEN__;
   if (token) {
     setSessionHeader(headers, token);
   }
-  const res = await fetch(`${BASE}${url}`, { ...init, headers });
+  const res = await fetch(`${BASE}${url}`, {
+    ...init,
+    headers,
+    credentials: init?.credentials ?? "same-origin",
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);
@@ -124,7 +130,10 @@ export const api = {
     if (token) {
       setSessionHeader(headers, token);
     }
-    const res = await fetch(`${BASE}/auth/me`, { headers });
+    const res = await fetch(`${BASE}/auth/me`, {
+      headers,
+      credentials: "same-origin",
+    });
     if (res.status === 401) {
       return {
         authenticated: false,
