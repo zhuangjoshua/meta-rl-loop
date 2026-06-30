@@ -494,6 +494,15 @@ def run_one(
             pass
         job_lifecycle_conn = None
 
+    def _claim_is_recent(lifecycle_conn) -> bool:
+        window_seconds = max(60.0, float(heartbeat_interval_seconds or 0) * 4.0)
+        row = lifecycle_conn.execute(
+            "select status, locked_at > now() - (%s::double precision * interval '1 second') "
+            "from jobs where id = %s",
+            (window_seconds, job.id),
+        ).fetchone()
+        return bool(row is not None and str(row[0]) == "running" and row[1])
+
     try:
         wait_timeout = (
             heartbeat_interval_seconds
@@ -535,6 +544,13 @@ def run_one(
                             continue
                         except Exception:
                             pass
+                    try:
+                        _reset_lifecycle_conn()
+                        probe_conn, _close_probe = _lifecycle_conn()
+                        if _claim_is_recent(probe_conn):
+                            continue
+                    except Exception:
+                        pass
                     _log.warning(
                         "jobs: heartbeat could not refresh claim for job %s (kind=%s, non-fatal; "
                         "handler still running): %s",
