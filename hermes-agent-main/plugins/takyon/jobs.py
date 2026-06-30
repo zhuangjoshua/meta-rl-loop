@@ -465,14 +465,34 @@ def run_one(
             )
             return JobOutcome(job.id, job.kind, "blocked", reason="budget_exhausted")
 
+    job_lifecycle_conn = None
+
     def _lifecycle_conn():
+        nonlocal job_lifecycle_conn
         if heartbeat_conn_factory is None:
             return conn, False
-        return heartbeat_conn_factory(), True
+        if job_lifecycle_conn is None:
+            job_lifecycle_conn = heartbeat_conn_factory()
+        return job_lifecycle_conn, False
 
     def _close_lifecycle_conn(lifecycle_conn, should_close: bool) -> None:
+        nonlocal job_lifecycle_conn
         if should_close:
             lifecycle_conn.close()
+            return
+        if lifecycle_conn is not None and lifecycle_conn is job_lifecycle_conn:
+            lifecycle_conn.close()
+            job_lifecycle_conn = None
+
+    def _reset_lifecycle_conn() -> None:
+        nonlocal job_lifecycle_conn
+        if job_lifecycle_conn is None:
+            return
+        try:
+            job_lifecycle_conn.close()
+        except Exception:
+            pass
+        job_lifecycle_conn = None
 
     try:
         wait_timeout = (
@@ -504,16 +524,15 @@ def run_one(
                 # heartbeat failure: keep waiting for the handler, and let the TERMINAL transition be
                 # the single authority on the outcome.
                 try:
-                    heartbeat(conn, job.id, worker_id=worker_id)
+                    hb_conn, _close_hb = _lifecycle_conn()
+                    heartbeat(hb_conn, job.id, worker_id=worker_id)
                 except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
                     if heartbeat_conn_factory is not None:
+                        _reset_lifecycle_conn()
                         try:
-                            hb_conn = heartbeat_conn_factory()
-                            try:
-                                heartbeat(hb_conn, job.id, worker_id=worker_id)
-                                continue
-                            finally:
-                                hb_conn.close()
+                            hb_conn, _close_hb = _lifecycle_conn()
+                            heartbeat(hb_conn, job.id, worker_id=worker_id)
+                            continue
                         except Exception:
                             pass
                     _log.warning(
