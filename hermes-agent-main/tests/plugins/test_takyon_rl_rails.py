@@ -158,6 +158,29 @@ def test_subuser_role_denied_direct_writes_to_money_identity_and_ceo_tables(pg_c
             pg_conn.execute("reset role")
 
 
+def test_subuser_role_denied_writing_0058_attribution_fingerprint_columns(pg_conn):
+    """0058 adds attribution_json / card_fingerprint to subuser/money tables. The subuser role
+    must remain unable to write them — they are populated only by the privileged ports."""
+    if not pg_conn.execute("select 1 from pg_roles where rolname='takyon_app_runtime'").fetchone():
+        pytest.skip("takyon_app_runtime role absent on this DB")
+    if not pg_conn.execute("select to_regclass('public.app_users') is not null").fetchone()[0]:
+        pytest.skip("app_users not in this schema build")
+    # app_users.attribution_json — subuser has no table UPDATE, so a direct write is denied.
+    pg_conn.execute("set role takyon_app_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute("update public.app_users set attribution_json = '{}'::jsonb")
+    finally:
+        pg_conn.execute("reset role")
+    # app_revenue_events is fully denied to the subuser role; the new fingerprint column too.
+    pg_conn.execute("set role takyon_app_runtime")
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute("update public.app_revenue_events set card_fingerprint = 'x'")
+    finally:
+        pg_conn.execute("reset role")
+
+
 def test_subuser_role_cannot_set_rls_bypass_guc(pg_conn):
     """takyon_app_runtime must not be able to flip the RLS-bypass GUC on itself."""
     if not pg_conn.execute("select 1 from pg_roles where rolname='takyon_app_runtime'").fetchone():
