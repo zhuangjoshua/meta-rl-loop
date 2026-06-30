@@ -2946,9 +2946,33 @@ def _render_slash_palette(entries: list[dict[str, Any]], line: str, current_busi
     ])
 
 
+_SHELL_INPUT_HISTORY: Any = None
+
+
+def _shell_input_history():
+    """Persistent command history for the operator shell — enables up/down recall, Ctrl-R reverse
+    search, and ghost auto-suggest (the modern gemini-cli / claude-code REPL feel). Cached at module
+    level so it survives the per-line PromptSession and persists across shell sessions on disk."""
+    global _SHELL_INPUT_HISTORY
+    if _SHELL_INPUT_HISTORY is None:
+        try:
+            from prompt_toolkit.history import FileHistory
+            from takyon_constants import get_takyon_home
+
+            path = Path(get_takyon_home()) / ".coscale_shell_history"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _SHELL_INPUT_HISTORY = FileHistory(str(path))
+        except Exception:
+            from prompt_toolkit.history import InMemoryHistory
+
+            _SHELL_INPUT_HISTORY = InMemoryHistory()
+    return _SHELL_INPUT_HISTORY
+
+
 def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[dict[str, Any]]) -> str:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.application.current import get_app
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.completion import Completer, Completion
 
     class SlashCompleter(Completer):
@@ -2981,6 +3005,8 @@ def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[
         complete_while_typing=True,
         reserve_space_for_menu=max(4, min(_slash_page_size() + 2, 12)),
         bottom_toolbar=slash_toolbar,
+        history=_shell_input_history(),
+        auto_suggest=AutoSuggestFromHistory(),
     )
     sys.stdout.write(_input_bar_top(current_business) + "\n")
     sys.stdout.flush()
