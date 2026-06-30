@@ -12,6 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNTIME_DIR="$ROOT/hermes-agent-main"
 TAKYON_ENTRY="$ROOT/takyon"
 TAKYON_CLI_BIN="$RUNTIME_DIR/.venv/bin/takyon-cli"
+TAKYON_CLI_PYTHON="$RUNTIME_DIR/.venv/bin/python"
 
 SSH_HOST="${TAKYON_OPERATOR_VPS_HOST:-root@137.184.75.57}"
 SSH_KEY="${TAKYON_OPERATOR_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -37,9 +38,30 @@ die() {
   exit 1
 }
 
+takyon_cli_shim_ready() {
+  [[ -x "$TAKYON_CLI_BIN" ]]
+}
+
+takyon_cli_fallback_ready() {
+  [[ -x "$TAKYON_CLI_PYTHON" ]] || return 1
+  PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" - <<'PY' >/dev/null 2>&1
+import takyon_cli.main
+PY
+}
+
+run_takyon_cli() {
+  if takyon_cli_shim_ready; then
+    "$TAKYON_CLI_BIN" "$@"
+    return
+  fi
+  PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"
+}
+
 require_files() {
   [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
-  [[ -x "$TAKYON_CLI_BIN" ]] || die "takyon-cli missing: $TAKYON_CLI_BIN"
+  if ! takyon_cli_shim_ready && ! takyon_cli_fallback_ready; then
+    die "takyon CLI missing: expected $TAKYON_CLI_BIN or runnable fallback via $TAKYON_CLI_PYTHON -m takyon_cli.main"
+  fi
   [[ -f "$SSH_KEY" ]] || die "SSH key missing: $SSH_KEY"
 }
 
@@ -396,7 +418,10 @@ PY
 
 local_worker_pids() {
   command -v pgrep >/dev/null 2>&1 || return 0
-  pgrep -f "$TAKYON_CLI_BIN worker --worker-id mac-operator-" 2>/dev/null || true
+  {
+    pgrep -f "$TAKYON_CLI_BIN worker --worker-id mac-operator-" 2>/dev/null || true
+    pgrep -f "$TAKYON_CLI_PYTHON -m takyon_cli.main worker --worker-id mac-operator-" 2>/dev/null || true
+  } | awk '!seen[$0]++'
 }
 
 stop_local_workers() {
@@ -538,7 +563,7 @@ cmd_worker() {
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-5}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-14400}"
   cd "$RUNTIME_DIR"
-  exec "$TAKYON_CLI_BIN" worker --worker-id "mac-operator-$(hostname -s)-$$"
+  run_takyon_cli worker --worker-id "mac-operator-$(hostname -s)-$$"
 }
 
 cmd_worker_once() {
@@ -547,7 +572,7 @@ cmd_worker_once() {
   cmd_preflight
   require_docker_for_worker
   cd "$RUNTIME_DIR"
-  exec "$TAKYON_CLI_BIN" worker --once --worker-id "mac-operator-$(hostname -s)-once-$$"
+  run_takyon_cli worker --once --worker-id "mac-operator-$(hostname -s)-once-$$"
 }
 
 cmd_console() {
