@@ -16488,6 +16488,39 @@ class TakyonStore:
                 },
             }
 
+    def record_pulse(self, slug: str, *, limit: int = 10) -> dict[str, Any]:
+        """RL rail R4: compute a pulse and persist it as a business.pulse.snapshot whose payload
+        carries the full pulse under a "pulse" key, so the NEXT calculate_pulse has a real numeric
+        baseline. Without this, the only snapshot written is the metrics/summary.md-write event,
+        which carries no metric values, so deltas_from_previous_pulse always baselines against an
+        empty prior (effectively zero). This makes pulse deltas truthful."""
+        slug = _slugify(slug)
+        pulse = self.calculate_pulse(slug, limit=limit)
+        generated_at = str(pulse.get("generated_at") or _now())
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            event_id = self._record_event(
+                conn,
+                scope=f"business:{slug}",
+                business_slug=slug,
+                event_type="business.pulse.snapshot",
+                payload={
+                    "generated_at": generated_at,
+                    "pulse": pulse,
+                    "source": "business_record_pulse",
+                },
+            )
+        return {
+            "success": True,
+            "business": slug,
+            "recorded": True,
+            "event_id": event_id,
+            "event_type": "business.pulse.snapshot",
+            "generated_at": generated_at,
+            "was_first_pulse": pulse.get("is_first_pulse"),
+            "deltas_from_previous_pulse": pulse.get("deltas_from_previous_pulse"),
+        }
+
     def traction_timeseries(self, slug: str, *, range_key: str = "M") -> dict[str, Any]:
         slug = _slugify(slug)
         key = str(range_key or "M").strip().upper() or "M"
@@ -20898,6 +20931,13 @@ def handle_business_read_file(args: dict, **_: Any) -> str:
 def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
     try:
         return tool_result(_store().calculate_pulse(_resolved_business_slug(args, required=True), limit=args.get("limit") or 10))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_record_pulse(args: dict, **_: Any) -> str:
+    try:
+        return tool_result(_store().record_pulse(_resolved_business_slug(args, required=True), limit=args.get("limit") or 10))
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -32629,6 +32669,12 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Read-only deterministic pulse calculation from canonical business state, app metrics, conversations, jobs, ledger, and events.",
         "handler": handle_business_calculate_pulse,
         "schema": _schema("business_calculate_pulse", "Calculate a business pulse without mutating state.", {"business": _BUSINESS_PROP, "limit": {"type": "integer", "description": "Top grouped rows to return; default 10"}}, ["business"]),
+    },
+    {
+        "name": "business_record_pulse",
+        "description": "Compute a pulse and persist it as a business.pulse.snapshot so future pulse deltas baseline against real prior metrics instead of zero (RL rail R4).",
+        "handler": handle_business_record_pulse,
+        "schema": _schema("business_record_pulse", "Compute and persist a pulse snapshot baseline.", {"business": _BUSINESS_PROP, "limit": {"type": "integer", "description": "Top grouped rows to return; default 10"}}, ["business"]),
     },
     {
         "name": "business_read_app_analytics",
