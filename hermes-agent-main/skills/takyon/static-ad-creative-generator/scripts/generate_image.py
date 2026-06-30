@@ -27,6 +27,7 @@ import datetime
 import json
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -87,17 +88,31 @@ def generate_one(
     refs = spec.get("prompting", {}).get("reference_images") or []
     refs = [r for r in refs if os.path.exists(r)]
 
-    renders: List[Dict] = []
+    # Compile prompts + resolve sizes inline (cheap), then dispatch the
+    # independent, blocking backend.generate() calls in parallel.
+    plans = []
     for ratio in ratios:
         render_spec = dict(spec)
         render_spec["aspect_ratio"] = ratio
         size = resolve_size(ratio, model_str)
         prompt = compile_prompt(render_spec, size)
+        plans.append((ratio, size, prompt))
 
+    def _render(plan):
+        ratio, size, prompt = plan
         images = backend.generate(prompt=prompt, size=size, n=n, reference_images=refs or None, quality=quality)
         if crop:
             images = [crop_to_aspect(img, ratio) for img in images]
+        return images
 
+    if multi:
+        with ThreadPoolExecutor(max_workers=len(plans)) as pool:
+            generated = list(pool.map(_render, plans))
+    else:
+        generated = [_render(plan) for plan in plans]
+
+    renders: List[Dict] = []
+    for (ratio, size, prompt), images in zip(plans, generated):
         suffix = f"__{_ratio_key(ratio)}" if multi else ""
         prompt_name = f"{cid}{suffix}.prompt.txt"
         with open(os.path.join(out_dir, prompt_name), "w", encoding="utf-8") as fh:

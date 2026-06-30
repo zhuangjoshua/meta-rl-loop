@@ -1641,15 +1641,21 @@ class DiscordAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=f"Channel {chat_id} not found")
 
         filename = file_name or os.path.basename(file_path)
-        with open(file_path, "rb") as fh:
-            file = discord.File(fh, filename=filename)
-            if self._is_forum_parent(channel):
-                return await self._forum_post_file(
-                    channel,
-                    content=(caption or "").strip(),
-                    file=file,
-                )
-            msg = await channel.send(content=caption if caption else None, file=file)
+
+        def _read_file() -> bytes:
+            with open(file_path, "rb") as fh:
+                return fh.read()
+
+        file_data = await asyncio.to_thread(_read_file)
+        import io
+        file = discord.File(io.BytesIO(file_data), filename=filename)
+        if self._is_forum_parent(channel):
+            return await self._forum_post_file(
+                channel,
+                content=(caption or "").strip(),
+                file=file,
+            )
+        msg = await channel.send(content=caption if caption else None, file=file)
         return SendResult(success=True, message_id=str(msg.id))
 
     async def send_multiple_images(
@@ -1822,8 +1828,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
             filename = os.path.basename(audio_path)
 
-            with open(audio_path, "rb") as f:
-                file_data = f.read()
+            def _read_audio() -> bytes:
+                with open(audio_path, "rb") as f:
+                    return f.read()
+
+            file_data = await asyncio.to_thread(_read_audio)
 
             # Forum channels (type 15) reject direct POST /messages — the
             # native voice flag path also targets /messages so it would fail

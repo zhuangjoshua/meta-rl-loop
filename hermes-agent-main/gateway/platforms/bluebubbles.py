@@ -479,23 +479,25 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         fname = filename or os.path.basename(file_path)
         try:
-            with open(file_path, "rb") as f:
-                files = {"attachment": (fname, f, "application/octet-stream")}
-                data: Dict[str, str] = {
-                    "chatGuid": guid,
-                    "name": fname,
-                    "tempGuid": uuid.uuid4().hex,
-                }
-                if is_audio_message:
-                    data["isAudioMessage"] = "true"
-                res = await self.client.post(
-                    self._api_url("/api/v1/message/attachment"),
-                    files=files,
-                    data=data,
-                    timeout=120,
-                )
-                res.raise_for_status()
-                result = res.json()
+            file_bytes = await asyncio.to_thread(
+                lambda: open(file_path, "rb").read()
+            )
+            files = {"attachment": (fname, file_bytes, "application/octet-stream")}
+            data: Dict[str, str] = {
+                "chatGuid": guid,
+                "name": fname,
+                "tempGuid": uuid.uuid4().hex,
+            }
+            if is_audio_message:
+                data["isAudioMessage"] = "true"
+            res = await self.client.post(
+                self._api_url("/api/v1/message/attachment"),
+                files=files,
+                data=data,
+                timeout=120,
+            )
+            res.raise_for_status()
+            result = res.json()
 
             if caption:
                 await self.send(chat_id, caption)

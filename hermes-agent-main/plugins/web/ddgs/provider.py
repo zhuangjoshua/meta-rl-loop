@@ -72,7 +72,9 @@ class DDGSWebSearchProvider(WebSearchProvider):
 
         try:
             web_results = []
-            with DDGS() as client:
+            # Bound network I/O: a stalled DuckDuckGo endpoint fails fast
+            # (surfaced by the except block) instead of hanging the turn.
+            with DDGS(timeout=15) as client:
                 for i, hit in enumerate(client.text(query, max_results=safe_limit)):
                     if i >= safe_limit:
                         break

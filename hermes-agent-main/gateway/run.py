@@ -16457,6 +16457,14 @@ class GatewayRunner:
 
             # Store agent reference for interrupt support
             agent_holder[0] = agent
+            # Signal the async tracker (and stream consumer poller) that the
+            # agent is now available — avoids an asyncio.sleep busy-wait.
+            safe_schedule_threadsafe(
+                _set_agent_ready_event(),
+                _loop_for_step,
+                logger=logger,
+                log_message="agent-ready event scheduling error",
+            )
             # Capture the full tool definitions for transcript logging
             tools_holder[0] = agent.tools if hasattr(agent, 'tools') else None
             
@@ -16978,10 +16986,14 @@ class GatewayRunner:
         
         # Track this agent as running for this session (for interrupt support)
         # We do this in a callback after the agent is created
+        _agent_ready_event = asyncio.Event()
+
+        async def _set_agent_ready_event():
+            _agent_ready_event.set()
+
         async def track_agent():
             # Wait for agent to be created
-            while agent_holder[0] is None:
-                await asyncio.sleep(0.05)
+            await _agent_ready_event.wait()
             if not session_key:
                 return
             # Only promote the sentinel to the real agent if this run is still
@@ -17815,7 +17827,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             for _ in range(20):
                 if not _pid_exists(existing_pid):
                     break  # Process is gone
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
             else:
                 # Still alive after 10s — force kill
                 logger.warning(
@@ -17824,7 +17836,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 )
                 try:
                     terminate_pid(existing_pid, force=True)
-                    time.sleep(0.5)
+                    await asyncio.sleep(0.5)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
             remove_pid_file()

@@ -36,9 +36,11 @@ jobs:
 
       - name: Validate tag exists
         if: github.event_name == 'workflow_dispatch'
+        env:
+          CONFIRM_TAG: ${{ inputs.confirm_tag }}
         run: |
-          if ! git tag -l "${{ inputs.confirm_tag }}" | grep -q .; then
-            echo "::error::Tag '${{ inputs.confirm_tag }}' does not exist in the repo"
+          if ! git tag -l "$CONFIRM_TAG" | grep -q .; then
+            echo "::error::Tag '$CONFIRM_TAG' does not exist in the repo"
             exit 1
           fi
 

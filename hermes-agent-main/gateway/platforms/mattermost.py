@@ -491,7 +491,7 @@ class MattermostAdapter(BasePlatformAdapter):
         import mimetypes
 
         p = Path(file_path)
-        if not p.exists():
+        if not await asyncio.to_thread(p.exists):
             logger.warning(
                 "Mattermost: local file not found, skipping: %s", file_path
             )
@@ -499,7 +499,7 @@ class MattermostAdapter(BasePlatformAdapter):
 
         fname = file_name or p.name
         ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-        file_data = p.read_bytes()
+        file_data = await asyncio.to_thread(p.read_bytes)
 
         file_id = await self._upload_file(chat_id, file_data, fname, ct)
         if not file_id:
@@ -557,12 +557,12 @@ class MattermostAdapter(BasePlatformAdapter):
                     if image_url.startswith("file://"):
                         local_path = _unquote(image_url[7:])
                         p = Path(local_path)
-                        if not p.exists():
+                        if not await asyncio.to_thread(p.exists):
                             logger.warning("Mattermost: skipping missing image %s", local_path)
                             continue
                         fname = p.name
                         ct = mimetypes.guess_type(fname)[0] or "image/png"
-                        file_data = p.read_bytes()
+                        file_data = await asyncio.to_thread(p.read_bytes)
                     else:
                         from tools.url_safety import is_safe_url
                         if not is_safe_url(image_url):

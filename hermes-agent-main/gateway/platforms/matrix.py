@@ -1384,14 +1384,14 @@ class MatrixAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Read a local file and upload it."""
         p = Path(file_path).expanduser()
-        if not p.exists():
+        if not await asyncio.to_thread(p.exists):
             return await self.send(
                 room_id, f"{caption or ''}\n(file not found: {file_path})", reply_to
             )
 
         fname = file_name or p.name
         ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-        data = p.read_bytes()
+        data = await asyncio.to_thread(p.read_bytes)
 
         return await self._upload_and_send(
             room_id, data, fname, ct, msgtype, caption, reply_to, metadata, is_voice

@@ -14,7 +14,7 @@ import os
 import tempfile
 import html as _html
 import re
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 from takyon_cli.config import get_env_value
 
@@ -3387,70 +3387,75 @@ class TelegramAdapter(BasePlatformAdapter):
             if not os.path.exists(audio_path):
                 return SendResult(success=False, error=self._missing_media_path_error("Audio", audio_path))
             
-            with open(audio_path, "rb") as audio_file:
-                ext = os.path.splitext(audio_path)[1].lower()
-                # .ogg / .opus files -> send as voice (round playable bubble)
-                if ext in {".ogg", ".opus"}:
-                    _voice_thread = self._metadata_thread_id(metadata)
-                    reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
-                    voice_thread_kwargs = self._thread_kwargs_for_send(
-                        chat_id,
-                        _voice_thread,
-                        metadata,
-                        reply_to_message_id=reply_to_id,
-                        reply_to_mode=self._reply_to_mode
-                    )
-                    msg = await self._send_with_dm_topic_reply_anchor_retry(
-                        self._bot.send_voice,
-                        {
-                            "chat_id": int(chat_id),
-                            "voice": audio_file,
-                            "caption": caption[:1024] if caption else None,
-                            "reply_to_message_id": reply_to_id,
-                            **voice_thread_kwargs,
-                            **self._notification_kwargs(metadata),
-                        },
-                        metadata,
-                        reply_to_id,
-                        "voice",
-                        reset_media=lambda: audio_file.seek(0),
-                    )
-                elif ext in {".mp3", ".m4a"}:
-                    # Telegram's Bot API sendAudio only accepts MP3 / M4A.
-                    _audio_thread = self._metadata_thread_id(metadata)
-                    reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
-                    audio_thread_kwargs = self._thread_kwargs_for_send(
-                        chat_id,
-                        _audio_thread,
-                        metadata,
-                        reply_to_message_id=reply_to_id,
-                        reply_to_mode=self._reply_to_mode
-                    )
-                    msg = await self._send_with_dm_topic_reply_anchor_retry(
-                        self._bot.send_audio,
-                        {
-                            "chat_id": int(chat_id),
-                            "audio": audio_file,
-                            "caption": caption[:1024] if caption else None,
-                            "reply_to_message_id": reply_to_id,
-                            **audio_thread_kwargs,
-                            **self._notification_kwargs(metadata),
-                        },
-                        metadata,
-                        reply_to_id,
-                        "audio",
-                        reset_media=lambda: audio_file.seek(0),
-                    )
-                else:
-                    # Formats Telegram can't play natively (.wav, .flac, ...)
-                    # — fall back to document delivery instead of raising.
-                    return await self.send_document(
-                        chat_id=chat_id,
-                        file_path=audio_path,
-                        caption=caption,
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
+            ext = os.path.splitext(audio_path)[1].lower()
+            # .ogg / .opus files -> send as voice (round playable bubble)
+            if ext in {".ogg", ".opus"}:
+                def _read_voice() -> bytes:
+                    with open(audio_path, "rb") as audio_file:
+                        return audio_file.read()
+                audio_data = await asyncio.to_thread(_read_voice)
+                _voice_thread = self._metadata_thread_id(metadata)
+                reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
+                voice_thread_kwargs = self._thread_kwargs_for_send(
+                    chat_id,
+                    _voice_thread,
+                    metadata,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
+                )
+                msg = await self._send_with_dm_topic_reply_anchor_retry(
+                    self._bot.send_voice,
+                    {
+                        "chat_id": int(chat_id),
+                        "voice": audio_data,
+                        "caption": caption[:1024] if caption else None,
+                        "reply_to_message_id": reply_to_id,
+                        **voice_thread_kwargs,
+                        **self._notification_kwargs(metadata),
+                    },
+                    metadata,
+                    reply_to_id,
+                    "voice",
+                )
+            elif ext in {".mp3", ".m4a"}:
+                # Telegram's Bot API sendAudio only accepts MP3 / M4A.
+                def _read_audio() -> bytes:
+                    with open(audio_path, "rb") as audio_file:
+                        return audio_file.read()
+                audio_data = await asyncio.to_thread(_read_audio)
+                _audio_thread = self._metadata_thread_id(metadata)
+                reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
+                audio_thread_kwargs = self._thread_kwargs_for_send(
+                    chat_id,
+                    _audio_thread,
+                    metadata,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
+                )
+                msg = await self._send_with_dm_topic_reply_anchor_retry(
+                    self._bot.send_audio,
+                    {
+                        "chat_id": int(chat_id),
+                        "audio": audio_data,
+                        "caption": caption[:1024] if caption else None,
+                        "reply_to_message_id": reply_to_id,
+                        **audio_thread_kwargs,
+                        **self._notification_kwargs(metadata),
+                    },
+                    metadata,
+                    reply_to_id,
+                    "audio",
+                )
+            else:
+                # Formats Telegram can't play natively (.wav, .flac, ...)
+                # — fall back to document delivery instead of raising.
+                return await self.send_document(
+                    chat_id=chat_id,
+                    file_path=audio_path,
+                    caption=caption,
+                    reply_to=reply_to,
+                    metadata=metadata,
+                )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             logger.error(
@@ -3524,7 +3529,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 await asyncio.sleep(human_delay)
 
             media: List[Any] = []
-            opened_files: List[Any] = []
             try:
                 for image_url, alt_text in chunk:
                     caption = alt_text[:1024] if alt_text else None
@@ -3536,9 +3540,12 @@ class TelegramAdapter(BasePlatformAdapter):
                                 self.name, local_path,
                             )
                             continue
-                        fh = open(local_path, "rb")
-                        opened_files.append(fh)
-                        media.append(InputMediaPhoto(media=fh, caption=caption))
+
+                        def _read_group_image(path: str = local_path) -> bytes:
+                            with open(path, "rb") as fh:
+                                return fh.read()
+                        image_bytes = await asyncio.to_thread(_read_group_image)
+                        media.append(InputMediaPhoto(media=image_bytes, caption=caption))
                     else:
                         media.append(InputMediaPhoto(media=image_url, caption=caption))
 
@@ -3558,13 +3565,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     reply_to_mode=self._reply_to_mode
                 )
 
-                def _reset_opened_files() -> None:
-                    for fh in opened_files:
-                        try:
-                            fh.seek(0)
-                        except Exception:
-                            pass
-
                 await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_media_group,
                     {
@@ -3577,7 +3577,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     metadata,
                     reply_to_id,
                     "media group",
-                    reset_media=_reset_opened_files,
                 )
             except Exception as e:
                 logger.warning(
@@ -3589,12 +3588,6 @@ class TelegramAdapter(BasePlatformAdapter):
                 await super().send_multiple_images(
                     chat_id, chunk, metadata, human_delay=human_delay,
                 )
-            finally:
-                for fh in opened_files:
-                    try:
-                        fh.close()
-                    except Exception:
-                        pass
 
     async def send_image_file(
         self,
@@ -3622,22 +3615,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to_id,
                 reply_to_mode=self._reply_to_mode
             )
-            with open(image_path, "rb") as image_file:
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
-                    self._bot.send_photo,
-                    {
-                        "chat_id": int(chat_id),
-                        "photo": image_file,
-                        "caption": caption[:1024] if caption else None,
-                        "reply_to_message_id": reply_to_id,
-                        **thread_kwargs,
-                        **self._notification_kwargs(metadata),
-                    },
-                    metadata,
-                    reply_to_id,
-                    "photo",
-                    reset_media=lambda: image_file.seek(0),
-                )
+            def _read_image() -> bytes:
+                with open(image_path, "rb") as image_file:
+                    return image_file.read()
+            image_data = await asyncio.to_thread(_read_image)
+            msg = await self._send_with_dm_topic_reply_anchor_retry(
+                self._bot.send_photo,
+                {
+                    "chat_id": int(chat_id),
+                    "photo": image_data,
+                    "caption": caption[:1024] if caption else None,
+                    "reply_to_message_id": reply_to_id,
+                    **thread_kwargs,
+                    **self._notification_kwargs(metadata),
+                },
+                metadata,
+                reply_to_id,
+                "photo",
+            )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             error_str = str(e)
@@ -3718,23 +3713,25 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_mode=self._reply_to_mode
             )
 
-            with open(file_path, "rb") as f:
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
-                    self._bot.send_document,
-                    {
-                        "chat_id": int(chat_id),
-                        "document": f,
-                        "filename": display_name,
-                        "caption": caption[:1024] if caption else None,
-                        "reply_to_message_id": reply_to_id,
-                        **thread_kwargs,
-                        **self._notification_kwargs(metadata),
-                    },
-                    metadata,
-                    reply_to_id,
-                    "document",
-                    reset_media=lambda: f.seek(0),
-                )
+            def _read_document() -> bytes:
+                with open(file_path, "rb") as f:
+                    return f.read()
+            document_data = await asyncio.to_thread(_read_document)
+            msg = await self._send_with_dm_topic_reply_anchor_retry(
+                self._bot.send_document,
+                {
+                    "chat_id": int(chat_id),
+                    "document": document_data,
+                    "filename": display_name,
+                    "caption": caption[:1024] if caption else None,
+                    "reply_to_message_id": reply_to_id,
+                    **thread_kwargs,
+                    **self._notification_kwargs(metadata),
+                },
+                metadata,
+                reply_to_id,
+                "document",
+            )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             print(f"[{self.name}] Failed to send document: {e}")
@@ -3766,22 +3763,24 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_message_id=reply_to_id,
                 reply_to_mode=self._reply_to_mode
             )
-            with open(video_path, "rb") as f:
-                msg = await self._send_with_dm_topic_reply_anchor_retry(
-                    self._bot.send_video,
-                    {
-                        "chat_id": int(chat_id),
-                        "video": f,
-                        "caption": caption[:1024] if caption else None,
-                        "reply_to_message_id": reply_to_id,
-                        **thread_kwargs,
-                        **self._notification_kwargs(metadata),
-                    },
-                    metadata,
-                    reply_to_id,
-                    "video",
-                    reset_media=lambda: f.seek(0),
-                )
+            def _read_video() -> bytes:
+                with open(video_path, "rb") as f:
+                    return f.read()
+            video_data = await asyncio.to_thread(_read_video)
+            msg = await self._send_with_dm_topic_reply_anchor_retry(
+                self._bot.send_video,
+                {
+                    "chat_id": int(chat_id),
+                    "video": video_data,
+                    "caption": caption[:1024] if caption else None,
+                    "reply_to_message_id": reply_to_id,
+                    **thread_kwargs,
+                    **self._notification_kwargs(metadata),
+                },
+                metadata,
+                reply_to_id,
+                "video",
+            )
             return SendResult(success=True, message_id=str(msg.message_id))
         except Exception as e:
             print(f"[{self.name}] Failed to send video: {e}")

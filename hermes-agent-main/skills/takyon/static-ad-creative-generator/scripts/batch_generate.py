@@ -21,6 +21,7 @@ import datetime
 import json
 import os
 import sys
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import List
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -45,6 +46,8 @@ def _main(argv: List[str]) -> int:
                     help="override every spec's ratio; comma-separated for multi-size, e.g. 1:1,9:16,1.91:1")
     ap.add_argument("--strict", action="store_true", help="treat lint warnings as errors")
     ap.add_argument("--stop-on-error", action="store_true", help="abort on the first failure")
+    ap.add_argument("--concurrency", type=int, default=4,
+                    help="max creatives to generate in parallel (default: 4)")
     args = ap.parse_args(argv)
     aspect_ratios = parse_aspect_ratios(args.aspect_ratio)
 
@@ -59,17 +62,32 @@ def _main(argv: List[str]) -> int:
 
     print(f"Generating {len(specs)} creative(s) -> {args.out} (backend={backend.name})")
     records, failures = [], []
-    for spec in specs:
-        cid = spec.get("creative_id", "?")
-        try:
-            records.append(generate_one(
+    workers = max(1, args.concurrency)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        future_to_cid = {
+            pool.submit(
+                generate_one,
                 spec, args.out, backend=backend, crop=args.crop,
                 quality=args.quality, strict=args.strict, aspect_ratios=aspect_ratios,
-            ))
-        except Exception as exc:  # keep going by default so one bad spec doesn't sink the batch
-            failures.append({"creative_id": cid, "error": str(exc)})
-            print(f"  FAIL [{cid}] {exc}", file=sys.stderr)
-            if args.stop_on_error:
+            ): spec.get("creative_id", "?")
+            for spec in specs
+        }
+        pending = set(future_to_cid)
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_EXCEPTION)
+            hit_error = False
+            for fut in done:
+                cid = future_to_cid[fut]
+                try:
+                    records.append(fut.result())
+                except Exception as exc:  # keep going by default so one bad spec doesn't sink the batch
+                    failures.append({"creative_id": cid, "error": str(exc)})
+                    print(f"  FAIL [{cid}] {exc}", file=sys.stderr)
+                    hit_error = True
+            if hit_error and args.stop_on_error:
+                for fut in pending:
+                    fut.cancel()
+                pending = set()
                 break
 
     manifest = {

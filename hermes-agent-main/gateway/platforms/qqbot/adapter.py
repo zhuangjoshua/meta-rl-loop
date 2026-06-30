@@ -1609,7 +1609,7 @@ class QQAdapter(BasePlatformAdapter):
                 # Image: download and cache locally.
                 try:
                     cached_path = await self._download_and_cache(url, ct)
-                    if cached_path and os.path.isfile(cached_path):
+                    if cached_path and await asyncio.to_thread(os.path.isfile, cached_path):
                         image_urls.append(cached_path)
                         image_media_types.append(ct or "image/jpeg")
                     elif cached_path:
@@ -1799,7 +1799,7 @@ class QQAdapter(BasePlatformAdapter):
                     "[%s] STT: converting to wav, filename=%r", self._log_tag, filename
                 )
                 wav_path = await self._convert_audio_to_wav_file(audio_data, filename)
-                if not wav_path or not Path(wav_path).exists():
+                if not wav_path or not await asyncio.to_thread(Path(wav_path).exists):
                     logger.warning(
                         "[%s] STT: ffmpeg conversion produced no output", self._log_tag
                     )
@@ -1880,6 +1880,18 @@ class QQAdapter(BasePlatformAdapter):
         return result
 
     @staticmethod
+    def _safe_stat(path: str):
+        """Return ``os.stat`` for *path*, or ``None`` if it does not exist.
+
+        Used from async code via ``asyncio.to_thread`` so the blocking
+        ``stat()`` call doesn't run on the event loop.
+        """
+        try:
+            return os.stat(path)
+        except OSError:
+            return None
+
+    @staticmethod
     def _guess_ext_from_data(data: bytes) -> str:
         """Guess file extension from magic bytes."""
         if data[:9] == b"#!SILK_V3" or data[:5] == b"#!SILK":
@@ -1922,12 +1934,13 @@ class QQAdapter(BasePlatformAdapter):
         # Try converting the file as-is
         try:
             pilk.silk_to_wav(src_path, wav_path, rate=16000)
-            if Path(wav_path).exists() and Path(wav_path).stat().st_size > 44:
+            wav_stat = await asyncio.to_thread(self._safe_stat, wav_path)
+            if wav_stat is not None and wav_stat.st_size > 44:
                 logger.debug(
                     "[%s] pilk converted %s to wav (%d bytes)",
                     self._log_tag,
                     Path(src_path).name,
-                    Path(wav_path).stat().st_size,
+                    wav_stat.st_size,
                 )
                 return wav_path
         except Exception as exc:
@@ -1940,12 +1953,13 @@ class QQAdapter(BasePlatformAdapter):
 
             shutil.copy2(src_path, silk_path)
             pilk.silk_to_wav(silk_path, wav_path, rate=16000)
-            if Path(wav_path).exists() and Path(wav_path).stat().st_size > 44:
+            wav_stat = await asyncio.to_thread(self._safe_stat, wav_path)
+            if wav_stat is not None and wav_stat.st_size > 44:
                 logger.debug(
                     "[%s] pilk converted %s (as .silk) to wav (%d bytes)",
                     self._log_tag,
                     Path(src_path).name,
-                    Path(wav_path).stat().st_size,
+                    wav_stat.st_size,
                 )
                 return wav_path
         except Exception as exc:
@@ -2007,7 +2021,8 @@ class QQAdapter(BasePlatformAdapter):
             logger.warning("[%s] ffmpeg conversion error: %s", self._log_tag, exc)
             return None
 
-        if not Path(wav_path).exists() or Path(wav_path).stat().st_size <= 44:
+        wav_stat = await asyncio.to_thread(self._safe_stat, wav_path)
+        if wav_stat is None or wav_stat.st_size <= 44:
             logger.warning(
                 "[%s] ffmpeg produced no/small output for %s",
                 self._log_tag,
@@ -2018,7 +2033,7 @@ class QQAdapter(BasePlatformAdapter):
             "[%s] ffmpeg converted %s to wav (%d bytes)",
             self._log_tag,
             Path(src_path).name,
-            Path(wav_path).stat().st_size,
+            wav_stat.st_size,
         )
         return wav_path
 
@@ -2098,14 +2113,14 @@ class QQAdapter(BasePlatformAdapter):
         model = stt_cfg["model"]
 
         try:
-            with open(wav_path, "rb") as f:
-                resp = await self._http_client.post(
-                    f"{base_url}/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files={"file": (Path(wav_path).name, f, "audio/wav")},
-                    data={"model": model},
-                    timeout=30.0,
-                )
+            wav_bytes = await asyncio.to_thread(Path(wav_path).read_bytes)
+            resp = await self._http_client.post(
+                f"{base_url}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (Path(wav_path).name, wav_bytes, "audio/wav")},
+                data={"model": model},
+                timeout=30.0,
+            )
             resp.raise_for_status()
             result = resp.json()
             # Zhipu/GLM format: {"choices": [{"message": {"content": "transcript text"}}]}
@@ -2183,8 +2198,8 @@ class QQAdapter(BasePlatformAdapter):
 
         # Verify output and cache
         try:
-            wav_data = Path(wav_path).read_bytes()
-            os.unlink(wav_path)
+            wav_data = await asyncio.to_thread(Path(wav_path).read_bytes)
+            await asyncio.to_thread(os.unlink, wav_path)
             return cache_document_from_bytes(wav_data, "qq_voice.wav")
         except Exception as exc:
             logger.debug("[%s] Failed to read converted wav: %s", self._log_tag, exc)
@@ -2865,7 +2880,9 @@ class QQAdapter(BasePlatformAdapter):
         if not local_path.is_absolute():
             local_path = (Path.cwd() / local_path).resolve()
 
-        if not local_path.exists() or not local_path.is_file():
+        local_stat = await asyncio.to_thread(self._safe_stat, str(local_path))
+        import stat as _stat
+        if local_stat is None or not _stat.S_ISREG(local_stat.st_mode):
             if media_source.startswith("<") or len(media_source) < 3:
                 raise ValueError(
                     f"Invalid media source (looks like a placeholder): {media_source!r}"
@@ -2908,7 +2925,9 @@ class QQAdapter(BasePlatformAdapter):
         if not local_path.is_absolute():
             local_path = (Path.cwd() / local_path).resolve()
 
-        if not local_path.exists() or not local_path.is_file():
+        local_stat = await asyncio.to_thread(self._safe_stat, str(local_path))
+        import stat as _stat
+        if local_stat is None or not _stat.S_ISREG(local_stat.st_mode):
             # Guard against placeholder paths like "<path>" that the LLM
             # sometimes emits instead of real file paths.
             if source.startswith("<") or len(source) < 3:
@@ -2917,7 +2936,7 @@ class QQAdapter(BasePlatformAdapter):
                 )
             raise FileNotFoundError(f"Media file not found: {local_path}")
 
-        raw = local_path.read_bytes()
+        raw = await asyncio.to_thread(local_path.read_bytes)
         resolved_name = file_name or local_path.name
         content_type = (
                 mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"

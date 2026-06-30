@@ -20,6 +20,7 @@ import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional, Set
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import aiohttp
@@ -140,8 +141,20 @@ class HomeAssistantAdapter(BasePlatformAdapter):
 
     async def _ws_connect(self) -> bool:
         """Establish WebSocket connection and authenticate."""
-        ws_url = self._hass_url.replace("https://", "wss://").replace("http://", "ws://")
-        ws_url = f"{ws_url}/api/websocket"
+        parts = urlsplit(self._hass_url)
+        # Secure HTTP maps to the secure WebSocket scheme (wss); only an
+        # explicitly plaintext http:// URL (e.g. a local LAN host) downgrades
+        # to ws://.  Anything already using a ws*/wss* scheme is preserved.
+        scheme = parts.scheme.lower()
+        if scheme in ("https", "wss"):
+            ws_scheme = "wss"
+        elif scheme in ("http", "ws"):
+            ws_scheme = "ws"
+        else:
+            ws_scheme = "wss"
+        ws_url = urlunsplit(
+            (ws_scheme, parts.netloc, "/api/websocket", "", "")
+        )
 
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30)

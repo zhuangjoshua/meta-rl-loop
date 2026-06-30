@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from typing import Any, Dict
 
@@ -101,6 +102,10 @@ class FirecrawlBrowserProvider(BrowserProvider):
             )
 
         data = response.json()
+        if not isinstance(data, dict) or "id" not in data or "cdpUrl" not in data:
+            raise RuntimeError(
+                f"Firecrawl returned unexpected session body: {data}"
+            )
         session_name = f"takyon_{task_id}_{uuid.uuid4().hex[:8]}"
 
         logger.info("Created Firecrawl browser session %s", session_name)
@@ -113,26 +118,62 @@ class FirecrawlBrowserProvider(BrowserProvider):
         }
 
     def close_session(self, session_id: str) -> bool:
-        try:
-            response = requests.delete(
-                f"{self._api_url()}/v2/browser/{session_id}",
-                headers=self._headers(),
-                timeout=10,
-            )
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.delete(
+                    f"{self._api_url()}/v2/browser/{session_id}",
+                    headers=self._headers(),
+                    timeout=10,
+                )
+            except requests.RequestException as e:
+                logger.warning(
+                    "Connection error closing Firecrawl session %s "
+                    "(attempt %s/%s): %s",
+                    session_id,
+                    attempt,
+                    max_attempts,
+                    e,
+                )
+                if attempt < max_attempts:
+                    time.sleep(0.5 * attempt)
+                    continue
+                logger.error(
+                    "Exception closing Firecrawl session %s: %s", session_id, e
+                )
+                return False
+            except Exception as e:
+                logger.error(
+                    "Exception closing Firecrawl session %s: %s", session_id, e
+                )
+                return False
+
             if response.status_code in {200, 201, 204}:
                 logger.debug("Successfully closed Firecrawl session %s", session_id)
                 return True
-            else:
+
+            if response.status_code >= 500 and attempt < max_attempts:
                 logger.warning(
-                    "Failed to close Firecrawl session %s: HTTP %s - %s",
-                    session_id,
+                    "Transient HTTP %s closing Firecrawl session %s "
+                    "(attempt %s/%s): %s",
                     response.status_code,
+                    session_id,
+                    attempt,
+                    max_attempts,
                     response.text[:200],
                 )
-                return False
-        except Exception as e:
-            logger.error("Exception closing Firecrawl session %s: %s", session_id, e)
+                time.sleep(0.5 * attempt)
+                continue
+
+            logger.warning(
+                "Failed to close Firecrawl session %s: HTTP %s - %s",
+                session_id,
+                response.status_code,
+                response.text[:200],
+            )
             return False
+
+        return False
 
     def emergency_cleanup(self, session_id: str) -> None:
         if not self.is_available():

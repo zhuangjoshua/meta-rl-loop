@@ -32,7 +32,6 @@ import hmac
 import json
 import logging
 import re
-import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -723,31 +722,37 @@ class WebhookAdapter(BasePlatformAdapter):
             )
 
         try:
-            result = subprocess.run(
-                [
-                    "gh",
-                    "pr",
-                    "comment",
-                    str(pr_number),
-                    "--repo",
-                    repo,
-                    "--body",
-                    content,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            proc = await asyncio.create_subprocess_exec(
+                "gh",
+                "pr",
+                "comment",
+                str(pr_number),
+                "--repo",
+                repo,
+                "--body",
+                content,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            if result.returncode == 0:
+            try:
+                _, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=30
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                raise
+            if proc.returncode == 0:
                 logger.info(
                     "[webhook] Posted comment on %s#%s", repo, pr_number
                 )
                 return SendResult(success=True)
             else:
+                stderr_text = stderr_bytes.decode("utf-8", "replace")
                 logger.error(
-                    "[webhook] gh pr comment failed: %s", result.stderr
+                    "[webhook] gh pr comment failed: %s", stderr_text
                 )
-                return SendResult(success=False, error=result.stderr)
+                return SendResult(success=False, error=stderr_text)
         except FileNotFoundError:
             logger.error(
                 "[webhook] 'gh' CLI not found — install GitHub CLI for "

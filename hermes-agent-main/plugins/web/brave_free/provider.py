@@ -29,6 +29,21 @@ logger = logging.getLogger(__name__)
 
 _BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
+# Module-level pooled httpx client, lazily created so importing this module
+# does not require httpx and so the connection pool (keep-alive) is reused
+# across repeated searches instead of paying a fresh TLS handshake each call.
+_CLIENT = None
+
+
+def _get_client():
+    """Return a shared, lazily-created ``httpx.Client`` with the 15s timeout."""
+    global _CLIENT
+    if _CLIENT is None:
+        import httpx
+
+        _CLIENT = httpx.Client(timeout=15)
+    return _CLIENT
+
 
 class BraveFreeWebSearchProvider(WebSearchProvider):
     """Search-only Brave provider using the free-tier Data-for-Search API.
@@ -73,14 +88,13 @@ class BraveFreeWebSearchProvider(WebSearchProvider):
         count = max(1, min(int(limit), 20))
 
         try:
-            resp = httpx.get(
+            resp = _get_client().get(
                 _BRAVE_ENDPOINT,
                 params={"q": query, "count": count},
                 headers={
                     "X-Subscription-Token": api_key,
                     "Accept": "application/json",
                 },
-                timeout=15,
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:

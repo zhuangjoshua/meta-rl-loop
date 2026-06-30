@@ -1117,10 +1117,12 @@ class WeComAdapter(BasePlatformAdapter):
         if not local_path.is_absolute():
             local_path = (Path.cwd() / local_path).resolve()
 
-        if not local_path.exists() or not local_path.is_file():
-            raise FileNotFoundError(f"Media file not found: {local_path}")
+        def _read_local_file() -> bytes:
+            if not local_path.exists() or not local_path.is_file():
+                raise FileNotFoundError(f"Media file not found: {local_path}")
+            return local_path.read_bytes()
 
-        data = local_path.read_bytes()
+        data = await asyncio.to_thread(_read_local_file)
         resolved_name = file_name or local_path.name
         content_type = self._normalize_content_type("", resolved_name)
         return data, content_type, resolved_name

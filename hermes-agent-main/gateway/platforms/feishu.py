@@ -2101,8 +2101,12 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             import io as _io
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
+
+            def _read_image_bytes() -> bytes:
+                with open(image_path, "rb") as f:
+                    return f.read()
+
+            image_bytes = await asyncio.to_thread(_read_image_bytes)
             # Wrap in BytesIO so lark SDK's MultipartEncoder can read .name and .tell()
             image_file = _io.BytesIO(image_bytes)
             image_file.name = os.path.basename(image_path)
@@ -4266,14 +4270,17 @@ class FeishuAdapter(BasePlatformAdapter):
             requested_message_type=outbound_message_type,
         )
         try:
-            with open(file_path, "rb") as file_obj:
-                body = self._build_file_upload_body(
-                    file_type=upload_file_type,
-                    file_name=display_name,
-                    file=file_obj,
-                )
-                request = self._build_file_upload_request(body)
-                upload_response = await asyncio.to_thread(self._client.im.v1.file.create, request)
+            def _upload_file() -> Any:
+                with open(file_path, "rb") as file_obj:
+                    body = self._build_file_upload_body(
+                        file_type=upload_file_type,
+                        file_name=display_name,
+                        file=file_obj,
+                    )
+                    request = self._build_file_upload_request(body)
+                    return self._client.im.v1.file.create(request)
+
+            upload_response = await asyncio.to_thread(_upload_file)
             file_key = self._extract_response_field(upload_response, "file_key")
             if not file_key:
                 return self._response_error_result(
