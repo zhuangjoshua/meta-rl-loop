@@ -495,7 +495,9 @@ def run_one(
         job_lifecycle_conn = None
 
     def _claim_is_recent(lifecycle_conn) -> bool:
-        window_seconds = max(60.0, float(heartbeat_interval_seconds or 0) * 4.0)
+        stale_seconds = max(60.0, float(os.getenv("TAKYON_WORKER_STALE_SECONDS") or 14_400))
+        warning_window_seconds = max(300.0, float(heartbeat_interval_seconds or 0) * 20.0)
+        window_seconds = min(warning_window_seconds, stale_seconds / 2.0)
         row = lifecycle_conn.execute(
             "select status, locked_at > now() - (%s::double precision * interval '1 second') "
             "from jobs where id = %s",
