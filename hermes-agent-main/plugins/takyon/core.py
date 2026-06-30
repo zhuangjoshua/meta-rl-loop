@@ -16558,6 +16558,7 @@ class TakyonStore:
                 som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
                 settled = self._recent_event_payloads(conn, slug, "ceo.episode.settled", episode_limit)
                 opened = self._recent_event_payloads(conn, slug, "ceo.episode.opened", episode_limit)
+                intra_learn, inter_learn = self._retrieve_learnings(conn, slug)
         except Exception:
             return ""
         lines: list[str] = []
@@ -16585,6 +16586,17 @@ class TakyonStore:
                 bets.append(f"- (in flight) {desc}")
         if bets:
             lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
+        learn_lines: list[str] = []
+        for p in intra_learn:
+            claim = str((p or {}).get("claim") or "").strip()
+            if claim:
+                learn_lines.append(f"- (this business) {claim}")
+        for p in inter_learn:
+            claim = str((p or {}).get("claim") or "").strip()
+            if claim:
+                learn_lines.append(f"- (from similar businesses) {claim}")
+        if learn_lines:
+            lines.append("Learnings:\n" + "\n".join(learn_lines))
         if not lines:
             return ""
         return (
@@ -16634,6 +16646,98 @@ class TakyonStore:
             )
         return {"success": True, "business": slug, "episode_id": episode_id, "event_id": event_id,
                 "event_type": "ceo.episode.opened"}
+
+    @staticmethod
+    def _tokenize_tags(raw: Any) -> set[str]:
+        if isinstance(raw, (list, tuple, set)):
+            items = [str(x) for x in raw]
+        else:
+            items = re.split(r"[\s,;/]+", str(raw or ""))
+        return {t.strip().lower() for t in items if t and len(t.strip()) > 1}
+
+    def _business_tags(self, conn: Any, slug: str) -> set[str]:
+        try:
+            biz = self._ensure_business(conn, slug)
+        except Exception:
+            return set()
+        text = " ".join(str((biz or {}).get(k) or "") for k in ("name", "goal", "work_focus"))
+        return {t.strip().lower() for t in re.split(r"[\s,;/]+", text) if len(t.strip()) > 2}
+
+    def _retrieve_learnings(self, conn: Any, slug: str, *, intra_limit: int = 10,
+                            inter_k: int = 5) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """RL rail R7 retrieval: ALL of this business's own learnings (intra, bounded) + top-k
+        cross-business learnings (inter) ranked by tag overlap. Cheap tag-overlap scoring now
+        (embeddings deferred); never crosses operators."""
+        intra = self._recent_event_payloads(conn, slug, "ceo.learning", intra_limit)
+        shared_rows = conn.execute(
+            "SELECT * FROM events WHERE event_type = 'ceo.learning.shared' ORDER BY created_at DESC LIMIT 200"
+        ).fetchall()
+        op = str(self._operator_user_id or "").strip()
+        biz_tags = self._business_tags(conn, slug)
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for raw in shared_rows:
+            row = self._row_to_dict(raw)
+            p = (row or {}).get("payload") or {}
+            if not isinstance(p, dict):
+                continue
+            learning_op = str(p.get("operator") or "").strip()
+            if op and learning_op and learning_op != op:
+                continue  # never surface another operator's learnings
+            score = len(biz_tags & self._tokenize_tags(p.get("tags")))
+            scored.append((score, p))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        inter = [p for _score, p in scored[:inter_k]]
+        return intra, inter
+
+    def record_learning(self, slug: str, claim: str, *, tags: Any = None,
+                        scope: str = "business") -> dict[str, Any]:
+        """RL rail R7 write: record a learning. scope='business' -> intra (this business only);
+        scope='shared' -> inter (operator-scoped, surfaced to similar businesses by tag overlap)."""
+        slug = _slugify(slug)
+        claim = str(claim or "").strip()
+        if not claim:
+            raise TakyonError("learning claim required")
+        scope_kind = str(scope or "business").strip().lower()
+        if scope_kind not in {"business", "shared"}:
+            raise TakyonError("learning scope must be 'business' or 'shared'")
+        tag_set = sorted(self._tokenize_tags(tags))
+        payload = {
+            "claim": claim,
+            "tags": tag_set,
+            "operator": str(self._operator_user_id or "").strip(),
+            "authored_by": slug,
+            "status": "candidate",
+            "created_at": _now(),
+        }
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            if scope_kind == "shared":
+                event_id = self._record_event(
+                    conn, scope=f"business:{slug}", business_slug=slug,
+                    event_type="ceo.learning.shared", payload=payload,
+                )
+            else:
+                event_id = self._record_event(
+                    conn, scope=f"business:{slug}", business_slug=slug,
+                    event_type="ceo.learning", payload=payload,
+                )
+        return {"success": True, "business": slug, "event_id": event_id, "scope": scope_kind,
+                "event_type": "ceo.learning.shared" if scope_kind == "shared" else "ceo.learning"}
+
+    def set_identity(self, slug: str, identity: str) -> dict[str, Any]:
+        """RL rail R5: set the CEO's stable identity, injected at the top of every wake."""
+        slug = _slugify(slug)
+        identity = str(identity or "").strip()
+        if not identity:
+            raise TakyonError("identity text required")
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            event_id = self._record_event(
+                conn, scope=f"business:{slug}", business_slug=slug,
+                event_type="ceo.identity",
+                payload={"identity": identity, "generated_at": _now()},
+            )
+        return {"success": True, "business": slug, "event_id": event_id, "event_type": "ceo.identity"}
 
     def traction_timeseries(self, slug: str, *, range_key: str = "M") -> dict[str, Any]:
         slug = _slugify(slug)
@@ -20063,6 +20167,8 @@ class TakyonStore:
             "metric, event, conversation, ledger, job, or wake data during a wake. "
             "Record the 1-2 moves you choose as bets with business_record_episode, and before you sleep write where "
             "you are leaving off with business_open_state_of_mind so your next wake remembers this one. "
+            "When an outcome teaches you something durable, capture it with business_record_learning (scope 'business' "
+            "for this company's own playbook; scope 'shared' if it should help similar businesses). "
             f"{daily_summary_line}"
             "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
             "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
@@ -21079,6 +21185,28 @@ def handle_business_open_state_of_mind(args: dict, **_: Any) -> str:
         return tool_result(_store().open_state_of_mind(
             _resolved_business_slug(args, required=True),
             str(args.get("note") or ""),
+        ))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_record_learning(args: dict, **_: Any) -> str:
+    try:
+        return tool_result(_store().record_learning(
+            _resolved_business_slug(args, required=True),
+            str(args.get("claim") or ""),
+            tags=args.get("tags"),
+            scope=str(args.get("scope") or "business"),
+        ))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_set_identity(args: dict, **_: Any) -> str:
+    try:
+        return tool_result(_store().set_identity(
+            _resolved_business_slug(args, required=True),
+            str(args.get("identity") or ""),
         ))
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -32829,6 +32957,18 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Record where the CEO is leaving off this wake; the latest note is injected into the next wake's context so the CEO remembers across wakes (RL rail R5).",
         "handler": handle_business_open_state_of_mind,
         "schema": _schema("business_open_state_of_mind", "Record where you are leaving off for your next wake.", {"business": _BUSINESS_PROP, "note": {"type": "string", "description": "Where you are leaving off: open threads, current focus, what to check next wake."}}, ["business", "note"]),
+    },
+    {
+        "name": "business_record_learning",
+        "description": "Record a durable learning. scope 'business' = this business's own playbook (always surfaced for it); scope 'shared' = a cross-business prior surfaced to similar businesses by tag overlap (RL rail R7).",
+        "handler": handle_business_record_learning,
+        "schema": _schema("business_record_learning", "Record a learning for this business or the shared cross-business pool.", {"business": _BUSINESS_PROP, "claim": {"type": "string", "description": "The lesson, 1-2 sentences."}, "tags": {"type": "array", "items": {"type": "string"}, "description": "Situation tags for retrieval, e.g. ['b2c','reddit','pre-launch']."}, "scope": {"type": "string", "enum": ["business", "shared"], "description": "'business' (intra, default) or 'shared' (inter/cross-business)."}}, ["business", "claim"]),
+    },
+    {
+        "name": "business_set_identity",
+        "description": "Set the CEO's stable identity for a business; injected at the top of every wake (RL rail R5).",
+        "handler": handle_business_set_identity,
+        "schema": _schema("business_set_identity", "Set the CEO identity injected at every wake.", {"business": _BUSINESS_PROP, "identity": {"type": "string", "description": "Who you are + the company thesis, 1-3 sentences."}}, ["business", "identity"]),
     },
     {
         "name": "business_read_app_analytics",

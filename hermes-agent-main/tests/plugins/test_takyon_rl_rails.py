@@ -91,3 +91,42 @@ def test_record_pulse_creates_real_baseline(pg_store, pg_store_dsn):
 def test_state_of_mind_requires_note(pg_store):
     with pytest.raises(TakyonError):
         pg_store.open_state_of_mind("anyco", "   ")
+
+
+# --- R7 learnings: intra (this business, always) vs inter (cross-business, top-k) -----------
+
+def test_identity_surfaces_in_wake(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "identco")
+    pg_store.set_identity("identco", "You are the CEO of Identco, a B2C habit tracker. Thesis: streaks drive retention.")
+    prompt = pg_store._ceo_cron_prompt("identco")
+    assert "Who you are" in prompt and "habit tracker" in prompt
+
+
+def test_intra_learning_isolated_to_its_business(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "intraco")
+    _seed_owned_business(pg_store_dsn, "otherco")
+    pg_store.record_learning("intraco", "Cold DMs convert 3x better than top-of-funnel posts here.", scope="business")
+    assert "Cold DMs convert" in pg_store._ceo_cron_prompt("intraco")
+    # intra is scoped to its own business — must NOT leak into another business's wake.
+    assert "Cold DMs convert" not in pg_store._ceo_cron_prompt("otherco")
+
+
+def test_shared_learning_surfaces_cross_business(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "authorco")
+    _seed_owned_business(pg_store_dsn, "readerco")
+    pg_store.record_learning("authorco", "Pain-first hooks beat feature lists for consumer apps.",
+                             tags=["b2c", "consumer"], scope="shared")
+    # A shared learning authored by one business surfaces (as a prior) for a DIFFERENT business.
+    prompt = pg_store._ceo_cron_prompt("readerco")
+    assert "Pain-first hooks" in prompt and "from similar businesses" in prompt
+
+
+def test_shared_learning_not_shown_across_operators(pg_store_dsn, tmp_path):
+    _seed_owned_business(pg_store_dsn, "opaco")
+    _seed_owned_business(pg_store_dsn, "opbco")
+    store_a = takyon_core.TakyonStore(root=tmp_path, database_url=pg_store_dsn, operator_user_id="op-a")
+    store_b = takyon_core.TakyonStore(root=tmp_path, database_url=pg_store_dsn, operator_user_id="op-b")
+    store_a.record_learning("opaco", "Operator-A secret: niche subreddit X converts.",
+                            tags=["b2c"], scope="shared")
+    # Operator B must never see operator A's shared learnings.
+    assert "Operator-A secret" not in store_b._ceo_cron_prompt("opbco")
