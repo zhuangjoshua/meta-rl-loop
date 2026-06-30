@@ -251,14 +251,14 @@ def _read_mascot_lines() -> list[str]:
         if lines:
             return lines
     return [
-        "    ####        ",
-        "  ########      ",
-        " ##########     ",
-        "###..##..###==> ",
-        " ############   ",
-        "  ########      ",
-        "    ####        ",
-        "   ##  ##       ",
+        "       ▁        ",
+        " ▗▆▇▛▔ ▀▀▘  ▁   ",
+        "  ▜██▆▄▃▂▁▁▂▟▇▖ ",
+        "    ▀▀▀██████▛▘ ",
+        "   ▃▁         ▔ ",
+        "  ▟███▇▆▅▅▅▖    ",
+        " ▟█████████▌    ",
+        "▐██████████▊    ",
     ]
 
 
@@ -280,12 +280,26 @@ def _startup_graphic(current_business: str | None) -> str:
         _ANSI["bronze"], _ANSI["bronze"],
     ]
     mascot = _read_mascot_lines()
+    # The mascot is now block art (chafa-rendered), colored directly in a gold→amber→bronze
+    # gradient (not pixel-mapped). Pad each row to the widest so the wordmark column stays aligned.
+    mascot_width = max((_visible_len(m) for m in mascot), default=16)
+    mascot_tints = [
+        _ANSI["electric"], _ANSI["electric"], _ANSI["electric"],
+        _ANSI["amber"], _ANSI["amber"], _ANSI["amber"],
+        _ANSI["bronze"], _ANSI["bronze"],
+    ]
+
+    def _mascot_cell(idx: int) -> str:
+        raw = _pad_visible(mascot[idx], mascot_width) if idx < len(mascot) else " " * mascot_width
+        tint = mascot_tints[idx] if idx < len(mascot_tints) else _THEME["brand"]
+        return _color(raw, tint)
+
     rows = [_frame_line(width)]
     for index, line in enumerate(wordmark):
         tint = wordmark_tints[index] if index < len(wordmark_tints) else _THEME["brand"]
-        rows.append(_framed_text(f"{_render_pixel_mascot_line(mascot[index] if index < len(mascot) else '')}  {_color(line, tint)}", width))
-    for line in mascot[len(wordmark) :]:
-        rows.append(_framed_text(f"{_render_pixel_mascot_line(line)}", width))
+        rows.append(_framed_text(f"{_mascot_cell(index)}  {_color(line, tint)}", width))
+    for index in range(len(wordmark), len(mascot)):
+        rows.append(_framed_text(_mascot_cell(index), width))
     rows.extend([
         _framed_text("", width),
         _framed_text(f"{_bold('CoScale operator')} {_color('ready', _THEME['success'])}  {_dim(str(Path.cwd()))}", width),
