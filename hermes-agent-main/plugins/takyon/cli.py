@@ -1090,7 +1090,7 @@ def _resolve_dashboard_create_identity(
 
 
 _SHELL_CREATE_COMMANDS = {"create", "build", "init"}
-_SHELL_CREATE_FLAGS_NO_VALUE = {"--live", "--auto", "--no-auto", "--manual", "--follow", "-f"}
+_SHELL_CREATE_FLAGS_NO_VALUE = {"--live", "--auto", "--no-auto", "--manual", "--follow", "-f", "--detach", "--background"}
 _SHELL_CREATE_FLAGS_WITH_VALUE = {"--mode", "--name", "--schedule", "--slug"}
 _SHELL_EXPLICIT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,79}$")
 
@@ -1215,7 +1215,7 @@ def _parse_business_start_args(
     *,
     usage: str,
     auto_default: bool = False,
-) -> tuple[str, str, str, str | None, str | None, bool, bool, bool]:
+) -> tuple[str, str, str, str | None, str | None, bool, bool, bool, bool]:
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
@@ -1226,6 +1226,7 @@ def _parse_business_start_args(
     auto_start = auto_default
     no_auto = False
     follow = False
+    detach = False
     clean: list[str] = []
     index = 0
     while index < len(tokens):
@@ -1246,6 +1247,10 @@ def _parse_business_start_args(
             no_auto = True
         elif parse_flags and token in {"--follow", "-f"}:
             follow = True
+            detach = False
+        elif parse_flags and token in {"--detach", "--background"}:
+            detach = True
+            follow = False
         elif parse_flags and token == "--schedule":
             index += 1
             if index >= len(tokens):
@@ -1286,19 +1291,19 @@ def _parse_business_start_args(
             raw_name = explicit_name or _display_name_from_slug(slug)
         else:
             raw_name, slug = _resolve_create_identity(explicit_name or "", goal, "")
-        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach
 
     if slug_override:
         slug = _slugify(slug_override)
         raw_name = explicit_name or _display_name_from_slug(slug)
         goal = " ".join(clean).strip()
-        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach
 
     slug_token = clean[0]
     raw_name = explicit_name or slug_token
     slug = _slugify(slug_token)
     goal = " ".join(clean[1:]).strip()
-    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach
 
 
 def _strip_log_follow_flags(argv: list[str], *, default: bool = False) -> tuple[list[str], bool]:
@@ -4317,10 +4322,10 @@ def _handle_shell_line(
     if command in _SHELL_CREATE_COMMANDS:
         command_argv = _shell_create_argv(command, raw_args)
         if len(command_argv) < 2:
-            raise SystemExit('usage: /create [--live] [--no-auto] [--follow] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]')
-        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow = _parse_business_start_args(
+            raise SystemExit('usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]')
+        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow, detach = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--live] [--no-auto] [--follow] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]',
+            usage='usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -4345,6 +4350,8 @@ def _handle_shell_line(
             follow_result = result.get("follow") if isinstance(result.get("follow"), dict) else {}
             bootstrap_job = result.get("bootstrap_job") if isinstance(result.get("bootstrap_job"), dict) else {}
             status = str(follow_result.get("status") or bootstrap_job.get("status") or "queued")
+            if detach or bool(result.get("detached")):
+                return f"Create {status} for business:{actual_slug}. Use /use {actual_slug} to attach.", current_business
             return f"Create {status} for business:{actual_slug}.", actual_slug
         return _format_cli_value(result), actual_slug
 
@@ -5264,9 +5271,9 @@ def run_takyon_command(
 
     if command in {"init", "create", "build"}:
         auto_default = command in {"create", "build"}
-        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow = _parse_business_start_args(
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow, detach = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow|--detach] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         # Fail closed on operator identity at the create chokepoint. On a plane that declares
@@ -5370,7 +5377,7 @@ def run_takyon_command(
             # the job, so it changes no creation/billing/identity authority and the build keeps
             # running if the operator detaches.
             follow_result = None
-            should_follow = follow or follow_logs
+            should_follow = (follow or follow_logs) and not detach
             if should_follow and str(bootstrap_job.get("job_id") or "").strip():
                 follow_result = _follow_worker_job(
                     store,
@@ -5386,6 +5393,7 @@ def run_takyon_command(
                 "schedule": schedule if should_schedule else "",
                 "init": business_result,
                 "bootstrap_job": bootstrap_job,
+                "detached": detach,
                 "starter_credit_seed": starter_credit_seed,
                 **({"follow": follow_result} if follow_result is not None else {}),
             }
