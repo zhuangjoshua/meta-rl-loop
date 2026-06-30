@@ -1921,10 +1921,11 @@ def test_outreach_start_endpoint_defaults_to_start_when_no_campaign_exists(tmp_p
     assert captured["payload"]["summary"] == "Start or continue the Reddit outreach lane."
 
 
-def test_auth0_public_path_allows_litebulb_shell_and_machine_facing_pg_routes():
+def test_auth0_public_path_allows_only_static_and_machine_facing_pg_routes():
     import takyon_cli.web_server as web_server
 
-    assert web_server._auth0_public_path("/chat") is True
+    assert web_server._auth0_public_path("/") is False
+    assert web_server._auth0_public_path("/chat") is False
     assert web_server._auth0_public_path("/litebulb/assets/litebulb.js") is True
     assert web_server._auth0_public_path("/litebulb/takyon-adapter.js") is True
     assert web_server._auth0_public_path("/v1/me") is True
@@ -2002,6 +2003,57 @@ def test_product_subdomain_serves_published_site_files(tmp_path, monkeypatch, pg
     assert "Write LaTeX without tickets" in local_response.text
     assert missing_response.status_code == 404
     assert missing_response.json()["error"] == "product site file not found"
+
+
+def test_product_site_path_cannot_escape_business_build_root(tmp_path, monkeypatch, pg_store_dsn):
+    import takyon_cli.web_server as web_server
+    from plugins.takyon.core import TakyonStore
+
+    site_root = tmp_path / "product-sites"
+    latexflow_build = site_root / "latexflow" / "builds" / "build123"
+    other_build = site_root / "otherbiz" / "builds" / "build999"
+    latexflow_build.mkdir(parents=True)
+    other_build.mkdir(parents=True)
+    (latexflow_build / "index.html").write_text("<!doctype html><main>Latexflow</main>", encoding="utf-8")
+    (other_build / "secret.txt").write_text("top-secret", encoding="utf-8")
+    os.symlink("builds/build123", site_root / "latexflow" / "current")
+    monkeypatch.setenv("DATABASE_URL", pg_store_dsn)
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|web-server-subdomain")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(site_root))
+    monkeypatch.setattr(web_server, "get_takyon_home", lambda: tmp_path)
+    _clear_product_serving_caches(web_server)
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    store.seed_platform_owner()
+    store.commit(
+        scope="business:latexflow",
+        operations=[{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        idempotency_key="product-subdomain-escape-business",
+        reason="test",
+        actor="test",
+    )
+    store.commit(
+        scope="business:latexflow",
+        operations=[
+            {"action": "app.surface.upsert", "business": "latexflow", "status": "active", "source_path": "product/site", "routes": ["/"]},
+            {
+                "action": "app.surface.publish_result",
+                "business": "latexflow",
+                "publish_status": "published",
+                "public_url": "https://latexflow.coscale.app/",
+                "live_build_id": "build123",
+            },
+        ],
+        idempotency_key="product-subdomain-escape-publish",
+        reason="test",
+        actor="test",
+    )
+
+    response = asyncio.run(
+        web_server._serve_product_site_file("latexflow", "../../../otherbiz/builds/build999/secret.txt")
+    )
+
+    assert response.status_code == 404
 
 
 def test_product_subdomain_spa_routes_fall_back_to_index_html(tmp_path, monkeypatch, pg_store_dsn):
@@ -3617,30 +3669,33 @@ class TestWebServerEndpoints:
         assert _post("takyon.dashboard.create").status_code == 200
         assert "_takyon_operator_user_id" not in captured["req"]["params"]
 
-    def test_dashboard_ws_principal_uses_session_token_fallback(self, monkeypatch):
-        """After the WS auth gate accepts Auth0 + dashboard token, the live WS transport resolves
-        the same server-side operator principal as HTTP requests do."""
+    def test_dashboard_ws_principal_does_not_fall_back_to_local_token_on_public_host(self, monkeypatch):
         import takyon_cli.web_server as web_server
-
-        class _Principal:
-            user_id = "user-real"
 
         fake_ws = types.SimpleNamespace(
             headers={"cookie": "auth0=valid", "host": "app.fourmanifold.com"},
             query_params={"token": "server-token"},
         )
 
-        monkeypatch.setattr(web_server, "_SESSION_TOKEN", "server-token")
         monkeypatch.setattr(web_server, "_auth0_config", lambda: object())
         monkeypatch.setattr(web_server, "_session_from_cookie_header", lambda _cookie, _cfg: {})
         monkeypatch.setattr(web_server, "_resolve_dashboard_principal", lambda _user: None)
         monkeypatch.setattr(web_server, "_auth0_required_for_host", lambda _headers: True)
-        monkeypatch.setattr(web_server, "_resolve_local_dashboard_principal", lambda: _Principal())
-
-        assert web_server._resolve_dashboard_ws_principal(fake_ws).user_id == "user-real"
-
-        fake_ws.query_params = {"token": "attacker-token"}
         assert web_server._resolve_dashboard_ws_principal(fake_ws) is None
+
+    def test_dashboard_ws_browser_authorized_allows_auth0_cookie_without_token(self, monkeypatch):
+        import takyon_cli.web_server as web_server
+
+        fake_ws = types.SimpleNamespace(
+            headers={"cookie": "auth0=valid", "host": "app.fourmanifold.com"},
+            query_params={},
+        )
+
+        monkeypatch.setattr(web_server, "_auth0_required_for_host", lambda _headers: True)
+        monkeypatch.setattr(web_server, "_has_valid_auth0_dashboard_session", lambda _headers: True)
+
+        assert web_server._dashboard_ws_browser_authorized(fake_ws) is True
+        assert web_server._dashboard_ws_browser_reject_reason(fake_ws) == ""
 
     def test_get_status_filters_unconfigured_gateway_platforms(self, monkeypatch):
         import gateway.config as gateway_config
@@ -5917,6 +5972,44 @@ class TestPtyWebSocket:
 
         assert FakeBridge.spawn_calls == 1
         assert FakeBridge.close_calls == 1
+
+    def test_attach_held_pty_requires_same_principal(self, monkeypatch):
+        import takyon_cli.web_server as ws_mod
+
+        class FakeBridge:
+            def is_alive(self):
+                return True
+
+        held = ws_mod._HeldPtySession(
+            bridge=FakeBridge(),
+            keys=("resume:sess-42",),
+            channel="chat-a",
+            principal_user_id="user-a",
+            attached=False,
+        )
+
+        async def _exercise():
+            async with ws_mod._held_pty_lock:
+                ws_mod._held_pty_sessions.clear()
+                ws_mod._held_pty_sessions["resume:sess-42"] = held
+            denied = await ws_mod._attach_held_pty(
+                ("resume:sess-42",),
+                requested_channel="chat-a",
+                principal_user_id="user-b",
+            )
+            allowed = await ws_mod._attach_held_pty(
+                ("resume:sess-42",),
+                requested_channel="chat-a",
+                principal_user_id="user-a",
+            )
+            async with ws_mod._held_pty_lock:
+                ws_mod._held_pty_sessions.clear()
+            return denied, allowed
+
+        denied, allowed = asyncio.run(_exercise())
+
+        assert denied is None
+        assert allowed is held
 
     def test_pub_broadcasts_to_events_subscribers(self, monkeypatch):
         """Frame written to /api/pub is rebroadcast verbatim to every

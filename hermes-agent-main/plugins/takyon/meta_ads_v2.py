@@ -247,6 +247,72 @@ def _is_test_mode(store: Any, business: str) -> bool:
         )
 
 
+def _launch_receipt_rel(slug: str) -> str:
+    return f"distribution/meta-ads/{slug}/receipt.json"
+
+
+def _load_launch_receipt(store: Any, business: str, slug: str) -> Mapping[str, Any]:
+    receipt_rel = _launch_receipt_rel(slug)
+    receipt_abs = store._resolve_business_file(business, receipt_rel)
+    if not receipt_abs.is_file():
+        raise core.TakyonError(
+            f"Meta launch receipt not found at {receipt_rel}; launch the paused Meta ad first"
+        )
+    try:
+        receipt = json.loads(receipt_abs.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise core.TakyonError(f"Meta launch receipt is unreadable at {receipt_rel}: {exc}") from exc
+    if not isinstance(receipt, Mapping):
+        raise core.TakyonError(f"Meta launch receipt at {receipt_rel} is not a JSON object")
+    return receipt
+
+
+def _launch_receipt_ids(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+    ids = receipt.get("ids")
+    if not isinstance(ids, Mapping):
+        raise core.TakyonError("Meta launch receipt does not contain launched object ids")
+    return ids
+
+
+def _authorized_meta_object_ids(receipt: Mapping[str, Any]) -> set[str]:
+    ids = _launch_receipt_ids(receipt)
+    return {
+        value
+        for value in (
+            str(ids.get("campaign_id") or "").strip(),
+            str(ids.get("adset_id") or "").strip(),
+            str(ids.get("ad_id") or "").strip(),
+        )
+        if value
+    }
+
+
+def _receipt_object_id_for_level(level: str, receipt: Mapping[str, Any]) -> str:
+    key = {
+        "campaign": "campaign_id",
+        "adset": "adset_id",
+        "ad": "ad_id",
+    }.get(str(level or "").strip().lower())
+    if not key:
+        raise core.TakyonError("level must be one of: campaign, adset, ad")
+    value = str(_launch_receipt_ids(receipt).get(key) or "").strip()
+    if not value:
+        raise core.TakyonError(f"Meta launch receipt does not contain {key} for level={level!r}")
+    return value
+
+
+def _require_authorized_meta_object_id(
+    store: Any,
+    business: str,
+    slug: str,
+    object_id: str,
+) -> Mapping[str, Any]:
+    receipt = _load_launch_receipt(store, business, slug)
+    if str(object_id or "").strip() not in _authorized_meta_object_ids(receipt):
+        raise core.TakyonError("target object does not belong to this business's launched Meta ad")
+    return receipt
+
+
 def _stage_thumbnail_bytes(store: Any, business: str, args: Mapping[str, Any], plan_slug: str) -> bytes | None:
     """Resolve thumbnail bytes for a video creative (Meta requires an image_hash/url for video).
 
@@ -711,8 +777,19 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
             })
 
         if operation == "set_budget":
+            receipt = _require_authorized_meta_object_id(store, business, slug, object_id)
             daily_budget_cents = _budget_cents(
                 _arg(args, "daily_budget_usd", "daily_budget", default=_DEFAULT_DAILY_BUDGET_USD)
+            )
+            expected_adset_id = _receipt_object_id_for_level("adset", receipt)
+            if object_id != expected_adset_id:
+                raise core.TakyonError("set_budget target must be the launched ad set for this business")
+            core._assert_ad_set_budget_authorized(
+                channel="meta",
+                business=business,
+                slug=slug,
+                target_id=object_id,
+                daily_budget_cents=daily_budget_cents,
             )
             result = core.safebox.meta_graph_forward(
                 method="POST",
@@ -721,6 +798,7 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
             )
             applied = {"daily_budget_cents": daily_budget_cents}
         elif operation == "pause":
+            _require_authorized_meta_object_id(store, business, slug, object_id)
             result = core.safebox.meta_graph_forward(
                 method="POST",
                 path=object_id,
@@ -728,6 +806,7 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
             )
             applied = {"status": "PAUSED"}
         else:  # activate
+            _require_authorized_meta_object_id(store, business, slug, object_id)
             result = core.safebox.meta_graph_forward(
                 method="POST",
                 path=object_id,
@@ -816,15 +895,15 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
             })
 
         fields = "impressions,reach,clicks,spend,cpc,cpm,ctr,frequency,actions,date_start,date_stop"
-        if object_id:
-            path = f"{object_id}/insights"
-            params = {"level": level, "fields": fields, "date_preset": date_preset}
+        receipt = _load_launch_receipt(store, business, slug)
+        resolved_object_id = object_id
+        if resolved_object_id:
+            _require_authorized_meta_object_id(store, business, slug, resolved_object_id)
         else:
-            ad_account_id = _resolve_config_value(args, ("ad_account_id",), ("META_AD_ACCOUNT_ID",))
-            if not ad_account_id:
-                raise core.TakyonError("ad_account_id or object_id is required for an insights sync")
-            path = f"{meta_graph.account_path(ad_account_id)}/insights"
-            params = {"level": level, "fields": fields, "date_preset": date_preset}
+            resolved_object_id = _receipt_object_id_for_level(level, receipt)
+        base_sync["object_id"] = resolved_object_id
+        path = f"{resolved_object_id}/insights"
+        params = {"level": level, "fields": fields, "date_preset": date_preset}
 
         resp = core.safebox.meta_graph_forward(method="GET", path=path, params=params)
         rows = resp.get("data") if isinstance(resp, Mapping) else None
@@ -853,7 +932,7 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
                 continue
             record = {
                 "level": level,
-                "object_id": object_id or str(row.get("ad_id") or row.get("adset_id") or row.get("campaign_id") or ""),
+                "object_id": resolved_object_id or str(row.get("ad_id") or row.get("adset_id") or row.get("campaign_id") or ""),
                 "date_start": row.get("date_start"),
                 "date_stop": row.get("date_stop"),
                 "impressions": core._meta_int_metric(row.get("impressions")),

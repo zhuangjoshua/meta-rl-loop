@@ -155,7 +155,7 @@ class _FakeSafebox:
         )
         clean_method = str(method or "").upper()
         if clean_method == "GET":
-            return {"data": []}
+            return dict(self.graph_rec.graph_forward_get_response)
         if "daily_budget" in clean_params:
             self.graph_rec.budget_calls.append({"token": "", "object_id": path, "daily_budget_cents": clean_params.get("daily_budget")})
             return {"success": True, "id": path, "daily_budget": clean_params.get("daily_budget")}
@@ -199,6 +199,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     reservations: list[dict] = []
     commits: list[dict] = []
     releases: list[dict] = []
+    budget_authz_calls: list[dict] = []
 
     def _store():
         return store
@@ -344,6 +345,26 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
         releases.append(record)
         return {"reservation_key": reservation_key, "released": True}
 
+    def _assert_ad_set_budget_authorized(
+        *,
+        channel,
+        business,
+        slug,
+        target_id,
+        daily_budget_cents,
+        safety_cap_cents=0,
+    ):
+        budget_authz_calls.append(
+            {
+                "channel": channel,
+                "business": business,
+                "slug": slug,
+                "target_id": target_id,
+                "daily_budget_cents": daily_budget_cents,
+                "safety_cap_cents": safety_cap_cents,
+            }
+        )
+
     # Public surface.
     mod._store = _store
     mod.tool_result = tool_result
@@ -356,6 +377,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._reserve_creative_credits = _reserve_creative_credits
     mod._commit_creative_credits = _commit_creative_credits
     mod._release_creative_credits = _release_creative_credits
+    mod._assert_ad_set_budget_authorized = _assert_ad_set_budget_authorized
     mod._business_mode = _business_mode
     mod._resolved_business_slug = _resolved_business_slug
     mod._file_slug = _file_slug
@@ -388,6 +410,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._test_reservations = reservations
     mod._test_commits = commits
     mod._test_releases = releases
+    mod._test_budget_authz_calls = budget_authz_calls
     return mod
 
 
@@ -402,6 +425,7 @@ class _GraphRecorder:
         self.custom_conversions: list[dict] = []
         # Raw _graph round-trips (insights sync + pixel verify read through this).
         self.graph_calls: list[dict] = []
+        self.graph_forward_get_response: dict[str, object] = {"data": []}
 
 
 def _build_fake_meta_graph(recorder: _GraphRecorder) -> types.ModuleType:
@@ -620,6 +644,25 @@ def _control_args(**overrides):
     }
     args.update(overrides)
     return args
+
+
+def _write_launch_receipt(harness, *, business="clipbook", slug="demo-meta", ids=None):
+    payload = {
+        "idempotency_key": "launch-receipt-v1",
+        "business": business,
+        "slug": slug,
+        "status": "created_paused",
+        "ids": ids
+        or {
+            "campaign_id": "campaign-1",
+            "adset_id": "adset-1",
+            "ad_id": "ad-1",
+        },
+    }
+    path = harness.business_file_path(business, f"distribution/meta-ads/{slug}/receipt.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    return payload
 
 
 def _result(raw):
@@ -909,6 +952,7 @@ def test_launch_requires_idempotency_key(harness):
 # --------------------------------------------------------------------------- #
 def test_control_set_budget_updates_daily_budget(harness):
     harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
     result = _result(
         harness.module.handle_business_meta_ad_control(
             _control_args(
@@ -926,6 +970,16 @@ def test_control_set_budget_updates_daily_budget(harness):
     assert call["object_id"] == "adset-1"
     assert call["daily_budget_cents"] == 1200  # $12.00 in cents
     assert call["token"] == ""
+    assert harness.core._test_budget_authz_calls == [
+        {
+            "channel": "meta",
+            "business": "clipbook",
+            "slug": "demo-meta",
+            "target_id": "adset-1",
+            "daily_budget_cents": 1200,
+            "safety_cap_cents": 0,
+        }
+    ]
 
     action = harness.read_business_file(
         "clipbook", "distribution/meta-ads/demo-meta/actions/clipbook-meta-budget-v1.json"
@@ -935,6 +989,7 @@ def test_control_set_budget_updates_daily_budget(harness):
 
 def test_control_pause_sets_status_paused(harness):
     harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
     result = _result(
         harness.module.handle_business_meta_ad_control(
             _control_args(operation="pause", object_id="campaign-1")
@@ -950,6 +1005,7 @@ def test_control_pause_sets_status_paused(harness):
 
 def test_control_activate_sets_status_active(harness):
     harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
     result = _result(
         harness.module.handle_business_meta_ad_control(
             _control_args(
@@ -965,6 +1021,77 @@ def test_control_activate_sets_status_active(harness):
         c["status"] == "ACTIVE" and c["object_id"] == "ad-1"
         for c in harness.graph.status_calls
     )
+
+
+def test_control_rejects_object_id_from_another_business(harness):
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+
+    result = _result(
+        harness.module.handle_business_meta_ad_control(
+            _control_args(operation="pause", object_id="campaign-other")
+        )
+    )
+
+    assert result["success"] is False
+    assert "does not belong to this business" in result["error"]
+    assert harness.graph.status_calls == []
+
+
+def test_insights_sync_defaults_to_receipt_owned_object(harness):
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+    harness.graph.graph_forward_get_response = {
+        "data": [
+            {
+                "ad_id": "ad-1",
+                "date_start": "2026-06-24",
+                "date_stop": "2026-06-24",
+                "impressions": "12",
+                "reach": "10",
+                "clicks": "3",
+                "spend": "4.56",
+            }
+        ]
+    }
+
+    result = _result(
+        harness.module.handle_business_meta_ad_insights_sync(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "level": "ad",
+                "idempotency_key": "clipbook-meta-insights-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert harness.graph.graph_calls[-1]["path"] == "ad-1/insights"
+    insights_path = harness.business_file_path("clipbook", "metrics/meta-ads/demo-meta/insights.jsonl")
+    lines = [json.loads(line) for line in insights_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines[0]["object_id"] == "ad-1"
+
+
+def test_insights_sync_rejects_cross_business_object_id(harness):
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+
+    result = _result(
+        harness.module.handle_business_meta_ad_insights_sync(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "level": "ad",
+                "object_id": "ad-other",
+                "idempotency_key": "clipbook-meta-insights-cross-v1",
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert "does not belong to this business" in result["error"]
+    assert harness.graph.graph_calls == []
 
 
 # --------------------------------------------------------------------------- #

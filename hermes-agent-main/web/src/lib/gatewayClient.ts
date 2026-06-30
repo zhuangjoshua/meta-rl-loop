@@ -136,19 +136,13 @@ export class GatewayClient {
     this.setState("connecting");
 
     const resolved = token ?? window.__TAKYON_SESSION_TOKEN__ ?? "";
-    if (!resolved) {
-      this.setState("error");
-      throw new Error(
-        "Session token not available — page must be served by the Takyon dashboard",
-      );
-    }
-
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     this._lastCloseCode = null;
     this._lastCloseReason = "";
     this._lastCloseMessage = "";
+    const qs = resolved ? `?token=${encodeURIComponent(resolved)}` : "";
     const ws = new WebSocket(
-      `${scheme}//${location.host}${TAKYON_BASE_PATH}/api/ws?token=${encodeURIComponent(resolved)}`,
+      `${scheme}//${location.host}${TAKYON_BASE_PATH}/api/ws${qs}`,
     );
     this.ws = ws;
 
@@ -310,25 +304,22 @@ export class GatewayClient {
     timeoutMs: number,
   ): Promise<T> {
     const resolved = window.__TAKYON_SESSION_TOKEN__ ?? "";
-    if (!resolved) {
-      this.setState("error");
-      throw new Error(
-        "Session token not available — page must be served by the Takyon dashboard",
-      );
-    }
-
     const id = `h${++this.reqId}`;
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (resolved) {
+      headers["X-Takyon-Session-Token"] = resolved;
+    }
 
     try {
       const res = await fetch(`${TAKYON_BASE_PATH}/api/tui/rpc`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Takyon-Session-Token": resolved,
-        },
+        headers,
         body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        credentials: "same-origin",
         signal: controller.signal,
       });
       if (!res.ok) {

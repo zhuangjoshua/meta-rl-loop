@@ -73,3 +73,41 @@ def test_docker_broker_rejects_unsupported_run_option(monkeypatch):
 
     assert response.status_code == 400
     assert "unsupported docker option" in response.text
+
+
+def test_docker_broker_rejects_invalid_image(monkeypatch):
+    monkeypatch.setenv("TAKYON_DOCKER_BROKER_TOKEN", "shared-token")
+    monkeypatch.setattr(broker_mod, "_docker_binary", lambda: "/usr/bin/docker")
+    client = TestClient(broker_mod.build_docker_broker_app())
+
+    response = client.post(
+        "/v1/containers/run-detached",
+        headers={"Authorization": "Bearer shared-token"},
+        json={
+            "args": ["-d"],
+            "image": "-v",
+            "command": ["sleep", "infinity"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "invalid docker image" in response.text
+
+
+def test_docker_broker_rejects_invalid_container_id(monkeypatch):
+    monkeypatch.setenv("TAKYON_DOCKER_BROKER_TOKEN", "shared-token")
+    monkeypatch.setattr(broker_mod, "_docker_binary", lambda: "/usr/bin/docker")
+    client = TestClient(broker_mod.build_docker_broker_app())
+
+    response = client.post(
+        "/v1/containers/exec-attached",
+        headers={"Authorization": "Bearer shared-token"},
+        json={
+            "args": ["-i"],
+            "container_id": "--privileged",
+            "command": ["sh"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "invalid container_id" in response.text
