@@ -11,8 +11,8 @@
     "thinking": {
       "enabled": true,
       "label": "thinking",
-      "intervalMs": 140,
-      "frames": ["*", "**", "***", " **", "  *", " **"]
+      "intervalMs": 90,
+      "frames": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     },
     "shellHistory": {
       "enabled": true,

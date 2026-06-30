@@ -179,7 +179,7 @@ Slash commands are narrow shell controls only: scope navigation, local status/in
 
 Business creation belongs to one shell command: `/create`. Creation-time choices such as test mode, immediate CEO start, and wake cadence should be flags on `/create`, not separate slash commands.
 
-When the CEO is working, the shell must leave a visible operator lane. Do not use spinners, carriage-return redraws, explanatory status text, or progress output that occupies or clears the input row. The active-run indicator should be minimal and visual: use a blinking `*` only when it can be cleared on completion, and let streaming tool progress stand alone when progress lines are visible. If true mid-turn injection is not available, document that in help/status surfaces rather than cluttering the active input area.
+When the CEO is working, the shell must leave a visible operator lane. Never put spinners, carriage-return redraws, explanatory status text, or progress output on the input row. The active-run indicator is an animated braille spinner (`⠋⠙⠹…`) with a `thinking…` label on its OWN dedicated line below the (already-submitted) input — it redraws in place via `\r` and is fully cleared (`\r\x1b[2K`) on completion. This is safe because the agent turn runs with stdio silenced (`_silence_process_stdio`), so the spinner never interleaves with agent output; the response prints after the spinner clears. Frames/cadence are source-of-truth in `harness/settings.json` (`ui.thinking.frames`). Let streaming tool progress stand alone when progress lines are visible. If true mid-turn injection is not available, document that in help/status surfaces rather than cluttering the active input area.
 
 ## E2E Testing
 

@@ -369,6 +369,29 @@ def _print(value: Any, *, raw_json: bool = False) -> None:
     print(_format_cli_value(value))
 
 
+def _format_cli_dict(value: dict) -> str:
+    """Render an unhandled result dict as clean, aligned key: value lines (gemini-like) instead of
+    raw JSON. Keys are dimmed; small nested structures stay compact, long ones indent. Nothing dropped."""
+    if not value:
+        return "(empty)"
+    pad = min(26, max((len(str(k)) for k in value), default=0) + 2)
+    out: list[str] = []
+    for key, val in value.items():
+        label = _color(str(key).ljust(pad), _THEME["muted"])
+        if isinstance(val, (dict, list)):
+            compact = json.dumps(val, ensure_ascii=False)
+            if len(compact) <= 80:
+                out.append(f"{label}{compact}")
+            else:
+                pretty = json.dumps(val, indent=2, ensure_ascii=False)
+                out.append(f"{_color(str(key), _THEME['muted'])}:\n" + "\n".join("    " + ln for ln in pretty.splitlines()))
+        elif isinstance(val, bool):
+            out.append(f"{label}{_color('yes' if val else 'no', _THEME['success'] if val else _THEME['muted'])}")
+        else:
+            out.append(f"{label}{'' if val is None else val}")
+    return "\n".join(out)
+
+
 def _format_cli_value(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -560,7 +583,7 @@ def _format_cli_value(value: Any) -> str:
     if "action" in value:
         return _format_operation_result(value)
 
-    return json.dumps(value, indent=2, ensure_ascii=False)
+    return _format_cli_dict(value)
 
 
 def _format_operation_result(item: Any) -> str:
@@ -2759,34 +2782,36 @@ def _format_harness_commands() -> str:
     controls = _control_slash_commands()
     commands = _list_harness_commands()
     skill_entries = _takyon_skill_entries()
+
+    def _row(name: str, scope: str, desc: str) -> str:
+        tag = _color("biz", _THEME["secondary"]) if scope == "business" else _dim("any")
+        gap = " " * max(2, 18 - len(name))
+        return f"  {_color('/' + name, _THEME['primary'])}{gap}{tag}  {desc}".rstrip()
+
     lines = [
-        "Takyon shell:",
-        "  Plain text always goes to the CEO for the current scope.",
-        "  Global is an account/root scope, not the CEO.",
+        _bold("CoScale shell"),
+        _dim("  Plain text talks to the CEO for the current scope  ·  @path pulls a file into your message"),
+        _dim("  ↑/↓ history  ·  Ctrl-R search  ·  Tab completes  ·  Shift+Enter newline"),
         "",
-        "Takyon controls:",
+        _bold("Controls"),
     ]
+    for command in controls or []:
+        scope = "business" if command.get("requires_business") else "global"
+        lines.append(_row(command["name"], scope, str(command.get("description") or "")))
     if not controls:
-        lines.append("  none")
-    for command in controls:
-        scope = "business" if command.get("requires_business") else "global"
-        band = command.get("priority_band") or "unbanded"
-        lines.append(f"  /{command['name']:<12} {scope:<8} {band:<12} {command.get('description') or ''}".rstrip())
-    lines.append("")
-    lines.append("File-backed skill commands:")
-    if not commands:
-        lines.append("  none")
-    for command in commands:
-        scope = "business" if command.get("requires_business") else "global"
-        band = command.get("priority_band") or "unbanded"
-        lines.append(f"  /{command['name']:<12} {scope:<8} {band:<12} {command.get('description') or ''}".rstrip())
-    lines.append("")
-    lines.append("Takyon skills:")
-    if not skill_entries:
-        lines.append("  none")
-    for item in skill_entries:
-        skill_slug = str(item.get("command") or "").lstrip("/")
-        lines.append(f"  /{skill_slug:<28} takyon {item.get('description') or ''}".rstrip())
+        lines.append(_dim("  none"))
+    if commands:
+        lines.append("")
+        lines.append(_bold("Skill commands"))
+        for command in commands:
+            scope = "business" if command.get("requires_business") else "global"
+            lines.append(_row(command["name"], scope, str(command.get("description") or "")))
+    if skill_entries:
+        lines.append("")
+        lines.append(_bold("Takyon skills"))
+        for item in skill_entries:
+            skill_slug = str(item.get("command") or "").lstrip("/")
+            lines.append(_row(skill_slug, "business", str(item.get("description") or "")))
     return "\n".join(lines)
 
 
@@ -2974,6 +2999,7 @@ def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[
     from prompt_toolkit.application.current import get_app
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
     from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.key_binding import KeyBindings
 
     class SlashCompleter(Completer):
         def get_completions(self, document, complete_event):  # noqa: ANN001
@@ -3000,6 +3026,21 @@ def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[
     def slash_toolbar() -> str:
         return ""
 
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):  # noqa: ANN001
+        # Enter accepts the highlighted completion if the menu is open; otherwise submits the line.
+        buf = event.current_buffer
+        if buf.complete_state and buf.complete_state.current_completion:
+            buf.apply_completion(buf.complete_state.current_completion)
+        else:
+            buf.validate_and_handle()
+
+    @kb.add("c-j")  # Shift+Enter on most terminals → newline, for multi-line compose
+    def _newline(event):  # noqa: ANN001
+        event.current_buffer.insert_text("\n")
+
     session = PromptSession(
         completer=SlashCompleter(),
         complete_while_typing=True,
@@ -3007,6 +3048,8 @@ def _read_shell_line_prompt_toolkit(current_business: str | None, entries: list[
         bottom_toolbar=slash_toolbar,
         history=_shell_input_history(),
         auto_suggest=AutoSuggestFromHistory(),
+        multiline=True,
+        key_bindings=kb,
     )
     sys.stdout.write(_input_bar_top(current_business) + "\n")
     sys.stdout.flush()
@@ -3019,7 +3062,7 @@ def _thinking_ui_config() -> dict[str, Any]:
     thinking = ui.get("thinking") if isinstance(ui.get("thinking"), dict) else {}
     frames = [str(item) for item in thinking.get("frames", []) if str(item)]
     if not frames:
-        frames = ["*", "**", "***", " **", "  *", " **"]
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     interval_ms = thinking.get("intervalMs", 140)
     try:
         interval = max(0.05, min(float(interval_ms) / 1000.0, 1.0))
@@ -3674,19 +3717,38 @@ def _thinking_indicator(enabled: bool):
     if not config["enabled"]:
         yield
         return
+    import itertools
+    import threading
+
+    frames = config.get("frames") or ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    label = str(config.get("label") or "thinking")
+    interval = float(config.get("interval") or 0.09)
+    # Animated spinner on its own dedicated line (the agent turn runs with stdio silenced, so the
+    # spinner never interleaves), redrawn in place via \r and fully cleared on completion. The input
+    # row is never touched. This is the gemini-cli "loading" feel.
     writer_fd = os.dup(1)
-    line = f"{_blink('*')}\n"
-    try:
-        os.write(writer_fd, line.encode("utf-8", errors="replace"))
-    except OSError:
-        os.close(writer_fd)
-        yield
-        return
+    stop = threading.Event()
+
+    def _spin() -> None:
+        for frame in itertools.cycle(frames):
+            if stop.is_set():
+                break
+            painted = f"\r{_color(frame, _THEME['primary'])} {_dim(label + '…')}\x1b[K"
+            try:
+                os.write(writer_fd, painted.encode("utf-8", errors="replace"))
+            except OSError:
+                break
+            stop.wait(interval)
+
+    spinner = threading.Thread(target=_spin, daemon=True)
+    spinner.start()
     try:
         yield
     finally:
+        stop.set()
+        spinner.join(timeout=0.4)
         try:
-            os.write(writer_fd, b"\x1b[1A\x1b[2K")
+            os.write(writer_fd, b"\r\x1b[2K")
         except OSError:
             pass
         os.close(writer_fd)
@@ -3764,7 +3826,47 @@ def _looks_like_slug(value: str) -> bool:
         return False
 
 
+def _expand_file_refs(message: str, current_business: str | None) -> str:
+    """Expand @path tokens in an operator message into the file's contents (gemini-cli @-refs).
+    Resolves relative to the business workspace (when scoped) then cwd; appends fenced contents so
+    the CEO sees the file without copy-paste. Missing refs are left untouched."""
+    import re as _re
+
+    refs = _re.findall(r"(?<!\S)@([^\s]+)", message)
+    if not refs:
+        return message
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        candidates: list[Path] = []
+        p = Path(ref).expanduser()
+        if p.is_absolute():
+            candidates.append(p)
+        else:
+            if current_business:
+                try:
+                    candidates.append(_business_root(current_business) / ref)
+                except Exception:
+                    pass
+            candidates.append(Path.cwd() / ref)
+        for cand in candidates:
+            try:
+                if cand.is_file():
+                    content = cand.read_text(encoding="utf-8", errors="replace")
+                    if len(content) > 20000:
+                        content = content[:20000] + "\n…(truncated; file longer than 20000 chars)"
+                    blocks.append(f"\n\nContents of @{ref}:\n```\n{content}\n```")
+                    break
+            except Exception:
+                continue
+    return message + "".join(blocks)
+
+
 def _operator_context_message(message: str, current_business: str | None) -> str:
+    message = _expand_file_refs(message, current_business)
     if current_business:
         return (
             f"Scope: business:{current_business}\n"
