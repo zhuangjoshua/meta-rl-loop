@@ -3500,8 +3500,60 @@ class _ShellProgress:
         self.typewriter_enabled = bool(typewriter["enabled"] and sys.stdout.isatty())
         self.typewriter_cps = int(typewriter["chars_per_second"])
         self.typewriter_chunk_chars = int(typewriter["chunk_chars"])
+        self._spin_stop: Any = None
+        self._spin_thread: Any = None
+
+    def start_thinking(self) -> None:
+        # Animated braille "thinking…" spinner shown during the wait before the first output line,
+        # on the same dup'd fd. Cleared by _stop_thinking() the instant real output arrives — so it
+        # never interleaves with streamed activity. Gemini-cli loading feel.
+        if not self.enabled or self.fd is None or self._spin_thread is not None or not sys.stdout.isatty():
+            return
+        import itertools
+        import threading
+
+        cfg = _thinking_ui_config()
+        if not cfg["enabled"]:
+            return
+        frames = cfg.get("frames") or ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        label = str(cfg.get("label") or "thinking")
+        interval = float(cfg.get("interval") or 0.09)
+        stop = threading.Event()
+        fd = self.fd
+
+        def _spin() -> None:
+            for frame in itertools.cycle(frames):
+                if stop.is_set():
+                    break
+                painted = f"\r{_color(frame, _THEME['primary'])} {_dim(label + '…')}\x1b[K"
+                try:
+                    os.write(fd, painted.encode("utf-8", errors="replace"))
+                except OSError:
+                    break
+                stop.wait(interval)
+
+        self._spin_stop = stop
+        self._spin_thread = threading.Thread(target=_spin, daemon=True)
+        self._spin_thread.start()
+
+    def _stop_thinking(self) -> None:
+        if self._spin_thread is None:
+            return
+        try:
+            if self._spin_stop is not None:
+                self._spin_stop.set()
+            self._spin_thread.join(timeout=0.4)
+        finally:
+            self._spin_thread = None
+            self._spin_stop = None
+            if self.fd is not None:
+                try:
+                    os.write(self.fd, b"\r\x1b[2K")
+                except OSError:
+                    pass
 
     def close(self) -> None:
+        self._stop_thinking()
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
@@ -3509,6 +3561,8 @@ class _ShellProgress:
     def _write(self, text: str) -> None:
         if self.fd is None:
             return
+        if self._spin_thread is not None:
+            self._stop_thinking()
         try:
             os.write(self.fd, text.encode("utf-8", errors="replace"))
         except OSError:
@@ -4744,9 +4798,10 @@ def _run_agent_with_meta(
                 if show_agent_activity:
                     result, actual_cents = invoke()
                 else:
-                    with _thinking_indicator(show_indicator and not progress.enabled):
-                        with _silence_process_stdio():
-                            result, actual_cents = invoke()
+                    progress.start_thinking()
+                    with _silence_process_stdio():
+                        result, actual_cents = invoke()
+        progress._stop_thinking()  # guarantee the spinner is cleared before the response is returned/printed
         if reservation_key:
             billing_warning = _operator_budget_finalize(
                 operator_user_id=resolved_operator_user_id,
