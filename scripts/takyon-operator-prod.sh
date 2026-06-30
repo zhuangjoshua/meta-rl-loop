@@ -28,9 +28,31 @@ CONTAINER_SAFEBOX_URL="${TAKYON_CONTAINER_SAFEBOX_URL:-http://host.docker.intern
 LOCAL_PROD_ROOT="${TAKYON_OPERATOR_PROD_ROOT:-$HOME/.takyon-fourmanifold-operator-prod}"
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
 DEFAULT_OPERATOR_USER_ID="${TAKYON_SESSION_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
+SSH_SERVER_ALIVE_INTERVAL="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_INTERVAL:-15}"
+SSH_SERVER_ALIVE_COUNT_MAX="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
+CONSOLE_TUNNEL_MONITOR_SECONDS="${TAKYON_OPERATOR_TUNNEL_MONITOR_SECONDS:-5}"
 
 ssh_base() {
-  ssh -i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$SSH_HOST" "$@"
+  local -a args=(
+    -i "$SSH_KEY"
+    -o IdentitiesOnly=yes
+    -o StrictHostKeyChecking=accept-new
+  )
+  ssh "${args[@]}" "$SSH_HOST" "$@"
+}
+
+ssh_tunnel_exec() {
+  local -a args=(
+    -i "$SSH_KEY"
+    -o IdentitiesOnly=yes
+    -o StrictHostKeyChecking=accept-new
+    -o ExitOnForwardFailure=yes
+    -o "ServerAliveInterval=${SSH_SERVER_ALIVE_INTERVAL}"
+    -o "ServerAliveCountMax=${SSH_SERVER_ALIVE_COUNT_MAX}"
+    -o TCPKeepAlive=yes
+    -N
+  )
+  exec ssh "${args[@]}" "$@" "$SSH_HOST"
 }
 
 die() {
@@ -300,6 +322,94 @@ wait_for_url() {
   return 1
 }
 
+terminate_pid() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+}
+
+pid_file_process_running() {
+  local pid_file="$1"
+  [[ -f "$pid_file" ]] || return 1
+  local pid
+  pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" >/dev/null 2>&1
+}
+
+stop_pid_file_process() {
+  local pid_file="$1"
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+  local pid
+  pid="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
+  terminate_pid "$pid"
+  rm -f "$pid_file"
+}
+
+start_managed_tunnel() {
+  local label="$1"
+  local command="$2"
+  local health_url="$3"
+  local log_file="$4"
+  local pid_file="$5"
+  "$0" "$command" >>"$log_file" 2>&1 &
+  local pid="$!"
+  printf '%s\n' "$pid" >"$pid_file"
+  if wait_for_url "$label" "$health_url" "$log_file"; then
+    return 0
+  fi
+  stop_pid_file_process "$pid_file"
+  return 1
+}
+
+ensure_managed_tunnel() {
+  local label="$1"
+  local display_url="$2"
+  local health_url="$3"
+  local command="$4"
+  local log_file="$5"
+  local pid_file="$6"
+  local health_fn="$7"
+  if "$health_fn"; then
+    echo "$label tunnel: already healthy at $display_url"
+    return 0
+  fi
+  echo "Starting $label tunnel in background..."
+  start_managed_tunnel "$label" "$command" "$health_url" "$log_file" "$pid_file"
+}
+
+monitor_console_tunnels() {
+  local safebox_log="$1"
+  local safebox_pid_file="$2"
+  local dashboard_log="$3"
+  local dashboard_pid_file="$4"
+  while true; do
+    sleep "$CONSOLE_TUNNEL_MONITOR_SECONDS"
+    if ! safebox_tunnel_healthy; then
+      stop_pid_file_process "$safebox_pid_file"
+      echo "Safebox tunnel dropped; restarting..."
+      start_managed_tunnel "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" "$safebox_log" "$safebox_pid_file" || true
+    fi
+    if ! dashboard_tunnel_healthy; then
+      stop_pid_file_process "$dashboard_pid_file"
+      echo "Operator dashboard tunnel dropped; restarting..."
+      start_managed_tunnel "Operator dashboard" "dashboard-tunnel" "$LOCAL_DASHBOARD_URL/healthz" "$dashboard_log" "$dashboard_pid_file" || true
+    fi
+  done
+}
+
 require_docker_for_worker() {
   if [[ "${TERMINAL_ENV:-docker}" != "docker" ]]; then
     return 0
@@ -513,25 +623,15 @@ stop_local_workers() {
 cmd_safebox_tunnel() {
   require_files
   echo "Opening Safebox tunnel: $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT via $SSH_HOST" >&2
-  exec ssh \
-    -i "$SSH_KEY" \
-    -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=accept-new \
-    -N \
-    -L "127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}" \
-    "$SSH_HOST"
+  ssh_tunnel_exec \
+    -L "127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}"
 }
 
 cmd_dashboard_tunnel() {
   require_files
   echo "Opening operator dashboard tunnel: $LOCAL_DASHBOARD_URL -> $REMOTE_DASHBOARD_HOST:$REMOTE_DASHBOARD_PORT via $SSH_HOST" >&2
-  exec ssh \
-    -i "$SSH_KEY" \
-    -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=accept-new \
-    -N \
-    -L "127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}" \
-    "$SSH_HOST"
+  ssh_tunnel_exec \
+    -L "127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}"
 }
 
 cmd_tunnel() {
@@ -539,14 +639,9 @@ cmd_tunnel() {
   echo "Opening Safebox + operator dashboard tunnels:" >&2
   echo "  $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT" >&2
   echo "  $LOCAL_DASHBOARD_URL -> $REMOTE_DASHBOARD_HOST:$REMOTE_DASHBOARD_PORT" >&2
-  exec ssh \
-    -i "$SSH_KEY" \
-    -o IdentitiesOnly=yes \
-    -o StrictHostKeyChecking=accept-new \
-    -N \
+  ssh_tunnel_exec \
     -L "127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}" \
-    -L "127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}" \
-    "$SSH_HOST"
+    -L "127.0.0.1:${LOCAL_DASHBOARD_PORT}:${REMOTE_DASHBOARD_HOST}:${REMOTE_DASHBOARD_PORT}"
 }
 
 cmd_shell() {
@@ -645,48 +740,30 @@ cmd_console() {
   require_files
   mkdir -p "$LOCAL_PROD_ROOT/logs"
 
-  local tunnel_pid=""
-  local dashboard_tunnel_pid=""
+  local tunnel_monitor_pid=""
   local worker_pid=""
   local timestamp
   timestamp="$(date +%Y%m%d-%H%M%S)"
   local tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
   local dashboard_tunnel_log="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.log"
   local worker_log="$LOCAL_PROD_ROOT/logs/worker-$timestamp.log"
+  local tunnel_pid_file="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
+  local dashboard_tunnel_pid_file="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.pid"
 
   cleanup() {
+    if [[ -n "${tunnel_monitor_pid:-}" ]] && kill -0 "$tunnel_monitor_pid" >/dev/null 2>&1; then
+      terminate_pid "$tunnel_monitor_pid"
+    fi
     if [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
-      kill "$worker_pid" >/dev/null 2>&1 || true
-      wait "$worker_pid" >/dev/null 2>&1 || true
+      terminate_pid "$worker_pid"
     fi
-    if [[ -n "${tunnel_pid:-}" ]] && kill -0 "$tunnel_pid" >/dev/null 2>&1; then
-      kill "$tunnel_pid" >/dev/null 2>&1 || true
-      wait "$tunnel_pid" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "${dashboard_tunnel_pid:-}" ]] && kill -0 "$dashboard_tunnel_pid" >/dev/null 2>&1; then
-      kill "$dashboard_tunnel_pid" >/dev/null 2>&1 || true
-      wait "$dashboard_tunnel_pid" >/dev/null 2>&1 || true
-    fi
+    stop_pid_file_process "$tunnel_pid_file"
+    stop_pid_file_process "$dashboard_tunnel_pid_file"
   }
   trap cleanup EXIT INT TERM
 
-  if safebox_tunnel_healthy; then
-    echo "Safebox tunnel: already healthy at $LOCAL_SAFEBOX_URL"
-  else
-    echo "Starting Safebox tunnel in background..."
-    "$0" safebox-tunnel >"$tunnel_log" 2>&1 &
-    tunnel_pid="$!"
-    wait_for_url "Safebox" "$LOCAL_SAFEBOX_URL/healthz" "$tunnel_log"
-  fi
-
-  if dashboard_tunnel_healthy; then
-    echo "Operator dashboard tunnel: already healthy at $LOCAL_DASHBOARD_URL"
-  else
-    echo "Starting operator dashboard tunnel in background..."
-    "$0" dashboard-tunnel >"$dashboard_tunnel_log" 2>&1 &
-    dashboard_tunnel_pid="$!"
-    wait_for_url "Operator dashboard" "$LOCAL_DASHBOARD_URL/healthz" "$dashboard_tunnel_log"
-  fi
+  ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
+  ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy
 
   load_operator_env
   cmd_preflight
@@ -708,6 +785,8 @@ cmd_console() {
   echo
   cd "$ROOT"
   local shell_status=0
+  monitor_console_tunnels "$tunnel_log" "$tunnel_pid_file" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" &
+  tunnel_monitor_pid="$!"
   if [[ -n "$business" ]]; then
     echo "Opening operator shell for $business..."
     "$TAKYON_ENTRY" --logs shell "$business" || shell_status="$?"
