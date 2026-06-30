@@ -313,7 +313,8 @@ npm test          # vitest
 The dashboard embeds the real `takyon --tui` — **not** a rewrite.  See `takyon_cli/pty_bridge.py` + the `@app.websocket("/api/pty")` endpoint in `takyon_cli/web_server.py`.
 
 - Browser loads `web/src/pages/ChatPage.tsx`, which mounts xterm.js's `Terminal` with the WebGL renderer, `@xterm/addon-fit` for container-driven resize, and `@xterm/addon-unicode11` for modern wide-character widths.
-- `/api/pty?token=…` upgrades to a WebSocket; auth uses the same ephemeral `_SESSION_TOKEN` as REST, via query param (browsers can't set `Authorization` on WS upgrade).
+- On local/dashboard hosts, `/api/pty?token=…` still uses the ephemeral `_SESSION_TOKEN` via query param.
+- On the public Auth0 host, browser PTY/WebSocket auth uses the Auth0 session cookie instead; the shared dashboard session token is not accepted for browser control paths.
 - The server spawns whatever `takyon --tui` would spawn, through `ptyprocess` (POSIX PTY — WSL works, native Windows does not).
 - Frames: raw PTY bytes each direction; resize via `\x1b[RESIZE:<cols>;<rows>]` intercepted on the server and applied with `TIOCSWINSZ`.
 
