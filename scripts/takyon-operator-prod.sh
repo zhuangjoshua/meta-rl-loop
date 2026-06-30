@@ -57,6 +57,29 @@ run_takyon_cli() {
   PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"
 }
 
+operator_runtime_deps_ready() {
+  [[ -x "$TAKYON_CLI_PYTHON" ]] || return 1
+  "$TAKYON_CLI_PYTHON" - <<'PY' >/dev/null 2>&1
+import psycopg
+import fastapi
+import uvicorn
+import simple_term_menu
+PY
+}
+
+ensure_operator_runtime_deps() {
+  if operator_runtime_deps_ready; then
+    return 0
+  fi
+  command -v uv >/dev/null 2>&1 || die "operator runtime deps missing in $TAKYON_CLI_PYTHON and uv is not installed; run: cd $RUNTIME_DIR && uv pip install -e '.[all,postgres]'"
+  echo "Installing local operator runtime deps into $RUNTIME_DIR/.venv ..." >&2
+  (
+    cd "$RUNTIME_DIR"
+    UV_PROJECT_ENVIRONMENT="$RUNTIME_DIR/.venv" uv pip install -e ".[all,postgres]"
+  ) || die "failed to install .[all,postgres] into $RUNTIME_DIR/.venv"
+  operator_runtime_deps_ready || die "operator runtime deps still missing after installing .[all,postgres]"
+}
+
 require_files() {
   [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
   if ! takyon_cli_shim_ready && ! takyon_cli_fallback_ready; then
@@ -144,6 +167,7 @@ PY"
 
 load_operator_env() {
   require_files
+  ensure_operator_runtime_deps
   ensure_home
   # shellcheck disable=SC1090
   eval "$(fetch_operator_env_exports)"
