@@ -16663,28 +16663,58 @@ class TakyonStore:
         text = " ".join(str((biz or {}).get(k) or "") for k in ("name", "goal", "work_focus"))
         return {t.strip().lower() for t in re.split(r"[\s,;/]+", text) if len(t.strip()) > 2}
 
+    def _rl_fetch_events(self, conn: Any, event_types: list[str], *, slug: str | None = None,
+                         limit: int = 500) -> list[dict[str, Any]]:
+        """Full event rows (incl. id) for the given types, newest first. Source of truth = events."""
+        out: list[dict[str, Any]] = []
+        for et in event_types:
+            if slug:
+                cur = conn.execute(
+                    "SELECT * FROM events WHERE business_slug = ? AND event_type = ? ORDER BY created_at DESC LIMIT ?",
+                    (slug, et, max(1, int(limit))),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM events WHERE event_type = ? ORDER BY created_at DESC LIMIT ?",
+                    (et, max(1, int(limit))),
+                )
+            out.extend(self._row_to_dict(r) for r in cur.fetchall())
+        return out
+
+    def _rl_review_status(self, conn: Any, slug: str | None = None) -> dict[str, str]:
+        """lesson event_id -> latest human review decision ('approve'|'reject'). Empty if none."""
+        out: dict[str, str] = {}
+        for rv in self._rl_fetch_events(conn, ["ceo.learning.review"], slug=slug, limit=2000):
+            p = rv.get("payload") or {}
+            lid = str((p or {}).get("lesson_id") or "")
+            decision = str((p or {}).get("decision") or "")
+            if lid and lid not in out:  # rows are newest-first; first seen is the latest review
+                out[lid] = decision
+        return out
+
     def _retrieve_learnings(self, conn: Any, slug: str, *, intra_limit: int = 10,
                             inter_k: int = 5) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """RL rail R7 retrieval: ALL of this business's own learnings (intra, bounded) + top-k
-        cross-business learnings (inter) ranked by tag overlap. Cheap tag-overlap scoring now
-        (embeddings deferred); never crosses operators."""
-        intra = self._recent_event_payloads(conn, slug, "ceo.learning", intra_limit)
-        shared_rows = conn.execute(
-            "SELECT * FROM events WHERE event_type = 'ceo.learning.shared' ORDER BY created_at DESC LIMIT 200"
-        ).fetchall()
+        cross-business learnings (inter) ranked by tag overlap. Human-REJECTED lessons are excluded
+        — the operator's reject in the CLI actually removes a lesson from what the CEO sees. Never
+        crosses operators. Cheap tag-overlap scoring now (embeddings deferred)."""
+        rejected = {lid for lid, d in self._rl_review_status(conn).items() if d == "reject"}
+        intra_rows = self._rl_fetch_events(conn, ["ceo.learning"], slug=slug, limit=intra_limit * 4)
+        intra = [r["payload"] for r in intra_rows
+                 if isinstance(r.get("payload"), dict) and r.get("id") not in rejected][:intra_limit]
         op = str(self._operator_user_id or "").strip()
         biz_tags = self._business_tags(conn, slug)
         scored: list[tuple[int, dict[str, Any]]] = []
-        for raw in shared_rows:
-            row = self._row_to_dict(raw)
-            p = (row or {}).get("payload") or {}
+        for row in self._rl_fetch_events(conn, ["ceo.learning.shared"], slug=None, limit=200):
+            if row.get("id") in rejected:
+                continue
+            p = row.get("payload") or {}
             if not isinstance(p, dict):
                 continue
             learning_op = str(p.get("operator") or "").strip()
             if op and learning_op and learning_op != op:
                 continue  # never surface another operator's learnings
-            score = len(biz_tags & self._tokenize_tags(p.get("tags")))
-            scored.append((score, p))
+            scored.append((len(biz_tags & self._tokenize_tags(p.get("tags"))), p))
         scored.sort(key=lambda x: x[0], reverse=True)
         inter = [p for _score, p in scored[:inter_k]]
         return intra, inter
@@ -16738,6 +16768,162 @@ class TakyonStore:
                 payload={"identity": identity, "generated_at": _now()},
             )
         return {"success": True, "business": slug, "event_id": event_id, "event_type": "ceo.identity"}
+
+    # --- RL observability (CLI read layer) — pure projections over events, fabricate nothing ------
+
+    def rl_lessons(self, slug: str | None = None, *, scope: str | None = None,
+                   status: str | None = None, limit: int = 100) -> dict[str, Any]:
+        """List lessons from the events store with their effective status (candidate, or the latest
+        human review: approve->proven / reject->retired). Operator-scoped; no fabrication — every
+        field comes from a ceo.learning(.shared) / ceo.learning.review event."""
+        slug = _slugify(slug) if slug else None
+        op = str(self._operator_user_id or "").strip()
+        types: list[str] = []
+        if scope in (None, "business", "intra", "all"):
+            types.append("ceo.learning")
+        if scope in (None, "shared", "inter", "all"):
+            types.append("ceo.learning.shared")
+        out: list[dict[str, Any]] = []
+        with self._connect() as conn:
+            reviews = self._rl_review_status(conn, slug=None)
+            for row in self._rl_fetch_events(conn, types, slug=slug, limit=500):
+                p = row.get("payload") or {}
+                if not isinstance(p, dict):
+                    continue
+                row_op = str(p.get("operator") or "").strip()
+                if op and row_op and row_op != op:
+                    continue
+                eid = str(row.get("id") or "")
+                decided = reviews.get(eid)
+                effective = {"approve": "proven", "reject": "retired"}.get(decided, str(p.get("status") or "candidate"))
+                if status and effective != status:
+                    continue
+                out.append({
+                    "id": eid,
+                    "business": row.get("business_slug"),
+                    "scope": "shared" if row.get("event_type") == "ceo.learning.shared" else "business",
+                    "claim": p.get("claim"),
+                    "tags": p.get("tags") or [],
+                    "evidence": p.get("evidence") or [],
+                    "status": effective,
+                    "human_reviewed": decided is not None,
+                    "created_at": row.get("created_at"),
+                })
+        out.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        return {"success": True, "count": len(out[:limit]), "lessons": out[:limit]}
+
+    def rl_review_lesson(self, lesson_id: str, decision: str, *, reason: str = "",
+                         reviewer: str = "operator") -> dict[str, Any]:
+        """Record an operator approve/reject on a lesson as an append-only ceo.learning.review event.
+        Reject removes the lesson from what the CEO is shown (see _retrieve_learnings). Fails if the
+        lesson id does not exist — never reviews a fabricated id."""
+        lesson_id = str(lesson_id or "").strip()
+        decision = str(decision or "").strip().lower()
+        if decision not in {"approve", "reject"}:
+            raise TakyonError("decision must be 'approve' or 'reject'")
+        if not lesson_id:
+            raise TakyonError("lesson_id required")
+        with self._connect() as conn:
+            row = self._row_to_dict(conn.execute(
+                "SELECT * FROM events WHERE id = ? AND event_type IN ('ceo.learning', 'ceo.learning.shared')",
+                (lesson_id,),
+            ).fetchone())
+            if not row:
+                raise TakyonError(f"no lesson with id {lesson_id}")
+            slug = row.get("business_slug")
+            event_id = self._record_event(
+                conn, scope=f"business:{slug}", business_slug=slug,
+                event_type="ceo.learning.review",
+                payload={"lesson_id": lesson_id, "decision": decision, "reason": str(reason or ""),
+                         "reviewer": reviewer, "reviewed_at": _now()},
+            )
+        return {"success": True, "lesson_id": lesson_id, "decision": decision,
+                "new_status": "proven" if decision == "approve" else "retired", "event_id": event_id}
+
+    def rl_why(self, episode_id: str) -> dict[str, Any]:
+        """Reconstruct the reasoning behind a bet: the bet itself, the context that was injectable
+        just before it (identity + latest state-of-mind), and its settled outcome. All from events;
+        absent pieces are reported as null, never invented."""
+        episode_id = str(episode_id or "").strip()
+        if not episode_id:
+            raise TakyonError("episode_id required")
+        with self._connect() as conn:
+            opened = next((r for r in self._rl_fetch_events(conn, ["ceo.episode.opened"], limit=2000)
+                           if str((r.get("payload") or {}).get("episode_id") or "") == episode_id), None)
+            if not opened:
+                raise TakyonError(f"no episode with id {episode_id}")
+            op_p = opened.get("payload") or {}
+            slug = opened.get("business_slug")
+            opened_at = str(op_p.get("opened_at") or opened.get("created_at") or "")
+            settled = next((r for r in self._rl_fetch_events(conn, ["ceo.episode.settled"], slug=slug, limit=2000)
+                            if str((r.get("payload") or {}).get("episode_id") or "") == episode_id), None)
+            # context that existed BEFORE the bet (truthful: latest with created_at <= opened_at)
+            def latest_before(event_type: str) -> dict[str, Any] | None:
+                for r in self._rl_fetch_events(conn, [event_type], slug=slug, limit=500):
+                    if str(r.get("created_at") or "") <= opened_at:
+                        return r.get("payload") or {}
+                return None
+            identity = latest_before("ceo.identity")
+            som = latest_before("ceo.state_of_mind")
+        return {
+            "success": True,
+            "episode_id": episode_id,
+            "business": slug,
+            "bet": {"hypothesis": op_p.get("hypothesis"), "channel": op_p.get("channel"),
+                    "action_kind": op_p.get("action_kind"), "baseline": op_p.get("baseline"),
+                    "opened_at": opened_at},
+            "context_before": {
+                "identity": (identity or {}).get("identity"),
+                "state_of_mind": (som or {}).get("note"),
+            },
+            "outcome": (settled.get("payload") if settled else None),
+            "settled": settled is not None,
+        }
+
+    def rl_status(self, slug: str | None = None) -> dict[str, Any]:
+        """Per-business RL summary from events: counts of episodes (open/settled), lessons by
+        effective status, last activity. Zeros when there is nothing — never padded."""
+        slug = _slugify(slug) if slug else None
+        with self._connect() as conn:
+            opened = self._rl_fetch_events(conn, ["ceo.episode.opened"], slug=slug, limit=5000)
+            settled = self._rl_fetch_events(conn, ["ceo.episode.settled"], slug=slug, limit=5000)
+            som = self._rl_fetch_events(conn, ["ceo.state_of_mind"], slug=slug, limit=1)
+        lessons = self.rl_lessons(slug, limit=10000)["lessons"]
+        by_status: dict[str, int] = {}
+        for ln in lessons:
+            by_status[ln["status"]] = by_status.get(ln["status"], 0) + 1
+        rewards = [p.get("reward") for r in settled if isinstance((p := r.get("payload")), dict) and p.get("reward") is not None]
+        return {
+            "success": True,
+            "business": slug or "(all)",
+            "episodes_opened": len(opened),
+            "episodes_settled": len(settled),
+            "lessons_total": len(lessons),
+            "lessons_by_status": by_status,
+            "rewarded_episodes": len(rewards),
+            "last_state_of_mind_at": (som[0].get("created_at") if som else None),
+            "last_episode_at": (opened[0].get("created_at") if opened else None),
+        }
+
+    def rl_policy(self, slug: str) -> dict[str, Any]:
+        """The CEO's current injected policy for a business = exactly what _assemble_wake_memory
+        produces (identity + state-of-mind + recent bets + non-rejected learnings). Returns the
+        real injected text plus its structured pieces — this IS the policy, not a description."""
+        slug = _slugify(slug)
+        injected = self._assemble_wake_memory(slug)
+        with self._connect() as conn:
+            identity = self._latest_event_payload(conn, slug, "ceo.identity")
+            som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
+            intra, inter = self._retrieve_learnings(conn, slug)
+        return {
+            "success": True,
+            "business": slug,
+            "injected_text": injected,
+            "identity": (identity or {}).get("identity"),
+            "state_of_mind": (som or {}).get("note"),
+            "active_intra_learnings": [p.get("claim") for p in intra if isinstance(p, dict)],
+            "active_shared_learnings": [p.get("claim") for p in inter if isinstance(p, dict)],
+        }
 
     def traction_timeseries(self, slug: str, *, range_key: str = "M") -> dict[str, Any]:
         slug = _slugify(slug)

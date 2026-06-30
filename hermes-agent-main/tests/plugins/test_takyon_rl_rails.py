@@ -181,6 +181,66 @@ def test_subuser_role_denied_writing_0058_attribution_fingerprint_columns(pg_con
         pg_conn.execute("reset role")
 
 
+# --- RL observability CLI layer (read projections + review write, all from events) ----------
+
+def test_rl_lessons_effective_status_from_reviews(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "statco")
+    a = pg_store.record_learning("statco", "lesson A", scope="business")["event_id"]
+    b = pg_store.record_learning("statco", "lesson B", scope="shared", tags=["x"])["event_id"]
+    L = {l["id"]: l for l in pg_store.rl_lessons("statco")["lessons"]}
+    assert L[a]["status"] == "candidate" and L[b]["status"] == "candidate"
+    assert L[a]["human_reviewed"] is False
+    pg_store.rl_review_lesson(a, "approve")
+    pg_store.rl_review_lesson(b, "reject", reason="noise")
+    L = {l["id"]: l for l in pg_store.rl_lessons("statco")["lessons"]}
+    assert L[a]["status"] == "proven" and L[a]["human_reviewed"] is True
+    assert L[b]["status"] == "retired"
+
+
+def test_reject_removes_lesson_from_injection(pg_store, pg_store_dsn):
+    # the operator's reject must actually remove the lesson from what the CEO is shown.
+    _seed_owned_business(pg_store_dsn, "rejco")
+    lid = pg_store.record_learning("rejco", "Bad lesson spam everyone", scope="business")["event_id"]
+    assert "Bad lesson spam everyone" in pg_store._ceo_cron_prompt("rejco")
+    pg_store.rl_review_lesson(lid, "reject", reason="harmful")
+    assert "Bad lesson spam everyone" not in pg_store._ceo_cron_prompt("rejco")
+
+
+def test_rl_review_unknown_lesson_raises(pg_store):
+    with pytest.raises(TakyonError):
+        pg_store.rl_review_lesson("00000000-0000-0000-0000-000000000000", "approve")
+
+
+def test_rl_why_reconstructs_bet_and_context(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "whyco")
+    pg_store.set_identity("whyco", "B2C habit tracker")
+    pg_store.open_state_of_mind("whyco", "left off testing reddit")
+    ep = pg_store.record_episode("whyco", "try a pricing test", channel="pricing")["episode_id"]
+    w = pg_store.rl_why(ep)
+    assert w["bet"]["hypothesis"] == "try a pricing test" and w["bet"]["channel"] == "pricing"
+    assert w["context_before"]["identity"] == "B2C habit tracker"
+    assert w["context_before"]["state_of_mind"] == "left off testing reddit"
+    assert w["settled"] is False and w["outcome"] is None  # truthful: not invented
+
+
+def test_rl_status_counts_are_real(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "cntco")
+    pg_store.record_episode("cntco", "bet one")
+    pg_store.record_learning("cntco", "lesson one", scope="business")
+    s = pg_store.rl_status("cntco")
+    assert s["episodes_opened"] == 1 and s["episodes_settled"] == 0 and s["lessons_total"] == 1
+
+
+def test_rl_policy_is_the_injected_text(pg_store, pg_store_dsn):
+    _seed_owned_business(pg_store_dsn, "polco")
+    pg_store.set_identity("polco", "thesis: streaks drive retention")
+    pg_store.record_learning("polco", "ship weekly digests", scope="business")
+    p = pg_store.rl_policy("polco")
+    assert p["identity"] == "thesis: streaks drive retention"
+    assert "ship weekly digests" in p["active_intra_learnings"]
+    assert p["injected_text"] == pg_store._assemble_wake_memory("polco")  # IS the policy, not a description
+
+
 def test_subuser_role_cannot_set_rls_bypass_guc(pg_conn):
     """takyon_app_runtime must not be able to flip the RLS-bypass GUC on itself."""
     if not pg_conn.execute("select 1 from pg_roles where rolname='takyon_app_runtime'").fetchone():

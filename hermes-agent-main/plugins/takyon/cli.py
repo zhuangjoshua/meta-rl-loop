@@ -4819,6 +4819,44 @@ def run_takyon_command(
         slug = _slugify(argv[1])
         return store.calculate_pulse(slug)
 
+    if command == "rl":
+        # RL observability — read projections over the events store (source of truth, no fabrication)
+        sub = (argv[1].strip().lower() if len(argv) >= 2 else "status")
+        if sub in {"lessons", "lesson"}:
+            rest = argv[2:]
+            action = (rest[0].strip().lower() if rest else "")
+            if action in {"approve", "reject"}:
+                if len(rest) < 2:
+                    raise SystemExit(f"usage: takyon rl lessons {action} <lesson-id> [reason]")
+                return store.rl_review_lesson(rest[1], action, reason=" ".join(rest[2:]))
+            slug = None
+            scope = None
+            status = None
+            i = 0
+            while i < len(rest):
+                tok = rest[i]
+                if tok == "--scope" and i + 1 < len(rest):
+                    scope = rest[i + 1].lower(); i += 2; continue
+                if tok == "--status" and i + 1 < len(rest):
+                    status = rest[i + 1].lower(); i += 2; continue
+                if tok in {"pending", "review"}:
+                    status = "candidate"; i += 1; continue
+                if not tok.startswith("--"):
+                    slug = _slugify(tok)
+                i += 1
+            return store.rl_lessons(slug, scope=scope, status=status)
+        if sub == "why":
+            if len(argv) < 3:
+                raise SystemExit("usage: takyon rl why <episode-id>")
+            return store.rl_why(argv[2])
+        if sub == "policy":
+            if len(argv) < 3:
+                raise SystemExit("usage: takyon rl policy <business>")
+            return store.rl_policy(_slugify(argv[2]))
+        if sub in {"status", ""}:
+            return store.rl_status(_slugify(argv[2]) if len(argv) >= 3 else None)
+        raise SystemExit("usage: takyon rl status|lessons|why|policy ...")
+
     if command == "test":
         if len(argv) < 2:
             raise SystemExit("usage: takyon test <business> on|off|status")

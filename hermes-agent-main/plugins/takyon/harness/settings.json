@@ -68,6 +68,7 @@
     {"name": "pulse", "description": "Show current business pulse", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},
     {"name": "files", "description": "List business filesystem entries", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
     {"name": "read", "description": "Read a business-scoped file", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "default"},
+    {"name": "rl", "description": "Observe the RL loop: status, lessons (approve/reject), why, policy", "requiresBusiness": false, "priorityBand": "p3_learning", "palette": "advanced"},
     {
       "name": "focus",
       "description": "Set current business work focus",
