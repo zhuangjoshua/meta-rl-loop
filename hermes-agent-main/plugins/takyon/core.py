@@ -16521,6 +16521,120 @@ class TakyonStore:
             "deltas_from_previous_pulse": pulse.get("deltas_from_previous_pulse"),
         }
 
+    # --- RL rails: subjective CEO memory (events-store backed, plane-agnostic) -------------
+    # Episodes (R1), identity + state-of-mind (R5) and traces (R10) are written as
+    # business-scoped events (same scope/plane as business.pulse.snapshot) so they work on
+    # local SQLite and the Postgres control plane today. The 0057 ceo_* tables are the future
+    # indexed mirror (applied later under membrane sign-off); reads/writes go through events now.
+
+    def _latest_event_payload(self, conn: Any, slug: str, event_type: str) -> dict[str, Any]:
+        row = self._row_to_dict(conn.execute(
+            "SELECT * FROM events WHERE business_slug = ? AND event_type = ? ORDER BY created_at DESC LIMIT 1",
+            (slug, event_type),
+        ).fetchone())
+        payload = (row or {}).get("payload") or {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _recent_event_payloads(self, conn: Any, slug: str, event_type: str, limit: int) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for raw in conn.execute(
+            "SELECT * FROM events WHERE business_slug = ? AND event_type = ? ORDER BY created_at DESC LIMIT ?",
+            (slug, event_type, max(1, int(limit))),
+        ).fetchall():
+            row = self._row_to_dict(raw)
+            payload = (row or {}).get("payload") or {}
+            out.append(payload if isinstance(payload, dict) else {})
+        return out
+
+    def _assemble_wake_memory(self, slug: str, *, episode_limit: int = 5) -> str:
+        """RL rail R5: build the CEO's injected wake state (identity + where-I-left-off +
+        recent bets) from events. Returned text is prepended to the wake user turn by
+        _ceo_cron_prompt, so a planted state-of-mind byte provably enters the cold wake
+        context (floor-1 byte-carrying channel). Never raises — degrades to empty."""
+        slug = _slugify(slug)
+        try:
+            with self._connect() as conn:
+                identity = self._latest_event_payload(conn, slug, "ceo.identity")
+                som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
+                settled = self._recent_event_payloads(conn, slug, "ceo.episode.settled", episode_limit)
+                opened = self._recent_event_payloads(conn, slug, "ceo.episode.opened", episode_limit)
+        except Exception:
+            return ""
+        lines: list[str] = []
+        ident_text = str((identity or {}).get("identity") or "").strip()
+        if ident_text:
+            lines.append(f"Who you are: {ident_text}")
+        som_text = str((som or {}).get("note") or "").strip()
+        if som_text:
+            lines.append(f"Where you left off last wake: {som_text}")
+        bets: list[str] = []
+        for p in settled:
+            desc = str(p.get("hypothesis") or p.get("summary") or "").strip()
+            if not desc:
+                continue
+            outcome = str(p.get("outcome") or "settled").strip()
+            reward = p.get("reward")
+            tag = f" [reward {reward}]" if reward is not None else ""
+            bets.append(f"- (settled) {desc} -> {outcome}{tag}")
+        settled_ids = {str(p.get("episode_id")) for p in settled if p.get("episode_id")}
+        for p in opened:
+            if str(p.get("episode_id")) in settled_ids:
+                continue
+            desc = str(p.get("hypothesis") or "").strip()
+            if desc:
+                bets.append(f"- (in flight) {desc}")
+        if bets:
+            lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
+        if not lines:
+            return ""
+        return (
+            "== Your memory (injected — this is your own state across wakes, not the operator's) ==\n"
+            + "\n".join(lines)
+            + "\n== end memory ==\n\n"
+        )
+
+    def open_state_of_mind(self, slug: str, note: str) -> dict[str, Any]:
+        """RL rail R5: record where the CEO is leaving off; latest wins at next wake injection."""
+        slug = _slugify(slug)
+        note = str(note or "").strip()
+        if not note:
+            raise TakyonError("state-of-mind note required")
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            event_id = self._record_event(
+                conn, scope=f"business:{slug}", business_slug=slug,
+                event_type="ceo.state_of_mind",
+                payload={"note": note, "generated_at": _now()},
+            )
+        return {"success": True, "business": slug, "event_id": event_id, "event_type": "ceo.state_of_mind"}
+
+    def record_episode(self, slug: str, hypothesis: str, *, channel: str | None = None,
+                       action_kind: str | None = None, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+        """RL rail R1: open an episode — the bet the CEO is making this wake. The re-derived
+        margin-net reward + settle is a separate (membrane-gated) job; this records the bet +
+        baseline so the next wake can see it and a future settle can attribute outcome to it."""
+        slug = _slugify(slug)
+        hypothesis = str(hypothesis or "").strip()
+        if not hypothesis:
+            raise TakyonError("episode hypothesis required")
+        episode_id = uuid.uuid4().hex
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            event_id = self._record_event(
+                conn, scope=f"business:{slug}", business_slug=slug,
+                event_type="ceo.episode.opened",
+                payload={
+                    "episode_id": episode_id,
+                    "hypothesis": hypothesis,
+                    "channel": (channel or "").strip() or None,
+                    "action_kind": (action_kind or "").strip() or None,
+                    "baseline": baseline if isinstance(baseline, dict) else {},
+                    "opened_at": _now(),
+                },
+            )
+        return {"success": True, "business": slug, "episode_id": episode_id, "event_id": event_id,
+                "event_type": "ceo.episode.opened"}
+
     def traction_timeseries(self, slug: str, *, range_key: str = "M") -> dict[str, Any]:
         slug = _slugify(slug)
         key = str(range_key or "M").strip().upper() or "M"
@@ -19917,8 +20031,10 @@ class TakyonStore:
                 "daily summary to metrics/summary.md via takyon-business-metrics before sleeping; "
                 "otherwise just keep metrics/summary.md current with this wake's pulse. "
             )
+        memory_block = self._assemble_wake_memory(slug)
         return (
-            f"CEO wakeup for business:{slug}.\n"
+            memory_block
+            + f"CEO wakeup for business:{slug}.\n"
             "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
             "Start with business_calculate_pulse to see what changed: usage, revenue, unresolved inbound, queued jobs, blockers, and recent activity. "
             "Then read research/strategy.md before choosing the next move. If new evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, update research/strategy.md before continuing. "
@@ -19945,6 +20061,8 @@ class TakyonStore:
             "the same motion. "
             "Append a compact wake snapshot to metrics/wake-history.md for future comparison. Never delete prior metrics, "
             "metric, event, conversation, ledger, job, or wake data during a wake. "
+            "Record the 1-2 moves you choose as bets with business_record_episode, and before you sleep write where "
+            "you are leaving off with business_open_state_of_mind so your next wake remembers this one. "
             f"{daily_summary_line}"
             "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
             "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
@@ -20938,6 +21056,30 @@ def handle_business_calculate_pulse(args: dict, **_: Any) -> str:
 def handle_business_record_pulse(args: dict, **_: Any) -> str:
     try:
         return tool_result(_store().record_pulse(_resolved_business_slug(args, required=True), limit=args.get("limit") or 10))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_record_episode(args: dict, **_: Any) -> str:
+    try:
+        baseline = args.get("baseline")
+        return tool_result(_store().record_episode(
+            _resolved_business_slug(args, required=True),
+            str(args.get("hypothesis") or ""),
+            channel=args.get("channel"),
+            action_kind=args.get("action_kind"),
+            baseline=baseline if isinstance(baseline, dict) else None,
+        ))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_open_state_of_mind(args: dict, **_: Any) -> str:
+    try:
+        return tool_result(_store().open_state_of_mind(
+            _resolved_business_slug(args, required=True),
+            str(args.get("note") or ""),
+        ))
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -32675,6 +32817,18 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Compute a pulse and persist it as a business.pulse.snapshot so future pulse deltas baseline against real prior metrics instead of zero (RL rail R4).",
         "handler": handle_business_record_pulse,
         "schema": _schema("business_record_pulse", "Compute and persist a pulse snapshot baseline.", {"business": _BUSINESS_PROP, "limit": {"type": "integer", "description": "Top grouped rows to return; default 10"}}, ["business"]),
+    },
+    {
+        "name": "business_record_episode",
+        "description": "Open an RL episode: record the bet/move the CEO is making this wake (hypothesis, channel, baseline) so the next wake sees it and a future settle can attribute outcome (RL rail R1).",
+        "handler": handle_business_record_episode,
+        "schema": _schema("business_record_episode", "Record the bet the CEO is making this wake.", {"business": _BUSINESS_PROP, "hypothesis": {"type": "string", "description": "The bet/move and what you expect it to move."}, "channel": {"type": "string", "description": "Channel/surface, e.g. x, reddit-ads, seo, pricing."}, "action_kind": {"type": "string", "description": "Optional action category."}, "baseline": {"type": "object", "description": "Optional baseline metric snapshot at bet time."}}, ["business", "hypothesis"]),
+    },
+    {
+        "name": "business_open_state_of_mind",
+        "description": "Record where the CEO is leaving off this wake; the latest note is injected into the next wake's context so the CEO remembers across wakes (RL rail R5).",
+        "handler": handle_business_open_state_of_mind,
+        "schema": _schema("business_open_state_of_mind", "Record where you are leaving off for your next wake.", {"business": _BUSINESS_PROP, "note": {"type": "string", "description": "Where you are leaving off: open threads, current focus, what to check next wake."}}, ["business", "note"]),
     },
     {
         "name": "business_read_app_analytics",
