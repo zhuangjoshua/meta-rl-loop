@@ -30,3 +30,12 @@ def test_litebulb_hook_exports_fresh_build_state_helper():
     assert "function createEmptyBuildState(): BuildState" in source
     assert "const resetBuildState = useCallback(() => {" in source
     assert "setBuildState(createEmptyBuildState());" in source
+
+
+def test_litebulb_hook_mirrors_tool_progress_into_live_business_logs():
+    source = HOOK_SOURCE.read_text(encoding="utf-8")
+
+    assert 'const offToolProgress = gateway.on("tool.progress"' in source
+    assert "if (preview) pushBuildTerminal(preview);" in source
+    assert "preview," in source
+    assert "offToolProgress();" in source

@@ -262,8 +262,24 @@ def _key_white_background_to_alpha(image_bytes: bytes) -> bytes:
         out = arr.copy()
         out[..., 3] = new_alpha
         out_img = Image.fromarray(out.astype(np.uint8), mode="RGBA")
-        # Tight framing: crop to the non-transparent bounding box when present.
-        bbox = out_img.getbbox()
+        # Tight framing: crop to the TRUE logo silhouette, not the full extent of the faint
+        # near-transparent halo the white-key ramp leaves behind. Using getbbox() on any alpha>0
+        # preserved a huge ghost margin around some Gemini renders, which made the actual mark look
+        # tiny once the site header/favicon scaled the PNG down. Crop against a stronger alpha floor
+        # instead, then add a tiny bleed so anti-aliased edges are not clipped.
+        content = np.argwhere(new_alpha >= 24.0)
+        if content.size:
+            y0, x0 = content.min(axis=0)
+            y1, x1 = content.max(axis=0)
+            pad = max(2, int(round(max(out_img.size) * 0.02)))
+            bbox = (
+                max(0, int(x0) - pad),
+                max(0, int(y0) - pad),
+                min(out_img.width, int(x1) + pad + 1),
+                min(out_img.height, int(y1) + pad + 1),
+            )
+        else:
+            bbox = out_img.getbbox()
         if bbox:
             out_img = out_img.crop(bbox)
         buf = io.BytesIO()

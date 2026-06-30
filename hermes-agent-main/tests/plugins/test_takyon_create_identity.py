@@ -111,6 +111,19 @@ def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_block
     assert "If something is blocked, record the blocker in research/strategy.md and continue with the next step." not in prompt
 
 
+def test_bootstrap_prompt_passes_explicit_search_console_site_url():
+    prompt = _business_bootstrap_instruction(
+        "roomviewer-2",
+        "room viewer",
+        "live",
+        business_name="Roomviewer 2",
+    )
+
+    assert 'Call business_register_search_console with the business, site_url "https://roomviewer-2.coscale.app/"' in prompt
+    assert "Do not rely on inferred public_url here." in prompt
+    assert '- Call business_seo_add_property with site_url "https://roomviewer-2.coscale.app/"' in prompt
+
+
 def test_bootstrap_turn_config_uses_expanded_shared_turn_budget():
     config = _ceo_bootstrap_turn_config(
         "crm",

@@ -42,6 +42,7 @@ _TAKYON_SKILL_ALIASES = {
 _TAKYON_SKILL_PREFIX = "takyon-"
 _DEFAULT_BOOTSTRAP_MAX_TURNS = 30
 _WORKFLOW_BOOTSTRAP_MAX_TURNS = 60
+_BOOTSTRAP_PRODUCT_BASE_DOMAIN = "coscale.app"
 _BOOTSTRAP_WORKFLOW_REQUEST_RE = re.compile(
     r"\b("
     r"real\s+(?:customer\s+)?ai\s+workflow|"
@@ -76,6 +77,13 @@ def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
     if cap > _DEFAULT_BOOTSTRAP_MAX_TURNS and raw <= _DEFAULT_BOOTSTRAP_MAX_TURNS:
         raw = cap
     return max(1, min(raw, cap))
+
+
+def _bootstrap_public_site_url(slug: str) -> str:
+    base = str(_company_base_domain() or "").strip().lower()
+    if not base or base == "fourmanifold.com":
+        base = _BOOTSTRAP_PRODUCT_BASE_DOMAIN
+    return f"https://{_slugify(slug)}.{base}/"
 
 
 _CREATE_NAME_LLM_PROMPT = (
@@ -1817,7 +1825,7 @@ def _business_bootstrap_instruction(
         "",
         "#### 2a.1. Register Search Console (immediately after the landing publishes)",
         "As soon as 2a reports `surface_refresh.publish.status == \"published\"` for the landing, register the live site with Google Search Console — do this BEFORE 2b so the single fast idempotent call is front-loaded onto the already-live landing instead of being pushed past the budget by the heavier 2b pass.",
-        "Call business_register_search_console with the business and a fresh idempotency_key. It injects the google-site-verification META tag onto BOTH the live published landing and the source template (so Google can verify it now AND the 2b appkit publish carries the tag forward), then registers the URL-prefix property.",
+        f'Call business_register_search_console with the business, site_url "{_bootstrap_public_site_url(slug)}", and a fresh idempotency_key. Do not rely on inferred public_url here. It injects the google-site-verification META tag onto BOTH the live published landing and the source template (so Google can verify it now AND the 2b appkit publish carries the tag forward), then registers the URL-prefix property.',
         "This is live-only, key-behind-TK, and fails closed on its own: if it returns blocked_search_console_unconfigured (the verification key is not provisioned) or any other blocker, record that exact blocker in research/strategy.md and continue to 2b — do not fabricate a verification and do not stop the whole build for it.",
         "",
         "#### 2b. Add the real logo, then finish the /app access shell + profile",
@@ -1894,7 +1902,7 @@ def _business_bootstrap_instruction(
         "Then verify only the declared action rail before continuing: call business_check_runtime_capabilities for the business and confirm the requested action is exposed. Do NOT call business_invoke_app_action during ceo_bootstrap; app action execution requires a real signed-in subscribed product-user session and is verified immediately after bootstrap completes. If the action is missing, record the exact blocker in research/strategy.md and stop bootstrap there. Do not proceed to X or final completion with a placeholder workflow.",
         "",
         "Once the product site is published, register its public URL with the operator's Search Console service account so the new site is owned and trackable from day one:",
-        f"- Call business_seo_add_property with site_url \"https://{slug}.{_company_base_domain()}/\".",
+        f"- Call business_seo_add_property with site_url \"{_bootstrap_public_site_url(slug)}\".",
         "- This is internal plumbing: never mention search console, indexing, ownership, or the tool name in any customer-visible sentence, and do not give it its own milestone card.",
         "- If it is blocked (the Search Console service-account secret is not configured in Safebox, or the URL is not under an owner-verified parent property), record the exact blocker in research/strategy.md and continue the remaining steps; do not fake success and do not abort bootstrap for it.",
         "",

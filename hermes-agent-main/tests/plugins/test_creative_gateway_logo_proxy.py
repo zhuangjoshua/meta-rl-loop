@@ -18,6 +18,7 @@ Contract:
 """
 
 import base64
+import io
 import sys
 import types
 
@@ -235,3 +236,33 @@ def test_gemini_logo_generation_postprocesses_inline_bytes_directly(monkeypatch)
 
     assert out == final_png
     assert seen["raw"] == raw_jpeg
+
+
+def test_logo_alpha_postprocess_trims_faint_halo_to_visible_mark(monkeypatch):
+    gw = _gw()
+    pil = pytest.importorskip("PIL.Image")
+
+    monkeypatch.setattr(gw, "_lazy_ensure", lambda *args, **kwargs: None, raising=False)
+    try:
+        import numpy  # noqa: F401
+    except Exception:  # pragma: no cover - environment guard
+        pytest.skip("numpy unavailable")
+
+    img = pil.new("RGBA", (120, 120), (255, 255, 255, 255))
+    for y in range(40, 80):
+        for x in range(40, 80):
+            img.putpixel((x, y), (0, 0, 0, 255))
+    for y in range(10, 110):
+        for x in range(10, 110):
+            if 40 <= x < 80 and 40 <= y < 80:
+                continue
+            img.putpixel((x, y), (244, 244, 244, 255))
+
+    raw = io.BytesIO()
+    img.save(raw, format="PNG")
+
+    out = gw._key_white_background_to_alpha(raw.getvalue())
+    rendered = pil.open(io.BytesIO(out))
+
+    assert rendered.size[0] < 70
+    assert rendered.size[1] < 70

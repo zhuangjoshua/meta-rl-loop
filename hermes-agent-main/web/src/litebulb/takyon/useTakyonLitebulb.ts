@@ -1206,6 +1206,17 @@ export function useTakyonLitebulb() {
         status: "running",
       });
     });
+    const offToolProgress = gateway.on("tool.progress", (event) => {
+      const payload = (event.payload as { name?: string; preview?: string } | undefined) || {};
+      const name = trimText(payload.name || "tool");
+      const preview = trimText(payload.preview);
+      if (preview) pushBuildTerminal(preview);
+      noteLiveChatTool({
+        name,
+        preview,
+        status: "running",
+      });
+    });
     const offToolComplete = gateway.on("tool.complete", (event) => {
       const payload = (event.payload as { name?: string; summary?: string } | undefined) || {};
       const text = trimText(payload.summary || payload.name || "Tool complete");
@@ -1233,6 +1244,7 @@ export function useTakyonLitebulb() {
       offThinking();
       offStatus();
       offToolStart();
+      offToolProgress();
       offToolComplete();
       offError();
       gateway.close();
