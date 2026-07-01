@@ -590,6 +590,25 @@ def test_business_read_file_labels_active_session_workspace_as_working(tmp_path)
     assert "active session workspace" in source["proof_guidance"]
 
 
+def test_business_read_file_includes_operator_artifact_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_DASHBOARD_PUBLIC_URL", "https://app.fourmanifold.com")
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:probe",
+        [{"action": "business.upsert", "business": "probe", "name": "Probe"}],
+        "init-probe-artifact-url",
+    )
+    business_root = tmp_path / "businesses" / "probe"
+    (business_root / "research").mkdir(parents=True, exist_ok=True)
+    (business_root / "research" / "strategy.md").write_text("# Strategy\n", encoding="utf-8")
+
+    result = store.read(scope="business:probe", query="read_file", path="research/strategy.md")
+
+    assert result["artifact_api_path"] == "/api/takyon/businesses/probe/artifact?path=research/strategy.md"
+    assert result["artifact_url"] == "https://app.fourmanifold.com/api/takyon/businesses/probe/artifact?path=research/strategy.md"
+
+
 def test_business_summary_and_app_surface_label_workspace_vs_recorded_live_truth(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))

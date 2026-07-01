@@ -1157,6 +1157,32 @@ def _business_file_truth_metadata(path: str, *, session_scoped: bool, revision: 
         **revision_payload,
     }
 
+
+def _dashboard_public_base_url() -> str:
+    raw = str(
+        os.getenv("TAKYON_DASHBOARD_PUBLIC_URL")
+        or os.getenv("APP_BASE_URL")
+        or os.getenv("APP_URL")
+        or os.getenv("TAKYON_DASHBOARD_URL")
+        or ""
+    ).strip().rstrip("/")
+    if raw and "://" not in raw:
+        raw = f"http://{raw}" if raw.startswith(("localhost", "127.0.0.1")) else f"https://{raw}"
+    return raw
+
+
+def _business_artifact_api_path(business: str, path: str) -> str:
+    slug = urllib.parse.quote(_slugify(business), safe="")
+    rel = urllib.parse.quote(_safe_relpath(path or ".", field="path").as_posix(), safe="/")
+    return f"/api/takyon/businesses/{slug}/artifact?path={rel}"
+
+
+def _business_artifact_url(business: str, path: str) -> str:
+    base = _dashboard_public_base_url()
+    api_path = _business_artifact_api_path(business, path)
+    return f"{base}{api_path}" if base else ""
+
+
 # Guardrail aliases only. Agents can always pass explicit env names through
 # requires_env when an API is not listed here.
 _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
@@ -17763,6 +17789,8 @@ class TakyonStore:
                 file_path = self._resolve_business_file(slug, path)
                 if not file_path.exists() or not file_path.is_file():
                     raise TakyonError(f"file not found: {path}")
+                artifact_api_path = _business_artifact_api_path(slug, path)
+                artifact_url = _business_artifact_url(slug, path)
                 return {
                     "success": True,
                     "scope": scope,
@@ -17773,6 +17801,8 @@ class TakyonStore:
                         revision=self._canonical_workspace_revision(slug),
                     ),
                     "content": _read_text_limited(file_path),
+                    "artifact_api_path": artifact_api_path,
+                    **({"artifact_url": artifact_url} if artifact_url else {}),
                 }
 
             if query in {"files", "list_files"}:
@@ -33520,9 +33550,9 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_file",
-        "description": "Read a file inside a business scope. The result labels whether the bytes came from committed canonical source or an active working workspace.",
+        "description": "Read a file inside a business scope. The result labels whether the bytes came from committed canonical source or an active working workspace, and returns an operator-openable artifact URL when available.",
         "handler": handle_business_read_file,
-        "schema": _schema("business_read_file", "Read a business-scoped file. Source-backed files are labeled as canonical or working; this read does not by itself prove live serving state.", {"business": _BUSINESS_PROP, "path": {"type": "string"}}, ["business", "path"]),
+        "schema": _schema("business_read_file", "Read a business-scoped file. Source-backed files are labeled as canonical or working; this read does not by itself prove live serving state. When the operator wants to open or download the artifact itself, prefer the returned artifact_url when present.", {"business": _BUSINESS_PROP, "path": {"type": "string"}}, ["business", "path"]),
     },
     {
         "name": "business_calculate_pulse",
