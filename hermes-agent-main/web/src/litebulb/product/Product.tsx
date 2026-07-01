@@ -18,6 +18,11 @@ import type {
   TakyonBusinessWorkspaceResponse,
 } from "@/lib/api";
 import {
+  buildTakyonBusinessArtifactUrl,
+  buildTakyonBusinessAssetUrl,
+  buildTakyonBusinessSitePreviewFrameUrl,
+} from "@/lib/api";
+import {
   chatStreamAgentMessages,
   liveWorkSteps,
   sanitizeCustomerReply,
@@ -151,6 +156,151 @@ function canonicalProductHost(slug: string) {
 // Strip scheme/trailing slash so the address bar reads as a clean host+path.
 function addressBarText(url: string) {
   return (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
+
+const CHAT_ARTIFACT_ROOTS = [
+  "product/",
+  "distribution/",
+  "research/",
+  "brain/",
+  "metrics/",
+  "outreach/",
+  "campaigns/",
+  "conversation/",
+  "app/",
+  "memory/",
+];
+const CHAT_MEDIA_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
+
+function outputSuffix(path: string) {
+  const clean = String(path || "").trim().toLowerCase();
+  const index = clean.lastIndexOf(".");
+  return index >= 0 ? clean.slice(index) : "";
+}
+
+function normalizeArtifactPath(value: string) {
+  return String(value || "").trim().replace(/^\/+/, "");
+}
+
+function isHttpUrl(value: string) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function looksLikeBusinessArtifactPath(value: string) {
+  const path = normalizeArtifactPath(value);
+  if (!path || isHttpUrl(path)) return false;
+  if (path === "product/site" || path === "product/site/index.html") return true;
+  return CHAT_ARTIFACT_ROOTS.some((prefix) => path.startsWith(prefix));
+}
+
+function resolveBusinessArtifactHref(slug: string, value: string) {
+  const target = normalizeArtifactPath(value);
+  if (!target) return "";
+  if (isHttpUrl(target)) return target;
+  const suffix = outputSuffix(target);
+  if (CHAT_MEDIA_SUFFIXES.has(suffix)) {
+    return buildTakyonBusinessAssetUrl(slug, target);
+  }
+  if (
+    target === "product/site"
+    || target === "product/site/index.html"
+    || (target.startsWith("product/site/") && (suffix === "" || suffix === ".html" || suffix === ".htm"))
+  ) {
+    return buildTakyonBusinessSitePreviewFrameUrl(slug);
+  }
+  if (looksLikeBusinessArtifactPath(target)) {
+    return buildTakyonBusinessArtifactUrl(slug, target);
+  }
+  return "";
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function collectWorkspaceArtifactPaths(workspace: TakyonBusinessWorkspaceResponse | null): string[] {
+  const seen = new Set<string>();
+  const add = (value: unknown) => {
+    const path = normalizeArtifactPath(typeof value === "string" ? value : "");
+    if (looksLikeBusinessArtifactPath(path)) {
+      seen.add(path);
+    }
+  };
+  const addRecordPath = (value: unknown) => {
+    if (!value || typeof value !== "object") return;
+    add((value as { path?: unknown }).path);
+  };
+
+  for (const item of Array.isArray(workspace?.deliverables) ? workspace.deliverables : []) {
+    addRecordPath(item);
+  }
+  for (const item of Array.isArray(workspace?.outputs) ? workspace.outputs : []) {
+    addRecordPath(item);
+  }
+  const liveState = workspace?.live_state;
+  const tasks = liveState && typeof liveState === "object"
+    ? (liveState as { tasks?: unknown }).tasks
+    : null;
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (!task || typeof task !== "object") continue;
+    const outputs = (task as { outputs?: unknown }).outputs;
+    for (const output of Array.isArray(outputs) ? outputs : []) {
+      add(typeof output === "string" ? output : "");
+    }
+  }
+  return [...seen];
+}
+
+function linkifyArtifactMentions(
+  text: string,
+  businessSlug: string,
+  knownPaths: string[],
+) {
+  const safe = typeof text === "string" ? text : String(text ?? "");
+  const business = String(businessSlug || "").trim().toLowerCase();
+  if (!safe.trim() || !business) return safe;
+
+  const replacements = new Map<string, string>();
+  const basenameCounts = new Map<string, number>();
+  for (const path of knownPaths) {
+    const normalized = normalizeArtifactPath(path);
+    if (!normalized) continue;
+    replacements.set(normalized, normalized);
+    const base = normalized.split("/").pop() || "";
+    if (base) basenameCounts.set(base, (basenameCounts.get(base) || 0) + 1);
+  }
+  for (const path of knownPaths) {
+    const normalized = normalizeArtifactPath(path);
+    const base = normalized.split("/").pop() || "";
+    if (base && basenameCounts.get(base) === 1) {
+      replacements.set(base, normalized);
+    }
+  }
+  for (const match of safe.matchAll(/\b(?:product|distribution|research|brain|metrics|outreach|campaigns|conversation|app|memory)\/[^\s)\]"'`,;:]+/g)) {
+    const normalized = normalizeArtifactPath(match[0]);
+    if (looksLikeBusinessArtifactPath(normalized)) {
+      replacements.set(normalized, normalized);
+    }
+  }
+
+  const candidates = [...replacements.entries()]
+    .map(([label, path]) => ({ label, href: resolveBusinessArtifactHref(business, path) }))
+    .filter((item) => item.href)
+    .sort((left, right) => right.label.length - left.label.length);
+  if (!candidates.length) return safe;
+
+  let linked = safe;
+  for (const candidate of candidates) {
+    const pattern = new RegExp(
+      `(^|[\\s(["'])(${escapeRegExp(candidate.label)})(?=$|[\\s).,!?:\\]\"'])`,
+      "gm",
+    );
+    linked = linked.replace(
+      pattern,
+      (_match, prefix: string, label: string) => `${prefix}[${label}](${candidate.href})`,
+    );
+  }
+  return linked;
 }
 
 // Chat dock horizontal resize: a per-browser persisted width, clamped to a usable
@@ -297,18 +447,27 @@ class MarkdownBoundary extends Component<
   }
 }
 
-function AgentMessageMarkdown({ text }: { text: string }) {
+function AgentMessageMarkdown({
+  text,
+  businessSlug = "",
+  knownArtifacts = [],
+}: {
+  text: string;
+  businessSlug?: string;
+  knownArtifacts?: string[];
+}) {
   const safe = typeof text === "string" ? text : String(text ?? "");
+  const linked = linkifyArtifactMentions(safe, businessSlug, knownArtifacts);
   return (
     <div className="lb-msg__md">
       <MarkdownBoundary text={safe}>
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkBreaks]}
           components={{
-            a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+            a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
           }}
         >
-          {safe}
+          {linked}
         </ReactMarkdown>
       </MarkdownBoundary>
     </div>
@@ -532,6 +691,7 @@ type TabKey = "product" | "company";
 
 function AgentChat({
   business,
+  artifactPaths,
   messages,
   agentStream,
   workSteps,
@@ -547,6 +707,7 @@ function AgentChat({
   onStop,
 }: {
   business: LitebulbBusiness;
+  artifactPaths: string[];
   // The raw client transcript. ONLY the user bubbles are taken from here; the
   // agent bubbles come from `agentStream` (the curated, customer-safe
   // chat_stream), never from the raw history/delta assistant messages which are
@@ -756,7 +917,11 @@ function AgentChat({
           ) : (
             <div key={entry.id} className="lb-msg lb-msg--agent">
               <div className="lb-msg__bubble">
-                <AgentMessageMarkdown text={entry.text} />
+                <AgentMessageMarkdown
+                  text={entry.text}
+                  businessSlug={business.slug}
+                  knownArtifacts={artifactPaths}
+                />
               </div>
             </div>
           ),
@@ -764,21 +929,33 @@ function AgentChat({
         {showSummary && (
           <div className="lb-msg lb-msg--agent">
             <div className="lb-msg__bubble">
-              <AgentMessageMarkdown text={summaryText} />
+              <AgentMessageMarkdown
+                text={summaryText}
+                businessSlug={business.slug}
+                knownArtifacts={artifactPaths}
+              />
             </div>
           </div>
         )}
         {showLiveStateLine && (
           <div className="lb-msg lb-msg--agent">
             <div className="lb-msg__bubble">
-              <AgentMessageMarkdown text={liveStateLine!} />
+              <AgentMessageMarkdown
+                text={liveStateLine!}
+                businessSlug={business.slug}
+                knownArtifacts={artifactPaths}
+              />
             </div>
           </div>
         )}
         {streamingBubble && (
           <div key={streamingBubble.id} className="lb-msg lb-msg--agent">
             <div className="lb-msg__bubble lb-msg__bubble--stream">
-              <AgentMessageMarkdown text={streamingBubble.text} />
+              <AgentMessageMarkdown
+                text={streamingBubble.text}
+                businessSlug={business.slug}
+                knownArtifacts={artifactPaths}
+              />
               <span className="lb-stream-caret" aria-hidden="true" />
             </div>
           </div>
@@ -1071,6 +1248,7 @@ export function Product({
   // accumulated across polls so it never truncates mid-turn and reset cleanly when
   // the turn settles. Same liveness as the bootstrap build screen, for the cockpit.
   const workSteps = useAccumulatedWorkSteps(workspace, workActive);
+  const artifactPaths = collectWorkspaceArtifactPaths(workspace);
 
   useEffect(() => {
     setTab("company");
@@ -1097,6 +1275,7 @@ export function Product({
           <ChatErrorBoundary key={business.slug}>
             <AgentChat
               business={business}
+              artifactPaths={artifactPaths}
               messages={chatMessages}
               agentStream={agentStream}
               workSteps={workSteps}

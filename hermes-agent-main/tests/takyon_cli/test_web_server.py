@@ -1331,6 +1331,49 @@ def test_business_site_preview_falls_back_to_published_public_url_when_local_htm
     }
 
 
+def test_business_artifact_serves_owner_scoped_markdown_file(monkeypatch, tmp_path):
+    from starlette.testclient import TestClient
+
+    import plugins.takyon.core as takyon_core
+    import takyon_cli.web_server as web_server
+
+    principal = types.SimpleNamespace(
+        user_id="user-123",
+        status="active",
+        business_slugs=("alpha",),
+    )
+
+    business_root = tmp_path / "businesses" / "alpha"
+    artifact_path = business_root / "distribution" / "local-published" / "launch-note.md"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("# Launch note\n\nReady.\n", encoding="utf-8")
+
+    class _FakeStore:
+        def __init__(self, operator_user_id=None):
+            self.operator_user_id = operator_user_id
+
+        def _resolve_business_file(self, slug, rel, *, sync=False):
+            assert slug == "alpha"
+            return business_root / rel
+
+    monkeypatch.setattr(web_server, "_resolve_dashboard_request_principal", lambda _request: principal)
+    monkeypatch.setattr(web_server, "_dashboard_principal_owns_business", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(takyon_core, "TakyonStore", _FakeStore)
+
+    client = TestClient(web_server.app)
+    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
+
+    resp = client.get(
+        "/api/takyon/businesses/alpha/artifact",
+        params={"path": "distribution/local-published/launch-note.md"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.text == "# Launch note\n\nReady.\n"
+    assert resp.headers["content-type"].startswith("text/markdown")
+    assert resp.headers["cache-control"] == "no-store, no-cache, must-revalidate"
+
+
 def test_business_site_preview_prefers_published_public_url_over_local_html(monkeypatch, tmp_path):
     from starlette.testclient import TestClient
 

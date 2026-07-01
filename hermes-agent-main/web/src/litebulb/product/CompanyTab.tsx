@@ -5,6 +5,8 @@ import remarkGfm from "remark-gfm";
 import {
   api,
   buildTakyonBusinessAssetUrl,
+  buildTakyonBusinessArtifactUrl,
+  buildTakyonBusinessSitePreviewFrameUrl,
   type TakyonBusinessCreativeCreditsResponse,
   type TakyonBusinessFileReadResponse,
   type TakyonBusinessTractionPoint,
@@ -63,6 +65,18 @@ const MEDIA_OUTPUT_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif",
 const VIDEO_OUTPUT_SUFFIXES = new Set([".mp4", ".mov", ".webm", ".m4v"]);
 const HIDDEN_DOCUMENT_SUFFIXES = new Set([".js", ".jsx", ".ts", ".tsx"]);
 const CHANNEL_BUDGET_KEYS: ChannelBudgetKey[] = ["x", "meta", "reddit"];
+const TASK_OUTPUT_ROOTS = [
+  "product/",
+  "distribution/",
+  "research/",
+  "brain/",
+  "metrics/",
+  "outreach/",
+  "campaigns/",
+  "conversation/",
+  "app/",
+  "memory/",
+];
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -199,6 +213,70 @@ function inlinePreviewFile(
 
 function buildAssetUrl(slug: string, path: string) {
   return buildTakyonBusinessAssetUrl(slug, path);
+}
+
+function isHttpUrl(value: string) {
+  return /^https?:\/\//i.test(asText(value));
+}
+
+function looksLikeBusinessArtifactPath(value: string) {
+  const path = asText(value).replace(/^\/+/, "");
+  if (!path || isHttpUrl(path)) return false;
+  if (path === "product/site" || path === "product/site/index.html") return true;
+  return TASK_OUTPUT_ROOTS.some((prefix) => path.startsWith(prefix));
+}
+
+function taskOutputTarget(raw: string) {
+  const text = asText(raw);
+  if (!text) return null;
+  const pieces = text.split("->").map((piece) => asText(piece)).filter(Boolean);
+  const target = pieces.length > 1 ? pieces[pieces.length - 1] : text;
+  const labelPrefix = pieces.length > 1 ? pieces[0] : "";
+  return target ? { raw: text, target, labelPrefix } : null;
+}
+
+function taskOutputLabel(labelPrefix: string, target: string) {
+  const prefix = asText(labelPrefix);
+  if (prefix && !looksLikeBusinessArtifactPath(prefix) && !isHttpUrl(prefix)) return prefix;
+  const normalized = asText(target).replace(/^\/+/, "");
+  if (normalized === "product/site" || normalized === "product/site/index.html") return "Product preview";
+  return normalized.split("/").pop() || normalized || "Artifact";
+}
+
+function taskOutputIcon(target: string) {
+  if (isHttpUrl(target)) return I.ext;
+  const suffix = outputSuffix(target);
+  if (VIDEO_OUTPUT_SUFFIXES.has(suffix)) return I.film;
+  if (MEDIA_OUTPUT_SUFFIXES.has(suffix)) return I.image;
+  return I.doc;
+}
+
+function resolveTaskOutputLink(slug: string, raw: string) {
+  const parsed = taskOutputTarget(raw);
+  if (!parsed) return null;
+  const normalized = parsed.target.replace(/^\/+/, "");
+  const suffix = outputSuffix(normalized);
+  let href = "";
+  if (isHttpUrl(normalized)) {
+    href = normalized;
+  } else if (MEDIA_OUTPUT_SUFFIXES.has(suffix)) {
+    href = buildAssetUrl(slug, normalized);
+  } else if (
+    normalized === "product/site"
+    || normalized === "product/site/index.html"
+    || (normalized.startsWith("product/site/") && (suffix === "" || suffix === ".html" || suffix === ".htm"))
+  ) {
+    href = buildTakyonBusinessSitePreviewFrameUrl(slug);
+  } else if (looksLikeBusinessArtifactPath(normalized)) {
+    href = buildTakyonBusinessArtifactUrl(slug, normalized);
+  }
+  if (!href) return null;
+  return {
+    href,
+    icon: taskOutputIcon(normalized),
+    label: taskOutputLabel(parsed.labelPrefix, normalized),
+    target: normalized,
+  };
 }
 
 function channelAllocatedCredits(channel: Record<string, unknown>) {
@@ -486,9 +564,11 @@ function activityTime(value: string): string {
 }
 
 function TaskDetail({
+  business,
   task,
   activities = [],
 }: {
+  business: LitebulbBusiness;
   task: Record<string, unknown>;
   // Nested child rows (steps / activities) whose task_id points at this task.
   // Rendered as the task LOG so the hierarchy reads company -> task -> activity.
@@ -501,6 +581,10 @@ function TaskDetail({
   const outputs = (Array.isArray(task.outputs) ? task.outputs : [])
     .map((o) => sanitizeTaskErrorText(asText(o)))
     .filter(Boolean);
+  const outputLinks = useMemo(
+    () => outputs.map((output) => ({ raw: output, link: resolveTaskOutputLink(business.slug, output) })),
+    [business.slug, outputs],
+  );
   const steps = asList(task.steps);
   // Canonical link captured on the task (e.g. the live X post URL, spec #19).
   const openUrl = asText(task.open_url);
@@ -534,9 +618,28 @@ function TaskDetail({
       {outputs.length > 0 && (
         <div className="lb-task__outs">
           <span className="lb-task__goal-h">Outputs</span>
-          <ul className="lb-task__outlist">
-            {outputs.map((out, i) => <li key={i}>{out}</li>)}
-          </ul>
+          <div className="lb-tmod__artlist">
+            {outputLinks.map(({ raw, link }, i) => link ? (
+              <a
+                key={`${link.target}-${i}`}
+                className="lb-tmod__art"
+                href={link.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(event) => event.stopPropagation()}
+                title={link.target}
+              >
+                {link.icon}
+                <span>{link.label}</span>
+                <span aria-hidden="true">{I.ext}</span>
+              </a>
+            ) : (
+              <span key={`${raw}-${i}`} className="lb-tmod__art" title={raw}>
+                {I.doc}
+                <span>{raw}</span>
+              </span>
+            ))}
+          </div>
         </div>
       )}
       {steps.length > 0 && (
@@ -607,7 +710,13 @@ function TaskDetail({
   );
 }
 
-function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
+function Tasks({
+  business,
+  tasks,
+}: {
+  business: LitebulbBusiness;
+  tasks: Array<Record<string, unknown>>;
+}) {
   // Only intent-level tasks are top-level rows; raw tool calls / runtime steps
   // carry a task_id pointing at a parent (spec #6), so nested events are not
   // listed flat here — they are grouped under their parent and rendered as the
@@ -720,7 +829,7 @@ function Tasks({ tasks }: { tasks: Array<Record<string, unknown>> }) {
                   View post {I.ext}
                 </a>
               )}
-              {isOpen && <TaskDetail task={task} activities={childActivities} />}
+              {isOpen && <TaskDetail business={business} task={task} activities={childActivities} />}
             </div>
           );
         })}
@@ -1648,7 +1757,7 @@ export function CompanyTab({
       <div className="lb-comp__inner">
         <Traction traction={traction} range={tractionRange} onRangeChange={onTractionRangeChange} />
         <div className="lb-comp__fold">
-          <Tasks tasks={tasks} />
+          <Tasks business={business} tasks={tasks} />
           <ChannelBudget
             workspace={workspace}
             creativeCredits={creativeCredits}

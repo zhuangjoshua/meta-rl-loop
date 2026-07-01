@@ -122,6 +122,19 @@ export function buildTakyonBusinessAssetUrl(slug: string, path: string): string 
   return `${BASE}/api/takyon/businesses/${encodeURIComponent(businessSlug)}/asset?${query.toString()}`;
 }
 
+// Authenticated URL for a generic business artifact (markdown/json/html/receipts/etc).
+// Uses the same token-query pattern as the asset / site-preview endpoints so the
+// operator UI can open durable outputs in a new tab without a session RPC hop.
+export function buildTakyonBusinessArtifactUrl(slug: string, path: string): string {
+  const businessSlug = String(slug || "").trim();
+  const artifactPath = String(path || "").trim();
+  if (!businessSlug || !artifactPath) return "";
+  const token = readSessionToken();
+  const query = new URLSearchParams({ path: artifactPath });
+  if (token) query.set("token", token);
+  return `${BASE}/api/takyon/businesses/${encodeURIComponent(businessSlug)}/artifact?${query.toString()}`;
+}
+
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getDashboardAuthState: async () => {

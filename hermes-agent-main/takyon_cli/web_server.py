@@ -16,6 +16,7 @@ import hmac
 import importlib.util
 import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
@@ -4902,6 +4903,54 @@ async def get_takyon_business_asset(request: Request, slug: str, path: str = "")
         raise
     except Exception as exc:  # noqa: BLE001 - handoff should fail honestly
         _log.warning("dashboard business asset download failed for %s:%s: %s", business, rel_path, exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/takyon/businesses/{slug}/artifact")
+async def get_takyon_business_artifact(request: Request, slug: str, path: str = ""):
+    """Direct authenticated business artifact open/download for operator-facing outputs."""
+    principal = _resolve_dashboard_request_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="operator_principal_unavailable")
+    business = str(slug or "").strip()
+    rel_path = str(path or "").strip()
+    if not business:
+        raise HTTPException(status_code=400, detail="business slug required")
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="path required")
+    if not _dashboard_principal_owns_business(request, principal, business):
+        raise HTTPException(status_code=404, detail="business not found")
+    try:
+        from plugins.takyon.core import TakyonStore
+
+        store = TakyonStore(operator_user_id=str(principal.user_id))
+        file_path = store._resolve_business_file(business, rel_path, sync=False)
+        if not file_path.exists() or not file_path.is_file():
+            raise HTTPException(status_code=404, detail=f"artifact not found: {rel_path}")
+        suffix = file_path.suffix.lower()
+        media_type = {
+            ".md": "text/markdown; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
+            ".json": "application/json",
+            ".html": "text/html; charset=utf-8",
+            ".htm": "text/html; charset=utf-8",
+            ".csv": "text/csv; charset=utf-8",
+            ".yaml": "application/yaml",
+            ".yml": "application/yaml",
+        }.get(suffix)
+        if not media_type:
+            guessed, _encoding = mimetypes.guess_type(file_path.name)
+            media_type = guessed or "application/octet-stream"
+        return FileResponse(
+            file_path,
+            media_type=media_type,
+            filename=file_path.name,
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - artifact open should fail honestly
+        _log.warning("dashboard business artifact open failed for %s:%s: %s", business, rel_path, exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
