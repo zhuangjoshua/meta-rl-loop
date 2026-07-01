@@ -375,7 +375,7 @@ def _resolve_anthropic_broker_runtime(
     body: dict[str, Any],
 ) -> dict[str, Any]:
     """Build the key-free anthropic runtime for a CEO turn: point upstream at the safebox PROXY ROOT and
-    authenticate with a minted ``operator.session`` token carrying the REAL business owner.
+    authenticate with a minted ``operator.session`` token carrying the REAL operator.
 
     The raw provider key is NEVER resolved on this plane — the safebox holds it and meters each proxied
     call against THAT owner's control-plane billing allowance. Fails CLOSED (raises) when the proxy URL or
@@ -392,18 +392,22 @@ def _resolve_anthropic_broker_runtime(
         )
     business_slug = str(context.business_slug or "").strip()
     operator_user_id = _resolve_operator_owner_user_id(context)
-    if not business_slug or not operator_user_id:
+    if not operator_user_id:
         raise RuntimeError(
-            "operator anthropic broker lockdown requires a business + its resolved owner to mint an "
-            "operator.session token; one is missing for this CEO turn"
+            "operator anthropic broker lockdown requires a resolved operator owner to mint an "
+            "operator.session token; it is missing for this CEO turn"
         )
     session_token = str(
-        safebox.mint_operator_session_token(business_slug, operator_user_id) or ""
+        safebox.mint_operator_session_token(
+            business_slug,
+            operator_user_id,
+        )
+        or ""
     ).strip()
     if not session_token:
         raise RuntimeError(
             "the safebox refused to mint an operator.session token for this CEO turn (the operator does "
-            "not own the business, or /v1/operator/session-token is unavailable)"
+            "not own the business / root scope session, or /v1/operator/session-token is unavailable)"
         )
     return {
         "provider": context.provider or "anthropic",

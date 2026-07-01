@@ -906,9 +906,10 @@ _OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD = 2_000_000
 
 
 def mint_operator_session_token(
-    business: str,
+    business: str | None,
     operator_user_id: str,
     *,
+    session_token: str | None = None,
     max_cost_microusd: int = _OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD,
     ttl_seconds: int | None = None,
 ) -> str:
@@ -921,15 +922,21 @@ def mint_operator_session_token(
     issues a REUSABLE, TTL-bounded capability — so the operator host never holds the raw provider key and
     cannot forge or widen scope.
 
+    Business-scoped runs prove boundary 1 through business ownership. Root-scope operator runs (before a
+    business exists, e.g. ``/create``) may present a verified dashboard Auth0 session; when they do not,
+    the safebox may fall back only to the single configured platform owner on the operator-only rail.
+
     Uses the same internal-token transport (``_remote_json`` -> ``/v1/operator/session-token``) as the
     other broker clients. Fails CLOSED: raises ``RemoteSafeboxError`` when the safebox is unreachable,
-    refuses the mint (e.g. the operator does not own the business), or returns no token — it NEVER falls
-    back to a raw key. The caller MUST treat any exception as "no key-free auth" and refuse the run."""
+    refuses the mint (e.g. the operator does not own the business / the dashboard session does not match
+    the requested operator), or returns no token — it NEVER falls back to a raw key. The caller MUST
+    treat any exception as "no key-free auth" and refuse the run."""
     slug = str(business or "").strip()
     owner = str(operator_user_id or "").strip()
-    if not slug or not owner:
+    session = str(session_token or "").strip()
+    if not owner:
         raise RemoteSafeboxError(
-            "operator session token requires both a business and an owner operator_user_id",
+            "operator session token requires an owner operator_user_id",
             status_code=400,
             payload={"detail": "missing_identity"},
         )
@@ -942,6 +949,8 @@ def mint_operator_session_token(
         "operator_user_id": owner,
         "max_cost_microusd": int(max_cost_microusd),
     }
+    if session:
+        body["session_token"] = session
     if ttl_seconds is not None:
         body["ttl_seconds"] = int(ttl_seconds)
     result = _remote_json("POST", "/v1/operator/session-token", body, timeout=10.0)

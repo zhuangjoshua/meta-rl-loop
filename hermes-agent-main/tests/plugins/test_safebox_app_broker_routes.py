@@ -126,6 +126,110 @@ def test_operator_session_token_roundtrips_to_validated_scope(client, monkeypatc
     assert nonce and exp > 0
 
 
+def test_operator_root_session_token_derives_user_from_verified_auth0_session(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "auth0_verify_session",
+        lambda **_kwargs: {"sub": "auth0|user_A", "email": "owner@example.com"},
+    )
+
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "",
+            "session_token": "dashboard-session-token",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    token = resp.json()["token"]
+    scope, _, _ = verify_capability(
+        token,
+        signing_key=_SIGNING_KEY.encode("utf-8"),
+        expected_audience=safebox_app._OPERATOR_SESSION_AUDIENCE,
+        now=0,
+    )
+    assert scope.takyon_user_id == "user_A"
+    assert scope.business_slug == ""
+    assert scope.app_user_id is None
+    assert scope.action == safebox_app._OPERATOR_SESSION_AUDIENCE
+
+
+def test_operator_root_session_token_refuses_session_user_mismatch(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "auth0_verify_session",
+        lambda **_kwargs: {"sub": "auth0|user_A", "email": "owner@example.com"},
+    )
+
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "",
+            "session_token": "dashboard-session-token",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_B",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "operator_user_mismatch"
+
+
+def test_operator_root_session_token_allows_platform_owner_without_auth0_session(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "auth0_verify_session", lambda **_kwargs: None)
+    import plugins.takyon.control_plane as control_plane
+
+    monkeypatch.setattr(control_plane, "resolve_platform_owner_id", lambda _conn: "user_A")
+
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_A",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    token = resp.json()["token"]
+    scope, _, _ = verify_capability(
+        token,
+        signing_key=_SIGNING_KEY.encode("utf-8"),
+        expected_audience=safebox_app._OPERATOR_SESSION_AUDIENCE,
+        now=0,
+    )
+    assert scope.takyon_user_id == "user_A"
+    assert scope.business_slug == ""
+    assert scope.app_user_id is None
+    assert scope.action == safebox_app._OPERATOR_SESSION_AUDIENCE
+
+
+def test_operator_root_session_token_refuses_non_platform_owner_without_auth0_session(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "auth0_verify_session", lambda **_kwargs: None)
+    import plugins.takyon.control_plane as control_plane
+
+    monkeypatch.setattr(control_plane, "resolve_platform_owner_id", lambda _conn: "user_A")
+
+    resp = client.post(
+        "/v1/operator/session-token",
+        headers=_auth(),
+        json={
+            "business": "",
+            "max_cost_microusd": 5000,
+            "operator_user_id": "user_B",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "operator_root_session_required"
+
+
 def test_operator_session_token_needs_operator_client_authority(client, monkeypatch):
     monkeypatch.delenv(safebox_app._OPERATOR_CLIENTS_ENV, raising=False)
     resp = client.post(

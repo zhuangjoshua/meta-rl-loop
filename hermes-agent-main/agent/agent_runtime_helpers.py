@@ -702,7 +702,11 @@ def try_recover_primary_transport(
             agent._transport_cache.clear()
         agent.api_key = rt["api_key"]
 
-        if agent.api_mode == "anthropic_messages":
+        if getattr(agent, "_takyon_operator_gateway", False):
+            from plugins.takyon.operator_gateway import rebuild_operator_gateway_transport
+
+            rebuild_operator_gateway_transport(agent)
+        elif agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]
@@ -866,7 +870,11 @@ def restore_primary_runtime(agent) -> bool:
         )
 
         # ── Rebuild client for the primary provider ──
-        if agent.api_mode == "anthropic_messages":
+        if getattr(agent, "_takyon_operator_gateway", False):
+            from plugins.takyon.operator_gateway import rebuild_operator_gateway_transport
+
+            rebuild_operator_gateway_transport(agent)
+        elif agent.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client
             agent._anthropic_api_key = rt["anthropic_api_key"]
             agent._anthropic_base_url = rt["anthropic_base_url"]

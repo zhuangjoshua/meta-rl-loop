@@ -1044,13 +1044,16 @@ class _MintTokenBody(BaseModel):
 
 class _OperatorSessionTokenBody(BaseModel):
     # Mint a SESSION-scoped operator capability (audience = operator.session) for the operator/platform
-    # plane. The operator MUST own the business (boundary 1, validated via authorize_operator_call).
-    # ``max_cost_microusd`` is the per-CALL ceiling the proxy enforces on every metered call under this
-    # token; ``ttl_seconds`` is the session lifetime (minutes-to-hours, capped). The token is REUSABLE
-    # across calls — the proxy verifies it but does NOT claim a nonce.
-    business: str
+    # plane. Business-scoped runs prove boundary 1 by owning the business; root-scope runs (before a
+    # business exists) may present a verified dashboard Auth0 session so the safebox can derive the
+    # REAL Takyon user, otherwise the root path falls back only to the single configured platform owner
+    # on this operator-only rail. ``max_cost_microusd`` is the per-CALL ceiling the proxy enforces on
+    # every metered call under this token; ``ttl_seconds`` is the session lifetime (minutes-to-hours,
+    # capped). The token is REUSABLE across calls — the proxy verifies it but does NOT claim a nonce.
+    business: str | None = None
     operator_user_id: str
     max_cost_microusd: int
+    session_token: str | None = None
     ttl_seconds: int | None = None
 
 
@@ -3854,10 +3857,14 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         """Mint a SESSION-scoped operator capability (audience = operator.session) for one CEO/worker
-        run. Validates operator ownership of the business (boundary 1 via ``authorize_operator_call``),
-        binds the per-CALL cost ceiling, and issues a REUSABLE, TTL-bounded capability the operator plane
-        presents on every Anthropic / Tavily proxy call. The signing key lives ONLY on the safebox, so
-        the operator host cannot forge or widen scope. Internal-token only.
+        run. Business-scoped runs validate operator ownership of the business (boundary 1 via
+        ``authorize_operator_call``); root-scope runs either validate a dashboard Auth0 session and
+        derive the REAL Takyon user id from that verified session, or fall back only to the single
+        configured platform owner on the operator-only rail when no verified dashboard session exists.
+        The token binds the per-CALL cost ceiling and is REUSABLE + TTL-bounded, so the operator plane
+        presents it on every Anthropic / Tavily proxy call without ever seeing the raw provider key. The
+        signing key lives ONLY on the safebox, so the operator host cannot forge or widen scope.
+        Internal-token only.
 
         Distinct from ``/v1/token/mint``: that mints a SINGLE-USE (nonce-claimed) per-action capability
         for the metered ``/v1/providers/*`` business broker; this mints a long-lived, reusable session
@@ -3870,16 +3877,65 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="ttl_must_be_positive")
         # Clamp the session TTL so a leaked token still expires within the hard bound.
         ttl_seconds = min(ttl_seconds, _OPERATOR_SESSION_TTL_MAX_SECONDS)
-        token = _mint_capability_token(
-            business=body.business,
-            action=_OPERATOR_SESSION_AUDIENCE,
-            max_cost_microusd=int(body.max_cost_microusd),
-            session_token=None,
-            operator_user_id=body.operator_user_id,
-            audience=_OPERATOR_SESSION_AUDIENCE,
-            ttl_seconds=ttl_seconds,
-            now=int(time.time()),
-        )
+        business = str(body.business or "").strip()
+        if business:
+            token = _mint_capability_token(
+                business=business,
+                action=_OPERATOR_SESSION_AUDIENCE,
+                max_cost_microusd=int(body.max_cost_microusd),
+                session_token=None,
+                operator_user_id=body.operator_user_id,
+                audience=_OPERATOR_SESSION_AUDIENCE,
+                ttl_seconds=ttl_seconds,
+                now=int(time.time()),
+            )
+        else:
+            requested_user_id = str(body.operator_user_id or "").strip()
+            resolved_user_id = ""
+            session_user = safebox.auth0_verify_session(
+                session_token=str(body.session_token or ""),
+            )
+            if isinstance(session_user, dict):
+                auth0_sub = str(session_user.get("sub") or "").strip()
+                if not auth0_sub:
+                    raise HTTPException(status_code=403, detail="operator_root_session_required")
+                with _safebox_db_conn() as conn:
+                    row = conn.execute(
+                        "select id from users where auth0_sub = %s",
+                        (auth0_sub,),
+                    ).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="operator_user_not_found")
+                resolved_user_id = str(_db_row_value(row, 0, "id") or "").strip()
+                if not requested_user_id or requested_user_id != resolved_user_id:
+                    raise HTTPException(status_code=403, detail="operator_user_mismatch")
+            else:
+                from . import control_plane
+
+                with _safebox_db_conn() as conn:
+                    platform_owner_id = str(control_plane.resolve_platform_owner_id(conn) or "").strip()
+                if not platform_owner_id:
+                    raise HTTPException(status_code=404, detail="operator_platform_owner_not_found")
+                if not requested_user_id or requested_user_id != platform_owner_id:
+                    raise HTTPException(status_code=403, detail="operator_root_session_required")
+                resolved_user_id = platform_owner_id
+            signing_key = _cap_signing_key()
+            if not signing_key:
+                raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
+            token = mint_capability(
+                CapabilityScope(
+                    takyon_user_id=resolved_user_id,
+                    business_slug="",
+                    app_user_id=None,
+                    action=_OPERATOR_SESSION_AUDIENCE,
+                    max_cost_microusd=int(body.max_cost_microusd),
+                ),
+                signing_key=signing_key,
+                audience=_OPERATOR_SESSION_AUDIENCE,
+                nonce=str(uuid.uuid4()),
+                issued_at=int(time.time()),
+                ttl_seconds=ttl_seconds,
+            )
         return {
             "token": token,
             "audience": _OPERATOR_SESSION_AUDIENCE,

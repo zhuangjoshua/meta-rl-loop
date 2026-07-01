@@ -45,6 +45,20 @@ class CapabilityScope:
         return asdict(self)
 
 
+def _scope_requires_business_slug(*, action: str, app_user_id: str | None) -> bool:
+    """Whether a capability scope must carry a business slug.
+
+    Product/sub-user scopes and business-bound operator scopes always require
+    one. The one narrow exception is the root-scope operator SESSION capability
+    used for global CEO turns before a business exists: it is keyed only on the
+    verified Takyon user and carries no app user.
+    """
+    return not (
+        app_user_id is None
+        and str(action or "").strip() == "operator.session"
+    )
+
+
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
@@ -74,7 +88,12 @@ def mint_capability(
         raise CapabilityError("ttl must be positive")
     if int(scope.max_cost_microusd) < 0:
         raise CapabilityError("max_cost_microusd must be >= 0")
-    if not scope.takyon_user_id or not scope.business_slug or not scope.action:
+    if not scope.takyon_user_id or not scope.action:
+        raise CapabilityError("incomplete scope")
+    if _scope_requires_business_slug(
+        action=str(scope.action or ""),
+        app_user_id=scope.app_user_id,
+    ) and not str(scope.business_slug or "").strip():
         raise CapabilityError("incomplete scope")
     if not nonce:
         raise CapabilityError("missing nonce")
@@ -139,6 +158,11 @@ def verify_capability(
         action=str(payload.get("act") or ""),
         max_cost_microusd=int(payload.get("mc") or 0),
     )
-    if not scope.takyon_user_id or not scope.business_slug or not scope.action:
+    if not scope.takyon_user_id or not scope.action:
+        raise CapabilityError("incomplete scope")
+    if _scope_requires_business_slug(
+        action=str(scope.action or ""),
+        app_user_id=scope.app_user_id,
+    ) and not str(scope.business_slug or "").strip():
         raise CapabilityError("incomplete scope")
     return scope, nonce, exp

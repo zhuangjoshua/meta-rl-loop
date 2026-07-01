@@ -233,6 +233,19 @@ class TestRestorePrimaryRuntime:
 
         assert result is False
 
+    def test_restore_rebuilds_operator_gateway_transport(self):
+        agent = _make_agent()
+        agent._fallback_activated = True
+        agent._takyon_operator_gateway = True
+
+        with patch(
+            "plugins.takyon.operator_gateway.rebuild_operator_gateway_transport"
+        ) as mock_rebuild:
+            result = agent._restore_primary_runtime()
+
+        assert result is True
+        mock_rebuild.assert_called_once_with(agent)
+
 
 # =============================================================================
 # _try_recover_primary_transport()
@@ -421,6 +434,21 @@ class TestTryRecoverPrimaryTransport:
             )
 
         assert result is False
+
+    def test_recovery_rebuilds_operator_gateway_transport(self):
+        agent = _make_agent(provider="custom")
+        agent._takyon_operator_gateway = True
+        error = _make_transport_error("ReadTimeout")
+
+        with patch(
+            "plugins.takyon.operator_gateway.rebuild_operator_gateway_transport"
+        ) as mock_rebuild, patch("time.sleep"):
+            result = agent._try_recover_primary_transport(
+                error, retry_count=3, max_retries=3,
+            )
+
+        assert result is True
+        mock_rebuild.assert_called_once_with(agent)
 
 
 # =============================================================================

@@ -133,6 +133,31 @@ def test_anthropic_broker_runtime_prefers_host_gateway_url_over_docker_worker_ur
     assert runtime["api_key"] == "operator-session-token-xyz"
 
 
+def test_root_scope_anthropic_broker_runtime_mints_without_dashboard_session(monkeypatch):
+    monkeypatch.setattr(og, "_operator_anthropic_broker_lockdown", lambda: True)
+    monkeypatch.setattr(og, "_resolve_operator_owner_user_id", lambda context: "owner-1")
+    from plugins.takyon import safebox
+
+    monkeypatch.setenv("TAKYON_OPERATOR_GATEWAY_BROKER_URL", "http://127.0.0.1:8765")
+    minted: dict[str, object] = {}
+
+    def fake_mint(business, operator_user_id, **kwargs):
+        minted["business"] = business
+        minted["operator_user_id"] = operator_user_id
+        return "operator-session-token-xyz"
+
+    monkeypatch.setattr(safebox, "mint_operator_session_token", fake_mint)
+
+    runtime = _resolve_runtime_for_request(_anthropic_context(business=""), {"model": "claude-opus-4-8"})
+
+    assert runtime["base_url"] == "http://127.0.0.1:8765"
+    assert runtime["api_key"] == "operator-session-token-xyz"
+    assert minted == {
+        "business": "",
+        "operator_user_id": "owner-1",
+    }
+
+
 def test_anthropic_broker_runtime_fails_closed_when_owner_missing(monkeypatch):
     monkeypatch.setattr(og, "_operator_anthropic_broker_lockdown", lambda: True)
     monkeypatch.setattr(og, "_resolve_operator_owner_user_id", lambda context: "")

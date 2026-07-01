@@ -94,6 +94,28 @@ def test_operator_plane_token_has_no_subuser():
     assert scope.takyon_user_id == "user_A" and scope.business_slug == "climblog"
 
 
+def test_root_scope_operator_session_token_allows_empty_business_slug():
+    token = mint_capability(
+        _scope(app_user_id=None, business_slug="", action="operator.session"),
+        signing_key=KEY,
+        audience="operator.session",
+        nonce="n1",
+        issued_at=NOW,
+        ttl_seconds=300,
+    )
+
+    scope, _, _ = verify_capability(
+        token,
+        signing_key=KEY,
+        expected_audience="operator.session",
+        now=NOW + 10,
+    )
+    assert scope.takyon_user_id == "user_A"
+    assert scope.business_slug == ""
+    assert scope.app_user_id is None
+    assert scope.action == "operator.session"
+
+
 def test_incomplete_scope_refused_at_mint():
     with pytest.raises(CapabilityError):
         _mint(_scope(business_slug=""))
