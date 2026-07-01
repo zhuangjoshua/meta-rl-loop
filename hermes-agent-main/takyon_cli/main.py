@@ -10382,6 +10382,7 @@ def cmd_worker(args):
             poll_interval=getattr(args, "poll_interval", None),
             dispatch=not getattr(args, "no_dispatch", False),
             kinds=kinds or None,
+            owner_user_id=getattr(args, "owner_user_id", None),
             once=getattr(args, "once", False),
             max_jobs=getattr(args, "max_jobs", None),
         )
@@ -13299,6 +13300,16 @@ Examples:
         dest="worker_id",
         default=None,
         help="Override the worker identity stamped on claims (default: worker-<host>-<pid>).",
+    )
+    worker_parser.add_argument(
+        "--user-id",
+        "--owner-user-id",
+        dest="owner_user_id",
+        default=None,
+        help=(
+            "Restrict claims to businesses owned by this Takyon user id. "
+            "Used by the operator-prod Mac-primary worker rail."
+        ),
     )
     worker_parser.set_defaults(func=cmd_worker)
 
