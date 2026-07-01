@@ -1049,6 +1049,76 @@ def test_use_global_alias_switches_to_global(monkeypatch):
     assert business is None
 
 
+def test_format_cli_value_surfaces_artifact_url_for_read_results():
+    rendered = cli._format_cli_value(
+        {
+            "path": "research/strategy.md",
+            "content": "# Strategy\n",
+            "artifact_url": "https://app.fourmanifold.com/api/takyon/businesses/probe/artifact?path=research/strategy.md",
+        }
+    )
+
+    assert "Path: research/strategy.md" in rendered
+    assert "Artifact URL: https://app.fourmanifold.com/api/takyon/businesses/probe/artifact?path=research/strategy.md" in rendered
+    assert "# Strategy" in rendered
+
+
+def test_scoped_shell_read_slash_injects_current_business(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    captured: dict[str, object] = {}
+
+    def fake_run_takyon_command(argv, **_kwargs):  # noqa: ANN001
+        captured["argv"] = argv
+        return {
+            "success": True,
+            "path": "research/strategy.md",
+            "content": "# Strategy\n",
+            "artifact_url": "https://app.fourmanifold.com/api/takyon/businesses/probe/artifact?path=research/strategy.md",
+        }
+
+    monkeypatch.setattr(cli, "run_takyon_command", fake_run_takyon_command)
+
+    output, business = cli._handle_shell_line(
+        "/read research/strategy.md",
+        current_business="probe",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert captured["argv"] == ["read", "probe", "research/strategy.md"]
+    assert "Artifact URL:" in output
+    assert business == "probe"
+
+
+def test_scoped_shell_show_path_slash_injects_current_business(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    captured: dict[str, object] = {}
+
+    def fake_run_takyon_command(argv, **_kwargs):  # noqa: ANN001
+        captured["argv"] = argv
+        return {
+            "success": True,
+            "path": "research/strategy.md",
+            "content": "# Strategy\n",
+            "artifact_url": "https://app.fourmanifold.com/api/takyon/businesses/probe/artifact?path=research/strategy.md",
+        }
+
+    monkeypatch.setattr(cli, "run_takyon_command", fake_run_takyon_command)
+
+    output, business = cli._handle_shell_line(
+        "/show research/strategy.md",
+        current_business="probe",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert captured["argv"] == ["show", "probe", "research/strategy.md"]
+    assert "Artifact URL:" in output
+    assert business == "probe"
+
+
 def test_global_plain_text_is_rejected_without_running_agent(monkeypatch):
     monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
 

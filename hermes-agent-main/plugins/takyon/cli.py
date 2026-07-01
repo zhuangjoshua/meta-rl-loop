@@ -262,6 +262,8 @@ _CLI_ONLY_COMMANDS = {
     "business",
     "list",
     "campaign",
+    "files",
+    "read",
     "workspace",
     "jobs",
     "harness",
@@ -583,7 +585,20 @@ def _format_cli_value(value: Any) -> str:
         return json.dumps(value, indent=2, ensure_ascii=False)
 
     if "content" in value and "path" in value:
-        return str(value.get("content") or "")
+        content = str(value.get("content") or "")
+        path = str(value.get("path") or "").strip()
+        artifact_url = str(value.get("artifact_url") or "").strip()
+        artifact_api_path = str(value.get("artifact_api_path") or "").strip()
+        lines: list[str] = []
+        if path:
+            lines.append(f"Path: {path}")
+        if artifact_url:
+            lines.append(f"Artifact URL: {artifact_url}")
+        elif artifact_api_path:
+            lines.append(f"Artifact API: {artifact_api_path}")
+        if lines:
+            return "\n".join(lines + ["", content]).rstrip()
+        return content
 
     if "files" in value:
         files = value.get("files") or []
@@ -4083,8 +4098,8 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
     if not tokens:
         return tokens
     command = tokens[0].lower().lstrip("/")
-    if command in {"status", "show"} and len(tokens) == 1 and current_business:
-        return ["show", current_business]
+    if command in {"status", "show"} and current_business:
+        return ["show", current_business, *tokens[1:]]
     if command == "pulse" and len(tokens) == 1 and current_business:
         return ["pulse", current_business]
     if command in {"files", "workspace"} and current_business:
