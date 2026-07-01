@@ -208,7 +208,14 @@ def _reasoning_progress_callback(progress: Any) -> Callable[[str], None] | None:
 def _follow_chat_matches_stream(streamed_text: str, chat_text: str) -> bool:
     streamed = _normalize_progress_text(streamed_text)
     chat = _normalize_progress_text(chat_text)
-    return bool(streamed) and streamed == chat
+    if not streamed or not chat:
+        return False
+    if streamed == chat:
+        return True
+    shorter = min(len(streamed), len(chat))
+    if shorter < 32:
+        return False
+    return streamed.endswith(chat) or chat.endswith(streamed)
 
 
 _CLI_ONLY_COMMANDS = {

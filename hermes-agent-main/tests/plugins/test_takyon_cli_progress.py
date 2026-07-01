@@ -847,8 +847,118 @@ def test_follow_worker_job_dedupes_immediate_worker_note_repeats(monkeypatch):
     assert result["status"] == "completed"
 
 
+def test_follow_worker_job_dedupes_chat_when_stream_contains_prefixed_restart(monkeypatch):
+    class Store:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self._chat_reads = 0
+
+        def _connect(self):
+            return self.conn
+
+        def _leaf_conn(self, conn):
+            return contextlib.nullcontext(conn)
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload) if payload else {}
+            return data
+
+        def read_ceo_turn_events(self, _slug, limit=200):
+            self._chat_reads += 1
+            if self._chat_reads <= 2:
+                return []
+            return [
+                {
+                    "id": "chat-1",
+                    "payload": {
+                        "text": (
+                            "I'll start building your move-out evidence product right now. "
+                            "Let me kick off with the customer's first update and get research going."
+                        )
+                    },
+                }
+            ]
+
+    store = Store()
+    final_text = (
+        "I'll start building your move-out evidence product right now. "
+        "Let me kick off with the customer's first update and get research going."
+    )
+    streamed_text = (
+        "moving on this right away. Let me start by posting the customer update and "
+        "setting up the initial brief."
+        + final_text
+    )
+    runtime_rows = [
+        {
+            "id": "evt-1",
+            "business_slug": "demo",
+            "event_type": "dashboard.run.output",
+            "payload": {"stream": "message_delta", "line": streamed_text},
+        },
+        {
+            "id": "evt-2",
+            "business_slug": "demo",
+            "event_type": "dashboard.run.output",
+            "payload": {"stream": "message_flush"},
+        },
+    ]
+
+    runtime_calls = {"count": 0}
+
+    def _fake_runtime_rows(_store, _scope, limit=300):
+        runtime_calls["count"] += 1
+        if runtime_calls["count"] == 1:
+            return []
+        return runtime_rows
+
+    statuses = iter(
+        [
+            SimpleNamespace(status="queued", result=None, error=None),
+            SimpleNamespace(status="running", result=None, error=None),
+            SimpleNamespace(status="completed", result={"ok": True}, error=None),
+        ]
+    )
+
+    def _fake_get_job(_conn, _job_id):
+        try:
+            return next(statuses)
+        except StopIteration:
+            return SimpleNamespace(status="completed", result={"ok": True}, error=None)
+
+    monkeypatch.setattr("plugins.takyon.jobs.get_job", _fake_get_job)
+    monkeypatch.setattr(cli, "_runtime_event_rows_for_business", _fake_runtime_rows)
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = cli._follow_worker_job(
+            store,
+            "demo",
+            "job-1",
+            label="bootstrap",
+            tail_logs=False,
+            poll_seconds=0.0,
+            max_seconds=5.0,
+        )
+
+    output = out.getvalue()
+    assert output.count(final_text) == 1
+    assert result["status"] == "completed"
+
+
 def test_follow_chat_matches_just_streamed_ceo_text():
     assert cli._follow_chat_matches_stream("Hello\nworld", " Hello world ") is True
+    assert (
+        cli._follow_chat_matches_stream(
+            "moving on this right away. Let me start by posting the customer update."
+            "I'll start building your move-out evidence product right now.",
+            "I'll start building your move-out evidence product right now.",
+        )
+        is True
+    )
     assert cli._follow_chat_matches_stream("Hello world", "Hello there") is False
 
 
