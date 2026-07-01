@@ -27,7 +27,8 @@ LOCAL_DASHBOARD_URL="${TAKYON_LOCAL_DASHBOARD_URL:-http://127.0.0.1:${LOCAL_DASH
 CONTAINER_SAFEBOX_URL="${TAKYON_CONTAINER_SAFEBOX_URL:-http://host.docker.internal:${LOCAL_SAFEBOX_PORT}}"
 LOCAL_PROD_ROOT="${TAKYON_OPERATOR_PROD_ROOT:-$HOME/.takyon-fourmanifold-operator-prod}"
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
-DEFAULT_OPERATOR_USER_ID="${TAKYON_SESSION_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
+DEFAULT_OPERATOR_USER_ID="${TAKYON_OPERATOR_DEFAULT_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
+OPERATOR_USER_ID_OVERRIDE=""
 SSH_SERVER_ALIVE_INTERVAL="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_INTERVAL:-15}"
 SSH_SERVER_ALIVE_COUNT_MAX="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
 CONSOLE_TUNNEL_MONITOR_SECONDS="${TAKYON_OPERATOR_TUNNEL_MONITOR_SECONDS:-5}"
@@ -53,6 +54,23 @@ ssh_tunnel_exec() {
     -N
   )
   exec ssh "${args[@]}" "$@" "$SSH_HOST"
+}
+
+resolved_operator_user_id() {
+  local explicit="${1:-}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  if [[ -n "${OPERATOR_USER_ID_OVERRIDE:-}" ]]; then
+    printf '%s' "$OPERATOR_USER_ID_OVERRIDE"
+    return 0
+  fi
+  if [[ -n "${TAKYON_SESSION_USER_ID:-}" ]]; then
+    printf '%s' "$TAKYON_SESSION_USER_ID"
+    return 0
+  fi
+  printf '%s' "$DEFAULT_OPERATOR_USER_ID"
 }
 
 die() {
@@ -282,7 +300,7 @@ load_operator_env() {
     export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
   fi
   export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-supabase_s3}"
-  export TAKYON_SESSION_USER_ID="$DEFAULT_OPERATOR_USER_ID"
+  export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
   export TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE="${TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE:-true}"
   export TERMINAL_CONTAINER_PERSISTENT="${TERMINAL_CONTAINER_PERSISTENT:-false}"
   unset TAKYON_DOCKER_BINARY TAKYON_DOCKER_BROKER_URL TAKYON_DOCKER_BROKER_TOKEN
@@ -751,10 +769,47 @@ PY
 }
 
 cmd_worker() {
-  local concurrency="${1:-10}"
+  local concurrency="10"
+  local concurrency_set="0"
+  local operator_user_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --operator-user-id)
+        shift || die "usage: $0 worker [concurrency] [--user-id <id>]"
+        [[ $# -gt 0 ]] || die "usage: $0 worker [concurrency] [--user-id <id>]"
+        operator_user_id="$1"
+        ;;
+      --operator-user-id=*)
+        operator_user_id="${1#*=}"
+        [[ -n "$operator_user_id" ]] || die "usage: $0 worker [concurrency] [--user-id <id>]"
+        ;;
+      --user-id)
+        shift || die "usage: $0 worker [concurrency] [--user-id <id>]"
+        [[ $# -gt 0 ]] || die "usage: $0 worker [concurrency] [--user-id <id>]"
+        operator_user_id="$1"
+        ;;
+      --user-id=*)
+        operator_user_id="${1#*=}"
+        [[ -n "$operator_user_id" ]] || die "usage: $0 worker [concurrency] [--user-id <id>]"
+        ;;
+      -h|--help)
+        die "usage: $0 worker [concurrency] [--user-id <id>]"
+        ;;
+      *)
+        if [[ "$1" =~ ^[0-9]+$ ]] && [[ "$concurrency_set" == "0" ]]; then
+          concurrency="$1"
+          concurrency_set="1"
+        else
+          die "usage: $0 worker [concurrency] [--user-id <id>]"
+        fi
+        ;;
+    esac
+    shift || true
+  done
   if ! [[ "$concurrency" =~ ^[0-9]+$ ]] || [[ "$concurrency" -lt 1 ]]; then
     die "worker concurrency must be a positive integer"
   fi
+  OPERATOR_USER_ID_OVERRIDE="$operator_user_id"
   load_operator_env
   require_tunnel
   cmd_preflight
@@ -764,21 +819,57 @@ cmd_worker() {
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-5}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-14400}"
   cd "$RUNTIME_DIR"
-  run_takyon_cli worker --worker-id "mac-operator-$(hostname -s)-$$"
+  run_takyon_cli worker \
+    --worker-id "mac-operator-$(hostname -s)-$$" \
+    --user-id "$(resolved_operator_user_id)"
 }
 
 cmd_worker_once() {
+  local operator_user_id=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --operator-user-id)
+        shift || die "usage: $0 worker-once [--user-id <id>]"
+        [[ $# -gt 0 ]] || die "usage: $0 worker-once [--user-id <id>]"
+        operator_user_id="$1"
+        ;;
+      --operator-user-id=*)
+        operator_user_id="${1#*=}"
+        [[ -n "$operator_user_id" ]] || die "usage: $0 worker-once [--user-id <id>]"
+        ;;
+      --user-id)
+        shift || die "usage: $0 worker-once [--user-id <id>]"
+        [[ $# -gt 0 ]] || die "usage: $0 worker-once [--user-id <id>]"
+        operator_user_id="$1"
+        ;;
+      --user-id=*)
+        operator_user_id="${1#*=}"
+        [[ -n "$operator_user_id" ]] || die "usage: $0 worker-once [--user-id <id>]"
+        ;;
+      -h|--help)
+        die "usage: $0 worker-once [--user-id <id>]"
+        ;;
+      *)
+        die "usage: $0 worker-once [--user-id <id>]"
+        ;;
+    esac
+    shift || true
+  done
+  OPERATOR_USER_ID_OVERRIDE="$operator_user_id"
   load_operator_env
   require_tunnel
   cmd_preflight
   require_docker_for_worker
   cd "$RUNTIME_DIR"
-  run_takyon_cli worker --once --worker-id "mac-operator-$(hostname -s)-once-$$"
+  run_takyon_cli worker \
+    --once \
+    --worker-id "mac-operator-$(hostname -s)-once-$$" \
+    --user-id "$(resolved_operator_user_id)"
 }
 
 console_usage() {
   cat >&2 <<EOF
-usage: $0 console [concurrency] [business] [--shells N] [--quiet]
+usage: $0 console [concurrency] [business] [--user-id <id>] [--shells N] [--quiet]
 EOF
   exit 1
 }
@@ -787,6 +878,7 @@ spawn_console_shell_windows() {
   local shell_count="$1"
   local shell_mode="$2"
   local business="${3:-}"
+  local operator_user_id="${4:-}"
   local extra_shells=$((shell_count - 1))
   local subcommand="shell"
   local root_quoted=""
@@ -798,9 +890,9 @@ spawn_console_shell_windows() {
   fi
   printf -v root_quoted '%q' "$ROOT"
   if [[ -n "$business" ]]; then
-    tail_command="$(shell_join exec ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
+    tail_command="$(shell_join env TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
   else
-    tail_command="$(shell_join exec ./scripts/takyon-operator-prod.sh "$subcommand")"
+    tail_command="$(shell_join env TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand")"
   fi
   command_text="cd $root_quoted && $tail_command"
   local index=0
@@ -839,8 +931,27 @@ cmd_console() {
   local shell_count="1"
   local shell_mode="shell"
   local concurrency_set="0"
+  local operator_user_id=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --operator-user-id)
+        shift || console_usage
+        [[ $# -gt 0 ]] || console_usage
+        operator_user_id="$1"
+        ;;
+      --operator-user-id=*)
+        operator_user_id="${1#*=}"
+        [[ -n "$operator_user_id" ]] || console_usage
+        ;;
+      --user-id)
+        shift || console_usage
+        [[ $# -gt 0 ]] || console_usage
+        operator_user_id="$1"
+        ;;
+      --user-id=*)
+        operator_user_id="${1#*=}"
+        [[ -n "$operator_user_id" ]] || console_usage
+        ;;
       --shells)
         shift || console_usage
         [[ $# -gt 0 ]] || console_usage
@@ -871,9 +982,11 @@ cmd_console() {
 
   require_files
   mkdir -p "$LOCAL_PROD_ROOT/logs"
+  OPERATOR_USER_ID_OVERRIDE="$operator_user_id"
 
   local tunnel_monitor_pid=""
   local worker_pid=""
+  local local_worker_started="0"
   local timestamp
   timestamp="$(date +%Y%m%d-%H%M%S)"
   local tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
@@ -899,26 +1012,30 @@ cmd_console() {
 
   load_operator_env
   cmd_preflight
-  require_docker_for_worker
   echo "Starting local worker pool: concurrency=$concurrency (log: $worker_log)"
-  "$0" worker "$concurrency" >"$worker_log" 2>&1 &
+  "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
   worker_pid="$!"
   sleep 1
-  if ! kill -0 "$worker_pid" >/dev/null 2>&1; then
-    echo "Local worker exited immediately." >&2
-    tail -80 "$worker_log" >&2 || true
-    exit 1
+  if kill -0 "$worker_pid" >/dev/null 2>&1; then
+    local_worker_started="1"
+  else
+    worker_pid=""
+    echo "Local worker unavailable; relying on delayed VPS worker fallback (log: $worker_log)." >&2
   fi
 
   cmd_overview
   echo
   echo "Worker log: $worker_log"
-  echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
+  if [[ "$local_worker_started" == "1" ]]; then
+    echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
+  else
+    echo "No local worker is running on this Mac. The VPS worker will claim after its queue-age delay."
+  fi
   echo
   cd "$ROOT"
   if [[ "$shell_count" -gt 1 ]]; then
     echo "Opening $((shell_count - 1)) additional operator shell window(s)..."
-    spawn_console_shell_windows "$shell_count" "$shell_mode" "$business"
+    spawn_console_shell_windows "$shell_count" "$shell_mode" "$business" "$(resolved_operator_user_id)"
   fi
   local shell_status=0
   monitor_console_tunnels "$tunnel_log" "$tunnel_pid_file" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" &
@@ -968,14 +1085,14 @@ Usage:
   scripts/takyon-operator-prod.sh tunnel
   scripts/takyon-operator-prod.sh safebox-tunnel
   scripts/takyon-operator-prod.sh dashboard-tunnel
-  scripts/takyon-operator-prod.sh console [concurrency] [business] [--shells N] [--quiet]
+  scripts/takyon-operator-prod.sh console [concurrency] [business] [--user-id <id>] [--shells N] [--quiet]
   scripts/takyon-operator-prod.sh preflight
   scripts/takyon-operator-prod.sh overview
   scripts/takyon-operator-prod.sh shell [business]
   scripts/takyon-operator-prod.sh quiet [business]
   scripts/takyon-operator-prod.sh run <takyon args...>
-  scripts/takyon-operator-prod.sh worker [concurrency]
-  scripts/takyon-operator-prod.sh worker-once
+  scripts/takyon-operator-prod.sh worker [concurrency] [--user-id <id>]
+  scripts/takyon-operator-prod.sh worker-once [--user-id <id>]
   scripts/takyon-operator-prod.sh stop-workers
   scripts/takyon-operator-prod.sh vps-worker {status|stop|start}
   scripts/takyon-operator-prod.sh status
@@ -994,7 +1111,7 @@ Common flow:
   scripts/takyon-operator-prod.sh console 10 homework-solver
 
   Multi-shell flow:
-  scripts/takyon-operator-prod.sh console 1 --shells 4
+  scripts/takyon-operator-prod.sh console 1 --user-id 150e4213-4006-4dc1-9cf3-ca7ab3b4696f --shells 4
 EOF
 }
 
