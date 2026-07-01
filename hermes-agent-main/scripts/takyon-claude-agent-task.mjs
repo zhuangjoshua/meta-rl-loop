@@ -99,9 +99,112 @@ function humanizeLabel(value) {
   return cleaned.replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
+const thinkingBlockState = new Map();
+
+function reasoningProgressEvent(note, { entryKey = "claude-reasoning", traceStatus = "running" } = {}) {
+  const summary = compactText(note, 220);
+  if (!summary) return null;
+  const line = `reasoning -> ${summary}`;
+  return {
+    kind: "claude_agent_sdk",
+    status: "output",
+    detail: line,
+    line,
+    trace: {
+      kind: "reasoning",
+      entry_key: entryKey,
+      label: "Reasoning",
+      detail: summary,
+      status: traceStatus,
+      summary,
+    },
+  };
+}
+
+function assistantThinkingText(message) {
+  const record = message && typeof message === "object" ? message : null;
+  if (!record || record.type !== "assistant") return "";
+  const inner = record.message && typeof record.message === "object" ? record.message : null;
+  const content = Array.isArray(inner?.content) ? inner.content : [];
+  return content
+    .map((part) => (part?.type === "thinking" && typeof part.thinking === "string" ? part.thinking : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function _ensureThinkingState(index, initialValue = "") {
+  const key = Number(index);
+  let state = thinkingBlockState.get(key);
+  if (!state) {
+    state = { buffer: "", lastEmitted: "", lastEmitLength: 0 };
+    thinkingBlockState.set(key, state);
+  }
+  if (typeof initialValue === "string" && initialValue) {
+    state.buffer = initialValue;
+  }
+  return state;
+}
+
+function _flushThinkingState(index, { traceStatus = "running" } = {}) {
+  const key = Number(index);
+  const state = thinkingBlockState.get(key);
+  if (!state) return null;
+  const summary = compactText(state.buffer, 220);
+  if (!summary || summary === state.lastEmitted) return null;
+  state.lastEmitted = summary;
+  state.lastEmitLength = state.buffer.length;
+  return reasoningProgressEvent(summary, {
+    entryKey: `claude-reasoning:${key}`,
+    traceStatus,
+  });
+}
+
+function thinkingProgressEventFromStream(message) {
+  const record = message && typeof message === "object" ? message : null;
+  const event = record && record.type === "stream_event" && record.event && typeof record.event === "object"
+    ? record.event
+    : null;
+  if (!event) return null;
+  if (event.type === "content_block_start") {
+    const block = event.content_block && typeof event.content_block === "object" ? event.content_block : null;
+    if (block?.type !== "thinking") return null;
+    _ensureThinkingState(event.index, typeof block.thinking === "string" ? block.thinking : "");
+    return null;
+  }
+  if (event.type === "content_block_delta") {
+    const delta = event.delta && typeof event.delta === "object" ? event.delta : null;
+    if (!delta || delta.type !== "thinking_delta") return null;
+    const chunk = typeof delta.thinking === "string" ? delta.thinking : "";
+    if (!chunk) return null;
+    const state = _ensureThinkingState(event.index);
+    state.buffer += chunk;
+    const shouldEmit = (
+      state.buffer.length - state.lastEmitLength >= 80
+      || /[.!?]\s*$/.test(chunk)
+      || chunk.includes("\n")
+    );
+    return shouldEmit ? _flushThinkingState(event.index) : null;
+  }
+  if (event.type === "content_block_stop") {
+    const progress = _flushThinkingState(event.index, { traceStatus: "completed" });
+    thinkingBlockState.delete(Number(event.index));
+    return progress;
+  }
+  return null;
+}
+
 function progressEventFromSdkMessage(message) {
   const record = message && typeof message === "object" ? message : null;
   if (!record) return null;
+  const thinkingProgress = thinkingProgressEventFromStream(record);
+  if (thinkingProgress) return thinkingProgress;
+  const assistantThinking = assistantThinkingText(record);
+  if (assistantThinking) {
+    return reasoningProgressEvent(assistantThinking, {
+      entryKey: `claude-reasoning:${String(record.uuid || "assistant").trim() || "assistant"}`,
+      traceStatus: "completed",
+    });
+  }
   if (record.type === "system" && record.subtype === "task_started") {
     const entryKey = `claude-task:${String(record.task_id || record.uuid || "task").trim()}`;
     const detail = compactText(record.description || record.prompt || record.workflow_name || record.task_type || "Claude task started.");
@@ -318,7 +421,8 @@ async function main() {
               ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {})
             },
             model,
-            thinking: { type: "adaptive", display: "omitted" },
+            includePartialMessages: true,
+            thinking: { type: "adaptive", display: "summarized" },
             effort: ["low", "medium", "high"].includes(effort) ? effort : "high",
             tools: allowBash
               ? ["Read", "Write", "Edit", "MultiEdit", "Grep", "Glob", "Bash"]

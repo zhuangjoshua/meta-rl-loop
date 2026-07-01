@@ -588,6 +588,24 @@ def test_runtime_event_tail_prints_claude_worker_runtime_events():
     store.conn.execute(
         "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
         (
+            "evt-2b",
+            "demo",
+            "dashboard.run.output",
+            json.dumps(
+                {
+                    "kind": "claude_agent_sdk",
+                    "status": "output",
+                    "detail": "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks.",
+                    "line": "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks.",
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:01.500000Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
             "evt-3",
             "demo",
             "dashboard.run.completed",
@@ -632,6 +650,7 @@ def test_runtime_event_tail_prints_claude_worker_runtime_events():
     assert "Claude worker started for product/site." in output
     assert "— Claude worker:running —" in output
     assert "Generating the landing page." in output
+    assert "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks." in output
     assert "— Claude worker:completed —" in output
     assert "Worker finished cleanly." in output
     assert "tool started -> business_read_business" in output

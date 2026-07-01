@@ -1648,6 +1648,15 @@ def test_claude_agent_task_script_forces_local_terminal_work_inside_outer_docker
     assert 'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "0"' in text
 
 
+def test_claude_agent_task_script_enables_partial_summarized_reasoning_trace():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert "includePartialMessages: true" in text
+    assert 'thinking: { type: "adaptive", display: "summarized" }' in text
+    assert 'delta.type !== "thinking_delta"' in text
+    assert '`reasoning -> ${summary}`' in text
+
+
 def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_once(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured_payloads: list[dict[str, object]] = []
