@@ -122,6 +122,15 @@
     {"name": "cron", "description": "List or tick cron jobs", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "advanced"},
     {"name": "goal", "description": "Run a CEO goal instruction", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "advanced"},
     {"name": "campaigns", "description": "List business workspaces/campaigns", "requiresBusiness": true, "priorityBand": "p2_growth", "palette": "advanced"},
+    {
+      "name": "credits",
+      "description": "Buy creative credits or allocate channel budgets",
+      "requiresBusiness": true,
+      "priorityBand": "p0_control",
+      "palette": "advanced",
+      "usage": "/credits [status|packs|buy <credits>|buy pack <pack-id>|allocate <x|meta|reddit> <credits> ...|reconcile <session-id>]",
+      "summary": "Use `/credits buy <credits>` to create a Stripe checkout, `/credits allocate meta 100` to move existing credits into a channel budget, and `/credits` to inspect balances."
+    },
     {"name": "workspaces", "description": "List business workspaces", "requiresBusiness": true, "priorityBand": "p3_learning", "palette": "advanced"},
     {"name": "gc", "description": "Garbage collect stale ephemeral Takyon state", "requiresBusiness": false, "priorityBand": "p4_maintenance", "palette": "advanced"},
     {"name": "exit", "description": "Close shell", "requiresBusiness": false, "priorityBand": "p1_ceo", "palette": "default"}

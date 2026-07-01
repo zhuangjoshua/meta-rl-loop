@@ -3466,6 +3466,334 @@ def _shell_money_cents(value: Any) -> str:
     return f"{sign}${cents // 100}.{cents % 100:02d}"
 
 
+def _credits_usage() -> str:
+    return (
+        "usage: takyon credits <business> [status|packs|buy <credits>|buy pack <pack-id>|"
+        "reconcile <session-id>|allocate <x|meta|reddit> <credits> ...]"
+    )
+
+
+def _credit_bucket_label(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    aliases = {
+        "x": "x",
+        "twitter": "x",
+        "meta": "meta",
+        "facebook": "meta",
+        "instagram": "meta",
+        "fb": "meta",
+        "ig": "meta",
+        "reddit": "reddit",
+    }
+    return aliases.get(text, "")
+
+
+def _credits_default_return_url(business: str) -> str:
+    try:
+        from .core import _dashboard_public_base_url
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon.core import _dashboard_public_base_url
+
+    base = _dashboard_public_base_url().rstrip("/")
+    if not base:
+        base = "https://app.fourmanifold.com"
+    return f"{base}/"
+
+
+def _credit_business_owner_user_id(
+    store: TakyonStore,
+    business: str,
+    operator_user_id: str | None,
+) -> str:
+    slug = _slugify(str(business or "").strip())
+    if not slug:
+        raise SystemExit(_credits_usage())
+    store.enforce_operator_business_access(slug)
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT owner_user_id FROM businesses WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+    if row is None:
+        raise SystemExit(f"business:{slug} does not exist")
+    owner = str((row["owner_user_id"] if isinstance(row, Mapping) else row[0]) or "").strip()
+    active = _resolved_operator_user_id(operator_user_id)
+    if active and owner and active != owner:
+        raise SystemExit(f"access denied for business:{slug}")
+    user_id = active or owner
+    if not user_id:
+        raise SystemExit(
+            "credits checkout requires a Takyon user id; set TAKYON_OPERATOR_USER_ID or run from an authenticated dashboard shell"
+        )
+    return user_id
+
+
+def _read_credit_snapshot(business: str) -> dict[str, Any]:
+    try:
+        from .core import handle_business_read_channel_credit_budgets
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon.core import handle_business_read_channel_credit_budgets
+
+    data = _parse_tool_json_result(handle_business_read_channel_credit_budgets({"business": business}))
+    if not data.get("success"):
+        raise SystemExit(str(data.get("error") or "failed to read creative credits"))
+    value = data.get("value") if isinstance(data.get("value"), dict) else {}
+    return value
+
+
+def _format_credit_snapshot(business: str, snapshot: Mapping[str, Any]) -> str:
+    channels = snapshot.get("channels") if isinstance(snapshot.get("channels"), Mapping) else {}
+    lines = [
+        f"Creative credits for business:{business}",
+        (
+            f"balance={_shell_int(snapshot.get('balance_credits'))} "
+            f"reserved={_shell_int(snapshot.get('reserved_credits'))} "
+            f"unallocated={_shell_int(snapshot.get('unallocated_credits'))}"
+        ),
+    ]
+    for bucket in ("x", "meta", "reddit"):
+        data = channels.get(bucket) if isinstance(channels.get(bucket), Mapping) else {}
+        lines.append(
+            f"{bucket}: allocated={_shell_int(data.get('allocated_credits'))} "
+            f"used={_shell_int(data.get('used_credits'))} "
+            f"reserved={_shell_int(data.get('reserved_credits'))} "
+            f"remaining={_shell_int(data.get('remaining_credits'))}"
+        )
+    costs = snapshot.get("action_costs") if isinstance(snapshot.get("action_costs"), Mapping) else {}
+    if costs:
+        cost_bits = []
+        for key in ("x_publish_outreach", "meta_ad_launch", "reddit_ad_launch", "static_ad_generate", "ugc_ad_generate"):
+            item = costs.get(key) if isinstance(costs.get(key), Mapping) else {}
+            if item:
+                cost_bits.append(f"{key}={_shell_int(item.get('credits'))}")
+        if cost_bits:
+            lines.append("costs: " + " ".join(cost_bits))
+    return "\n".join(lines)
+
+
+def _current_credit_allocations(snapshot: Mapping[str, Any]) -> dict[str, int]:
+    channels = snapshot.get("channels") if isinstance(snapshot.get("channels"), Mapping) else {}
+    allocations: dict[str, int] = {}
+    for bucket in ("x", "meta", "reddit"):
+        data = channels.get(bucket) if isinstance(channels.get(bucket), Mapping) else {}
+        allocations[bucket] = _shell_int(data.get("allocated_credits"))
+    return allocations
+
+
+def _parse_credit_allocations(args: list[str], snapshot: Mapping[str, Any]) -> dict[str, int]:
+    allocations = _current_credit_allocations(snapshot)
+    if not args:
+        raise SystemExit("usage: takyon credits <business> allocate <x|meta|reddit> <credits> ...")
+    i = 0
+    changed = False
+    while i < len(args):
+        token = str(args[i] or "").strip()
+        if not token:
+            i += 1
+            continue
+        if token.startswith("--"):
+            bucket = _credit_bucket_label(token[2:])
+            if not bucket or i + 1 >= len(args):
+                raise SystemExit("usage: takyon credits <business> allocate --meta 100 [--x 1 --reddit 0]")
+            allocations[bucket] = _shell_int(args[i + 1])
+            changed = True
+            i += 2
+            continue
+        if "=" in token:
+            key, value = token.split("=", 1)
+            bucket = _credit_bucket_label(key)
+            if not bucket:
+                raise SystemExit(f"unknown credit bucket: {key}")
+            allocations[bucket] = _shell_int(value)
+            changed = True
+            i += 1
+            continue
+        bucket = _credit_bucket_label(token)
+        if not bucket or i + 1 >= len(args):
+            raise SystemExit("usage: takyon credits <business> allocate meta 100 [x 1 reddit 0]")
+        allocations[bucket] = _shell_int(args[i + 1])
+        changed = True
+        i += 2
+    if not changed:
+        raise SystemExit("no credit allocation was provided")
+    return allocations
+
+
+def _credit_checkout_options(args: list[str], business: str) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "credits": None,
+        "pack_id": None,
+        "success_url": _credits_default_return_url(business),
+        "cancel_url": _credits_default_return_url(business),
+    }
+    i = 0
+    while i < len(args):
+        token = str(args[i] or "").strip()
+        if token in {"--success-url", "--success"} and i + 1 < len(args):
+            options["success_url"] = args[i + 1]
+            i += 2
+            continue
+        if token in {"--cancel-url", "--cancel"} and i + 1 < len(args):
+            options["cancel_url"] = args[i + 1]
+            i += 2
+            continue
+        if token in {"--return-url", "--return"} and i + 1 < len(args):
+            options["success_url"] = args[i + 1]
+            options["cancel_url"] = args[i + 1]
+            i += 2
+            continue
+        if token in {"--pack", "pack"} and i + 1 < len(args):
+            options["pack_id"] = str(args[i + 1]).strip()
+            i += 2
+            continue
+        if token.startswith("--"):
+            raise SystemExit(f"unknown credits buy option: {token}")
+        if options["credits"] is None:
+            options["credits"] = _shell_int(token)
+            i += 1
+            continue
+        raise SystemExit(_credits_usage())
+    if not options["pack_id"] and not options["credits"]:
+        raise SystemExit("usage: takyon credits <business> buy <credits>")
+    return options
+
+
+def _format_credit_checkout(result: Mapping[str, Any]) -> str:
+    amount = _shell_money_cents(result.get("amount_cents"))
+    lines = [
+        f"Checkout created for business:{result.get('business_slug') or ''}",
+        f"credits={_shell_int(result.get('credits'))} amount={amount}",
+    ]
+    if result.get("session_id"):
+        lines.append(f"session_id={result.get('session_id')}")
+    if result.get("checkout_url"):
+        lines.append(f"checkout_url={result.get('checkout_url')}")
+    if result.get("session_id"):
+        lines.append(f"reconcile: /credits reconcile {result.get('session_id')}")
+    return "\n".join(lines)
+
+
+def _format_credit_packs() -> str:
+    try:
+        from . import control_api
+    except ImportError:  # pragma: no cover - alternate load path as a top-level package
+        from plugins.takyon import control_api
+
+    packs = control_api.configured_creative_credit_packs()
+    config = control_api.creative_credit_checkout_config()
+    lines = [
+        (
+            f"Custom credits: {config.get('price_cents_per_credit')}c/credit, "
+            f"minimum {config.get('minimum_checkout_credits')} credits"
+        )
+    ]
+    if packs:
+        lines.append("Packs:")
+        for pack in packs:
+            lines.append(
+                f"{pack.get('id')}: {pack.get('credits')} credits for "
+                f"{_shell_money_cents(pack.get('amount_cents'))}"
+            )
+    return "\n".join(lines)
+
+
+def _handle_credits_command(
+    store: TakyonStore,
+    argv: list[str],
+    *,
+    operator_user_id: str | None = None,
+) -> str:
+    args = list(argv[1:])
+    subcommands = {"status", "show", "packs", "buy", "checkout", "reconcile", "allocate", "alloc", "set"}
+    if not args:
+        raise SystemExit(_credits_usage())
+    if args[0].lower() in subcommands:
+        if len(args) < 2:
+            raise SystemExit(_credits_usage())
+        subcommand = args[0].lower()
+        business = _slugify(args[1])
+        rest = args[2:]
+    else:
+        business = _slugify(args[0])
+        subcommand = args[1].lower() if len(args) >= 2 else "status"
+        rest = args[2:]
+
+    if subcommand in {"status", "show"}:
+        store.enforce_operator_business_access(business)
+        return _format_credit_snapshot(business, _read_credit_snapshot(business))
+
+    if subcommand == "packs":
+        store.enforce_operator_business_access(business)
+        return _format_credit_packs()
+
+    if subcommand in {"buy", "checkout"}:
+        user_id = _credit_business_owner_user_id(store, business, operator_user_id)
+        options = _credit_checkout_options(rest, business)
+        try:
+            from . import safebox
+        except ImportError:  # pragma: no cover - alternate load path as a top-level package
+            from plugins.takyon import safebox
+
+        result = safebox.create_creative_credit_checkout(
+            user_id,
+            business,
+            credits=options["credits"],
+            pack_id=options["pack_id"],
+            success_url=str(options["success_url"]),
+            cancel_url=str(options["cancel_url"]),
+        )
+        return _format_credit_checkout(result)
+
+    if subcommand == "reconcile":
+        store.enforce_operator_business_access(business)
+        if not rest:
+            raise SystemExit("usage: takyon credits <business> reconcile <session-id>")
+        try:
+            from . import safebox
+        except ImportError:  # pragma: no cover - alternate load path as a top-level package
+            from plugins.takyon import safebox
+
+        result = safebox.reconcile_creative_credit_checkout(
+            None,
+            session_id=rest[0],
+            expected_business_slug=business,
+        )
+        credited = _shell_int(result.get("credited_credits"))
+        balance = _shell_int(result.get("balance_credits"))
+        return f"Credits reconciled for business:{business}: credited={credited} balance={balance}"
+
+    if subcommand in {"allocate", "alloc", "set"}:
+        store.enforce_operator_business_access(business)
+        snapshot = _read_credit_snapshot(business)
+        allocations = _parse_credit_allocations(rest, snapshot)
+        try:
+            from .core import handle_business_set_channel_credit_budgets
+        except ImportError:  # pragma: no cover - alternate load path as a top-level package
+            from plugins.takyon.core import handle_business_set_channel_credit_budgets
+
+        result = _parse_tool_json_result(
+            handle_business_set_channel_credit_budgets(
+                {
+                    "business": business,
+                    "allocations": allocations,
+                    "idempotency_key": _idempotency_key(
+                        "operator-credit-allocation-v1",
+                        business,
+                        json.dumps(allocations, sort_keys=True),
+                    ),
+                    "reason": "operator allocated channel creative credits from CLI",
+                    "actor": "operator",
+                }
+            )
+        )
+        if not result.get("success"):
+            raise SystemExit(str(result.get("error") or "failed to allocate credits"))
+        updated = result.get("value") if isinstance(result.get("value"), dict) else _read_credit_snapshot(business)
+        return _format_credit_snapshot(business, updated)
+
+    raise SystemExit(_credits_usage())
+
+
 def _shell_metric_value(stats: dict[str, Any], *names: str) -> int | None:
     for name in names:
         if name not in stats:
@@ -4108,6 +4436,10 @@ def _command_with_current_business(tokens: list[str], current_business: str | No
         return ["read", current_business, *tokens[1:]]
     if command in {"jobs", "campaigns", "capabilities", "caps"} and len(tokens) == 1 and current_business:
         return [command, current_business]
+    if command in {"credits", "credit"} and current_business:
+        credit_args = {"status", "show", "packs", "buy", "checkout", "reconcile", "allocate", "alloc", "set"}
+        if len(tokens) == 1 or tokens[1] in credit_args:
+            return ["credits", current_business, *tokens[1:]]
     if command == "test" and current_business:
         mode_args = {"on", "off", "status", "show", "test", "live"}
         if len(tokens) == 1 or tokens[1] in mode_args:
@@ -5401,6 +5733,13 @@ def run_takyon_command(
             if str(item.get("path", "")).startswith(("distribution/", "campaigns/"))
         ]
         return {"success": True, "business": slug, "campaigns": workspaces}
+
+    if command in {"credits", "credit"}:
+        return _handle_credits_command(
+            store,
+            argv,
+            operator_user_id=resolved_operator_user_id,
+        )
 
     if command in {"cron", "crons"}:
         action = argv[1].lower() if len(argv) >= 2 else "list"

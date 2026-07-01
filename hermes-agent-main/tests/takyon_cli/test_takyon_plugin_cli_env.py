@@ -74,6 +74,107 @@ def test_shell_command_accepts_trailing_logs_flag(monkeypatch):
     assert captured["follow_logs"] is True
 
 
+def test_credits_shell_command_uses_current_business():
+    import plugins.takyon.cli as takyon_cli
+
+    assert takyon_cli._command_with_current_business(
+        ["credits", "buy", "125"],
+        "alpha",
+    ) == ["credits", "alpha", "buy", "125"]
+    assert takyon_cli._command_with_current_business(
+        ["credits", "allocate", "meta", "50"],
+        "alpha",
+    ) == ["credits", "alpha", "allocate", "meta", "50"]
+
+
+def test_credits_buy_creates_checkout(monkeypatch):
+    import plugins.takyon.cli as takyon_cli
+    from plugins.takyon import safebox
+
+    captured: dict[str, object] = {}
+
+    class _Store:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    def fake_checkout(user_id, business, **kwargs):
+        captured["user_id"] = user_id
+        captured["business"] = business
+        captured.update(kwargs)
+        return {
+            "checkout_url": "https://checkout.stripe.test/session",
+            "session_id": "cs_test_123",
+            "business_slug": business,
+            "credits": kwargs["credits"],
+            "amount_cents": 125,
+        }
+
+    monkeypatch.setattr(takyon_cli, "load_takyon_env", lambda: [])
+    monkeypatch.setattr(takyon_cli, "TakyonStore", _Store)
+    monkeypatch.setattr(takyon_cli, "_credit_business_owner_user_id", lambda *_a, **_k: "user_123")
+    monkeypatch.setattr(takyon_cli, "_credits_default_return_url", lambda _business: "https://app.example/")
+    monkeypatch.setattr(safebox, "create_creative_credit_checkout", fake_checkout)
+
+    result = takyon_cli.run_takyon_command(
+        ["credits", "alpha", "buy", "125"],
+        operator_user_id="user_123",
+    )
+
+    assert "checkout_url=https://checkout.stripe.test/session" in result
+    assert captured["business"] == "alpha"
+    assert captured["credits"] == 125
+    assert captured["success_url"] == "https://app.example/"
+
+
+def test_credits_allocate_preserves_unspecified_channels(monkeypatch):
+    import json
+
+    import plugins.takyon.cli as takyon_cli
+    from plugins.takyon import core
+
+    captured: dict[str, object] = {}
+
+    class _Store:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def enforce_operator_business_access(self, business):
+            captured["access"] = business
+
+    snapshot = {
+        "balance_credits": 100,
+        "reserved_credits": 0,
+        "unallocated_credits": 99,
+        "channels": {
+            "x": {"allocated_credits": 1, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 1},
+            "meta": {"allocated_credits": 0, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 0},
+            "reddit": {"allocated_credits": 0, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 0},
+        },
+    }
+
+    def fake_set(args):
+        captured["allocations"] = args["allocations"]
+        updated = {
+            **snapshot,
+            "channels": {
+                **snapshot["channels"],
+                "meta": {"allocated_credits": 50, "used_credits": 0, "reserved_credits": 0, "remaining_credits": 50},
+            },
+        }
+        return json.dumps({"success": True, "value": updated})
+
+    monkeypatch.setattr(takyon_cli, "load_takyon_env", lambda: [])
+    monkeypatch.setattr(takyon_cli, "TakyonStore", _Store)
+    monkeypatch.setattr(takyon_cli, "_read_credit_snapshot", lambda _business: snapshot)
+    monkeypatch.setattr(core, "handle_business_set_channel_credit_budgets", fake_set)
+
+    result = takyon_cli.run_takyon_command(["credits", "alpha", "allocate", "meta", "50"])
+
+    assert captured["access"] == "alpha"
+    assert captured["allocations"] == {"x": 1, "meta": 50, "reddit": 0}
+    assert "meta: allocated=50" in result
+
+
 def test_platform_owner_seed_skips_when_session_user_bound(monkeypatch, capsys):
     import plugins.takyon.cli as takyon_cli
 
