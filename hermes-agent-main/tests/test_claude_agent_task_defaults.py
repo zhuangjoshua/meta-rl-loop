@@ -1567,7 +1567,17 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
 def test_claude_agent_task_bash_wrapper_uses_absolute_env_and_bash_paths():
     script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
     text = script.read_text(encoding="utf-8")
-    assert "/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp /bin/bash -lc" in text
+    assert 'const SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";' in text
+    assert "return `/usr/bin/env -i PATH=${SANDBOX_PATH} HOME=/tmp /bin/bash -lc ${JSON.stringify(script)}`;" in text
+
+
+def test_claude_agent_task_script_passes_safe_host_path_to_child_env():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert "function buildClaudeSessionEnv({" in text
+    assert 'PATH: String(process.env.PATH || SANDBOX_PATH).trim() || SANDBOX_PATH,' in text
+    assert 'HOME: String(process.env.HOME || "/tmp").trim() || "/tmp",' in text
+    assert 'for (const key of ["LANG", "LC_ALL", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER"]) {' in text
 
 
 def test_docker_claude_worker_binary_mounts_uses_repo_binary_when_present(tmp_path, monkeypatch):
@@ -1643,9 +1653,9 @@ def test_claude_agent_task_script_forces_local_terminal_work_inside_outer_docker
     script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
     text = script.read_text(encoding="utf-8")
     assert 'const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";' in text
-    assert 'TERMINAL_ENV: "local"' in text
-    assert "TERMINAL_CWD: cwd" in text
-    assert 'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "0"' in text
+    assert 'env.TERMINAL_ENV = "local";' in text
+    assert "env.TERMINAL_CWD = cwd;" in text
+    assert 'env.TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE = "0";' in text
 
 
 def test_claude_agent_task_script_enables_partial_summarized_reasoning_trace():

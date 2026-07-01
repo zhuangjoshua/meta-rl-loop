@@ -2,6 +2,7 @@
 import path from "node:path";
 
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
+const SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 let workerStderr = "";
 
 function readStdin() {
@@ -38,7 +39,36 @@ function normalizeRelative(value) {
 
 function sandboxedBashCommand(command) {
   const script = String(command || "");
-  return `/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp /bin/bash -lc ${JSON.stringify(script)}`;
+  return `/usr/bin/env -i PATH=${SANDBOX_PATH} HOME=/tmp /bin/bash -lc ${JSON.stringify(script)}`;
+}
+
+function buildClaudeSessionEnv({
+  anthropicApiKey,
+  anthropicToken,
+  disableExperimentalBetas,
+  anthropicBaseUrl,
+  inDockerWorker,
+  cwd,
+}) {
+  const env = {
+    PATH: String(process.env.PATH || SANDBOX_PATH).trim() || SANDBOX_PATH,
+    HOME: String(process.env.HOME || "/tmp").trim() || "/tmp",
+    ANTHROPIC_API_KEY: anthropicApiKey,
+    ANTHROPIC_TOKEN: anthropicToken,
+    CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent",
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas,
+    ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {})
+  };
+  for (const key of ["LANG", "LC_ALL", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER"]) {
+    const value = String(process.env[key] || "").trim();
+    if (value) env[key] = value;
+  }
+  if (inDockerWorker) {
+    env.TERMINAL_ENV = "local";
+    env.TERMINAL_CWD = cwd;
+    env.TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE = "0";
+  }
+  return env;
 }
 
 function rewriteWorkspacePrefixedPaths(input, workspace) {
@@ -399,26 +429,14 @@ async function main() {
           options: {
             abortController,
             cwd,
-            env: {
-              ANTHROPIC_API_KEY: anthropicApiKey,
-              ANTHROPIC_TOKEN: anthropicToken,
-              CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent",
-              CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas,
-              // The outer Takyon Docker worker already bind-mounts the exact business workspace.
-              // Force SDK child Bash/terminal work to stay in this container instead of trying a
-              // nested Docker lane that can inherit host cwd mount config from the operator shell.
-              ...(inDockerWorker
-                ? {
-                    TERMINAL_ENV: "local",
-                    TERMINAL_CWD: cwd,
-                    TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "0"
-                  }
-                : {}),
-              // Route the SDK at the safebox broker when the host put us in lockdown; the broker
-              // verifies the capability token (passed as ANTHROPIC_API_KEY) and makes the real
-              // provider call on the safebox host so no raw provider key is ever present here.
-              ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {})
-            },
+            env: buildClaudeSessionEnv({
+              anthropicApiKey,
+              anthropicToken,
+              disableExperimentalBetas,
+              anthropicBaseUrl,
+              inDockerWorker,
+              cwd,
+            }),
             model,
             includePartialMessages: true,
             thinking: { type: "adaptive", display: "summarized" },
