@@ -287,6 +287,36 @@ def test_handler_error_refunds_hold_and_fails(pg_conn):
     assert bal.allowance_used_cents == 0
 
 
+def test_bootstrap_timeout_requeues_and_releases_running_claim(pg_conn):
+    # Regression for moveoutpacket0701: a ceo_bootstrap inactivity timeout must not leave the durable
+    # job wedged in 'running'. It should release its claim, refund the hold, and return to the queue
+    # when attempts remain.
+    slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
+    jobs.enqueue(
+        pg_conn, slug, "ceo_bootstrap", idempotency_key="j",
+        payload={"estimate_cents": 500}, max_attempts=2,
+    )
+    handler = _RecordingHandler(raises=TimeoutError("CEO wake for business wedge idle past 600s inactivity limit"))
+
+    outcome = jobs.run_one(pg_conn, worker_id="w1", handlers={"ceo_bootstrap": handler})
+
+    assert outcome.status == "requeued"
+    assert outcome.reason == "handler_error"
+    assert len(handler.calls) == 1
+
+    job = jobs.get_job(pg_conn, outcome.job_id)
+    assert job.status == "queued"
+    assert job.locked_by is None
+    assert job.locked_at is None
+    assert job.error["reason"] == "handler_error"
+    assert "idle past 600s inactivity limit" in job.error["error"]
+    assert jobs.claim_one(pg_conn, worker_id="w2").id == job.id
+
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.reserved_cents == 0
+    assert bal.allowance_used_cents == 0
+
+
 def test_handler_error_still_terminalizes_job_when_first_refund_raises(pg_conn, monkeypatch):
     slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
     jobs.enqueue(
