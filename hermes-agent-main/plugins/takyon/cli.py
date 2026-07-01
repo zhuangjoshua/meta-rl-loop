@@ -635,6 +635,23 @@ def _format_cli_value(value: Any) -> str:
         lines.extend(["", str(value.get("agent_response") or "").strip()])
         return "\n".join(line for line in lines if line is not None).rstrip()
 
+    if "bootstrap_job" in value and "business" in value:
+        bootstrap_job = value.get("bootstrap_job") if isinstance(value.get("bootstrap_job"), dict) else {}
+        if bootstrap_job:
+            business_ref = value.get("business") or bootstrap_job.get("business") or "<unknown>"
+            if isinstance(business_ref, dict):
+                slug = business_ref.get("slug") or business_ref.get("business") or "<unknown>"
+            else:
+                slug = str(business_ref or "<unknown>")
+            follow = value.get("follow") if isinstance(value.get("follow"), dict) else {}
+            status = str(follow.get("status") or bootstrap_job.get("status") or "queued")
+            if value.get("detached"):
+                return f"Create {status} for business:{slug}. Use /use {slug} to attach."
+            job_id = str(bootstrap_job.get("job_id") or "").strip()
+            if job_id:
+                return f"Create {status} for business:{slug}. Bootstrap job: {job_id}."
+            return f"Create {status} for business:{slug}."
+
     if "summary" in value and "deltas_from_previous_pulse" in value and "windows" in value:
         business = value.get("business") or "<unknown>"
         summary = value.get("summary") or {}
@@ -2632,29 +2649,8 @@ def _follow_worker_job(
     current_stream_text = ""
     last_streamed_ceo_message = ""
     last_worker_note_text = ""
-    # Prime with already-recorded turns so --follow shows only narration produced from now on.
-    try:
-        for event in store.read_ceo_turn_events(slug, limit=200):
-            eid = str(event.get("id") or "")
-            if eid:
-                seen_events.add(eid)
-    except Exception:  # noqa: BLE001 - best-effort priming
-        pass
-    try:
-        for event in _runtime_event_rows_for_business(store, slug, limit=200):
-            eid = str(event.get("id") or "")
-            if eid:
-                seen_runtime_events.add(eid)
-    except Exception:  # noqa: BLE001 - runtime stream is display-only
-        pass
-
-    log_path = _agent_log_path() if tail_logs else None
+    log_path = None
     log_offset = 0
-    if log_path is not None:
-        try:
-            log_offset = log_path.stat().st_size  # only surface lines written after we attach
-        except OSError:
-            log_path = None
 
     def _drain_new_chat() -> None:
         nonlocal last_streamed_ceo_message
@@ -2753,16 +2749,40 @@ def _follow_worker_job(
             if line.strip():
                 print(f"  · {line}", flush=True)
 
-    print(
-        f"[{label}] following job {job_id} for business:{slug} "
-        "(Ctrl-C to detach; the worker job keeps running)",
-        flush=True,
-    )
     last_status = ""
-    started = time.monotonic()
-    queued_warned = False
     record = None
+    detached = False
     try:
+        # Prime with already-recorded turns so --follow shows only narration produced from now on.
+        try:
+            for event in store.read_ceo_turn_events(slug, limit=200):
+                eid = str(event.get("id") or "")
+                if eid:
+                    seen_events.add(eid)
+        except Exception:  # noqa: BLE001 - best-effort priming
+            pass
+        try:
+            for event in _runtime_event_rows_for_business(store, slug, limit=200):
+                eid = str(event.get("id") or "")
+                if eid:
+                    seen_runtime_events.add(eid)
+        except Exception:  # noqa: BLE001 - runtime stream is display-only
+            pass
+
+        log_path = _agent_log_path() if tail_logs else None
+        if log_path is not None:
+            try:
+                log_offset = log_path.stat().st_size  # only surface lines written after we attach
+            except OSError:
+                log_path = None
+
+        print(
+            f"[{label}] following job {job_id} for business:{slug} "
+            "(Ctrl-C to detach; the worker job keeps running)",
+            flush=True,
+        )
+        started = time.monotonic()
+        queued_warned = False
         while True:
             _drain_new_runtime_stream()
             _drain_new_logs()
@@ -2796,19 +2816,21 @@ def _follow_worker_job(
                 )
                 break
             time.sleep(poll_seconds)
+        # Final sweep for trailing narration / log lines written just before the terminal status.
+        _drain_new_runtime_stream()
+        _finish_stream()
+        _drain_new_logs()
+        _drain_new_chat()
     except KeyboardInterrupt:
+        detached = True
         print(f"\n[{label}] detached (the worker job keeps running).", flush=True)
-    # Final sweep for trailing narration / log lines written just before the terminal status.
-    _drain_new_runtime_stream()
-    _finish_stream()
-    _drain_new_logs()
-    _drain_new_chat()
     return {
         "action": f"{label}.follow",
         "job_id": str(job_id),
         "status": last_status or "queued",
         "result": (record.result if record else None),
         "error": (record.error if record else None),
+        "detached": detached,
     }
 
 
@@ -5935,6 +5957,14 @@ def run_takyon_command(
                 schedule=schedule if should_schedule else None,
                 max_turns=_clamp_bootstrap_max_turns(goal, max_turns),
             )
+            should_follow = (follow or follow_logs) and not detach
+            bootstrap_job_id = str(bootstrap_job.get("job_id") or "").strip()
+            if should_follow and bootstrap_job_id:
+                print(
+                    f"[bootstrap] queued job {bootstrap_job_id} for business:{slug}; "
+                    "attaching after starter credit seed...",
+                    flush=True,
+                )
             # Free starter creative-credit seed is useful, but it must never sit between the durable
             # business row and the durable bootstrap job. If the creative-credit ledger is temporarily
             # unavailable, bootstrap still starts and records the precise blocker when it reaches
@@ -5948,12 +5978,11 @@ def run_takyon_command(
             # the job, so it changes no creation/billing/identity authority and the build keeps
             # running if the operator detaches.
             follow_result = None
-            should_follow = (follow or follow_logs) and not detach
-            if should_follow and str(bootstrap_job.get("job_id") or "").strip():
+            if should_follow and bootstrap_job_id:
                 follow_result = _follow_worker_job(
                     store,
                     slug,
-                    str(bootstrap_job["job_id"]).strip(),
+                    bootstrap_job_id,
                     label="bootstrap",
                     tail_logs=not follow_logs,
                 )

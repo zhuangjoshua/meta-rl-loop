@@ -128,6 +128,72 @@ def test_create_enqueues_bootstrap_even_when_starter_credit_seed_fails(monkeypat
     assert "creative credit ledger temporarily unavailable" in result["starter_credit_seed"]["error"]
 
 
+def test_create_follow_logs_announces_bootstrap_before_credit_seed(monkeypatch, capsys):
+    monkeypatch.setattr(takyon_cli, "_require_agent_model_config", lambda *args, **kwargs: None)
+
+    state = {"business": {"slug": "claimscope", "mode": "live"}}
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def commit(self, *, scope, operations, **kwargs):
+            return {"results": [{"action": "business.upsert"}]}
+
+        def read(self, *, scope, query, **kwargs):
+            assert scope == "business:claimscope"
+            assert query == "summary"
+            return state
+
+    def fake_enqueue(store, slug, *, goal, mode, schedule, max_turns):
+        return {
+            "action": "ceo_bootstrap.enqueue",
+            "business": slug,
+            "job_id": "job-follow",
+            "status": "queued",
+            "created": True,
+            "schedule": schedule or "",
+        }
+
+    observed: list[str] = []
+
+    def fake_seed(*_args, **_kwargs):
+        observed.append("seed")
+        return {
+            "action": "business_credits.bootstrap_free_seed",
+            "business": "claimscope",
+            "status": "ok",
+            "credits": 3,
+        }
+
+    def fake_follow(*_args, **_kwargs):
+        observed.append("follow")
+        return {
+            "action": "bootstrap.follow",
+            "job_id": "job-follow",
+            "status": "running",
+        }
+
+    monkeypatch.setattr(takyon_cli, "TakyonStore", FakeStore)
+    monkeypatch.setattr(takyon_cli, "_read_model_config", lambda store: {})
+    monkeypatch.setattr(takyon_cli, "_enqueue_pg_ceo_bootstrap", fake_enqueue)
+    monkeypatch.setattr(takyon_cli, "_try_seed_business_free_credits", fake_seed)
+    monkeypatch.setattr(takyon_cli, "_follow_worker_job", fake_follow)
+    monkeypatch.setattr(takyon_cli, "_business_exists", lambda *_a, **_k: False)
+    monkeypatch.setattr(takyon_cli, "_operator_create_balance_preflight", lambda *_a, **_k: None)
+
+    takyon_cli.run_takyon_command(
+        ["create", "--live", "claimscope", "insurance claim copilot"],
+        model="",
+        max_turns=7,
+        follow_logs=True,
+    )
+
+    captured = capsys.readouterr().out
+    assert "[bootstrap] queued job job-follow for business:claimscope; attaching after starter credit seed..." in captured
+    assert observed == ["seed", "follow"]
+
+
 def test_create_caps_bootstrap_turn_budget(monkeypatch):
     monkeypatch.setattr(takyon_cli, "_require_agent_model_config", lambda *args, **kwargs: None)
 

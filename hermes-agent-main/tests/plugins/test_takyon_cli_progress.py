@@ -949,6 +949,29 @@ def test_follow_worker_job_dedupes_chat_when_stream_contains_prefixed_restart(mo
     assert result["status"] == "completed"
 
 
+def test_follow_worker_job_interrupts_cleanly_during_initial_priming():
+    class Store:
+        def read_ceo_turn_events(self, _slug, limit=200):
+            raise KeyboardInterrupt()
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = cli._follow_worker_job(
+            Store(),
+            "demo",
+            "job-1",
+            label="bootstrap",
+            tail_logs=False,
+            poll_seconds=0.0,
+            max_seconds=5.0,
+        )
+
+    output = out.getvalue()
+    assert "detached (the worker job keeps running)" in output
+    assert result["status"] == "queued"
+    assert result["detached"] is True
+
+
 def test_follow_chat_matches_just_streamed_ceo_text():
     assert cli._follow_chat_matches_stream("Hello\nworld", " Hello world ") is True
     assert (
@@ -1061,6 +1084,22 @@ def test_format_cli_value_surfaces_artifact_url_for_read_results():
     assert "Path: research/strategy.md" in rendered
     assert "Artifact URL: https://app.fourmanifold.com/api/takyon/businesses/probe/artifact?path=research/strategy.md" in rendered
     assert "# Strategy" in rendered
+
+
+def test_format_cli_value_preserves_bootstrap_job_summary_for_create_results():
+    rendered = cli._format_cli_value(
+        {
+            "success": True,
+            "business": "claimscope0701d",
+            "mode": "live",
+            "bootstrap_job": {
+                "job_id": "job-123",
+                "status": "running",
+            },
+        }
+    )
+
+    assert rendered == "Create running for business:claimscope0701d. Bootstrap job: job-123."
 
 
 def test_scoped_shell_read_slash_injects_current_business(monkeypatch):
