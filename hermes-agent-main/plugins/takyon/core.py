@@ -25454,7 +25454,13 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
         }
         operation["worker_queue"] = True
         operation["worker_max_attempts"] = 1
-        return _commit_tool(canonical_args, operation, scope=operation["scope"])
+        return _run_worker_backed_business_job_and_wait(
+            canonical_args,
+            operation,
+            tool_name="business_x_publish_outreach",
+            wait_seconds=45.0,
+            scope=operation["scope"],
+        )
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -29148,7 +29154,13 @@ def _handle_live_business_reddit_publish_outreach(args: dict) -> str:
             "worker_queue": True,
             "worker_max_attempts": 1,
         }
-        return _commit_tool(canonical_args, operation, scope=operation["scope"])
+        return _run_worker_backed_business_job_and_wait(
+            canonical_args,
+            operation,
+            tool_name="business_reddit_publish_outreach",
+            wait_seconds=45.0,
+            scope=operation["scope"],
+        )
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -31382,6 +31394,139 @@ def _read_work_request_run(store: "TakyonStore", run_id: str) -> tuple[str, dict
     return str(row["status"] or ""), payload if isinstance(payload, dict) else {}
 
 
+def _read_worker_job_run(store: "TakyonStore", worker_job_id: str) -> tuple[str, dict[str, Any]]:
+    """Read the mirrored worker-plane job row when the work-request row is stale."""
+    job_id = str(worker_job_id or "").strip()
+    if not job_id:
+        return "", {}
+    try:
+        try:
+            from . import jobs as worker_jobs
+        except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
+            from plugins.takyon import jobs as worker_jobs
+        with store._connect() as conn:
+            with store._leaf_conn(conn) as raw:
+                job = worker_jobs.get_job(raw, job_id)
+    except Exception:
+        return "", {}
+    if job is None:
+        return "", {}
+    return str(job.status or ""), {
+        "kind": str(job.kind or ""),
+        "payload": dict(job.payload or {}) if isinstance(job.payload, dict) else {},
+        "result": dict(job.result or {}) if isinstance(job.result, dict) else {},
+        "error": dict(job.error or {}) if isinstance(job.error, dict) else {},
+    }
+
+
+def _distribution_provider_blocked_text(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    patterns = (
+        r"\bcreditsdepleted\b",
+        r"does not have any credits to fulfill this request",
+        r"/2/problems/credits\b",
+        r"\bno active composio\b",
+        r"\bconnected account\b",
+    )
+    return any(re.search(pattern, raw, re.I) for pattern in patterns)
+
+
+def _terminal_work_request_result_from_worker_job(
+    worker_status: str,
+    worker_payload: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, Any]] | None:
+    normalized_worker_status = str(worker_status or "").strip().lower()
+    if normalized_worker_status not in _WORK_REQUEST_TERMINAL_STATUSES:
+        return None
+    payload = worker_payload if isinstance(worker_payload, Mapping) else {}
+    result = dict(payload.get("result") or {}) if isinstance(payload.get("result"), Mapping) else {}
+    error_payload = payload.get("error") if isinstance(payload.get("error"), Mapping) else {}
+    error_text = str(
+        result.get("error")
+        or error_payload.get("error")
+        or error_payload.get("reason")
+        or ""
+    ).strip()
+    result_status = str(result.get("status") or "").strip().lower()
+    final_status = result_status if result_status in _WORK_REQUEST_TERMINAL_STATUSES else normalized_worker_status
+    if final_status == "completed":
+        if result.get("blocked"):
+            final_status = "blocked"
+        elif result.get("success") is False:
+            final_status = "failed"
+    if final_status == "failed" and _distribution_provider_blocked_text(error_text):
+        final_status = "blocked"
+    repaired_result = dict(result)
+    repaired_result.setdefault("status", final_status)
+    if final_status == "completed":
+        repaired_result.setdefault("success", True)
+    else:
+        repaired_result.setdefault("success", False)
+    if final_status == "blocked":
+        repaired_result.setdefault("blocked", True)
+    if error_text:
+        repaired_result.setdefault("error", error_text)
+    return final_status, repaired_result
+
+
+def _repair_stale_work_request_from_worker_job(
+    store: "TakyonStore",
+    *,
+    run_id: str,
+    worker_job_id: str,
+    business: str,
+    kind: str,
+    worker_status: str,
+    worker_payload: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, Any]] | None:
+    repaired = _terminal_work_request_result_from_worker_job(worker_status, worker_payload)
+    if repaired is None:
+        return None
+    final_status, final_result = repaired
+    error_text = str(final_result.get("error") or "").strip()
+    try:
+        with store._connect() as conn:
+            row = conn.execute(
+                f"SELECT scope, kind, payload_json FROM {store._work_requests_table()} WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is not None:
+                payload = _json_loads(row.get("payload_json"), {})
+                payload = payload if isinstance(payload, dict) else {}
+                payload["worker_job_id"] = worker_job_id
+                payload["result"] = final_result
+                if error_text:
+                    payload["worker_error"] = error_text
+                conn.execute(
+                    f"UPDATE {store._work_requests_table()} SET status = ?, payload_json = ?, updated_at = ? WHERE id = ?",
+                    (final_status, _json_dumps(payload), _now(), run_id),
+                )
+                if kind not in _WORKER_EXECUTED_JOB_KINDS:
+                    store._rewrite_distribution_files(conn, business)
+                store._record_event(
+                    conn,
+                    scope=str(row.get("scope") or f"business:{business}"),
+                    business_slug=business,
+                    event_type="job.enqueue.status",
+                    payload={
+                        "job_id": run_id,
+                        "kind": str(row.get("kind") or kind),
+                        "status": final_status,
+                        "worker_job_id": worker_job_id,
+                    },
+                )
+    except Exception as exc:
+        logging.getLogger("takyon.worker_attach").warning(
+            "failed to repair stale work request %s from terminal worker job %s: %s",
+            run_id,
+            worker_job_id,
+            exc,
+        )
+    return final_status, final_result
+
+
 def _run_operator_task_on_worker(
     *,
     store: "TakyonStore",
@@ -31428,6 +31573,10 @@ def _run_operator_task_on_worker(
         normalized_status = str(status or "").strip().lower()
         if normalized_status == "running":
             picked_up = True
+        worker_status, worker_payload = _read_worker_job_run(store, worker_job_id)
+        normalized_worker_status = str(worker_status or "").strip().lower()
+        if normalized_worker_status and normalized_worker_status != "queued":
+            picked_up = True
         if normalized_status in _WORK_REQUEST_TERMINAL_STATUSES:
             result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
             result.setdefault("run_id", run_id)
@@ -31438,6 +31587,27 @@ def _run_operator_task_on_worker(
                 result.get("error") or f"{tool_name} {normalized_status or status} on the worker plane"
             )
             return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+        repaired = _repair_stale_work_request_from_worker_job(
+            store,
+            run_id=run_id,
+            worker_job_id=worker_job_id,
+            business=business,
+            kind=kind,
+            worker_status=worker_status,
+            worker_payload=worker_payload,
+        )
+        if repaired is not None:
+            repaired_status, repaired_result = repaired
+            repaired_result = dict(repaired_result)
+            repaired_result.setdefault("run_id", run_id)
+            repaired_result.setdefault("worker_job", worker_job_id)
+            if repaired_result.get("success"):
+                return tool_result(repaired_result)
+            error_text = str(
+                repaired_result.get("error")
+                or f"{tool_name} {repaired_status or worker_status} on the worker plane"
+            )
+            return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
         now = time.monotonic()
         if not picked_up and now >= pickup_deadline:
             # The worker has not STARTED this job yet — it is queued behind an in-flight build on the
@@ -31480,6 +31650,129 @@ def _run_operator_task_on_worker(
                 }
             )
         time.sleep(_WORKER_DEFERRAL_POLL_SECONDS)
+
+
+def _run_worker_backed_business_job_and_wait(
+    args: dict,
+    operation: dict[str, Any],
+    *,
+    tool_name: str,
+    wait_seconds: float = 45.0,
+    scope: str | None = None,
+    store: "TakyonStore" | None = None,
+    principal: dict[str, Any] | None = None,
+) -> str:
+    """Enqueue one worker-backed business job and attach to its canonical work-request row."""
+    active_store = store or _store()
+    try:
+        commit = _commit_tool_data(args, operation, scope=scope, store=active_store, principal=principal)
+        op_result = (commit.get("results") or [{}])[0] if isinstance(commit, dict) else {}
+        run_id = str(op_result.get("job") or "").strip()
+        worker_job_id = str(op_result.get("worker_job") or "").strip()
+        if not run_id or not worker_job_id:
+            raise TakyonError(f"worker-plane enqueue did not return a run handle for {tool_name}")
+        business = _business_slug(
+            {
+                "business": operation.get("business") or args.get("business"),
+                "business_slug": args.get("business_slug"),
+            },
+            required=True,
+        )
+        deadline = time.monotonic() + max(30.0, float(wait_seconds))
+        pickup_deadline = time.monotonic() + min(
+            max(5.0, _WORKER_PICKUP_TIMEOUT_SECONDS),
+            max(5.0, float(wait_seconds)),
+        )
+        picked_up = False
+        while True:
+            status, payload = _read_work_request_run(active_store, run_id)
+            normalized_status = str(status or "").strip().lower()
+            if normalized_status == "running":
+                picked_up = True
+            worker_status, worker_payload = _read_worker_job_run(active_store, worker_job_id)
+            normalized_worker_status = str(worker_status or "").strip().lower()
+            if normalized_worker_status and normalized_worker_status != "queued":
+                picked_up = True
+            if normalized_status in _WORK_REQUEST_TERMINAL_STATUSES:
+                result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                result = dict(result) if isinstance(result, dict) else {}
+                result.setdefault("run_id", run_id)
+                result.setdefault("worker_job", worker_job_id)
+                result.setdefault("business", business)
+                result.setdefault("kind", str(operation.get("kind") or "").strip())
+                result.setdefault("status", normalized_status or status)
+                if normalized_status == "completed" and "success" not in result:
+                    result["success"] = True
+                if result.get("success"):
+                    return tool_result(result)
+                error_text = str(
+                    result.get("error")
+                    or result.get("worker_error")
+                    or f"{tool_name} {normalized_status or status} on the worker plane"
+                ).strip() or f"{tool_name} {normalized_status or status} on the worker plane"
+                return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+            repaired = _repair_stale_work_request_from_worker_job(
+                active_store,
+                run_id=run_id,
+                worker_job_id=worker_job_id,
+                business=business,
+                kind=str(operation.get("kind") or "").strip(),
+                worker_status=worker_status,
+                worker_payload=worker_payload,
+            )
+            if repaired is not None:
+                repaired_status, repaired_result = repaired
+                repaired_result = dict(repaired_result)
+                repaired_result.setdefault("run_id", run_id)
+                repaired_result.setdefault("worker_job", worker_job_id)
+                repaired_result.setdefault("business", business)
+                repaired_result.setdefault("kind", str(operation.get("kind") or "").strip())
+                if repaired_result.get("success"):
+                    return tool_result(repaired_result)
+                error_text = str(
+                    repaired_result.get("error")
+                    or repaired_result.get("worker_error")
+                    or f"{tool_name} {repaired_status or worker_status} on the worker plane"
+                ).strip() or f"{tool_name} {repaired_status or worker_status} on the worker plane"
+                return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+            now = time.monotonic()
+            if not picked_up and now >= pickup_deadline:
+                return tool_result(
+                    {
+                        "success": False,
+                        "status": normalized_status or "queued",
+                        "detached": True,
+                        "run_id": run_id,
+                        "worker_job": worker_job_id,
+                        "business": business,
+                        "kind": str(operation.get("kind") or "").strip(),
+                        "note": (
+                            f"{tool_name} is queued on the worker plane and survives this session. "
+                            "Re-call the tool with the SAME arguments and idempotency_key to "
+                            f"re-attach and collect the result for run {run_id}."
+                        ),
+                    }
+                )
+            if now >= deadline:
+                return tool_result(
+                    {
+                        "success": False,
+                        "status": normalized_status or "running",
+                        "detached": True,
+                        "run_id": run_id,
+                        "worker_job": worker_job_id,
+                        "business": business,
+                        "kind": str(operation.get("kind") or "").strip(),
+                        "note": (
+                            f"{tool_name} is still executing on the worker plane and survives this "
+                            "session. Re-call the tool with the SAME arguments and idempotency_key to "
+                            f"re-attach and collect the result for run {run_id}."
+                        ),
+                    }
+                )
+            time.sleep(_WORKER_DEFERRAL_POLL_SECONDS)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
 
 
 def _defer_claude_agent_task_to_worker(args: dict) -> str | None:

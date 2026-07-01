@@ -7678,6 +7678,58 @@ def test_business_x_publish_outreach_live_x_blocks_before_enqueue_when_credits_a
     assert "insufficient_creative_credits" in result["error"]
 
 
+def test_business_x_publish_outreach_live_attaches_to_worker_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:jobtailor",
+        [
+            {
+                "action": "business.upsert",
+                "business": "jobtailor",
+                "name": "JobTailor",
+                "mode": "live",
+            }
+        ],
+        "init-jobtailor-live-x-worker-wait",
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_wait(args, operation, **kwargs):
+        captured["args"] = dict(args)
+        captured["operation"] = dict(operation)
+        captured.update(kwargs)
+        return takyon_core.tool_result({"success": True, "status": "completed", "post_id": "tweet-123"})
+
+    monkeypatch.setattr(takyon_core, "_creative_credit_preflight_gate", lambda *args, **kwargs: {"success": True})
+    monkeypatch.setattr(takyon_core, "_run_worker_backed_business_job_and_wait", _fake_wait)
+
+    result = json.loads(
+        handle_business_x_publish_outreach(
+            {
+                "business": "jobtailor",
+                "channel": "x",
+                "provider": "x",
+                "body": "Scope creep keeps eating freelancer margins.",
+                "requires_api": ["x"],
+                "idempotency_key": "jobtailor-x-live-worker-wait-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["post_id"] == "tweet-123"
+    assert captured["tool_name"] == "business_x_publish_outreach"
+    assert captured["wait_seconds"] == 45.0
+    assert captured["operation"]["kind"] == "x.publish_outreach"
+    assert captured["operation"]["worker_queue"] is True
+    assert captured["operation"]["worker_max_attempts"] == 1
+    assert captured["operation"]["payload"]["requested_external_side_effect"] == "publish_outreach"
+    assert captured["scope"] == "business:jobtailor"
+
+
 def test_business_reddit_publish_outreach_sets_reddit_defaults_in_test_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
@@ -8012,6 +8064,76 @@ class _DeferralStoreStub:
         }
 
 
+def test_worker_backed_business_job_wait_returns_terminal_result(monkeypatch):
+    store = _DeferralStoreStub()
+    statuses = iter(
+        [
+            ("queued", {}),
+            ("running", {}),
+            ("completed", {"result": {"success": True, "status": "completed", "post_id": "tweet-123"}}),
+        ]
+    )
+    monkeypatch.setattr(takyon_core, "_read_work_request_run", lambda _store, _run_id: next(statuses))
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
+
+    raw = takyon_core._run_worker_backed_business_job_and_wait(
+        {"business": "acme", "idempotency_key": "x-job-1"},
+        {
+            "action": "job.enqueue",
+            "business": "acme",
+            "kind": "x.publish_outreach",
+            "worker_queue": True,
+            "payload": {"body": "Ship it"},
+        },
+        tool_name="business_x_publish_outreach",
+        store=store,
+        wait_seconds=30.0,
+    )
+    result = json.loads(raw)
+
+    assert result["success"] is True
+    assert result["status"] == "completed"
+    assert result["post_id"] == "tweet-123"
+    assert result["run_id"] == "run-1"
+    assert result["worker_job"] == "wj-1"
+
+
+def test_worker_backed_business_job_wait_repairs_stale_run_from_terminal_worker_job(monkeypatch):
+    store = _DeferralStoreStub()
+    monkeypatch.setattr(takyon_core, "_read_work_request_run", lambda _store, _run_id: ("queued", {}))
+    monkeypatch.setattr(
+        takyon_core,
+        "_read_worker_job_run",
+        lambda _store, _worker_job_id: (
+            "failed",
+            {"error": {"reason": "handler_error", "error": "CreditsDepleted: buy more credits"}},
+        ),
+    )
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
+
+    raw = takyon_core._run_worker_backed_business_job_and_wait(
+        {"business": "acme", "idempotency_key": "x-job-stale"},
+        {
+            "action": "job.enqueue",
+            "business": "acme",
+            "kind": "x.publish_outreach",
+            "worker_queue": True,
+            "payload": {"body": "Ship it"},
+        },
+        tool_name="business_x_publish_outreach",
+        store=store,
+        wait_seconds=30.0,
+    )
+    result = json.loads(raw)
+
+    assert result["success"] is False
+    assert result["status"] == "blocked"
+    assert result["blocked"] is True
+    assert result["run_id"] == "run-1"
+    assert result["worker_job"] == "wj-1"
+    assert "CreditsDepleted" in result["error"]
+
+
 def test_defer_claude_agent_task_attaches_to_worker_run(monkeypatch):
     """The tool enqueues ONE canonical run (work request mirrored to a worker job), waits on the
     run row, and returns the recorded tool result verbatim — caller-context defaults (like
@@ -8054,6 +8176,40 @@ def test_defer_claude_agent_task_attaches_to_worker_run(monkeypatch):
     # No session binding here, product workspace: refresh default frozen at the caller.
     assert op["payload"]["args"]["refresh_surface"] is True
     assert store.commits[0]["idempotency_key"] == "task-1:claude-sdk-worker-job"
+
+
+def test_defer_claude_agent_task_repairs_stale_run_from_terminal_worker_job(monkeypatch):
+    monkeypatch.setenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", "1")
+    monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
+    store = _DeferralStoreStub()
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda op, **kw: {})
+    monkeypatch.setattr(takyon_core, "_read_work_request_run", lambda _store, _run_id: ("queued", {}))
+    monkeypatch.setattr(
+        takyon_core,
+        "_read_worker_job_run",
+        lambda _store, _worker_job_id: (
+            "completed",
+            {"result": {"success": False, "status": "failed", "error": "claude worker crashed"}},
+        ),
+    )
+    monkeypatch.setattr(takyon_core, "_WORKER_DEFERRAL_POLL_SECONDS", 0.0)
+
+    raw = takyon_core._defer_claude_agent_task_to_worker(
+        {
+            "business": "acme",
+            "instruction": "build the site",
+            "idempotency_key": "task-stale",
+            "workspace": "product/site",
+        }
+    )
+    result = json.loads(raw)
+
+    assert result["success"] is False
+    assert result["status"] == "failed"
+    assert result["run_id"] == "run-1"
+    assert result["worker_job"] == "wj-1"
+    assert result["error"] == "claude worker crashed"
 
 
 def test_defer_claude_agent_task_detaches_when_wait_budget_expires(monkeypatch):
