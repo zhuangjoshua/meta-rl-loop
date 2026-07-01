@@ -89,10 +89,24 @@ def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface(
 
     assert "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access." in prompt
     assert "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell." in prompt
-    assert "Do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows on this first pass." in prompt
+    assert "If `Explicit product workflow requested: no`, do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows in this pass." in prompt
     assert "The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like." in prompt
     assert "Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI." in prompt
     assert "The result should be publishable and product-specific on the first pass." in prompt
+
+
+def test_bootstrap_prompt_folds_workflow_build_into_second_pass_and_verifies_real_action():
+    prompt = _business_bootstrap_instruction(
+        "quoteforge",
+        "Build a service that turns messy home-repair notes into a contractor-ready scope of work and quote request.",
+        "live",
+        business_name="QuoteForge",
+    )
+
+    assert "In this SAME second business_claude_agent_task, extend `/app` into the requested real signed-in subscribed customer workflow" in prompt
+    assert "do NOT start a third product build pass here" in prompt
+    assert "Verify that `/app` is wired to at least one real non-underscore HTTP action file under `product/site/actions/`" in prompt
+    assert "call business_check_runtime_capabilities for the business and confirm the requested action is exposed" not in prompt
 
 
 def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_blocker():

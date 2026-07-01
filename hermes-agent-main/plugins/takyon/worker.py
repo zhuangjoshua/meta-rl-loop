@@ -1212,6 +1212,40 @@ def _business_owner_user_id(slug: str) -> str:
     )
 
 
+def _bootstrap_real_http_actions(store: Any, slug: str) -> set[str]:
+    """Real HTTP action files present for a bootstrap-built product surface."""
+    try:
+        from . import app_actions as takyon_app_actions
+        from .core import _surface_product_workflow_shape
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+        from plugins.takyon.core import _surface_product_workflow_shape
+
+    surface: dict[str, Any] = {}
+    source_path = "product/site"
+    try:
+        if hasattr(store, "_connect") and hasattr(store, "_app_surface_contract"):
+            with store._connect() as conn:
+                loaded_surface = store._app_surface_contract(conn, slug)
+            if isinstance(loaded_surface, dict):
+                surface = loaded_surface
+                source_path = str(surface.get("source_path") or "").strip() or source_path
+    except Exception:
+        surface = {}
+    try:
+        site_root = store._business_root(slug) / source_path
+    except Exception:
+        return set()
+    surface_with_workflow = {
+        **surface,
+        "product_workflow": _surface_product_workflow_shape(surface),
+    }
+    try:
+        return takyon_app_actions.site_http_action_names(site_root, surface_with_workflow)
+    except Exception:
+        return set()
+
+
 def ceo_wake_handler(job: Job) -> JobRunResult:
     """Handle a ``ceo_wake`` job: run the scheduled CEO turn for ``job.business_slug`` and report its
     true model cost as ``actual_cost_cents`` for flow-A settlement.
@@ -1472,12 +1506,25 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         )
 
     # The done-gate. A bootstrap is DONE the moment its CEO turn finished cleanly (turn_completed)
-    # OR its product site published — either way the build reached its goal and must settle+complete,
-    # never requeue. Iteration-budget exhaustion is a real incomplete ONLY when the turn capped out
-    # AND the site never published: that genuine pre-publish cap raises so run_one requeues for
-    # continuation. Everything else here is non-fatal bookkeeping (the try/except wraps above/below).
-    bootstrap_done = bool(turn_completed) or publish_status == "published"
+    # OR its product site published — unless the goal explicitly requested a real signed-in workflow
+    # and the published source still has no real HTTP action backing `/app`. In that workflow case a
+    # published access shell is incomplete and must requeue rather than settling a fake "done".
+    try:
+        from .cli import _bootstrap_goal_requests_product_workflow
+    except Exception:
+        from plugins.takyon.cli import _bootstrap_goal_requests_product_workflow
+
+    workflow_requested = _bootstrap_goal_requests_product_workflow(goal)
+    real_http_actions = _bootstrap_real_http_actions(store, slug) if workflow_requested else set()
+    bootstrap_done = (bool(turn_completed) or publish_status == "published") and (
+        not workflow_requested or bool(real_http_actions)
+    )
     if not bootstrap_done:
+        if workflow_requested and publish_status == "published" and not real_http_actions:
+            raise RuntimeError(
+                f"bootstrap for business:{slug} published the access shell but never materialized "
+                "a real /app workflow action"
+            )
         raise RuntimeError(
             f"bootstrap for business:{slug} exhausted its iteration budget before publishing "
             f"(surface status={publish_status})"

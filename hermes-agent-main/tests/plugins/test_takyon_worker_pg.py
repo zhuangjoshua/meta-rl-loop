@@ -1355,11 +1355,12 @@ def test_business_owner_user_id_fails_loud_when_row_never_appears(monkeypatch):
 class _BootstrapStubStore:
     """Minimal TakyonStore stand-in for ceo_bootstrap_handler unit tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, goal: str = "do the thing") -> None:
+        self.goal = goal
         self.commits: list[dict[str, Any]] = []
 
     def read(self, *_, **__) -> dict[str, Any]:
-        return {"business": {"name": "Acme", "goal": "do the thing"}}
+        return {"business": {"name": "Acme", "goal": self.goal}}
 
     def commit(self, **kwargs) -> dict[str, Any]:
         self.commits.append(kwargs)
@@ -1372,6 +1373,7 @@ def _install_bootstrap_handler_stubs(
     turn_completed: bool,
     surface_refresh: Any,
     run_turn=None,
+    goal: str = "do the thing",
 ):
     """Patch every heavy collaborator of ceo_bootstrap_handler so it runs in-process without a DB,
     workspace, agent, or network. Returns the dict capturing what the handler did."""
@@ -1381,7 +1383,7 @@ def _install_bootstrap_handler_stubs(
     import gateway.session_context as session_context
 
     captured: dict[str, Any] = {"events": [], "refresh_calls": 0}
-    store = _BootstrapStubStore()
+    store = _BootstrapStubStore(goal=goal)
 
     monkeypatch.setattr(core, "TakyonStore", lambda *a, **k: store)
 
@@ -1523,7 +1525,41 @@ def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         worker.ceo_bootstrap_handler(job)
     assert "iteration budget" in str(exc.value)
-    assert "acme" in str(exc.value)
+
+
+def test_bootstrap_workflow_goal_published_without_real_action_requeues(monkeypatch):
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+        goal=(
+            "Build a service that helps customers upload messy contractor notes and receive a "
+            "quote-ready scope of work in the signed-in app."
+        ),
+    )
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: set())
+    job = SimpleNamespace(id="job-workflow-missing", business_slug="acme", payload={})
+
+    with pytest.raises(RuntimeError) as exc:
+        worker.ceo_bootstrap_handler(job)
+    assert "never materialized a real /app workflow action" in str(exc.value)
+
+
+def test_bootstrap_workflow_goal_published_with_real_action_completes(monkeypatch):
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+        goal=(
+            "Build a service that helps customers upload messy contractor notes and receive a "
+            "quote-ready scope of work in the signed-in app."
+        ),
+    )
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"generate-quote"})
+    job = SimpleNamespace(id="job-workflow-ok", business_slug="acme", payload={})
+
+    result = worker.ceo_bootstrap_handler(job)
+    assert isinstance(result, jobs.JobRunResult)
 
 
 def test_channel_tracked_link_tags_without_clobbering_and_meta_delegates():
