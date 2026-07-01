@@ -472,3 +472,50 @@ class TestWebExtractDiagnosis:
         assert entry["content"]
         assert "Example Domain" in entry["content"]
         assert not entry.get("error")
+
+    def test_extract_falls_back_to_raw_content_when_auxiliary_resolution_fails(self, monkeypatch):
+        import asyncio
+        from tools import web_tools
+        from agent import web_search_registry as reg
+
+        long_content = "Example Domain\n" + ("Long content. " * 600)
+
+        class _PaidExtract:
+            name = "tavily"
+            display_name = "Tavily"
+
+            def supports_extract(self):
+                return True
+
+            def extract(self, urls, **kwargs):
+                return [
+                    {
+                        "url": urls[0],
+                        "title": "Example Domain",
+                        "content": long_content,
+                        "raw_content": long_content,
+                        "error": "",
+                    }
+                ]
+
+        monkeypatch.setattr(web_tools, "_get_extract_backend", lambda: "tavily")
+        monkeypatch.setattr(reg, "get_provider", lambda name: _PaidExtract())
+        monkeypatch.setattr(web_tools, "provider_billing", lambda name: ("free", "tavily"))
+        monkeypatch.setattr(
+            web_tools,
+            "get_async_text_auxiliary_client",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing auxiliary runtime")),
+        )
+
+        result = json.loads(
+            asyncio.run(
+                web_tools.web_extract_tool(
+                    ["https://example.com"], use_llm_processing=True
+                )
+            )
+        )
+        assert "results" in result
+        assert len(result["results"]) == 1
+        entry = result["results"][0]
+        assert entry["content"] == long_content
+        assert not entry.get("error")

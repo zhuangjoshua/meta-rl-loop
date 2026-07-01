@@ -343,8 +343,12 @@ def _is_nous_auxiliary_client(client: Any) -> bool:
 
 def _resolve_web_extract_auxiliary(model: Optional[str] = None) -> tuple[Optional[Any], Optional[str], Dict[str, Any]]:
     """Resolve the current web-extract auxiliary client, model, and extra body."""
-    client, default_model = get_async_text_auxiliary_client("web_extract")
     configured_model = os.getenv("AUXILIARY_WEB_EXTRACT_MODEL", "").strip()
+    try:
+        client, default_model = get_async_text_auxiliary_client("web_extract")
+    except Exception as exc:
+        logger.warning("web_extract auxiliary unavailable: %s", exc)
+        return None, (model or configured_model or None), {}
     effective_model = model or configured_model or default_model
 
     extra_body: Dict[str, Any] = {}

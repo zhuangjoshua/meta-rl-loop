@@ -174,6 +174,16 @@ class TestFirecrawlClientConfig:
             assert tools.web_tools.check_auxiliary_model() is False
             assert tools.web_tools.check_auxiliary_model() is True
 
+    def test_check_auxiliary_model_returns_false_when_aux_resolution_raises(self):
+        """Auxiliary resolution failures should degrade to unavailable, not crash web_extract."""
+        import tools.web_tools
+
+        with patch(
+            "tools.web_tools.get_async_text_auxiliary_client",
+            side_effect=FileNotFoundError("missing auxiliary runtime"),
+        ):
+            assert tools.web_tools.check_auxiliary_model() is False
+
     @pytest.mark.asyncio
     async def test_summarizer_re_resolves_backend_after_initial_unavailable_state(self):
         """Summarization should pick up a backend that becomes available later in-process."""
