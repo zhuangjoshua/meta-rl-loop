@@ -54,11 +54,11 @@ import { Md } from './markdown.js'
 // as still-open keeps the boundary parked behind it until the closer
 // arrives (or the stream ends and the non-streaming `<Md>` takes over,
 // at which point the renderer's fallback kicks in correctly).
-const fenceOpenAt = (s: string, end: number) => {
+const fenceOpenAt = (s: string, end: number, from = 0) => {
   let codeOpen = false
   let mathOpen = false
   let mathOpener: '$$' | '\\[' | null = null
-  let i = 0
+  let i = from
 
   while (i < end) {
     const nl = s.indexOf('\n', i)
@@ -104,21 +104,30 @@ const fenceOpenAt = (s: string, end: number) => {
 // Find the last "\n\n" boundary before `end` that is OUTSIDE a fenced code
 // block. Returns the index AFTER the second newline (start of the next
 // block), or -1 if no safe boundary exists yet.
-export const findStableBoundary = (text: string) => {
+//
+// `from` is the length of an already-committed, known-fence-clean stable
+// prefix. The caller only ever advances the prefix, so any new boundary must
+// lie at or beyond `from`; searching below it can never win. Because the
+// prefix is guaranteed fence-balanced at `from` (that is precisely how it was
+// committed), fence toggles need only be re-scanned over the suffix beyond
+// `from` rather than from index 0 — turning per-delta work from
+// O(total text) into O(new suffix).
+export const findStableBoundary = (text: string, from = 0) => {
   let idx = text.length
 
-  while (idx > 0) {
+  while (idx > from) {
     const boundary = text.lastIndexOf('\n\n', idx - 1)
 
-    if (boundary < 0) {
+    if (boundary < 0 || boundary + 2 <= from) {
       return -1
     }
 
     // Boundary candidate: end of stable prefix is boundary + 2 (start of
-    // next block). Check fence balance up to that point.
+    // next block). Check fence balance up to that point, scanning only the
+    // suffix beyond the known-clean prefix at `from`.
     const splitAt = boundary + 2
 
-    if (!fenceOpenAt(text, splitAt)) {
+    if (!fenceOpenAt(text, splitAt, from)) {
       return splitAt
     }
 
@@ -137,7 +146,7 @@ export const StreamingMd = memo(function StreamingMd({ cols, compact, t, text }:
     stablePrefixRef.current = ''
   }
 
-  const boundary = findStableBoundary(text)
+  const boundary = findStableBoundary(text, stablePrefixRef.current.length)
 
   // Only advance the prefix — never retreat. The boundary math looks at the
   // FULL text each call; if it returns a larger index than before, we grow

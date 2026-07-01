@@ -98,6 +98,7 @@ class HonchoSessionManager:
         self._cache_lock = threading.RLock()
         self._peers_cache: dict[str, Any] = {}
         self._sessions_cache: dict[str, Any] = {}
+        self._session_messages_cache: dict[str, list] = {}
 
         # Write frequency state
         write_frequency = (config.write_frequency if config else "async")
@@ -181,7 +182,10 @@ class HonchoSessionManager:
         with self._cache_lock:
             if session_id in self._sessions_cache:
                 logger.debug("Honcho session '%s' retrieved from cache", session_id)
-                return self._sessions_cache[session_id], []
+                return (
+                    self._sessions_cache[session_id],
+                    self._session_messages_cache.get(session_id, []),
+                )
 
         session = self.honcho.session(session_id)
 
@@ -261,6 +265,7 @@ class HonchoSessionManager:
             )
 
         self._sessions_cache[session_id] = session
+        self._session_messages_cache[session_id] = existing_messages
         return session, existing_messages
 
     def _sanitize_id(self, id_str: str) -> str:
@@ -505,6 +510,7 @@ class HonchoSessionManager:
             old_session = self._cache.pop(key, None)
             if old_session:
                 self._sessions_cache.pop(old_session.honcho_session_id, None)
+                self._session_messages_cache.pop(old_session.honcho_session_id, None)
 
             # Create new session with timestamp suffix
             timestamp = int(time.time())

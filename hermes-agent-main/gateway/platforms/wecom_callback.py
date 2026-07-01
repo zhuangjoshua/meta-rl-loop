@@ -16,6 +16,7 @@ import asyncio
 import logging
 import socket as _socket
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from xml.etree import ElementTree as ET
 
@@ -46,6 +47,7 @@ DEFAULT_PORT = 8645
 DEFAULT_PATH = "/wecom/callback"
 ACCESS_TOKEN_TTL_SECONDS = 7200
 MESSAGE_DEDUP_TTL_SECONDS = 300
+MAX_USER_APP_MAP_ENTRIES = 5000
 
 
 def check_wecom_callback_requirements() -> bool:
@@ -67,7 +69,7 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self._message_queue: asyncio.Queue[MessageEvent] = asyncio.Queue()
         self._poll_task: Optional[asyncio.Task] = None
         self._seen_messages: Dict[str, float] = {}
-        self._user_app_map: Dict[str, str] = {}
+        self._user_app_map: "OrderedDict[str, str]" = OrderedDict()
         self._access_tokens: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -136,13 +138,15 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                 "[WecomCallback] HTTP server listening on %s:%s%s",
                 self._host, self._port, self._path,
             )
-            for app in self._apps:
-                try:
-                    await self._refresh_access_token(app)
-                except Exception as exc:
+            results = await asyncio.gather(
+                *(self._refresh_access_token(app) for app in self._apps),
+                return_exceptions=True,
+            )
+            for app, result in zip(self._apps, results):
+                if isinstance(result, Exception):
                     logger.warning(
                         "[WecomCallback] Initial token refresh failed for app '%s': %s",
-                        app.get("name", "default"), exc,
+                        app.get("name", "default"), result,
                     )
             return True
         except Exception:
@@ -279,7 +283,13 @@ class WecomCallbackAdapter(BasePlatformAdapter):
                         map_key = self._user_app_key(
                             str(app.get("corp_id") or ""), event.source.user_id,
                         )
+                        # LRU insert: refresh recency and cap total entries so
+                        # long-running multi-tenant gateways don't grow without
+                        # bound (mirrors the _seen_messages prune at ~2000).
                         self._user_app_map[map_key] = app["name"]
+                        self._user_app_map.move_to_end(map_key)
+                        while len(self._user_app_map) > MAX_USER_APP_MAP_ENTRIES:
+                            self._user_app_map.popitem(last=False)
                     await self._message_queue.put(event)
                 # Immediately acknowledge — the agent's reply will arrive
                 # later via the proactive message/send API.

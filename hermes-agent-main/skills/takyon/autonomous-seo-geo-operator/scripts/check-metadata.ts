@@ -15,8 +15,9 @@
  * (.tsx/.jsx/.astro/.vue/.svelte/.md/.mdx) are scanned heuristically — confirm
  * findings by reading the file or rendering the page before acting on them.
  */
-import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
-import { join, extname, relative } from "node:path";
+import { readFileSync } from "node:fs";
+import { extname, relative } from "node:path";
+import { collectTargets } from "./lib/fs-scan.ts";
 
 const TITLE_MAX = 60;
 const TITLE_MIN = 15;
@@ -38,19 +39,6 @@ const PAGE_EXTS = [
   ".mdx",
 ];
 
-const IGNORE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  ".nuxt",
-  ".svelte-kit",
-  ".astro",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-]);
-
 type Finding = {
   file: string;
   kind: "html" | "source";
@@ -66,39 +54,6 @@ type Finding = {
   words: number | null;
   issues: string[];
 };
-
-function walk(dir: string, acc: string[] = []): string[] {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const e of entries) {
-    const full = join(dir, e.name);
-    if (e.isDirectory()) {
-      if (IGNORE_DIRS.has(e.name) || e.name.startsWith(".")) continue;
-      walk(full, acc);
-    } else if (e.isFile() && PAGE_EXTS.includes(extname(e.name))) {
-      acc.push(full);
-    }
-  }
-  return acc;
-}
-
-function collectTargets(args: string[]): string[] {
-  const inputs = args.length ? args : [process.cwd()];
-  const files = new Set<string>();
-  for (const input of inputs) {
-    if (!existsSync(input)) continue;
-    if (statSync(input).isDirectory()) {
-      for (const f of walk(input)) files.add(f);
-    } else if (PAGE_EXTS.includes(extname(input))) {
-      files.add(input);
-    }
-  }
-  return [...files];
-}
 
 function parseAttrs(tag: string): Record<string, string> {
   const attrs: Record<string, string> = {};
@@ -256,7 +211,7 @@ function finalize(f: Finding): Finding {
 }
 
 function main() {
-  const targets = collectTargets(process.argv.slice(2));
+  const targets = collectTargets(process.argv.slice(2), PAGE_EXTS);
   const findings: Finding[] = [];
   for (const file of targets) {
     let content: string;

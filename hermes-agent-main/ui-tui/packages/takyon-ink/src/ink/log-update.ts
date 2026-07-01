@@ -68,40 +68,44 @@ export class LogUpdate {
     let currentHyperlink: Hyperlink = undefined
 
     for (let y = 0; y < screen.height; y++) {
-      let line = ''
+      const pieces: string[] = []
 
       for (let x = 0; x < screen.width; x++) {
         const cell = cellAt(screen, x, y)
 
-        if (cell && cell.width !== CellWidth.SpacerTail) {
-          // Handle hyperlink transitions
-          if (cell.hyperlink !== currentHyperlink) {
-            if (currentHyperlink !== undefined) {
-              line += LINK_END
-            }
-
-            if (cell.hyperlink !== undefined) {
-              line += oscLink(cell.hyperlink)
-            }
-
-            currentHyperlink = cell.hyperlink
-          }
-
-          const cellStyles = this.options.stylePool.get(cell.styleId)
-          const styleDiff = diffAnsiCodes(currentStyles, cellStyles)
-
-          if (styleDiff.length > 0) {
-            line += ansiCodesToString(styleDiff)
-            currentStyles = cellStyles
-          }
-
-          line += cell.char
+        // Fast path: skip empty/null cells and wide-char spacer tails before
+        // doing any hyperlink/style work.
+        if (!cell || cell.width === CellWidth.SpacerTail) {
+          continue
         }
+
+        // Handle hyperlink transitions
+        if (cell.hyperlink !== currentHyperlink) {
+          if (currentHyperlink !== undefined) {
+            pieces.push(LINK_END)
+          }
+
+          if (cell.hyperlink !== undefined) {
+            pieces.push(oscLink(cell.hyperlink))
+          }
+
+          currentHyperlink = cell.hyperlink
+        }
+
+        const cellStyles = this.options.stylePool.get(cell.styleId)
+        const styleDiff = diffAnsiCodes(currentStyles, cellStyles)
+
+        if (styleDiff.length > 0) {
+          pieces.push(ansiCodesToString(styleDiff))
+          currentStyles = cellStyles
+        }
+
+        pieces.push(cell.char)
       }
 
       // Close any open hyperlink before resetting styles
       if (currentHyperlink !== undefined) {
-        line += LINK_END
+        pieces.push(LINK_END)
         currentHyperlink = undefined
       }
 
@@ -109,11 +113,11 @@ export class LogUpdate {
       const resetCodes = diffAnsiCodes(currentStyles, [])
 
       if (resetCodes.length > 0) {
-        line += ansiCodesToString(resetCodes)
+        pieces.push(ansiCodesToString(resetCodes))
         currentStyles = []
       }
 
-      lines.push(line.trimEnd())
+      lines.push(pieces.join('').trimEnd())
     }
 
     if (lines.length === 0) {

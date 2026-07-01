@@ -145,6 +145,15 @@ export function scanPositions(screen: Screen, query: string): MatchPosition[] {
 
   const t0 = performance.now()
 
+  // First code unit of the (lowercased) query. Rows whose built text
+  // can't contain it are skipped without running indexOf — identical
+  // result since indexOf would return -1 anyway.
+  const firstUnit = lq[0]!
+
+  // Reused across rows — cleared via .length = 0 instead of reallocating.
+  const colOf: number[] = []
+  const codeUnitToCell: number[] = []
+
   for (let row = 0; row < h; row++) {
     const rowOff = row * w
     // Same text-build as applySearchHighlight. Keep in sync — or extract
@@ -153,8 +162,9 @@ export function scanPositions(screen: Screen, query: string): MatchPosition[] {
     // indices in colOf — surrogate pairs (emoji) and multi-unit lowercase
     // (Turkish İ → i + U+0307) make text.length > colOf.length.
     let text = ''
-    const colOf: number[] = []
-    const codeUnitToCell: number[] = []
+    colOf.length = 0
+    codeUnitToCell.length = 0
+    let hasFirstUnit = false
 
     for (let col = 0; col < w; col++) {
       const idx = rowOff + col
@@ -168,11 +178,21 @@ export function scanPositions(screen: Screen, query: string): MatchPosition[] {
       const cellIdx = colOf.length
 
       for (let i = 0; i < lc.length; i++) {
+        if (lc[i] === firstUnit) {
+          hasFirstUnit = true
+        }
+
         codeUnitToCell.push(cellIdx)
       }
 
       text += lc
       colOf.push(col)
+    }
+
+    // Query's first code unit never appears in this row — indexOf(lq)
+    // would return -1, so skip the search entirely.
+    if (!hasFirstUnit) {
+      continue
     }
 
     // Non-overlapping — same advance as applySearchHighlight.

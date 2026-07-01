@@ -267,11 +267,13 @@ class IRCAdapter(BasePlatformAdapter):
         target = chat_id  # channel name or nick for DMs
         lines = self._split_message(content, target)
 
-        for line in lines:
+        for i, line in enumerate(lines):
             try:
                 await self._send_raw(f"PRIVMSG {target} :{line}")
-                # Basic rate limiting to avoid excess flood
-                await asyncio.sleep(0.3)
+                # Basic rate limiting to avoid excess flood — skip the sleep
+                # after the final line so single-line replies incur no delay.
+                if i < len(lines) - 1:
+                    await asyncio.sleep(0.3)
             except Exception as e:
                 return SendResult(success=False, error=str(e))
 
@@ -363,6 +365,12 @@ class IRCAdapter(BasePlatformAdapter):
         self._writer.write(encoded)
         await self._writer.drain()
 
+    # IRC lines are capped at 512 bytes; a residual buffer far larger than
+    # that can never complete a valid line.  Cap accumulated unterminated
+    # data so a stuck/hostile peer streaming without CRLF cannot grow the
+    # buffer without bound on this hot read path.
+    _MAX_UNTERMINATED_BUFFER = 64 * 1024
+
     async def _receive_loop(self) -> None:
         """Main receive loop — reads lines and dispatches them."""
         buffer = b""
@@ -379,6 +387,13 @@ class IRCAdapter(BasePlatformAdapter):
                         await self._handle_line(decoded)
                     except Exception as e:
                         logger.warning("IRC: error handling line: %s", e)
+                # Bound accumulation of unterminated data before re-looping.
+                if len(buffer) > self._MAX_UNTERMINATED_BUFFER:
+                    logger.warning(
+                        "IRC: discarding %d bytes of unterminated data (no CRLF)",
+                        len(buffer),
+                    )
+                    buffer = b""
         except asyncio.CancelledError:
             raise
         except Exception as e:

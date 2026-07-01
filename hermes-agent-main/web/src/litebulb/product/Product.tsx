@@ -1,5 +1,7 @@
 import {
   Component,
+  Suspense,
+  lazy,
   useEffect,
   useRef,
   useState,
@@ -9,9 +11,6 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkBreaks from "remark-breaks";
-import remarkGfm from "remark-gfm";
 import type {
   TakyonBusinessCreativeCreditsResponse,
   TakyonBusinessTractionResponse,
@@ -465,6 +464,33 @@ class MarkdownBoundary extends Component<
   }
 }
 
+// The react-markdown pipeline (react-markdown + remark-gfm + remark-breaks) pulls
+// in the full unified/mdast/micromark stack (~60-100KB gz). It only ever renders
+// inside chat bubbles that appear after interaction/polling, so it is code-split
+// out of the initial Product route bundle here: the renderer and both remark
+// plugins are loaded lazily the first time a markdown bubble actually mounts.
+const LazyMarkdown = lazy(async () => {
+  const [{ default: ReactMarkdown }, { default: remarkGfm }, { default: remarkBreaks }] =
+    await Promise.all([
+      import("react-markdown"),
+      import("remark-gfm"),
+      import("remark-breaks"),
+    ]);
+  function MarkdownRenderer({ children }: { children: string }) {
+    return (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={{
+          a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
+        }}
+      >
+        {children}
+      </ReactMarkdown>
+    );
+  }
+  return { default: MarkdownRenderer };
+});
+
 function AgentMessageMarkdown({
   text,
   businessSlug = "",
@@ -479,14 +505,9 @@ function AgentMessageMarkdown({
   return (
     <div className="lb-msg__md">
       <MarkdownBoundary text={safe}>
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm, remarkBreaks]}
-          components={{
-            a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
-          }}
-        >
-          {linked}
-        </ReactMarkdown>
+        <Suspense fallback={<div className="lb-msg__md lb-msg__md--raw">{safe}</div>}>
+          <LazyMarkdown>{linked}</LazyMarkdown>
+        </Suspense>
       </MarkdownBoundary>
     </div>
   );

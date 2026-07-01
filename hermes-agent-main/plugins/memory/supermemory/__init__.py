@@ -260,15 +260,39 @@ def _is_trivial_message(text: str) -> bool:
     return bool(_TRIVIAL_RE.match((text or "").strip()))
 
 
+_SDK_CLIENT_CACHE: Dict[tuple, Any] = {}
+_SDK_CLIENT_CACHE_LOCK = threading.Lock()
+
+
+def _get_sdk_client(api_key: str, timeout: float):
+    """Return a shared Supermemory SDK client keyed by (api_key, timeout).
+
+    The SDK client owns an httpx connection pool; sharing one per
+    (api_key, timeout) across concurrent sessions collapses N per-session
+    pools into one, saving RAM and idle sockets. ``container_tag`` and
+    ``search_mode`` stay per-instance since they are passed per-call.
+    """
+    key = (api_key, timeout)
+    client = _SDK_CLIENT_CACHE.get(key)
+    if client is not None:
+        return client
+    with _SDK_CLIENT_CACHE_LOCK:
+        client = _SDK_CLIENT_CACHE.get(key)
+        if client is None:
+            from supermemory import Supermemory
+
+            client = Supermemory(api_key=api_key, timeout=timeout, max_retries=0)
+            _SDK_CLIENT_CACHE[key] = client
+        return client
+
+
 class _SupermemoryClient:
     def __init__(self, api_key: str, timeout: float, container_tag: str, search_mode: str = "hybrid"):
-        from supermemory import Supermemory
-
         self._api_key = api_key
         self._container_tag = container_tag
         self._search_mode = search_mode if search_mode in _VALID_SEARCH_MODES else _DEFAULT_SEARCH_MODE
         self._timeout = timeout
-        self._client = Supermemory(api_key=api_key, timeout=timeout, max_retries=0)
+        self._client = _get_sdk_client(api_key, timeout)
 
     def add_memory(self, content: str, metadata: Optional[dict] = None, *,
                    entity_context: str = "", container_tag: Optional[str] = None,

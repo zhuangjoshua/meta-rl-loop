@@ -181,7 +181,7 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
             "quality": quality,
             "output_format": "png",
             "background": "opaque",
-            "partial_images": 1,
+            "partial_images": 0,
         }],
         tool_choice={
             "type": "allowed_tools",
@@ -197,10 +197,6 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
                     result = getattr(item, "result", None)
                     if isinstance(result, str) and result:
                         image_b64 = result
-            elif event_type == "response.image_generation_call.partial_image":
-                partial = getattr(event, "partial_image_b64", None)
-                if isinstance(partial, str) and partial:
-                    image_b64 = partial
         final = stream.get_final_response()
 
     # Final-response sweep covers the case where the stream finished before

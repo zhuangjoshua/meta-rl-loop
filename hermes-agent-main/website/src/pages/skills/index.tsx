@@ -112,8 +112,9 @@ function highlightMatch(text: string, query: string): React.ReactNode {
   );
 }
 
-function SkillCard({
+const SkillCard = React.memo(function SkillCard({
   skill,
+  cardKey,
   query,
   expanded,
   onToggle,
@@ -122,9 +123,10 @@ function SkillCard({
   style,
 }: {
   skill: Skill;
+  cardKey: string;
   query: string;
   expanded: boolean;
-  onToggle: () => void;
+  onToggle: (key: string) => void;
   onCategoryClick: (cat: string) => void;
   onTagClick: (tag: string) => void;
   style?: React.CSSProperties;
@@ -135,7 +137,7 @@ function SkillCard({
   return (
     <div
       className={`${styles.card} ${expanded ? styles.cardExpanded : ""}`}
-      onClick={onToggle}
+      onClick={() => onToggle(cardKey)}
       style={style}
     >
       <div className={styles.cardAccent} style={{ background: src.color }} />
@@ -266,7 +268,7 @@ function SkillCard({
       </div>
     </div>
   );
-}
+});
 
 function StatCard({ value, label, color }: { value: number; label: string; color: string }) {
   return (
@@ -311,6 +313,24 @@ export default function SkillsDashboard() {
     return SOURCE_ORDER.filter((s) => s === "all" || set.has(s));
   }, []);
 
+  const searchIndex = useMemo(
+    () =>
+      allSkills.map((skill) => ({
+        skill,
+        haystack: [
+          skill.name,
+          skill.description,
+          skill.overview,
+          skill.categoryLabel,
+          skill.author,
+          ...(skill.tags || []),
+        ]
+          .join(" ")
+          .toLowerCase(),
+      })),
+    []
+  );
+
   const categoryEntries = useMemo(() => {
     const pool =
       sourceFilter === "all"
@@ -336,18 +356,15 @@ export default function SkillsDashboard() {
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
-    return allSkills.filter((s) => {
-      if (sourceFilter !== "all" && s.source !== sourceFilter) return false;
-      if (categoryFilter !== "all" && s.category !== categoryFilter) return false;
-      if (q) {
-        const haystack = [s.name, s.description, s.overview, s.categoryLabel, s.author, ...(s.tags || [])]
-          .join(" ")
-          .toLowerCase();
-        return haystack.includes(q);
-      }
-      return true;
-    });
-  }, [search, sourceFilter, categoryFilter]);
+    return searchIndex
+      .filter(({ skill: s, haystack }) => {
+        if (sourceFilter !== "all" && s.source !== sourceFilter) return false;
+        if (categoryFilter !== "all" && s.category !== categoryFilter) return false;
+        if (q) return haystack.includes(q);
+        return true;
+      })
+      .map(({ skill }) => skill);
+  }, [search, sourceFilter, categoryFilter, searchIndex]);
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
@@ -374,6 +391,10 @@ export default function SkillsDashboard() {
   const handleTagClick = useCallback((tag: string) => {
     setSearch(tag);
     searchRef.current?.focus();
+  }, []);
+
+  const handleToggle = useCallback((key: string) => {
+    setExpandedCard((prev) => (prev === key ? null : key));
   }, []);
 
   const clearAll = useCallback(() => {
@@ -585,12 +606,11 @@ export default function SkillsDashboard() {
                     return (
                       <SkillCard
                         key={key}
+                        cardKey={key}
                         skill={skill}
                         query={search}
                         expanded={expandedCard === key}
-                        onToggle={() =>
-                          setExpandedCard(expandedCard === key ? null : key)
-                        }
+                        onToggle={handleToggle}
                         onCategoryClick={handleCategoryClick}
                         onTagClick={handleTagClick}
                         style={{ animationDelay: `${Math.min(i, 20) * 25}ms` }}

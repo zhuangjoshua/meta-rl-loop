@@ -28,6 +28,7 @@ Usage:
     )
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -38,6 +39,7 @@ from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from agent.retry_utils import jittered_backoff
 from takyon_constants import get_takyon_dir
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
@@ -205,15 +207,15 @@ async def _download_image(image_url: str, destination: Path, max_retries: int = 
                     raise ValueError(
                         f"Image too large ({len(body)} bytes, max {_VISION_MAX_DOWNLOAD_BYTES})"
                     )
-                destination.write_bytes(body)
+                await asyncio.to_thread(destination.write_bytes, body)
             
             return destination
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
-                wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                wait_time = jittered_backoff(attempt + 1, base_delay=2.0, max_delay=8.0)
                 logger.warning("Image download failed (attempt %s/%s): %s", attempt + 1, max_retries, str(e)[:50])
-                logger.warning("Retrying in %ss...", wait_time)
+                logger.warning("Retrying in %.1fs...", wait_time)
                 await asyncio.sleep(wait_time)
             else:
                 logger.error(
@@ -582,7 +584,7 @@ async def _vision_analyze_native(
                 success=False,
             )
 
-        image_size_bytes = temp_image_path.stat().st_size
+        image_size_bytes = (await asyncio.to_thread(temp_image_path.stat)).st_size
         detected_mime_type = _detect_image_mime_type(temp_image_path)
         if not detected_mime_type:
             return tool_error(
@@ -624,8 +626,8 @@ async def _vision_analyze_native(
         # Only delete temp files we created — never user-provided paths.
         if should_cleanup and temp_image_path is not None:
             try:
-                if temp_image_path.exists():
-                    temp_image_path.unlink()
+                if await asyncio.to_thread(temp_image_path.exists):
+                    await asyncio.to_thread(temp_image_path.unlink)
             except Exception:
                 pass
 
@@ -723,7 +725,7 @@ async def vision_analyze_tool(
             )
         
         # Get image file size for logging
-        image_size_bytes = temp_image_path.stat().st_size
+        image_size_bytes = (await asyncio.to_thread(temp_image_path.stat)).st_size
         image_size_kb = image_size_bytes / 1024
         logger.info("Image ready (%.1f KB)", image_size_kb)
 
@@ -903,9 +905,9 @@ async def vision_analyze_tool(
     
     finally:
         # Clean up temporary image file (but NOT local/cached files)
-        if should_cleanup and temp_image_path and temp_image_path.exists():
+        if should_cleanup and temp_image_path and await asyncio.to_thread(temp_image_path.exists):
             try:
-                temp_image_path.unlink()
+                await asyncio.to_thread(temp_image_path.unlink)
                 logger.debug("Cleaned up temporary image file")
             except Exception as cleanup_error:
                 logger.warning(
@@ -1143,7 +1145,7 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
                     raise ValueError(
                         f"Video too large ({len(body)} bytes, max {_MAX_VIDEO_BASE64_BYTES})"
                     )
-                destination.write_bytes(body)
+                await asyncio.to_thread(destination.write_bytes, body)
 
             return destination
         except Exception as e:
@@ -1220,7 +1222,7 @@ async def video_analyze_tool(
                 "Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path."
             )
 
-        video_size_bytes = temp_video_path.stat().st_size
+        video_size_bytes = (await asyncio.to_thread(temp_video_path.stat)).st_size
         video_size_mb = video_size_bytes / (1024 * 1024)
         logger.info("Video ready (%.1f MB)", video_size_mb)
 
@@ -1362,9 +1364,9 @@ async def video_analyze_tool(
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     finally:
-        if should_cleanup and temp_video_path and temp_video_path.exists():
+        if should_cleanup and temp_video_path and await asyncio.to_thread(temp_video_path.exists):
             try:
-                temp_video_path.unlink()
+                await asyncio.to_thread(temp_video_path.unlink)
                 logger.debug("Cleaned up temporary video file")
             except Exception as cleanup_error:
                 logger.warning(

@@ -63,6 +63,33 @@ class MicrosoftGraphClient:
         self._transport = transport
         self._sleep = sleep or asyncio.sleep
         self.user_agent = user_agent
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return a lazily-created, reused ``httpx.AsyncClient``.
+
+        A single pooled client is kept for the lifetime of this instance so
+        connections to graph.microsoft.com are reused (keep-alive) across
+        requests and retries instead of paying a TLS handshake per call.
+        """
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                transport=self._transport,
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the underlying pooled client, if one was created."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+
+    async def __aenter__(self) -> "MicrosoftGraphClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
 
     @classmethod
     def from_env(cls, **kwargs: Any) -> "MicrosoftGraphClient":
@@ -168,7 +195,7 @@ class MicrosoftGraphClient:
         """
         url = self._resolve_url(path)
         target = Path(destination)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
         tmp_target = target.with_suffix(target.suffix + ".part")
 
         attempt = 0
@@ -187,52 +214,49 @@ class MicrosoftGraphClient:
                 request_headers.update(headers)
 
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout),
-                    transport=self._transport,
-                ) as client:
-                    async with client.stream(
-                        "GET",
-                        url,
-                        headers=request_headers,
-                    ) as response:
-                        if response.status_code >= 400:
-                            # Materialize error body so we can surface a meaningful
-                            # message; error bodies are small.
-                            await response.aread()
-                            api_error = self._build_api_error("GET", url, response)
-                            last_error = api_error
+                client = self._get_client()
+                async with client.stream(
+                    "GET",
+                    url,
+                    headers=request_headers,
+                ) as response:
+                    if response.status_code >= 400:
+                        # Materialize error body so we can surface a meaningful
+                        # message; error bodies are small.
+                        await response.aread()
+                        api_error = self._build_api_error("GET", url, response)
+                        last_error = api_error
 
-                            if (
-                                response.status_code == 401
-                                and attempt < self.max_retries
-                            ):
-                                self.token_provider.clear_cache()
-                                await self._sleep(
-                                    self._retry_delay(response, attempt)
-                                )
-                                attempt += 1
-                                continue
+                        if (
+                            response.status_code == 401
+                            and attempt < self.max_retries
+                        ):
+                            self.token_provider.clear_cache()
+                            await self._sleep(
+                                self._retry_delay(response, attempt)
+                            )
+                            attempt += 1
+                            continue
 
-                            if (
-                                self._should_retry(response)
-                                and attempt < self.max_retries
-                            ):
-                                await self._sleep(
-                                    self._retry_delay(response, attempt)
-                                )
-                                attempt += 1
-                                continue
+                        if (
+                            self._should_retry(response)
+                            and attempt < self.max_retries
+                        ):
+                            await self._sleep(
+                                self._retry_delay(response, attempt)
+                            )
+                            attempt += 1
+                            continue
 
-                            raise api_error
+                        raise api_error
 
-                        content_type = response.headers.get("content-type")
-                        with tmp_target.open("wb") as handle:
-                            async for chunk in response.aiter_bytes(
-                                chunk_size=chunk_size
-                            ):
-                                if chunk:
-                                    handle.write(chunk)
+                    content_type = response.headers.get("content-type")
+                    with tmp_target.open("wb") as handle:
+                        async for chunk in response.aiter_bytes(
+                            chunk_size=chunk_size
+                        ):
+                            if chunk:
+                                handle.write(chunk)
             except httpx.HTTPError as exc:
                 last_error = exc
                 tmp_target.unlink(missing_ok=True)
@@ -284,17 +308,14 @@ class MicrosoftGraphClient:
                 request_headers.update(headers)
 
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout),
-                    transport=self._transport,
-                ) as client:
-                    response = await client.request(
-                        method,
-                        url,
-                        params=params,
-                        json=json_body,
-                        headers=request_headers,
-                    )
+                client = self._get_client()
+                response = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=request_headers,
+                )
             except httpx.HTTPError as exc:
                 last_error = exc
                 if attempt >= self.max_retries:

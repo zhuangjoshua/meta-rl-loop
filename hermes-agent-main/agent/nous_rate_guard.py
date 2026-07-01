@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 _STATE_SUBDIR = "rate_limits"
 _STATE_FILENAME = "nous.json"
 
+# In-process cache of the parsed state file, keyed on the file's mtime.
+# Avoids re-reading + JSON-parsing the shared file on every pre-request
+# check (up to ~9 checks per turn).  Re-read only when mtime changes.
+_state_cache: Optional[dict[str, Any]] = None
+_state_cache_mtime: Optional[float] = None
+
 
 def _state_path() -> str:
     """Return the path to the Nous rate limit state file."""
@@ -142,10 +148,17 @@ def nous_rate_limit_remaining() -> Optional[float]:
     Returns:
         Seconds remaining until reset, or None if not rate-limited.
     """
+    global _state_cache, _state_cache_mtime
     path = _state_path()
     try:
-        with open(path, encoding="utf-8") as f:
-            state = json.load(f)
+        mtime = os.stat(path).st_mtime
+        if _state_cache is not None and _state_cache_mtime == mtime:
+            state = _state_cache
+        else:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+            _state_cache = state
+            _state_cache_mtime = mtime
         reset_at = state.get("reset_at", 0)
         remaining = reset_at - time.time()
         if remaining > 0:
@@ -155,13 +168,20 @@ def nous_rate_limit_remaining() -> Optional[float]:
             os.unlink(path)
         except OSError:
             pass
+        _state_cache = None
+        _state_cache_mtime = None
         return None
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, OSError):
+        _state_cache = None
+        _state_cache_mtime = None
         return None
 
 
 def clear_nous_rate_limit() -> None:
     """Clear the rate limit state (e.g., after a successful Nous request)."""
+    global _state_cache, _state_cache_mtime
+    _state_cache = None
+    _state_cache_mtime = None
     try:
         os.unlink(_state_path())
     except FileNotFoundError:

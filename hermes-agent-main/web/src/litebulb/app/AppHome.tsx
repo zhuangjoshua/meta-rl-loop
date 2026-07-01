@@ -12,6 +12,14 @@ import type { LitebulbBusiness } from "../takyon/useTakyonLitebulb";
 import type { TakyonOperatorAccountResponse } from "@/lib/api";
 import "./apphome.css";
 
+/** Percentage-remaining wallet label from an operator account. Falls back to "Wallet" when the
+ *  allowance percentage isn't available. Single source of truth for wallet-label formatting. */
+function formatWalletLabel(account: TakyonOperatorAccountResponse | null): string {
+  return typeof account?.allowance_percent_remaining === "number"
+    ? `${account.allowance_percent_remaining.toFixed(1)}%`
+    : "Wallet";
+}
+
 const caret = (
   <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6l4 4 4-4" /></svg>
 );
@@ -26,9 +34,7 @@ function HomeNav({ user, account, onNav, onOpenSettings, onLogout }: {
   const [menu, setMenu] = useState(false);
   const initial = (user?.name?.[0] ?? "U").toUpperCase();
   const close = () => setMenu(false);
-  const walletLabel = typeof account?.allowance_percent_remaining === "number"
-    ? `${account.allowance_percent_remaining.toFixed(1)}%`
-    : "Wallet";
+  const walletLabel = formatWalletLabel(account);
   return (
     <header className="lb-homenav">
       <button className="lb-homenav__brand" onClick={() => onNav("/")} aria-label="Coscale home">

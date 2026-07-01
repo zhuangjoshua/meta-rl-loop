@@ -557,19 +557,35 @@ class TeamsMeetingPipeline:
         )
 
     async def _write_sinks(self, job: TeamsMeetingPipelineJob, payload: TeamsMeetingSummaryPayload) -> None:
-        if self.config.notion and self.config.notion.get("enabled") and self.notion_writer:
-            job = self._persist_job(job, status="writing_notion")
+        notion_enabled = bool(self.config.notion and self.config.notion.get("enabled") and self.notion_writer)
+        linear_enabled = bool(self.config.linear and self.config.linear.get("enabled") and self.linear_writer)
+
+        async def _write_notion() -> None:
             sink_key = f"notion:{payload.meeting_ref.meeting_id}"
             existing = self.store.get_sink_record(sink_key)
             result = await self.notion_writer.write_summary(payload, self.config.notion, existing)
             self.store.upsert_sink_record(sink_key, result)
 
-        if self.config.linear and self.config.linear.get("enabled") and self.linear_writer:
-            job = self._persist_job(job, status="writing_linear")
+        async def _write_linear() -> None:
             sink_key = f"linear:{payload.meeting_ref.meeting_id}"
             existing = self.store.get_sink_record(sink_key)
             result = await self.linear_writer.write_summary(payload, self.config.linear, existing)
             self.store.upsert_sink_record(sink_key, result)
+
+        # Notion and Linear are independent network sinks with no shared state,
+        # so their writes overlap instead of running strictly serial.
+        if notion_enabled:
+            job = self._persist_job(job, status="writing_notion")
+        if linear_enabled:
+            job = self._persist_job(job, status="writing_linear")
+
+        pending: list[Awaitable[None]] = []
+        if notion_enabled:
+            pending.append(_write_notion())
+        if linear_enabled:
+            pending.append(_write_linear())
+        if pending:
+            await asyncio.gather(*pending)
 
         if self.config.teams_delivery and self.config.teams_delivery.get("enabled") and self.teams_sender:
             job = self._persist_job(job, status="sending_teams")

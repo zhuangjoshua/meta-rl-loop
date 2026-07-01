@@ -1880,6 +1880,19 @@ class QQAdapter(BasePlatformAdapter):
         return result
 
     @staticmethod
+    def _resolve_local_path(source: str) -> Path:
+        """Expand and resolve *source* to an absolute path off the event loop.
+
+        ``Path.cwd()`` and ``Path.resolve()`` perform blocking filesystem
+        syscalls (and symlink resolution), so callers must invoke this via
+        ``asyncio.to_thread`` from async code.
+        """
+        local_path = Path(source).expanduser()
+        if not local_path.is_absolute():
+            local_path = (Path.cwd() / local_path).resolve()
+        return local_path
+
+    @staticmethod
     def _safe_stat(path: str):
         """Return ``os.stat`` for *path*, or ``None`` if it does not exist.
 
@@ -2876,9 +2889,7 @@ class QQAdapter(BasePlatformAdapter):
         if not self._http_client:
             raise RuntimeError("HTTP client not initialized — not connected?")
 
-        local_path = Path(media_source).expanduser()
-        if not local_path.is_absolute():
-            local_path = (Path.cwd() / local_path).resolve()
+        local_path = await asyncio.to_thread(self._resolve_local_path, media_source)
 
         local_stat = await asyncio.to_thread(self._safe_stat, str(local_path))
         import stat as _stat
@@ -2921,9 +2932,7 @@ class QQAdapter(BasePlatformAdapter):
 
         # Local file — encode as raw base64 for QQ Bot API file_data field.
         # The QQ API expects plain base64, NOT a data URI.
-        local_path = Path(source).expanduser()
-        if not local_path.is_absolute():
-            local_path = (Path.cwd() / local_path).resolve()
+        local_path = await asyncio.to_thread(self._resolve_local_path, source)
 
         local_stat = await asyncio.to_thread(self._safe_stat, str(local_path))
         import stat as _stat

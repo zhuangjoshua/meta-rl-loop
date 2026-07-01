@@ -60,17 +60,15 @@ _TYPE_MAP = {
 }
 
 
-def _read_csv(url: str, columns: list[str]) -> list[dict[str, str]]:
+def _read_csv(url: str, columns: list[str]):
     body = get(url, timeout=60).decode("latin-1", errors="replace")
     reader = csv.reader(io.StringIO(body))
-    out = []
     for row in reader:
         if not row:
             continue
         # Pad/truncate to expected width.
         row = row[: len(columns)] + [""] * (len(columns) - len(row))
-        out.append(dict(zip(columns, row)))
-    return out
+        yield dict(zip(columns, row))
 
 
 def _strip_quotes(s: str) -> str:
@@ -87,12 +85,10 @@ def fetch(
     entity_type: str | None,
     out_path: str,
 ) -> int:
-    sdn = _read_csv(SDN_URL, SDN_COLS)
-    addresses = _read_csv(ADD_URL, ADD_COLS)
-    akas = _read_csv(ALT_URL, ALT_COLS)
+    sdn = list(_read_csv(SDN_URL, SDN_COLS))
 
     addr_by_ent: dict[str, list[str]] = defaultdict(list)
-    for a in addresses:
+    for a in _read_csv(ADD_URL, ADD_COLS):
         ent = _strip_quotes(a["ent_num"])
         parts = [
             _strip_quotes(a[c])
@@ -103,7 +99,7 @@ def fetch(
             addr_by_ent[ent].append(", ".join(parts))
 
     aka_by_ent: dict[str, list[str]] = defaultdict(list)
-    for k in akas:
+    for k in _read_csv(ALT_URL, ALT_COLS):
         ent = _strip_quotes(k["ent_num"])
         name = _strip_quotes(k["alt_name"])
         if name:

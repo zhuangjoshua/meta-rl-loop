@@ -262,13 +262,15 @@ def sync_skills(quiet: bool = False) -> dict:
     for skill_name, skill_src in bundled_skills:
         dest = _compute_relative_dest(skill_src, bundled_dir)
         bundled_hash = _dir_hash(skill_src)
+        # Hash the on-disk copy at most once per skill and reuse it across
+        # branches; only computed when the destination actually exists.
+        user_hash = _dir_hash(dest) if dest.exists() else None
 
         if skill_name not in manifest:
             # ── New skill — never offered before ──
             try:
                 if dest.exists():
                     if force_restore:
-                        user_hash = _dir_hash(dest)
                         if user_hash == bundled_hash:
                             manifest[skill_name] = bundled_hash
                             skipped += 1
@@ -295,7 +297,7 @@ def sync_skills(quiet: bool = False) -> dict:
                     # user_hash != origin_hash read as "user-modified" on every
                     # subsequent sync, permanently blocking bundled updates.
                     skipped += 1
-                    if _dir_hash(dest) == bundled_hash:
+                    if user_hash == bundled_hash:
                         manifest[skill_name] = bundled_hash
                     elif not quiet:
                         print(
@@ -323,7 +325,7 @@ def sync_skills(quiet: bool = False) -> dict:
         elif dest.exists():
             # ── Existing skill — in manifest AND on disk ──
             origin_hash = manifest.get(skill_name, "")
-            user_hash = _dir_hash(dest)
+            # user_hash was computed once at the top of the loop.
 
             if force_restore:
                 if user_hash == bundled_hash and origin_hash == bundled_hash:

@@ -28,17 +28,41 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from agent.browser_provider import BrowserProvider
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.firecrawl.dev"
+
+_session: Optional[requests.Session] = None
+_session_lock = threading.Lock()
+
+
+def _get_session() -> requests.Session:
+    """Return a process-wide ``requests.Session`` with connection pooling.
+
+    Lazily created and shared across all provider calls so repeated
+    session-lifecycle requests reuse keep-alive TCP/TLS connections to
+    api.firecrawl.dev instead of paying a fresh handshake per call.
+    """
+    global _session
+    if _session is None:
+        with _session_lock:
+            if _session is None:
+                session = requests.Session()
+                adapter = HTTPAdapter(pool_connections=10, pool_maxsize=10)
+                session.mount("https://", adapter)
+                session.mount("http://", adapter)
+                _session = session
+    return _session
 
 
 class FirecrawlBrowserProvider(BrowserProvider):
@@ -84,7 +108,7 @@ class FirecrawlBrowserProvider(BrowserProvider):
         body: Dict[str, object] = {"ttl": ttl}
 
         try:
-            response = requests.post(
+            response = _get_session().post(
                 f"{self._api_url()}/v2/browser",
                 headers=self._headers(),
                 json=body,
@@ -121,7 +145,7 @@ class FirecrawlBrowserProvider(BrowserProvider):
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
-                response = requests.delete(
+                response = _get_session().delete(
                     f"{self._api_url()}/v2/browser/{session_id}",
                     headers=self._headers(),
                     timeout=10,
@@ -183,7 +207,7 @@ class FirecrawlBrowserProvider(BrowserProvider):
             )
             return
         try:
-            requests.delete(
+            _get_session().delete(
                 f"{self._api_url()}/v2/browser/{session_id}",
                 headers=self._headers(),
                 timeout=5,

@@ -64,6 +64,11 @@ class HomeAssistantAdapter(BasePlatformAdapter):
     # Reconnection backoff schedule (seconds)
     _BACKOFF_STEPS = [5, 10, 30, 60]
 
+    # Prune the cooldown map once it exceeds this many entries, dropping
+    # entries whose cooldown has already expired.  Bounds memory to
+    # actively-changing entities instead of the full entity space.
+    _COOLDOWN_MAP_PRUNE_THRESHOLD = 1024
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.HOMEASSISTANT)
 
@@ -302,6 +307,15 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         last = self._last_event_time.get(entity_id, 0)
         if (now - last) < self._cooldown_seconds:
             return
+        # Prune expired entries when the map grows large so it stays bounded
+        # to actively-changing entities.  Any pruned entry is already past its
+        # cooldown window, so this does not change cooldown behavior.
+        if len(self._last_event_time) > self._COOLDOWN_MAP_PRUNE_THRESHOLD:
+            self._last_event_time = {
+                eid: ts
+                for eid, ts in self._last_event_time.items()
+                if (now - ts) < self._cooldown_seconds
+            }
         self._last_event_time[entity_id] = now
 
         # Build human-readable message

@@ -326,12 +326,28 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             oldest = self._seen_receipt_order.popleft()
             self._seen_receipts.discard(oldest)
 
+    @staticmethod
+    def _synthesize_message_id(notification: Dict[str, Any]) -> str:
+        """Build a stable message id without hashing the whole payload.
+
+        Prefer cheap, stable identifying fields (subscriptionId + resource +
+        changeType) so the common ingress path avoids a full-dict JSON
+        serialize + sha1. Only fall back to hashing the entire notification
+        when none of those fields are present.
+        """
+        subscription_id = str(notification.get("subscriptionId") or "").strip()
+        resource = str(notification.get("resource") or "").strip()
+        change_type = str(notification.get("changeType") or "").strip()
+        if subscription_id or resource or change_type:
+            return f"msgraph:{subscription_id}|{resource}|{change_type}"
+        return f"sha1:{sha1(json.dumps(notification, sort_keys=True).encode('utf-8')).hexdigest()}"
+
     def _build_message_event(
         self,
         notification: Dict[str, Any],
         receipt_key: Optional[str],
     ) -> MessageEvent:
-        message_id = receipt_key or f"sha1:{sha1(json.dumps(notification, sort_keys=True).encode('utf-8')).hexdigest()}"
+        message_id = receipt_key or self._synthesize_message_id(notification)
         source = self.build_source(
             chat_id=f"msgraph:{notification.get('subscriptionId', 'unknown')}",
             chat_name="msgraph/webhook",

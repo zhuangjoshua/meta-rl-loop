@@ -2,7 +2,6 @@
 
 import threading
 
-import agent.retry_utils as retry_utils
 from agent.retry_utils import jittered_backoff
 
 
@@ -72,46 +71,3 @@ def test_backoff_thread_safety():
     assert len(results) == 8
     unique = len(set(results))
     assert unique >= 6, f"Expected mostly unique delays, got {unique}/8 unique"
-
-
-def test_backoff_uses_locked_tick_for_seed(monkeypatch):
-    """Seed derivation should use per-call tick captured under lock."""
-    import time
-
-    monkeypatch.setattr(retry_utils, "_jitter_counter", 0)
-
-    recorded_seeds = []
-
-    class _RecordingRandom:
-        def __init__(self, seed):
-            recorded_seeds.append(seed)
-
-        def uniform(self, a, b):
-            return 0.0
-
-    monkeypatch.setattr(retry_utils.random, "Random", _RecordingRandom)
-
-    fixed_time_ns = 123456789
-
-    def _time_ns_wait_for_two_ticks():
-        deadline = time.time() + 2.0
-        while retry_utils._jitter_counter < 2 and time.time() < deadline:
-            time.sleep(0.001)
-        return fixed_time_ns
-
-    monkeypatch.setattr(retry_utils.time, "time_ns", _time_ns_wait_for_two_ticks)
-
-    barrier = threading.Barrier(2)
-
-    def _call():
-        barrier.wait()
-        jittered_backoff(1, base_delay=10.0, max_delay=120.0, jitter_ratio=0.5)
-
-    threads = [threading.Thread(target=_call) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=5)
-
-    assert len(recorded_seeds) == 2
-    assert len(set(recorded_seeds)) == 2, f"Expected unique seeds, got {recorded_seeds}"

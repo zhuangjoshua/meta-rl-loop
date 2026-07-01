@@ -1107,12 +1107,12 @@ class SignalAdapter(BasePlatformAdapter):
                     skipped_download += 1
                     continue
 
-            if not file_path or not Path(file_path).exists():
+            if not file_path or not await asyncio.to_thread(Path(file_path).exists):
                 logger.warning("Signal: image file not found for %s", image_url)
                 skipped_missing += 1
                 continue
 
-            file_size = Path(file_path).stat().st_size
+            file_size = (await asyncio.to_thread(Path(file_path).stat)).st_size
             if file_size > SIGNAL_MAX_ATTACHMENT_SIZE:
                 logger.warning(
                     "Signal: image too large (%d bytes), skipping %s", file_size, image_url
@@ -1258,11 +1258,11 @@ class SignalAdapter(BasePlatformAdapter):
                 logger.warning("Signal: failed to download image: %s", e)
                 return SendResult(success=False, error=str(e))
 
-        if not file_path or not Path(file_path).exists():
+        if not file_path or not await asyncio.to_thread(Path(file_path).exists):
             return SendResult(success=False, error="Image file not found")
 
         # Validate size
-        file_size = Path(file_path).stat().st_size
+        file_size = (await asyncio.to_thread(Path(file_path).stat)).st_size
         if file_size > SIGNAL_MAX_ATTACHMENT_SIZE:
             return SendResult(success=False, error=f"Image too large ({file_size} bytes)")
 
@@ -1298,7 +1298,7 @@ class SignalAdapter(BasePlatformAdapter):
         await self._stop_typing_indicator(chat_id)
 
         try:
-            file_size = Path(file_path).stat().st_size
+            file_size = (await asyncio.to_thread(Path(file_path).stat)).st_size
         except FileNotFoundError:
             return SendResult(success=False, error=f"{media_label} file not found: {file_path}")
 

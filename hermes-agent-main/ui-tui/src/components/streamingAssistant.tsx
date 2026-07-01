@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 
 import type { AppLayoutProgressProps } from '../app/interfaces.js'
 import { toggleTodoCollapsed, useTurnSelector } from '../app/turnStore.js'
@@ -27,6 +27,7 @@ export const StreamingAssistant = memo(function StreamingAssistant({
   const streaming = useTurnSelector(state => state.streaming)
   const activeTools = useTurnSelector(state => state.tools)
   const showStreamingArea = Boolean(streaming)
+  const grouped = useMemo(() => groupedSegments(streamSegments), [streamSegments])
 
   if (!progress.showProgressArea && !showStreamingArea && !activeTools.length) {
     return null
@@ -34,7 +35,7 @@ export const StreamingAssistant = memo(function StreamingAssistant({
 
   return (
     <>
-      {groupedSegments(streamSegments).map((msg, i) => (
+      {grouped.map((msg, i) => (
         <MessageLine
           cols={cols}
           compact={compact}

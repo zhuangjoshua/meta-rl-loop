@@ -402,6 +402,10 @@ export function useViewerAccess(): ViewerAccessResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const aliveRef = useRef(true);
+  // Shared in-flight promise so overlapping refresh() calls — mount, the
+  // checkout-return poll, and the tab-focus/visibility re-read — dedupe onto a
+  // single session()+account() request chain instead of each firing its own.
+  const inflightRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -411,7 +415,9 @@ export function useViewerAccess(): ViewerAccessResult {
   }, []);
 
   const refresh = useCallback(async () => {
+    if (inflightRef.current) return inflightRef.current;
     setLoading(true);
+    const run = (async () => {
     try {
       const sessionPayload = await client.session();
       if (!aliveRef.current) return;
@@ -482,6 +488,13 @@ export function useViewerAccess(): ViewerAccessResult {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       if (aliveRef.current) setLoading(false);
+    }
+    })();
+    inflightRef.current = run;
+    try {
+      await run;
+    } finally {
+      inflightRef.current = null;
     }
   }, []);
 

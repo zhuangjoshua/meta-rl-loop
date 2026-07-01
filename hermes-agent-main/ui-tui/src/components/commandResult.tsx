@@ -1,4 +1,4 @@
-import { Box, Text } from 'ink'
+import { Box, Text } from '@takyon/ink'
 import { memo, type ReactNode } from 'react'
 
 import type { Theme } from '../theme.js'
@@ -71,25 +71,34 @@ function kvRows(pairs: [string, CommandCell][], t: Theme): ReactNode {
   ))
 }
 
-function CommandResultImpl({ cols, result: r, t }: { cols?: number; result: CommandResult; t: Theme }) {
-  const isError = r.kind === 'error'
-  const flush = r.kind === 'markdown' || r.kind === 'diff' || r.kind === 'table'
+// 1:1 kind → renderer mapping. Each renderer returns null when its required
+// fields are absent, so callers fall through to the isError+markdown fallback.
+type KindRenderer = (r: CommandResult, cols: number | undefined, t: Theme) => ReactNode
 
-  let body: ReactNode = null
-
-  if (r.kind === 'kv' && r.pairs) {
-    body = kvRows(r.pairs, t)
-  } else if (r.kind === 'list' && r.items) {
-    body = r.items.map((it, i) => (
-      <Text key={i} wrap="wrap">
-        <Text color={t.color.muted}>• </Text>
-        <Cell cell={it} t={t} />
-      </Text>
-    ))
-  } else if (r.kind === 'table' && r.columns && r.rows) {
-    body = r.rows.length ? <Md cols={cols} t={t} text={tableMarkdown(r.columns, r.rows)} /> : <Text color={t.color.muted}>(none)</Text>
-  } else if (r.kind === 'status' && r.sections) {
-    body = (
+const kindRenderers: Record<CommandResult['kind'], KindRenderer> = {
+  diff: (r, cols, t) => (r.diff != null ? <Md cols={cols} t={t} text={`\`\`\`diff\n${r.diff}\n\`\`\``} /> : null),
+  error: () => null,
+  kv: (r, _cols, t) => (r.pairs ? kvRows(r.pairs, t) : null),
+  list: (r, _cols, t) =>
+    r.items
+      ? r.items.map((it, i) => (
+          <Text key={i} wrap="wrap">
+            <Text color={t.color.muted}>• </Text>
+            <Cell cell={it} t={t} />
+          </Text>
+        ))
+      : null,
+  log: (r, _cols, t) =>
+    r.lines
+      ? r.lines.map((ln, i) => (
+          <Text color={toneColor(t, ln.tone) ?? t.color.text} key={i} wrap="wrap">
+            {ln.text}
+          </Text>
+        ))
+      : null,
+  markdown: (r, cols, t) => (r.markdown != null ? <Md cols={cols} t={t} text={r.markdown} /> : null),
+  status: (r, cols, t) =>
+    r.sections ? (
       <Box flexDirection="column">
         {r.sections.map((sec, si) => (
           <Box flexDirection="column" key={si} marginTop={si ? 1 : 0}>
@@ -109,18 +118,22 @@ function CommandResultImpl({ cols, result: r, t }: { cols?: number; result: Comm
           </Box>
         ) : null}
       </Box>
-    )
-  } else if (r.kind === 'markdown' && r.markdown != null) {
-    body = <Md cols={cols} t={t} text={r.markdown} />
-  } else if (r.kind === 'diff' && r.diff != null) {
-    body = <Md cols={cols} t={t} text={`\`\`\`diff\n${r.diff}\n\`\`\``} />
-  } else if (r.kind === 'log' && r.lines) {
-    body = r.lines.map((ln, i) => (
-      <Text color={toneColor(t, ln.tone) ?? t.color.text} key={i} wrap="wrap">
-        {ln.text}
-      </Text>
-    ))
-  } else if (isError && r.markdown != null) {
+    ) : null,
+  table: (r, cols, t) =>
+    r.columns && r.rows
+      ? r.rows.length
+        ? <Md cols={cols} t={t} text={tableMarkdown(r.columns, r.rows)} />
+        : <Text color={t.color.muted}>(none)</Text>
+      : null,
+}
+
+function CommandResultImpl({ cols, result: r, t }: { cols?: number; result: CommandResult; t: Theme }) {
+  const isError = r.kind === 'error'
+  const flush = r.kind === 'markdown' || r.kind === 'diff' || r.kind === 'table'
+
+  let body: ReactNode = kindRenderers[r.kind](r, cols, t)
+
+  if (body == null && isError && r.markdown != null) {
     body = <Md cols={cols} t={t} text={r.markdown} />
   }
 

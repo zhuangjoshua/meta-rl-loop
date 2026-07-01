@@ -186,6 +186,22 @@ function describeTool(tool: ProgressToolSignal): string {
   ).trim();
 }
 
+type WorkstreamSignal = { key: WorkstreamKey; status: WorkstreamStatus; detail: string };
+
+// Memoize by input array identity. During streaming the caller re-renders each
+// tick but typically hands back the SAME statusItems/progressLines/tools array
+// references between renders; caching on those identities lets us skip the full
+// reverse-and-rescan (issue #5121) while staying behavior-identical. A tiny
+// LRU-ish cache keyed on the composite input identity is enough — a new array
+// (real update) misses and recomputes exactly as before.
+const EMPTY_STATUS_ITEMS: string[] = [];
+const EMPTY_PROGRESS_LINES: string[] = [];
+const EMPTY_TOOLS: ProgressToolSignal[] = [];
+const collectWorkstreamSignalsCache = new WeakMap<
+  string[],
+  WeakMap<string[], WeakMap<ProgressToolSignal[], WorkstreamSignal[]>>
+>();
+
 function collectWorkstreamSignals({
   statusItems,
   progressLines,
@@ -194,8 +210,25 @@ function collectWorkstreamSignals({
   statusItems?: string[];
   progressLines?: string[];
   tools?: ProgressToolSignal[];
-}): Array<{ key: WorkstreamKey; status: WorkstreamStatus; detail: string }> {
-  const signals: Array<{ key: WorkstreamKey; status: WorkstreamStatus; detail: string }> = [];
+}): WorkstreamSignal[] {
+  const statusKey = statusItems ?? EMPTY_STATUS_ITEMS;
+  const progressKey = progressLines ?? EMPTY_PROGRESS_LINES;
+  const toolsKey = tools ?? EMPTY_TOOLS;
+
+  let byProgress = collectWorkstreamSignalsCache.get(statusKey);
+  if (!byProgress) {
+    byProgress = new WeakMap();
+    collectWorkstreamSignalsCache.set(statusKey, byProgress);
+  }
+  let byTools = byProgress.get(progressKey);
+  if (!byTools) {
+    byTools = new WeakMap();
+    byProgress.set(progressKey, byTools);
+  }
+  const cached = byTools.get(toolsKey);
+  if (cached) return cached;
+
+  const signals: WorkstreamSignal[] = [];
 
   for (const tool of (tools || []).slice().reverse()) {
     const detail = describeTool(tool);
@@ -218,6 +251,7 @@ function collectWorkstreamSignals({
     signals.push({ key, status: detectSignalStatus(detail), detail });
   }
 
+  byTools.set(toolsKey, signals);
   return signals;
 }
 

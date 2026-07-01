@@ -41,7 +41,16 @@ export const resolveEditor = (
   }
 
   const dirs = (env.PATH ?? '').split(delimiter).filter(Boolean)
-  const found = FALLBACKS.flatMap(name => dirs.map(d => join(d, name))).find(isExecutable)
 
-  return [found ?? 'vi']
+  for (const name of FALLBACKS) {
+    for (const d of dirs) {
+      const p = join(d, name)
+
+      if (isExecutable(p)) {
+        return [p]
+      }
+    }
+  }
+
+  return ['vi']
 }

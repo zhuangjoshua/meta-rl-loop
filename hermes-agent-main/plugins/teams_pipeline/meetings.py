@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -203,7 +204,7 @@ async def download_transcript_text(
         destination = Path(handle.name)
     try:
         await client.download_to_file(_transcript_download_path(meeting_ref, transcript), destination)
-        text = destination.read_text(encoding=encoding).strip()
+        text = (await asyncio.to_thread(destination.read_text, encoding=encoding)).strip()
     except MicrosoftGraphAPIError as exc:
         raise _wrap_graph_error(
             exc,
@@ -213,7 +214,7 @@ async def download_transcript_text(
         ) from exc
     finally:
         try:
-            destination.unlink(missing_ok=True)
+            await asyncio.to_thread(destination.unlink, missing_ok=True)
         except OSError:
             pass
 

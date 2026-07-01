@@ -84,10 +84,24 @@ def _state_path() -> Path:
     return _takyon_home() / "telephony_state.json"
 
 
+_ROOT_CONFIG_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_DOTENV_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+
+
 def _load_root_config() -> dict[str, Any]:
     path = _config_path()
     if not path.exists():
         return {}
+
+    cache_key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    cached = _ROOT_CONFIG_CACHE.get(cache_key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
     try:
         import yaml  # optional dependency; Takyon already ships PyYAML
     except Exception:
@@ -95,9 +109,12 @@ def _load_root_config() -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
-        return data if isinstance(data, dict) else {}
+        result = data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+    _ROOT_CONFIG_CACHE[cache_key] = (mtime, result)
+    return result
 
 
 def _config_lookup(*paths: tuple[str, ...], default: str = "") -> str:
@@ -118,6 +135,16 @@ def _load_dotenv_values(path: Path | None = None) -> dict[str, str]:
     env_file = path or _env_path()
     if not env_file.exists():
         return {}
+
+    cache_key = str(env_file)
+    try:
+        mtime = env_file.stat().st_mtime
+    except OSError:
+        mtime = -1.0
+    cached = _DOTENV_CACHE.get(cache_key)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
     values: dict[str, str] = {}
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -129,6 +156,8 @@ def _load_dotenv_values(path: Path | None = None) -> dict[str, str]:
         if value.startswith('"') and value.endswith('"') and len(value) >= 2:
             value = value[1:-1].replace('\\"', '"').replace('\\\\', '\\')
         values[key] = value
+
+    _DOTENV_CACHE[cache_key] = (mtime, values)
     return values
 
 

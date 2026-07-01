@@ -26,6 +26,7 @@ diff regions.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 from typing import Any, Callable, Dict, List, Optional
 
@@ -61,11 +62,18 @@ def build_line_shift(pre_text: str, post_text: str) -> Callable[[int], Optional[
     sm = difflib.SequenceMatcher(a=pre_lines, b=post_lines, autojunk=False)
     opcodes = sm.get_opcodes()
 
+    # Precompute the sorted list of opcode ``i1`` boundaries once so each
+    # lookup can binary-search the region containing ``line`` in O(log n)
+    # instead of scanning every opcode.  ``get_opcodes()`` already returns
+    # opcodes in ascending ``i1`` order, so ``i1_starts`` is sorted.
+    i1_starts = [i1 for _tag, i1, _i2, _j1, _j2 in opcodes]
+
     def shift(line: int) -> Optional[int]:
-        # Find the opcode region whose i1 <= line < i2.
-        # Linear scan is fine — typical opcode count is small (single
-        # digits for a typical patch-tool edit).
-        for tag, i1, i2, j1, j2 in opcodes:
+        # ``bisect_right`` finds the first i1 > line; the region that may
+        # contain ``line`` is the one immediately before it.
+        idx = bisect.bisect_right(i1_starts, line) - 1
+        if idx >= 0:
+            tag, i1, i2, j1, _j2 = opcodes[idx]
             if i1 <= line < i2:
                 if tag == "equal":
                     # Pre-line N → post-line (N - i1 + j1).
@@ -78,9 +86,6 @@ def build_line_shift(pre_text: str, post_text: str) -> Callable[[int], Optional[
                     # post counterpart in any meaningful sense.  Drop.
                     return None
                 # 'insert' has i1 == i2 so line < i2 can't be hit.
-            if line < i1:
-                # Past the relevant region — handled in earlier iteration.
-                break
         # Past the last opcode region (line >= len(pre_lines)).
         # Anchor at end of post.
         return max(0, len(post_lines) - 1) if post_lines else None

@@ -76,6 +76,26 @@ class SmsAdapter(BasePlatformAdapter):
         self._webhook_url: str = os.getenv("SMS_WEBHOOK_URL", "").strip()
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
+        self._http_session_lock = asyncio.Lock()
+
+    async def _get_http_session(self) -> "aiohttp.ClientSession":
+        """Return the shared ClientSession, creating it once on first use.
+
+        Guarded by a lock so concurrent sends don't create duplicates;
+        the pooled connector is reused across all sends and only closed
+        on ``disconnect()``.
+        """
+        import aiohttp
+
+        if self._http_session is not None and not self._http_session.closed:
+            return self._http_session
+        async with self._http_session_lock:
+            if self._http_session is None or self._http_session.closed:
+                self._http_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    trust_env=True,
+                )
+            return self._http_session
 
     def _basic_auth_header(self) -> str:
         """Build HTTP Basic auth header value for Twilio."""
@@ -169,41 +189,33 @@ class SmsAdapter(BasePlatformAdapter):
             "Authorization": self._basic_auth_header(),
         }
 
-        session = self._http_session or aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            trust_env=True,
-        )
-        try:
-            for chunk in chunks:
-                form_data = aiohttp.FormData()
-                form_data.add_field("From", self._from_number)
-                form_data.add_field("To", chat_id)
-                form_data.add_field("Body", chunk)
+        session = await self._get_http_session()
+        for chunk in chunks:
+            form_data = aiohttp.FormData()
+            form_data.add_field("From", self._from_number)
+            form_data.add_field("To", chat_id)
+            form_data.add_field("Body", chunk)
 
-                try:
-                    async with session.post(url, data=form_data, headers=headers) as resp:
-                        body = await resp.json()
-                        if resp.status >= 400:
-                            error_msg = body.get("message", str(body))
-                            logger.error(
-                                "[sms] send failed to %s: %s %s",
-                                redact_phone(chat_id),
-                                resp.status,
-                                error_msg,
-                            )
-                            return SendResult(
-                                success=False,
-                                error=f"Twilio {resp.status}: {error_msg}",
-                            )
-                        msg_sid = body.get("sid", "")
-                        last_result = SendResult(success=True, message_id=msg_sid)
-                except Exception as e:
-                    logger.error("[sms] send error to %s: %s", redact_phone(chat_id), e)
-                    return SendResult(success=False, error=str(e))
-        finally:
-            # Close session only if we created a fallback (no persistent session)
-            if not self._http_session and session:
-                await session.close()
+            try:
+                async with session.post(url, data=form_data, headers=headers) as resp:
+                    body = await resp.json()
+                    if resp.status >= 400:
+                        error_msg = body.get("message", str(body))
+                        logger.error(
+                            "[sms] send failed to %s: %s %s",
+                            redact_phone(chat_id),
+                            resp.status,
+                            error_msg,
+                        )
+                        return SendResult(
+                            success=False,
+                            error=f"Twilio {resp.status}: {error_msg}",
+                        )
+                    msg_sid = body.get("sid", "")
+                    last_result = SendResult(success=True, message_id=msg_sid)
+            except Exception as e:
+                logger.error("[sms] send error to %s: %s", redact_phone(chat_id), e)
+                return SendResult(success=False, error=str(e))
 
         return last_result
 

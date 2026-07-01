@@ -155,6 +155,24 @@ def activity_count(record: Dict[str, Any]) -> int:
 # Provenance — which skills are agent-created (and thus eligible for curation)
 # ---------------------------------------------------------------------------
 
+# Process-local caches keyed on the source file's mtime signature. These files
+# (.bundled_manifest / .hub/lock.json) change rarely, but _mutate() reads them
+# on every counter bump via is_agent_created(). Caching on mtime avoids
+# re-reading and re-parsing on the skill telemetry hot path while still picking
+# up changes automatically (a different mtime/size invalidates the entry).
+_bundled_manifest_cache: Dict[str, Tuple[Any, Set[str]]] = {}
+_hub_installed_cache: Dict[str, Tuple[Any, Set[str]]] = {}
+
+
+def _mtime_signature(path: Path) -> Any:
+    """Return an mtime/size signature for cache-keying, or None if missing."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 def _read_bundled_manifest_names() -> Set[str]:
     """Return the set of skill names that were seeded from the bundled repo.
 
@@ -162,7 +180,13 @@ def _read_bundled_manifest_names() -> Set[str]:
     Returns empty set if the file is missing or unreadable.
     """
     manifest = _skills_dir() / ".bundled_manifest"
-    if not manifest.exists():
+    sig = _mtime_signature(manifest)
+    cache_key = str(manifest)
+    cached = _bundled_manifest_cache.get(cache_key)
+    if cached is not None and cached[0] == sig:
+        return set(cached[1])
+    if sig is None:
+        _bundled_manifest_cache[cache_key] = (sig, set())
         return set()
     names: Set[str] = set()
     try:
@@ -175,6 +199,7 @@ def _read_bundled_manifest_names() -> Set[str]:
                 names.add(name)
     except OSError as e:
         logger.debug("Failed to read bundled manifest: %s", e)
+    _bundled_manifest_cache[cache_key] = (sig, set(names))
     return names
 
 
@@ -184,8 +209,15 @@ def _read_hub_installed_names() -> Set[str]:
     Reads ~/.takyon/skills/.hub/lock.json (see tools/skills_hub.py :: HubLockFile).
     """
     lock_path = _skills_dir() / ".hub" / "lock.json"
-    if not lock_path.exists():
+    sig = _mtime_signature(lock_path)
+    cache_key = str(lock_path)
+    cached = _hub_installed_cache.get(cache_key)
+    if cached is not None and cached[0] == sig:
+        return set(cached[1])
+    if sig is None:
+        _hub_installed_cache[cache_key] = (sig, set())
         return set()
+    names: Set[str] = set()
     try:
         data = json.loads(lock_path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -210,10 +242,11 @@ def _read_hub_installed_names() -> Set[str]:
                     skill_md = resolved / "SKILL.md"
                     if skill_md.exists():
                         names.add(_read_skill_name(skill_md, fallback=resolved.name))
-                return names
     except (OSError, json.JSONDecodeError) as e:
         logger.debug("Failed to read hub lock file: %s", e)
-    return set()
+        return set()
+    _hub_installed_cache[cache_key] = (sig, set(names))
+    return names
 
 
 def list_agent_created_skill_names() -> List[str]:

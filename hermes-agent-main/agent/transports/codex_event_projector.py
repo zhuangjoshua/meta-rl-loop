@@ -92,27 +92,39 @@ class CodexEventProjector:
         item_type = item.get("type") or ""
         item_id = item.get("id") or ""
 
-        if item_type == "agentMessage":
-            return self._project_agent_message(item)
-        if item_type == "reasoning":
-            self._pending_reasoning.extend(item.get("summary") or [])
-            self._pending_reasoning.extend(item.get("content") or [])
-            return ProjectionResult()
-        if item_type == "commandExecution":
-            return self._project_command(item, item_id)
-        if item_type == "fileChange":
-            return self._project_file_change(item, item_id)
-        if item_type == "mcpToolCall":
-            return self._project_mcp_tool_call(item, item_id)
-        if item_type == "dynamicToolCall":
-            return self._project_dynamic_tool_call(item, item_id)
-        if item_type == "userMessage":
-            return self._project_user_message(item)
+        # Handlers that only need the item dict.
+        single_arg = self._single_arg_projectors()
+        if item_type in single_arg:
+            return single_arg[item_type](item)
+
+        # Handlers that also need the codex item id (tool-shaped items).
+        id_arg = self._id_arg_projectors()
+        if item_type in id_arg:
+            return id_arg[item_type](item, item_id)
 
         # Unknown / rare items (plan, hookPrompt, collabAgentToolCall, etc.)
         # — record as opaque assistant note so memory review can still see
         # *something* happened, but don't fabricate tool_call structure.
         return self._project_opaque(item, item_type)
+
+    # ---------- dispatch registries ----------
+
+    def _single_arg_projectors(self) -> dict[str, Any]:
+        """item_type → handler(item) for items needing only the item dict."""
+        return {
+            "agentMessage": self._project_agent_message,
+            "reasoning": self._project_reasoning,
+            "userMessage": self._project_user_message,
+        }
+
+    def _id_arg_projectors(self) -> dict[str, Any]:
+        """item_type → handler(item, item_id) for tool-shaped items."""
+        return {
+            "commandExecution": self._project_command,
+            "fileChange": self._project_file_change,
+            "mcpToolCall": self._project_mcp_tool_call,
+            "dynamicToolCall": self._project_dynamic_tool_call,
+        }
 
     # ---------- per-type projections ----------
 
@@ -123,6 +135,11 @@ class CodexEventProjector:
             msg["reasoning"] = "\n".join(self._pending_reasoning)
             self._pending_reasoning = []
         return ProjectionResult(messages=[msg], final_text=text)
+
+    def _project_reasoning(self, item: dict) -> ProjectionResult:
+        self._pending_reasoning.extend(item.get("summary") or [])
+        self._pending_reasoning.extend(item.get("content") or [])
+        return ProjectionResult()
 
     def _project_user_message(self, item: dict) -> ProjectionResult:
         # codex's userMessage content is a list of UserInput variants. For

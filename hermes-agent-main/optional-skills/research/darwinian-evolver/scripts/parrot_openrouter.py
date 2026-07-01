@@ -12,6 +12,7 @@ Reads `OPENROUTER_API_KEY` from the environment.
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import sys
 from pathlib import Path
@@ -35,7 +36,10 @@ from darwinian_evolver.problem import Problem
 DEFAULT_MODEL = os.environ.get("EVOLVER_MODEL", "openai/gpt-4o-mini")
 
 
+@functools.lru_cache(maxsize=1)
 def _client() -> OpenAI:
+    # Built once and memoized so the underlying httpx connection pool (and
+    # keep-alive connections + TLS setup) are reused across all LLM calls.
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         sys.exit("OPENROUTER_API_KEY is not set")

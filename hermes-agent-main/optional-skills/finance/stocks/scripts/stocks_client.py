@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,7 @@ BACKOFF_BASE = 1.5  # seconds
 _cookie_jar = CookieJar()
 _opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cookie_jar))
 _crumb: str | None = None
+_crumb_resolved: bool = False
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -149,9 +151,11 @@ def _fetch_crumb() -> str | None:
     Yahoo Finance v8 requires a crumb + consent cookie.
     We hit the consent page once to grab cookies, then fetch the crumb.
     """
-    global _crumb
-    if _crumb is not None:
+    global _crumb, _crumb_resolved
+    if _crumb_resolved:
         return _crumb
+    # Mark resolved up front so a failed lookup isn't retried on every URL build.
+    _crumb_resolved = True
 
     # Step 1: touch Yahoo Finance to get cookies
     try:
@@ -176,16 +180,18 @@ def _fetch_crumb() -> str | None:
     return None
 
 
-def yf_url(path: str, params: dict | None = None) -> str:
+def yf_url(path: str, params: dict | None = None, base: str = YF_BASE) -> str:
     """Build a Yahoo Finance URL, injecting crumb if available."""
     crumb = _fetch_crumb()
     if params is None:
         params = {}
+    else:
+        params = dict(params)
     if crumb:
         params["crumb"] = crumb
     qs = urllib.parse.urlencode(params)
-    base = f"{YF_BASE}{path}"
-    return f"{base}?{qs}" if qs else base
+    url = f"{base}{path}"
+    return f"{url}?{qs}" if qs else url
 
 
 # ---------------------------------------------------------------------------
@@ -194,47 +200,32 @@ def yf_url(path: str, params: dict | None = None) -> str:
 
 
 def yf_chart(symbol: str, interval: str = "1d", range_: str = "1d") -> dict | None:
+    path = f"/v8/finance/chart/{urllib.parse.quote(symbol)}"
     params = {"interval": interval, "range": range_}
-    crumb = _fetch_crumb()
-    if crumb:
-        params["crumb"] = crumb
-    qs = urllib.parse.urlencode(params)
-    url = f"{YF_BASE}/v8/finance/chart/{urllib.parse.quote(symbol)}?{qs}"
-    data = fetch_url(url)
+    data = fetch_url(yf_url(path, params))
     if data is None:
         # fallback to query2
-        url2 = f"{YF_BASE2}/v8/finance/chart/{urllib.parse.quote(symbol)}?{qs}"
-        data = fetch_url(url2)
+        data = fetch_url(yf_url(path, params, base=YF_BASE2))
     return data
 
 
 def yf_search(query: str, count: int = 5) -> dict | None:
+    path = "/v1/finance/search"
     params = {"q": query, "quotesCount": count, "newsCount": 0}
-    crumb = _fetch_crumb()
-    if crumb:
-        params["crumb"] = crumb
-    qs = urllib.parse.urlencode(params)
-    url = f"{YF_BASE}/v1/finance/search?{qs}"
-    data = fetch_url(url)
+    data = fetch_url(yf_url(path, params))
     if data is None:
-        url2 = f"{YF_BASE2}/v1/finance/search?{qs}"
-        data = fetch_url(url2)
+        data = fetch_url(yf_url(path, params, base=YF_BASE2))
     return data
 
 
 def yf_quote_summary(symbol: str) -> dict | None:
     """Fetch detailed quote summary (quoteSummary) for PE, market cap, etc."""
     modules = "summaryDetail,defaultKeyStatistics,price"
+    path = f"/v11/finance/quoteSummary/{urllib.parse.quote(symbol)}"
     params = {"modules": modules}
-    crumb = _fetch_crumb()
-    if crumb:
-        params["crumb"] = crumb
-    qs = urllib.parse.urlencode(params)
-    url = f"{YF_BASE}/v11/finance/quoteSummary/{urllib.parse.quote(symbol)}?{qs}"
-    data = fetch_url(url)
+    data = fetch_url(yf_url(path, params))
     if data is None:
-        url2 = f"{YF_BASE2}/v11/finance/quoteSummary/{urllib.parse.quote(symbol)}?{qs}"
-        data = fetch_url(url2)
+        data = fetch_url(yf_url(path, params, base=YF_BASE2))
     return data
 
 
@@ -355,18 +346,35 @@ def extract_quote_summary_fields(qs_data: dict) -> dict:
 def cmd_quote(symbols: list[str]) -> None:
     results = []
 
-    for sym in symbols:
-        sym = sym.upper().strip()
+    normalized = [sym.upper().strip() for sym in symbols]
+    av_key = os.environ.get("ALPHA_VANTAGE_KEY")
+
+    # Fetch all independent network calls concurrently. Each fetch is
+    # independent blocking urllib I/O, so a thread pool collapses the
+    # serialized round-trips into roughly one round-trip of latency.
+    chart_futures = {}
+    qs_futures = {}
+    av_futures = {}
+    with ThreadPoolExecutor(max_workers=max(1, len(normalized) * 3)) as executor:
+        for sym in normalized:
+            chart_futures[sym] = executor.submit(
+                yf_chart, sym, interval="1d", range_="1d"
+            )
+            qs_futures[sym] = executor.submit(yf_quote_summary, sym)
+            if av_key:
+                av_futures[sym] = executor.submit(av_overview, sym)
+
+    for sym in normalized:
         entry = {"symbol": sym, "data_source": "Yahoo Finance"}
 
         # Fetch chart for price data
-        chart_data = yf_chart(sym, interval="1d", range_="1d")
+        chart_data = chart_futures[sym].result()
         if chart_data:
             q = extract_quote_from_chart(sym, chart_data)
             entry.update(q)
 
         # Fetch quoteSummary for enriched data
-        qs_data = yf_quote_summary(sym)
+        qs_data = qs_futures[sym].result()
         if qs_data:
             qs_fields = extract_quote_summary_fields(qs_data)
             # Prefer quoteSummary values if chart didn't have them
@@ -378,9 +386,8 @@ def cmd_quote(symbols: list[str]) -> None:
                     entry[field] = qs_fields[field]
 
         # Optionally enrich with Alpha Vantage
-        av_key = os.environ.get("ALPHA_VANTAGE_KEY")
         if av_key:
-            av_data = av_overview(sym)
+            av_data = av_futures[sym].result()
             if av_data:
                 entry["data_source"] = "Yahoo Finance + Alpha Vantage"
                 if entry.get("pe_ratio") is None:

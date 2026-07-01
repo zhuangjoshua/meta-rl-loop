@@ -4,6 +4,7 @@ import type { ScrollBoxHandle } from '@takyon/ink'
 import { evictInkCaches } from '@takyon/ink'
 import { useCallback, type RefObject } from 'react'
 
+import { MAX_HISTORY } from '../config/limits.js'
 import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
 import { introMsg, toTranscriptMessages } from '../domain/messages.js'
 import { ZERO } from '../domain/usage.js'
@@ -122,14 +123,22 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     [composerActions, setHistoryItems, setLastUserMsg, setStickyPrompt]
   )
 
+  const guardSetup = useCallback(async (): Promise<boolean> => {
+    const setup = await rpc<SetupStatusResponse>('setup.status', {})
+
+    if (setup?.provider_configured === false) {
+      panel(SETUP_REQUIRED_TITLE, buildSetupRequiredSections())
+      patchUiState({ status: 'setup required' })
+
+      return true
+    }
+
+    return false
+  }, [panel, rpc])
+
   const newSession = useCallback(
     async (msg?: string, title?: string) => {
-      const setup = await rpc<SetupStatusResponse>('setup.status', {})
-
-      if (setup?.provider_configured === false) {
-        panel(SETUP_REQUIRED_TITLE, buildSetupRequiredSections())
-        patchUiState({ status: 'setup required' })
-
+      if (await guardSetup()) {
         return
       }
 
@@ -195,7 +204,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           })
       }
     },
-    [closeSession, colsRef, panel, resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, guardSetup, resetSession, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const resumeById = useCallback(
@@ -203,11 +212,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       patchOverlayState({ picker: false })
       patchUiState({ status: 'resuming…' })
 
-      rpc<SetupStatusResponse>('setup.status', {}).then(setup => {
-        if (setup?.provider_configured === false) {
-          panel(SETUP_REQUIRED_TITLE, buildSetupRequiredSections())
-          patchUiState({ status: 'setup required' })
-
+      guardSetup().then(blocked => {
+        if (blocked) {
           return
         }
 
@@ -226,7 +232,13 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               resetSession()
               setSessionStartedAt(Date.now())
 
-              const resumed = toTranscriptMessages(r.messages)
+              // Window the resumed transcript to the same visible budget as
+              // capHistory() in useMainApp: only the tail is ever rendered, so
+              // converting/rendering the full history just janks resume. The
+              // intro row consumes one slot when present.
+              const budget = r.info ? MAX_HISTORY - 1 : MAX_HISTORY
+              const windowed = r.messages.length > budget ? r.messages.slice(-budget) : r.messages
+              const resumed = toTranscriptMessages(windowed)
 
               setHistoryItems(r.info ? [introMsg(r.info), ...resumed] : resumed)
               writeActiveSessionFile(r.resumed ?? r.session_id)
@@ -245,7 +257,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         )
       })
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, guardSetup, gw, resetSession, scrollRef, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const guardBusySessionSwitch = useCallback(

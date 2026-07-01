@@ -15,6 +15,7 @@ Or via $TAKYON_HOME/mem0.json.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -31,6 +32,16 @@ logger = logging.getLogger(__name__)
 # for _BREAKER_COOLDOWN_SECS to avoid hammering a down server.
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_SECS = 120
+
+# Bounded, process-wide pool shared across all Mem0MemoryProvider instances.
+# Caps the number of memory-provider worker threads regardless of how many
+# concurrent tenant/sessions are active, instead of spawning two short-lived
+# daemon threads per turn per provider.
+_MEM0_MAX_WORKERS = int(os.environ.get("MEM0_MAX_WORKERS", "4") or "4")
+_MEM0_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_MEM0_MAX_WORKERS,
+    thread_name_prefix="mem0",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +140,8 @@ class Mem0MemoryProvider(MemoryProvider):
         self._rerank = True
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
-        self._prefetch_thread = None
-        self._sync_thread = None
+        self._prefetch_future = None
+        self._sync_future = None
         # Circuit breaker state
         self._consecutive_failures = 0
         self._breaker_open_until = 0.0
@@ -235,8 +246,11 @@ class Mem0MemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
+        if self._prefetch_future is not None:
+            try:
+                self._prefetch_future.result(timeout=3.0)
+            except Exception:
+                pass
         with self._prefetch_lock:
             result = self._prefetch_result
             self._prefetch_result = ""
@@ -266,8 +280,7 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._record_failure()
                 logger.debug("Mem0 prefetch failed: %s", e)
 
-        self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
-        self._prefetch_thread.start()
+        self._prefetch_future = _MEM0_EXECUTOR.submit(_run)
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
@@ -288,11 +301,13 @@ class Mem0MemoryProvider(MemoryProvider):
                 logger.warning("Mem0 sync failed: %s", e)
 
         # Wait for any previous sync before starting a new one
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=5.0)
+        if self._sync_future is not None:
+            try:
+                self._sync_future.result(timeout=5.0)
+            except Exception:
+                pass
 
-        self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
-        self._sync_thread.start()
+        self._sync_future = _MEM0_EXECUTOR.submit(_sync)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [PROFILE_SCHEMA, SEARCH_SCHEMA, CONCLUDE_SCHEMA]
@@ -361,9 +376,12 @@ class Mem0MemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def shutdown(self) -> None:
-        for t in (self._prefetch_thread, self._sync_thread):
-            if t and t.is_alive():
-                t.join(timeout=5.0)
+        for f in (self._prefetch_future, self._sync_future):
+            if f is not None:
+                try:
+                    f.result(timeout=5.0)
+                except Exception:
+                    pass
         with self._client_lock:
             self._client = None
 

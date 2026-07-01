@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +47,10 @@ _MIN_OUTPUT_LEN = 20
 
 _brv_path_lock = threading.Lock()
 _cached_brv_path: Optional[str] = None
+
+# Shared bounded worker pool for background curate calls. Caps concurrency
+# across all provider instances instead of spawning one OS thread per turn.
+_curate_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="brv-curate")
 
 
 def _resolve_brv_path() -> Optional[str]:
@@ -175,7 +180,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
         self._cwd = ""
         self._session_id = ""
         self._turn_count = 0
-        self._sync_thread: Optional[threading.Thread] = None
+        self._sync_future: Optional[Future] = None
 
     @property
     def name(self) -> str:
@@ -227,6 +232,8 @@ class ByteRoverMemoryProvider(MemoryProvider):
         if result["success"] and result.get("output"):
             output = result["output"].strip()
             if len(output) > _MIN_OUTPUT_LEN:
+                if len(output) > 8000:
+                    output = output[:8000] + "\n\n[... truncated]"
                 return f"## ByteRover Context\n{output}"
         return ""
 
@@ -252,14 +259,14 @@ class ByteRoverMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("ByteRover sync failed: %s", e)
 
-        # Wait for previous sync
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=5.0)
+        # Wait for previous sync to finish before queuing the next one.
+        if self._sync_future and not self._sync_future.done():
+            try:
+                self._sync_future.result(timeout=5.0)
+            except Exception:
+                pass
 
-        self._sync_thread = threading.Thread(
-            target=_sync, daemon=True, name="brv-sync"
-        )
-        self._sync_thread.start()
+        self._sync_future = _curate_executor.submit(_sync)
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """Mirror built-in memory writes to ByteRover."""
@@ -276,8 +283,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("ByteRover memory mirror failed: %s", e)
 
-        t = threading.Thread(target=_write, daemon=True, name="brv-memwrite")
-        t.start()
+        _curate_executor.submit(_write)
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Extract insights before context compression discards turns."""
@@ -307,8 +313,7 @@ class ByteRoverMemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("ByteRover pre-compression flush failed: %s", e)
 
-        t = threading.Thread(target=_flush, daemon=True, name="brv-flush")
-        t.start()
+        _curate_executor.submit(_flush)
         return ""
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -324,8 +329,11 @@ class ByteRoverMemoryProvider(MemoryProvider):
         return tool_error(f"Unknown tool: {tool_name}")
 
     def shutdown(self) -> None:
-        if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=10.0)
+        if self._sync_future and not self._sync_future.done():
+            try:
+                self._sync_future.result(timeout=10.0)
+            except Exception:
+                pass
 
     # -- Tool implementations ------------------------------------------------
 

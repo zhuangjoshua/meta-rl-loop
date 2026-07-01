@@ -16,6 +16,7 @@ import json
 import re
 import sys
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -201,36 +202,47 @@ def _wd_qid_for_title(title: str) -> str:
     return ""
 
 
+def _enrich_hit(hit: dict, no_wikidata: bool) -> dict[str, str] | None:
+    """Fetch summary + Wikidata facts for a single search hit.
+
+    Independent per title, so these run concurrently across hits. Returns
+    ``None`` when the hit lacks a usable title.
+    """
+    title = hit.get("title", "")
+    if not title:
+        return None
+    summary = _wp_summary(title)
+    qid = _wd_qid_for_title(title) if not no_wikidata else ""
+    facts: dict = {}
+    if qid:
+        facts = _wd_lookup_by_qid(qid)
+    return {
+        "source": "wikipedia+wikidata" if qid else "wikipedia",
+        "label": title,
+        "description": (summary.get("description") or hit.get("description") or "").strip(),
+        "qid": qid,
+        "wikipedia_title": title,
+        "wikipedia_url": hit.get("url", ""),
+        "wikidata_url": f"https://www.wikidata.org/wiki/{qid}" if qid else "",
+        "instance_of": "; ".join(facts.get("instance_of", [])),
+        "country": "; ".join(facts.get("country", [])),
+        "occupation": "; ".join(facts.get("occupation", [])),
+        "employer": "; ".join(facts.get("employer", [])),
+        "date_of_birth": "; ".join(facts.get("date_of_birth", []))[:10] if facts.get("date_of_birth") else "",
+        "place_of_birth": "; ".join(facts.get("place_of_birth", [])),
+        "summary": (summary.get("extract") or "").replace("\n", " ")[:1000],
+    }
+
+
 def fetch(query: str, limit: int, no_wikidata: bool, out_path: str) -> int:
-    hits = _wp_search(query, limit)
+    hits = _wp_search(query, limit)[:limit]
+    # Each hit's enrichment is independent blocking I/O, so parallelize across
+    # titles. Preserve input order when collecting rows.
     rows: list[dict[str, str]] = []
-    for hit in hits[:limit]:
-        title = hit.get("title", "")
-        if not title:
-            continue
-        summary = _wp_summary(title)
-        qid = _wd_qid_for_title(title) if not no_wikidata else ""
-        facts: dict = {}
-        if qid:
-            facts = _wd_lookup_by_qid(qid)
-        rows.append(
-            {
-                "source": "wikipedia+wikidata" if qid else "wikipedia",
-                "label": title,
-                "description": (summary.get("description") or hit.get("description") or "").strip(),
-                "qid": qid,
-                "wikipedia_title": title,
-                "wikipedia_url": hit.get("url", ""),
-                "wikidata_url": f"https://www.wikidata.org/wiki/{qid}" if qid else "",
-                "instance_of": "; ".join(facts.get("instance_of", [])),
-                "country": "; ".join(facts.get("country", [])),
-                "occupation": "; ".join(facts.get("occupation", [])),
-                "employer": "; ".join(facts.get("employer", [])),
-                "date_of_birth": "; ".join(facts.get("date_of_birth", []))[:10] if facts.get("date_of_birth") else "",
-                "place_of_birth": "; ".join(facts.get("place_of_birth", [])),
-                "summary": (summary.get("extract") or "").replace("\n", " ")[:1000],
-            }
-        )
+    if hits:
+        with ThreadPoolExecutor(max_workers=min(len(hits), 8)) as pool:
+            results = list(pool.map(lambda h: _enrich_hit(h, no_wikidata), hits))
+        rows = [r for r in results if r is not None]
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as fh:

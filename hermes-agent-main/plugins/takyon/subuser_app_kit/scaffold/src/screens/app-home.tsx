@@ -9,7 +9,7 @@ import {
   CardTitle,
 } from "../components/ui/card";
 import { Skeleton } from "../components/ui/skeleton";
-import { businessDisplayName } from "../lib/branding";
+import { businessDisplayName, formatUsageAllowance } from "../lib/branding";
 import { resolveViewerCta, useViewerAccess } from "../lib/hooks";
 import { useProductAuth } from "../lib/product-auth";
 
@@ -17,25 +17,11 @@ function accountEmail(access: ReturnType<typeof useViewerAccess>): string {
   return String(access.user?.email || access.session?.email || access.account?.email || "").trim();
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function dollars(value: unknown): string | null {
-  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(2)}` : null;
-}
-
 /** "$X of $Y used this week" line from the account's weekly usage allowance. Returns null when no
- *  allowance is present so the line simply hides instead of faking a quota. */
+ *  allowance is present so the line simply hides instead of faking a quota. Delegates to the shared
+ *  formatter so account-usage display stays a single source of truth. */
 function weeklyAllocationLine(access: ReturnType<typeof useViewerAccess>): string | null {
-  const allocation = isRecord(access.account?.usage_allocation)
-    ? (access.account?.usage_allocation as Record<string, unknown>)
-    : null;
-  if (!allocation) return null;
-  const used = dollars(allocation.committed_usd);
-  if (used === null) return null;
-  const limit = dollars(allocation.hard_limit_usd);
-  return limit ? `${used} of ${limit} used this week` : `${used} used this week`;
+  return formatUsageAllowance(access.account);
 }
 
 export function AppHomeScreen() {

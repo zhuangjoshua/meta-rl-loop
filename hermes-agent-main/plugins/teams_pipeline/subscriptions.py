@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -134,6 +135,7 @@ async def maintain_graph_subscriptions(
     renewed: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    due_for_renewal: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
     for raw in remote_subscriptions:
         if not isinstance(raw, dict):
@@ -214,13 +216,33 @@ async def maintain_graph_subscriptions(
         if dry_run:
             continue
 
-        patched = await client.patch_json(
-            f"/subscriptions/{subscription_id}",
-            json_body={"expirationDateTime": new_expiration},
+        due_for_renewal.append((candidate, raw))
+
+    if due_for_renewal:
+        semaphore = asyncio.Semaphore(10)
+
+        async def _renew(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                return await client.patch_json(
+                    f"/subscriptions/{candidate['subscription_id']}",
+                    json_body={"expirationDateTime": candidate["new_expiration"]},
+                )
+
+        patched_results = await asyncio.gather(
+            *(_renew(candidate, raw) for candidate, raw in due_for_renewal)
         )
-        merged = {**raw, **(patched or {}), "id": subscription_id, "expirationDateTime": new_expiration}
-        sync_graph_subscription_record(store, merged, status="active", renewed=True)
-        renewed.append({**candidate, "result": patched})
+
+        for (candidate, raw), patched in zip(due_for_renewal, patched_results):
+            subscription_id = candidate["subscription_id"]
+            new_expiration = candidate["new_expiration"]
+            merged = {
+                **raw,
+                **(patched or {}),
+                "id": subscription_id,
+                "expirationDateTime": new_expiration,
+            }
+            sync_graph_subscription_record(store, merged, status="active", renewed=True)
+            renewed.append({**candidate, "result": patched})
 
     for subscription_id in store.list_subscriptions():
         if subscription_id in remote_ids:

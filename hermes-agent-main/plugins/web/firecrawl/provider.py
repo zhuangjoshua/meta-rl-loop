@@ -449,12 +449,16 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
         # module level (lazy-friendly because the website_policy import is
         # cheap) so monkeypatching it in tests works as expected.
 
-        results: List[Dict[str, Any]] = []
+        # Bound concurrency so a large multi-URL extract doesn't spawn an
+        # unbounded number of scrape threads. Each independent URL is
+        # scraped concurrently (up to the semaphore limit) rather than
+        # serially, so total wall-clock scales with the slowest fetch
+        # rather than the sum of all fetches.
+        semaphore = asyncio.Semaphore(6)
 
-        for url in urls:
+        async def _extract_one(url: str) -> Dict[str, Any]:
             if _is_interrupted():
-                results.append({"url": url, "error": "Interrupted", "title": ""})
-                continue
+                return {"url": url, "error": "Interrupted", "title": ""}
 
             # Pre-scrape website policy gate
             blocked = check_website_access(url)
@@ -464,46 +468,41 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                     blocked["host"],
                     blocked["rule"],
                 )
-                results.append(
-                    {
-                        "url": url,
-                        "title": "",
-                        "content": "",
-                        "error": blocked["message"],
-                        "blocked_by_policy": {
-                            "host": blocked["host"],
-                            "rule": blocked["rule"],
-                            "source": blocked["source"],
-                        },
-                    }
-                )
-                continue
+                return {
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "error": blocked["message"],
+                    "blocked_by_policy": {
+                        "host": blocked["host"],
+                        "rule": blocked["rule"],
+                        "source": blocked["source"],
+                    },
+                }
 
             try:
                 logger.info("Firecrawl scraping: %s", url)
                 try:
-                    scrape_result = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            _get_firecrawl_client().scrape,
-                            url=url,
-                            formats=formats,
-                        ),
-                        timeout=60,
-                    )
+                    async with semaphore:
+                        scrape_result = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                _get_firecrawl_client().scrape,
+                                url=url,
+                                formats=formats,
+                            ),
+                            timeout=60,
+                        )
                 except asyncio.TimeoutError:
                     logger.warning("Firecrawl scrape timed out for %s", url)
-                    results.append(
-                        {
-                            "url": url,
-                            "title": "",
-                            "content": "",
-                            "error": (
-                                "Scrape timed out after 60s — page may be too large "
-                                "or unresponsive. Try browser_navigate instead."
-                            ),
-                        }
-                    )
-                    continue
+                    return {
+                        "url": url,
+                        "title": "",
+                        "content": "",
+                        "error": (
+                            "Scrape timed out after 60s — page may be too large "
+                            "or unresponsive. Try browser_navigate instead."
+                        ),
+                    }
 
                 scrape_payload = _extract_scrape_payload(scrape_result)
                 metadata = scrape_payload.get("metadata", {})
@@ -530,21 +529,18 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                         final_blocked["host"],
                         final_blocked["rule"],
                     )
-                    results.append(
-                        {
-                            "url": final_url,
-                            "title": title,
-                            "content": "",
-                            "raw_content": "",
-                            "error": final_blocked["message"],
-                            "blocked_by_policy": {
-                                "host": final_blocked["host"],
-                                "rule": final_blocked["rule"],
-                                "source": final_blocked["source"],
-                            },
-                        }
-                    )
-                    continue
+                    return {
+                        "url": final_url,
+                        "title": title,
+                        "content": "",
+                        "raw_content": "",
+                        "error": final_blocked["message"],
+                        "blocked_by_policy": {
+                            "host": final_blocked["host"],
+                            "rule": final_blocked["rule"],
+                            "source": final_blocked["source"],
+                        },
+                    }
 
                 # Choose markdown vs html according to the requested format
                 if format == "markdown" or (format is None and content_markdown):
@@ -552,28 +548,29 @@ class FirecrawlWebSearchProvider(WebSearchProvider):
                 else:
                     chosen_content = content_html or content_markdown or ""
 
-                results.append(
-                    {
-                        "url": final_url,
-                        "title": title,
-                        "content": chosen_content,
-                        "raw_content": chosen_content,
-                        "metadata": metadata,
-                    }
-                )
+                return {
+                    "url": final_url,
+                    "title": title,
+                    "content": chosen_content,
+                    "raw_content": chosen_content,
+                    "metadata": metadata,
+                }
             except Exception as scrape_err:  # noqa: BLE001
                 logger.debug("Firecrawl scrape failed for %s: %s", url, scrape_err)
-                results.append(
-                    {
-                        "url": url,
-                        "title": "",
-                        "content": "",
-                        "raw_content": "",
-                        "error": str(scrape_err),
-                    }
-                )
+                return {
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "raw_content": "",
+                    "error": str(scrape_err),
+                }
 
-        return results
+        # gather preserves input order, so results align with `urls`.
+        results: List[Dict[str, Any]] = await asyncio.gather(
+            *(_extract_one(url) for url in urls)
+        )
+
+        return list(results)
 
     async def crawl(self, url: str, **kwargs: Any) -> Dict[str, Any]:
         """Crawl a seed URL via Firecrawl's ``/crawl`` endpoint.

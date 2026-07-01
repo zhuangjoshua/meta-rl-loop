@@ -63,16 +63,28 @@ def _main(argv: List[str]) -> int:
     print(f"Generating {len(specs)} creative(s) -> {args.out} (backend={backend.name})")
     records, failures = [], []
     workers = max(1, args.concurrency)
+
+    def _submit(pool, spec):
+        fut = pool.submit(
+            generate_one,
+            spec, args.out, backend=backend, crop=args.crop,
+            quality=args.quality, strict=args.strict, aspect_ratios=aspect_ratios,
+        )
+        future_to_cid[fut] = spec.get("creative_id", "?")
+        return fut
+
+    future_to_cid = {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_cid = {
-            pool.submit(
-                generate_one,
-                spec, args.out, backend=backend, crop=args.crop,
-                quality=args.quality, strict=args.strict, aspect_ratios=aspect_ratios,
-            ): spec.get("creative_id", "?")
-            for spec in specs
-        }
-        pending = set(future_to_cid)
+        specs_iter = iter(specs)
+        # Prime the pool with up to `workers` in-flight submissions, then submit
+        # lazily as futures complete so an early --stop-on-error abort never
+        # dispatches (and pays for) the remaining unsubmitted specs.
+        pending = set()
+        for spec in specs:
+            pending.add(_submit(pool, spec))
+            if len(pending) >= workers:
+                break
+        specs_iter = iter(specs[len(pending):])
         while pending:
             done, pending = wait(pending, return_when=FIRST_EXCEPTION)
             hit_error = False
@@ -89,6 +101,13 @@ def _main(argv: List[str]) -> int:
                     fut.cancel()
                 pending = set()
                 break
+            # Backfill completed slots by submitting the next unsubmitted specs.
+            for _ in range(len(done)):
+                try:
+                    next_spec = next(specs_iter)
+                except StopIteration:
+                    break
+                pending.add(_submit(pool, next_spec))
 
     manifest = {
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),

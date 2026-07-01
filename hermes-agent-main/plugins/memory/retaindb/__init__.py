@@ -178,9 +178,13 @@ FILE_DELETE_SCHEMA = {
 
 class _Client:
     def __init__(self, api_key: str, base_url: str, project: str):
+        import requests
         self.api_key = api_key
         self.base_url = re.sub(r"/+$", "", base_url)
         self.project = project
+        # Reuse a single Session for connection pooling / keep-alive so every
+        # prefetch/search/add_memory call avoids a fresh TCP+TLS handshake.
+        self._session = requests.Session()
 
     def _headers(self, path: str) -> dict:
         token = self.api_key.replace("Bearer ", "").strip()
@@ -194,9 +198,8 @@ class _Client:
         return h
 
     def request(self, method: str, path: str, *, params=None, json_body=None, timeout: float = 8.0) -> Any:
-        import requests
         url = f"{self.base_url}{path}"
-        resp = requests.request(
+        resp = self._session.request(
             method.upper(), url,
             params=params,
             json=json_body if method.upper() not in {"GET", "DELETE"} else None,
@@ -239,8 +242,14 @@ class _Client:
     def get_profile(self, user_id: str) -> dict:
         try:
             return self.request("GET", f"/v1/memory/profile/{quote(user_id, safe='')}", params={"project": self.project, "include_pending": "true"})
-        except Exception:
-            return self.request("GET", "/v1/memories", params={"project": self.project, "user_id": user_id, "limit": "200"})
+        except RuntimeError as exc:
+            # Only fall back to the heavy /v1/memories endpoint when the profile
+            # route is genuinely absent/unsupported (404/405). On transient
+            # failures re-raise so the caller's prefetch backoff kicks in
+            # instead of hammering the 200-row endpoint every turn.
+            if re.search(r"\((?:404|405)\)", str(exc)):
+                return self.request("GET", "/v1/memories", params={"project": self.project, "user_id": user_id, "limit": "200"})
+            raise
 
     def add_memory(self, user_id: str, session_id: str, content: str, memory_type: str = "factual", importance: float = 0.7) -> dict:
         try:
@@ -283,14 +292,13 @@ class _Client:
 
     def upload_file(self, data: bytes, filename: str, remote_path: str, mime_type: str, scope: str, project_id: str | None) -> dict:
         import io
-        import requests
         url = f"{self.base_url}/v1/files"
         token = self.api_key.replace("Bearer ", "").strip()
         headers = {"Authorization": f"Bearer {token}", "x-sdk-runtime": "takyon-plugin"}
         fields = {"path": remote_path, "scope": scope.upper()}
         if project_id:
             fields["project_id"] = project_id
-        resp = requests.post(url, files={"file": (filename, io.BytesIO(data), mime_type)}, data=fields, headers=headers, timeout=30)
+        resp = self._session.post(url, files={"file": (filename, io.BytesIO(data), mime_type)}, data=fields, headers=headers, timeout=30)
         resp.raise_for_status()
         return resp.json()
 
@@ -304,10 +312,9 @@ class _Client:
         return self.request("GET", f"/v1/files/{quote(file_id, safe='')}")
 
     def read_file_content(self, file_id: str) -> bytes:
-        import requests
         token = self.api_key.replace("Bearer ", "").strip()
         url = f"{self.base_url}/v1/files/{quote(file_id, safe='')}/content"
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}", "x-sdk-runtime": "takyon-plugin"}, timeout=30, allow_redirects=True)
+        resp = self._session.get(url, headers={"Authorization": f"Bearer {token}", "x-sdk-runtime": "takyon-plugin"}, timeout=30, allow_redirects=True)
         resp.raise_for_status()
         return resp.content
 

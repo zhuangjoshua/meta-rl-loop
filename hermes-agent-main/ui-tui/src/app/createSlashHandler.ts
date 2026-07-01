@@ -7,6 +7,35 @@ import { findSlashCommand } from './slash/registry.js'
 import type { SlashRunCtx } from './slash/types.js'
 import { getUiState } from './uiStore.js'
 
+type CanonIndex = {
+  byLowerAlias: Map<string, string>
+  aliases: { alias: string; canon: string }[]
+}
+
+const canonIndexCache = new WeakMap<object, CanonIndex>()
+
+function getCanonIndex(canon: Record<string, string>): CanonIndex {
+  const cached = canonIndexCache.get(canon)
+
+  if (cached) {
+    return cached
+  }
+
+  const byLowerAlias = new Map<string, string>()
+  const aliases: { alias: string; canon: string }[] = []
+
+  for (const [alias, canonValue] of Object.entries(canon)) {
+    byLowerAlias.set(alias.toLowerCase(), canonValue)
+    aliases.push({ alias, canon: canonValue })
+  }
+
+  const index: CanonIndex = { aliases, byLowerAlias }
+
+  canonIndexCache.set(canon, index)
+
+  return index
+}
+
 export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => boolean {
   const { gw } = ctx.gateway
   const { catalog } = ctx.local
@@ -47,20 +76,23 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string) => b
 
     if (catalog?.canon) {
       const needle = `/${parsed.name}`.toLowerCase()
-      const exact = Object.entries(catalog.canon).find(([alias]) => alias.toLowerCase() === needle)?.[1]
+      const { aliases, byLowerAlias } = getCanonIndex(catalog.canon)
+      const exact = byLowerAlias.get(needle)
 
       if (exact) {
         if (exact.toLowerCase() !== needle) {
           return handler(`${exact}${argTail}`)
         }
       } else {
-        const matches = [
-          ...new Set(
-            Object.entries(catalog.canon)
-              .filter(([alias]) => alias.startsWith(needle))
-              .map(([, canon]) => canon)
-          )
-        ]
+        const seen = new Set<string>()
+        const matches: string[] = []
+
+        for (const { alias, canon } of aliases) {
+          if (alias.startsWith(needle) && !seen.has(canon)) {
+            seen.add(canon)
+            matches.push(canon)
+          }
+        }
 
         if (matches.length === 1 && matches[0]!.toLowerCase() !== needle) {
           return handler(`${matches[0]}${argTail}`)

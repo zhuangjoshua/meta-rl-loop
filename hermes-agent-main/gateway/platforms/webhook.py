@@ -65,6 +65,12 @@ DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
 _DYNAMIC_ROUTES_FILENAME = "webhook_subscriptions.json"
 
+# Minimum seconds between filesystem checks for dynamic-route changes.
+# Under sustained webhook traffic this keeps the hot path from doing an
+# exists()+stat() syscall on literally every POST while still detecting
+# mtime changes within the cooldown window.
+_DYNAMIC_ROUTES_CHECK_COOLDOWN_S = 5.0
+
 # Hostnames/IP literals that only serve connections originating on the same
 # machine. Anything else is treated as a public bind for safety-rail purposes.
 _LOOPBACK_HOSTS = frozenset({
@@ -105,6 +111,9 @@ class WebhookAdapter(BasePlatformAdapter):
         self._static_routes: Dict[str, dict] = config.extra.get("routes", {})
         self._dynamic_routes: Dict[str, dict] = {}
         self._dynamic_routes_mtime: float = 0.0
+        # Monotonic timestamp of the last filesystem check; gates the
+        # exists()+stat() syscall behind a short cooldown on the hot path.
+        self._dynamic_routes_last_check: float = 0.0
         self._routes: Dict[str, dict] = dict(self._static_routes)
         self._runner = None
 
@@ -290,7 +299,18 @@ class WebhookAdapter(BasePlatformAdapter):
         return web.json_response({"status": "ok", "platform": "webhook"})
 
     def _reload_dynamic_routes(self) -> None:
-        """Reload agent-created subscriptions from disk if the file changed."""
+        """Reload agent-created subscriptions from disk if the file changed.
+
+        Gated behind a short in-memory cooldown so most POSTs skip the
+        exists()+stat() syscall entirely. mtime-based change detection
+        still fires, just no more often than every
+        ``_DYNAMIC_ROUTES_CHECK_COOLDOWN_S`` seconds.
+        """
+        now = time.monotonic()
+        if now - self._dynamic_routes_last_check < _DYNAMIC_ROUTES_CHECK_COOLDOWN_S:
+            return
+        self._dynamic_routes_last_check = now
+
         from takyon_constants import get_takyon_home
         takyon_home = get_takyon_home()
         subs_path = takyon_home / _DYNAMIC_ROUTES_FILENAME

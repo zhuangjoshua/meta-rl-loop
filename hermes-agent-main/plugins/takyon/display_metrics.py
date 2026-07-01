@@ -108,19 +108,29 @@ def synthetic_traction(
     # How much of the per-bucket activity falls inside this window vs a nominal month.
     window_frac = {"M": 1.0, "W": 0.30, "D": 1.0 / 28.0, "Y": 1.7}.get(key, 1.0)
 
+    # Precompute the per-bucket exponential drift once — it depends only on the
+    # bucket (via ``p``), not the metric, so recomputing it per metric wastes
+    # ~5x the math.exp/date-arithmetic evaluations. ``None`` marks pre-launch
+    # buckets whose increment is always 0.0.
+    drift_by_bucket: list[float | None] = []
+    for d in bucket_starts:
+        if d < launch:
+            drift_by_bucket.append(None)
+            continue
+        p = (d - launch).total_seconds() / 86400.0 / span_days
+        p = 0.0 if p < 0 else (1.0 if p > 1 else p)
+        drift_by_bucket.append(math.exp(_K * p))
+
     series_by_metric: dict[str, list[int]] = {}
     for mi, metric in enumerate(_METRICS):
         # Stochastic, strictly non-negative daily increments with an accelerating
         # (exponential) drift and high day-to-day variance — so the cumulative line
         # is jagged like a real revenue/usage chart yet can never go down.
         increments: list[float] = []
-        for i, d in enumerate(bucket_starts):
-            if d < launch:
+        for i, drift in enumerate(drift_by_bucket):
+            if drift is None:
                 increments.append(0.0)
                 continue
-            p = (d - launch).total_seconds() / 86400.0 / span_days
-            p = 0.0 if p < 0 else (1.0 if p > 1 else p)
-            drift = math.exp(_K * p)
             r1 = _texture(seed, mi * 2 + 1, i)
             r2 = _texture(seed, mi * 2 + 2, i * 3 + 7)
             jitter = 0.06 + 1.9 * (0.6 * r1 * r1 + 0.4 * r2)  # >0, wide spread, occasional near-flat days

@@ -55,7 +55,29 @@ DEFAULT_JUDGE_TIMEOUT = 30.0
 # triggering the auto-pause. 4096 covers reasoning + verdict on every model
 # we've live-tested; override via auxiliary.goal_judge.max_tokens for
 # specifically constrained setups.
-DEFAULT_JUDGE_MAX_TOKENS = 4096
+#
+# Non-reasoning judge models emit only the one-line JSON verdict, so a small
+# cap is plenty. Reasoning models (deepseek-v4, qwq, etc.) burn hidden
+# reasoning tokens before the visible JSON, so they need the larger budget —
+# 512 truncates the verdict on those. We resolve the judge model per turn and
+# raise the cap only when it looks like a reasoning model, cutting output-token
+# spend ~8x on the common non-reasoning case. The auxiliary.goal_judge.max_tokens
+# override still takes precedence.
+DEFAULT_JUDGE_MAX_TOKENS = 512
+DEFAULT_JUDGE_REASONING_MAX_TOKENS = 4096
+# Substrings that mark a resolved judge model as a reasoning model needing the
+# larger token budget. Matched case-insensitively against the model id.
+_REASONING_MODEL_MARKERS = (
+    "reasoning",
+    "reasoner",
+    "thinking",
+    "deepseek-v4",
+    "deepseek-r1",
+    "qwq",
+    "o1",
+    "o3",
+    "o4",
+)
 # Cap how much of the last response + recent messages we send to the judge.
 _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
 # After this many consecutive judge *parse* failures (empty output / non-JSON),
@@ -295,13 +317,36 @@ def _truncate(text: str, limit: int) -> str:
 _JSON_OBJECT_RE = re.compile(r"\{.*?\}", re.DOTALL)
 
 
-def _goal_judge_max_tokens() -> int:
-    """Resolve auxiliary.goal_judge.max_tokens, falling back to the default.
+def _is_reasoning_model(model: Optional[str]) -> bool:
+    """Heuristic: does the resolved judge model id look like a reasoning model?
+
+    Reasoning models emit hidden reasoning tokens before the visible JSON
+    verdict, so they need the larger token budget. Matched case-insensitively
+    against known markers.
+    """
+    if not model:
+        return False
+    lowered = model.lower()
+    return any(marker in lowered for marker in _REASONING_MODEL_MARKERS)
+
+
+def _goal_judge_max_tokens(model: Optional[str] = None) -> int:
+    """Resolve the judge output-token budget.
+
+    An explicit ``auxiliary.goal_judge.max_tokens`` config value always wins.
+    Otherwise the budget defaults to the small verdict-only cap, raised to the
+    reasoning budget when the resolved judge ``model`` looks like a reasoning
+    model (which burns hidden reasoning tokens before the visible JSON).
 
     ``load_config()`` is cached on the config file's (mtime, size), so calling
     this once per judge turn is cheap. A non-positive or non-int value falls
-    back to the default rather than crashing the goal loop.
+    back to the model-appropriate default rather than crashing the goal loop.
     """
+    fallback = (
+        DEFAULT_JUDGE_REASONING_MAX_TOKENS
+        if _is_reasoning_model(model)
+        else DEFAULT_JUDGE_MAX_TOKENS
+    )
     try:
         from takyon_cli.config import load_config
 
@@ -309,14 +354,15 @@ def _goal_judge_max_tokens() -> int:
         value = (
             (cfg.get("auxiliary") or {})
             .get("goal_judge", {})
-            .get("max_tokens", DEFAULT_JUDGE_MAX_TOKENS)
+            .get("max_tokens", None)
         )
-        value = int(value)
-        if value > 0:
-            return value
+        if value is not None:
+            value = int(value)
+            if value > 0:
+                return value
     except Exception:
         pass
-    return DEFAULT_JUDGE_MAX_TOKENS
+    return fallback
 
 
 def _parse_judge_response(raw: str) -> Tuple[bool, str, bool]:
@@ -444,7 +490,7 @@ def judge_goal(
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
-            max_tokens=_goal_judge_max_tokens(),
+            max_tokens=_goal_judge_max_tokens(model),
             timeout=timeout,
             extra_body=get_auxiliary_extra_body() or None,
         )

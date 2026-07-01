@@ -282,16 +282,42 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
     Searches the local skills dir (~/.takyon/skills/) first, then any
     external dirs configured via skills.external_dirs.  Returns
     {"path": Path} or None.
+
+    Prunes ``EXCLUDED_SKILL_DIRS`` during traversal (via ``os.walk`` with
+    in-place dir pruning) so we never descend into excluded subtrees. Also
+    probes the two common candidate layouts directly — ``<root>/<name>/``
+    and ``<root>/<category>/<name>/`` — before falling back to a full walk,
+    so the typical lookup avoids recursively reading the whole tree.
     """
     from agent.skill_utils import EXCLUDED_SKILL_DIRS, get_all_skills_dirs
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.exists():
             continue
-        for skill_md in skills_dir.rglob("SKILL.md"):
-            if any(part in EXCLUDED_SKILL_DIRS for part in skill_md.parts):
+
+        # Fast path: top-level skill directory `<root>/<name>/SKILL.md`.
+        if name not in EXCLUDED_SKILL_DIRS:
+            direct = skills_dir / name / "SKILL.md"
+            if direct.is_file():
+                return {"path": direct.parent}
+
+        # Fast path: single-category skill `<root>/<category>/<name>/SKILL.md`.
+        try:
+            categories = list(skills_dir.iterdir())
+        except OSError:
+            categories = []
+        for category in categories:
+            if not category.is_dir() or category.name in EXCLUDED_SKILL_DIRS:
                 continue
-            if skill_md.parent.name == name:
-                return {"path": skill_md.parent}
+            candidate = category / name / "SKILL.md"
+            if candidate.is_file():
+                return {"path": candidate.parent}
+
+        # Fallback: walk the tree, pruning excluded dirs so we never descend
+        # into them (matching the original per-part exclusion semantics).
+        for dirpath, dirnames, filenames in os.walk(skills_dir):
+            dirnames[:] = [d for d in dirnames if d not in EXCLUDED_SKILL_DIRS]
+            if "SKILL.md" in filenames and Path(dirpath).name == name:
+                return {"path": Path(dirpath)}
     return None
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import urlparse
 
@@ -12,6 +13,27 @@ from takyon_cli.auth import (
     AuthError,
     resolve_spotify_runtime_credentials,
 )
+
+
+_client_lock = threading.Lock()
+_shared_client: Optional[httpx.Client] = None
+
+
+def _client() -> httpx.Client:
+    """Return a lazily-created, keep-alive httpx.Client shared across requests.
+
+    Pooling connections avoids a fresh TLS handshake + pool teardown on every
+    Spotify API call.
+    """
+    global _shared_client
+    client = _shared_client
+    if client is None:
+        with _client_lock:
+            client = _shared_client
+            if client is None:
+                client = httpx.Client(timeout=30.0)
+                _shared_client = client
+    return client
 
 
 class SpotifyError(RuntimeError):
@@ -72,13 +94,12 @@ class SpotifyClient:
         empty_response: Optional[Dict[str, Any]] = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
-        response = httpx.request(
+        response = _client().request(
             method,
             url,
             headers=self._headers(),
             params=_strip_none(params),
             json=_strip_none(json_body) if json_body is not None else None,
-            timeout=30.0,
         )
         if response.status_code == 401 and allow_retry_on_401:
             self._runtime = self._resolve_runtime(force_refresh=True, refresh_if_expiring=True)
@@ -291,21 +312,42 @@ class SpotifyClient:
         return self.request("GET", "/me/tracks", params={"limit": limit, "offset": offset, "market": market})
 
     def save_library_items(self, *, uris: list[str]) -> Any:
-        return self.request("PUT", "/me/library", params={"uris": ",".join(uris)})
+        results = [
+            self.request("PUT", "/me/library", params={"uris": ",".join(chunk)})
+            for chunk in _chunk_uris(uris)
+        ]
+        return results[0] if len(results) == 1 else results
 
     def library_contains(self, *, uris: list[str]) -> Any:
-        return self.request("GET", "/me/library/contains", params={"uris": ",".join(uris)})
+        results: list[Any] = []
+        for chunk in _chunk_uris(uris):
+            result = self.request(
+                "GET", "/me/library/contains", params={"uris": ",".join(chunk)}
+            )
+            if isinstance(result, list):
+                results.extend(result)
+            else:
+                results.append(result)
+        return results
 
     def get_saved_albums(self, *, limit: int = 20, offset: int = 0, market: Optional[str] = None) -> Any:
         return self.request("GET", "/me/albums", params={"limit": limit, "offset": offset, "market": market})
 
     def remove_saved_tracks(self, *, track_ids: list[str]) -> Any:
         uris = [f"spotify:track:{track_id}" for track_id in track_ids]
-        return self.request("DELETE", "/me/library", params={"uris": ",".join(uris)})
+        results = [
+            self.request("DELETE", "/me/library", params={"uris": ",".join(chunk)})
+            for chunk in _chunk_uris(uris)
+        ]
+        return results[0] if len(results) == 1 else results
 
     def remove_saved_albums(self, *, album_ids: list[str]) -> Any:
         uris = [f"spotify:album:{album_id}" for album_id in album_ids]
-        return self.request("DELETE", "/me/library", params={"uris": ",".join(uris)})
+        results = [
+            self.request("DELETE", "/me/library", params={"uris": ",".join(chunk)})
+            for chunk in _chunk_uris(uris)
+        ]
+        return results[0] if len(results) == 1 else results
 
     def get_recently_played(
         self,
@@ -374,6 +416,14 @@ def _friendly_spotify_error_message(
     if detail:
         return detail
     return f"Spotify API request failed with status {status_code}."
+
+
+_SPOTIFY_LIBRARY_BATCH_SIZE = 50
+
+
+def _chunk_uris(uris: list[str], size: int = _SPOTIFY_LIBRARY_BATCH_SIZE) -> Iterable[list[str]]:
+    for start in range(0, len(uris), size):
+        yield uris[start:start + size]
 
 
 def _strip_none(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:

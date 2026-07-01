@@ -15,8 +15,9 @@
  * runtime (JSON.stringify / dangerouslySetInnerHTML) is reported as "runtime"
  * — validate it against rendered HTML instead.
  */
-import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
-import { join, extname, relative } from "node:path";
+import { readFileSync } from "node:fs";
+import { extname, relative } from "node:path";
+import { collectTargets } from "./lib/fs-scan.ts";
 
 const SCAN_EXTS = [
   ".html",
@@ -31,18 +32,6 @@ const SCAN_EXTS = [
   ".json",
   ".jsonld",
 ];
-const IGNORE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  ".nuxt",
-  ".svelte-kit",
-  ".astro",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-]);
 
 // Fields that assert facts which must be real, not fabricated.
 const TRUTH_KEYS = [
@@ -67,39 +56,6 @@ type Block = {
   warnings: string[];
   truthFlags: string[];
 };
-
-function walk(dir: string, acc: string[] = []): string[] {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const e of entries) {
-    const full = join(dir, e.name);
-    if (e.isDirectory()) {
-      if (IGNORE_DIRS.has(e.name) || e.name.startsWith(".")) continue;
-      walk(full, acc);
-    } else if (e.isFile() && SCAN_EXTS.includes(extname(e.name))) {
-      acc.push(full);
-    }
-  }
-  return acc;
-}
-
-function collectTargets(args: string[]): string[] {
-  const inputs = args.length ? args : [process.cwd()];
-  const files = new Set<string>();
-  for (const input of inputs) {
-    if (!existsSync(input)) continue;
-    if (statSync(input).isDirectory()) {
-      for (const f of walk(input)) files.add(f);
-    } else if (SCAN_EXTS.includes(extname(input))) {
-      files.add(input);
-    }
-  }
-  return [...files];
-}
 
 function findTruthKeys(node: unknown, found: Set<string>): void {
   if (Array.isArray(node)) {
@@ -214,7 +170,7 @@ function extractBlocks(file: string, content: string): Block[] {
 }
 
 function main() {
-  const targets = collectTargets(process.argv.slice(2));
+  const targets = collectTargets(process.argv.slice(2), SCAN_EXTS);
   const blocks: Block[] = [];
   for (const file of targets) {
     let content: string;

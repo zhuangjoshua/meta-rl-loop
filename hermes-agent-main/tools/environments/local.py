@@ -183,35 +183,60 @@ def _inject_context_takyon_home(env: dict) -> None:
         pass
 
 
-def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
-    """Filter Takyon-managed secrets from a subprocess environment."""
+def _filter_env(items, *, into: dict | None = None) -> dict:
+    """Apply force-prefix expansion + blocklist/passthrough filtering.
+
+    ``items`` is any iterable of ``(key, value)`` pairs. Keys carrying the
+    ``_TAKYON_FORCE_`` prefix are un-prefixed and always kept; every other
+    key is kept only when it's not blocklisted (or is an explicit
+    passthrough). Results are written into ``into`` (created when omitted)
+    so callers can seed and accumulate across multiple sources.
+    """
     try:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
 
-    sanitized: dict[str, str] = {}
-
-    for key, value in (base_env or {}).items():
-        if key.startswith(_TAKYON_PROVIDER_ENV_FORCE_PREFIX):
-            continue
-        if key not in _TAKYON_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
-            sanitized[key] = value
-
-    for key, value in (extra_env or {}).items():
+    out = into if into is not None else {}
+    for key, value in items:
         if key.startswith(_TAKYON_PROVIDER_ENV_FORCE_PREFIX):
             real_key = key[len(_TAKYON_PROVIDER_ENV_FORCE_PREFIX):]
-            sanitized[real_key] = value
+            out[real_key] = value
         elif key not in _TAKYON_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
-            sanitized[key] = value
+            out[key] = value
+    return out
 
-    _inject_context_takyon_home(sanitized)
 
-    # Per-profile HOME isolation for background processes (same as _make_run_env).
+def _apply_home_isolation(env: dict) -> None:
+    """Bridge context Takyon home + per-profile HOME isolation into ``env``."""
+    _inject_context_takyon_home(env)
+
+    # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
+    # npm …) into {TAKYON_HOME}/home/ when that directory exists.  Only the
+    # subprocess sees the override — the Python process keeps the real HOME.
     from takyon_constants import get_subprocess_home
     _profile_home = get_subprocess_home()
     if _profile_home:
-        sanitized["HOME"] = _profile_home
+        env["HOME"] = _profile_home
+
+
+def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
+    """Filter Takyon-managed secrets from a subprocess environment."""
+    sanitized: dict[str, str] = {}
+
+    # base_env force-prefixed keys are dropped entirely (not expanded); only
+    # extra_env may reintroduce them via the force prefix.
+    _filter_env(
+        (
+            (key, value)
+            for key, value in (base_env or {}).items()
+            if not key.startswith(_TAKYON_PROVIDER_ENV_FORCE_PREFIX)
+        ),
+        into=sanitized,
+    )
+    _filter_env((extra_env or {}).items(), into=sanitized)
+
+    _apply_home_isolation(sanitized)
 
     return sanitized
 
@@ -282,19 +307,7 @@ _SANE_PATH = (
 
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
-    try:
-        from tools.env_passthrough import is_env_passthrough as _is_passthrough
-    except Exception:
-        _is_passthrough = lambda _: False  # noqa: E731
-
-    merged = dict(os.environ | env)
-    run_env = {}
-    for k, v in merged.items():
-        if k.startswith(_TAKYON_PROVIDER_ENV_FORCE_PREFIX):
-            real_key = k[len(_TAKYON_PROVIDER_ENV_FORCE_PREFIX):]
-            run_env[real_key] = v
-        elif k not in _TAKYON_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
-            run_env[k] = v
+    run_env = _filter_env((os.environ | env).items())
     existing_path = run_env.get("PATH", "")
     # The "/usr/bin not already present → inject sane POSIX path" heuristic
     # only makes sense on POSIX.  On Windows the PATH separator is ";"
@@ -307,15 +320,7 @@ def _make_run_env(env: dict) -> dict:
     if not _IS_WINDOWS and "/usr/bin" not in existing_path.split(":"):
         run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
 
-    _inject_context_takyon_home(run_env)
-
-    # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
-    # npm …) into {TAKYON_HOME}/home/ when that directory exists.  Only the
-    # subprocess sees the override — the Python process keeps the real HOME.
-    from takyon_constants import get_subprocess_home
-    _profile_home = get_subprocess_home()
-    if _profile_home:
-        run_env["HOME"] = _profile_home
+    _apply_home_isolation(run_env)
 
     # Inject ContextVar-based session vars into subprocess env.
     # ContextVars don't propagate to child processes, so we bridge them here.

@@ -101,8 +101,9 @@ export function detectVSCodeLikeTerminal(env: NodeJS.ProcessEnv = process.env): 
  * Handles comments inside strings correctly (preserves them).
  */
 export function stripJsonComments(content: string): string {
-  let result = ''
+  const parts: string[] = []
   let i = 0
+  let spanStart = 0
   const len = content.length
 
   while (i < len) {
@@ -124,7 +125,7 @@ export function stripJsonComments(content: string): string {
         }
       }
 
-      result += content.slice(i, j)
+      // The string span stays part of the current preserved span; skip past it.
       i = j
 
       continue
@@ -132,26 +133,39 @@ export function stripJsonComments(content: string): string {
 
     // Line comment
     if (ch === '/' && content[i + 1] === '/') {
+      if (i > spanStart) {
+        parts.push(content.slice(spanStart, i))
+      }
+
       const eol = content.indexOf('\n', i)
       i = eol === -1 ? len : eol
+      spanStart = i
 
       continue
     }
 
     // Block comment
     if (ch === '/' && content[i + 1] === '*') {
+      if (i > spanStart) {
+        parts.push(content.slice(spanStart, i))
+      }
+
       const end = content.indexOf('*/', i + 2)
       i = end === -1 ? len : end + 2
+      spanStart = i
 
       continue
     }
 
-    result += ch
     i++
   }
 
+  if (spanStart < len) {
+    parts.push(content.slice(spanStart, len))
+  }
+
   // Remove trailing commas before ] or }
-  return result.replace(/,(\s*[}\]])/g, '$1')
+  return parts.join('').replace(/,(\s*[}\]])/g, '$1')
 }
 
 export function isRemoteShellSession(env: NodeJS.ProcessEnv): boolean {

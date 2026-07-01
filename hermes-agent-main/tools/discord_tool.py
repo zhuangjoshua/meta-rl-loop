@@ -28,6 +28,7 @@ actionable guidance the model can relay to the user.
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -132,8 +133,16 @@ def _channel_type_name(type_id: int) -> str:
 # Capability detection (application intents)
 # ---------------------------------------------------------------------------
 
-# Module-level cache so the app/me endpoint is hit at most once per process.
-_capability_cache: Dict[str, Dict[str, Any]] = {}
+# Module-level cache so the app/me endpoint is hit at most once per process
+# per token. Bounded (FIFO eviction) with a per-entry TTL so a multi-tenant
+# host serving many distinct DISCORD_BOT_TOKENs does not grow unbounded and
+# stale intent data is eventually re-probed.
+_CAPABILITY_CACHE_MAX_ENTRIES = 128
+_CAPABILITY_CACHE_TTL_SECONDS = 3600.0
+
+# Maps token -> (expiry_monotonic, caps_dict). Insertion order is preserved
+# by dict semantics, which gives us FIFO eviction of the oldest entry.
+_capability_cache: "Dict[str, Tuple[float, Dict[str, Any]]]" = {}
 
 
 def _detect_capabilities(token: str, *, force: bool = False) -> Dict[str, Any]:
@@ -149,8 +158,14 @@ def _detect_capabilities(token: str, *, force: bool = False) -> Dict[str, Any]:
     Cached in a module-global. Pass ``force=True`` to re-fetch.
     """
     global _capability_cache
-    if token in _capability_cache and not force:
-        return _capability_cache[token]
+    if not force:
+        entry = _capability_cache.get(token)
+        if entry is not None:
+            expiry, cached_caps = entry
+            if time.monotonic() < expiry:
+                return cached_caps
+            # Expired — drop it and re-probe below.
+            _capability_cache.pop(token, None)
 
     caps: Dict[str, Any] = {
         "has_members_intent": True,
@@ -173,7 +188,13 @@ def _detect_capabilities(token: str, *, force: bool = False) -> Dict[str, Any]:
             "Discord capability detection failed (%s); exposing all actions.", exc,
         )
 
-    _capability_cache[token] = caps
+    # Refresh any prior entry to reset its position (and thus eviction age),
+    # then enforce the bound with FIFO eviction of the oldest entries.
+    _capability_cache.pop(token, None)
+    _capability_cache[token] = (time.monotonic() + _CAPABILITY_CACHE_TTL_SECONDS, caps)
+    while len(_capability_cache) > _CAPABILITY_CACHE_MAX_ENTRIES:
+        oldest_key = next(iter(_capability_cache))
+        _capability_cache.pop(oldest_key, None)
     return caps
 
 
@@ -228,7 +249,10 @@ def _list_channels(token: str, guild_id: str, **_kwargs: Any) -> str:
     categories: Dict[Optional[str], Dict[str, Any]] = {}
     uncategorized: List[Dict[str, Any]] = []
 
-    # First pass: collect categories
+    # Single pass: collect categories and build channel entries, deferring
+    # parent resolution so a channel whose category appears later in the
+    # list is still assigned correctly (behavior-preserving vs. two passes).
+    pending: List[Tuple[Optional[str], Dict[str, Any]]] = []
     for ch in channels:
         if ch["type"] == 4:  # category
             categories[ch["id"]] = {
@@ -237,10 +261,6 @@ def _list_channels(token: str, guild_id: str, **_kwargs: Any) -> str:
                 "position": ch.get("position", 0),
                 "channels": [],
             }
-
-    # Second pass: assign channels to categories
-    for ch in channels:
-        if ch["type"] == 4:
             continue
         entry = {
             "id": ch["id"],
@@ -250,7 +270,10 @@ def _list_channels(token: str, guild_id: str, **_kwargs: Any) -> str:
             "topic": ch.get("topic"),
             "nsfw": ch.get("nsfw", False),
         }
-        parent = ch.get("parent_id")
+        pending.append((ch.get("parent_id"), entry))
+
+    # Resolve against the fully-populated category map.
+    for parent, entry in pending:
         if parent and parent in categories:
             categories[parent]["channels"].append(entry)
         else:

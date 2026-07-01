@@ -48,13 +48,15 @@ class TeamsPipelineStore:
             "jobs": {},
             "sink_records": {},
         }
+        self._last_serialized: Optional[str] = None
         self._load()
 
     def _load(self) -> None:
         with self._lock:
             if not self.path.exists():
                 return
-            data = json.loads(self.path.read_text(encoding="utf-8") or "{}")
+            raw = self.path.read_text(encoding="utf-8") or "{}"
+            data = json.loads(raw)
             if not isinstance(data, dict):
                 return
             self._state["subscriptions"] = dict(data.get("subscriptions") or {})
@@ -62,8 +64,16 @@ class TeamsPipelineStore:
             self._state["event_timestamps"] = dict(data.get("event_timestamps") or {})
             self._state["jobs"] = dict(data.get("jobs") or {})
             self._state["sink_records"] = dict(data.get("sink_records") or {})
+            # Cache the canonical serialization so an unchanged persist is a no-op.
+            self._last_serialized = json.dumps(
+                self._state, indent=2, sort_keys=True
+            )
 
     def _persist(self) -> None:
+        serialized = json.dumps(self._state, indent=2, sort_keys=True)
+        # Skip redundant disk I/O when the on-disk content would be identical.
+        if serialized == self._last_serialized:
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with NamedTemporaryFile(
             "w",
@@ -71,10 +81,11 @@ class TeamsPipelineStore:
             dir=str(self.path.parent),
             delete=False,
         ) as tmp:
-            json.dump(self._state, tmp, indent=2, sort_keys=True)
+            tmp.write(serialized)
             tmp.flush()
             tmp_path = Path(tmp.name)
         tmp_path.replace(self.path)
+        self._last_serialized = serialized
 
     def list_subscriptions(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
@@ -95,6 +106,31 @@ class TeamsPipelineStore:
             self._state["subscriptions"][subscription_id] = merged
             self._persist()
             return deepcopy(merged)
+
+    def upsert_subscriptions(
+        self, records: list[tuple[str, Dict[str, Any]]]
+    ) -> list[Dict[str, Any]]:
+        """Merge and persist multiple subscriptions in a single write.
+
+        ``records`` is a list of ``(subscription_id, payload)`` pairs. The
+        merge semantics for each entry match :meth:`upsert_subscription`, but
+        the store is persisted once for the whole batch rather than per item.
+        """
+        with self._lock:
+            results: list[Dict[str, Any]] = []
+            for subscription_id, payload in records:
+                existing = self._state["subscriptions"].get(subscription_id, {})
+                merged = {**existing, **deepcopy(payload)}
+                merged["subscription_id"] = subscription_id
+                merged.setdefault(
+                    "created_at", existing.get("created_at") or _utc_now_iso()
+                )
+                merged["updated_at"] = _utc_now_iso()
+                self._state["subscriptions"][subscription_id] = merged
+                results.append(deepcopy(merged))
+            if results:
+                self._persist()
+            return results
 
     def delete_subscription(self, subscription_id: str) -> bool:
         with self._lock:

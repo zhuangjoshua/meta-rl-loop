@@ -447,7 +447,17 @@ class SimplexAdapter(BasePlatformAdapter):
         await asyncio.sleep(2)
 
         # simplex-chat stores received files in ~/Downloads or a configured path.
-        # We try common locations.
+        # We try common locations. Filesystem access is offloaded to a thread
+        # so the blocking path/IO calls don't stall the event loop.
+        return await asyncio.to_thread(self._read_received_file, file_name)
+
+    @staticmethod
+    def _read_received_file(file_name: str) -> Optional[str]:
+        """Search common download locations and cache the file if found.
+
+        Synchronous helper invoked via ``asyncio.to_thread`` from
+        :meth:`_fetch_file` to keep blocking filesystem calls off the loop.
+        """
         for search_dir in (
             os.path.expanduser("~/Downloads"),
             os.path.expanduser("~/.simplex/files"),

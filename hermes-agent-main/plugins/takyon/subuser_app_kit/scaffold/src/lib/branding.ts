@@ -47,3 +47,26 @@ export function brandHeroHeadline(): string {
 export function brandHeroSubhead(): string {
   return String((surfaceContext as Record<string, unknown>).heroSubhead || "").trim();
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function dollars(value: unknown): string | null {
+  return typeof value === "number" && Number.isFinite(value) ? `$${value.toFixed(2)}` : null;
+}
+
+/** "$X of $Y used this week" line from an account's weekly usage allowance. Returns null when no
+ *  allowance is present so callers can hide the line instead of faking a quota. Single source of
+ *  truth for account usage-allowance formatting across screens. */
+export function formatUsageAllowance(account: unknown): string | null {
+  const acct = isRecord(account) ? account : null;
+  const allocation = acct && isRecord(acct.usage_allocation)
+    ? (acct.usage_allocation as Record<string, unknown>)
+    : null;
+  if (!allocation) return null;
+  const used = dollars(allocation.committed_usd);
+  if (used === null) return null;
+  const limit = dollars(allocation.hard_limit_usd);
+  return limit ? `${used} of ${limit} used this week` : `${used} used this week`;
+}

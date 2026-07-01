@@ -244,8 +244,10 @@ class ChunkedUploader:
                 f"ChunkedUploader: unsupported chat_type {chat_type!r}"
             )
 
-        path = Path(file_path)
-        file_size = path.stat().st_size
+        loop = asyncio.get_running_loop()
+        file_size = await loop.run_in_executor(
+            None, lambda: Path(file_path).stat().st_size
+        )
 
         logger.info(
             "[%s] Chunked upload start: file=%s size=%s type=%d",
@@ -253,7 +255,7 @@ class ChunkedUploader:
         )
 
         # Step 1: compute hashes (blocking I/O → executor).
-        hashes = await asyncio.get_running_loop().run_in_executor(
+        hashes = await loop.run_in_executor(
             None, _compute_file_hashes, file_path, file_size
         )
 

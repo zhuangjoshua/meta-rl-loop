@@ -45,6 +45,13 @@ _CHANNEL_TYPE_MAP = {
     "O": "channel",
 }
 
+# Bounded aiohttp connection-pool limits per tenant session.
+# Mirrors gateway.platforms._http_client_limits so many concurrent
+# Mattermost tenants on one VPS don't each hold aiohttp's default
+# pool of 100 connections.
+_MM_CONNECTOR_LIMIT = 20
+_MM_CONNECTOR_LIMIT_PER_HOST = 10
+
 # Reconnect parameters (exponential backoff).
 _RECONNECT_BASE_DELAY = 2.0
 _RECONNECT_MAX_DELAY = 60.0
@@ -201,8 +208,13 @@ class MattermostAdapter(BasePlatformAdapter):
             logger.error("Mattermost: URL or token not configured")
             return False
 
+        connector = aiohttp.TCPConnector(
+            limit=_MM_CONNECTOR_LIMIT,
+            limit_per_host=_MM_CONNECTOR_LIMIT_PER_HOST,
+        )
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
+            timeout=aiohttp.ClientTimeout(total=30),
+            connector=connector,
         )
         self._closing = False
 
@@ -281,17 +293,21 @@ class MattermostAdapter(BasePlatformAdapter):
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_POST_LENGTH)
 
+        # Thread support: reply_to is the root post ID. Resolve it once
+        # (not per-chunk) to avoid N redundant GET posts/{id} round-trips.
+        # Ensure root_id points to the thread root, not a reply — Mattermost
+        # rejects non-root post IDs as root_id.
+        resolved_root = None
+        if reply_to and self._reply_mode == "thread":
+            resolved_root = await self._resolve_root_id(reply_to)
+
         last_id = None
         for chunk in chunks:
             payload: Dict[str, Any] = {
                 "channel_id": chat_id,
                 "message": chunk,
             }
-            # Thread support: reply_to is the root post ID.
-            if reply_to and self._reply_mode == "thread":
-                # Ensure root_id points to the thread root, not a reply.
-                # Mattermost rejects non-root post IDs as root_id.
-                resolved_root = await self._resolve_root_id(reply_to)
+            if resolved_root is not None:
                 payload["root_id"] = resolved_root
 
             data = await self._api_post("posts", payload)

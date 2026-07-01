@@ -8,8 +8,27 @@ single session.
 Pure functions -- no class state, no AIAgent dependency.
 """
 
-import copy
 from typing import Any, Dict, List
+
+
+def _copy_message_for_marker(msg: dict) -> dict:
+    """Shallow-copy a message dict plus its ``content`` list (if any).
+
+    ``_apply_cache_marker`` mutates the message dict and, when content is a
+    list, mutates the last element of that list. Copying the dict and the
+    content list (and the last content element) is enough to keep the
+    caller's original objects unmutated without deep-copying the whole
+    history.
+    """
+    new_msg = dict(msg)
+    content = new_msg.get("content")
+    if isinstance(content, list) and content:
+        new_content = list(content)
+        last = new_content[-1]
+        if isinstance(last, dict):
+            new_content[-1] = dict(last)
+        new_msg["content"] = new_content
+    return new_msg
 
 
 def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False) -> None:
@@ -59,21 +78,24 @@ def apply_anthropic_cache_control(
     Returns:
         Deep copy of messages with cache_control breakpoints injected.
     """
-    messages = copy.deepcopy(api_messages)
-    if not messages:
-        return messages
+    if not api_messages:
+        return list(api_messages)
+
+    messages = list(api_messages)
 
     marker = _build_marker(cache_ttl)
 
     breakpoints_used = 0
 
     if messages[0].get("role") == "system":
+        messages[0] = _copy_message_for_marker(messages[0])
         _apply_cache_marker(messages[0], marker, native_anthropic=native_anthropic)
         breakpoints_used += 1
 
     remaining = 4 - breakpoints_used
     non_sys = [i for i in range(len(messages)) if messages[i].get("role") != "system"]
     for idx in non_sys[-remaining:]:
+        messages[idx] = _copy_message_for_marker(messages[idx])
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
     return messages

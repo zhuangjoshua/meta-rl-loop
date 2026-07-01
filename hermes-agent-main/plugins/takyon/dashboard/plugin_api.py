@@ -165,10 +165,28 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
     return frontmatter
 
 
-def _function_span(path: Path, name: str, class_name: str | None = None) -> tuple[int | None, int | None]:
+def _parse_tree(path: Path, cache: dict[Path, ast.AST | None] | None = None) -> ast.AST | None:
+    resolved = path.resolve()
+    if cache is not None and resolved in cache:
+        return cache[resolved]
     try:
-        tree = ast.parse(_read_text(path))
+        tree: ast.AST | None = ast.parse(_read_text(path))
     except Exception:
+        tree = None
+    if cache is not None:
+        cache[resolved] = tree
+    return tree
+
+
+def _function_span(
+    path: Path,
+    name: str,
+    class_name: str | None = None,
+    tree: ast.AST | None = None,
+) -> tuple[int | None, int | None]:
+    if tree is None:
+        tree = _parse_tree(path)
+    if tree is None:
         return None, None
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
@@ -347,6 +365,7 @@ async def graph() -> dict[str, Any]:
     edges: list[dict[str, Any]] = []
     edge_keys: set[tuple[str, str, str]] = set()
     warnings: list[str] = []
+    tree_cache: dict[Path, ast.AST | None] = {}
 
     registry, registry_warnings = _registry_snapshot()
     warnings.extend(registry_warnings)
@@ -409,7 +428,7 @@ async def graph() -> dict[str, Any]:
         ("_queue_skill_invocation", "Skill invocation wrapper", "skill-invocation-wrapper", "Loads a Hermes skill and wraps the operator instruction for direct skill invocation."),
         ("_load_ceo_prompt", "CEO prompt loader", "ceo-prompt-loader", "Loads the stable Takyon CEO prompt file."),
     ]:
-        start, end = _function_span(CLI_PATH, function_name)
+        start, end = _function_span(CLI_PATH, function_name, tree=_parse_tree(CLI_PATH, tree_cache))
         _add_node(
             nodes,
             sources,
@@ -486,7 +505,7 @@ async def graph() -> dict[str, Any]:
         ("create_job", "Cron job create", "cron-create-job", "Canonical cron job creator and skill field normalizer entrypoint.", CRON_JOBS_PY),
         ("_apply_skill_fields", "Cron skill fields", "cron-skill-fields", "Aligns legacy skill and canonical skills fields in cron jobs.", CRON_JOBS_PY),
     ]:
-        start, end = _function_span(src, function_name)
+        start, end = _function_span(src, function_name, tree=_parse_tree(src, tree_cache))
         _add_node(
             nodes,
             sources,

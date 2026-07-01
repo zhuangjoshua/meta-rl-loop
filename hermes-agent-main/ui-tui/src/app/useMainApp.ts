@@ -22,6 +22,7 @@ import { DEFAULT_VOICE_RECORD_KEY, isMac, type ParsedVoiceRecordKey } from '../l
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
 import { terminalParityHints } from '../lib/terminalParity.js'
 import { buildToolTrailLine, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
+import { firstUserIndex, hasSeparatorAt } from '../lib/transcriptSeparators.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
 import type { CommandResult, Msg, PanelSection, SlashCatalog } from '../types.js'
 
@@ -233,10 +234,36 @@ export function useMainApp(gw: GatewayClient) {
     return next
   }, [])
 
-  const virtualRows = useMemo<TranscriptRow[]>(
-    () => historyItems.map((msg, index) => ({ index, key: messageId(msg), msg })),
-    [historyItems, messageId]
-  )
+  const prevRowsRef = useRef<TranscriptRow[]>([])
+
+  const virtualRows = useMemo<TranscriptRow[]>(() => {
+    const prev = prevRowsRef.current
+    let changed = prev.length !== historyItems.length
+
+    const next: TranscriptRow[] = historyItems.map((msg, index) => {
+      const existing = prev[index]
+
+      // Reuse the previous row object when the message, its position, and its
+      // stable id are all unchanged — this keeps unchanged (older) rows from
+      // being re-allocated on every streaming tick, so only the mutated tail
+      // produces fresh TranscriptRow objects.
+      if (existing && existing.msg === msg && existing.index === index) {
+        return existing
+      }
+
+      changed = true
+
+      return { index, key: messageId(msg), msg }
+    })
+
+    // Preserve referential stability of the array itself when nothing changed
+    // so downstream memoized consumers can bail out early.
+    const rows = changed ? next : prev
+
+    prevRowsRef.current = rows
+
+    return rows
+  }, [historyItems, messageId])
 
   const detailsLayoutKey = useMemo(() => {
     const thinking = sectionMode('thinking', ui.detailsMode, ui.sections, ui.detailsModeCommandOverride)
@@ -267,7 +294,7 @@ export function useMainApp(gw: GatewayClient) {
   // Index of the first user-role message — separator-rendering in
   // appLayout.tsx skips this row, so the height estimator must skip it
   // too. -1 when no user message exists yet (no row will gate true).
-  const firstUserIdx = useMemo(() => virtualRows.findIndex(r => r.msg.role === 'user'), [virtualRows])
+  const firstUserIdx = useMemo(() => firstUserIndex(virtualRows.map(r => r.msg)), [virtualRows])
 
   const estimateRowHeight = useCallback(
     (index: number) =>
@@ -275,7 +302,7 @@ export function useMainApp(gw: GatewayClient) {
         compact: ui.compact,
         details: detailsVisible,
         userPrompt: ui.theme.brand.prompt,
-        withSeparator: virtualRows[index]!.msg.role === 'user' && firstUserIdx >= 0 && index > firstUserIdx
+        withSeparator: hasSeparatorAt(virtualRows[index]!.msg, index, firstUserIdx)
       }),
     [cols, detailsVisible, firstUserIdx, ui.compact, ui.theme.brand.prompt, virtualRows]
   )

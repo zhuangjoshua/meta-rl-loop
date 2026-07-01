@@ -6,14 +6,6 @@ rate-limited provider concurrently.
 """
 
 import random
-import threading
-import time
-
-# Monotonic counter for jitter seed uniqueness within the same process.
-# Protected by a lock to avoid race conditions in concurrent retry paths
-# (e.g. multiple gateway sessions retrying simultaneously).
-_jitter_counter = 0
-_jitter_lock = threading.Lock()
 
 
 def jittered_backoff(
@@ -38,20 +30,14 @@ def jittered_backoff(
     The jitter decorrelates concurrent retries so multiple sessions
     hitting the same provider don't all retry at the same instant.
     """
-    global _jitter_counter
-    with _jitter_lock:
-        _jitter_counter += 1
-        tick = _jitter_counter
-
     exponent = max(0, attempt - 1)
     if exponent >= 63 or base_delay <= 0:
         delay = max_delay
     else:
         delay = min(base_delay * (2 ** exponent), max_delay)
 
-    # Seed from time + counter for decorrelation even with coarse clocks.
-    seed = (time.time_ns() ^ (tick * 0x9E3779B9)) & 0xFFFFFFFF
-    rng = random.Random(seed)
-    jitter = rng.uniform(0, jitter_ratio * delay)
+    # Module-level random.random() is thread-safe in CPython and avoids
+    # constructing a fresh Mersenne-Twister generator per retry attempt.
+    jitter = jitter_ratio * delay * random.random()
 
     return delay + jitter

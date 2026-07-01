@@ -72,8 +72,21 @@ const HTTP_PREFERRED_METHODS = new Set([
 /** Wildcard listener key: subscribe to every event regardless of type. */
 const ANY = "*";
 
+/**
+ * High-frequency streaming event types whose listener fan-out is batched via a
+ * microtask so multiple deltas arriving in the same task coalesce into one
+ * render tick instead of triggering a synchronous fan-out per WS frame.
+ */
+const BATCHED_EVENT_TYPES = new Set<string>([
+  "message.delta",
+  "reasoning.delta",
+  "thinking.delta",
+  "tool.progress",
+]);
+
 export class GatewayClient {
   private ws: WebSocket | null = null;
+  private connectPromise: Promise<void> | null = null;
   private reqId = 0;
   private pending = new Map<string, Pending>();
   private listeners = new Map<string, Set<(ev: GatewayEvent) => void>>();
@@ -83,6 +96,8 @@ export class GatewayClient {
   private _lastCloseCode: number | null = null;
   private _lastCloseReason = "";
   private _lastCloseMessage = "";
+  private eventQueue: GatewayEvent[] = [];
+  private flushScheduled = false;
 
   get state(): ConnectionState {
     return this._state;
@@ -132,7 +147,17 @@ export class GatewayClient {
   }
 
   async connect(token?: string): Promise<void> {
-    if (this._state === "open" || this._state === "connecting") return;
+    if (this._state === "open") return;
+    if (this._state === "connecting" && this.connectPromise) {
+      return this.connectPromise;
+    }
+    this.connectPromise = this.doConnect(token).finally(() => {
+      this.connectPromise = null;
+    });
+    return this.connectPromise;
+  }
+
+  private async doConnect(token?: string): Promise<void> {
     this.setState("connecting");
 
     const resolved = token ?? window.__TAKYON_SESSION_TOKEN__ ?? "";
@@ -241,6 +266,33 @@ export class GatewayClient {
     const params = (msg.params ?? {}) as GatewayEvent;
     if (typeof params.type !== "string") return;
 
+    // High-frequency streaming events are queued and flushed together on a
+    // microtask so bursts of deltas coalesce into one render tick. Ordering is
+    // preserved: once anything is queued, subsequent events also queue until
+    // the flush drains, so no event can jump ahead of an earlier one.
+    if (this.flushScheduled || BATCHED_EVENT_TYPES.has(params.type)) {
+      this.eventQueue.push(params);
+      this.scheduleFlush();
+      return;
+    }
+
+    this.emitEvent(params);
+  }
+
+  private scheduleFlush() {
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+    queueMicrotask(() => this.flushEvents());
+  }
+
+  private flushEvents() {
+    this.flushScheduled = false;
+    const queued = this.eventQueue;
+    this.eventQueue = [];
+    for (const ev of queued) this.emitEvent(ev);
+  }
+
+  private emitEvent(params: GatewayEvent) {
     for (const cb of this.listeners.get(params.type) ?? []) cb(params);
     for (const cb of this.listeners.get(ANY) ?? []) cb(params);
   }
@@ -261,13 +313,19 @@ export class GatewayClient {
   }
 
   /** Send a JSON-RPC request. Rejects on error response or timeout. */
-  request<T = unknown>(
+  async request<T = unknown>(
     method: string,
     params: Record<string, unknown> = {},
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
     if (HTTP_PREFERRED_METHODS.has(method)) {
       return this.requestHttp<T>(method, params, timeoutMs);
+    }
+    // During a transient reconnect window, briefly await the in-progress
+    // connect() so bursts of RPCs coalesce back onto the single WebSocket
+    // once it opens instead of each spawning a fresh HTTP request.
+    if (this._state !== "open" && this.connectPromise) {
+      await this.connectPromise.catch(() => {});
     }
     if (!this.ws || this._state !== "open") {
       return this.requestHttp<T>(method, params, timeoutMs);

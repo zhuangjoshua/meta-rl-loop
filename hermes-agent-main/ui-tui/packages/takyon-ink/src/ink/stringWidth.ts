@@ -20,22 +20,25 @@ const EMOJI_REGEX = emojiRegex()
  * which correctly treats ambiguous-width characters as narrow (width 1) as
  * recommended by the Unicode standard for Western contexts.
  */
-function stringWidthJavaScript(str: string): number {
+function stringWidthJavaScript(str: string, isAscii?: boolean): number {
   if (typeof str !== 'string' || str.length === 0) {
     return 0
   }
 
-  // Fast path: pure ASCII string (no ANSI codes, no wide chars)
-  let isPureAscii = true
+  // Fast path: pure ASCII string (no ANSI codes, no wide chars).
+  // The caller may pass a precomputed hint to skip re-scanning the string.
+  let isPureAscii = isAscii ?? true
 
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i)
+  if (isAscii === undefined) {
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i)
 
-    // Check for non-ASCII or ANSI escape (0x1b)
-    if (code >= 127 || code === 0x1b) {
-      isPureAscii = false
+      // Check for non-ASCII or ANSI escape (0x1b)
+      if (code >= 127 || code === 0x1b) {
+        isPureAscii = false
 
-      break
+        break
+      }
     }
   }
 
@@ -272,7 +275,7 @@ const bunStringWidth = typeof Bun !== 'undefined' && typeof Bun.stringWidth === 
 
 const BUN_STRING_WIDTH_OPTS = { ambiguousIsNarrow: true } as const
 
-const rawStringWidth: (str: string) => number = bunStringWidth
+const rawStringWidth: (str: string, isAscii?: boolean) => number = bunStringWidth
   ? str => bunStringWidth(str, BUN_STRING_WIDTH_OPTS)
   : stringWidthJavaScript
 
@@ -292,23 +295,25 @@ export const stringWidth: (str: string) => number = str => {
     return 0
   }
 
-  // ASCII fast-path detection — for short ASCII, skip the cache.
-  if (str.length <= 64) {
-    let asciiOnly = true
+  // ASCII detection — scan the whole string once. The result is reused below
+  // (both to skip the cache for short ASCII and as a hint to rawStringWidth so
+  // the JS fallback doesn't re-scan the char codes we already inspected here).
+  let asciiOnly = true
 
-    for (let i = 0; i < str.length; i++) {
-      const code = str.charCodeAt(i)
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i)
 
-      if (code >= 127 || code === 0x1b) {
-        asciiOnly = false
+    if (code >= 127 || code === 0x1b) {
+      asciiOnly = false
 
-        break
-      }
+      break
     }
+  }
 
-    if (asciiOnly) {
-      return rawStringWidth(str)
-    }
+  // Short ASCII strings (the >90% common case): the inline JS loop is faster
+  // than a Map.get, so skip the cache entirely.
+  if (asciiOnly && str.length <= 64) {
+    return rawStringWidth(str, true)
   }
 
   const cached = widthCache.get(str)
@@ -321,7 +326,7 @@ export const stringWidth: (str: string) => number = str => {
     return cached
   }
 
-  const w = rawStringWidth(str)
+  const w = rawStringWidth(str, asciiOnly)
 
   if (widthCache.size >= WIDTH_CACHE_LIMIT) {
     widthCache.delete(widthCache.keys().next().value!)

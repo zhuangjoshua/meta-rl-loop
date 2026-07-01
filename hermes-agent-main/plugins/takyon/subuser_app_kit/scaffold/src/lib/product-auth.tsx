@@ -2,11 +2,12 @@ import {
   createContext,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { createClient, type Provider, type SupabaseClient } from "@supabase/supabase-js";
+import type { Provider, SupabaseClient } from "@supabase/supabase-js";
 import { useLocation, useNavigate } from "react-router-dom";
 import { surfaceContext } from "@takyon/surface-context.js";
 import { client } from "./takyon";
@@ -65,7 +66,7 @@ function displayError(err: unknown): string {
   return err instanceof Error ? err.message : String(err || "Authentication failed");
 }
 
-function getSupabaseBrowserClient(config: SurfaceAuthConfig): SupabaseClient | null {
+async function getSupabaseBrowserClient(config: SurfaceAuthConfig): Promise<SupabaseClient | null> {
   if (browserSupabaseClient !== undefined) return browserSupabaseClient;
   const url = String(config.url || "").trim();
   const publishableKey = String(config.publishableKey || "").trim();
@@ -73,6 +74,7 @@ function getSupabaseBrowserClient(config: SurfaceAuthConfig): SupabaseClient | n
     browserSupabaseClient = null;
     return browserSupabaseClient;
   }
+  const { createClient } = await import("@supabase/supabase-js");
   browserSupabaseClient = createClient(url, publishableKey, {
     auth: {
       detectSessionInUrl: false,
@@ -89,7 +91,10 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const handledCallbackRef = useRef("");
   const available = runtimeHasAuthRail();
-  const config = readSurfaceAuthConfig();
+  // surfaceContext.auth is static at runtime; memoize so the config object
+  // identity stays stable and the callback effect below doesn't re-subscribe
+  // on every render.
+  const config = useMemo(() => readSurfaceAuthConfig(), []);
   const configured =
     available &&
     config.provider === "supabase" &&
@@ -118,7 +123,7 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         if (oauthError) {
           throw new Error(oauthError);
         }
-        const supabase = getSupabaseBrowserClient(config);
+        const supabase = await getSupabaseBrowserClient(config);
         if (!supabase || !code) {
           throw new Error("Supabase Auth is not configured for this product.");
         }
@@ -161,7 +166,7 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
       if (!configured) {
         throw new Error("Supabase Auth is not configured for this product.");
       }
-      const supabase = getSupabaseBrowserClient(config);
+      const supabase = await getSupabaseBrowserClient(config);
       if (!supabase) {
         throw new Error("Supabase Auth is not configured for this product.");
       }
@@ -186,7 +191,7 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
     setError(null);
     try {
       await client.logout();
-      const supabase = getSupabaseBrowserClient(config);
+      const supabase = await getSupabaseBrowserClient(config);
       if (supabase) {
         const { error: signOutError } = await supabase.auth.signOut({ scope: "local" });
         if (signOutError) throw signOutError;

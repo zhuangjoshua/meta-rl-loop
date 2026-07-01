@@ -64,14 +64,27 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
     return str(ts)
 
 
-def _resolve_to_parent(db, session_id: str) -> str:
-    """Walk parent_session_id chain to the lineage root. Falls back to input on errors."""
+def _resolve_to_parent(db, session_id: str, cache: Optional[Dict[str, str]] = None) -> str:
+    """Walk parent_session_id chain to the lineage root. Falls back to input on errors.
+
+    An optional ``cache`` (session_id -> resolved_root) memoizes results across
+    calls. Every session visited along a chain is mapped to the same resolved
+    root, so repeated lookups of a session or any of its ancestors cost at most
+    one ``get_session`` per hop over the whole discovery pass.
+    """
     if not session_id:
         return session_id
+    if cache is not None and session_id in cache:
+        return cache[session_id]
     visited = set()
+    chain = []
     cur = session_id
     while cur and cur not in visited:
         visited.add(cur)
+        chain.append(cur)
+        if cache is not None and cur in cache:
+            cur = cache[cur]
+            break
         try:
             s = db.get_session(cur)
             if not s:
@@ -83,6 +96,9 @@ def _resolve_to_parent(db, session_id: str) -> str:
         except Exception as e:
             logging.debug("Error resolving parent for %s: %s", cur, e, exc_info=True)
             break
+    if cache is not None:
+        for sid in chain:
+            cache[sid] = cur
     return cur
 
 
@@ -308,7 +324,12 @@ def _discover(
             "message": "No matching sessions found.",
         }, ensure_ascii=False)
 
-    current_lineage_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
+    lineage_cache: Dict[str, str] = {}
+    current_lineage_root = (
+        _resolve_to_parent(db, current_session_id, lineage_cache)
+        if current_session_id
+        else None
+    )
 
     # Dedupe by lineage. Keep the raw owning session_id on the surviving
     # row — only that pairs validly with the FTS5 match id for the anchored
@@ -316,7 +337,7 @@ def _discover(
     seen_sessions = {}
     for r in raw_results:
         raw_sid = r["session_id"]
-        resolved_sid = _resolve_to_parent(db, raw_sid)
+        resolved_sid = _resolve_to_parent(db, raw_sid, lineage_cache)
         # Skip the current session lineage
         if current_lineage_root and resolved_sid == current_lineage_root:
             continue

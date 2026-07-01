@@ -3208,7 +3208,11 @@ class BasePlatformAdapter(ABC):
 
                 # Play TTS audio before text (voice-first experience)
                 _tts_caption_delivered = False
-                if _tts_path and Path(_tts_path).exists():
+                _tts_path_exists = bool(
+                    _tts_path
+                    and await asyncio.to_thread(os.path.exists, _tts_path)
+                )
+                if _tts_path_exists:
                     try:
                         telegram_tts_caption = None
                         if (

@@ -35,6 +35,41 @@ export const $uiSessionId = computed($uiState, state => state.sid)
 
 export const getUiState = () => $uiState.get()
 
+/**
+ * Resolve as soon as the session id becomes truthy, subscribing to
+ * ui-state changes instead of polling.  Resolves immediately if a
+ * session id is already present; falls back to resolving after
+ * `timeoutMs` so callers never hang indefinitely.
+ */
+export const waitForSessionId = (timeoutMs: number): Promise<string | null> =>
+  new Promise<string | null>(resolve => {
+    if ($uiState.get().sid) {
+      resolve($uiState.get().sid)
+
+      return
+    }
+
+    let done = false
+    const finish = (value: string | null) => {
+      if (done) {
+        return
+      }
+
+      done = true
+      clearTimeout(timer)
+      unsubscribe()
+      resolve(value)
+    }
+
+    const timer = setTimeout(() => finish($uiState.get().sid), timeoutMs)
+
+    const unsubscribe = $uiState.subscribe(state => {
+      if (state.sid) {
+        finish(state.sid)
+      }
+    })
+  })
+
 export const patchUiState = (next: Partial<UiState> | ((state: UiState) => UiState)) =>
   $uiState.set(typeof next === 'function' ? next($uiState.get()) : { ...$uiState.get(), ...next })
 

@@ -216,8 +216,13 @@ class OpenAIImageBackend(ImageBackend):
         # When provided (e.g. read from --api-key-file), the key is passed straight to the
         # client constructor and never set as an environment variable.
         self.api_key = api_key
+        # Memoized OpenAI client so a batch of generate() calls (one per creative across the
+        # ThreadPool) reuses a single client/connection pool instead of re-initializing one per image.
+        self._cached_client = None
 
     def _client(self):
+        if self._cached_client is not None:
+            return self._cached_client
         key = self.api_key
         if not key:
             raise RuntimeError(
@@ -228,7 +233,8 @@ class OpenAIImageBackend(ImageBackend):
             from openai import OpenAI
         except Exception as exc:  # pragma: no cover - import guard
             raise RuntimeError("The 'openai' package is required. Install: pip install openai") from exc
-        return OpenAI(api_key=key)
+        self._cached_client = OpenAI(api_key=key)
+        return self._cached_client
 
     def generate(
         self,

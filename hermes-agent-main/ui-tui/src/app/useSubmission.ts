@@ -16,6 +16,7 @@ import { PASTE_SNIPPET_RE } from '../protocol/paste.js'
 import type { Msg } from '../types.js'
 
 import type { ComposerActions, ComposerRefs, ComposerState, PasteSnippet } from './interfaces.js'
+import { looksLikeDroppedPath } from './useComposerState.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
@@ -126,7 +127,14 @@ export function useSubmission(opts: UseSubmissionOptions) {
         return sys('session not ready yet')
       }
 
-      // Always ask the backend whether this looks like a file drop.
+      // Plain prose can't be a file drop — skip the RPC round-trip entirely
+      // and submit directly. Only path-shaped single-line text is worth
+      // asking the backend about.
+      if (!looksLikeDroppedPath(text)) {
+        return startSubmit(text, expand(text), showUserMessage)
+      }
+
+      // Ask the backend whether this looks like a file drop.
       // The backend's _detect_file_drop handles paths with spaces, quotes,
       // Windows drive letters, and escaped characters correctly.
       gw.request<InputDetectDropResponse>('input.detect_drop', { session_id: sid, text })
@@ -182,18 +190,38 @@ export function useSubmission(opts: UseSubmissionOptions) {
       patchUiState({ status: 'interpolating…' })
       const matches = [...text.matchAll(new RegExp(INTERPOLATION_RE.source, 'g'))]
 
-      Promise.all(
-        matches.map(m =>
-          gw
-            .request<ShellExecResponse>('shell.exec', { command: m[1]! })
-            .then(raw => {
-              const r = asRpcResult<ShellExecResponse>(raw)
+      const runOne = (m: RegExpMatchArray) =>
+        gw
+          .request<ShellExecResponse>('shell.exec', { command: m[1]! })
+          .then(raw => {
+            const r = asRpcResult<ShellExecResponse>(raw)
 
-              return [r?.stdout, r?.stderr].filter(Boolean).join('\n').trim()
-            })
-            .catch(() => '(error)')
-        )
-      ).then(results => then(spliceMatches(text, matches, results)))
+            return [r?.stdout, r?.stderr].filter(Boolean).join('\n').trim()
+          })
+          .catch(() => '(error)')
+
+      // Bound concurrency so interpolation-heavy prompts don't fire N
+      // simultaneous shell.exec RPCs/subprocess spawns on the single
+      // gateway pipe. Results stay index-aligned with `matches` so the
+      // subsequent spliceMatches behavior is unchanged.
+      const runBounded = async (limit: number) => {
+        const results = new Array<string>(matches.length)
+        let next = 0
+
+        const worker = async () => {
+          while (next < matches.length) {
+            const i = next++
+            results[i] = await runOne(matches[i]!)
+          }
+        }
+
+        const workers = Array.from({ length: Math.min(limit, matches.length) }, worker)
+        await Promise.all(workers)
+
+        return results
+      }
+
+      runBounded(4).then(results => then(spliceMatches(text, matches, results)))
     },
     [gw]
   )

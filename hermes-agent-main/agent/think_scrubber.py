@@ -119,10 +119,10 @@ class StreamingThinkScrubber:
             return ""
         buf = self._buf + text
         self._buf = ""
+        buf_lower = buf.lower()
         out: list[str] = []
 
         while buf:
-            buf_lower = buf.lower()
             if self._in_block:
                 # Hunt for the earliest close tag.
                 close_idx, close_len = self._find_first_tag(
@@ -137,7 +137,9 @@ class StreamingThinkScrubber:
                     self._buf = buf[-held:] if held else ""
                     return "".join(out)
                 # Found close: discard block content + tag, continue.
-                buf = buf[close_idx + close_len:]
+                advance = close_idx + close_len
+                buf = buf[advance:]
+                buf_lower = buf_lower[advance:]
                 self._in_block = False
             else:
                 # Priority 1 — closed <tag>X</tag> pair anywhere in
@@ -167,6 +169,7 @@ class StreamingThinkScrubber:
                                 preceding.endswith("\n")
                             )
                     buf = buf[end_idx:]
+                    buf_lower = buf_lower[end_idx:]
                     continue
 
                 if open_idx != -1:
@@ -181,7 +184,9 @@ class StreamingThinkScrubber:
                                 preceding.endswith("\n")
                             )
                     self._in_block = True
-                    buf = buf[open_idx + open_len:]
+                    advance = open_idx + open_len
+                    buf = buf[advance:]
+                    buf_lower = buf_lower[advance:]
                     continue
 
                 # No resolvable tag structure in buf.  Hold back any

@@ -12,6 +12,7 @@ CLI:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -110,6 +111,7 @@ def load_specs(path: str) -> List[Dict]:
 
 
 # ----------------------------- structure validation -----------------------------
+@functools.lru_cache(maxsize=1)
 def _load_schema() -> Dict:
     with open(SCHEMA_PATH, "r", encoding="utf-8") as fh:
         return json.load(fh)

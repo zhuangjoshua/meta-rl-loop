@@ -80,33 +80,35 @@ def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[
     """
     lines = patch_content.split('\n')
     operations: List[PatchOperation] = []
-    
-    # Find patch boundaries
-    start_idx = None
-    end_idx = None
-    
-    for i, line in enumerate(lines):
-        if '*** Begin Patch' in line or '***Begin Patch' in line:
-            start_idx = i
-        elif '*** End Patch' in line or '***End Patch' in line:
-            end_idx = i
-            break
-    
-    if start_idx is None:
-        # Try to parse without explicit begin marker
-        start_idx = -1
-    
-    if end_idx is None:
-        end_idx = len(lines)
-    
-    # Parse operations between boundaries
-    i = start_idx + 1
+
+    # Single pass: fold boundary detection into the parse loop.
+    #
+    # Original two-pass semantics preserved exactly:
+    #   - start marker = the LAST "Begin Patch" line (later Begin wins);
+    #     a Begin marker resets any operations parsed before it.
+    #   - end marker   = the FIRST "End Patch" line, which stops parsing.
+    #   - no Begin marker → parse from the top (implicit start at -1).
+    #   - no End marker   → parse to end of file.
     current_op: Optional[PatchOperation] = None
     current_hunk: Optional[Hunk] = None
-    
-    while i < end_idx:
+
+    i = 0
+    n = len(lines)
+    while i < n:
         line = lines[i]
-        
+
+        # End marker: stop parsing at the first occurrence.
+        if '*** End Patch' in line or '***End Patch' in line:
+            break
+
+        # Begin marker: a later Begin discards everything parsed so far
+        # (matches the original "last Begin wins" boundary behavior).
+        if '*** Begin Patch' in line or '***Begin Patch' in line:
+            operations = []
+            current_op = None
+            current_hunk = None
+            i += 1
+            continue
         # Check for file operation markers
         update_match = re.match(r'\*\*\*\s*Update\s+File:\s*(.+)', line)
         add_match = re.match(r'\*\*\*\s*Add\s+File:\s*(.+)', line)
@@ -195,9 +197,9 @@ def parse_v4a_patch(patch_content: str) -> Tuple[List[PatchOperation], Optional[
             else:
                 # Treat as context line (implicit space prefix)
                 current_hunk.lines.append(HunkLine(' ', line))
-        
+
         i += 1
-    
+
     # Don't forget the last operation
     if current_op:
         if current_hunk and current_hunk.lines:

@@ -1009,7 +1009,7 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
-        if not os.path.exists(file_path):
+        if not await asyncio.to_thread(os.path.exists, file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
 
         thread_ts = self._resolve_thread_ts(reply_to, metadata)
@@ -1087,7 +1087,7 @@ class SlackAdapter(BasePlatformAdapter):
 
                         if image_url.startswith("file://"):
                             local_path = _unquote(image_url[7:])
-                            if not os.path.exists(local_path):
+                            if not await asyncio.to_thread(os.path.exists, local_path):
                                 logger.warning("[Slack] Skipping missing image: %s", local_path)
                                 continue
                             file_uploads.append({
@@ -1509,7 +1509,7 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
-        if not os.path.exists(video_path):
+        if not await asyncio.to_thread(os.path.exists, video_path):
             return SendResult(success=False, error=f"Video file not found: {video_path}")
 
         try:
@@ -1566,7 +1566,7 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
-        if not os.path.exists(file_path):
+        if not await asyncio.to_thread(os.path.exists, file_path):
             return SendResult(success=False, error=f"File not found: {file_path}")
 
         display_name = file_name or os.path.basename(file_path)

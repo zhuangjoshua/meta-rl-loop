@@ -18,6 +18,7 @@ import argparse
 import csv
 import sys
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -105,6 +106,7 @@ def fetch(
     masters: dict[str, dict] = {}
     if enrich and doc_ids:
         # Batch up to 100 doc_ids per request (Socrata IN-list is fine for this).
+        chunk_urls: list[str] = []
         for i in range(0, len(doc_ids), 100):
             chunk = doc_ids[i : i + 100]
             id_list = ",".join(f"'{d}'" for d in chunk)
@@ -112,17 +114,23 @@ def fetch(
                 "$where": f"document_id in ({id_list})",
                 "$limit": "100",
             }
-            url = f"{MASTER_URL}?{urllib.parse.urlencode(master_params)}"
+            chunk_urls.append(f"{MASTER_URL}?{urllib.parse.urlencode(master_params)}")
+
+        def _fetch_chunk(url: str):
             try:
-                rows = get_json(url)
+                return get_json(url)
             except Exception as e:  # noqa: BLE001
                 print(f"ACRIS master lookup failed for chunk: {e}", file=sys.stderr)
-                continue
-            if isinstance(rows, list):
-                for r in rows:
-                    did = r.get("document_id", "")
-                    if did:
-                        masters[did] = r
+                return None
+
+        # Independent requests — fetch concurrently with a bounded pool.
+        with ThreadPoolExecutor(max_workers=min(4, len(chunk_urls))) as executor:
+            for rows in executor.map(_fetch_chunk, chunk_urls):
+                if isinstance(rows, list):
+                    for r in rows:
+                        did = r.get("document_id", "")
+                        if did:
+                            masters[did] = r
 
     out_rows: list[dict[str, str]] = []
     for p in parties:

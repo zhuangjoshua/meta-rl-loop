@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
@@ -33,15 +34,18 @@ _BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 # does not require httpx and so the connection pool (keep-alive) is reused
 # across repeated searches instead of paying a fresh TLS handshake each call.
 _CLIENT = None
+_CLIENT_LOCK = threading.Lock()
 
 
 def _get_client():
     """Return a shared, lazily-created ``httpx.Client`` with the 15s timeout."""
     global _CLIENT
     if _CLIENT is None:
-        import httpx
+        with _CLIENT_LOCK:
+            if _CLIENT is None:
+                import httpx
 
-        _CLIENT = httpx.Client(timeout=15)
+                _CLIENT = httpx.Client(timeout=15)
     return _CLIENT
 
 

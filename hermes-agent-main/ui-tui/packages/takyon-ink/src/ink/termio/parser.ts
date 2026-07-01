@@ -99,7 +99,46 @@ function parseCSIParams(paramStr: string): number[] {
     return []
   }
 
-  return paramStr.split(/[;:]/).map(s => (s === '' ? 0 : parseInt(s, 10)))
+  const params: number[] = []
+  const len = paramStr.length
+  let start = 0
+
+  for (let i = 0; i <= len; i++) {
+    const code = i < len ? paramStr.charCodeAt(i) : -1
+
+    // Delimiter (';' or ':') or end of string closes the current field.
+    if (i === len || code === 0x3b || code === 0x3a) {
+      // Match parseInt(s, 10): empty field -> 0; otherwise read leading digits.
+      let value = 0
+
+      if (i > start) {
+        let j = start
+        let sawDigit = false
+
+        while (j < i) {
+          const c = paramStr.charCodeAt(j)
+
+          if (c < 0x30 || c > 0x39) {
+            break
+          }
+
+          value = value * 10 + (c - 0x30)
+          sawDigit = true
+          j++
+        }
+
+        if (!sawDigit) {
+          // parseInt would yield NaN for a non-numeric leading field.
+          value = NaN
+        }
+      }
+
+      params.push(value)
+      start = i + 1
+    }
+  }
+
+  return params
 }
 
 /** Parse a raw CSI sequence (e.g., "\x1b[31m") into an action */
@@ -122,6 +161,13 @@ function parseCSI(rawSequence: string): Action | null {
     paramStr = beforeFinal.slice(1)
   }
 
+  // SGR (Select Graphic Rendition) — hot path. Short-circuit before the
+  // intermediate regex match and parseCSIParams allocation, since SGR only
+  // depends on paramStr and has no intermediate bytes.
+  if (finalByte === CSI.SGR && privateMode === '') {
+    return { type: 'sgr', params: paramStr }
+  }
+
   const intermediateMatch = paramStr.match(/([^0-9;:]+)$/)
 
   if (intermediateMatch) {
@@ -132,11 +178,6 @@ function parseCSI(rawSequence: string): Action | null {
   const params = parseCSIParams(paramStr)
   const p0 = params[0] ?? 1
   const p1 = params[1] ?? 1
-
-  // SGR (Select Graphic Rendition)
-  if (finalByte === CSI.SGR && privateMode === '') {
-    return { type: 'sgr', params: paramStr }
-  }
 
   // Cursor movement
   if (finalByte === CSI.CUU) {

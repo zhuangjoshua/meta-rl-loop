@@ -1,16 +1,36 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./auth/useAuth";
 import { AuthModal, type AuthMode } from "./auth/AuthModal";
 import { Landing } from "./landing/Landing";
 import { AppHome } from "./app/AppHome";
-import { NewCompany } from "./app/NewCompany";
-import { Product } from "./product/Product";
-import { Building } from "./product/Building";
-import { Settings, type SettingsSection } from "./settings/Settings";
-import { Faq } from "./marketing/Faq";
-import { Legal } from "./marketing/Legal";
-import { NotFound } from "./common/NotFound";
+import type { SettingsSection } from "./settings/Settings";
 import { useTakyonLitebulb } from "./takyon/useTakyonLitebulb";
+
+// Rarely-used / authed surfaces are code-split so they stay off the initial
+// critical-path bundle. Only Landing/AppHome are eager for the first paint.
+const NewCompany = lazy(() =>
+  import("./app/NewCompany").then((m) => ({ default: m.NewCompany })),
+);
+const Product = lazy(() =>
+  import("./product/Product").then((m) => ({ default: m.Product })),
+);
+const Building = lazy(() =>
+  import("./product/Building").then((m) => ({ default: m.Building })),
+);
+const Settings = lazy(() =>
+  import("./settings/Settings").then((m) => ({ default: m.Settings })),
+);
+const Faq = lazy(() =>
+  import("./marketing/Faq").then((m) => ({ default: m.Faq })),
+);
+const Legal = lazy(() =>
+  import("./marketing/Legal").then((m) => ({ default: m.Legal })),
+);
+const NotFound = lazy(() =>
+  import("./common/NotFound").then((m) => ({ default: m.NotFound })),
+);
+
+export type { SettingsSection };
 
 export type Theme = "light" | "dark";
 
@@ -299,7 +319,7 @@ function Router() {
 
   return (
     <>
-      {view}
+      <Suspense fallback={null}>{view}</Suspense>
       {authModal && (
         <AuthModal
           mode={authModal}
@@ -309,6 +329,7 @@ function Router() {
         />
       )}
       {settings && (
+        <Suspense fallback={null}>
         <Settings
           section={settings}
           theme={theme}
@@ -323,6 +344,7 @@ function Router() {
           onBuyCreditPack={startCreativeCreditPackCheckout}
           onClose={closeSettings}
         />
+        </Suspense>
       )}
     </>
   );

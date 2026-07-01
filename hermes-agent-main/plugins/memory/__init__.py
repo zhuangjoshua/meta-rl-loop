@@ -26,8 +26,11 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 from takyon_cli.config import cfg_get
+
+if TYPE_CHECKING:
+    from agent.memory_provider import MemoryProvider
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +128,17 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
 
     Returns list of (name, description, is_available) tuples.
     Bundled providers take precedence on name collisions.
+
+    Only the provider named by ``memory.provider`` in config.yaml is
+    fully imported (to call ``is_available()``); scanning every provider
+    would pull in heavy SDKs (Honcho, Mem0, …) into every process even
+    though only one provider is ever active.  For all other providers we
+    report availability via a cheap presence check, deferring the heavy
+    import to :func:`load_memory_provider`.
     """
     results = []
+
+    active_provider = _get_active_memory_provider()
 
     for name, child in _iter_provider_dirs():
         # Read description from plugin.yaml if available
@@ -141,16 +153,21 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
             except Exception:
                 pass
 
-        # Quick availability check — try loading and calling is_available()
-        available = True
-        try:
-            provider = _load_provider_from_dir(child)
-            if provider:
-                available = provider.is_available()
-            else:
+        if name == active_provider:
+            # Active provider: fully load and call is_available().
+            available = True
+            try:
+                provider = _load_provider_from_dir(child)
+                if provider:
+                    available = provider.is_available()
+                else:
+                    available = False
+            except Exception:
                 available = False
-        except Exception:
-            available = False
+        else:
+            # Inactive providers: cheap presence check only — avoid
+            # importing/exec'ing their (potentially heavy) SDKs.
+            available = (child / "__init__.py").exists()
 
         results.append((name, desc, available))
 

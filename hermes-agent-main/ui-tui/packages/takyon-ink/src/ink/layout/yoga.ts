@@ -49,6 +49,34 @@ const GUTTER_MAP: Record<LayoutGutter, Gutter> = {
   row: Gutter.Row
 }
 
+const FLEX_DIRECTION_MAP: Record<LayoutFlexDirection, FlexDirection> = {
+  row: FlexDirection.Row,
+  'row-reverse': FlexDirection.RowReverse,
+  column: FlexDirection.Column,
+  'column-reverse': FlexDirection.ColumnReverse
+}
+
+const FLEX_WRAP_MAP: Record<LayoutWrap, Wrap> = {
+  nowrap: Wrap.NoWrap,
+  wrap: Wrap.Wrap,
+  'wrap-reverse': Wrap.WrapReverse
+}
+
+const JUSTIFY_MAP: Record<LayoutJustify, Justify> = {
+  'flex-start': Justify.FlexStart,
+  center: Justify.Center,
+  'flex-end': Justify.FlexEnd,
+  'space-between': Justify.SpaceBetween,
+  'space-around': Justify.SpaceAround,
+  'space-evenly': Justify.SpaceEvenly
+}
+
+const OVERFLOW_MAP: Record<LayoutOverflow, Overflow> = {
+  visible: Overflow.Visible,
+  hidden: Overflow.Hidden,
+  scroll: Overflow.Scroll
+}
+
 // --
 // Yoga adapter
 
@@ -178,14 +206,7 @@ export class YogaLayoutNode implements LayoutNode {
   }
 
   setFlexDirection(dir: LayoutFlexDirection): void {
-    const map: Record<LayoutFlexDirection, FlexDirection> = {
-      row: FlexDirection.Row,
-      'row-reverse': FlexDirection.RowReverse,
-      column: FlexDirection.Column,
-      'column-reverse': FlexDirection.ColumnReverse
-    }
-
-    this.yoga.setFlexDirection(map[dir]!)
+    this.yoga.setFlexDirection(FLEX_DIRECTION_MAP[dir]!)
   }
 
   setFlexGrow(value: number): void {
@@ -202,13 +223,7 @@ export class YogaLayoutNode implements LayoutNode {
   }
 
   setFlexWrap(wrap: LayoutWrap): void {
-    const map: Record<LayoutWrap, Wrap> = {
-      nowrap: Wrap.NoWrap,
-      wrap: Wrap.Wrap,
-      'wrap-reverse': Wrap.WrapReverse
-    }
-
-    this.yoga.setFlexWrap(map[wrap]!)
+    this.yoga.setFlexWrap(FLEX_WRAP_MAP[wrap]!)
   }
 
   setAlignItems(align: LayoutAlign): void {
@@ -236,16 +251,7 @@ export class YogaLayoutNode implements LayoutNode {
   }
 
   setJustifyContent(justify: LayoutJustify): void {
-    const map: Record<LayoutJustify, Justify> = {
-      'flex-start': Justify.FlexStart,
-      center: Justify.Center,
-      'flex-end': Justify.FlexEnd,
-      'space-between': Justify.SpaceBetween,
-      'space-around': Justify.SpaceAround,
-      'space-evenly': Justify.SpaceEvenly
-    }
-
-    this.yoga.setJustifyContent(map[justify]!)
+    this.yoga.setJustifyContent(JUSTIFY_MAP[justify]!)
   }
 
   setDisplay(display: LayoutDisplay): void {
@@ -269,13 +275,7 @@ export class YogaLayoutNode implements LayoutNode {
   }
 
   setOverflow(overflow: LayoutOverflow): void {
-    const map: Record<LayoutOverflow, Overflow> = {
-      visible: Overflow.Visible,
-      hidden: Overflow.Hidden,
-      scroll: Overflow.Scroll
-    }
-
-    this.yoga.setOverflow(map[overflow]!)
+    this.yoga.setOverflow(OVERFLOW_MAP[overflow]!)
   }
 
   setMargin(edge: LayoutEdge, value: number): void {

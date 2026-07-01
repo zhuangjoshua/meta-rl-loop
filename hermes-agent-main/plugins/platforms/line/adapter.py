@@ -1279,7 +1279,7 @@ class LineAdapter(BasePlatformAdapter):
             return web.Response(status=410, text="gone")
 
         path = Path(file_path)
-        if not path.exists() or not path.is_file():
+        if not await asyncio.to_thread(lambda: path.exists() and path.is_file()):
             return web.Response(status=404, text="not found")
 
         try:
@@ -1293,7 +1293,7 @@ class LineAdapter(BasePlatformAdapter):
             Path("/tmp").resolve(),  # → /private/tmp on macOS
             takyon_home,
         }
-        resolved = path.resolve()
+        resolved = await asyncio.to_thread(path.resolve)
         if not any(_is_relative_to(resolved, r) for r in allowed_roots):
             logger.warning("LINE: refusing to serve outside allowed roots: %s", resolved)
             return web.Response(status=403, text="forbidden")
@@ -1312,9 +1312,9 @@ class LineAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         path = Path(image_path)
-        if not path.exists() or not path.is_file():
+        if not await asyncio.to_thread(lambda: path.exists() and path.is_file()):
             return SendResult(success=False, error=f"image file not found: {image_path}")
-        if path.stat().st_size > LINE_IMAGE_MAX_BYTES:
+        if (await asyncio.to_thread(path.stat)).st_size > LINE_IMAGE_MAX_BYTES:
             return SendResult(success=False, error="image exceeds 10 MB LINE limit")
         if not self._client:
             return SendResult(success=False, error="LINE adapter not connected")
@@ -1325,7 +1325,7 @@ class LineAdapter(BasePlatformAdapter):
                 "(LINE only accepts publicly reachable HTTPS URLs)",
             )
 
-        token = self._register_media(str(path.resolve()))
+        token = self._register_media(str(await asyncio.to_thread(path.resolve)))
         url = self._media_url(token, path.name)
         if not url.lower().startswith("https://"):
             return SendResult(success=False, error=f"LINE image URL must be HTTPS: {url}")
@@ -1342,9 +1342,9 @@ class LineAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         path = Path(audio_path)
-        if not path.exists() or not path.is_file():
+        if not await asyncio.to_thread(lambda: path.exists() and path.is_file()):
             return SendResult(success=False, error=f"audio file not found: {audio_path}")
-        if path.stat().st_size > LINE_AV_MAX_BYTES:
+        if (await asyncio.to_thread(path.stat)).st_size > LINE_AV_MAX_BYTES:
             return SendResult(success=False, error="audio exceeds 200 MB LINE limit")
         if not self._client:
             return SendResult(success=False, error="LINE adapter not connected")
@@ -1354,7 +1354,7 @@ class LineAdapter(BasePlatformAdapter):
                 error="LINE_PUBLIC_URL must be set to send audio",
             )
 
-        token = self._register_media(str(path.resolve()))
+        token = self._register_media(str(await asyncio.to_thread(path.resolve)))
         url = self._media_url(token, path.name)
         return await self._send_messages(chat_id, [_audio_message(url, duration_ms)])
 
@@ -1366,9 +1366,9 @@ class LineAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         path = Path(video_path)
-        if not path.exists() or not path.is_file():
+        if not await asyncio.to_thread(lambda: path.exists() and path.is_file()):
             return SendResult(success=False, error=f"video file not found: {video_path}")
-        if path.stat().st_size > LINE_AV_MAX_BYTES:
+        if (await asyncio.to_thread(path.stat)).st_size > LINE_AV_MAX_BYTES:
             return SendResult(success=False, error="video exceeds 200 MB LINE limit")
         if not self._client:
             return SendResult(success=False, error="LINE adapter not connected")
@@ -1380,8 +1380,10 @@ class LineAdapter(BasePlatformAdapter):
 
         # LINE requires a previewImageUrl. Use one if supplied, otherwise
         # write a stdlib 1×1 PNG to /tmp and serve it. PR #8398.
-        if preview_path and Path(preview_path).is_file():
-            preview_token = self._register_media(str(Path(preview_path).resolve()))
+        if preview_path and await asyncio.to_thread(Path(preview_path).is_file):
+            preview_token = self._register_media(
+                str(await asyncio.to_thread(Path(preview_path).resolve))
+            )
             preview_filename = Path(preview_path).name
         else:
             tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
@@ -1398,7 +1400,7 @@ class LineAdapter(BasePlatformAdapter):
                     pass
                 raise
 
-        video_token = self._register_media(str(path.resolve()))
+        video_token = self._register_media(str(await asyncio.to_thread(path.resolve)))
         video_url = self._media_url(video_token, path.name)
         preview_url = self._media_url(preview_token, preview_filename)
         return await self._send_messages(chat_id, [_video_message(video_url, preview_url)])

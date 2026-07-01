@@ -2096,7 +2096,7 @@ class FeishuAdapter(BasePlatformAdapter):
         """Send a local image file to Feishu."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
-        if not os.path.exists(image_path):
+        if not await asyncio.to_thread(os.path.exists, image_path):
             return SendResult(success=False, error=f"Image file not found: {image_path}")
 
         try:
@@ -3557,7 +3557,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if not cached_path or not media_type.startswith("text/"):
             return ""
         try:
-            if os.path.getsize(cached_path) > _MAX_TEXT_INJECT_BYTES:
+            if await asyncio.to_thread(os.path.getsize, cached_path) > _MAX_TEXT_INJECT_BYTES:
                 return ""
             ext = Path(cached_path).suffix.lower()
             if ext not in {".txt", ".md"} and media_type not in {"text/plain", "text/markdown"}:
@@ -4261,7 +4261,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not self._client:
             return SendResult(success=False, error="Not connected")
-        if not os.path.exists(file_path):
+        if not await asyncio.to_thread(os.path.exists, file_path):
             return SendResult(success=False, error=f"File not found: {file_path}")
 
         display_name = file_name or os.path.basename(file_path)

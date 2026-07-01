@@ -266,7 +266,7 @@ export const estimateRows = (text: string, w: number, compact = false) => {
   let rows = 0
 
   for (const raw of text.split('\n')) {
-    const line = stripAnsi(raw)
+    const line = hasAnsi(raw) ? stripAnsi(raw) : raw
     const maybeFence = line.match(/^\s*(`{3,}|~{3,})(.*)$/)
 
     if (maybeFence) {

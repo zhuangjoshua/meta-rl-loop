@@ -173,26 +173,35 @@ def _short_mint(mint: str) -> str:
 # ---------------------------------------------------------------------------
 
 def fetch_prices(mints: List[str], max_lookups: int = 20) -> Dict[str, float]:
-    """Fetch USD prices for mint addresses via CoinGecko (one per request).
+    """Fetch USD prices for mint addresses via CoinGecko.
 
-    CoinGecko free tier doesn't support batch Solana token lookups,
-    so we do individual calls — capped at *max_lookups* to stay within
+    The ``/simple/token_price/solana`` endpoint accepts a comma-separated
+    ``contract_addresses`` list, so we batch mints into chunked requests
+    instead of one call per mint — capped at *max_lookups* to stay within
     rate limits. Returns {mint: usd_price}.
     """
     prices: Dict[str, float] = {}
-    for i, mint in enumerate(mints[:max_lookups]):
+    selected = mints[:max_lookups]
+    # CoinGecko URLs get long with many contract addresses; chunk to keep
+    # each request comfortably within URL limits.
+    chunk_size = 25
+    chunks = [selected[i:i + chunk_size] for i in range(0, len(selected), chunk_size)]
+    for i, chunk in enumerate(chunks):
+        addresses = ",".join(chunk)
         url = (
             f"https://api.coingecko.com/api/v3/simple/token_price/solana"
-            f"?contract_addresses={mint}&vs_currencies=usd"
+            f"?contract_addresses={addresses}&vs_currencies=usd"
         )
         data = _http_get_json(url, timeout=10)
         if data and isinstance(data, dict):
+            # CoinGecko keys responses by (lowercased) contract address.
+            lowered = {mint.lower(): mint for mint in chunk}
             for addr, info in data.items():
                 if isinstance(info, dict) and "usd" in info:
+                    mint = lowered.get(addr.lower(), addr)
                     prices[mint] = info["usd"]
-                    break
-        # Pause between calls to respect CoinGecko free-tier rate-limits
-        if i < len(mints[:max_lookups]) - 1:
+        # Pause between requests to respect CoinGecko free-tier rate-limits
+        if i < len(chunks) - 1:
             time.sleep(1.0)
     return prices
 

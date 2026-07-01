@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { TakyonBusinessWorkspaceResponse } from "@/lib/api";
 import type { BuildState } from "../takyon/useTakyonLitebulb";
 import {
@@ -77,12 +77,17 @@ export function Building({
   // that is fed raw message deltas (the CEO's chain-of-thought), which belong
   // strictly inside the collapsed "View build details" disclosure, never in the
   // customer-facing conversation.
-  const curatedStream = chatStreamAgentMessages(scopedWorkspace)
-    .map((item) => sanitizeCustomerReply(item.text))
-    .filter(Boolean);
-  const stream = curatedStream.length
-    ? curatedStream
-    : [`Reading your idea — ${idea}.`];
+  const curatedStream = useMemo(
+    () =>
+      chatStreamAgentMessages(scopedWorkspace)
+        .map((item) => sanitizeCustomerReply(item.text))
+        .filter(Boolean),
+    [scopedWorkspace],
+  );
+  const stream = useMemo(
+    () => (curatedStream.length ? curatedStream : [`Reading your idea — ${idea}.`]),
+    [curatedStream, idea],
+  );
   // Durable end-of-turn summary mirrored on the workspace; rendered as the
   // settled closing line when present (otherwise the static ready line below).
   const chatSummary = workspaceChatSummary(scopedWorkspace).trim();
@@ -92,7 +97,10 @@ export function Building({
   // from the canonical workspace mirror. Each detail is sanitized at render so no
   // tool/path noun reaches the screen; capped to the most recent few. Empty
   // before the boot payload arrives (the column simply doesn't render).
-  const workerTasks = (running ? liveWorkerTasks(scopedWorkspace) : []).slice(-6);
+  const workerTasks = useMemo(
+    () => (running ? liveWorkerTasks(scopedWorkspace) : []).slice(-6),
+    [running, scopedWorkspace],
+  );
   // Deterministic, timed build-phase ladder (Landing -> Logo -> Search Console
   // -> Sign-on -> Subscription/account -> Product/launch), derived from the real
   // per-tool runtime traces + persisted durations on the workspace mirror. Shows
@@ -100,7 +108,7 @@ export function Building({
   // long tail, and where sign-in/subscriptions get wired. Only renders once the
   // boot payload carries trace events (otherwise the array is all-queued with no
   // timing, and we hide it until the build actually starts moving).
-  const phases = livePhases(scopedWorkspace);
+  const phases = useMemo(() => livePhases(scopedWorkspace), [scopedWorkspace]);
   const showPhases = phases.some((phase) => phase.status !== "queued");
   const title = state.businessName.trim();
   // Real product host, shown from the moment the slug is known (as soon as

@@ -70,6 +70,11 @@ export function LandingThumb({
 }) {
   // 'embed' = live iframe rendering; 'skeleton' = published site missing / blocked.
   const [mode, setMode] = useState<"embed" | "skeleton">("embed");
+  // Defer the (heavy) iframe mount until the tile scrolls into view. With N
+  // companies this avoids N concurrent same-origin iframe document loads —
+  // only visible tiles pay the network/memory cost. Off-screen tiles keep the
+  // skeleton until they intersect the viewport.
+  const [visible, setVisible] = useState(false);
   const viewRef = useRef<HTMLDivElement | null>(null);
   // Scale the 1280px-wide logical page down to the tile width. Measured from the
   // real container (a ResizeObserver keeps it correct across breakpoints) and
@@ -78,7 +83,33 @@ export function LandingThumb({
   const [scale, setScale] = useState(0);
   const url = addressBarText(canonicalProductHost(slug)) || name.toLowerCase().replace(/[^a-z0-9]/g, "");
   const frameUrl = slug ? buildTakyonBusinessSitePreviewFrameUrl(slug) : "";
-  const showEmbed = mode === "embed" && Boolean(frameUrl);
+  const showEmbed = visible && mode === "embed" && Boolean(frameUrl);
+
+  // Mark the tile visible once it intersects the viewport, then stop observing.
+  // If IntersectionObserver is unavailable, fall back to mounting immediately so
+  // behavior is unchanged.
+  useEffect(() => {
+    const el = viewRef.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setVisible(true);
+            io.disconnect();
+            break;
+          }
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!showEmbed) return;

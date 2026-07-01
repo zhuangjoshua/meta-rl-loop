@@ -165,6 +165,14 @@ def _validate_manifest(data: Any) -> bool:
     return True
 
 
+def _disk_cache_mtime() -> float:
+    """Return the disk cache mtime without reading/parsing it. 0 if missing."""
+    try:
+        return _cache_path().stat().st_mtime
+    except (OSError, FileNotFoundError):
+        return 0.0
+
+
 def _read_disk_cache() -> tuple[dict[str, Any] | None, float]:
     """Return ``(data_or_none, mtime)``. mtime is 0 if file is missing."""
     path = _cache_path()
@@ -214,19 +222,22 @@ def get_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
 
     ttl_seconds = max(0.0, cfg["ttl_hours"] * 3600.0)
 
-    disk_data, disk_mtime = _read_disk_cache()
     now = time.time()
-    disk_fresh = disk_data is not None and (now - disk_mtime) < ttl_seconds
 
-    # In-process cache hit: disk hasn't changed since we loaded it and still fresh.
-    if (
-        not force_refresh
-        and _catalog_cache is not None
-        and disk_data is not None
-        and disk_mtime == _catalog_cache_source_mtime
-        and disk_fresh
-    ):
-        return _catalog_cache
+    # In-process cache hit: probe only the mtime (no parse/validate). If the
+    # disk file hasn't changed since we loaded it and it's still fresh, return
+    # the cached value without re-reading + re-validating the JSON.
+    if not force_refresh and _catalog_cache is not None:
+        probe_mtime = _disk_cache_mtime()
+        if (
+            probe_mtime
+            and probe_mtime == _catalog_cache_source_mtime
+            and (now - probe_mtime) < ttl_seconds
+        ):
+            return _catalog_cache
+
+    disk_data, disk_mtime = _read_disk_cache()
+    disk_fresh = disk_data is not None and (now - disk_mtime) < ttl_seconds
 
     # Disk is fresh enough — use it without a network hit.
     if not force_refresh and disk_fresh and disk_data is not None:
@@ -238,13 +249,15 @@ def get_catalog(*, force_refresh: bool = False) -> dict[str, Any]:
     fetched = _fetch_manifest(cfg["url"], DEFAULT_FETCH_TIMEOUT)
     if fetched is not None:
         _write_disk_cache(fetched)
-        new_disk_data, new_mtime = _read_disk_cache()
-        if new_disk_data is not None:
-            _catalog_cache = new_disk_data
-            _catalog_cache_source_mtime = new_mtime
-            return new_disk_data
+        # ``fetched`` is already parsed and validated; reuse it directly and
+        # take the source mtime from a stat() of the file we just wrote,
+        # avoiding a redundant open + json.load + re-validate round trip.
+        try:
+            new_mtime = _cache_path().stat().st_mtime
+        except OSError:
+            new_mtime = now
         _catalog_cache = fetched
-        _catalog_cache_source_mtime = now
+        _catalog_cache_source_mtime = new_mtime
         return fetched
 
     if disk_data is not None:

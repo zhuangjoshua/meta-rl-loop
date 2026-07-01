@@ -159,6 +159,7 @@ export function useConfigSync({
   sid
 }: UseConfigSyncOptions) {
   const mtimeRef = useRef(0)
+  const pollingRef = useRef(false)
 
   useEffect(() => {
     if (!sid) {
@@ -182,7 +183,19 @@ export function useConfigSync({
     }
 
     const id = setInterval(() => {
-      quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime' }).then(r => {
+      // Guard against overlapping polls: on a slow/stalled stdio RPC pipe a
+      // probe can outlast the interval. Without this, config.get + reload.mcp
+      // + hydrateFullConfig round-trips pile onto the single-lane gateway and
+      // starve prompt.submit. Skip the tick while a probe (and any follow-up
+      // reload/hydrate it triggers) is still in flight (#4136).
+      if (pollingRef.current) {
+        return
+      }
+
+      pollingRef.current = true
+
+      void (async () => {
+        const r = await quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime' })
         const next = Number(r?.mtime ?? 0)
 
         if (!mtimeRef.current) {
@@ -199,10 +212,12 @@ export function useConfigSync({
 
         mtimeRef.current = next
 
-        quietRpc<ReloadMcpResponse>(gw, 'reload.mcp', { session_id: sid, confirm: true }).then(
+        await quietRpc<ReloadMcpResponse>(gw, 'reload.mcp', { session_id: sid, confirm: true }).then(
           r => r && turnController.pushActivity('MCP reloaded after config change')
         )
-        void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
+        await hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey)
+      })().finally(() => {
+        pollingRef.current = false
       })
     }, MTIME_POLL_MS)
 

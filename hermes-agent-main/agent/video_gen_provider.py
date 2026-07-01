@@ -50,9 +50,10 @@ import abc
 import base64
 import datetime
 import logging
+import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,26 @@ def save_bytes_video(
     short = uuid.uuid4().hex[:8]
     path = _videos_cache_dir() / f"{prefix}_{ts}_{short}.{extension}"
     path.write_bytes(raw)
+    return path
+
+
+def save_stream_video(
+    stream: BinaryIO,
+    *,
+    prefix: str = "video",
+    extension: str = "mp4",
+) -> Path:
+    """Stream a readable file-like object (e.g. an HTTP response body) to the
+    cache in 1 MB chunks, avoiding buffering the whole video in memory.
+
+    Returns the absolute :class:`Path` to the saved file, matching the naming
+    convention used by :func:`save_bytes_video`.
+    """
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    short = uuid.uuid4().hex[:8]
+    path = _videos_cache_dir() / f"{prefix}_{ts}_{short}.{extension}"
+    with open(path, "wb") as fh:
+        shutil.copyfileobj(stream, fh, length=1024 * 1024)
     return path
 
 

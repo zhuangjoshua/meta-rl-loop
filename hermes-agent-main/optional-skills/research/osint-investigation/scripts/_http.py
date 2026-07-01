@@ -11,6 +11,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# Cap peak RAM on the fetch path. OSINT bodies (SEC filings, Wikimedia dumps)
+# can be tens/hundreds of MB; buffering an unbounded body risks OOM. Callers
+# expecting genuinely large payloads may raise this explicitly.
+DEFAULT_MAX_BYTES = 64 * 1024 * 1024  # 64 MiB
+
 DEFAULT_UA = (
     "takyon-osint-investigation/0.2 "
     "(+https://github.com/NousResearch/takyon-agent; "
@@ -28,12 +33,18 @@ def get(
     max_retries: int = 3,
     backoff: float = 1.5,
     timeout: float = 30.0,
+    max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> bytes:
     """GET with retry on 5xx and Retry-After honoring.
 
     429 (rate-limit) is raised IMMEDIATELY with a clear message — retrying
     when the upstream says "you're over quota" just wastes time. The caller
     should slow down or supply real credentials.
+
+    ``max_bytes`` caps the response body read into memory (default
+    :data:`DEFAULT_MAX_BYTES`); a body exceeding it raises ``RuntimeError``
+    rather than silently buffering an unbounded payload. Pass a larger value
+    for endpoints known to return big documents.
     """
     if params:
         sep = "&" if "?" in url else "?"
@@ -47,7 +58,16 @@ def get(
         req = urllib.request.Request(url, headers=h)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
+                # Read one byte past the cap so we can distinguish "exactly at
+                # the limit" from "over the limit" without buffering the rest.
+                body = resp.read(max_bytes + 1)
+                if len(body) > max_bytes:
+                    raise RuntimeError(
+                        f"Response body from {urllib.parse.urlsplit(url).netloc} "
+                        f"exceeds max_bytes={max_bytes}. Raise max_bytes if this "
+                        f"large payload is expected."
+                    )
+                return body
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 # Surface immediately. Read the body so the caller sees the

@@ -24,10 +24,10 @@ from __future__ import annotations
 import os
 import platform
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import psycopg
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
-from fastapi import FastAPI
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 from .ai_gateway import build_ai_gateway_router, get_gateway_conn
 from .control_api import build_control_router, get_control_conn
@@ -176,6 +176,8 @@ def _resolved_takyon_home() -> Path | None:
 
 
 def _conninfo_hosts(value: str) -> tuple[str, ...]:
+    from psycopg.conninfo import conninfo_to_dict
+
     try:
         info = conninfo_to_dict(value)
     except Exception:
@@ -207,6 +209,8 @@ def _conninfo_is_local_only(value: str) -> bool:
 
 
 def _with_database_connect_timeout(value: str) -> str:
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
     try:
         info = conninfo_to_dict(value)
     except Exception:
@@ -390,6 +394,9 @@ def build_runtime_app(
 ) -> FastAPI:
     """Build the host app that serves the Postgres-backed routers against ``database_url`` (or the
     environment). Raises ``RuntimeNotConfigured`` if no URL is configured."""
+    import psycopg
+    from fastapi import FastAPI
+
     runtime_planes = _normalize_runtime_planes(planes)
     mount_operator = "operator" in runtime_planes
     mount_app = "app" in runtime_planes

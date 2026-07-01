@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import re
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -341,19 +342,37 @@ class MemoryManager:
 
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
+
+        Provider prefetches are independent I/O (external providers may
+        perform network recall), so they are fanned out concurrently and
+        joined; the merged string preserves provider registration order.
         """
-        parts = []
-        for provider in self._providers:
+        if not self._providers:
+            return ""
+
+        def _prefetch(provider: MemoryProvider) -> str:
             try:
                 result = provider.prefetch(query, session_id=session_id)
                 if result and result.strip():
-                    parts.append(result)
+                    return result
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
                     provider.name, e,
                 )
-        return "\n\n".join(parts)
+            return ""
+
+        if len(self._providers) == 1:
+            results = [_prefetch(self._providers[0])]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=len(self._providers),
+                thread_name_prefix="mem-prefetch",
+            ) as executor:
+                # executor.map preserves input order in its results
+                results = list(executor.map(_prefetch, self._providers))
+
+        return "\n\n".join(part for part in results if part)
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""

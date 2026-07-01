@@ -23,7 +23,7 @@ from agent.video_gen_provider import (
     DEFAULT_RESOLUTION,
     VideoGenProvider,
     error_response,
-    save_bytes_video,
+    save_stream_video,
     success_response,
 )
 
@@ -159,7 +159,7 @@ def _json_request(
     return json.loads(raw) if raw else {}
 
 
-def _download_video(video_id: str, *, api_key: str, base_url: str) -> bytes:
+def _download_video(video_id: str, *, api_key: str, base_url: str, prefix: str) -> str:
     request = urllib.request.Request(
         f"{base_url}/videos/{urllib.parse.quote(video_id)}/content",
         headers={
@@ -170,7 +170,7 @@ def _download_video(video_id: str, *, api_key: str, base_url: str) -> bytes:
     )
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
-            return response.read()
+            saved_path = save_stream_video(response, prefix=prefix)
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
@@ -178,6 +178,7 @@ def _download_video(video_id: str, *, api_key: str, base_url: str) -> bytes:
         except Exception:
             pass
         raise RuntimeError(f"OpenAI video download failed ({exc.code}): {detail or exc.reason}") from exc
+    return str(saved_path)
 
 
 class OpenAIVideoGenProvider(VideoGenProvider):
@@ -348,8 +349,12 @@ class OpenAIVideoGenProvider(VideoGenProvider):
                     prompt=prompt,
                 )
 
-            raw_video = _download_video(video_id, api_key=api_key, base_url=base_url)
-            saved_path = save_bytes_video(raw_video, prefix=f"openai_{model_id}")
+            saved_path = _download_video(
+                video_id,
+                api_key=api_key,
+                base_url=base_url,
+                prefix=f"openai_{model_id}",
+            )
         except Exception as exc:
             logger.warning("OpenAI Sora video generation failed: %s", exc, exc_info=True)
             return error_response(

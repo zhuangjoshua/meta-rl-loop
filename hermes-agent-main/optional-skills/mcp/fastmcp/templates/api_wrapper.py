@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import os
 from typing import Any
 
@@ -21,12 +22,15 @@ def _headers() -> dict[str, str]:
     return headers
 
 
+_client = httpx.Client(timeout=REQUEST_TIMEOUT, headers=_headers())
+atexit.register(_client.close)
+
+
 def _request(method: str, path: str, *, params: dict[str, Any] | None = None) -> Any:
     url = f"{API_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
-    with httpx.Client(timeout=REQUEST_TIMEOUT, headers=_headers()) as client:
-        response = client.request(method, url, params=params)
-        response.raise_for_status()
-        return response.json()
+    response = _client.request(method, url, params=params)
+    response.raise_for_status()
+    return response.json()
 
 
 @mcp.tool

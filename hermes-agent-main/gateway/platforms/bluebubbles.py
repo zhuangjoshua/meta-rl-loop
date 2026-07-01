@@ -130,6 +130,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: Dict[str, str] = {}
+        # Short-lived cache of the fetched chat list so repeated resolves for
+        # not-yet-matched targets don't re-POST /api/v1/chat/query each call.
+        self._chat_list_cache: Optional[List[Dict[str, Any]]] = None
+        self._chat_list_cache_at: float = 0.0
+        self._chat_list_cache_ttl: float = 30.0
 
     # ------------------------------------------------------------------
     # API helpers
@@ -338,6 +343,27 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # Chat GUID resolution
     # ------------------------------------------------------------------
 
+    async def _fetch_chat_list(self) -> List[Dict[str, Any]]:
+        """Return the BlueBubbles chat list, cached with a short TTL.
+
+        Repeated resolves for as-yet-unmatched targets reuse this cached
+        page instead of re-POSTing /api/v1/chat/query every call.
+        """
+        now = asyncio.get_event_loop().time()
+        if (
+            self._chat_list_cache is not None
+            and (now - self._chat_list_cache_at) < self._chat_list_cache_ttl
+        ):
+            return self._chat_list_cache
+        payload = await self._api_post(
+            "/api/v1/chat/query",
+            {"limit": 100, "offset": 0, "with": ["participants"]},
+        )
+        chats = payload.get("data", []) or []
+        self._chat_list_cache = chats
+        self._chat_list_cache_at = now
+        return chats
+
     async def _resolve_chat_guid(self, target: str) -> Optional[str]:
         """Resolve an email/phone to a BlueBubbles chat GUID.
 
@@ -355,11 +381,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if target in self._guid_cache:
             return self._guid_cache[target]
         try:
-            payload = await self._api_post(
-                "/api/v1/chat/query",
-                {"limit": 100, "offset": 0, "with": ["participants"]},
-            )
-            for chat in payload.get("data", []) or []:
+            for chat in await self._fetch_chat_list():
                 guid = chat.get("guid") or chat.get("chatGuid")
                 identifier = chat.get("chatIdentifier") or chat.get("identifier")
                 if identifier == target:

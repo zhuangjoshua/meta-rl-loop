@@ -16,6 +16,7 @@ import {
 } from '../lib/inputMetrics.js'
 import { PerfPane } from '../lib/perfPane.js'
 import { composerPromptText } from '../lib/prompt.js'
+import { firstUserIndex, hasSeparatorAt } from '../lib/transcriptSeparators.js'
 
 import { AgentsOverlay } from './agentsOverlay.js'
 import { GoodVibesHeart, StatusRule, StickyPromptTracker, TranscriptScrollbar } from './appChrome.js'
@@ -81,10 +82,7 @@ const TranscriptPane = memo(function TranscriptPane({
   // small dash above it so multi-turn transcripts visually segment by
   // turn. -1 when no user message has been sent yet → no separator ever
   // renders.
-  const firstUserIdx = useMemo(
-    () => transcript.historyItems.findIndex(m => m.role === 'user'),
-    [transcript.historyItems]
-  )
+  const firstUserIdx = useMemo(() => firstUserIndex(transcript.historyItems), [transcript.historyItems])
 
   return (
     <>
@@ -105,7 +103,7 @@ const TranscriptPane = memo(function TranscriptPane({
 
           {transcript.virtualRows.slice(transcript.virtualHistory.start, transcript.virtualHistory.end).map(row => (
             <Box flexDirection="column" key={row.key} ref={transcript.virtualHistory.measureRef(row.key)}>
-              {row.msg.role === 'user' && firstUserIdx >= 0 && row.index > firstUserIdx && (
+              {hasSeparatorAt(row.msg, row.index, firstUserIdx) && (
                 <Box marginTop={1}>
                   <Text color={ui.theme.color.border}>───</Text>
                 </Box>

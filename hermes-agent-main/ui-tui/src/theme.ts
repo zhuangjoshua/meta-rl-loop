@@ -180,24 +180,49 @@ function richEightBitColorNumber(red: number, green: number, blue: number): numb
   return 16 + 36 * Math.round(sixRed) + 6 * Math.round(sixGreen) + Math.round(sixBlue)
 }
 
+interface AnsiCandidate {
+  colorNumber: number
+  luminance: number
+  hue: number
+  saturation: number
+  lightness: number
+}
+
+// The candidate palette (RGB → luminance/HSL per colorNumber) is static, so
+// compute it once at module load rather than recomputing xtermEightBitRgb /
+// relativeLuminance / rgbToHsl for all 240 candidates on every foreground
+// normalization call (#4933).
+const ANSI_CANDIDATE_TABLE: readonly AnsiCandidate[] = (() => {
+  const table: AnsiCandidate[] = []
+
+  for (let colorNumber = 16; colorNumber <= 255; colorNumber += 1) {
+    const [red, green, blue] = xtermEightBitRgb(colorNumber)
+    const luminance = relativeLuminance(red, green, blue)
+
+    if (luminance > ANSI_LIGHT_MAX_LUMINANCE) {
+      continue
+    }
+
+    const [hue, saturation, lightness] = rgbToHsl(red, green, blue)
+
+    table.push({ colorNumber, luminance, hue, saturation, lightness })
+  }
+
+  return table
+})()
+
 function bestReadableAnsiColor(red: number, green: number, blue: number): number {
   const [hue, saturation, lightness] = rgbToHsl(red, green, blue)
   let bestColor = richEightBitColorNumber(red, green, blue)
   let bestScore = Number.POSITIVE_INFINITY
 
-  for (let colorNumber = 16; colorNumber <= 255; colorNumber += 1) {
-    const [candidateRed, candidateGreen, candidateBlue] = xtermEightBitRgb(colorNumber)
-    const candidateLuminance = relativeLuminance(candidateRed, candidateGreen, candidateBlue)
-
-    if (candidateLuminance > ANSI_LIGHT_MAX_LUMINANCE) {
-      continue
-    }
-
-    const [candidateHue, candidateSaturation, candidateLightness] = rgbToHsl(
-      candidateRed,
-      candidateGreen,
-      candidateBlue
-    )
+  for (const candidate of ANSI_CANDIDATE_TABLE) {
+    const {
+      colorNumber,
+      hue: candidateHue,
+      saturation: candidateSaturation,
+      lightness: candidateLightness
+    } = candidate
 
     const saturationFloorPenalty =
       candidateSaturation < ANSI_LIGHT_MIN_SATURATION ? (ANSI_LIGHT_MIN_SATURATION - candidateSaturation) * 3 : 0

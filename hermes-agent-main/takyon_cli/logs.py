@@ -261,25 +261,27 @@ def _read_tail(
     When filters are active, we read more raw lines to find enough matches.
     """
     if has_filters:
-        # Read more lines to ensure we get enough after filtering.
-        # For large files, read last 10K lines and filter down.
-        raw_lines = _read_last_n_lines(path, max(num_lines * 20, 2000))
-        filtered = [
-            l for l in raw_lines
-            if _matches_filters(l, min_level=min_level,
-                                session_filter=session_filter, since=since,
-                                component_prefixes=component_prefixes)
-        ]
-        return filtered[-num_lines:]
+        def predicate(line: str) -> bool:
+            return _matches_filters(
+                line, min_level=min_level,
+                session_filter=session_filter, since=since,
+                component_prefixes=component_prefixes,
+            )
+
+        return _read_last_n_lines(path, num_lines, predicate=predicate)
     else:
         return _read_last_n_lines(path, num_lines)
 
 
-def _read_last_n_lines(path: Path, n: int) -> list:
+def _read_last_n_lines(path: Path, n: int, *, predicate=None) -> list:
     """Efficiently read the last N lines from a file.
 
     For files under 1MB, reads the whole file (fast, simple).
     For larger files, reads chunks from the end.
+
+    When *predicate* is given, only lines for which ``predicate(line)``
+    returns True are retained, and the read window is grown from the end
+    until N matching lines are found (or the file is exhausted).
     """
     try:
         size = path.stat().st_size
@@ -290,15 +292,38 @@ def _read_last_n_lines(path: Path, n: int) -> list:
         if size <= 1_048_576:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
+            if predicate is not None:
+                all_lines = [l for l in all_lines if predicate(l)]
             return all_lines[-n:]
 
-        # For large files, read chunks from the end.
+        # For large files, read chunks from the end. Without a predicate we
+        # stop once we've buffered N+1 lines. With a predicate we keep growing
+        # the window until we've found N matching lines (or hit the file start).
         with open(path, "rb") as f:
             chunk_size = 8192
             lines = []
             pos = size
 
-            while pos > 0 and len(lines) <= n + 1:
+            def _decode(raw_lines):
+                out = []
+                for raw in raw_lines:
+                    if not raw.strip():
+                        continue
+                    try:
+                        out.append(raw.decode("utf-8", errors="replace") + "\n")
+                    except Exception:
+                        out.append(raw.decode("latin-1") + "\n")
+                return out
+
+            def _enough() -> bool:
+                if predicate is None:
+                    return len(lines) > n + 1
+                # Count matches among fully-read lines (all but the first,
+                # which may still be partial until we reach the file start).
+                matches = sum(1 for l in _decode(lines[1:]) if predicate(l))
+                return matches >= n
+
+            while pos > 0 and not _enough():
                 read_size = min(chunk_size, pos)
                 pos -= read_size
                 f.seek(pos)
@@ -313,21 +338,18 @@ def _read_last_n_lines(path: Path, n: int) -> list:
                     lines = chunk_lines
                 chunk_size = min(chunk_size * 2, 65536)
 
-            # Decode and return last N non-empty lines.
-            decoded = []
-            for raw in lines:
-                if not raw.strip():
-                    continue
-                try:
-                    decoded.append(raw.decode("utf-8", errors="replace") + "\n")
-                except Exception:
-                    decoded.append(raw.decode("latin-1") + "\n")
+            # Decode and return last N (optionally matching) non-empty lines.
+            decoded = _decode(lines)
+            if predicate is not None:
+                decoded = [l for l in decoded if predicate(l)]
             return decoded[-n:]
 
     except Exception:
         # Fallback: read entire file
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
+        if predicate is not None:
+            all_lines = [l for l in all_lines if predicate(l)]
         return all_lines[-n:]
 
 

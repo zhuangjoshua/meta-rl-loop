@@ -19,7 +19,7 @@ import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
-import { getUiState, patchUiState } from './uiStore.js'
+import { getUiState, patchUiState, waitForSessionId } from './uiStore.js'
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
 
@@ -175,12 +175,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
     startupPromptSubmitted = true
     setTimeout(async () => {
-      let sid = getUiState().sid
-
-      for (let i = 0; !sid && i < 40; i += 1) {
-        await new Promise(resolve => setTimeout(resolve, 100))
-        sid = getUiState().sid
-      }
+      const sid = await waitForSessionId(4000)
 
       if (!sid) {
         return sys('startup query skipped: no active session')

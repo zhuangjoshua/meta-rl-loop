@@ -1,6 +1,9 @@
 """OpenRouter provider profile."""
 
+import json
 import logging
+import time
+from pathlib import Path
 from typing import Any
 
 from providers import register_provider
@@ -9,6 +12,53 @@ from providers.base import ProviderProfile
 logger = logging.getLogger(__name__)
 
 _CACHE: list[str] | None = None
+
+# On-disk TTL cache — lets short-lived CLI/cron/gateway processes reuse the
+# last catalog fetch instead of re-hitting the OpenRouter /models endpoint on
+# every startup.
+_DISK_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours
+
+
+def _disk_cache_path() -> Path | None:
+    try:
+        from takyon_constants import get_takyon_home
+
+        return get_takyon_home() / "cache" / "openrouter_models.json"
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("openrouter disk cache path unavailable: %s", exc)
+        return None
+
+
+def _read_disk_cache() -> list[str] | None:
+    path = _disk_cache_path()
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        fetched_at = float(payload.get("fetched_at", 0))
+        models = payload.get("models")
+        if not isinstance(models, list):
+            return None
+        if (time.time() - fetched_at) > _DISK_CACHE_TTL_SECONDS:
+            return None
+        return [str(m) for m in models]
+    except Exception as exc:  # corrupt/unreadable cache — treat as miss
+        logger.debug("openrouter disk cache read failed: %s", exc)
+        return None
+
+
+def _write_disk_cache(models: list[str]) -> None:
+    path = _disk_cache_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"fetched_at": time.time(), "models": models}),
+            encoding="utf-8",
+        )
+    except Exception as exc:  # non-fatal — cache is best-effort
+        logger.debug("openrouter disk cache write failed: %s", exc)
 
 
 class OpenRouterProfile(ProviderProfile):
@@ -30,10 +80,15 @@ class OpenRouterProfile(ProviderProfile):
         global _CACHE  # noqa: PLW0603
         if _CACHE is not None:
             return _CACHE
+        disk_cached = _read_disk_cache()
+        if disk_cached is not None:
+            _CACHE = disk_cached
+            return _CACHE
         try:
             result = super().fetch_models(api_key=None, timeout=timeout)
             if result is not None:
                 _CACHE = result
+                _write_disk_cache(result)
             return result
         except Exception as exc:
             logger.debug("fetch_models(openrouter): %s", exc)

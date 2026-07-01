@@ -23,7 +23,7 @@ import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync, promises as fsPromises } from 'fs';
 import { randomBytes } from 'crypto';
 import { execFileSync } from 'child_process';
 import { tmpdir } from 'os';
@@ -343,7 +343,7 @@ async function startSocket() {
           const ext = extMap[mime] || '.jpg';
           mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
           const filePath = path.join(IMAGE_CACHE_DIR, `img_${randomBytes(6).toString('hex')}${ext}`);
-          writeFileSync(filePath, buf);
+          await fsPromises.writeFile(filePath, buf);
           mediaUrls.push(filePath);
         } catch (err) {
           console.error('[bridge] Failed to download image:', err.message);
@@ -358,7 +358,7 @@ async function startSocket() {
           const ext = mime.includes('mp4') ? '.mp4' : '.mkv';
           mkdirSync(DOCUMENT_CACHE_DIR, { recursive: true });
           const filePath = path.join(DOCUMENT_CACHE_DIR, `vid_${randomBytes(6).toString('hex')}${ext}`);
-          writeFileSync(filePath, buf);
+          await fsPromises.writeFile(filePath, buf);
           mediaUrls.push(filePath);
         } catch (err) {
           console.error('[bridge] Failed to download video:', err.message);
@@ -373,7 +373,7 @@ async function startSocket() {
           const ext = mime.includes('ogg') ? '.ogg' : mime.includes('mp4') ? '.m4a' : '.ogg';
           mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
           const filePath = path.join(AUDIO_CACHE_DIR, `aud_${randomBytes(6).toString('hex')}${ext}`);
-          writeFileSync(filePath, buf);
+          await fsPromises.writeFile(filePath, buf);
           mediaUrls.push(filePath);
         } catch (err) {
           console.error('[bridge] Failed to download audio:', err.message);
@@ -388,7 +388,7 @@ async function startSocket() {
           mkdirSync(DOCUMENT_CACHE_DIR, { recursive: true });
           const safeFileName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
           const filePath = path.join(DOCUMENT_CACHE_DIR, `doc_${randomBytes(6).toString('hex')}_${safeFileName}`);
-          writeFileSync(filePath, buf);
+          await fsPromises.writeFile(filePath, buf);
           mediaUrls.push(filePath);
         } catch (err) {
           console.error('[bridge] Failed to download document:', err.message);

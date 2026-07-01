@@ -10,6 +10,8 @@ import subprocess
 
 from takyon_constants import get_takyon_home
 
+from takyon_cli._subprocess_compat import windows_detach_flags
+
 
 DEFAULT_BROWSER_CDP_PORT = 9222
 DEFAULT_BROWSER_CDP_URL = f"http://127.0.0.1:{DEFAULT_BROWSER_CDP_PORT}"
@@ -190,9 +192,7 @@ def manual_chrome_debug_command(port: int = DEFAULT_BROWSER_CDP_PORT, system: st
 def _detach_kwargs(system: str) -> dict:
     if system != "Windows":
         return {"start_new_session": True}
-    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
-        subprocess, "CREATE_NEW_PROCESS_GROUP", 0
-    )
+    flags = windows_detach_flags()
     return {"creationflags": flags} if flags else {}
 
 

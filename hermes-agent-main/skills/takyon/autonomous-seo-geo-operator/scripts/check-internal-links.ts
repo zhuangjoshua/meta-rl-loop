@@ -16,8 +16,9 @@
  * Heuristic by design. Dynamic routes, rewrites/redirects, and links built from
  * variables in nav components can cause false positives — verify before acting.
  */
-import { readdirSync, existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, extname, relative, basename, sep } from "node:path";
+import { walk } from "./lib/fs-scan.ts";
 
 const root = process.argv[2] ? process.argv[2] : process.cwd();
 
@@ -35,37 +36,6 @@ const SCAN_EXTS = [
   ".svelte",
 ];
 const ROUTE_EXTS = [".tsx", ".ts", ".jsx", ".js", ".mdx", ".md", ".astro", ".vue", ".html"];
-const IGNORE_DIRS = new Set([
-  "node_modules",
-  ".git",
-  ".next",
-  ".nuxt",
-  ".svelte-kit",
-  ".astro",
-  "dist",
-  "build",
-  "out",
-  "coverage",
-]);
-
-function walk(dir: string, acc: string[] = []): string[] {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const e of entries) {
-    const full = join(dir, e.name);
-    if (e.isDirectory()) {
-      if (IGNORE_DIRS.has(e.name) || e.name.startsWith(".")) continue;
-      walk(full, acc);
-    } else if (e.isFile()) {
-      acc.push(full);
-    }
-  }
-  return acc;
-}
 
 function toPosix(p: string): string {
   return p.split(sep).join("/");
@@ -232,6 +202,20 @@ function main() {
   let relativeSkipped = 0;
   let externalSkipped = 0;
 
+  // Memoize resolution per unique target so the dynamicMatchers scan and the
+  // publicHasFile fs stats run at most once per distinct link.
+  const resolutionCache = new Map<string, boolean>();
+  const resolveTarget = (t: string, candidate: string): boolean => {
+    const cached = resolutionCache.get(t);
+    if (cached !== undefined) return cached;
+    const matched =
+      staticRoutes.has(candidate) ||
+      dynamicMatchers.some((m) => matchesRoute(candidate, m)) ||
+      publicHasFile(t);
+    resolutionCache.set(t, matched);
+    return matched;
+  };
+
   for (const f of files) {
     if (!SCAN_EXTS.includes(extname(f))) continue;
     let content: string;
@@ -261,11 +245,7 @@ function main() {
       }
       const candidate = t.replace(/\.html$/, "") || "/";
       inbound.set(candidate, (inbound.get(candidate) || 0) + 1);
-      const matched =
-        staticRoutes.has(candidate) ||
-        dynamicMatchers.some((m) => matchesRoute(candidate, m)) ||
-        publicHasFile(t);
-      if (!matched) broken.push({ link: t, from });
+      if (!resolveTarget(t, candidate)) broken.push({ link: t, from });
     }
   }
 

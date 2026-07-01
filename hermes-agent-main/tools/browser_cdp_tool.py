@@ -47,6 +47,33 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+import concurrent.futures
+import threading
+
+# Shared, bounded executor reused across CDP calls made from inside a running
+# event loop.  Creating a fresh ThreadPoolExecutor per call spawns a new
+# thread + event loop each time (~8MB stack reservation per thread), which
+# multiplies RAM under many concurrent CDP-using workflows.  A single shared
+# pool amortizes that cost while preserving identical per-call semantics:
+# each submission still runs ``asyncio.run(coro)`` on a worker thread and the
+# caller blocks on the result.
+_ASYNC_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_ASYNC_EXECUTOR_LOCK = threading.Lock()
+
+
+def _get_async_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the shared bounded executor, creating it on first use."""
+    global _ASYNC_EXECUTOR
+    if _ASYNC_EXECUTOR is None:
+        with _ASYNC_EXECUTOR_LOCK:
+            if _ASYNC_EXECUTOR is None:
+                _ASYNC_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=8,
+                    thread_name_prefix="browser-cdp",
+                )
+    return _ASYNC_EXECUTOR
+
+
 def _run_async(coro):
     """Run an async coroutine from a sync handler, safe inside or outside a loop."""
     try:
@@ -55,11 +82,8 @@ def _run_async(coro):
         loop = None
 
     if loop and loop.is_running():
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, coro)
-            return future.result()
+        future = _get_async_executor().submit(asyncio.run, coro)
+        return future.result()
     return asyncio.run(coro)
 
 

@@ -17,16 +17,22 @@ class QwenProfile(ProviderProfile):
 
         Matches the behavior of run_agent.py:_qwen_prepare_chat_messages().
         """
-        prepared = copy.deepcopy(messages)
-        if not prepared:
-            return prepared
+        if not messages:
+            return list(messages)
 
-        for msg in prepared:
+        # Shallow-copy the list; only rebuild the individual message dicts we
+        # actually normalize (and deep-copy the parts we mutate) so long
+        # histories aren't deep-copied and re-walked wholesale each turn.
+        prepared: list[dict[str, Any]] = list(messages)
+
+        for idx, msg in enumerate(prepared):
             if not isinstance(msg, dict):
                 continue
             content = msg.get("content")
             if isinstance(content, str):
-                msg["content"] = [{"type": "text", "text": content}]
+                new_msg = dict(msg)
+                new_msg["content"] = [{"type": "text", "text": content}]
+                prepared[idx] = new_msg
             elif isinstance(content, list):
                 normalized_parts = []
                 for part in content:
@@ -35,10 +41,12 @@ class QwenProfile(ProviderProfile):
                     elif isinstance(part, dict):
                         normalized_parts.append(part)
                 if normalized_parts:
-                    msg["content"] = normalized_parts
+                    new_msg = dict(msg)
+                    new_msg["content"] = normalized_parts
+                    prepared[idx] = new_msg
 
         # Inject cache_control on the last part of the system message.
-        for msg in prepared:
+        for idx, msg in enumerate(prepared):
             if isinstance(msg, dict) and msg.get("role") == "system":
                 content = msg.get("content")
                 if (
@@ -46,7 +54,15 @@ class QwenProfile(ProviderProfile):
                     and content
                     and isinstance(content[-1], dict)
                 ):
-                    content[-1]["cache_control"] = {"type": "ephemeral"}
+                    # Deep-copy only the part we mutate so the caller's dict is
+                    # never modified in place.
+                    new_content = list(content)
+                    new_last = copy.deepcopy(new_content[-1])
+                    new_last["cache_control"] = {"type": "ephemeral"}
+                    new_content[-1] = new_last
+                    new_msg = dict(msg)
+                    new_msg["content"] = new_content
+                    prepared[idx] = new_msg
                 break
 
         return prepared

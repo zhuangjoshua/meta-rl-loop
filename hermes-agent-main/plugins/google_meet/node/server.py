@@ -47,12 +47,21 @@ class NodeServer:
         port: int = 18789,
         token_path: Optional[Path] = None,
         display_name: str = "takyon-meet-node",
+        max_connections: int = 8,
+        max_size: int = 1 << 20,  # 1 MiB per-message cap
+        max_queue: int = 32,
     ) -> None:
         self.host = host
         self.port = port
         self.display_name = display_name
         self.token_path = Path(token_path) if token_path is not None else _default_token_path()
         self._token: Optional[str] = None
+        # Bound per-connection memory/task growth so a shared host isn't
+        # overwhelmed by many simultaneous gateway connections.
+        self.max_connections = max_connections
+        self.max_size = max_size
+        self.max_queue = max_queue
+        self._active_connections = 0
 
     # ----- token management --------------------------------------------
 
@@ -185,16 +194,36 @@ class NodeServer:
         self.ensure_token()
 
         async def _handler(ws):
-            async for raw in ws:
+            # Cap concurrent connections so per-connection task/buffer
+            # growth stays bounded on a shared host.
+            if self._active_connections >= self.max_connections:
                 try:
-                    msg = _proto.decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
-                except ValueError as exc:
-                    await ws.send(_proto.encode(_proto.make_error("", f"decode: {exc}")))
-                    continue
-                reply = await self._handle_request(msg)
-                await ws.send(_proto.encode(reply))
+                    await ws.send(
+                        _proto.encode(_proto.make_error("", "server at capacity"))
+                    )
+                finally:
+                    await ws.close(code=1013, reason="try again later")
+                return
+            self._active_connections += 1
+            try:
+                async for raw in ws:
+                    try:
+                        msg = _proto.decode(raw if isinstance(raw, str) else raw.decode("utf-8"))
+                    except ValueError as exc:
+                        await ws.send(_proto.encode(_proto.make_error("", f"decode: {exc}")))
+                        continue
+                    reply = await self._handle_request(msg)
+                    await ws.send(_proto.encode(reply))
+            finally:
+                self._active_connections -= 1
 
-        async with websockets.serve(_handler, self.host, self.port):
+        async with websockets.serve(
+            _handler,
+            self.host,
+            self.port,
+            max_size=self.max_size,
+            max_queue=self.max_queue,
+        ):
             # Run until cancelled.
             import asyncio
             await asyncio.Future()

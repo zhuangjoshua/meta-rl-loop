@@ -6,6 +6,7 @@ Built on gateway startup, refreshed periodically (every 5 min), and saved to
 action="list" and for resolving human-friendly channel names to numeric IDs.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -150,6 +151,50 @@ def _build_discord(adapter, sessions_data: Optional[Dict[str, Any]] = None) -> L
     return channels
 
 
+async def _list_slack_team_channels(team_id: str, client) -> List[Dict[str, Any]]:
+    """Paginate ``users.conversations`` for a single Slack workspace.
+
+    Returns the raw channel entries (id/name/type) for this team; caller
+    applies cross-team dedup. Failures are logged and yield an empty list.
+    """
+    team_channels: List[Dict[str, Any]] = []
+    try:
+        cursor: Optional[str] = None
+        for _page in range(20):  # safety cap on pagination
+            response = await client.users_conversations(
+                types="public_channel,private_channel",
+                exclude_archived=True,
+                limit=200,
+                cursor=cursor,
+            )
+            if not response.get("ok"):
+                logger.warning(
+                    "Channel directory: users.conversations not ok for team %s: %s",
+                    team_id,
+                    response.get("error", "unknown"),
+                )
+                break
+            for ch in response.get("channels", []):
+                cid = ch.get("id")
+                name = ch.get("name")
+                if not cid or not name:
+                    continue
+                team_channels.append({
+                    "id": cid,
+                    "name": name,
+                    "type": "private" if ch.get("is_private") else "channel",
+                })
+            cursor = (response.get("response_metadata") or {}).get("next_cursor")
+            if not cursor:
+                break
+    except Exception as e:
+        logger.warning(
+            "Channel directory: failed to list Slack channels for team %s: %s",
+            team_id, e,
+        )
+    return team_channels
+
+
 async def _build_slack(adapter, sessions_data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """List Slack channels the bot has joined across all workspaces.
 
@@ -165,43 +210,21 @@ async def _build_slack(adapter, sessions_data: Optional[Dict[str, Any]] = None) 
     channels: List[Dict[str, Any]] = []
     seen_ids: set = set()
 
-    for team_id, client in team_clients.items():
-        try:
-            cursor: Optional[str] = None
-            for _page in range(20):  # safety cap on pagination
-                response = await client.users_conversations(
-                    types="public_channel,private_channel",
-                    exclude_archived=True,
-                    limit=200,
-                    cursor=cursor,
-                )
-                if not response.get("ok"):
-                    logger.warning(
-                        "Channel directory: users.conversations not ok for team %s: %s",
-                        team_id,
-                        response.get("error", "unknown"),
-                    )
-                    break
-                for ch in response.get("channels", []):
-                    cid = ch.get("id")
-                    name = ch.get("name")
-                    if not cid or not name or cid in seen_ids:
-                        continue
-                    seen_ids.add(cid)
-                    channels.append({
-                        "id": cid,
-                        "name": name,
-                        "type": "private" if ch.get("is_private") else "channel",
-                    })
-                cursor = (response.get("response_metadata") or {}).get("next_cursor")
-                if not cursor:
-                    break
-        except Exception as e:
-            logger.warning(
-                "Channel directory: failed to list Slack channels for team %s: %s",
-                team_id, e,
-            )
-            continue
+    # Teams are independent — enumerate each workspace's channels concurrently
+    # so total latency is max(per-team) rather than sum(per-team). Dedup via
+    # seen_ids is applied after gather completes to keep behavior deterministic.
+    per_team_results = await asyncio.gather(
+        *(_list_slack_team_channels(team_id, client)
+          for team_id, client in team_clients.items())
+    )
+
+    for team_channels in per_team_results:
+        for ch in team_channels:
+            cid = ch["id"]
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            channels.append(ch)
 
     # Merge in DM/group entries discovered from session history.
     for entry in _build_from_sessions("slack", sessions_data):

@@ -57,13 +57,24 @@ export function reorderBidi(characters: ClusteredChar[]): ClusteredChar[] {
     return characters
   }
 
-  // Build a plain string from the clustered chars to run through bidi
-  const plainText = characters.map(c => c.value).join('')
+  // Fast-path: scan characters directly for RTL before allocating a
+  // joined string. On the common pure-LTR case this avoids the
+  // map/join allocation entirely.
+  let containsRTL = false
 
-  // Check if there are any RTL characters — skip bidi if pure LTR
-  if (!hasRTLCharacters(plainText)) {
+  for (let i = 0; i < characters.length; i++) {
+    if (hasRTLCharacters(characters[i]!.value)) {
+      containsRTL = true
+      break
+    }
+  }
+
+  if (!containsRTL) {
     return characters
   }
+
+  // Build a plain string from the clustered chars to run through bidi
+  const plainText = characters.map(c => c.value).join('')
 
   const bidi = getBidi()
   const { levels } = bidi.getEmbeddingLevels(plainText, 'auto')
@@ -72,9 +83,12 @@ export function reorderBidi(characters: ClusteredChar[]): ClusteredChar[] {
   // Each ClusteredChar may be multiple code units in the joined string.
   const charLevels: number[] = []
   let offset = 0
+  let maxLevel = 0
 
   for (let i = 0; i < characters.length; i++) {
-    charLevels.push(levels[offset]!)
+    const level = levels[offset]!
+    charLevels.push(level)
+    maxLevel = Math.max(maxLevel, level)
     offset += characters[i]!.value.length
   }
 
@@ -83,7 +97,6 @@ export function reorderBidi(characters: ClusteredChar[]): ClusteredChar[] {
   // standard bidi reordering: find the max level, then for each level
   // from max down to 1, reverse all contiguous runs >= that level.
   const reordered = [...characters]
-  const maxLevel = Math.max(...charLevels)
 
   for (let level = maxLevel; level >= 1; level--) {
     let i = 0

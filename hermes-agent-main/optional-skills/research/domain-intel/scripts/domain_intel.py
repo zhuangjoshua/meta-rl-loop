@@ -252,62 +252,76 @@ def check_available(domain):
     signals = {}
 
     # DNS
-    try:
-        a = [i[4][0] for i in socket.getaddrinfo(domain, None, socket.AF_INET)]
-    except Exception:
-        a = []
+    def probe_dns():
+        try:
+            a = [i[4][0] for i in socket.getaddrinfo(domain, None, socket.AF_INET)]
+        except Exception:
+            a = []
 
-    try:
-        ns_url = f"https://dns.google/resolve?name={urllib.parse.quote(domain)}&type=NS"
-        req = urllib.request.Request(ns_url, headers={"User-Agent": "domain-intel-skill/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            ns = [x.get("data", "") for x in json.loads(r.read()).get("Answer", [])]
-    except Exception:
-        ns = []
+        try:
+            ns_url = f"https://dns.google/resolve?name={urllib.parse.quote(domain)}&type=NS"
+            req = urllib.request.Request(ns_url, headers={"User-Agent": "domain-intel-skill/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                ns = [x.get("data", "") for x in json.loads(r.read()).get("Answer", [])]
+        except Exception:
+            ns = []
+
+        return a, ns
+
+    # SSL
+    def probe_ssl():
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((domain, 443), timeout=3) as s:
+                with ctx.wrap_socket(s, server_hostname=domain):
+                    return True
+        except Exception:
+            return False
+
+    # WHOIS (quick check)
+    def probe_whois():
+        tld = domain.rsplit(".", 1)[-1]
+        server = WHOIS_SERVERS.get(tld)
+        whois_avail = None
+        whois_note = ""
+        if server:
+            try:
+                with socket.create_connection((server, 43), timeout=10) as s:
+                    s.sendall((domain + "\r\n").encode())
+                    raw = b""
+                    while True:
+                        c = s.recv(4096)
+                        if not c:
+                            break
+                        raw += c
+                    raw = raw.decode("utf-8", errors="replace").lower()
+                if any(p in raw for p in ["no match", "not found", "no data found", "status: free"]):
+                    whois_avail = True
+                    whois_note = "WHOIS: not found"
+                elif "registrar:" in raw or "creation date:" in raw:
+                    whois_avail = False
+                    whois_note = "WHOIS: registered"
+                else:
+                    whois_note = "WHOIS: inconclusive"
+            except Exception as e:
+                whois_note = f"WHOIS error: {e}"
+        return whois_avail, whois_note
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        dns_future = ex.submit(probe_dns)
+        ssl_future = ex.submit(probe_ssl)
+        whois_future = ex.submit(probe_whois)
+        a, ns = dns_future.result()
+        ssl_up = ssl_future.result()
+        whois_avail, whois_note = whois_future.result()
 
     signals["dns_a"] = a
     signals["dns_ns"] = ns
     dns_exists = bool(a or ns)
 
-    # SSL
-    ssl_up = False
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with socket.create_connection((domain, 443), timeout=3) as s:
-            with ctx.wrap_socket(s, server_hostname=domain):
-                ssl_up = True
-    except Exception:
-        pass
     signals["ssl_reachable"] = ssl_up
-
-    # WHOIS (quick check)
-    tld = domain.rsplit(".", 1)[-1]
-    server = WHOIS_SERVERS.get(tld)
-    whois_avail = None
-    whois_note = ""
-    if server:
-        try:
-            with socket.create_connection((server, 43), timeout=10) as s:
-                s.sendall((domain + "\r\n").encode())
-                raw = b""
-                while True:
-                    c = s.recv(4096)
-                    if not c:
-                        break
-                    raw += c
-                raw = raw.decode("utf-8", errors="replace").lower()
-            if any(p in raw for p in ["no match", "not found", "no data found", "status: free"]):
-                whois_avail = True
-                whois_note = "WHOIS: not found"
-            elif "registrar:" in raw or "creation date:" in raw:
-                whois_avail = False
-                whois_note = "WHOIS: registered"
-            else:
-                whois_note = "WHOIS: inconclusive"
-        except Exception as e:
-            whois_note = f"WHOIS error: {e}"
 
     signals["whois_available"] = whois_avail
     signals["whois_note"] = whois_note
@@ -340,15 +354,24 @@ def bulk_check(domains, checks=None, max_workers=5):
     if not checks:
         checks = ["ssl", "whois", "dns"]
 
+    def run_check(d, check):
+        fn = COMMAND_MAP.get(check)
+        if not fn:
+            return None
+        try:
+            return fn(d)
+        except Exception as e:
+            return {"error": str(e)}
+
     def run_one(d):
         entry = {"domain": d}
-        for check in checks:
-            fn = COMMAND_MAP.get(check)
-            if fn:
-                try:
-                    entry[check] = fn(d)
-                except Exception as e:
-                    entry[check] = {"error": str(e)}
+        active = [c for c in checks if COMMAND_MAP.get(c)]
+        if not active:
+            return entry
+        with ThreadPoolExecutor(max_workers=len(active)) as ex:
+            futures = {ex.submit(run_check, d, c): c for c in active}
+            for f in as_completed(futures):
+                entry[futures[f]] = f.result()
         return entry
 
     results = []

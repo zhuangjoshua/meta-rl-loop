@@ -572,7 +572,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     return False
 
             # Ensure session directory exists
-            self._session_path.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                self._session_path.mkdir, parents=True, exist_ok=True
+            )
             
             # Check if bridge is already running and connected
             import aiohttp
@@ -1247,11 +1249,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     ext = Path(doc_path).suffix.lower()
                     if ext in {".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".log", ".py", ".js", ".ts", ".html", ".css"}:
                         try:
-                            file_size = Path(doc_path).stat().st_size
+                            file_size = (await asyncio.to_thread(Path(doc_path).stat)).st_size
                             if file_size > MAX_TEXT_INJECT_BYTES:
                                 print(f"[{self.name}] Skipping text injection for {doc_path} ({file_size} bytes > {MAX_TEXT_INJECT_BYTES})", flush=True)
                                 continue
-                            content = Path(doc_path).read_text(encoding="utf-8", errors="replace")
+                            content = await asyncio.to_thread(
+                                Path(doc_path).read_text, encoding="utf-8", errors="replace"
+                            )
                             fname = Path(doc_path).name
                             # Remove the doc_<hex>_ prefix for display
                             display_name = fname

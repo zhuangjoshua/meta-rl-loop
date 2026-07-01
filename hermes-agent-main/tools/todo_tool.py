@@ -68,15 +68,9 @@ class TodoStore:
                     validated = self._validate(t)
                     existing[validated["id"]] = validated
                     self._items.append(validated)
-            # Rebuild _items preserving order for existing items
-            seen = set()
-            rebuilt = []
-            for item in self._items:
-                current = existing.get(item["id"], item)
-                if current["id"] not in seen:
-                    rebuilt.append(current)
-                    seen.add(current["id"])
-            self._items = rebuilt
+            # Existing items were mutated in place (same object references)
+            # and new items appended in order; self._items is already the
+            # correct, deduped, ordered list — no rebuild pass needed.
         return self.read()
 
     def read(self) -> List[Dict[str, str]]:

@@ -35,6 +35,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { resolveWithinCwd } = require("./lib/paths");
 
 const GATE_REFUSAL = {
   success: false,
@@ -64,12 +65,11 @@ function safeResolveWithinCwd(targetPath) {
   // Constrain the user-supplied output path to the current working directory so
   // a crafted `../` argument cannot redirect the refusal write to an arbitrary
   // file. Returns null when the path would escape the CWD.
-  const base = path.resolve(process.cwd());
-  const resolved = path.resolve(base, targetPath);
-  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+  try {
+    return resolveWithinCwd(targetPath);
+  } catch {
     return null;
   }
-  return resolved;
 }
 
 function emitRefusal(outputPath) {

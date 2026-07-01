@@ -59,11 +59,6 @@ class ResponsesApiTransport(ProviderTransport):
             is_xai_responses: bool — xAI/Grok backend
             github_reasoning_extra: dict | None — Copilot reasoning params
         """
-        from agent.codex_responses_adapter import (
-            _chat_messages_to_responses_input,
-            _responses_tools,
-        )
-
         from run_agent import DEFAULT_AGENT_IDENTITY
 
         instructions = params.get("instructions", "")
@@ -92,11 +87,11 @@ class ResponsesApiTransport(ProviderTransport):
         _effort_clamp = {"minimal": "low"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
-        response_tools = _responses_tools(tools)
+        response_tools = self.convert_tools(tools)
         kwargs = {
             "model": model,
             "instructions": instructions,
-            "input": _chat_messages_to_responses_input(
+            "input": self.convert_messages(
                 payload_messages,
                 is_xai_responses=is_xai_responses,
             ),

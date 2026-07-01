@@ -43,6 +43,69 @@ _DEPRECATION_MARKERS = (
     "no commands will be executed",
 )
 
+# Cache for serialized tool-spec JSON blocks, keyed by the identity of the
+# ``tools`` list passed in. Each ACP request rebuilds the prompt from scratch
+# (sessions are short-lived), but the tool schemas are stable across turns of a
+# conversation, so re-serializing them via json.dumps every call is wasted work.
+# We keep a strong reference to the tools list alongside the serialized block so
+# id() cannot be reused for a different (GC'd) object while the entry is live.
+_TOOL_SPECS_CACHE: dict[int, tuple[Any, str | None]] = {}
+_TOOL_SPECS_CACHE_LOCK = threading.Lock()
+
+
+def _serialize_tool_specs(tools: list[dict[str, Any]] | None) -> str | None:
+    """Return the serialized tool-spec section for ``tools``, or None.
+
+    The result is memoized by the identity of the ``tools`` list so repeated
+    turns over the same conversation don't re-run json.dumps on the schemas.
+    """
+
+    if not isinstance(tools, list) or not tools:
+        return None
+
+    key = id(tools)
+    with _TOOL_SPECS_CACHE_LOCK:
+        cached = _TOOL_SPECS_CACHE.get(key)
+        if cached is not None and cached[0] is tools:
+            return cached[1]
+
+    tool_specs: list[dict[str, Any]] = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") or {}
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        tool_specs.append(
+            {
+                "name": name.strip(),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            }
+        )
+
+    if tool_specs:
+        section: str | None = (
+            "Available tools (OpenAI function schema). "
+            "When using a tool, emit ONLY <tool_call>{...}</tool_call> with one JSON object "
+            "containing id/type/function{name,arguments}. arguments must be a JSON string.\n"
+            + json.dumps(tool_specs, ensure_ascii=False)
+        )
+    else:
+        section = None
+
+    with _TOOL_SPECS_CACHE_LOCK:
+        # Bound the cache so it can't grow without limit over a long-lived
+        # process; identity keys are cheap to recompute on eviction.
+        if len(_TOOL_SPECS_CACHE) > 128:
+            _TOOL_SPECS_CACHE.clear()
+        _TOOL_SPECS_CACHE[key] = (tools, section)
+
+    return section
+
 
 def _is_gh_copilot_deprecation_message(stderr_text: str) -> bool:
     """True iff stderr looks like the deprecated gh-copilot extension's banner."""
@@ -147,31 +210,9 @@ def _format_messages_as_prompt(
     if model:
         sections.append(f"Takyon requested model hint: {model}")
 
-    if isinstance(tools, list) and tools:
-        tool_specs: list[dict[str, Any]] = []
-        for t in tools:
-            if not isinstance(t, dict):
-                continue
-            fn = t.get("function") or {}
-            if not isinstance(fn, dict):
-                continue
-            name = fn.get("name")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            tool_specs.append(
-                {
-                    "name": name.strip(),
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                }
-            )
-        if tool_specs:
-            sections.append(
-                "Available tools (OpenAI function schema). "
-                "When using a tool, emit ONLY <tool_call>{...}</tool_call> with one JSON object "
-                "containing id/type/function{name,arguments}. arguments must be a JSON string.\n"
-                + json.dumps(tool_specs, ensure_ascii=False)
-            )
+    tool_specs_section = _serialize_tool_specs(tools)
+    if tool_specs_section:
+        sections.append(tool_specs_section)
 
     if tool_choice is not None:
         sections.append(f"Tool choice hint: {json.dumps(tool_choice, ensure_ascii=False)}")

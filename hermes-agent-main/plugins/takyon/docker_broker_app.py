@@ -24,6 +24,23 @@ from pydantic import BaseModel
 
 _BROKER_TOKEN_ENV = "TAKYON_DOCKER_BROKER_TOKEN"
 
+_STREAM_CONCURRENCY_ENV = "TAKYON_DOCKER_STREAM_CONCURRENCY"
+
+
+def _stream_concurrency_limit() -> int:
+    raw = str(os.getenv(_STREAM_CONCURRENCY_ENV) or "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else 8
+
+
+# Bounds thread/subprocess fan-out: each streamed run/exec spawns a subprocess
+# plus two daemon reader threads. Without a cap, many concurrent operator-plane
+# requests grow threads/RAM unbounded on a shared VPS.
+_STREAM_SEMAPHORE = threading.Semaphore(_stream_concurrency_limit())
+
 _RUN_FLAG_NOARG = {"--rm", "--init", "-i", "-d", "--read-only"}
 _RUN_FLAG_WITH_ARG = {
     "--cap-drop",
@@ -188,52 +205,56 @@ def _pipe_stdin(proc: subprocess.Popen[str], stdin_bytes: bytes | None) -> None:
 
 
 def _stream_process(cmd: list[str], stdin_bytes: bytes | None = None) -> Iterable[bytes]:
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    _pipe_stdin(proc, stdin_bytes)
-    event_queue: queue.Queue[dict[str, str | int | None]] = queue.Queue()
+    _STREAM_SEMAPHORE.acquire()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        _pipe_stdin(proc, stdin_bytes)
+        event_queue: queue.Queue[dict[str, str | int | None]] = queue.Queue()
 
-    def _reader(pipe, stream_name: str) -> None:
-        if pipe is None:
-            return
-        try:
-            for line in iter(pipe.readline, ""):
-                event_queue.put({"stream": stream_name, "data": line})
-        finally:
+        def _reader(pipe, stream_name: str) -> None:
+            if pipe is None:
+                return
             try:
-                pipe.close()
-            except Exception:
-                pass
-            event_queue.put({"stream": f"{stream_name}_eof"})
+                for line in iter(pipe.readline, ""):
+                    event_queue.put({"stream": stream_name, "data": line})
+            finally:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+                event_queue.put({"stream": f"{stream_name}_eof"})
 
-    stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
-    stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
+        stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
+        stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
 
-    eof_seen = set()
-    while True:
-        item = event_queue.get()
-        stream_name = str(item.get("stream") or "")
-        if stream_name.endswith("_eof"):
-            eof_seen.add(stream_name)
-            if proc.poll() is not None and {"stdout_eof", "stderr_eof"} <= eof_seen:
+        eof_seen = set()
+        while True:
+            item = event_queue.get()
+            stream_name = str(item.get("stream") or "")
+            if stream_name.endswith("_eof"):
+                eof_seen.add(stream_name)
+                if proc.poll() is not None and {"stdout_eof", "stderr_eof"} <= eof_seen:
+                    break
+                continue
+            yield (json.dumps(item) + "\n").encode("utf-8")
+            if proc.poll() is not None and {"stdout_eof", "stderr_eof"} <= eof_seen and event_queue.empty():
                 break
-            continue
-        yield (json.dumps(item) + "\n").encode("utf-8")
-        if proc.poll() is not None and {"stdout_eof", "stderr_eof"} <= eof_seen and event_queue.empty():
-            break
 
-    returncode = proc.wait()
-    stdout_thread.join(timeout=1.0)
-    stderr_thread.join(timeout=1.0)
-    yield (json.dumps({"returncode": returncode}) + "\n").encode("utf-8")
+        returncode = proc.wait()
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
+        yield (json.dumps({"returncode": returncode}) + "\n").encode("utf-8")
+    finally:
+        _STREAM_SEMAPHORE.release()
 
 
 def build_docker_broker_app() -> FastAPI:

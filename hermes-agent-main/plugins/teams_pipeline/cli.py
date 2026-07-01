@@ -314,19 +314,30 @@ def _cmd_fetch(args) -> None:
         return
 
     client = build_graph_client()
-    meeting_ref = _run_async(
-        resolve_meeting_reference(
+
+    async def _resolve_all():
+        meeting_ref = await resolve_meeting_reference(
             client,
             meeting_id=meeting_id,
             join_web_url=join_web_url,
             tenant_id=tenant_id,
         )
-    )
-    transcript_artifact, transcript_text = _run_async(fetch_preferred_transcript_text(client, meeting_ref))
-    recordings = _run_async(list_recording_artifacts(client, meeting_ref))
-    call_record = _run_async(
-        enrich_meeting_with_call_record(client, meeting_ref, call_record_id=call_record_id)
-    )
+        transcript_artifact, transcript_text = await fetch_preferred_transcript_text(
+            client, meeting_ref
+        )
+        recordings = await list_recording_artifacts(client, meeting_ref)
+        call_record = await enrich_meeting_with_call_record(
+            client, meeting_ref, call_record_id=call_record_id
+        )
+        return meeting_ref, transcript_artifact, transcript_text, recordings, call_record
+
+    (
+        meeting_ref,
+        transcript_artifact,
+        transcript_text,
+        recordings,
+        call_record,
+    ) = _run_async(_resolve_all())
     print(
         json.dumps(
             {
@@ -348,11 +359,16 @@ def _cmd_subscriptions(args) -> None:
     store = TeamsPipelineStore(_store_path(getattr(args, "store_path", None)))
     client = build_graph_client()
     subscriptions = _run_async(client.collect_paginated("/subscriptions"))
+    batched_records: list[tuple[str, dict[str, Any]]] = []
     for sub in subscriptions:
         try:
-            _sync_subscription_record(store, sub, status="active")
+            normalized = GraphSubscription.from_dict(sub).to_dict()
+            normalized["status"] = "active"
         except Exception:
             continue
+        batched_records.append((normalized["subscription_id"], normalized))
+    if batched_records:
+        store.upsert_subscriptions(batched_records)
     if not subscriptions:
         print("No Microsoft Graph subscriptions found.")
         return

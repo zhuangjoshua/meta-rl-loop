@@ -2,19 +2,11 @@
 
 const fs = require("fs");
 const path = require("path");
+const { resolveWithinCwd } = require("./lib/paths");
 
 function usage() {
   console.error("Usage: build_fal_payload.js <runtime-input.json> <seedancified.json> [output-json]");
   process.exit(1);
-}
-
-function resolveWithinCwd(filePath) {
-  const root = path.resolve(process.cwd());
-  const resolved = path.resolve(root, filePath);
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-    throw new Error(`Refusing to read path outside working directory: ${filePath}`);
-  }
-  return resolved;
 }
 
 function readJson(filePath) {

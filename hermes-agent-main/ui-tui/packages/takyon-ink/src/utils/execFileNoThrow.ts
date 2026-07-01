@@ -23,8 +23,8 @@ export function execFileNoThrow(
       stdio: 'pipe'
     })
 
-    let stdout = ''
-    let stderr = ''
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
     let timedOut = false
 
     const timer = options.timeout
@@ -35,24 +35,33 @@ export function execFileNoThrow(
       : null
 
     child.stdout?.on('data', chunk => {
-      stdout += String(chunk)
+      stdoutChunks.push(Buffer.from(chunk))
     })
     child.stderr?.on('data', chunk => {
-      stderr += String(chunk)
+      stderrChunks.push(Buffer.from(chunk))
     })
     child.on('error', error => {
       if (timer) {
         clearTimeout(timer)
       }
 
-      resolve({ stdout, stderr, code: 1, error: String(error) })
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString(),
+        stderr: Buffer.concat(stderrChunks).toString(),
+        code: 1,
+        error: String(error)
+      })
     })
     child.on('close', code => {
       if (timer) {
         clearTimeout(timer)
       }
 
-      resolve({ stdout, stderr, code: timedOut ? 124 : (code ?? 0) })
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString(),
+        stderr: Buffer.concat(stderrChunks).toString(),
+        code: timedOut ? 124 : (code ?? 0)
+      })
     })
 
     if (options.input) {

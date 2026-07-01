@@ -45,7 +45,31 @@ export function applySearchHighlight(screen: Screen, query: string, stylePool: S
     // codeUnitToCell maps positions in the LOWERCASED text — U+0130
     // (Turkish İ) lowercases to 2 code units, so lowering the joined
     // string would desync indexOf positions from the map.
+    // Cheap first pass: build only the lowercased row text (no colOf /
+    // codeUnitToCell arrays) so we can indexOf and bail out early on the
+    // majority of rows that hold no match. The full cell-index maps are
+    // only constructed when a match is confirmed below.
     let text = ''
+
+    for (let col = 0; col < w; col++) {
+      const idx = rowOff + col
+      const cell = cellAtIndex(screen, idx)
+
+      if (cell.width === CellWidth.SpacerTail || cell.width === CellWidth.SpacerHead || noSelect[idx] === 1) {
+        continue
+      }
+
+      text += cell.char.toLowerCase()
+    }
+
+    let pos = text.indexOf(lq)
+
+    if (pos < 0) {
+      continue
+    }
+
+    // Match confirmed on this row — now build the cell-index maps needed
+    // to translate lowercased-text positions back to screen cells.
     const colOf: number[] = []
     const codeUnitToCell: number[] = []
 
@@ -64,11 +88,8 @@ export function applySearchHighlight(screen: Screen, query: string, stylePool: S
         codeUnitToCell.push(cellIdx)
       }
 
-      text += lc
       colOf.push(col)
     }
-
-    let pos = text.indexOf(lq)
 
     while (pos >= 0) {
       applied = true

@@ -32,7 +32,24 @@ const graphemes = (value: string) =>
 // delegates to wrap-ansi — so any drift between the two algorithms parks the
 // hardware cursor several cells away from the last rendered character.
 // Sourcing both from wrap-ansi guarantees agreement.
+//
+// A single keystroke/render calls this via cursorLayout, inputVisualHeight and
+// (on drag) offsetFromPosition — each with the same (value, cols). A 1-entry
+// memo keyed by (value, cols) collapses those 3+ full-buffer wrap+walk passes
+// into one, without changing behavior (the function is pure).
+let _visualLinesCache: { value: string; cols: number; lines: VisualLine[] } | null = null
+
 function visualLines(value: string, cols: number): VisualLine[] {
+  if (_visualLinesCache && _visualLinesCache.value === value && _visualLinesCache.cols === cols) {
+    return _visualLinesCache.lines
+  }
+
+  const lines = computeVisualLines(value, cols)
+  _visualLinesCache = { value, cols, lines }
+  return lines
+}
+
+function computeVisualLines(value: string, cols: number): VisualLine[] {
   if (!value.length) {
     return [{ start: 0, end: 0 }]
   }
@@ -101,8 +118,8 @@ function visualLines(value: string, cols: number): VisualLine[] {
 function widthBetween(value: string, start: number, end: number) {
   let width = 0
 
-  for (const part of graphemes(value.slice(start, end))) {
-    width += part.width
+  for (const { segment } of seg().segment(value.slice(start, end))) {
+    width += Math.max(1, stringWidth(segment))
   }
 
   return width

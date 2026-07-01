@@ -257,6 +257,8 @@ function parseHtmlTitle(html: string): string {
   return raw ? decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim() : ''
 }
 
+const TITLE_STOP_RE = /<\/title\s*>|<\/head\s*>/i
+
 async function readResponseSnippet(response: Response): Promise<string> {
   const reader = response.body?.getReader()
 
@@ -264,7 +266,8 @@ async function readResponseSnippet(response: Response): Promise<string> {
     return (await response.text()).slice(0, TITLE_BYTE_BUDGET)
   }
 
-  const chunks: Uint8Array[] = []
+  const decoder = new TextDecoder()
+  let decoded = ''
   let done = false
   let bytes = 0
 
@@ -285,12 +288,14 @@ async function readResponseSnippet(response: Response): Promise<string> {
       }
 
       const remaining = TITLE_BYTE_BUDGET - bytes
-      const next = value.length > remaining ? value.subarray(0, remaining) : value
+      const capped = value.length > remaining
+      const next = capped ? value.subarray(0, remaining) : value
 
-      chunks.push(next)
       bytes += next.length
+      decoded += decoder.decode(next, { stream: !capped })
 
-      if (next.length < value.length) {
+      // The title lives in <head>; stop once we've seen its close tag.
+      if (capped || TITLE_STOP_RE.test(decoded)) {
         break
       }
     }
@@ -306,19 +311,7 @@ async function readResponseSnippet(response: Response): Promise<string> {
     }
   }
 
-  if (!chunks.length) {
-    return ''
-  }
-
-  const joined = new Uint8Array(bytes)
-  let offset = 0
-
-  for (const chunk of chunks) {
-    joined.set(chunk, offset)
-    offset += chunk.length
-  }
-
-  return new TextDecoder().decode(joined)
+  return decoded + decoder.decode()
 }
 
 function usableTitle(value: string): string {
