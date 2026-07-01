@@ -342,6 +342,69 @@ def test_publish_product_surface_reuses_the_same_build_id_for_identical_output(t
     assert first["live_build_id"] == second["live_build_id"]
 
 
+def test_publish_product_surface_does_not_block_on_best_effort_source_cache_sync_failure(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    dist = business_root / "product" / "site" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.delenv("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC", raising=False)
+    monkeypatch.setattr(
+        takyon_core,
+        "_sync_product_source_caches",
+        lambda _slug, _source_root: {
+            "local": {"synced": True, "status": "synced"},
+            "subuser": {"synced": False, "status": "blocked", "error": "ssh key not found"},
+        },
+    )
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "published"
+    assert result["blocker"] == ""
+    assert result["source_cache_sync_warning"] == "product source cache sync failed: subuser: ssh key not found"
+
+
+def test_publish_product_surface_can_explicitly_require_source_cache_sync(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    dist = business_root / "product" / "site" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+
+    publish_root = tmp_path / "product-sites"
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(publish_root))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC", "1")
+    monkeypatch.setattr(
+        takyon_core,
+        "_sync_product_source_caches",
+        lambda _slug, _source_root: {
+            "local": {"synced": True, "status": "synced"},
+            "subuser": {"synced": False, "status": "blocked", "error": "ssh key not found"},
+        },
+    )
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocker"] == "product source cache sync failed: subuser: ssh key not found"
 def test_publish_product_surface_mirrors_to_r2_via_remote_storage_authority(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     dist = business_root / "product" / "site" / "dist"

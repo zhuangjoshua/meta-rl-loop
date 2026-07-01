@@ -13413,18 +13413,35 @@ def _publish_product_surface_path(
 
     source_cache_sync = _sync_product_source_caches(slug, source_root)
     result["source_cache_sync"] = source_cache_sync
-    has_runtime_actions = (source_root / "actions").is_dir()
-    critical_planes = ["subuser"]
-    if _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"):
-        critical_planes.append("operator")
+    # Product publish truth is the committed workspace + build artifact + public R2 pointer. The
+    # SSH-mirrored product source cache is a best-effort operator convenience cache and is not read
+    # by the live product edge or the app-action runtime. A missing deploy key on the worker plane
+    # therefore must not hard-stop a successful publish for future businesses. Keep the sync result
+    # in the receipt for diagnostics, and only fail closed when an operator explicitly opts into a
+    # cache-sync gate for debugging.
+    required_cache_planes: list[str] = []
+    if _env_truthy("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC"):
+        required_cache_planes.append("subuser")
+        if _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"):
+            required_cache_planes.append("operator")
     failed_cache_sync = [
         f"{plane}: {sync.get('error') or sync.get('status')}"
-        for plane in critical_planes
-        for sync in [source_cache_sync.get(plane) if isinstance(source_cache_sync.get(plane), Mapping) else {}]
-        if has_runtime_actions and not sync.get("synced")
+        for plane, sync in (
+            (plane, source_cache_sync.get(plane) if isinstance(source_cache_sync.get(plane), Mapping) else {})
+            for plane in ("subuser", "operator")
+        )
+        if sync and not sync.get("synced")
     ]
     if failed_cache_sync:
-        result["blocker"] = "product source cache sync failed: " + "; ".join(failed_cache_sync)
+        result["source_cache_sync_warning"] = "product source cache sync failed: " + "; ".join(failed_cache_sync)
+        logging.getLogger("takyon.publish").warning(
+            "product source cache sync failed but publish continues: slug=%s details=%s",
+            _slugify(slug),
+            "; ".join(failed_cache_sync),
+        )
+    required_failures = [detail for detail in failed_cache_sync if detail.split(":", 1)[0] in required_cache_planes]
+    if required_failures:
+        result["blocker"] = "product source cache sync failed: " + "; ".join(required_failures)
         return result
 
     storage.write_build_artifact(backend, slug, build_id, publish_source)
