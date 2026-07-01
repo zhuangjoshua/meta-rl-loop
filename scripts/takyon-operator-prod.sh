@@ -623,17 +623,6 @@ try:
             add("fail", f"Safebox storage broker:{provider}", str(exc))
 
     try:
-        token = safebox.mint_operator_session_token(
-            "homework-solver",
-            os.environ.get("TAKYON_SESSION_USER_ID", ""),
-            max_cost_microusd=1,
-            ttl_seconds=60,
-        )
-        add("ok" if token else "fail", "operator AI broker session", "minted scoped operator.session token" if token else "empty token")
-    except Exception as exc:  # noqa: BLE001
-        add("fail", "operator AI broker session", str(exc))
-
-    try:
         gsc = safebox.gsc_verification_token("https://coscale.app/")
         add("ok" if gsc.get("verification_token") else "warn", "Google Search Console", "operator broker reachable" if gsc.get("verification_token") else "empty verification token", required=False)
     except Exception as exc:  # noqa: BLE001
