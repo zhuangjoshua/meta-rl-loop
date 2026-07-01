@@ -113,6 +113,19 @@ def test_claim_one_filters_by_kind(pg_conn):
     assert claimed is not None and claimed.id == wake.id
 
 
+def test_claim_one_filters_by_owner_user_id(pg_conn):
+    first_slug, _first_uid = _provision_business(pg_conn)
+    second_slug, second_uid = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, first_slug, "ceo_wake", idempotency_key="first")
+    second = jobs.enqueue(pg_conn, second_slug, "ceo_wake", idempotency_key="second")
+
+    claimed = jobs.claim_one(pg_conn, worker_id="w1", owner_user_id=second_uid)
+
+    assert claimed is not None
+    assert claimed.id == second.id
+    assert jobs.claim_one(pg_conn, worker_id="w2", owner_user_id=second_uid) is None
+
+
 def test_claim_one_prioritizes_bootstrap_over_older_wake(pg_conn):
     first_slug, _uid = _provision_business(pg_conn)
     second_slug, _uid2 = _provision_business(pg_conn)

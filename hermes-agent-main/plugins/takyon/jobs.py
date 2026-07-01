@@ -242,7 +242,13 @@ def list_jobs(conn, business_slug: str, *, limit: int = 50) -> list[Job]:
 # ── claim / lifecycle ────────────────────────────────────────────────────────────────────────────
 
 
-def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None = None) -> Job | None:
+def claim_one(
+    conn,
+    *,
+    worker_id: str,
+    kinds: list[str] | tuple[str, ...] | None = None,
+    owner_user_id: str | None = None,
+) -> Job | None:
     """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
     ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
     A business runs at most ONE job per lane at a time (see ``_LANE_SQL``): CEO turns serialize
@@ -259,34 +265,51 @@ def claim_one(conn, *, worker_id: str, kinds: list[str] | tuple[str, ...] | None
         ") "
     )
     min_queue_age_seconds = max(0.0, float(os.getenv("TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS") or 0.0))
+    owner_filter = str(owner_user_id or "").strip()
     age_gate = ""
     if min_queue_age_seconds > 0:
         age_gate = "and j.created_at <= (now() - (%s::double precision * interval '1 second')) "
+    owner_gate = ""
+    if owner_filter:
+        owner_gate = (
+            "and exists ("
+            "  select 1 from businesses b "
+            "  where b.slug = j.business_slug and b.owner_user_id = %s"
+            ") "
+        )
 
     with conn.transaction():
         if kinds:
-            params: tuple[Any, ...] = (
-                (list(kinds), min_queue_age_seconds) if min_queue_age_seconds > 0 else (list(kinds),)
-            )
+            params: list[Any] = [list(kinds)]
+            if min_queue_age_seconds > 0:
+                params.append(min_queue_age_seconds)
+            if owner_filter:
+                params.append(owner_filter)
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' and j.kind = any(%s) "
                 + age_gate
+                + owner_gate
                 + lane_gate
                 + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1",
-                params,
+                tuple(params),
             ).fetchone()
         else:
-            params = (min_queue_age_seconds,) if min_queue_age_seconds > 0 else ()
+            params = []
+            if min_queue_age_seconds > 0:
+                params.append(min_queue_age_seconds)
+            if owner_filter:
+                params.append(owner_filter)
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' "
                 + age_gate
+                + owner_gate
                 + lane_gate
                 + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1",
-                params,
+                tuple(params),
             ).fetchone()
         if picked is None:
             return None
@@ -451,6 +474,7 @@ def run_one(
     worker_id: str,
     handlers: Mapping[str, Handler],
     kinds: list[str] | tuple[str, ...] | None = None,
+    owner_user_id: str | None = None,
     heartbeat_interval_seconds: float = 15.0,
     heartbeat_conn_factory: Callable[[], Any] | None = None,
 ) -> JobOutcome | None:
@@ -465,7 +489,7 @@ def run_one(
       4. run            — handler(job). Raises ⇒ refund the hold, then fail/requeue.
       5. settle         — clamp actual ≤ reserved, settle (releases the remainder), complete.
     """
-    job = claim_one(conn, worker_id=worker_id, kinds=kinds)
+    job = claim_one(conn, worker_id=worker_id, kinds=kinds, owner_user_id=owner_user_id)
     if job is None:
         return None
 

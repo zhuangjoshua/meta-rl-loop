@@ -242,6 +242,49 @@ def test_drain_tick_defaults_stale_reclaim_to_15_minutes(monkeypatch):
     }
 
 
+def test_drain_tick_passes_owner_user_id_to_run_one(monkeypatch):
+    class _RoleConn:
+        def execute(self, sql, params=()):
+            if "session_user::text" in sql and "current_user::text" in sql:
+                return self
+            raise AssertionError(f"unexpected SQL on fake operator conn: {sql}")
+
+        def fetchone(self):
+            return {
+                "session_user": "takyon_operator_runtime",
+                "current_user": "takyon_operator_runtime",
+            }
+
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(worker.jobs, "requeue_stale", lambda *_a, **_kw: 0)
+
+    def _capture_run_one(_conn, **kwargs):
+        seen["owner_user_id"] = kwargs.get("owner_user_id")
+        return None
+
+    monkeypatch.setattr(worker.jobs, "run_one", _capture_run_one)
+
+    counts = worker.drain_tick(
+        _RoleConn(),
+        worker_id="operator-worker",
+        handlers={},
+        dispatch=False,
+        owner_user_id="user-123",
+    )
+
+    assert counts == {
+        "dispatched": 0,
+        "requeued": 0,
+        "usage_holds_released": 0,
+        "drained": 0,
+        "completed": 0,
+        "blocked": 0,
+        "failed": 0,
+    }
+    assert seen == {"owner_user_id": "user-123"}
+
+
 def test_drain_tick_reconciles_orphaned_usage_holds(pg_conn, monkeypatch):
     slug, _uid = _provision_business(pg_conn)
     app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=1_000)

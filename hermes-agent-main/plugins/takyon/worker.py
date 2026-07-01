@@ -2543,6 +2543,7 @@ def drain_tick(
     worker_id: str,
     handlers: Mapping[str, jobs.Handler] | None = None,
     kinds: list[str] | tuple[str, ...] | None = None,
+    owner_user_id: str | None = None,
     dispatch: bool = True,
     stop: threading.Event | None = None,
     max_jobs: int | None = None,
@@ -2590,6 +2591,7 @@ def drain_tick(
             worker_id=worker_id,
             handlers=handlers,
             kinds=kinds,
+            owner_user_id=owner_user_id,
             heartbeat_conn_factory=heartbeat_conn_factory,
         )
         if outcome is None:
@@ -2649,6 +2651,7 @@ def run_worker_loop(
     poll_interval: float | None = None,
     dispatch: bool = True,
     kinds: list[str] | tuple[str, ...] | None = None,
+    owner_user_id: str | None = None,
     once: bool = False,
     max_jobs: int | None = None,
     database_url: str | None = None,
@@ -2731,6 +2734,7 @@ def run_worker_loop(
                     conn,
                     worker_id=thread_worker_id,
                     kinds=kinds,
+                    owner_user_id=owner_user_id,
                     dispatch=allow_dispatch,
                     stop=stop,
                     max_jobs=max_jobs,
@@ -2749,11 +2753,12 @@ def run_worker_loop(
         return total_drained
 
     _log.info(
-        "worker[%s]: starting (dispatch=%s poll=%.0fs concurrency=%d)",
+        "worker[%s]: starting (dispatch=%s poll=%.0fs concurrency=%d owner=%s)",
         worker_id,
         dispatch,
         interval,
         concurrency,
+        str(owner_user_id or "").strip() or "*",
     )
     if concurrency == 1:
         return _run_loop(thread_worker_id=worker_id, allow_dispatch=dispatch)
