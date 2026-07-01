@@ -76,6 +76,19 @@ _TERMINAL = ("completed", "blocked", "failed", "cancelled")
 # is derived from kind in SQL (no schema change, dispatch_due_wakes untouched).
 _LANE_SQL = "(case when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' else {a}.kind end)"
 
+# Fresh create-time bootstrap can carry a short-lived worker affinity hint in its payload:
+# a local operator shell may request "claim this first on workers whose id starts with X, then let
+# anyone drain it after N seconds". This keeps same-owner sibling workers on other machines from
+# hijacking a just-created business immediately, without stranding the job if the preferred machine
+# disappears. Jobs without the hint are unaffected.
+_PREFERRED_WORKER_PREFIX_SQL = "coalesce(j.payload->>'preferred_worker_id_prefix', '')"
+_PREFERRED_WORKER_WINDOW_SQL = (
+    "(case "
+    "when coalesce(j.payload->>'preferred_worker_claim_seconds', '') ~ '^[0-9]+(\\.[0-9]+)?$' "
+    "then greatest(0.0, (j.payload->>'preferred_worker_claim_seconds')::double precision) "
+    "else 0.0 end)"
+)
+
 # The columns of a jobs row, in one place so every SELECT projects the same Job.
 _COLS = (
     "id, business_slug, kind, status, idempotency_key, payload, result, error, "
@@ -266,6 +279,7 @@ def claim_one(
     )
     min_queue_age_seconds = max(0.0, float(os.getenv("TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS") or 0.0))
     owner_filter = str(owner_user_id or "").strip()
+    worker_filter = str(worker_id or "").strip()
     age_gate = ""
     if min_queue_age_seconds > 0:
         age_gate = "and j.created_at <= (now() - (%s::double precision * interval '1 second')) "
@@ -277,6 +291,22 @@ def claim_one(
             "  where b.slug = j.business_slug and b.owner_user_id = %s"
             ") "
         )
+    preferred_gate = (
+        "and ("
+        f"  {_PREFERRED_WORKER_PREFIX_SQL} = '' "
+        f"  or %s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
+        f"  or {_PREFERRED_WORKER_WINDOW_SQL} <= 0 "
+        f"  or j.created_at <= (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second'))"
+        ") "
+    )
+    preferred_order = (
+        "case "
+        f"when {_PREFERRED_WORKER_PREFIX_SQL} <> '' "
+        f" and {_PREFERRED_WORKER_WINDOW_SQL} > 0 "
+        f" and %s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
+        f" and j.created_at > (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second')) "
+        "then 0 else 1 end, "
+    )
 
     with conn.transaction():
         if kinds:
@@ -285,13 +315,18 @@ def claim_one(
                 params.append(min_queue_age_seconds)
             if owner_filter:
                 params.append(owner_filter)
+            params.append(worker_filter)
+            params.append(worker_filter)
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' and j.kind = any(%s) "
                 + age_gate
                 + owner_gate
+                + preferred_gate
                 + lane_gate
-                + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+                + "order by "
+                + preferred_order
+                + "case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1",
                 tuple(params),
             ).fetchone()
@@ -301,13 +336,18 @@ def claim_one(
                 params.append(min_queue_age_seconds)
             if owner_filter:
                 params.append(owner_filter)
+            params.append(worker_filter)
+            params.append(worker_filter)
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' "
                 + age_gate
                 + owner_gate
+                + preferred_gate
                 + lane_gate
-                + "order by case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+                + "order by "
+                + preferred_order
+                + "case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
                 "for update skip locked limit 1",
                 tuple(params),
             ).fetchone()

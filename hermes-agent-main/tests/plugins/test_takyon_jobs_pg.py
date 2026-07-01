@@ -126,6 +126,74 @@ def test_claim_one_filters_by_owner_user_id(pg_conn):
     assert jobs.claim_one(pg_conn, worker_id="w2", owner_user_id=second_uid) is None
 
 
+def test_claim_one_prefers_matching_worker_prefix_during_grace_window(pg_conn):
+    first_slug, _uid = _provision_business(pg_conn)
+    second_slug, _uid2 = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, first_slug, "ceo_bootstrap", idempotency_key="older-bootstrap")
+    preferred = jobs.enqueue(
+        pg_conn,
+        second_slug,
+        "ceo_bootstrap",
+        idempotency_key="preferred-bootstrap",
+        payload={
+            "preferred_worker_id_prefix": "mac-operator-Local-",
+            "preferred_worker_claim_seconds": 120,
+        },
+    )
+
+    claimed = jobs.claim_one(pg_conn, worker_id="mac-operator-Local-123")
+
+    assert claimed is not None
+    assert claimed.id == preferred.id
+    assert claimed.locked_by == "mac-operator-Local-123"
+
+
+def test_claim_one_skips_nonmatching_worker_prefix_until_grace_window_expires(pg_conn):
+    first_slug, _uid = _provision_business(pg_conn)
+    second_slug, _uid2 = _provision_business(pg_conn)
+    fallback = jobs.enqueue(pg_conn, first_slug, "ceo_bootstrap", idempotency_key="fallback-bootstrap")
+    preferred = jobs.enqueue(
+        pg_conn,
+        second_slug,
+        "ceo_bootstrap",
+        idempotency_key="preferred-bootstrap",
+        payload={
+            "preferred_worker_id_prefix": "mac-operator-Local-",
+            "preferred_worker_claim_seconds": 120,
+        },
+    )
+
+    claimed = jobs.claim_one(pg_conn, worker_id="mac-operator-Other-123")
+
+    assert claimed is not None
+    assert claimed.id == fallback.id
+    assert jobs.get_job(pg_conn, preferred.id).status == "queued"
+
+
+def test_claim_one_allows_nonmatching_worker_prefix_after_grace_window_expires(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    preferred = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_bootstrap",
+        idempotency_key="preferred-bootstrap",
+        payload={
+            "preferred_worker_id_prefix": "mac-operator-Local-",
+            "preferred_worker_claim_seconds": 120,
+        },
+    )
+    pg_conn.execute(
+        "update jobs set created_at = now() - interval '5 minutes', updated_at = now() where id = %s",
+        (preferred.id,),
+    )
+
+    claimed = jobs.claim_one(pg_conn, worker_id="mac-operator-Other-123")
+
+    assert claimed is not None
+    assert claimed.id == preferred.id
+    assert claimed.locked_by == "mac-operator-Other-123"
+
+
 def test_claim_one_prioritizes_bootstrap_over_older_wake(pg_conn):
     first_slug, _uid = _provision_business(pg_conn)
     second_slug, _uid2 = _provision_business(pg_conn)

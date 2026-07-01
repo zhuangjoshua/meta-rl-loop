@@ -2182,6 +2182,31 @@ def _run_pg_ceo_wake_once(store: TakyonStore, slug: str, *, run_inline: bool = T
     }
 
 
+def _bootstrap_preferred_worker_claim_payload() -> dict[str, Any]:
+    """Optional short-lived worker affinity for fresh create-time bootstrap jobs.
+
+    Operator-prod shells can export a worker-id prefix for this Mac (for example
+    ``mac-operator-My-Mac-``). The queue then lets matching local workers claim the brand-new
+    bootstrap first and only falls back to sibling workers after the grace window expires.
+    """
+    prefix = str(os.getenv("TAKYON_PREFERRED_WORKER_ID_PREFIX") or "").strip()
+    if not prefix:
+        return {}
+    raw_seconds = str(os.getenv("TAKYON_PREFERRED_WORKER_CLAIM_SECONDS") or "").strip()
+    grace_seconds = 0
+    if raw_seconds:
+        try:
+            grace_seconds = int(float(raw_seconds))
+        except ValueError:
+            grace_seconds = 0
+    if grace_seconds <= 0:
+        grace_seconds = 120
+    return {
+        "preferred_worker_id_prefix": prefix,
+        "preferred_worker_claim_seconds": grace_seconds,
+    }
+
+
 def _enqueue_pg_ceo_bootstrap(
     store: TakyonStore,
     slug: str,
@@ -2204,6 +2229,7 @@ def _enqueue_pg_ceo_bootstrap(
     }
     if schedule:
         payload["schedule"] = schedule
+    payload.update(_bootstrap_preferred_worker_claim_payload())
 
     with store._connect() as conn:
         with store._leaf_conn(conn) as raw:

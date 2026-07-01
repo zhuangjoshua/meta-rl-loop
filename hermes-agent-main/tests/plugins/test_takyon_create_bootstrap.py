@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import cron.jobs as cron_jobs
 
@@ -190,6 +191,68 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
         "schedule": "every 6h",
         "max_turns": takyon_cli._DEFAULT_BOOTSTRAP_MAX_TURNS,
     }
+
+
+def test_enqueue_pg_ceo_bootstrap_stamps_preferred_worker_claim(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _Ctx:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeStore:
+        def _connect(self):
+            return _Ctx()
+
+        def _leaf_conn(self, _conn):
+            return _Ctx()
+
+    monkeypatch.setenv("TAKYON_PREFERRED_WORKER_ID_PREFIX", "mac-operator-Local-")
+    monkeypatch.setenv("TAKYON_PREFERRED_WORKER_CLAIM_SECONDS", "90")
+
+    from plugins.takyon import jobs as takyon_jobs
+
+    monkeypatch.setattr(takyon_jobs, "list_jobs", lambda *_a, **_k: [])
+
+    def fake_enqueue(_raw, slug, kind, *, idempotency_key, payload, max_attempts):
+        captured.update(
+            {
+                "slug": slug,
+                "kind": kind,
+                "payload": dict(payload),
+                "max_attempts": max_attempts,
+                "idempotency_key": idempotency_key,
+            }
+        )
+        return SimpleNamespace(id="job-pref", status="queued")
+
+    monkeypatch.setattr(takyon_jobs, "enqueue", fake_enqueue)
+
+    result = takyon_cli._enqueue_pg_ceo_bootstrap(
+        FakeStore(),
+        "latexflow",
+        goal="overleaf competitor",
+        mode="live",
+        schedule="every 6h",
+        max_turns=7,
+    )
+
+    assert captured["slug"] == "latexflow"
+    assert captured["kind"] == "ceo_bootstrap"
+    assert captured["max_attempts"] == 2
+    assert captured["payload"] == {
+        "goal": "overleaf competitor",
+        "mode": "live",
+        "schedule": "every 6h",
+        "max_turns": 7,
+        "estimate_cents": takyon_cli._operator_turn_estimate_cents(),
+        "preferred_worker_id_prefix": "mac-operator-Local-",
+        "preferred_worker_claim_seconds": 90,
+    }
+    assert result["job_id"] == "job-pref"
 
 
 def test_bootstrap_goal_requests_product_workflow_for_featureful_saas_goal():
