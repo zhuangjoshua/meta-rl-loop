@@ -43,6 +43,35 @@ _tool_loop = None          # persistent loop for the main (CLI) thread
 _tool_loop_lock = threading.Lock()
 _worker_thread_local = threading.local()  # per-worker-thread persistent loops
 
+# Shared, bounded executor for the in-loop offload path (gateway / RL). Reused
+# across tool calls so we don't spawn a fresh single-worker ThreadPoolExecutor
+# per invocation — which thrashed thread + executor creation/teardown under
+# many concurrent sessions (#4985). Each submission still owns its own event
+# loop (created inside _run_in_worker) so per-run cancellation is unaffected.
+_in_loop_executor = None
+_in_loop_executor_lock = threading.Lock()
+
+
+def _get_in_loop_executor():
+    """Return a lazily-created, process-wide bounded ThreadPoolExecutor for the
+    running-loop offload path.
+
+    Bounded by (cpu_count or 1) * 4 to cap concurrent offload threads while
+    allowing enough parallelism for I/O-bound async tool handlers. The pool is
+    never shut down for the process lifetime; per-submission event loops are
+    created and torn down inside the worker, so the shared threads stay clean.
+    """
+    global _in_loop_executor
+    with _in_loop_executor_lock:
+        if _in_loop_executor is None:
+            import concurrent.futures
+            max_workers = (os.cpu_count() or 1) * 4
+            _in_loop_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="tool-inloop",
+            )
+        return _in_loop_executor
+
 
 def _get_tool_loop():
     """Return a long-lived event loop for running async tool handlers.
@@ -139,13 +168,16 @@ def _run_async(coro):
                     pass
                 worker_loop.close()
 
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        pool = _get_in_loop_executor()
         future = pool.submit(_run_in_worker)
         try:
             return future.result(timeout=300)
         except concurrent.futures.TimeoutError:
             # Cancel the coroutine inside its own loop so the worker thread
-            # can wind down instead of running forever.
+            # can wind down instead of running forever.  The shared executor
+            # is not shut down here (it's process-wide); requesting
+            # cancellation lets the worker's per-submission loop finish and
+            # return the thread to the pool.
             if loop_ready.wait(timeout=1.0) and worker_loop is not None:
                 try:
                     for t in asyncio.all_tasks(worker_loop):
@@ -154,11 +186,6 @@ def _run_async(coro):
                     # Loop already closed — nothing to cancel.
                     pass
             raise
-        finally:
-            # wait=False: don't block the caller on a stuck coroutine. We've
-            # already requested cancellation above; the worker will exit
-            # once the coroutine observes it (usually at the next await).
-            pool.shutdown(wait=False)
 
     # If we're on a worker thread (e.g., parallel tool execution in
     # delegate_task), use a per-thread persistent loop.  This avoids

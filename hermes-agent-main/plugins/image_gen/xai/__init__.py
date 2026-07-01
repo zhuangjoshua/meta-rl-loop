@@ -35,6 +35,10 @@ from tools.xai_http import takyon_xai_user_agent, resolve_xai_http_credentials
 
 logger = logging.getLogger(__name__)
 
+# Module-level session for connection pooling / TLS keep-alive reuse across
+# generate() calls (e.g. concurrent batch runs hitting api.x.ai).
+_SESSION = requests.Session()
+
 # ---------------------------------------------------------------------------
 # Model catalog
 # ---------------------------------------------------------------------------
@@ -197,7 +201,7 @@ class XAIImageGenProvider(ImageGenProvider):
         base_url = str(creds.get("base_url") or "https://api.x.ai/v1").strip().rstrip("/")
 
         try:
-            response = requests.post(
+            response = _SESSION.post(
                 f"{base_url}/images/generations",
                 headers=headers,
                 json=payload,

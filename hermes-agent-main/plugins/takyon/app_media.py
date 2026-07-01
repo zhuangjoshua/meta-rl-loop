@@ -291,10 +291,14 @@ def _usage_totals(
             if isinstance(row, Mapping):
                 return int(row["user_bytes"] or 0), int(row["business_bytes"] or 0)
             return int(row[0] or 0), int(row[1] or 0)
-    return (
-        _usage_bytes(store, business_slug, app_user_id, session_token=session_token),
-        _usage_bytes(store, business_slug, None),
-    )
+        row = conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN app_user_id = ? THEN size_bytes ELSE 0 END), 0), "
+            "COALESCE(SUM(size_bytes), 0) FROM app_media WHERE business_slug = ?",
+            (app_user_id, business_slug),
+        ).fetchone()
+    if not row:
+        return 0, 0
+    return int(row[0] or 0), int(row[1] or 0)
 
 
 def _insert_media_row(store: Any, *, business_slug: str, app_user_id: str, media_id: str,

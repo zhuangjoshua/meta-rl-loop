@@ -256,19 +256,15 @@ class XAIVideoGenProvider(VideoGenProvider):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         try:
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(self._generate_async(
-                    prompt=prompt,
-                    model=model,
-                    image_url=image_url,
-                    reference_image_urls=reference_image_urls,
-                    duration=duration,
-                    aspect_ratio=aspect_ratio,
-                    resolution=resolution,
-                ))
-            finally:
-                loop.close()
+            return asyncio.run(self._generate_async(
+                prompt=prompt,
+                model=model,
+                image_url=image_url,
+                reference_image_urls=reference_image_urls,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+            ))
         except Exception as exc:
             logger.warning("xAI video gen unexpected failure: %s", exc, exc_info=True)
             return error_response(

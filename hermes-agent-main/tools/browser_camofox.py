@@ -47,6 +47,11 @@ _SNAPSHOT_MAX_CHARS = 80_000  # camofox paginates at this limit
 _vnc_url: Optional[str] = None  # cached from /health response
 _vnc_url_checked = False  # only probe once per process
 
+# Module-level pooled session so keep-alive reuses the TCP/TLS connection to
+# the Camofox server across the many HTTP calls per browser step, instead of
+# opening a fresh socket per request.
+_session = requests.Session()
+
 
 def get_camofox_url() -> str:
     """Return the configured Camofox server URL, or empty string."""
@@ -73,7 +78,7 @@ def check_camofox_available() -> bool:
     if not url:
         return False
     try:
-        resp = requests.get(f"{url}/health", timeout=5)
+        resp = _session.get(f"{url}/health", timeout=5)
         if resp.status_code == 200 and not _vnc_url_checked:
             try:
                 data = resp.json()
@@ -254,7 +259,7 @@ def _ensure_tab(task_id: Optional[str], url: str = "about:blank") -> Dict[str, A
     if session["tab_id"]:
         return session
     base = get_camofox_url()
-    resp = requests.post(
+    resp = _session.post(
         f"{base}/tabs",
         json={
             "userId": session["user_id"],
@@ -300,7 +305,7 @@ def camofox_soft_cleanup(task_id: Optional[str] = None) -> bool:
 def _post(path: str, body: dict, timeout: int = _DEFAULT_TIMEOUT) -> dict:
     """POST JSON to camofox and return parsed response."""
     url = f"{get_camofox_url()}{path}"
-    resp = requests.post(url, json=body, timeout=timeout)
+    resp = _session.post(url, json=body, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -308,7 +313,7 @@ def _post(path: str, body: dict, timeout: int = _DEFAULT_TIMEOUT) -> dict:
 def _get(path: str, params: dict = None, timeout: int = _DEFAULT_TIMEOUT) -> dict:
     """GET from camofox and return parsed response."""
     url = f"{get_camofox_url()}{path}"
-    resp = requests.get(url, params=params, timeout=timeout)
+    resp = _session.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 
@@ -316,7 +321,7 @@ def _get(path: str, params: dict = None, timeout: int = _DEFAULT_TIMEOUT) -> dic
 def _get_raw(path: str, params: dict = None, timeout: int = _DEFAULT_TIMEOUT) -> requests.Response:
     """GET from camofox and return raw response (for binary data)."""
     url = f"{get_camofox_url()}{path}"
-    resp = requests.get(url, params=params, timeout=timeout)
+    resp = _session.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     return resp
 
@@ -324,7 +329,7 @@ def _get_raw(path: str, params: dict = None, timeout: int = _DEFAULT_TIMEOUT) ->
 def _delete(path: str, body: dict = None, timeout: int = _DEFAULT_TIMEOUT) -> dict:
     """DELETE to camofox and return parsed response."""
     url = f"{get_camofox_url()}{path}"
-    resp = requests.delete(url, json=body, timeout=timeout)
+    resp = _session.delete(url, json=body, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
 

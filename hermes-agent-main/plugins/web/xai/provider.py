@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from typing import Any, Dict, List, Optional
 
 from agent.web_search_provider import WebSearchProvider
@@ -54,6 +55,26 @@ _MAX_DOMAIN_FILTERS = 5  # xAI hard cap on allowed_domains / excluded_domains
 # prose since reasoning models occasionally narrate before the JSON block
 # even when explicitly asked not to.
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}", re.MULTILINE)
+
+# Lazily-initialized, process-wide httpx.Client. Reusing one client keeps a
+# pooled connection + TLS session alive across search() calls, so we don't
+# pay a fresh TCP+TLS handshake (and pool allocation) on every web_search.
+# Per-call headers and timeout are still passed to ``client.post(...)`` so
+# behavior is unchanged.
+_HTTP_CLIENT = None
+_HTTP_CLIENT_LOCK = threading.Lock()
+
+
+def _get_http_client():
+    """Return the shared httpx.Client, creating it on first use."""
+    global _HTTP_CLIENT
+    if _HTTP_CLIENT is None:
+        with _HTTP_CLIENT_LOCK:
+            if _HTTP_CLIENT is None:
+                import httpx
+
+                _HTTP_CLIENT = httpx.Client()
+    return _HTTP_CLIENT
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +252,8 @@ class XAIWebSearchProvider(WebSearchProvider):
 
         try:
             import httpx
+
+            client = _get_http_client()
         except ImportError:
             return {
                 "success": False,
@@ -257,7 +280,7 @@ class XAIWebSearchProvider(WebSearchProvider):
         resp = None
         for attempt in range(2):
             try:
-                resp = httpx.post(
+                resp = client.post(
                     f"{base_url}/responses",
                     headers=headers,
                     json=payload,

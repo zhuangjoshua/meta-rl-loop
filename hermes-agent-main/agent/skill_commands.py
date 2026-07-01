@@ -81,6 +81,32 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
                 skill_file = direct
                 break
 
+    # Fast path: consult the already-populated slash-command index
+    # (name/slug -> skill_md_path) before doing an O(N) rglob + YAML
+    # re-parse across every skills dir (#4241).
+    if skill_file is None:
+        try:
+            commands = get_skill_commands()
+            slug = identifier.lower().replace(" ", "-").replace("_", "-")
+            slug = _SKILL_INVALID_CHARS.sub("", slug)
+            slug = _SKILL_MULTI_HYPHEN.sub("-", slug).strip("-")
+            candidates = []
+            if slug:
+                candidates.append(commands.get(f"/{slug}"))
+            for info in commands.values():
+                if str((info or {}).get("name") or "").strip() == identifier:
+                    candidates.append(info)
+                    break
+            for info in candidates:
+                if not info:
+                    continue
+                candidate = Path(str(info.get("skill_md_path") or ""))
+                if candidate.exists():
+                    skill_file = candidate
+                    break
+        except Exception:
+            skill_file = None
+
     if skill_file is None:
         for skills_dir in scan_dirs:
             for candidate in skills_dir.rglob("SKILL.md"):

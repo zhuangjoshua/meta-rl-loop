@@ -73,6 +73,7 @@ class FileStateRegistry:
             if lock is None:
                 lock = threading.Lock()
                 self._path_locks[resolved] = lock
+                _cap_dict(self._path_locks, _MAX_PATHS_PER_AGENT)
             return lock
 
     @contextmanager

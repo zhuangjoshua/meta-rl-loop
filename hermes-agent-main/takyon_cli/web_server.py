@@ -8094,48 +8094,56 @@ async def get_profile_setup_command(name: str):
     return {"command": _profile_setup_command(name)}
 
 
+def _spawn_profile_terminal(command: str) -> None:
+    """Spawn a terminal emulator running ``command`` (blocking subprocess work).
+
+    Run off the event loop via ``asyncio.to_thread`` so the async endpoint
+    never creates subprocesses with blocking methods on the loop thread.
+    """
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["cmd.exe", "/c", "start", "", command])
+    elif sys.platform == "darwin":
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        applescript = (
+            'tell application "Terminal"\n'
+            "activate\n"
+            f'do script "{escaped}"\n'
+            "end tell"
+        )
+        subprocess.Popen(["osascript", "-e", applescript])
+    else:
+        terminal_commands = [
+            ("x-terminal-emulator", ["x-terminal-emulator", "-e", "sh", "-lc", command]),
+            ("gnome-terminal", ["gnome-terminal", "--", "sh", "-lc", command]),
+            ("konsole", ["konsole", "-e", "sh", "-lc", command]),
+            ("xfce4-terminal", ["xfce4-terminal", "-e", f"sh -lc '{command}'"]),
+            ("mate-terminal", ["mate-terminal", "-e", f"sh -lc '{command}'"]),
+            ("lxterminal", ["lxterminal", "-e", f"sh -lc '{command}'"]),
+            ("tilix", ["tilix", "-e", "sh", "-lc", command]),
+            ("alacritty", ["alacritty", "-e", "sh", "-lc", command]),
+            ("kitty", ["kitty", "sh", "-lc", command]),
+            ("xterm", ["xterm", "-e", "sh", "-lc", command]),
+        ]
+        for executable, popen_args in terminal_commands:
+            if subprocess.call(
+                ["which", executable],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ) == 0:
+                subprocess.Popen(popen_args)
+                break
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="No supported terminal emulator found",
+            )
+
+
 @app.post("/api/profiles/{name}/open-terminal")
 async def open_profile_terminal_endpoint(name: str):
     try:
         command = _profile_setup_command(name)
-
-        if sys.platform.startswith("win"):
-            subprocess.Popen(["cmd.exe", "/c", "start", "", command])
-        elif sys.platform == "darwin":
-            escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-            applescript = (
-                'tell application "Terminal"\n'
-                "activate\n"
-                f'do script "{escaped}"\n'
-                "end tell"
-            )
-            subprocess.Popen(["osascript", "-e", applescript])
-        else:
-            terminal_commands = [
-                ("x-terminal-emulator", ["x-terminal-emulator", "-e", "sh", "-lc", command]),
-                ("gnome-terminal", ["gnome-terminal", "--", "sh", "-lc", command]),
-                ("konsole", ["konsole", "-e", "sh", "-lc", command]),
-                ("xfce4-terminal", ["xfce4-terminal", "-e", f"sh -lc '{command}'"]),
-                ("mate-terminal", ["mate-terminal", "-e", f"sh -lc '{command}'"]),
-                ("lxterminal", ["lxterminal", "-e", f"sh -lc '{command}'"]),
-                ("tilix", ["tilix", "-e", "sh", "-lc", command]),
-                ("alacritty", ["alacritty", "-e", "sh", "-lc", command]),
-                ("kitty", ["kitty", "sh", "-lc", command]),
-                ("xterm", ["xterm", "-e", "sh", "-lc", command]),
-            ]
-            for executable, popen_args in terminal_commands:
-                if subprocess.call(
-                    ["which", executable],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                ) == 0:
-                    subprocess.Popen(popen_args)
-                    break
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No supported terminal emulator found",
-                )
+        await asyncio.to_thread(_spawn_profile_terminal, command)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -9926,7 +9934,7 @@ def mount_spa(application: FastAPI):
         # filename, and the (uncached) HTML entry point references the new name.
         if target.suffix.lower() == ".css":
             prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
-            css = target.read_text()
+            css = await asyncio.to_thread(target.read_text)
             if prefix:
                 for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
                     css = css.replace(f"url({asset_dir}", f"url({prefix}{asset_dir}")

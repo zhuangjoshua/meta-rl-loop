@@ -51,10 +51,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from agent.retry_utils import jittered_backoff
 from tools.registry import registry, tool_error
 from tools.xai_http import takyon_xai_user_agent, resolve_xai_http_credentials
 
 logger = logging.getLogger(__name__)
+
+# Module-level session so keep-alive reuses the TLS connection across
+# retries within a call and across repeated x_search invocations, avoiding a
+# fresh handshake per POST.
+_SESSION = requests.Session()
 
 DEFAULT_XAI_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_X_SEARCH_MODEL = "grok-4.20-reasoning"
@@ -331,7 +337,7 @@ def x_search_tool(
         response: Optional[requests.Response] = None
         for attempt in range(max_retries + 1):
             try:
-                response = requests.post(
+                response = _SESSION.post(
                     f"{base_url}/responses",
                     headers={
                         "Authorization": f"Bearer {api_key}",
@@ -353,7 +359,7 @@ def x_search_tool(
                     max_retries + 1,
                     _http_error_message(e),
                 )
-                time.sleep(min(5.0, 1.5 * (attempt + 1)))
+                time.sleep(jittered_backoff(attempt + 1, base_delay=1.5, max_delay=5.0))
             except (requests.ReadTimeout, requests.ConnectionError) as e:
                 if attempt >= max_retries:
                     raise
@@ -363,7 +369,7 @@ def x_search_tool(
                     max_retries + 1,
                     e,
                 )
-                time.sleep(min(5.0, 1.5 * (attempt + 1)))
+                time.sleep(jittered_backoff(attempt + 1, base_delay=1.5, max_delay=5.0))
 
         if response is None:
             raise RuntimeError("x_search request did not return a response")

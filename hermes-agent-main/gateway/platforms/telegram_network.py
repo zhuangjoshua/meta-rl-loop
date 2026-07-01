@@ -13,6 +13,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import time
 from typing import Iterable, Optional
 
 import httpx
@@ -41,6 +42,13 @@ _DOH_PROVIDERS: list[dict] = [
 # Last-resort IPs when DoH is also blocked.  These are stable Telegram Bot API
 # endpoints in the 149.154.160.0/20 block (same seed used by OpenClaw).
 _SEED_FALLBACK_IPS: list[str] = ["149.154.167.220"]
+
+# Per-process TTL cache for discovered fallback IPs.  Repeated gateway
+# (re)connects across many tenants reuse the last DoH answer instead of
+# reallocating an httpx.AsyncClient and firing fresh DoH round-trips each time.
+_DISCOVERY_TTL = 300.0  # seconds
+_discovery_cache: Optional[tuple[float, list[str]]] = None
+_discovery_lock = asyncio.Lock()
 
 
 def _resolve_proxy_url(target_hosts=None) -> str | None:
@@ -202,7 +210,33 @@ async def discover_fallback_ips() -> list[str]:
     against the same address via the IP-rewrite path before the seed list is
     consulted (#14520).  Falls back to a hardcoded seed list only when DoH
     yields no usable answers.
+
+    Results are cached per process for ``_DISCOVERY_TTL`` seconds so repeated
+    connects reuse the last DoH answer instead of reallocating an
+    ``httpx.AsyncClient`` and re-running discovery each time.
     """
+    global _discovery_cache
+
+    now = time.monotonic()
+    cached = _discovery_cache
+    if cached is not None and now - cached[0] < _DISCOVERY_TTL:
+        return list(cached[1])
+
+    async with _discovery_lock:
+        # Re-check under the lock in case another caller populated the cache
+        # while we were waiting.
+        now = time.monotonic()
+        cached = _discovery_cache
+        if cached is not None and now - cached[0] < _DISCOVERY_TTL:
+            return list(cached[1])
+
+        result = await _discover_fallback_ips_uncached()
+        _discovery_cache = (time.monotonic(), list(result))
+        return list(result)
+
+
+async def _discover_fallback_ips_uncached() -> list[str]:
+    """Perform DoH discovery without consulting the TTL cache."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(_DOH_TIMEOUT)) as client:
         doh_tasks = [_query_doh_provider(client, p) for p in _DOH_PROVIDERS]
         system_dns_task = asyncio.to_thread(_resolve_system_dns)

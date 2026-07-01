@@ -27,8 +27,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils import atomic_json_write
 
-import requests
-
 logger = logging.getLogger(__name__)
 
 MODELS_DEV_URL = "https://models.dev/api.json"
@@ -288,6 +286,8 @@ def fetch_models_dev(force_refresh: bool = False) -> Dict[str, Any]:
 
     # Stage 3: network fetch.
     try:
+        import requests
+
         response = requests.get(MODELS_DEV_URL, timeout=15)
         response.raise_for_status()
         data = response.json()
@@ -342,13 +342,18 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
         if ctx:
             return ctx
 
-    # Case-insensitive match
+    # Build a single lowercased-key index so the case-insensitive lookups
+    # below are O(1) instead of re-scanning models.items() (and recomputing
+    # mid.lower()) once per model variant. This is a hot path.
     model_lower = model.lower()
-    for mid, mdata in models.items():
-        if mid.lower() == model_lower:
-            ctx = _extract_context(mdata)
-            if ctx:
-                return ctx
+    lower_index = {mid.lower(): mdata for mid, mdata in models.items()}
+
+    # Case-insensitive match
+    mdata = lower_index.get(model_lower)
+    if mdata is not None:
+        ctx = _extract_context(mdata)
+        if ctx:
+            return ctx
 
     # Suffix-aware fallback: some providers (e.g. ollama-cloud) store
     # model IDs with :cloud / -cloud suffixes in models.dev while the
@@ -366,11 +371,11 @@ def lookup_models_dev_context(provider: str, model: str) -> Optional[int]:
                 return ctx
         # Also try case-insensitive
         suffixed_lower = model_lower + suffix
-        for mid, mdata in models.items():
-            if mid.lower() == suffixed_lower:
-                ctx = _extract_context(mdata)
-                if ctx:
-                    return ctx
+        mdata = lower_index.get(suffixed_lower)
+        if mdata is not None:
+            ctx = _extract_context(mdata)
+            if ctx:
+                return ctx
 
     return None
 

@@ -96,6 +96,22 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
     _adapter_key = web.AppKey("adapter", UpstreamAdapter)
     app[_adapter_key] = adapter
 
+    # One shared ClientSession per app — enables connection pooling / keep-alive
+    # to the upstream so we don't pay a fresh TCP+TLS handshake per request.
+    _timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300)
+    _session_key = web.AppKey("client_session", aiohttp.ClientSession)
+
+    async def _on_startup(app: "web.Application") -> None:
+        app[_session_key] = aiohttp.ClientSession(timeout=_timeout)
+
+    async def _on_cleanup(app: "web.Application") -> None:
+        session = app.get(_session_key)
+        if session is not None:
+            await session.close()
+
+    app.on_startup.append(_on_startup)
+    app.on_cleanup.append(_on_cleanup)
+
     async def handle_health(request: "web.Request") -> "web.Response":
         return web.json_response(
             {
@@ -142,7 +158,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
         # the request body too.
         body = await request.read()
 
-        timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300)
+        session = request.app[_session_key]
 
         async def _send_upstream(active_cred: UpstreamCredential):
             upstream_url = f"{active_cred.base_url.rstrip('/')}{rel_path}"
@@ -158,53 +174,41 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
                 request.method, rel_path, upstream_url, len(body),
             )
 
-            try:
-                session = aiohttp.ClientSession(timeout=timeout)
-            except Exception as exc:  # pragma: no cover - aiohttp setup issue
-                raise RuntimeError(f"proxy session init failed: {exc}") from exc
-
-            try:
-                upstream_resp = await session.request(
-                    request.method,
-                    upstream_url,
-                    data=body if body else None,
-                    headers=fwd_headers,
-                    allow_redirects=False,
-                )
-            except Exception:
-                await session.close()
-                raise
-            return session, upstream_resp
+            upstream_resp = await session.request(
+                request.method,
+                upstream_url,
+                data=body if body else None,
+                headers=fwd_headers,
+                allow_redirects=False,
+            )
+            return upstream_resp
 
         async def _open_upstream(active_cred: UpstreamCredential):
             try:
-                return await _send_upstream(active_cred)
-            except RuntimeError as exc:
-                return _json_error(500, str(exc)), None
+                return await _send_upstream(active_cred), None
             except aiohttp.ClientError as exc:
                 logger.warning("proxy: upstream connection failed: %s", exc)
                 return (
+                    None,
                     _json_error(
                         502,
                         f"upstream connection failed: {exc}",
                         code="upstream_unreachable",
                     ),
-                    None,
                 )
             except asyncio.TimeoutError:
                 return (
+                    None,
                     _json_error(
                         504,
                         "upstream request timed out",
                         code="upstream_timeout",
                     ),
-                    None,
                 )
 
-        session_or_response, upstream_resp = await _open_upstream(cred)
+        upstream_resp, error_response = await _open_upstream(cred)
         if upstream_resp is None:
-            return session_or_response
-        session = session_or_response
+            return error_response
 
         if upstream_resp.status == 401:
             try:
@@ -218,11 +222,9 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
 
             if retry_cred is not None:
                 upstream_resp.release()
-                await session.close()
-                session_or_response, upstream_resp = await _open_upstream(retry_cred)
+                upstream_resp, error_response = await _open_upstream(retry_cred)
                 if upstream_resp is None:
-                    return session_or_response
-                session = session_or_response
+                    return error_response
 
         # Stream response back. Headers first, then chunked body.
         resp = web.StreamResponse(
@@ -239,7 +241,6 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
             logger.warning("proxy: streaming interrupted: %s", exc)
         finally:
             upstream_resp.release()
-            await session.close()
 
         await resp.write_eof()
         return resp

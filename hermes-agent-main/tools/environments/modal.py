@@ -292,6 +292,30 @@ class ModalEnvironment(BaseEnvironment):
         self._sync_manager.sync(force=True)
         self.init_session()
 
+    async def _stream_stdin(self, cmd: str, payload: str, *, check: bool = False) -> None:
+        """Run ``cmd`` and stream ``payload`` through its stdin in chunks.
+
+        Chunks ``payload`` by ``self._STDIN_CHUNK_SIZE`` with a ``drain()``
+        between writes to stay under the SDK's per-write buffer limit
+        (2 MB legacy / 16 MB router), writes EOF, and waits for the process.
+        When ``check`` is set, raises ``RuntimeError`` on a non-zero exit.
+        """
+        proc = await self._sandbox.exec.aio("bash", "-c", cmd)
+        offset = 0
+        chunk_size = self._STDIN_CHUNK_SIZE
+        while offset < len(payload):
+            proc.stdin.write(payload[offset:offset + chunk_size])
+            await proc.stdin.drain.aio()
+            offset += chunk_size
+        proc.stdin.write_eof()
+        await proc.stdin.drain.aio()
+        exit_code = await proc.wait.aio()
+        if check and exit_code != 0:
+            stderr_text = await proc.stderr.read.aio()
+            raise RuntimeError(
+                f"Modal stdin stream failed (exit {exit_code}): {stderr_text}"
+            )
+
     def _modal_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via base64 piped through stdin."""
         content = Path(host_path).read_bytes()
@@ -302,19 +326,7 @@ class ModalEnvironment(BaseEnvironment):
             f"base64 -d > {shlex.quote(remote_path)}"
         )
 
-        async def _write():
-            proc = await self._sandbox.exec.aio("bash", "-c", cmd)
-            offset = 0
-            chunk_size = self._STDIN_CHUNK_SIZE
-            while offset < len(b64):
-                proc.stdin.write(b64[offset:offset + chunk_size])
-                await proc.stdin.drain.aio()
-                offset += chunk_size
-            proc.stdin.write_eof()
-            await proc.stdin.drain.aio()
-            await proc.wait.aio()
-
-        self._worker.run_coroutine(_write(), timeout=30)
+        self._worker.run_coroutine(self._stream_stdin(cmd, b64), timeout=30)
 
     # Modal SDK stdin buffer limit (legacy server path).  The command-router
     # path allows 16 MB, but we must stay under the smaller 2 MB cap for
@@ -342,29 +354,9 @@ class ModalEnvironment(BaseEnvironment):
         mkdir_part = quoted_mkdir_command(parents)
         cmd = f"{mkdir_part} && base64 -d | tar xzf - -C /"
 
-        async def _bulk():
-            proc = await self._sandbox.exec.aio("bash", "-c", cmd)
-
-            # Stream payload through stdin in chunks to stay under the
-            # SDK's per-write buffer limit (2 MB legacy / 16 MB router).
-            offset = 0
-            chunk_size = self._STDIN_CHUNK_SIZE
-            while offset < len(payload):
-                proc.stdin.write(payload[offset:offset + chunk_size])
-                await proc.stdin.drain.aio()
-                offset += chunk_size
-
-            proc.stdin.write_eof()
-            await proc.stdin.drain.aio()
-
-            exit_code = await proc.wait.aio()
-            if exit_code != 0:
-                stderr_text = await proc.stderr.read.aio()
-                raise RuntimeError(
-                    f"Modal bulk upload failed (exit {exit_code}): {stderr_text}"
-                )
-
-        self._worker.run_coroutine(_bulk(), timeout=120)
+        self._worker.run_coroutine(
+            self._stream_stdin(cmd, payload, check=True), timeout=120
+        )
 
     def _modal_bulk_download(self, dest: Path) -> None:
         """Download remote .takyon/ as a tar archive.

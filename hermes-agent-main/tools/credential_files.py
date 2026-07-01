@@ -251,7 +251,30 @@ def _safe_skills_path(skills_dir: Path) -> str:
     """Return *skills_dir* if symlink-free, else a sanitized temp copy."""
     global _safe_skills_tempdir
 
-    symlinks = [p for p in skills_dir.rglob("*") if p.is_symlink()]
+    # Single traversal: collect non-symlink dirs/files to replicate and note
+    # any symlinks found.  Only fall into copy mode if a symlink was seen.
+    symlinks: list[Path] = []
+    dirs_to_make: list[Path] = []
+    files_to_copy: list[Path] = []
+    for root, dir_names, file_names in os.walk(skills_dir):
+        root_path = Path(root)
+        kept_dirs = []
+        for name in dir_names:
+            entry = root_path / name
+            if entry.is_symlink():
+                symlinks.append(entry)
+            else:
+                dirs_to_make.append(entry)
+                kept_dirs.append(name)
+        # Prune symlinked directories so os.walk does not descend into them.
+        dir_names[:] = kept_dirs
+        for name in file_names:
+            entry = root_path / name
+            if entry.is_symlink():
+                symlinks.append(entry)
+            else:
+                files_to_copy.append(entry)
+
     if not symlinks:
         return str(skills_dir)
 
@@ -270,16 +293,14 @@ def _safe_skills_path(skills_dir: Path) -> str:
     safe_dir = Path(tempfile.mkdtemp(prefix="takyon-skills-safe-"))
     _safe_skills_tempdir = safe_dir
 
-    for item in skills_dir.rglob("*"):
-        if item.is_symlink():
-            continue
+    for item in dirs_to_make:
+        rel = item.relative_to(skills_dir)
+        (safe_dir / rel).mkdir(parents=True, exist_ok=True)
+    for item in files_to_copy:
         rel = item.relative_to(skills_dir)
         target = safe_dir / rel
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif item.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(item), str(target))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(item), str(target))
 
     def _cleanup():
         if safe_dir.is_dir():
