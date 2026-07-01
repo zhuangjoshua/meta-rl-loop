@@ -1023,7 +1023,12 @@ def _run_ceo_turn(
 
     from takyon_cli.runtime_provider import resolve_runtime_provider
 
-    from .cli import _read_model_config, _require_agent_model_config
+    from .cli import (
+        _read_model_config,
+        _reasoning_progress_callback,
+        _require_agent_model_config,
+        _takyon_reasoning_config,
+    )
     from .core import TakyonStore, load_takyon_env
     from .operator_gateway import build_operator_gateway_agent
 
@@ -1062,6 +1067,8 @@ def _run_ceo_turn(
             "skip_context_files": True,
             "platform": "takyon",
             "quiet_mode": True,
+            "reasoning_config": _takyon_reasoning_config(),
+            "reasoning_callback": _reasoning_progress_callback(progress) if progress is not None else None,
             "tool_progress_callback": progress.tool_progress if progress is not None else None,
             "tool_start_callback": progress.tool_started if progress is not None else None,
             "tool_gen_callback": progress.tool_generating if progress is not None else None,

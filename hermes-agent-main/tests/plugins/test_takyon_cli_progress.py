@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import sqlite3
@@ -243,6 +244,205 @@ def test_runtime_progress_records_reasoning_summary(monkeypatch):
 
     lines = [item.get("line") for item in recorded if item.get("status") == "output"]
     assert "reasoning -> Plan the landing brief before running the product surface tools." in lines
+
+
+def test_run_agent_wires_reasoning_config_and_callback(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeProgress:
+        def __init__(self, enabled, *, raw_hermes=False):
+            self.enabled = bool(enabled)
+            self.streamed_chars = 0
+            self.tool_progress_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def tool_progress(self, *args, **kwargs):
+            self.tool_progress_calls.append((args, kwargs))
+
+        def tool_started(self, *_args, **_kwargs):
+            pass
+
+        def tool_generating(self, *_args, **_kwargs):
+            pass
+
+        def tool_completed(self, *_args, **_kwargs):
+            pass
+
+        def activity(self, *_args, **_kwargs):
+            pass
+
+        def start_thinking(self):
+            pass
+
+        def _stop_thinking(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeStream:
+        def __init__(self, *, progress, store, business_slug):
+            captured["progress"] = progress
+
+        def hermes_turn(self, *_args, **_kwargs):
+            pass
+
+        def stream_delta(self, *_args, **_kwargs):
+            pass
+
+        def finish_stream(self):
+            pass
+
+    class FakeAgent:
+        def __init__(self):
+            self.session_estimated_cost_usd = 0.0
+            self.session_cost_status = "ok"
+            self._memory_nudge_interval = 0
+            self._skill_nudge_interval = 0
+            self.activity_callback = None
+            self.suppress_status_output = False
+
+        def run_conversation(self, _prompt, stream_callback=None):
+            captured["stream_callback"] = stream_callback
+            callback = captured["agent_kwargs"]["reasoning_callback"]
+            assert callback is not None
+            callback("Plan the landing brief before running the product surface tools.")
+            return {"final_response": "Done"}
+
+    def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
+        captured["runtime"] = runtime
+        captured["agent_kwargs"] = agent_kwargs
+        return FakeAgent()
+
+    monkeypatch.setattr(cli, "load_takyon_env", lambda: None)
+    monkeypatch.setattr(cli, "_load_ceo_prompt", lambda: "ceo")
+    monkeypatch.setattr(cli, "TakyonStore", lambda: _FakeStore())
+    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(cli, "_config_bool", lambda value, default=False: default if value in {None, ""} else bool(value))
+    monkeypatch.setattr(cli, "_resolved_operator_user_id", lambda _value=None: "")
+    monkeypatch.setattr(cli, "_ShellProgress", FakeProgress)
+    monkeypatch.setattr(cli, "_ShellRuntimeStream", FakeStream)
+    monkeypatch.setattr(cli, "_business_workspace_execution_context", lambda *_args, **_kwargs: contextlib.nullcontext(None))
+    monkeypatch.setattr(cli, "_silence_process_stdio", lambda: contextlib.nullcontext())
+    monkeypatch.setattr(cli, "_AgentLogTail", lambda enabled=False: contextlib.nullcontext())
+    monkeypatch.setattr(
+        "takyon_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {"provider": "anthropic", "api_mode": "anthropic_messages"},
+    )
+    monkeypatch.setattr("plugins.takyon.operator_gateway.build_operator_gateway_agent", fake_builder)
+
+    response, _meta = cli._run_agent_with_meta(
+        "ship it",
+        model="",
+        max_turns=3,
+        show_activity=False,
+        show_indicator=True,
+        current_business="demo",
+    )
+
+    assert response == "Done"
+    assert captured["agent_kwargs"]["reasoning_config"] == {"enabled": True, "effort": "medium"}
+    assert captured["progress"].tool_progress_calls == [
+        (
+            (
+                "reasoning.available",
+                "_thinking",
+                "Plan the landing brief before running the product surface tools.",
+                None,
+            ),
+            {},
+        )
+    ]
+
+
+def test_worker_run_ceo_turn_wires_reasoning_config_and_callback(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeProgress:
+        def __init__(self):
+            self.tool_progress_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        def tool_progress(self, *args, **kwargs):
+            self.tool_progress_calls.append((args, kwargs))
+
+        def tool_started(self, *_args, **_kwargs):
+            pass
+
+        def tool_generating(self, *_args, **_kwargs):
+            pass
+
+        def tool_completed(self, *_args, **_kwargs):
+            pass
+
+        def activity(self, *_args, **_kwargs):
+            pass
+
+        def stream_delta(self, *_args, **_kwargs):
+            pass
+
+        def finish_stream(self):
+            pass
+
+    class FakeAgent:
+        def __init__(self):
+            self.session_estimated_cost_usd = 0.0
+            self.session_cost_status = "ok"
+            self._memory_nudge_interval = 0
+            self._skill_nudge_interval = 0
+            self.activity_callback = None
+            self.suppress_status_output = False
+
+        def run_conversation(self, _prompt, stream_callback=None):
+            captured["stream_callback"] = stream_callback
+            callback = captured["agent_kwargs"]["reasoning_callback"]
+            assert callback is not None
+            callback("Draft the pricing copy before the checkout pass.")
+            return {"final_response": "Done", "completed": True}
+
+    def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
+        captured["runtime"] = runtime
+        captured["agent_kwargs"] = agent_kwargs
+        return FakeAgent()
+
+    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+    monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
+    monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
+    monkeypatch.setattr(
+        "takyon_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {"provider": "anthropic", "api_mode": "anthropic_messages"},
+    )
+    monkeypatch.setattr("plugins.takyon.operator_gateway.build_operator_gateway_agent", fake_builder)
+
+    progress = FakeProgress()
+    response, cost_usd, cost_status, turn_completed = worker._run_ceo_turn(
+        slug="demo",
+        system_prompt="ceo",
+        user_prompt="ship it",
+        toolsets=["takyon"],
+        max_turns=3,
+        inactivity_limit=0,
+        progress=progress,
+    )
+
+    assert response == "Done"
+    assert cost_usd == 0.0
+    assert cost_status == "ok"
+    assert turn_completed is True
+    assert captured["agent_kwargs"]["reasoning_config"] == {"enabled": True, "effort": "medium"}
+    assert progress.tool_progress_calls == [
+        (
+            (
+                "reasoning.available",
+                "_thinking",
+                "Draft the pricing copy before the checkout pass.",
+                None,
+            ),
+            {},
+        )
+    ]
 
 
 def test_runtime_event_tail_prints_ceo_stream_only():

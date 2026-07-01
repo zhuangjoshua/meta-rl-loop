@@ -177,6 +177,27 @@ def _reasoning_progress_text(name: str | None, preview: str | None) -> str:
     return _normalize_progress_text(candidate, limit=220)
 
 
+def _takyon_reasoning_config(effort: str | None = None) -> dict[str, Any]:
+    level = str(effort or "").strip().lower()
+    if level in {"off", "none", "disable", "disabled"}:
+        return {"enabled": False}
+    if level not in {"minimal", "low", "medium", "high", "max", "xhigh"}:
+        level = "medium"
+    return {"enabled": True, "effort": level}
+
+
+def _reasoning_progress_callback(progress: Any) -> Callable[[str], None] | None:
+    if progress is None:
+        return None
+
+    def _callback(text: str) -> None:
+        note = _normalize_progress_text(text, limit=220)
+        if note:
+            progress.tool_progress("reasoning.available", "_thinking", note, None)
+
+    return _callback
+
+
 def _follow_chat_matches_stream(streamed_text: str, chat_text: str) -> bool:
     streamed = _normalize_progress_text(streamed_text)
     chat = _normalize_progress_text(chat_text)
@@ -4845,6 +4866,8 @@ def _run_agent_with_meta(
                 "skip_context_files": True,
                 "platform": "takyon",
                 "quiet_mode": not show_agent_activity,
+                "reasoning_config": _takyon_reasoning_config(),
+                "reasoning_callback": _reasoning_progress_callback(progress) if progress.enabled else None,
                 "tool_progress_callback": progress.tool_progress if progress.enabled else None,
                 "tool_start_callback": progress.tool_started if progress.enabled else None,
                 "tool_gen_callback": progress.tool_generating if progress.enabled else None,
