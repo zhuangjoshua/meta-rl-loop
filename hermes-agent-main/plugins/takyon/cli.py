@@ -56,10 +56,48 @@ _BOOTSTRAP_WORKFLOW_REQUEST_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_BOOTSTRAP_PRODUCT_SHAPE_RE = re.compile(
+    r"\b("
+    r"saas|software|app|application|platform|tool|assistant|copilot|service|portal|dashboard|"
+    r"generator|tracker|planner|coach"
+    r")\b",
+    re.IGNORECASE,
+)
+_BOOTSTRAP_CUSTOMER_ACTION_RE = re.compile(
+    r"\b("
+    r"helps?|lets?|allows?|enables?|"
+    r"customers?\s+can|users?\s+can|subscribers?\s+can|"
+    r"enter(?:s|ing)?|upload(?:s|ing)?|draft(?:s|ing)?|generate(?:s|d|ing)?|"
+    r"track(?:s|ing)?|plan(?:s|ning)?|calculate(?:s|ing)?|analy[sz]e(?:s|d|ing)?|"
+    r"compare(?:s|d|ing)?|organize(?:s|d|ing)?|summari[sz]e(?:s|d|ing)?|"
+    r"rewrite(?:s|d|ing)?|convert(?:s|ed|ing)?|automate(?:s|d|ing)?|"
+    r"dispute(?:s|d|ing)?|quote(?:s|d|ing)?|schedule(?:s|d|ing)?|"
+    r"transcribe(?:s|d|ing)?|classif(?:y|ies|ied|ying)|extract(?:s|ed|ing)?"
+    r")\b",
+    re.IGNORECASE,
+)
+_BOOTSTRAP_FEATURE_NOUN_RE = re.compile(
+    r"\b("
+    r"automation|generator|planner|tracker|calculator|assistant|copilot|workflow|"
+    r"report(?:s)?|letter(?:s)?|evidence|deadline(?:s)?|timeline|analysis|"
+    r"summary|summaries|quiz(?:zes)?|flashcards?|invoice(?:s)?|proposal(?:s)?|"
+    r"resume(?:s)?|forecast(?:s)?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _bootstrap_goal_requests_product_workflow(goal: str) -> bool:
-    return bool(_BOOTSTRAP_WORKFLOW_REQUEST_RE.search(str(goal or "")))
+    text = " ".join(str(goal or "").split())
+    if not text:
+        return False
+    if _BOOTSTRAP_WORKFLOW_REQUEST_RE.search(text):
+        return True
+    if not _BOOTSTRAP_PRODUCT_SHAPE_RE.search(text):
+        return False
+    if _BOOTSTRAP_CUSTOMER_ACTION_RE.search(text):
+        return True
+    return " with " in text.lower() and bool(_BOOTSTRAP_FEATURE_NOUN_RE.search(text))
 
 
 def _bootstrap_turn_cap_for_goal(goal: str) -> int:

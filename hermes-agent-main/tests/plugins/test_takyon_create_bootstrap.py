@@ -192,6 +192,23 @@ def test_create_caps_bootstrap_turn_budget(monkeypatch):
     }
 
 
+def test_bootstrap_goal_requests_product_workflow_for_featureful_saas_goal():
+    goal = (
+        "Build a consumer SaaS that helps renters dispute unfair security-deposit deductions "
+        "with photo evidence, statute-aware deadlines, and demand-letter automation."
+    )
+
+    assert takyon_cli._bootstrap_goal_requests_product_workflow(goal) is True
+    assert takyon_cli._bootstrap_turn_cap_for_goal(goal) == takyon_cli._WORKFLOW_BOOTSTRAP_MAX_TURNS
+
+
+def test_bootstrap_goal_does_not_flag_simple_brand_goal_as_product_workflow():
+    goal = "Overleaf competitor for legal teams."
+
+    assert takyon_cli._bootstrap_goal_requests_product_workflow(goal) is False
+    assert takyon_cli._bootstrap_turn_cap_for_goal(goal) == takyon_cli._DEFAULT_BOOTSTRAP_MAX_TURNS
+
+
 def test_ensure_ceo_wakeup_can_defer_first_run(monkeypatch, tmp_path):
     store = TakyonStore(tmp_path)
 
