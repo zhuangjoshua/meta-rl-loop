@@ -36,6 +36,11 @@ from agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
 
+# Default per-call timeout (seconds) for Parallel SDK network requests.
+# Bounds each web search/extract so an unresponsive Parallel.ai cannot hang
+# the agent turn indefinitely.
+_PARALLEL_TIMEOUT_SECONDS = 30.0
+
 # Module-level note: the canonical cache slots ``_parallel_client`` and
 # ``_async_parallel_client`` live on :mod:`tools.web_tools` so tests that do
 # ``tools.web_tools._parallel_client = None`` between cases see fresh state.
@@ -83,7 +88,7 @@ def _get_sync_client() -> Any:
     _ensure_parallel_sdk_installed()
     from parallel import Parallel  # noqa: WPS433 — deliberately lazy
 
-    client = Parallel(api_key=api_key)
+    client = Parallel(api_key=api_key, timeout=_PARALLEL_TIMEOUT_SECONDS)
     _wt._parallel_client = client
     return client
 
@@ -109,7 +114,7 @@ def _get_async_client() -> Any:
     _ensure_parallel_sdk_installed()
     from parallel import AsyncParallel  # noqa: WPS433 — deliberately lazy
 
-    client = AsyncParallel(api_key=api_key)
+    client = AsyncParallel(api_key=api_key, timeout=_PARALLEL_TIMEOUT_SECONDS)
     _wt._async_parallel_client = client
     return client
 

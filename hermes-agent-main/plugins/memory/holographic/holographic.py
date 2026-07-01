@@ -19,6 +19,7 @@ References:
   Gayler (2004) — Vector Symbolic Architectures answer Jackendoff's challenges
 """
 
+import functools
 import hashlib
 import logging
 import struct
@@ -40,20 +41,13 @@ def _require_numpy() -> None:
         raise RuntimeError("numpy is required for holographic operations")
 
 
-def encode_atom(word: str, dim: int = 1024) -> "np.ndarray":
-    """Deterministic phase vector via SHA-256 counter blocks.
+@functools.lru_cache(maxsize=8192)
+def _encode_atom_cached(word: str, dim: int) -> "np.ndarray":
+    """Compute the deterministic phase vector (cached, immutable result).
 
-    Uses hashlib (not numpy RNG) for cross-platform reproducibility.
-
-    Algorithm:
-    - Generate enough SHA-256 blocks by hashing f"{word}:{i}" for i=0,1,2,...
-    - Concatenate digests, interpret as uint16 values via struct.unpack
-    - Scale to [0, 2π): phases = values * (2π / 65536)
-    - Truncate to dim elements
-    - Returns np.float64 array of shape (dim,)
+    The cached array must never be mutated by callers; ``encode_atom``
+    returns a copy to preserve the previous mutable contract.
     """
-    _require_numpy()
-
     # Each SHA-256 digest is 32 bytes = 16 uint16 values.
     values_per_block = 16
     blocks_needed = math.ceil(dim / values_per_block)
@@ -65,6 +59,25 @@ def encode_atom(word: str, dim: int = 1024) -> "np.ndarray":
 
     phases = np.array(uint16_values[:dim], dtype=np.float64) * (_TWO_PI / 65536.0)
     return phases
+
+
+def encode_atom(word: str, dim: int = 1024) -> "np.ndarray":
+    """Deterministic phase vector via SHA-256 counter blocks.
+
+    Uses hashlib (not numpy RNG) for cross-platform reproducibility.
+
+    Algorithm:
+    - Generate enough SHA-256 blocks by hashing f"{word}:{i}" for i=0,1,2,...
+    - Concatenate digests, interpret as uint16 values via struct.unpack
+    - Scale to [0, 2π): phases = values * (2π / 65536)
+    - Truncate to dim elements
+    - Returns np.float64 array of shape (dim,)
+
+    Results are cached (atoms are immutable); a fresh copy is returned each
+    call so callers may safely mutate the array in place.
+    """
+    _require_numpy()
+    return _encode_atom_cached(word, dim).copy()
 
 
 def bind(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":

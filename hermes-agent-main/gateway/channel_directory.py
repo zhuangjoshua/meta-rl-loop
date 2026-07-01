@@ -67,12 +67,16 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
 
     platforms: Dict[str, List[Dict[str, str]]] = {}
 
+    # Parse sessions.json once and reuse it for every per-platform filter below,
+    # avoiding N re-reads / re-parses of the same file per directory build.
+    sessions_data = _load_sessions_data()
+
     for platform, adapter in adapters.items():
         try:
             if platform == Platform.DISCORD:
-                platforms["discord"] = _build_discord(adapter)
+                platforms["discord"] = _build_discord(adapter, sessions_data)
             elif platform == Platform.SLACK:
-                platforms["slack"] = await _build_slack(adapter)
+                platforms["slack"] = await _build_slack(adapter, sessions_data)
         except Exception as e:
             logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
 
@@ -84,7 +88,7 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         plat_name = plat.value
         if plat_name in _SKIP_SESSION_DISCOVERY or plat_name in platforms:
             continue
-        platforms[plat_name] = _build_from_sessions(plat_name)
+        platforms[plat_name] = _build_from_sessions(plat_name, sessions_data)
 
     # Include plugin-registered platforms (dynamic enum members aren't in
     # Platform.__members__, so the loop above misses them).
@@ -92,7 +96,7 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             if entry.name not in _SKIP_SESSION_DISCOVERY and entry.name not in platforms:
-                platforms[entry.name] = _build_from_sessions(entry.name)
+                platforms[entry.name] = _build_from_sessions(entry.name, sessions_data)
     except Exception:
         pass
 
@@ -109,7 +113,7 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     return directory
 
 
-def _build_discord(adapter) -> List[Dict[str, str]]:
+def _build_discord(adapter, sessions_data: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
     """Enumerate all text channels and forum channels the Discord bot can see."""
     channels = []
     client = getattr(adapter, "_client", None)
@@ -142,11 +146,11 @@ def _build_discord(adapter) -> List[Dict[str, str]]:
         # feasible via guild enumeration; those come from sessions.
 
     # Merge any DMs from session history
-    channels.extend(_build_from_sessions("discord"))
+    channels.extend(_build_from_sessions("discord", sessions_data))
     return channels
 
 
-async def _build_slack(adapter) -> List[Dict[str, Any]]:
+async def _build_slack(adapter, sessions_data: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """List Slack channels the bot has joined across all workspaces.
 
     Uses ``users.conversations`` against each workspace's web client. Pulls
@@ -156,7 +160,7 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
     """
     team_clients = getattr(adapter, "_team_clients", None) or {}
     if not team_clients:
-        return _build_from_sessions("slack")
+        return _build_from_sessions("slack", sessions_data)
 
     channels: List[Dict[str, Any]] = []
     seen_ids: set = set()
@@ -200,7 +204,7 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
             continue
 
     # Merge in DM/group entries discovered from session history.
-    for entry in _build_from_sessions("slack"):
+    for entry in _build_from_sessions("slack", sessions_data):
         if entry.get("id") not in seen_ids:
             channels.append(entry)
             seen_ids.add(entry.get("id"))
@@ -208,19 +212,36 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
     return channels
 
 
-def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
-    """Pull known channels/contacts from sessions.json origin data."""
+def _load_sessions_data() -> Optional[Dict[str, Any]]:
+    """Read and parse sessions.json once, returning the parsed dict or None."""
     sessions_path = get_takyon_home() / "sessions" / "sessions.json"
     if not sessions_path.exists():
+        return None
+    try:
+        with open(sessions_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.debug("Channel directory: failed to read sessions.json: %s", e)
+        return None
+
+
+def _build_from_sessions(
+    platform_name: str, sessions_data: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, str]]:
+    """Pull known channels/contacts from sessions.json origin data.
+
+    ``sessions_data`` is the already-parsed sessions.json dict; when omitted it
+    is loaded on demand (preserving standalone-call behavior).
+    """
+    if sessions_data is None:
+        sessions_data = _load_sessions_data()
+    if not sessions_data:
         return []
 
     entries = []
     try:
-        with open(sessions_path, encoding="utf-8") as f:
-            data = json.load(f)
-
         seen_ids = set()
-        for _key, session in data.items():
+        for _key, session in sessions_data.items():
             origin = session.get("origin") or {}
             if origin.get("platform") != platform_name:
                 continue

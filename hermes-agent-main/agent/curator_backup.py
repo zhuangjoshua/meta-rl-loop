@@ -77,7 +77,9 @@ def _skills_dir() -> Path:
 
 def _cron_jobs_file() -> Path:
     """Source path for the live cron jobs store (``~/.takyon/cron/jobs.json``)."""
-    return get_takyon_home() / "cron" / "jobs.json"
+    from cron.jobs import cron_jobs_path
+
+    return cron_jobs_path()
 
 
 CRON_JOBS_FILENAME = "cron-jobs.json"

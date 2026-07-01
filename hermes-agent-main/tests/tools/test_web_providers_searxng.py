@@ -72,7 +72,7 @@ class TestSearXNGSearchProviderSearch:
         from plugins.web.searxng.provider import SearXNGWebSearchProvider
         mock_resp = self._make_mock_response(self._SAMPLE_RESPONSE)
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.Client.get", return_value=mock_resp):
             result = SearXNGWebSearchProvider().search("test query", limit=5)
 
         assert result["success"] is True
@@ -96,7 +96,7 @@ class TestSearXNGSearchProviderSearch:
         }
         mock_resp = self._make_mock_response(unordered)
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.Client.get", return_value=mock_resp):
             result = SearXNGWebSearchProvider().search("query", limit=5)
 
         assert result["success"] is True
@@ -109,7 +109,7 @@ class TestSearXNGSearchProviderSearch:
         from plugins.web.searxng.provider import SearXNGWebSearchProvider
         mock_resp = self._make_mock_response(self._SAMPLE_RESPONSE)
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.Client.get", return_value=mock_resp):
             result = SearXNGWebSearchProvider().search("query", limit=2)
 
         assert result["success"] is True
@@ -120,7 +120,7 @@ class TestSearXNGSearchProviderSearch:
         from plugins.web.searxng.provider import SearXNGWebSearchProvider
         mock_resp = self._make_mock_response(self._SAMPLE_RESPONSE)
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.Client.get", return_value=mock_resp):
             result = SearXNGWebSearchProvider().search("query", limit=5)
 
         positions = [r["position"] for r in result["data"]["web"]]
@@ -131,7 +131,7 @@ class TestSearXNGSearchProviderSearch:
         from plugins.web.searxng.provider import SearXNGWebSearchProvider
         mock_resp = self._make_mock_response({"results": []})
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.Client.get", return_value=mock_resp):
             result = SearXNGWebSearchProvider().search("nothing", limit=5)
 
         assert result["success"] is True
@@ -149,7 +149,7 @@ class TestSearXNGSearchProviderSearch:
         }
         mock_resp = self._make_mock_response(data)
 
-        with patch("httpx.get", return_value=mock_resp):
+        with patch("httpx.Client.get", return_value=mock_resp):
             result = SearXNGWebSearchProvider().search("query", limit=5)
 
         assert result["success"] is True
@@ -165,7 +165,7 @@ class TestSearXNGSearchProviderSearch:
         mock_resp.status_code = 500
         http_err = httpx.HTTPStatusError("500", request=MagicMock(), response=mock_resp)
 
-        with patch("httpx.get", side_effect=http_err):
+        with patch("httpx.Client.get", side_effect=http_err):
             result = SearXNGWebSearchProvider().search("query", limit=5)
 
         assert result["success"] is False
@@ -176,7 +176,7 @@ class TestSearXNGSearchProviderSearch:
         monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
         from plugins.web.searxng.provider import SearXNGWebSearchProvider
 
-        with patch("httpx.get", side_effect=httpx.RequestError("connection refused")):
+        with patch("httpx.Client.get", side_effect=httpx.RequestError("connection refused")):
             result = SearXNGWebSearchProvider().search("query", limit=5)
 
         assert result["success"] is False
@@ -201,7 +201,7 @@ class TestSearXNGSearchProviderSearch:
             calls.append(url)
             return mock_resp
 
-        with patch("httpx.get", side_effect=capture_get):
+        with patch("httpx.Client.get", side_effect=capture_get):
             SearXNGWebSearchProvider().search("query", limit=5)
 
         assert calls[0] == "http://localhost:8080/search", f"Got: {calls[0]}"

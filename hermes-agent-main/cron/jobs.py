@@ -38,9 +38,19 @@ except ImportError:
 # Configuration
 # =============================================================================
 
-TAKYON_DIR = get_takyon_home().resolve()
-CRON_DIR = TAKYON_DIR / "cron"
-JOBS_FILE = CRON_DIR / "jobs.json"
+def cron_jobs_path() -> Path:
+    """Single source of truth for the cron jobs file location.
+
+    Returns ``<takyon_home>/cron/jobs.json``. Both this module and other
+    modules that need to resolve the cron jobs path should call this so the
+    storage-location contract lives in exactly one place.
+    """
+    return get_takyon_home().resolve() / "cron" / "jobs.json"
+
+
+JOBS_FILE = cron_jobs_path()
+CRON_DIR = JOBS_FILE.parent
+TAKYON_DIR = CRON_DIR.parent
 
 # In-process lock protecting load_jobs→modify→save_jobs cycles.
 # Required when tick() runs jobs in parallel threads — without this,

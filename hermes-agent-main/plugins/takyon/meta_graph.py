@@ -21,6 +21,7 @@ Meta with httpx ``files=``. We never round-trip through a signed/public URL.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any, Mapping
 
@@ -35,6 +36,31 @@ _GRAPH_VIDEO_HOST = "graph-video.facebook.com"
 # immediately but the creative cannot reference the video until status is
 # "ready"; we poll GET /<video_id>?fields=status until then (or timeout).
 _VIDEO_POLL_INTERVAL_S = 3.0
+
+# Shared, keep-alive httpx client reused across all Graph calls (including the
+# upload_video poll loop). Building one client per request tore down a fresh
+# connection pool + TLS handshake every time; a single module-level client
+# amortizes that across the upload+poll hot path. Created lazily so a missing
+# httpx dependency still surfaces only when a Graph call is actually made
+# (preserving prior behavior).
+_CLIENT_LOCK = threading.Lock()
+_CLIENT: Any = None
+
+
+def _client() -> Any:
+    """Return the shared, lazily-initialized keep-alive httpx.Client."""
+    global _CLIENT
+    if _CLIENT is None:
+        with _CLIENT_LOCK:
+            if _CLIENT is None:
+                try:
+                    import httpx
+                except Exception as exc:  # pragma: no cover - dependency missing
+                    raise MetaGraphError(
+                        "Meta Graph calls require the httpx package"
+                    ) from exc
+                _CLIENT = httpx.Client()
+    return _CLIENT
 
 
 def account_path(ad_account_id: str) -> str:
@@ -110,10 +136,7 @@ def _graph(
     injected as a form/query field, never logged. Any HTTP >=400 or any response
     carrying an ``error`` envelope is raised as MetaGraphError.
     """
-    try:
-        import httpx
-    except Exception as exc:  # pragma: no cover - dependency missing
-        raise MetaGraphError("Meta Graph calls require the httpx package") from exc
+    client = _client()
 
     bearer = str(token or "").strip()
     if not bearer:
@@ -133,7 +156,7 @@ def _graph(
             request_kwargs["files"] = dict(files)
 
     try:
-        resp = httpx.request(str(method).upper(), url, **request_kwargs)
+        resp = client.request(str(method).upper(), url, **request_kwargs)
     except Exception as exc:
         raise MetaGraphError(f"Meta Graph {method} /{path} failed: {exc}") from exc
 

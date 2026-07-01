@@ -24,11 +24,30 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+
+# Shared, lazily-created httpx client so repeated searches within a session
+# reuse the same TCP/TLS connection (keep-alive) instead of paying full
+# connection setup on every call.
+_CLIENT_LOCK = threading.Lock()
+_CLIENT = None
+
+
+def _get_client():
+    """Return a process-wide keep-alive ``httpx.Client``, creating it lazily."""
+    global _CLIENT
+    if _CLIENT is None:
+        with _CLIENT_LOCK:
+            if _CLIENT is None:
+                import httpx
+
+                _CLIENT = httpx.Client(timeout=15)
+    return _CLIENT
 
 
 class SearXNGWebSearchProvider(WebSearchProvider):
@@ -67,10 +86,9 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         }
 
         try:
-            resp = httpx.get(
+            resp = _get_client().get(
                 f"{base_url}/search",
                 params=params,
-                timeout=15,
                 headers={"Accept": "application/json"},
             )
             resp.raise_for_status()

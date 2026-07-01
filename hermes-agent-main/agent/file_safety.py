@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,18 @@ def build_write_denied_prefixes(home: str) -> list[str]:
     ]
 
 
+@functools.lru_cache(maxsize=None)
+def _cached_write_denied_paths(home: str, takyon_home: str) -> frozenset[str]:
+    """Cache the exact denied-path set keyed on (home, takyon_home)."""
+    return frozenset(build_write_denied_paths(home))
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_write_denied_prefixes(home: str, takyon_home: str) -> tuple[str, ...]:
+    """Cache the denied-prefix list keyed on (home, takyon_home)."""
+    return tuple(build_write_denied_prefixes(home))
+
+
 def get_safe_write_root() -> Optional[str]:
     """Return the resolved TAKYON_WRITE_SAFE_ROOT path, or None if unset."""
     root = os.getenv("TAKYON_WRITE_SAFE_ROOT", "")
@@ -75,11 +88,12 @@ def get_safe_write_root() -> Optional[str]:
 def is_write_denied(path: str) -> bool:
     """Return True if path is blocked by the write denylist or safe root."""
     home = os.path.realpath(os.path.expanduser("~"))
+    takyon_home = str(_takyon_home_path())
     resolved = os.path.realpath(os.path.expanduser(str(path)))
 
-    if resolved in build_write_denied_paths(home):
+    if resolved in _cached_write_denied_paths(home, takyon_home):
         return True
-    for prefix in build_write_denied_prefixes(home):
+    for prefix in _cached_write_denied_prefixes(home, takyon_home):
         if resolved.startswith(prefix):
             return True
 

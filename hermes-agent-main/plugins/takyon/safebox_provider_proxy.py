@@ -197,6 +197,9 @@ class _AnthropicStreamUsage:
         self.cache_read_tokens = 0
         self.cache_write_tokens = 0
         self.saw_usage = False
+        # Persistent line buffer: SSE lines can split across raw byte chunks, so we accumulate the
+        # trailing incomplete fragment here and only process complete (newline-terminated) lines.
+        self._line_buffer = ""
 
     def _apply(self, usage: dict[str, Any]) -> None:
         if not isinstance(usage, dict):
@@ -213,17 +216,33 @@ class _AnthropicStreamUsage:
 
     def feed(self, chunk: bytes) -> None:
         """Parse any ``data: {...}`` JSON lines in the chunk and pull out usage. Best-effort: malformed
-        or partial lines are ignored (the settle falls back to the estimate when no usage was seen)."""
+        lines are ignored (the settle falls back to the estimate when no usage was seen).
+
+        Maintains a persistent line buffer so a line split across raw byte chunk boundaries is
+        reassembled and parsed once, and only complete (newline-terminated) lines are processed."""
         try:
             text = chunk.decode("utf-8", errors="ignore")
         except Exception:
             return
-        for line in text.splitlines():
-            line = line.strip()
+        self._line_buffer += text
+        # Split on newline; the last element is the (possibly empty) trailing incomplete fragment,
+        # which we keep buffered for the next feed().
+        lines = self._line_buffer.split("\n")
+        self._line_buffer = lines.pop()
+        for raw in lines:
+            line = raw.strip()
             if not line.startswith("data:"):
                 continue
             payload = line[len("data:"):].strip()
             if not payload or payload == "[DONE]":
+                continue
+            # Only the message_start/message_delta/message_stop events carry usage. Cheaply skip
+            # everything else (content deltas etc.) before paying for a json.loads on the hot path.
+            if not (
+                "message_start" in payload
+                or "message_delta" in payload
+                or "message_stop" in payload
+            ):
                 continue
             try:
                 obj = _json.loads(payload)

@@ -18,8 +18,11 @@ from __future__ import annotations
 import logging
 import time
 from enum import IntEnum
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 from urllib.parse import quote
+
+if TYPE_CHECKING:
+    import httpx
 
 from .constants import (
     ONBOARD_API_TIMEOUT,
@@ -81,7 +84,10 @@ def _render_qr(url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _create_bind_task(timeout: float = ONBOARD_API_TIMEOUT) -> Tuple[str, str]:
+def _create_bind_task(
+    timeout: float = ONBOARD_API_TIMEOUT,
+    client: "Optional[httpx.Client]" = None,
+) -> Tuple[str, str]:
     """Create a bind task and return *(task_id, aes_key_base64)*.
 
     Raises:
@@ -92,10 +98,15 @@ def _create_bind_task(timeout: float = ONBOARD_API_TIMEOUT) -> Tuple[str, str]:
     url = f"https://{PORTAL_HOST}{ONBOARD_CREATE_PATH}"
     key = generate_bind_key()
 
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+    if client is not None:
         resp = client.post(url, json={"key": key}, headers=get_api_headers())
         resp.raise_for_status()
         data = resp.json()
+    else:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as owned:
+            resp = owned.post(url, json={"key": key}, headers=get_api_headers())
+            resp.raise_for_status()
+            data = resp.json()
 
     if data.get("retcode") != 0:
         raise RuntimeError(data.get("msg", "create_bind_task failed"))
@@ -111,6 +122,7 @@ def _create_bind_task(timeout: float = ONBOARD_API_TIMEOUT) -> Tuple[str, str]:
 def _poll_bind_result(
     task_id: str,
     timeout: float = ONBOARD_API_TIMEOUT,
+    client: "Optional[httpx.Client]" = None,
 ) -> Tuple[BindStatus, str, str, str]:
     """Poll the bind result for *task_id*.
 
@@ -124,10 +136,15 @@ def _poll_bind_result(
 
     url = f"https://{PORTAL_HOST}{ONBOARD_POLL_PATH}"
 
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+    if client is not None:
         resp = client.post(url, json={"task_id": task_id}, headers=get_api_headers())
         resp.raise_for_status()
         data = resp.json()
+    else:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as owned:
+            resp = owned.post(url, json={"task_id": task_id}, headers=get_api_headers())
+            resp.raise_for_status()
+            data = resp.json()
 
     if data.get("retcode") != 0:
         raise RuntimeError(data.get("msg", "poll_bind_result failed"))
@@ -163,58 +180,65 @@ def qr_register(timeout_seconds: int = 600) -> Optional[dict]:
         ``{"app_id": ..., "client_secret": ..., "user_openid": ...}`` on
         success, or ``None`` on failure / expiry / cancellation.
     """
+    import httpx
+
     deadline = time.monotonic() + timeout_seconds
 
-    for refresh_count in range(_MAX_REFRESHES + 1):
-        # ── Create bind task ──
-        try:
-            task_id, aes_key = _create_bind_task()
-        except Exception as exc:
-            logger.warning("[QQBot onboard] Failed to create bind task: %s", exc)
-            return None
-
-        url = build_connect_url(task_id)
-
-        # ── Display QR code + URL ──
-        print()
-        if _render_qr(url):
-            print(f"  Scan the QR code above, or open this URL directly:\n  {url}")
-        else:
-            print(f"  Open this URL in QQ on your phone:\n  {url}")
-            print("  Tip: pip install qrcode  to display a scannable QR code here")
-        print()
-
-        # ── Poll loop ──
-        while time.monotonic() < deadline:
+    # Reuse a single client (and its TLS connection) across all create/poll
+    # calls in this onboarding session instead of building one per request.
+    with httpx.Client(timeout=ONBOARD_API_TIMEOUT, follow_redirects=True) as client:
+        for refresh_count in range(_MAX_REFRESHES + 1):
+            # ── Create bind task ──
             try:
-                status, app_id, encrypted_secret, user_openid = _poll_bind_result(task_id)
-            except Exception:
+                task_id, aes_key = _create_bind_task(client=client)
+            except Exception as exc:
+                logger.warning("[QQBot onboard] Failed to create bind task: %s", exc)
+                return None
+
+            url = build_connect_url(task_id)
+
+            # ── Display QR code + URL ──
+            print()
+            if _render_qr(url):
+                print(f"  Scan the QR code above, or open this URL directly:\n  {url}")
+            else:
+                print(f"  Open this URL in QQ on your phone:\n  {url}")
+                print("  Tip: pip install qrcode  to display a scannable QR code here")
+            print()
+
+            # ── Poll loop ──
+            while time.monotonic() < deadline:
+                try:
+                    status, app_id, encrypted_secret, user_openid = _poll_bind_result(
+                        task_id, client=client
+                    )
+                except Exception:
+                    time.sleep(ONBOARD_POLL_INTERVAL)
+                    continue
+
+                if status == BindStatus.COMPLETED:
+                    client_secret = decrypt_secret(encrypted_secret, aes_key)
+                    print()
+                    print(f"  QR scan complete! (App ID: {app_id})")
+                    if user_openid:
+                        print(f"  Scanner's OpenID: {user_openid}")
+                    return {
+                        "app_id": app_id,
+                        "client_secret": client_secret,
+                        "user_openid": user_openid,
+                    }
+
+                if status == BindStatus.EXPIRED:
+                    if refresh_count >= _MAX_REFRESHES:
+                        logger.warning("[QQBot onboard] QR code expired %d times — giving up", _MAX_REFRESHES)
+                        return None
+                    print(f"\n  QR code expired, refreshing... ({refresh_count + 1}/{_MAX_REFRESHES})")
+                    break  # next for-loop iteration creates a new task
+
                 time.sleep(ONBOARD_POLL_INTERVAL)
-                continue
-
-            if status == BindStatus.COMPLETED:
-                client_secret = decrypt_secret(encrypted_secret, aes_key)
-                print()
-                print(f"  QR scan complete! (App ID: {app_id})")
-                if user_openid:
-                    print(f"  Scanner's OpenID: {user_openid}")
-                return {
-                    "app_id": app_id,
-                    "client_secret": client_secret,
-                    "user_openid": user_openid,
-                }
-
-            if status == BindStatus.EXPIRED:
-                if refresh_count >= _MAX_REFRESHES:
-                    logger.warning("[QQBot onboard] QR code expired %d times — giving up", _MAX_REFRESHES)
-                    return None
-                print(f"\n  QR code expired, refreshing... ({refresh_count + 1}/{_MAX_REFRESHES})")
-                break  # next for-loop iteration creates a new task
-
-            time.sleep(ONBOARD_POLL_INTERVAL)
-        else:
-            # deadline reached without completing
-            logger.warning("[QQBot onboard] Poll timed out after %ds", timeout_seconds)
-            return None
+            else:
+                # deadline reached without completing
+                logger.warning("[QQBot onboard] Poll timed out after %ds", timeout_seconds)
+                return None
 
     return None

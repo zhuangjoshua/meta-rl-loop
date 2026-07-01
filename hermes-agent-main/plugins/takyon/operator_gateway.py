@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import parse_qsl, urlparse
@@ -27,6 +28,32 @@ from urllib.parse import parse_qsl, urlparse
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_UPSTREAM_CLIENT_LOCK = threading.Lock()
+_UPSTREAM_CLIENT: httpx.Client | None = None
+
+
+def _get_upstream_client() -> httpx.Client:
+    """Return a process-wide pooled httpx.Client for upstream forwarding.
+
+    Reusing a single client preserves connection pooling / keep-alive across
+    proxied operator turns instead of paying a fresh TCP+TLS handshake per
+    request. The client is created lazily and never closed for the life of the
+    process; its connection pool is shared across all forwarded requests.
+    """
+    global _UPSTREAM_CLIENT
+    client = _UPSTREAM_CLIENT
+    if client is not None and not client.is_closed:
+        return client
+    with _UPSTREAM_CLIENT_LOCK:
+        client = _UPSTREAM_CLIENT
+        if client is None or client.is_closed:
+            client = httpx.Client(
+                timeout=httpx.Timeout(900.0, connect=10.0),
+                follow_redirects=False,
+            )
+            _UPSTREAM_CLIENT = client
+        return client
 
 _PLACEHOLDER_API_KEY = "takyon-operator-gateway"
 _OPENAI_GATEWAY_BASE_URL = "https://operator-gateway.local/v1"
@@ -61,12 +88,34 @@ def operator_gateway_placeholder_api_key() -> str:
     return _PLACEHOLDER_API_KEY
 
 
+def _operator_gateway_dispatch() -> dict[str, dict[str, Any]]:
+    """Single source of truth mapping each supported ``api_mode`` to its local
+    gateway base URL and the client-replacement function used to swap the outer
+    agent's transport. Anything not listed here falls back to the OpenAI-family
+    defaults. The replace functions are referenced here (rather than at import
+    time) because they are defined later in this module."""
+    return {
+        "anthropic_messages": {
+            "base_url": _ANTHROPIC_GATEWAY_BASE_URL,
+            "replace_fn": _replace_anthropic_gateway_client,
+        },
+    }
+
+
+def _operator_gateway_default_dispatch() -> dict[str, Any]:
+    return {
+        "base_url": _OPENAI_GATEWAY_BASE_URL,
+        "replace_fn": _replace_openai_gateway_client,
+    }
+
+
+def _operator_gateway_dispatch_for(api_mode: str) -> dict[str, Any]:
+    key = str(api_mode or "").strip().lower()
+    return _operator_gateway_dispatch().get(key, _operator_gateway_default_dispatch())
+
+
 def operator_gateway_client_base_url(api_mode: str) -> str:
-    return (
-        _ANTHROPIC_GATEWAY_BASE_URL
-        if str(api_mode or "").strip().lower() == "anthropic_messages"
-        else _OPENAI_GATEWAY_BASE_URL
-    )
+    return _operator_gateway_dispatch_for(api_mode)["base_url"]
 
 
 def build_operator_gateway_context(
@@ -126,10 +175,7 @@ def enable_operator_gateway(
     # agent should not try to re-resolve raw provider credentials.
     agent._credential_pool = None
 
-    if context.api_mode == "anthropic_messages":
-        _replace_anthropic_gateway_client(agent, context)
-    else:
-        _replace_openai_gateway_client(agent, context)
+    _operator_gateway_dispatch_for(context.api_mode)["replace_fn"](agent, context)
     return agent
 
 
@@ -243,9 +289,8 @@ def _replace_anthropic_gateway_client(agent: Any, context: OperatorGatewayContex
 
 
 class _ProxyByteStream(httpx.SyncByteStream):
-    def __init__(self, upstream_response: httpx.Response, upstream_client: httpx.Client):
+    def __init__(self, upstream_response: httpx.Response):
         self._response = upstream_response
-        self._client = upstream_client
         self._closed = False
 
     def __iter__(self) -> Iterable[bytes]:
@@ -260,10 +305,9 @@ class _ProxyByteStream(httpx.SyncByteStream):
         if self._closed:
             return
         self._closed = True
-        try:
-            self._response.close()
-        finally:
-            self._client.close()
+        # Only release the streamed response back to the shared pool; the
+        # pooled upstream client is process-scoped and must stay open.
+        self._response.close()
 
 
 class _OperatorGatewayHandler:
@@ -443,8 +487,7 @@ def _proxy_upstream_request(
 ) -> httpx.Response:
     target_url, query_params = _upstream_url(runtime, path)
     headers = _upstream_headers(runtime, incoming_headers)
-    timeout = httpx.Timeout(900.0, connect=10.0)
-    client = httpx.Client(timeout=timeout, follow_redirects=False)
+    client = _get_upstream_client()
     request = client.build_request(
         "POST",
         target_url,
@@ -454,25 +497,22 @@ def _proxy_upstream_request(
     )
 
     if not stream:
-        try:
-            response = client.send(request, stream=False)
-            content = response.content
-            out = httpx.Response(
-                response.status_code,
-                headers=_response_headers(response.headers, streaming=False),
-                content=content,
-                request=None,
-            )
-            response.close()
-            return out
-        finally:
-            client.close()
+        response = client.send(request, stream=False)
+        content = response.content
+        out = httpx.Response(
+            response.status_code,
+            headers=_response_headers(response.headers, streaming=False),
+            content=content,
+            request=None,
+        )
+        response.close()
+        return out
 
     response = client.send(request, stream=True)
     return httpx.Response(
         response.status_code,
         headers=_response_headers(response.headers, streaming=True),
-        stream=_ProxyByteStream(response, client),
+        stream=_ProxyByteStream(response),
         request=None,
     )
 
