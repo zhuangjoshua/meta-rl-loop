@@ -182,6 +182,31 @@ def test_stream_delta_uses_natural_text_writer(monkeypatch):
     assert output == "abcdef\n"
 
 
+def test_shell_progress_surfaces_reasoning_summary():
+    read_fd, write_fd = os.pipe()
+    progress = cli._ShellProgress(False)
+    progress.fd = write_fd
+
+    try:
+        progress.tool_progress(
+            "reasoning.available",
+            "_thinking",
+            "Plan the landing brief before running the product surface tools.",
+            None,
+        )
+        os.close(write_fd)
+        progress.fd = None
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        progress.close()
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert "reasoning -> Plan the landing brief before running the product surface tools." in output
+
+
 def test_runtime_progress_records_ceo_stream_deltas(monkeypatch):
     recorded = []
 
@@ -198,6 +223,26 @@ def test_runtime_progress_records_ceo_stream_deltas(monkeypatch):
     delta_events = [item for item in recorded if item.get("extra", {}).get("stream") == "message_delta"]
     assert "".join(str(item.get("line") or "") for item in delta_events) == "Hello world"
     assert recorded[-1]["extra"]["stream"] == "message_flush"
+
+
+def test_runtime_progress_records_reasoning_summary(monkeypatch):
+    recorded = []
+
+    def fake_record(slug, **kwargs):
+        recorded.append({"slug": slug, **kwargs})
+
+    monkeypatch.setattr(worker, "_record_runtime_event", fake_record)
+    progress = worker._RuntimeProgress(slug="demo", kind="ceo_bootstrap", command="/create demo")
+
+    progress.tool_progress(
+        "reasoning.available",
+        "_thinking",
+        "Plan the landing brief before running the product surface tools.",
+        None,
+    )
+
+    lines = [item.get("line") for item in recorded if item.get("status") == "output"]
+    assert "reasoning -> Plan the landing brief before running the product surface tools." in lines
 
 
 def test_runtime_event_tail_prints_ceo_stream_only():
@@ -275,7 +320,7 @@ def test_runtime_event_tail_prints_ceo_stream_only():
 
     assert "— CEO —" in output
     assert "CEO text" in output
-    assert "tool started" not in output
+    assert "tool started -> business_read_business" in output
 
 
 def test_runtime_event_tail_prints_claude_worker_runtime_events():
@@ -389,7 +434,12 @@ def test_runtime_event_tail_prints_claude_worker_runtime_events():
     assert "Generating the landing page." in output
     assert "— Claude worker:completed —" in output
     assert "Worker finished cleanly." in output
-    assert "tool started -> business_read_business" not in output
+    assert "tool started -> business_read_business" in output
+
+
+def test_follow_chat_matches_just_streamed_ceo_text():
+    assert cli._follow_chat_matches_stream("Hello\nworld", " Hello world ") is True
+    assert cli._follow_chat_matches_stream("Hello world", "Hello there") is False
 
 
 def test_runtime_event_tail_stays_silent_in_global_scope(tmp_path):

@@ -142,9 +142,11 @@ def _runtime_event_tail_entry(event: Mapping[str, Any] | dict[str, Any] | None) 
         return None
     command = str(payload.get("command") or "").strip()
     kind = str(payload.get("kind") or "").strip().lower()
-    if not (command.startswith("Claude worker ->") or kind in {"claude_agent_sdk", "task"}):
-        return None
     text = str(payload.get("line") or payload.get("detail") or "").strip()
+    if not (command.startswith("Claude worker ->") or kind in {"claude_agent_sdk", "task"}):
+        if str(event.get("event_type") or "") == "dashboard.run.output" and text:
+            return {"mode": "runtime_note", "text": text}
+        return None
     if not text:
         return None
     return {
@@ -159,6 +161,26 @@ def _runtime_event_tail_label(entry: Mapping[str, Any] | dict[str, Any]) -> str:
     if not status or status == "output":
         return "— Claude worker —"
     return f"— Claude worker:{status} —"
+
+
+def _normalize_progress_text(value: Any, *, limit: int | None = None) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or text in {"(empty)", "_thinking"}:
+        return ""
+    if limit is not None and limit > 0 and len(text) > limit:
+        return text[: max(1, limit - 3)].rstrip() + "..."
+    return text
+
+
+def _reasoning_progress_text(name: str | None, preview: str | None) -> str:
+    candidate = preview if _normalize_progress_text(preview) else name
+    return _normalize_progress_text(candidate, limit=220)
+
+
+def _follow_chat_matches_stream(streamed_text: str, chat_text: str) -> bool:
+    streamed = _normalize_progress_text(streamed_text)
+    chat = _normalize_progress_text(chat_text)
+    return bool(streamed) and streamed == chat
 
 
 _CLI_ONLY_COMMANDS = {
@@ -2417,6 +2439,8 @@ class _RuntimeEventTail:
                 self._write_delta(str(entry.get("text") or ""), business=business)
             elif mode == "ceo_flush":
                 self._finish_stream()
+            elif mode == "runtime_note":
+                self._write_runtime_note(str(entry.get("text") or ""))
             elif mode == "worker_note":
                 self._write_worker_note(str(entry.get("text") or ""), status=str(entry.get("status") or "output"))
 
@@ -2449,6 +2473,13 @@ class _RuntimeEventTail:
         print(f"\n{label}", file=self._out, flush=True)
         print(text, file=self._out, flush=True)
 
+    def _write_runtime_note(self, text: str) -> None:
+        note = _normalize_progress_text(text)
+        if self._out is None or not note:
+            return
+        self._finish_stream()
+        print(f"{_color('->', _THEME['secondary'])} {note}", file=self._out, flush=True)
+
 
 def _follow_worker_job(
     store: TakyonStore,
@@ -2480,6 +2511,8 @@ def _follow_worker_job(
     seen_events: set[str] = set()
     seen_runtime_events: set[str] = set()
     stream_open = False
+    current_stream_text = ""
+    last_streamed_ceo_message = ""
     # Prime with already-recorded turns so --follow shows only narration produced from now on.
     try:
         for event in store.read_ceo_turn_events(slug, limit=200):
@@ -2505,6 +2538,7 @@ def _follow_worker_job(
             log_path = None
 
     def _drain_new_chat() -> None:
+        nonlocal last_streamed_ceo_message
         try:
             events = store.read_ceo_turn_events(slug, limit=50)
         except Exception:  # noqa: BLE001 - chat mirror is display-only
@@ -2521,17 +2555,26 @@ def _follow_worker_job(
                 except Exception:  # noqa: BLE001
                     payload = {}
             text = str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
-            if text:
-                print(f"\n— CEO —\n{text}\n", flush=True)
+            if not text:
+                continue
+            if _follow_chat_matches_stream(last_streamed_ceo_message, text):
+                last_streamed_ceo_message = ""
+                continue
+            last_streamed_ceo_message = ""
+            print(f"\n— CEO —\n{text}\n", flush=True)
 
     def _finish_stream() -> None:
-        nonlocal stream_open
+        nonlocal current_stream_text, last_streamed_ceo_message, stream_open
         if stream_open:
             print("", flush=True)
+            normalized = _normalize_progress_text(current_stream_text)
+            if normalized:
+                last_streamed_ceo_message = normalized
         stream_open = False
+        current_stream_text = ""
 
     def _drain_new_runtime_stream() -> None:
-        nonlocal stream_open
+        nonlocal current_stream_text, stream_open
         try:
             rows = _runtime_event_rows_for_business(store, slug, limit=300)
         except Exception:  # noqa: BLE001 - runtime stream is display-only
@@ -2551,9 +2594,15 @@ def _follow_worker_job(
                     if not stream_open:
                         print("\n— CEO —", flush=True)
                         stream_open = True
+                    current_stream_text += text
                     print(text, end="", flush=True)
             elif mode == "ceo_flush":
                 _finish_stream()
+            elif mode == "runtime_note":
+                _finish_stream()
+                note = _normalize_progress_text(str(entry.get("text") or ""))
+                if note:
+                    print(f"{_color('->', _THEME['secondary'])} {note}", flush=True)
             elif mode == "worker_note":
                 _finish_stream()
                 print(f"\n{_runtime_event_tail_label(entry)}", flush=True)
@@ -3705,6 +3754,10 @@ class _ShellProgress:
             duration = kwargs.get("duration")
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
+        elif event_type in {"reasoning.available", "_thinking"}:
+            note = _reasoning_progress_text(name, preview)
+            if note:
+                self.emit(f"reasoning -> {note}")
 
     def tool_started(self, tool_id: str, name: str, args: dict[str, Any]) -> None:
         self.raw_event("tool_call", {"id": tool_id, "name": name, "args": args})

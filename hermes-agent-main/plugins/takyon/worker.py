@@ -75,6 +75,13 @@ def _truncate_worker_text(value: str, limit: int = 400) -> str:
     return text[:limit].rstrip() + "..."
 
 
+def _normalize_worker_progress_text(value: Any, *, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or text in {"(empty)", "_thinking"}:
+        return ""
+    return _truncate_worker_text(text, limit=limit)
+
+
 def _parse_jsonish_output(text: str) -> dict[str, Any]:
     raw = str(text or "").strip()
     if not raw:
@@ -956,6 +963,10 @@ class _RuntimeProgress:
             duration = kwargs.get("duration")
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
+        elif event_type in {"reasoning.available", "_thinking"}:
+            note = _normalize_worker_progress_text(preview if _normalize_worker_progress_text(preview) else name)
+            if note:
+                self.emit(f"reasoning -> {note}")
 
     def tool_completed(
         self,
