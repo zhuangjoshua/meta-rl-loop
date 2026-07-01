@@ -60,6 +60,40 @@ die() {
   exit 1
 }
 
+shell_join() {
+  local out=""
+  local arg=""
+  local quoted=""
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    if [[ -n "$out" ]]; then
+      out+=" "
+    fi
+    out+="$quoted"
+  done
+  printf '%s' "$out"
+}
+
+applescript_escape() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "$value"
+}
+
+open_terminal_window() {
+  command -v osascript >/dev/null 2>&1 || die "osascript is required to open Terminal windows automatically"
+  local command_text="${1:-}"
+  local escaped_command=""
+  escaped_command="$(applescript_escape "$command_text")"
+  osascript <<EOF
+tell application "Terminal"
+  activate
+  do script "$escaped_command"
+end tell
+EOF
+}
+
 takyon_cli_shim_ready() {
   [[ -x "$TAKYON_CLI_BIN" ]]
 }
@@ -728,14 +762,98 @@ cmd_worker_once() {
   run_takyon_cli worker --once --worker-id "mac-operator-$(hostname -s)-once-$$"
 }
 
+console_usage() {
+  cat >&2 <<EOF
+usage: $0 console [concurrency] [business] [--shells N] [--quiet]
+EOF
+  exit 1
+}
+
+spawn_console_shell_windows() {
+  local shell_count="$1"
+  local shell_mode="$2"
+  local business="${3:-}"
+  local extra_shells=$((shell_count - 1))
+  local subcommand="shell"
+  local root_quoted=""
+  local tail_command=""
+  local command_text=""
+  [[ "$shell_mode" == "quiet" ]] && subcommand="quiet"
+  if [[ "$extra_shells" -le 0 ]]; then
+    return 0
+  fi
+  printf -v root_quoted '%q' "$ROOT"
+  if [[ -n "$business" ]]; then
+    tail_command="$(shell_join exec ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
+  else
+    tail_command="$(shell_join exec ./scripts/takyon-operator-prod.sh "$subcommand")"
+  fi
+  command_text="cd $root_quoted && $tail_command"
+  local index=0
+  for ((index = 0; index < extra_shells; index += 1)); do
+    open_terminal_window "$command_text"
+  done
+}
+
+run_console_shell() {
+  local shell_mode="$1"
+  local business="${2:-}"
+  local shell_status=0
+  if [[ "$shell_mode" == "quiet" ]]; then
+    if [[ -n "$business" ]]; then
+      echo "Opening quiet operator shell for $business..."
+      "$TAKYON_ENTRY" shell "$business" || shell_status="$?"
+    else
+      echo "Opening quiet operator shell..."
+      "$TAKYON_ENTRY" shell || shell_status="$?"
+    fi
+    return "$shell_status"
+  fi
+  if [[ -n "$business" ]]; then
+    echo "Opening operator shell for $business..."
+    "$TAKYON_ENTRY" --logs shell "$business" || shell_status="$?"
+  else
+    echo "Opening operator shell..."
+    "$TAKYON_ENTRY" --logs shell || shell_status="$?"
+  fi
+  return "$shell_status"
+}
+
 cmd_console() {
   local concurrency="10"
   local business=""
-  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
-    concurrency="$1"
+  local shell_count="1"
+  local shell_mode="shell"
+  local concurrency_set="0"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --shells)
+        shift || console_usage
+        [[ $# -gt 0 ]] || console_usage
+        shell_count="$1"
+        ;;
+      --quiet)
+        shell_mode="quiet"
+        ;;
+      -h|--help)
+        console_usage
+        ;;
+      *)
+        if [[ "$1" =~ ^[0-9]+$ ]] && [[ "$concurrency_set" == "0" ]]; then
+          concurrency="$1"
+          concurrency_set="1"
+        elif [[ -z "$business" ]]; then
+          business="$1"
+        else
+          console_usage
+        fi
+        ;;
+    esac
     shift || true
+  done
+  if ! [[ "$shell_count" =~ ^[0-9]+$ ]] || [[ "$shell_count" -lt 1 ]]; then
+    die "shell count must be a positive integer"
   fi
-  business="${1:-}"
 
   require_files
   mkdir -p "$LOCAL_PROD_ROOT/logs"
@@ -784,16 +902,14 @@ cmd_console() {
   echo "VPS worker remains delayed fallback. Exit the shell to stop this local worker."
   echo
   cd "$ROOT"
+  if [[ "$shell_count" -gt 1 ]]; then
+    echo "Opening $((shell_count - 1)) additional operator shell window(s)..."
+    spawn_console_shell_windows "$shell_count" "$shell_mode" "$business"
+  fi
   local shell_status=0
   monitor_console_tunnels "$tunnel_log" "$tunnel_pid_file" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" &
   tunnel_monitor_pid="$!"
-  if [[ -n "$business" ]]; then
-    echo "Opening operator shell for $business..."
-    "$TAKYON_ENTRY" --logs shell "$business" || shell_status="$?"
-  else
-    echo "Opening operator shell..."
-    "$TAKYON_ENTRY" --logs shell || shell_status="$?"
-  fi
+  run_console_shell "$shell_mode" "$business" || shell_status="$?"
   cleanup
   trap - EXIT INT TERM
   return "$shell_status"
@@ -838,7 +954,7 @@ Usage:
   scripts/takyon-operator-prod.sh tunnel
   scripts/takyon-operator-prod.sh safebox-tunnel
   scripts/takyon-operator-prod.sh dashboard-tunnel
-  scripts/takyon-operator-prod.sh console [concurrency] [business]
+  scripts/takyon-operator-prod.sh console [concurrency] [business] [--shells N] [--quiet]
   scripts/takyon-operator-prod.sh preflight
   scripts/takyon-operator-prod.sh overview
   scripts/takyon-operator-prod.sh shell [business]
@@ -860,8 +976,11 @@ Common flow:
   # Terminal 3: local operator shell against the same prod state as app.fourmanifold.com.
   scripts/takyon-operator-prod.sh shell homework-solver
 
-One-terminal flow:
+  One-terminal flow:
   scripts/takyon-operator-prod.sh console 10 homework-solver
+
+  Multi-shell flow:
+  scripts/takyon-operator-prod.sh console 1 --shells 4
 EOF
 }
 
