@@ -167,6 +167,13 @@ run_takyon_cli() {
   PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"
 }
 
+exec_takyon_cli() {
+  if takyon_cli_shim_ready; then
+    exec "$TAKYON_CLI_BIN" "$@"
+  fi
+  exec env PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" "$TAKYON_CLI_PYTHON" -m takyon_cli.main "$@"
+}
+
 operator_runtime_deps_ready() {
   [[ -x "$TAKYON_CLI_PYTHON" ]] || return 1
   "$TAKYON_CLI_PYTHON" - <<'PY' >/dev/null 2>&1
@@ -388,6 +395,14 @@ terminate_pid() {
     sleep 0.25
   done
   kill -KILL "$pid" >/dev/null 2>&1 || true
+}
+
+local_worker_stop_grace_seconds() {
+  local seconds="${TAKYON_LOCAL_WORKER_STOP_GRACE_SECONDS:-900}"
+  if ! [[ "$seconds" =~ ^[0-9]+$ ]] || [[ "$seconds" -lt 5 ]]; then
+    seconds="900"
+  fi
+  printf '%s' "$seconds"
 }
 
 pid_file_process_running() {
@@ -671,17 +686,28 @@ stop_local_workers() {
     return 0
   fi
 
-  echo "Stopping existing local worker pool(s): ${pids[*]}" >&2
+  local grace_seconds
+  grace_seconds="$(local_worker_stop_grace_seconds)"
+  echo "Stopping existing local worker pool(s): ${pids[*]} (grace ${grace_seconds}s)" >&2
   kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
-  sleep 1
 
   local alive=()
-  for pid in "${pids[@]}"; do
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      alive+=("$pid")
+  local _wait
+  for _wait in $(seq 1 "$grace_seconds"); do
+    alive=()
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        alive+=("$pid")
+      fi
+    done
+    if [[ "${#alive[@]}" -eq 0 ]]; then
+      return 0
     fi
+    sleep 1
   done
+
   if [[ "${#alive[@]}" -gt 0 ]]; then
+    echo "Force-stopping local worker pool(s) after ${grace_seconds}s: ${alive[*]}" >&2
     kill -KILL "${alive[@]}" >/dev/null 2>&1 || true
   fi
 }
@@ -819,7 +845,7 @@ cmd_worker() {
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-5}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-14400}"
   cd "$RUNTIME_DIR"
-  run_takyon_cli worker \
+  exec_takyon_cli worker \
     --worker-id "mac-operator-$(hostname -s)-$$" \
     --user-id "$(resolved_operator_user_id)"
 }
@@ -861,7 +887,7 @@ cmd_worker_once() {
   cmd_preflight
   require_docker_for_worker
   cd "$RUNTIME_DIR"
-  run_takyon_cli worker \
+  exec_takyon_cli worker \
     --once \
     --worker-id "mac-operator-$(hostname -s)-once-$$" \
     --user-id "$(resolved_operator_user_id)"
@@ -999,7 +1025,9 @@ cmd_console() {
     if [[ -n "${tunnel_monitor_pid:-}" ]] && kill -0 "$tunnel_monitor_pid" >/dev/null 2>&1; then
       terminate_pid "$tunnel_monitor_pid"
     fi
-    if [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
+    if [[ "$local_worker_started" == "1" ]]; then
+      stop_local_workers
+    elif [[ -n "${worker_pid:-}" ]] && kill -0 "$worker_pid" >/dev/null 2>&1; then
       terminate_pid "$worker_pid"
     fi
     stop_pid_file_process "$tunnel_pid_file"
