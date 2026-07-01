@@ -924,7 +924,7 @@ def mint_operator_session_token(
 
     Business-scoped runs prove boundary 1 through business ownership. Root-scope operator runs (before a
     business exists, e.g. ``/create``) may present a verified dashboard Auth0 session; when they do not,
-    the safebox may fall back only to the single configured platform owner on the operator-only rail.
+    the safebox may fall back only to an ACTIVE Takyon user on the operator-only rail.
 
     Uses the same internal-token transport (``_remote_json`` -> ``/v1/operator/session-token``) as the
     other broker clients. Fails CLOSED: raises ``RemoteSafeboxError`` when the safebox is unreachable,

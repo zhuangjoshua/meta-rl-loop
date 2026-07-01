@@ -1046,9 +1046,9 @@ class _OperatorSessionTokenBody(BaseModel):
     # Mint a SESSION-scoped operator capability (audience = operator.session) for the operator/platform
     # plane. Business-scoped runs prove boundary 1 by owning the business; root-scope runs (before a
     # business exists) may present a verified dashboard Auth0 session so the safebox can derive the
-    # REAL Takyon user, otherwise the root path falls back only to the single configured platform owner
-    # on this operator-only rail. ``max_cost_microusd`` is the per-CALL ceiling the proxy enforces on
-    # every metered call under this token; ``ttl_seconds`` is the session lifetime (minutes-to-hours,
+    # REAL Takyon user, otherwise the root path falls back only to an ACTIVE Takyon user on this
+    # operator-only rail. ``max_cost_microusd`` is the per-CALL ceiling the proxy enforces on every
+    # metered call under this token; ``ttl_seconds`` is the session lifetime (minutes-to-hours,
     # capped). The token is REUSABLE across calls — the proxy verifies it but does NOT claim a nonce.
     business: str | None = None
     operator_user_id: str
@@ -3859,8 +3859,8 @@ def build_safebox_app() -> FastAPI:
         """Mint a SESSION-scoped operator capability (audience = operator.session) for one CEO/worker
         run. Business-scoped runs validate operator ownership of the business (boundary 1 via
         ``authorize_operator_call``); root-scope runs either validate a dashboard Auth0 session and
-        derive the REAL Takyon user id from that verified session, or fall back only to the single
-        configured platform owner on the operator-only rail when no verified dashboard session exists.
+        derive the REAL Takyon user id from that verified session, or fall back only to an ACTIVE
+        Takyon user on the operator-only rail when no verified dashboard session exists.
         The token binds the per-CALL cost ceiling and is REUSABLE + TTL-bounded, so the operator plane
         presents it on every Anthropic / Tavily proxy call without ever seeing the raw provider key. The
         signing key lives ONLY on the safebox, so the operator host cannot forge or widen scope.
@@ -3913,12 +3913,14 @@ def build_safebox_app() -> FastAPI:
                 from . import control_plane
 
                 with _safebox_db_conn() as conn:
-                    platform_owner_id = str(control_plane.resolve_platform_owner_id(conn) or "").strip()
-                if not platform_owner_id:
-                    raise HTTPException(status_code=404, detail="operator_platform_owner_not_found")
-                if not requested_user_id or requested_user_id != platform_owner_id:
+                    principal = control_plane.resolve_user_principal(
+                        conn,
+                        requested_user_id,
+                        key_id="operator-root-local",
+                    )
+                if principal is None:
                     raise HTTPException(status_code=403, detail="operator_root_session_required")
-                resolved_user_id = platform_owner_id
+                resolved_user_id = str(getattr(principal, "user_id", "") or "").strip()
             signing_key = _cap_signing_key()
             if not signing_key:
                 raise HTTPException(status_code=503, detail="capability_signing_unconfigured")

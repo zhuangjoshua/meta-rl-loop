@@ -180,11 +180,15 @@ def test_operator_root_session_token_refuses_session_user_mismatch(client, monke
     assert resp.json()["detail"] == "operator_user_mismatch"
 
 
-def test_operator_root_session_token_allows_platform_owner_without_auth0_session(client, monkeypatch):
+def test_operator_root_session_token_allows_active_user_without_auth0_session(client, monkeypatch):
     monkeypatch.setattr(safebox_app.safebox, "auth0_verify_session", lambda **_kwargs: None)
     import plugins.takyon.control_plane as control_plane
 
-    monkeypatch.setattr(control_plane, "resolve_platform_owner_id", lambda _conn: "user_A")
+    monkeypatch.setattr(
+        control_plane,
+        "resolve_user_principal",
+        lambda _conn, _user_id, **_kwargs: types.SimpleNamespace(user_id="user_A"),
+    )
 
     resp = client.post(
         "/v1/operator/session-token",
@@ -210,11 +214,11 @@ def test_operator_root_session_token_allows_platform_owner_without_auth0_session
     assert scope.action == safebox_app._OPERATOR_SESSION_AUDIENCE
 
 
-def test_operator_root_session_token_refuses_non_platform_owner_without_auth0_session(client, monkeypatch):
+def test_operator_root_session_token_refuses_unknown_user_without_auth0_session(client, monkeypatch):
     monkeypatch.setattr(safebox_app.safebox, "auth0_verify_session", lambda **_kwargs: None)
     import plugins.takyon.control_plane as control_plane
 
-    monkeypatch.setattr(control_plane, "resolve_platform_owner_id", lambda _conn: "user_A")
+    monkeypatch.setattr(control_plane, "resolve_user_principal", lambda *_args, **_kwargs: None)
 
     resp = client.post(
         "/v1/operator/session-token",
