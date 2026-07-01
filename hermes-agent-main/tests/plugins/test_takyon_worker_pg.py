@@ -201,6 +201,47 @@ def test_operator_drain_tick_skips_safebox_only_usage_reconciler(monkeypatch):
     }
 
 
+def test_drain_tick_defaults_stale_reclaim_to_15_minutes(monkeypatch):
+    class _RoleConn:
+        def execute(self, sql, params=()):
+            if "session_user::text" in sql and "current_user::text" in sql:
+                return self
+            raise AssertionError(f"unexpected SQL on fake operator conn: {sql}")
+
+        def fetchone(self):
+            return {
+                "session_user": "takyon_operator_runtime",
+                "current_user": "takyon_operator_runtime",
+            }
+
+    seen: dict[str, object] = {}
+
+    def _capture_requeue(_conn, *, older_than_seconds, worker_id):
+        seen["older_than_seconds"] = older_than_seconds
+        seen["worker_id"] = worker_id
+        return 0
+
+    monkeypatch.delenv("TAKYON_WORKER_STALE_SECONDS", raising=False)
+    monkeypatch.setattr(worker.jobs, "requeue_stale", _capture_requeue)
+    monkeypatch.setattr(worker.jobs, "run_one", lambda *_a, **_kw: None)
+
+    counts = worker.drain_tick(_RoleConn(), worker_id="operator-worker", handlers={}, dispatch=False)
+
+    assert counts == {
+        "dispatched": 0,
+        "requeued": 0,
+        "usage_holds_released": 0,
+        "drained": 0,
+        "completed": 0,
+        "blocked": 0,
+        "failed": 0,
+    }
+    assert seen == {
+        "older_than_seconds": 900,
+        "worker_id": "operator-worker",
+    }
+
+
 def test_drain_tick_reconciles_orphaned_usage_holds(pg_conn, monkeypatch):
     slug, _uid = _provision_business(pg_conn)
     app_usage.set_app_budget(pg_conn, slug, hard_limit_microusd=1_000)

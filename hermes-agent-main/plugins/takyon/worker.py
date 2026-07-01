@@ -57,8 +57,9 @@ _DEFAULT_MAX_TURNS = 30
 _DEFAULT_TURN_TIMEOUT = 600.0
 # Default queue poll cadence when a tick drains nothing. Drain itself is tight (run_one in a loop).
 _DEFAULT_POLL_SECONDS = 15.0
-# Reclaim claims older than this from a crashed worker (matches jobs.requeue_stale's own default).
-_STALE_SECONDS = 14_400
+# Reclaim claims older than this from a crashed worker. Keep the worker-loop default aligned with
+# jobs.requeue_stale so dead local workers do not strand create/bootstrap jobs for hours.
+_STALE_SECONDS = 900
 # Release product-AI usage holds whose provider call crashed before settle/release.
 _APP_USAGE_HOLD_TTL_SECONDS = 3600
 _X_POST_CHAR_LIMIT = 280

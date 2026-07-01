@@ -20715,10 +20715,22 @@ def _commit_tool_data(
     if business:
         normalized_operation["business"] = business
     active_store = store or _store()
+    resolved_scope = scope or (f"business:{business}" if business else _business_scope(args))
+    raw_idempotency_key = str(args.get("idempotency_key") or "").strip()
+    scoped_idempotency_key = raw_idempotency_key
+    if raw_idempotency_key:
+        action = str(normalized_operation.get("action") or "").strip() or "operation"
+        scope_suffix = hashlib.sha256(f"{resolved_scope}:{action}".encode("utf-8")).hexdigest()[:12]
+        candidate = f"{raw_idempotency_key}:{scope_suffix}"
+        if len(candidate) <= 200:
+            scoped_idempotency_key = candidate
+        else:
+            keep = max(1, 200 - len(scope_suffix) - 1)
+            scoped_idempotency_key = f"{raw_idempotency_key[:keep]}:{scope_suffix}"
     result = active_store.commit(
-        scope=scope or (f"business:{business}" if business else _business_scope(args)),
+        scope=resolved_scope,
         operations=[normalized_operation],
-        idempotency_key=args.get("idempotency_key") or "",
+        idempotency_key=scoped_idempotency_key,
         reason=args.get("reason") or "",
         actor=args.get("actor") or "agent",
         principal=principal,

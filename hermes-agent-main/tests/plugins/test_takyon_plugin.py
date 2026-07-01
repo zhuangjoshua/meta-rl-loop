@@ -2412,6 +2412,32 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     assert "Runtime rails: auth, account, records, checkout" in surface_md
 
 
+def test_commit_tool_namespaces_raw_idempotency_keys_per_action(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    result = json.loads(
+        handle_business_upsert_business(
+            {
+                "business": "latexflow",
+                "name": "Latexflow",
+                "idempotency_key": "bootstrap-step",
+            }
+        )
+    )
+    assert result["success"] is True
+
+    surface = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "routes": [{"path": "/"}],
+                "idempotency_key": "bootstrap-step",
+            }
+        )
+    )
+    assert surface["success"] is True
+
+
 def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)
