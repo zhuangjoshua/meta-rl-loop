@@ -1,7 +1,9 @@
 import contextlib
+import io
 import json
 import os
 import sqlite3
+from types import SimpleNamespace
 
 from plugins.takyon import cli, worker
 
@@ -654,6 +656,195 @@ def test_runtime_event_tail_prints_claude_worker_runtime_events():
     assert "— Claude worker:completed —" in output
     assert "Worker finished cleanly." in output
     assert "tool started -> business_read_business" in output
+
+
+def test_runtime_event_tail_dedupes_immediate_worker_note_repeats():
+    class Store:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+            self.conn.executescript(
+                """
+                CREATE TABLE events (
+                  id TEXT,
+                  business_slug TEXT,
+                  event_type TEXT,
+                  payload_json TEXT,
+                  created_at TEXT
+                );
+                """
+            )
+
+        def _connect(self):
+            return self.conn
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload) if payload else {}
+            return data
+
+    store = Store()
+    repeated_note = "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks."
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-1",
+            "demo",
+            "dashboard.run.output",
+            json.dumps(
+                {
+                    "kind": "claude_agent_sdk",
+                    "status": "output",
+                    "detail": repeated_note,
+                    "line": repeated_note,
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:00Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-2",
+            "demo",
+            "dashboard.run.running",
+            json.dumps(
+                {
+                    "kind": "task",
+                    "status": "running",
+                    "detail": repeated_note,
+                    "line": repeated_note,
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:01Z",
+        ),
+    )
+    store.conn.execute(
+        "INSERT INTO events VALUES (?, ?, ?, ?, ?)",
+        (
+            "evt-3",
+            "demo",
+            "dashboard.run.output",
+            json.dumps(
+                {
+                    "kind": "claude_agent_sdk",
+                    "status": "output",
+                    "detail": repeated_note,
+                    "line": repeated_note,
+                    "command": "Claude worker -> product/site",
+                }
+            ),
+            "2026-06-28T12:00:02Z",
+        ),
+    )
+    store.conn.commit()
+
+    read_fd, write_fd = os.pipe()
+    tail = cli._RuntimeEventTail(store=store, enabled=True, business_filter="demo")
+    tail._out = os.fdopen(write_fd, "w", buffering=1, encoding="utf-8")
+    tail._scope = "demo"
+    try:
+        tail._drain_once()
+        tail._out.close()
+        output = os.read(read_fd, 65536).decode("utf-8")
+    finally:
+        try:
+            os.close(read_fd)
+        except OSError:
+            pass
+
+    assert output.count(repeated_note) == 1
+
+
+def test_follow_worker_job_dedupes_immediate_worker_note_repeats(monkeypatch):
+    class Store:
+        def __init__(self):
+            self.conn = sqlite3.connect(":memory:")
+            self.conn.row_factory = sqlite3.Row
+
+        def _connect(self):
+            return self.conn
+
+        def _leaf_conn(self, conn):
+            return contextlib.nullcontext(conn)
+
+        def _row_to_dict(self, row):
+            data = dict(row)
+            payload = data.pop("payload_json", "")
+            data["payload"] = json.loads(payload) if payload else {}
+            return data
+
+        def read_ceo_turn_events(self, _slug, limit=200):
+            return []
+
+    store = Store()
+    repeated_note = "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks."
+    runtime_rows = [
+        {
+            "id": f"evt-{idx}",
+            "business_slug": "demo",
+            "event_type": event_type,
+            "payload": {
+                "kind": "claude_agent_sdk" if status == "output" else "task",
+                "status": status,
+                "detail": repeated_note,
+                "line": repeated_note,
+                "command": "Claude worker -> product/site",
+            },
+        }
+        for idx, (event_type, status) in enumerate(
+            [
+                ("dashboard.run.output", "output"),
+                ("dashboard.run.running", "running"),
+                ("dashboard.run.output", "output"),
+            ],
+            start=1,
+        )
+    ]
+
+    runtime_calls = {"count": 0}
+
+    def _fake_runtime_rows(_store, _scope, limit=300):
+        runtime_calls["count"] += 1
+        if runtime_calls["count"] == 1:
+            return []
+        return runtime_rows
+
+    statuses = iter(
+        [
+            SimpleNamespace(status="queued", result=None, error=None),
+            SimpleNamespace(status="running", result=None, error=None),
+            SimpleNamespace(status="completed", result={"ok": True}, error=None),
+        ]
+    )
+
+    def _fake_get_job(_conn, _job_id):
+        try:
+            return next(statuses)
+        except StopIteration:
+            return SimpleNamespace(status="completed", result={"ok": True}, error=None)
+
+    monkeypatch.setattr("plugins.takyon.jobs.get_job", _fake_get_job)
+    monkeypatch.setattr(cli, "_runtime_event_rows_for_business", _fake_runtime_rows)
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        result = cli._follow_worker_job(
+            store,
+            "demo",
+            "job-1",
+            label="bootstrap",
+            tail_logs=False,
+            poll_seconds=0.0,
+            max_seconds=5.0,
+        )
+
+    output = out.getvalue()
+    assert output.count(repeated_note) == 1
+    assert result["status"] == "completed"
 
 
 def test_follow_chat_matches_just_streamed_ceo_text():

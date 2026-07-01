@@ -163,6 +163,13 @@ def _runtime_event_tail_label(entry: Mapping[str, Any] | dict[str, Any]) -> str:
     return f"— Claude worker:{status} —"
 
 
+def _deduped_worker_note_text(text: Any, *, last_text: str = "") -> str:
+    note = _normalize_progress_text(text)
+    if not note or note == last_text:
+        return ""
+    return note
+
+
 def _normalize_progress_text(value: Any, *, limit: int | None = None) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if not text or text in {"(empty)", "_thinking"}:
@@ -2376,6 +2383,7 @@ class _RuntimeEventTail:
         self._scope = ""
         self._stream_open = False
         self._stream_business = ""
+        self._last_worker_note_text = ""
 
     def __enter__(self):
         if not self.enabled:
@@ -2456,11 +2464,14 @@ class _RuntimeEventTail:
                 continue
             mode = str(entry.get("mode") or "")
             if mode == "ceo_stream":
+                self._last_worker_note_text = ""
                 business = "" if scope else str(entry.get("business") or "")
                 self._write_delta(str(entry.get("text") or ""), business=business)
             elif mode == "ceo_flush":
+                self._last_worker_note_text = ""
                 self._finish_stream()
             elif mode == "runtime_note":
+                self._last_worker_note_text = ""
                 self._write_runtime_note(str(entry.get("text") or ""))
             elif mode == "worker_note":
                 self._write_worker_note(str(entry.get("text") or ""), status=str(entry.get("status") or "output"))
@@ -2487,12 +2498,14 @@ class _RuntimeEventTail:
         self._stream_business = ""
 
     def _write_worker_note(self, text: str, *, status: str = "output") -> None:
-        if self._out is None or not text:
+        note = _deduped_worker_note_text(text, last_text=self._last_worker_note_text)
+        if self._out is None or not note:
             return
+        self._last_worker_note_text = note
         self._finish_stream()
         label = _runtime_event_tail_label({"status": status})
         print(f"\n{label}", file=self._out, flush=True)
-        print(text, file=self._out, flush=True)
+        print(note, file=self._out, flush=True)
 
     def _write_runtime_note(self, text: str) -> None:
         note = _normalize_progress_text(text)
@@ -2534,6 +2547,7 @@ def _follow_worker_job(
     stream_open = False
     current_stream_text = ""
     last_streamed_ceo_message = ""
+    last_worker_note_text = ""
     # Prime with already-recorded turns so --follow shows only narration produced from now on.
     try:
         for event in store.read_ceo_turn_events(slug, limit=200):
@@ -2595,7 +2609,7 @@ def _follow_worker_job(
         current_stream_text = ""
 
     def _drain_new_runtime_stream() -> None:
-        nonlocal current_stream_text, stream_open
+        nonlocal current_stream_text, last_worker_note_text, stream_open
         try:
             rows = _runtime_event_rows_for_business(store, slug, limit=300)
         except Exception:  # noqa: BLE001 - runtime stream is display-only
@@ -2610,6 +2624,7 @@ def _follow_worker_job(
                 continue
             mode = str(entry.get("mode") or "")
             if mode == "ceo_stream":
+                last_worker_note_text = ""
                 text = str(entry.get("text") or "")
                 if text:
                     if not stream_open:
@@ -2618,16 +2633,25 @@ def _follow_worker_job(
                     current_stream_text += text
                     print(text, end="", flush=True)
             elif mode == "ceo_flush":
+                last_worker_note_text = ""
                 _finish_stream()
             elif mode == "runtime_note":
+                last_worker_note_text = ""
                 _finish_stream()
                 note = _normalize_progress_text(str(entry.get("text") or ""))
                 if note:
                     print(f"{_color('->', _THEME['secondary'])} {note}", flush=True)
             elif mode == "worker_note":
                 _finish_stream()
+                note = _deduped_worker_note_text(
+                    str(entry.get("text") or ""),
+                    last_text=last_worker_note_text,
+                )
+                if not note:
+                    continue
+                last_worker_note_text = note
                 print(f"\n{_runtime_event_tail_label(entry)}", flush=True)
-                print(str(entry.get("text") or ""), flush=True)
+                print(note, flush=True)
 
     def _drain_new_logs() -> None:
         nonlocal log_offset, log_path
