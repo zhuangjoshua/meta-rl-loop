@@ -832,7 +832,7 @@ cmd_worker() {
   stop_local_workers
   export TAKYON_WORKER_CONCURRENCY="$concurrency"
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-5}"
-  export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-14400}"
+  export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-900}"
   cd "$RUNTIME_DIR"
   exec_takyon_cli worker \
     --worker-id "mac-operator-$(hostname -s)-$$" \
