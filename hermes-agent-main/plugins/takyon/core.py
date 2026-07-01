@@ -12113,9 +12113,22 @@ def _subuser_vps_ssh_target() -> str:
     return f"{user}@134.209.123.8"
 
 
+def _subuser_vps_default_ssh_key_candidates() -> list[Path]:
+    return [
+        Path.home() / ".ssh" / "takyon_argon_alpha14",
+        Path("/opt/takyon/secrets/takyon-subuser-sync.key"),
+    ]
+
+
 def _subuser_vps_ssh_key_path() -> Path:
     raw = str(os.getenv("TAKYON_SUBUSER_VPS_SSH_KEY") or "").strip()
-    return Path(raw).expanduser() if raw else (Path.home() / ".ssh" / "takyon_argon_alpha14")
+    if raw:
+        return Path(raw).expanduser()
+    candidates = _subuser_vps_default_ssh_key_candidates()
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _subuser_remote_home() -> PurePosixPath:

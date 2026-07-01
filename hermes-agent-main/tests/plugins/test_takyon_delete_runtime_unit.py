@@ -322,3 +322,19 @@ def test_delete_subuser_product_site_uses_tracked_ssh_defaults(tmp_path, monkeyp
     assert calls[0][11] == "root@134.209.123.8"
     assert "target=/opt/takyon/.takyon/product-sites/latexflow" in calls[0][12]
     assert "root=/opt/takyon/.takyon/product-sites" in calls[0][12]
+
+
+def test_subuser_vps_ssh_key_path_falls_back_to_tracked_operator_secret(monkeypatch, tmp_path):
+    home_key = tmp_path / "home" / ".ssh" / "takyon_argon_alpha14"
+    tracked_key = tmp_path / "secrets" / "takyon-subuser-sync.key"
+    tracked_key.parent.mkdir(parents=True, exist_ok=True)
+    tracked_key.write_text("dummy-key\n", encoding="utf-8")
+
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_SSH_KEY", raising=False)
+    monkeypatch.setattr(
+        takyon_core,
+        "_subuser_vps_default_ssh_key_candidates",
+        lambda: [home_key, tracked_key],
+    )
+
+    assert takyon_core._subuser_vps_ssh_key_path() == tracked_key
