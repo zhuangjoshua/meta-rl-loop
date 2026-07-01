@@ -205,12 +205,12 @@ require_files() {
 
 ensure_home() {
   mkdir -p "$OPERATOR_HOME" "$LOCAL_PROD_ROOT/logs"
-  if [[ ! -f "$OPERATOR_HOME/config.yaml" ]]; then
-    if ssh_base "test -f /opt/takyon/.takyon/config.yaml"; then
-      ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml"
-    elif [[ -f "$ROOT/.takyon/config.yaml" ]]; then
+  if [[ -f "$ROOT/.takyon/config.yaml" ]]; then
+    if ! cmp -s "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
       cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
     fi
+  elif [[ ! -f "$OPERATOR_HOME/config.yaml" ]] && ssh_base "test -f /opt/takyon/.takyon/config.yaml"; then
+    ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml"
   fi
   if ssh_base "test -f /opt/takyon/.takyon/dashboard_session_token"; then
     ssh_base "cat /opt/takyon/.takyon/dashboard_session_token" >"$OPERATOR_HOME/dashboard_session_token"
