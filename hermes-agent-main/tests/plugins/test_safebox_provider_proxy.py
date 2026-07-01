@@ -315,6 +315,26 @@ def test_anthropic_non_stream_reserves_settles_once_and_is_key_free(client, monk
     assert sent["headers"]["anthropic-version"] == "2023-06-01"
 
 
+def test_anthropic_non_stream_accepts_claude_sonnet_5_catalog_pricing(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_provider_proxy, "_anthropic_actual_microusd_from_response", lambda p, r: 400
+    )
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_sonnet_5", "usage": {"output_tokens": 20}})
+    resp = client.post(
+        "/v1/messages",
+        headers=_cap_headers(_session_cap()),
+        json={"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "msg_sonnet_5"
+    assert _reserves()
+    assert _settles() == [("settle", "r0", 400)]
+    assert _releases() == []
+    _assert_no_key(resp)
+
+
 def test_anthropic_upstream_error_releases_hold_and_is_sanitized(client, monkeypatch):
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 5000)
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)

@@ -940,6 +940,7 @@ def test_run_claude_agent_task_in_docker_authenticates_to_proxy_with_capability(
     assert "ANTHROPIC_API_KEY=cap-anthropic-msgs" in joined
     assert "raw-should-not-leak" not in joined
     assert "ANTHROPIC_TOKEN=" not in joined
+    assert "TAKYON_CLAUDE_AGENT_IN_DOCKER=1" in joined
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1" in joined
     # No confined network configured → default bridge (still key-free via host NAT).
     assert "--network" not in run_cmd
@@ -1636,6 +1637,15 @@ def test_claude_agent_task_script_passes_beta_disable_to_child_env():
     text = script.read_text(encoding="utf-8")
     assert "process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS" in text
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas" in text
+
+
+def test_claude_agent_task_script_forces_local_terminal_work_inside_outer_docker_worker():
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    text = script.read_text(encoding="utf-8")
+    assert 'const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";' in text
+    assert 'TERMINAL_ENV: "local"' in text
+    assert "TERMINAL_CWD: cwd" in text
+    assert 'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "0"' in text
 
 
 def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_once(tmp_path, monkeypatch):

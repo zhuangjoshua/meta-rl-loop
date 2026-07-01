@@ -94,19 +94,19 @@ async function getSessionToken(): Promise<string> {
   throw new Error("Session token not available — page must be served by the Takyon dashboard server");
 }
 
-// The product preview embeds the business's PUBLIC published landing directly
-// (https://<slug>.coscale.app/). That page is public, so the preview needs NO
-// operator auth / sign-in. The previous same-origin /api/takyon/site-preview operator
-// endpoint returned {"detail":"Auth0 login required"} inside the iframe — the Auth0
-// session cookie does not ride a cross-origin sub-resource request, and the ?token=
-// fallback resolved the wrong (empty) "local" operator on prod rather than the Auth0
-// operator that owns the businesses. The product host sets no X-Frame-Options/CSP, so
-// a direct cross-origin iframe loads fine; callers fall back to a skeleton / "building"
-// state for businesses whose landing is not published yet (the iframe simply errors).
-export function buildTakyonBusinessSitePreviewFrameUrl(slug: string): string {
+// Authenticated iframe URL for the dashboard's same-origin site-preview document.
+// Browsers cannot attach the session header to an <iframe>, so carry the injected
+// dashboard session token as ?token= (same pattern as buildTakyonBusinessAssetUrl).
+// The backend resolves either a live public URL wrapper or inline local product/site
+// HTML based on the business's workspace preview metadata.
+export function buildTakyonBusinessSitePreviewFrameUrl(slug: string, path = "product/site"): string {
   const businessSlug = String(slug || "").trim().toLowerCase();
   if (!businessSlug) return "";
-  return `https://${businessSlug}.coscale.app/`;
+  const previewPath = String(path || "").trim() || "product/site";
+  const token = readSessionToken();
+  const query = new URLSearchParams({ path: previewPath });
+  if (token) query.set("token", token);
+  return `${BASE}/api/takyon/site-preview/${encodeURIComponent(businessSlug)}?${query.toString()}`;
 }
 
 // Authenticated URL for a generated business asset (image/video/logo). Browsers can't

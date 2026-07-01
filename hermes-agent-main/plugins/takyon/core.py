@@ -7497,6 +7497,10 @@ def _run_claude_agent_task_in_docker(
     env_args.extend(["-e", f"ANTHROPIC_BASE_URL={broker_base_url}"])
     env_args.extend(["-e", f"ANTHROPIC_API_KEY={broker_capability_token}"])
 
+    # The Claude SDK worker already runs inside this outer Docker sandbox. Mark that fact so the
+    # SDK child forces any Bash/terminal work to execute locally inside the same container rather
+    # than trying to spin up a second Docker layer that inherits host-Mac cwd mount config.
+    env_args.extend(["-e", "TAKYON_CLAUDE_AGENT_IN_DOCKER=1"])
     sdk_mount_args, sdk_env = _docker_claude_worker_binary_mounts(docker_exe=docker, repo_root=repo_root)
     for key, value in sdk_env.items():
         if value:

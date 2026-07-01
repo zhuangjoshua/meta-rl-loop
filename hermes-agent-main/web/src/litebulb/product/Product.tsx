@@ -144,20 +144,6 @@ const Icon = {
 // core._product_publish_target). The address bar must show this real canonical
 // host — never a fabricated `.app` placeholder.
 const PRODUCT_BASE_DOMAIN = "coscale.app";
-
-// Canonical expected product host derived from the business slug. Used only as a
-// last-resort fallback when neither the published public_url nor the backend
-// publish_target is available yet.
-function canonicalProductHost(slug: string) {
-  const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
-  return clean ? `${clean}.${PRODUCT_BASE_DOMAIN}` : "";
-}
-
-// Strip scheme/trailing slash so the address bar reads as a clean host+path.
-function addressBarText(url: string) {
-  return (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
-}
-
 const CHAT_ARTIFACT_ROOTS = [
   "product/",
   "distribution/",
@@ -171,6 +157,19 @@ const CHAT_ARTIFACT_ROOTS = [
   "memory/",
 ];
 const CHAT_MEDIA_SUFFIXES = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".m4v"]);
+
+// Canonical expected product host derived from the business slug. Used only as a
+// last-resort fallback when neither the published public_url nor the backend
+// publish_target is available yet.
+function canonicalProductHost(slug: string) {
+  const clean = (slug || "").toLowerCase().replace(/[^a-z0-9-]/g, "");
+  return clean ? `${clean}.${PRODUCT_BASE_DOMAIN}` : "";
+}
+
+// Strip scheme/trailing slash so the address bar reads as a clean host+path.
+function addressBarText(url: string) {
+  return (url || "").replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
 
 function outputSuffix(path: string) {
   const clean = String(path || "").trim().toLowerCase();
@@ -292,7 +291,7 @@ function linkifyArtifactMentions(
   let linked = safe;
   for (const candidate of candidates) {
     const pattern = new RegExp(
-      `(^|[\\s(["'])(${escapeRegExp(candidate.label)})(?=$|[\\s).,!?:\\]\"'])`,
+      `(^|[\\s(["'])(${escapeRegExp(candidate.label)})(?=$|[\\s).,!?:\\]"'])`,
       "gm",
     );
     linked = linked.replace(
@@ -384,6 +383,25 @@ function liveStateOneLiner(
     return `Working on ${businessName} now — I'll update you here in a moment.`;
   }
   return "";
+}
+
+function liveProgress(status: unknown, detail: unknown) {
+  const state = String(status || "").trim().toLowerCase();
+  const summary = sanitizeTaskErrorText(String(detail || "").trim());
+  return {
+    state,
+    detail: summary,
+  };
+}
+
+function liveStateProgress(
+  workspace: TakyonBusinessWorkspaceResponse | null,
+) {
+  const state = workspace?.live_state;
+  if (!state || typeof state !== "object") return null;
+  const payload = state as Record<string, unknown>;
+  const progress = liveProgress(payload.status, payload.detail);
+  return progress;
 }
 
 function CompanyMark({ name, size = 22 }: { name: string; size?: number }) {
@@ -498,7 +516,10 @@ class ChatErrorBoundary extends Component<
           <div className="lb-chat__log">
             <div className="lb-msg lb-msg--agent">
               <div className="lb-msg__bubble">
-                <AgentMessageMarkdown text="Something in the chat view hit a snag and recovered. Your business is still running — reload the page to restore the live conversation." />
+                <AgentMessageMarkdown
+                  text="Something in the chat view hit a snag and recovered. Your business is still running — reload the page to restore the live conversation."
+                  businessSlug=""
+                />
               </div>
             </div>
             <button
@@ -783,6 +804,7 @@ function AgentChat({
     text: string;
     ts?: number;
     order: number;
+    working?: boolean;
   };
   const userEntries: TranscriptEntry[] = messages
     .filter((message) => message.who === "user")
@@ -909,19 +931,22 @@ function AgentChat({
       </div>
 
       <div className="lb-chat__log">
-        {bubbles.map((entry) =>
-          entry.who === "user" ? (
-            <div key={entry.id} className="lb-msg lb-msg--user">
-              <div className="lb-msg__bubble">{entry.text}</div>
+        {bubbles.map((message) =>
+          message.who === "user" ? (
+            <div key={message.id} className="lb-msg lb-msg--user">
+              <div className="lb-msg__bubble">{message.text}</div>
             </div>
           ) : (
-            <div key={entry.id} className="lb-msg lb-msg--agent">
+            <div key={message.id} className="lb-msg lb-msg--agent">
               <div className="lb-msg__bubble">
                 <AgentMessageMarkdown
-                  text={entry.text}
+                  text={message.text}
                   businessSlug={business.slug}
                   knownArtifacts={artifactPaths}
                 />
+                {message.working && (
+                  <span className="lb-msg__work">Working…</span>
+                )}
               </div>
             </div>
           ),
@@ -1027,16 +1052,15 @@ function ProductPreview({
     canonicalProductHost(business.slug) ? `https://${canonicalProductHost(business.slug)}/` : ""
   );
   const previewStatus = typeof product.preview_status === "string" ? product.preview_status : "";
+  const previewAvailable = Boolean(product.preview_available);
+  const previewPath = typeof product.preview_path === "string" ? product.preview_path : "product/site";
   const outputs = Array.isArray(workspace?.outputs) ? workspace.outputs : [];
   const sourcePath = typeof product.source_path === "string" ? product.source_path : "";
   const publishStatus = typeof product.publish_status === "string" ? product.publish_status : "";
   const productStatus = typeof product.status === "string" ? product.status : "";
-  // Embed the PUBLIC published landing (slug.coscale.app) directly — it is a
-  // public page, so the preview needs no operator auth / sign-in. Only embed once it
-  // is actually published; otherwise fall through to the "building" / "no preview yet"
-  // state below (an unpublished slug has no live landing to show).
-  const isPublished = previewStatus === "published" || publishStatus === "published";
-  const frameUrl = isPublished && canonicalUrl ? canonicalUrl : "";
+  const frameUrl = previewAvailable
+    ? buildTakyonBusinessSitePreviewFrameUrl(business.slug, previewPath)
+    : "";
   const hasLocalSource = Boolean(
     sourcePath
     || outputs.some((item) => {
@@ -1217,6 +1241,7 @@ export function Product({
   const overview = (workspace?.overview || {}) as Record<string, unknown>;
   const product = (overview.product || {}) as Record<string, unknown>;
   const publicUrl = typeof product.public_url === "string" ? product.public_url : "";
+  const effectiveProgress = liveStateProgress(workspace);
   // Durable one-line status from the server-mirrored live_state. Rendered as a
   // single plain assistant bubble only when there is no curated chat_stream yet
   // (e.g. a reload mid-bootstrap) — never as a card or a phase ladder.
@@ -1316,6 +1341,7 @@ export function Product({
             <CompanyTab
               business={business}
               workspace={workspace}
+              progress={effectiveProgress}
               creativeCredits={creativeCredits}
               traction={traction}
               tractionRange={tractionRange}

@@ -282,6 +282,7 @@ async function main() {
   const effort = String(input.effort || process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high").trim().toLowerCase();
   const allowBash = Boolean(input.allowBash);
   const pathToClaudeCodeExecutable = String(process.env.TAKYON_CLAUDE_CODE_EXECUTABLE || "").trim();
+  const inDockerWorker = String(process.env.TAKYON_CLAUDE_AGENT_IN_DOCKER || "").trim() === "1";
 
   let timeout = null;
   let text = "";
@@ -301,6 +302,16 @@ async function main() {
               ANTHROPIC_TOKEN: anthropicToken,
               CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent",
               CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas,
+              // The outer Takyon Docker worker already bind-mounts the exact business workspace.
+              // Force SDK child Bash/terminal work to stay in this container instead of trying a
+              // nested Docker lane that can inherit host cwd mount config from the operator shell.
+              ...(inDockerWorker
+                ? {
+                    TERMINAL_ENV: "local",
+                    TERMINAL_CWD: cwd,
+                    TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE: "0"
+                  }
+                : {}),
               // Route the SDK at the safebox broker when the host put us in lockdown; the broker
               // verifies the capability token (passed as ANTHROPIC_API_KEY) and makes the real
               // provider call on the safebox host so no raw provider key is ever present here.

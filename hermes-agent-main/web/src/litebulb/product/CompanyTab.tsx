@@ -1737,6 +1737,7 @@ export function CompanyTab({
 }: {
   business: LitebulbBusiness;
   workspace: TakyonBusinessWorkspaceResponse | null;
+  progress?: unknown;
   creativeCredits: TakyonBusinessCreativeCreditsResponse | null;
   traction: TakyonBusinessTractionResponse | null;
   tractionRange: "D" | "W" | "M" | "Y";
