@@ -158,6 +158,21 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://platform.claude.com/docs/en/about-claude/pricing",
         pricing_version="anthropic-pricing-2026-05",
     ),
+    # ── Anthropic Claude Sonnet 5 ────────────────────────────────────────
+    # Introductory pricing is in effect through 2026-08-31; standard pricing
+    # reverts on 2026-09-01 per Anthropic's pricing page.
+    (
+        "anthropic",
+        "claude-sonnet-5",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.00"),
+        output_cost_per_million=Decimal("10.00"),
+        cache_read_cost_per_million=Decimal("0.20"),
+        cache_write_cost_per_million=Decimal("2.50"),
+        source="official_docs_snapshot",
+        source_url="https://platform.claude.com/docs/en/about-claude/pricing",
+        pricing_version="anthropic-pricing-2026-06-30",
+    ),
     # ── Anthropic Claude 4.8 ─────────────────────────────────────────────
     # Opus 4.8 keeps the Opus-tier $5/$25 pricing (same as 4.5/4.6/4.7).
     # Source: https://platform.claude.com/docs/en/about-claude/pricing

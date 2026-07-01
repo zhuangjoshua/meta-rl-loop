@@ -76,7 +76,7 @@ TAKYON_AUTHORITY_TOOLSET = "takyon-authority"
 OPERATOR_UPDATE_CATEGORIES = ("RESEARCH", "PRODUCT", "LAUNCH", "GROWTH", "OPS")
 OPERATOR_UPDATE_STATUSES = ("queued", "running", "blocked", "completed")
 DEFAULT_TAKYON_DIRNAME = "takyon"
-DEFAULT_CLAUDE_AGENT_MODEL = "claude-opus-4-8"
+DEFAULT_CLAUDE_AGENT_MODEL = "claude-sonnet-5"
 MAX_READ_CHARS = 64_000
 MAX_WRITE_CHARS = 1_000_000
 CURRENT_BUSINESS_SCHEMA_VERSION = 1
@@ -31757,7 +31757,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         if effort not in {"low", "medium", "high"}:
             effort = "medium" if customer_facing_product_workspace else "high"
         default_model = (
-            "claude-opus-4-8"
+            "claude-sonnet-5"
             if customer_facing_product_workspace
             else (_model_from_config("claude_agent_default", "deep_work_default") or DEFAULT_CLAUDE_AGENT_MODEL)
         )
@@ -34178,7 +34178,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
                 "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus the shared style packs (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-doodle) when you want Claude to choose one coherent visual direction from the brief. When omitted, the runtime does not inject design guidance automatically."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
-                "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-opus-4-8; other work follows the configured Claude agent default."},
+                "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-5; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 1200000 for product/site work and 300000 otherwise"},

@@ -84,12 +84,12 @@ The platform contract for product source — action-file shape, `user` + `entitl
    - `instruction`: name the concrete product goal for this phase in business terms (the real customer job for `/app`, the specific flow/screen/price to change, the brand/offer to land on the landing page) plus the business + research context. Do NOT restate the platform contract — it is injected.
    - `guidance_skills`: pass the design packs when you want a coherent visual direction (e.g. `claude-design` plus one style pack).
    - **Un-nerf the worker per call.** Pass a stronger model and a higher turn/budget/time ceiling than the tool defaults, because this is the highest-leverage product pass and a tight default budget makes the worker bail mid-build:
-     - `model` — a stronger model than the `claude-sonnet-4-6` product default, so the worker reasons through the real product job, not just edits.
+     - `model` — override the `claude-sonnet-5` product default only when a task needs a different lane for a specific reason.
      - `max_turns` — above the product default of 60 (cap 90), so a real workflow build finishes in one warm pass instead of hitting the turn cap.
      - `budget_usd` — above the product default of 8.0 (cap 25.0), so the stronger model + extra turns do not starve mid-build.
      - `timeout_ms` — above the product default of 1_200_000 (cap 1_800_000), so the longer pass is not wall-clock killed.
      - Pass these only on THIS call. Do not change the tool defaults; bootstrap rides the defaults and a default change would leak into the latency-tuned landing pass.
-     - Concrete recommended values for the product-workflow / iterate pass: `model: claude-opus-4-8`, `effort: high`, `max_turns: 90`, `budget_usd: 25.0`, `timeout_ms: 1800000`. These are the product-path ceilings; they are ceilings, not floors, so a small surgical pass finishes well under them while a full `/app` build gets the headroom it needs.
+     - Concrete recommended values for the product-workflow / iterate pass: `model: claude-sonnet-5`, `effort: high`, `max_turns: 90`, `budget_usd: 25.0`, `timeout_ms: 1800000`. These are the product-path ceilings; they are ceilings, not floors, so a small surgical pass finishes well under them while a full `/app` build gets the headroom it needs.
 6. The worker self-verifies build/typecheck green and self-fixes within its pass (the `.mjs` build gate plus the in-handler warm build-fix retry). Read its structured result, not its prose. A `timed_out`/`blocked` result means the partial edits were preserved — continue from them, do not cold re-delegate from scratch.
 7. Follow with `business_refresh_product_surface` (when `refresh_surface: true` the delegated call already runs it) and confirm the publish status.
 8. Run the Verification floors below before reporting done. If an action changed, invoke it for real and read the receipt back.

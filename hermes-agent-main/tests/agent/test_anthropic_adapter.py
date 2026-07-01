@@ -1142,6 +1142,17 @@ class TestBuildAnthropicKwargs:
         assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
         assert kwargs["output_config"] == {"effort": "xhigh"}
 
+    def test_reasoning_config_preserves_xhigh_for_sonnet_5(self):
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-5",
+            messages=[{"role": "user", "content": "think harder"}],
+            tools=None,
+            max_tokens=4096,
+            reasoning_config={"enabled": True, "effort": "xhigh"},
+        )
+        assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert kwargs["output_config"] == {"effort": "xhigh"}
+
     def test_reasoning_config_maps_max_effort_for_4_7_models(self):
         kwargs = build_anthropic_kwargs(
             model="claude-opus-4-7",
@@ -1170,6 +1181,7 @@ class TestBuildAnthropicKwargs:
         # calling the internal predicate directly.
         from agent.anthropic_adapter import _forbids_sampling_params
         assert _forbids_sampling_params("claude-opus-4-7") is True
+        assert _forbids_sampling_params("claude-sonnet-5") is True
         assert _forbids_sampling_params("claude-opus-4-6") is False
         assert _forbids_sampling_params("claude-sonnet-4-5") is False
 
@@ -1338,6 +1350,10 @@ class TestGetAnthropicMaxOutput:
     def test_sonnet_4_6(self):
         from agent.anthropic_adapter import _get_anthropic_max_output
         assert _get_anthropic_max_output("claude-sonnet-4-6") == 64_000
+
+    def test_sonnet_5(self):
+        from agent.anthropic_adapter import _get_anthropic_max_output
+        assert _get_anthropic_max_output("claude-sonnet-5") == 128_000
 
     def test_sonnet_4_date_stamped(self):
         from agent.anthropic_adapter import _get_anthropic_max_output

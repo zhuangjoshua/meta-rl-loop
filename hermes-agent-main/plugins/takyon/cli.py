@@ -1959,7 +1959,7 @@ def _business_bootstrap_instruction(
         "- workspace: product/site",
         "- instruction: Build the real post-sign-in subscribed customer workflow requested in the Business goal. Keep the landing, sign-in gate, checkout, and profile/account rails intact. Implement the backend behavior as one or more real `product/site/actions/<name>.ts` files that default-export async `(payload, ctx) => result` and call `ctx.generate(...)` for AI output; call the action from `/app` through the shared runtime client (`createActionRunner`/`invokeAction`). Do not use provider SDKs, provider env vars, direct provider URLs, mock outputs, fixtures, static canned AI responses, browser-only fake generation, localStorage as authority, or unsupported server routes. Render honest loading, success, and error states; on budget/entitlement errors, show the runtime-provided path to subscribe/upgrade instead of retrying or faking success.",
         '- guidance_skills: pass the SAME two design packs used for 2a/2b — "claude-design" plus the one style pack you selected — so the real workflow matches the brand.',
-        "- model: claude-opus-4-8",
+        "- model: claude-sonnet-5",
         "- effort: high",
         "- max_turns: 90",
         "- budget_usd: 25.0",
