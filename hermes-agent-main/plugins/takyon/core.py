@@ -8259,11 +8259,20 @@ def load_takyon_env() -> list[str]:
 
 def _runtime_path_prefixes() -> list[Path]:
     takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
-    return [
+    prefixes = [
         takyon_home / "node" / "bin",
+        # Takyon-managed Deno (scripts/lib/deno-bootstrap.sh self-heals into here) so a
+        # host without a system Deno still resolves it for the product actions rail.
+        takyon_home / "deno" / "bin",
         _repo_root() / "node_modules" / ".bin",
         Path(sys.executable).resolve().parent,
     ]
+    deno_install = os.getenv("DENO_INSTALL")
+    if deno_install:
+        prefixes.append(Path(deno_install).expanduser() / "bin")
+    # The official deno installer drops the binary at ~/.deno/bin.
+    prefixes.append(Path.home() / ".deno" / "bin")
+    return prefixes
 
 
 def _runtime_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -8536,6 +8545,69 @@ def _ensure_javascript_runtime(*, package_manager: bool = False) -> dict[str, An
         after = _runtime_capabilities(names)
         return {
             "success": proc.returncode == 0,
+            "installed": proc.returncode == 0 and before != after,
+            "started_at": started,
+            "completed_at": _now(),
+            "returncode": proc.returncode,
+            "stdout": _truncate_text(proc.stdout or "", 4000),
+            "stderr": _truncate_text(proc.stderr or "", 4000),
+            "capabilities": after,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "success": False,
+            "installed": False,
+            "started_at": started,
+            "completed_at": _now(),
+            "stdout": _truncate_text(exc.stdout or "", 4000),
+            "stderr": _truncate_text(exc.stderr or "", 4000),
+            "error": "runtime install timed out",
+            "capabilities": _runtime_capabilities(names),
+        }
+
+
+def _ensure_deno_runtime() -> dict[str, Any]:
+    """Self-heal a missing Deno for the product actions rail, mirroring node bootstrap.
+
+    Deno is the runtime for product/site/actions/*.ts. Without it the actions-rail
+    verification blocks a publish (see app_actions.action_refresh_blocker). This lets a
+    host without a system Deno install one into $TAKYON_HOME/deno/bin with zero manual
+    steps — the same self-healing node already has — so the build fleet is uniform by
+    construction instead of depending on every teammate running `brew install deno`.
+    """
+    names = ("deno",)
+    before = _runtime_capabilities(names)
+    if bool(before.get("deno", {}).get("available")):
+        return {"success": True, "installed": False, "capabilities": before}
+    if not _allow_runtime_installs():
+        return {
+            "success": False,
+            "installed": False,
+            "capabilities": before,
+            "error": "runtime installs are disabled by config",
+        }
+    helper = _repo_root() / "scripts" / "lib" / "deno-bootstrap.sh"
+    if not helper.exists():
+        return {
+            "success": False,
+            "installed": False,
+            "capabilities": before,
+            "error": f"runtime installer missing: {helper}",
+        }
+    takyon_home = Path(os.getenv("TAKYON_HOME") or get_takyon_home()).expanduser()
+    command = f"source {shlex.quote(str(helper))}; ensure_deno"
+    started = _now()
+    try:
+        proc = subprocess.run(
+            ["bash", "-lc", command],
+            text=True,
+            capture_output=True,
+            timeout=240,
+            env=_runtime_env({"TAKYON_HOME": str(takyon_home)}),
+        )
+        after = _runtime_capabilities(names)
+        return {
+            "success": proc.returncode == 0 and bool(after.get("deno", {}).get("available")),
             "installed": proc.returncode == 0 and before != after,
             "started_at": started,
             "completed_at": _now(),
@@ -21445,6 +21517,10 @@ def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
                     "error": None if _resolve_runtime_executable("python") else "python runtime is unavailable",
                 })
             elif ecosystem in {"actions", "app-actions", "app_actions"}:
+                # Self-heal a missing Deno (the actions-rail runtime) the same way the
+                # javascript ecosystem self-heals node — so this host stops needing a
+                # manual `brew install deno` to build+publish a product with actions.
+                deno_ensure = _ensure_deno_runtime()
                 capabilities = _runtime_capabilities(("deno", "systemd-run"))
                 require_systemd_scope = _normalized_host_role() == "operator"
                 deno_ready = bool(capabilities.get("deno", {}).get("available"))
@@ -21458,7 +21534,8 @@ def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
                 ensure_results.append({
                     "ecosystem": ecosystem,
                     "success": success,
-                    "installed": False,
+                    "installed": bool(deno_ensure.get("installed")),
+                    "ensure": deno_ensure,
                     "capabilities": capabilities,
                     "error": error,
                 })

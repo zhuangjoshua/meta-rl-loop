@@ -57,6 +57,73 @@ def test_validate_action_contract_allows_actions_rail_before_named_actions_exist
     )
 
 
+def _deno_gate_site(tmp_path, *, files):
+    """business_root/product/site populated with rel->content; returns (store, source_path)."""
+    site = tmp_path / "product" / "site"
+    site.mkdir(parents=True)
+    for rel, content in files.items():
+        target = site / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    class _Store:
+        def _business_root(self, slug):
+            return tmp_path
+
+    return _Store(), "product/site"
+
+
+def test_action_refresh_blocker_no_actions_publishes_without_deno(tmp_path, monkeypatch):
+    # A fresh business with only the scaffold's runtime-ignored actions/_example-generate.ts
+    # must publish on a host without deno — the deno requirement is for real actions only,
+    # not the mere existence of an actions/ directory.
+    monkeypatch.setattr(app_actions, "_resolve_deno", lambda: None)
+    monkeypatch.setattr(app_actions, "_try_ensure_deno_runtime", lambda: None)
+    store, source_path = _deno_gate_site(
+        tmp_path,
+        files={
+            "actions/_example-generate.ts": "// ignored example — leading underscore\n",
+            "src/App.tsx": "export default () => null;\n",
+        },
+    )
+    assert app_actions.action_refresh_blocker(
+        store=store, business="b", surface={}, source_path=source_path
+    ) == ""
+
+
+def test_action_refresh_blocker_real_action_requires_deno(tmp_path, monkeypatch):
+    # A product that actually ships a runtime-valid action file must still require deno,
+    # and should try to self-heal a missing deno before giving up.
+    ensure_calls: list[int] = []
+    monkeypatch.setattr(app_actions, "_resolve_deno", lambda: None)
+    monkeypatch.setattr(app_actions, "_try_ensure_deno_runtime", lambda: ensure_calls.append(1))
+    store, source_path = _deno_gate_site(
+        tmp_path,
+        files={
+            "actions/_example-generate.ts": "// ignored\n",
+            "actions/generate.ts": "export default async function (ctx, req) { return { ok: true }; }\n",
+            "src/App.tsx": "export default () => null;\n",
+        },
+    )
+    assert app_actions.action_refresh_blocker(
+        store=store, business="b", surface={}, source_path=source_path
+    ) == "actions rail requires the deno runtime on this host"
+    assert ensure_calls, "expected a self-heal attempt before blocking on a real action"
+
+
+def test_resolve_deno_finds_takyon_managed_install(tmp_path, monkeypatch):
+    # deno self-healed into $TAKYON_HOME/deno/bin must resolve even when it is not on the
+    # process PATH — a bare shutil.which("deno") misses it, which silently blocked publishes.
+    monkeypatch.setattr(app_actions.shutil, "which", lambda name, path=None: None)
+    monkeypatch.delenv("DENO_INSTALL", raising=False)
+    managed = tmp_path / "deno" / "bin" / "deno"
+    managed.parent.mkdir(parents=True)
+    managed.write_text("#!/bin/sh\n")
+    managed.chmod(0o755)
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    assert app_actions._resolve_deno() == str(managed)
+
+
 def test_normalize_action_specs_maps_user_trigger_to_http():
     specs = app_actions.normalize_action_specs(
         [{"name": "generate-routine", "trigger": "user", "description": "Build the routine"}]

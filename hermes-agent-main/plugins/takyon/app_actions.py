@@ -792,6 +792,61 @@ def surface_http_action_names(
     return site_http_action_names(site_root, surface)
 
 
+def _resolve_deno() -> str | None:
+    """Resolve the deno binary across PATH + managed/standard install locations.
+
+    The actions rail (build-time verification AND action exec) must see the same deno
+    that core._runtime_capabilities resolves and that scripts/lib/deno-bootstrap.sh
+    self-heals into $TAKYON_HOME/deno/bin. A bare shutil.which("deno") misses a
+    Takyon-managed install and standard installer paths, which is how a publish got
+    silently blocked on a host where deno was installed off-PATH (or freshly
+    self-healed but not yet on the process PATH).
+    """
+    found = shutil.which("deno")
+    if found:
+        return found
+    candidates: list[Path] = []
+    takyon_home = os.getenv("TAKYON_HOME")
+    if takyon_home:
+        candidates.append(Path(takyon_home).expanduser() / "deno" / "bin" / "deno")
+    deno_install = os.getenv("DENO_INSTALL")
+    if deno_install:
+        candidates.append(Path(deno_install).expanduser() / "bin" / "deno")
+    home = Path.home()
+    candidates.extend([
+        home / ".deno" / "bin" / "deno",
+        home / ".local" / "bin" / "deno",
+        Path("/opt/homebrew/bin/deno"),
+        Path("/usr/local/bin/deno"),
+    ])
+    for cand in candidates:
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        except OSError:
+            continue
+    return None
+
+
+def _try_ensure_deno_runtime() -> None:
+    """Best-effort self-heal of a missing deno; never raises into the caller.
+
+    Imported lazily to avoid a circular import (core imports app_actions at module
+    load); a failure here just leaves deno unresolved and the caller blocks as before.
+    """
+    try:
+        from . import core as takyon_core
+    except Exception:
+        try:
+            from plugins.takyon import core as takyon_core
+        except Exception:
+            return
+    try:
+        takyon_core._ensure_deno_runtime()
+    except Exception:
+        pass
+
+
 def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, Any], source_path: str) -> str:
     """Minimal action-rail blocker: referenced UI actions must resolve to real backend handlers."""
     business_root = store._business_root(business)
@@ -805,10 +860,23 @@ def action_refresh_blocker(*, store: Any, business: str, surface: Mapping[str, A
         for spec in file_backed_action_specs(site_root, workflow)
         if str(spec.get("name") or "").strip()
     }
-    if not shutil.which("deno"):
-        if referenced or actions_root.exists():
-            return "actions rail requires the deno runtime on this host"
-        return ""
+    deno = _resolve_deno()
+    if not deno:
+        # The deno requirement is real only when the product actually SHIPS an action —
+        # a referenced UI call or a runtime-valid (non "_"-prefixed) action file. The
+        # scaffold seeds an ignored actions/_example-generate.ts, so keying on
+        # actions_root.exists() made EVERY fresh business unpublishable on a host without
+        # deno even when it uses zero actions. Gate on real actions (referenced/file_backed).
+        needs_deno = bool(referenced or file_backed)
+        if needs_deno:
+            # Self-heal a missing deno once (mirrors node bootstrap), then re-resolve, so a
+            # host that lacks deno installs it instead of silently stripping the build.
+            _try_ensure_deno_runtime()
+            deno = _resolve_deno()
+        if not deno:
+            if needs_deno:
+                return "actions rail requires the deno runtime on this host"
+            return ""
     for action_name in sorted(referenced):
         if action_name not in file_backed:
             return f"product UI invokes action `{action_name}` but product/site/actions/{action_name}.ts does not exist"
@@ -1771,7 +1839,7 @@ def _run_action_subprocess(
     cpu_quota_percent: int,
     memory_max_mb: int,
 ) -> tuple[Any, dict[str, Any]]:
-    deno = shutil.which("deno")
+    deno = _resolve_deno()
     if not deno:
         raise ActionConfigError("deno is not installed on this host")
     with tempfile.TemporaryDirectory(prefix="takyon-app-actions-") as tempdir:

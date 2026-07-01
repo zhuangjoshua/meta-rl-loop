@@ -456,10 +456,24 @@ require_docker_for_worker() {
   fi
 }
 
+ensure_deno_toolchain() {
+  # Self-heal a missing Deno (the product actions-rail runtime) into
+  # $TAKYON_HOME/deno so no teammate has to `brew install deno` by hand for their
+  # Mac to build+publish a product that ships actions. Non-fatal: action-free
+  # products still publish (see app_actions.action_refresh_blocker). Runs in a
+  # subshell so PATH/env side effects don't leak into the operator shell; the
+  # binary it writes to disk persists regardless.
+  local boot="$RUNTIME_DIR/scripts/lib/deno-bootstrap.sh"
+  [[ -f "$boot" ]] || return 0
+  ( set +e; source "$boot"; ensure_deno ) || true
+  return 0
+}
+
 cmd_preflight() {
   load_operator_env
   require_tunnel
   cd "$ROOT"
+  ensure_deno_toolchain
   PYTHONPATH="$RUNTIME_DIR" "$RUNTIME_DIR/.venv/bin/python" - <<'PY'
 from __future__ import annotations
 
