@@ -987,6 +987,48 @@ def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):
     assert captured["max_turns"] == 7
 
 
+def test_ceo_wake_handler_binds_owner_before_loading_prompt(monkeypatch):
+    import contextlib
+
+    from plugins.takyon import cli as takyon_cli
+    import gateway.session_context as session_context
+
+    seen: dict[str, Any] = {}
+
+    class _FakeStore:
+        def __init__(self, *args, **kwargs):
+            self.operator_user_id = kwargs.get("operator_user_id")
+            seen["store_operator_user_id"] = self.operator_user_id
+
+        def _ceo_cron_prompt(self, slug: str) -> str:
+            assert slug == "acme"
+            if self.operator_user_id != "user-123":
+                raise AssertionError("wake prompt read before owner binding")
+            return "wake prompt"
+
+        def _ceo_cron_toolsets(self) -> list[str]:
+            if self.operator_user_id != "user-123":
+                raise AssertionError("wake toolsets read before owner binding")
+            return ["takyon", "web", "skills", "todo"]
+
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield "/tmp/fake-workspace"
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
+    monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("ok", 0.0, "none", True))
+
+    result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+
+    assert result.result["business_slug"] == "acme"
+    assert seen["store_operator_user_id"] == "user-123"
+
+
 def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
     backend = storage.LocalStorageBackend(tmp_path / "bucket")
     seed = tmp_path / "seed"
@@ -1432,6 +1474,68 @@ def _install_bootstrap_handler_stubs(
     monkeypatch.setattr(worker, "_record_runtime_event", _capture_event)
     captured["store"] = store
     return captured
+
+
+def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
+    import contextlib
+
+    from plugins.takyon import cli as takyon_cli
+    import gateway.session_context as session_context
+
+    seen: dict[str, Any] = {}
+
+    class _FakeStore:
+        def __init__(self, *args, **kwargs):
+            self.operator_user_id = kwargs.get("operator_user_id")
+            seen["store_operator_user_id"] = self.operator_user_id
+
+        def read(self, *, scope, query, include=None, limit=None):
+            assert scope == "business:acme"
+            assert query == "summary"
+            if self.operator_user_id != "user-123":
+                raise AssertionError("summary read before owner binding")
+            return {"business": {"name": "Acme", "goal": "do the thing"}}
+
+        def commit(self, **_kwargs) -> dict[str, Any]:
+            return {"ok": True}
+
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield "/tmp/fake-workspace"
+
+    @contextlib.contextmanager
+    def _fake_bound_op(*_a, **_k):
+        yield
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+    monkeypatch.setattr(core, "_bound_operator_task_context", _fake_bound_op)
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(
+        takyon_cli,
+        "_ceo_bootstrap_turn_config",
+        lambda *a, **k: {
+            "user_prompt": "Bootstrap business now.",
+            "ephemeral_system_prompt": "CEO prompt",
+            "enabled_toolsets": ["takyon", "web", "skills"],
+        },
+    )
+    monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
+    monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("ok", 0.0, "none", True))
+    monkeypatch.setattr(
+        worker,
+        "_refresh_business_surface_after_bootstrap",
+        lambda *_a, **_k: {"publish": {"status": "published"}},
+    )
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-1", business_slug="acme", payload={})
+    )
+
+    assert result.result["business_slug"] == "acme"
+    assert seen["store_operator_user_id"] == "user-123"
 
 
 def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatch):

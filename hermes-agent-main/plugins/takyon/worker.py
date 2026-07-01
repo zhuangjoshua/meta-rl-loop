@@ -1259,11 +1259,11 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     from .core import TakyonStore, _bound_operator_task_context
 
     slug = job.business_slug
-    store = TakyonStore()
+    owner_user_id = _business_owner_user_id(slug)
+    store = TakyonStore(operator_user_id=owner_user_id)
     user_prompt = store._ceo_cron_prompt(slug)
     toolsets = store._ceo_cron_toolsets()
     system_prompt = _load_ceo_prompt()
-    owner_user_id = _business_owner_user_id(slug)
     progress = _RuntimeProgress(slug=slug, kind="ceo_wake", command=f"/wake {slug}")
 
     payload = job.payload or {}
@@ -1369,7 +1369,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     from .core import TakyonStore, _bound_operator_task_context
 
     slug = job.business_slug
-    store = TakyonStore()
+    owner_user_id = _business_owner_user_id(slug)
+    store = TakyonStore(operator_user_id=owner_user_id)
     summary = store.read(scope=f"business:{slug}", query="summary")
     business = summary.get("business") if isinstance(summary.get("business"), dict) else {}
     active_mode = "live"
@@ -1384,7 +1385,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     user_prompt = str(bootstrap_turn.get("user_prompt") or "")
     system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")
     toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "takyon-authority", "web", "skills"])
-    owner_user_id = _business_owner_user_id(slug)
     payload = job.payload or {}
     try:
         max_turns = int(payload.get("max_turns") or _DEFAULT_MAX_TURNS)
