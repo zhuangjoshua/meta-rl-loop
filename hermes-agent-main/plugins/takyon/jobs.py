@@ -602,9 +602,23 @@ def run_one(
         assert run_result is not None
     except Exception as exc:  # handler failed: release the hold, then fail/requeue
         lifecycle_conn, close_lifecycle = _lifecycle_conn()
+        refund_exc: Exception | None = None
         try:
             if estimate_cents > 0:
-                billing.refund(lifecycle_conn, reservation_key)
+                try:
+                    billing.refund(lifecycle_conn, reservation_key)
+                except Exception as refund_err:  # noqa: BLE001 - terminal job transition outranks refund hiccups
+                    refund_exc = refund_err
+                    _log.warning(
+                        "jobs: refund failed after handler error for job %s (kind=%s); "
+                        "continuing to fail/requeue the job so it does not stay running: %s",
+                        job.id,
+                        job.kind,
+                        refund_err,
+                    )
+                    if heartbeat_conn_factory is not None:
+                        _reset_lifecycle_conn()
+                        lifecycle_conn, close_lifecycle = _lifecycle_conn()
             try:
                 status = fail(lifecycle_conn, job.id, error=str(exc), retryable=True)
             except JobNotRunning:
@@ -623,6 +637,16 @@ def run_one(
                     f" ({repaired_status})" if repaired_status else "",
                 )
                 status = repaired_status or "failed"
+            if refund_exc is not None and estimate_cents > 0:
+                try:
+                    billing.refund(lifecycle_conn, reservation_key)
+                except Exception as retry_exc:  # noqa: BLE001 - row is terminal; avoid wedging on cleanup
+                    _log.warning(
+                        "jobs: refund retry still failed after terminalizing job %s (kind=%s): %s",
+                        job.id,
+                        job.kind,
+                        retry_exc,
+                    )
         finally:
             _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
         return JobOutcome(

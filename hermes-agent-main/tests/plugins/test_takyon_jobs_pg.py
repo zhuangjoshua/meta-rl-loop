@@ -274,6 +274,40 @@ def test_handler_error_refunds_hold_and_fails(pg_conn):
     assert bal.allowance_used_cents == 0
 
 
+def test_handler_error_still_terminalizes_job_when_first_refund_raises(pg_conn, monkeypatch):
+    slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
+    jobs.enqueue(
+        pg_conn, slug, "ceo_wake", idempotency_key="j",
+        payload={"estimate_cents": 500}, max_attempts=1,
+    )
+    handler = _RecordingHandler(raises=RuntimeError("boom"))
+    refund_calls: list[str] = []
+    original_refund = billing.refund
+
+    def _flaky_refund(conn, reservation_key: str) -> None:
+        refund_calls.append(reservation_key)
+        if len(refund_calls) == 1:
+            raise RuntimeError("safebox timeout")
+        original_refund(conn, reservation_key)
+
+    monkeypatch.setattr(billing, "refund", _flaky_refund)
+
+    outcome = jobs.run_one(pg_conn, worker_id="w1", handlers={"ceo_wake": handler})
+
+    assert outcome.status == "failed"
+    assert len(handler.calls) == 1
+    assert len(refund_calls) == 2
+
+    job = jobs.get_job(pg_conn, outcome.job_id)
+    assert job.status == "failed"
+    assert job.error["reason"] == "handler_error"
+    assert "boom" in job.error["error"]
+
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.reserved_cents == 0
+    assert bal.allowance_used_cents == 0
+
+
 def test_handler_error_lost_claim_does_not_wedge_worker(pg_conn, monkeypatch):
     # A stale/lost claim can make the terminal fail() transition raise JobNotRunning after the
     # handler already raised. That must not escape the tick and wedge the daemon; the worker should
