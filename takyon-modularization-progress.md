@@ -103,12 +103,12 @@ _**Mixed-version window (expected, closing):** the E2E's strict reservation was 
 - ⬜ `takyon env create|status|destroy` over `environments/*.yaml` (idempotent, receipted)
 - **Proof:** clean slate → `takyon env create dev` → browser dashboard at `localhost:9119` → fresh business with real Stripe test checkout → **DB assertion: zero prod-plane rows changed**; `dev2` with zero human steps.
 
-### Stage 4a — subuser box unblocked · ⬜ (chip ready) → most of **UC2**
-_No new infrastructure._
-- ⬜ `asyncio.to_thread` the blocking `/generate`//search + inline read handlers
-- ⬜ `uvicorn workers=N` (Supavisor pooler role already provisioned)
-- ⬜ Pool the 3+ per-request fresh psycopg.connects
-- ⬜ Same fixes on the safebox app
+### Stage 4a — subuser box unblocked · 🟡 IN BUILD (worktree `takyon-stage4a`, background build agent; Q16 "ship soon" adopted) → most of **UC2**
+_No new infrastructure. Constraints pinned: process-model changes ONLY (no auth/session/entitlement/webhook logic, role allowlist untouched — subuser security priority one); workers=N gated to the stateless subuser role via import-string (operator dashboard keeps module state → stays single-process); one shared conn pool extended, never a second pooling layer._
+- 🟡 `asyncio.to_thread` the blocking `/generate`//search + inline I/O handlers (mirror of the action path's existing pattern)
+- 🟡 `uvicorn workers=N` (subuser role + env gate; tracked service unit updated; Supavisor pooler role already provisioned)
+- 🟡 Pool the 3+ per-request fresh psycopg.connects (workers-aware sizing; per-site session semantics preserved)
+- 🟡 Same fixes on the safebox app (+ its tracked unit), with a module-global-state audit before enabling workers
 - **Proof:** a stubbed 30s AI call no longer moves p95 of concurrent reads on the box.
 
 ### Stage 4b — N subuser replicas behind VPC LB · ⬜ 🔑DO → **UC2 ships**
