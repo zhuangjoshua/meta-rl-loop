@@ -10,7 +10,7 @@ _Last updated: 2026-07-02, by Claude. This file is updated as stages move._
 ## Parallel build wave (2026-07-02, operator "go fast") — 4 agents in flight
 Independent file clusters, each in its own worktree off origin/main, verified + landed individually (baseline-diff + proof) as they return — NOT batched:
 - **Stage 3 RuntimeContext** (`takyon-stage3`) — host-role collapse onto the enum views + cache scoping + spawn threading. environment.py keystone hand-written.
-- **Stage 5 composition engine** (`takyon-stage5b`) — PricedComponent/compose_plan (derived pricing, margin invariant fail-loud), wired into the plan-write path.
+- **Stage 5 composition engine** (`takyon-stage5b`) — ✅ LANDED 264d346d. `plan_composition.py`: PricedComponent/CostBasis/MarginPolicy/compose_plan — prices DERIVED (metered COGS via usage_pricing SSOT, unpriced=fail-closed), margin invariant fail-loud with figures; freehand write path now funnels through the SAME invariant. Wired via `upsert_plan_from_composition` (monthly-only + GrandfatheredPlanFrozen preserved). 31 tests green, baseline-clean. **HONEST SCOPE:** the ENGINE is hooked into the plan-write path; the CEO-facing "add a component" tool input (`business_upsert_app_plan` composition arg) + the money-shape gate at the tool choke point are the NEXT wiring step — UC4 does not "ship" until the CEO can drive it. Deploy batched with this wave.
 - **§6b ChannelPublisher** (`takyon-channel`) — one generic outreach handler + CHANNEL_REGISTRY; X/Reddit duplicate handlers collapse; money envelope lifted verbatim.
 - **§6b CreativeProviderSpec** (`takyon-creative`) — money-gate-as-type-invariant registry; fixes the live logo receipt/priced-model divergence.
 
