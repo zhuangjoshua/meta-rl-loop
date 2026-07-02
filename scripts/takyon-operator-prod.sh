@@ -97,6 +97,8 @@ active_local_worker_prefix() {
   local stored_prefix=""
   local worker_id=""
   local command_text=""
+  local direct_worker_match="0"
+  local wrapper_worker_match="0"
   read -r stored_pid stored_prefix <"$ACTIVE_LOCAL_WORKER_PREFIX_FILE" || true
   if [[ ! "$stored_pid" =~ ^[0-9]+$ ]] || [[ -z "$stored_prefix" ]]; then
     rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
@@ -111,7 +113,11 @@ active_local_worker_prefix() {
 
   if command -v ps >/dev/null 2>&1; then
     command_text="$(ps -p "$stored_pid" -o command= 2>/dev/null || true)"
-    if [[ -n "$command_text" ]] && [[ "$command_text" != *"worker --worker-id ${worker_id}"* ]]; then
+    if [[ -n "$command_text" ]]; then
+      [[ "$command_text" == *"worker --worker-id ${worker_id}"* ]] && direct_worker_match="1"
+      [[ "$command_text" == *"takyon-operator-prod.sh worker"* ]] && wrapper_worker_match="1"
+    fi
+    if [[ -n "$command_text" ]] && [[ "$direct_worker_match" != "1" ]] && [[ "$wrapper_worker_match" != "1" ]]; then
       rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
       return 0
     fi
@@ -536,6 +542,52 @@ monitor_console_tunnels() {
   done
 }
 
+WORKER_TUNNEL_GUARD_MONITOR_PID=""
+WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
+WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE=""
+WORKER_TUNNEL_GUARD_CHILD_PID=""
+
+cleanup_worker_tunnel_guard() {
+  if [[ -n "${WORKER_TUNNEL_GUARD_CHILD_PID:-}" ]] && kill -0 "$WORKER_TUNNEL_GUARD_CHILD_PID" >/dev/null 2>&1; then
+    terminate_pid "$WORKER_TUNNEL_GUARD_CHILD_PID"
+  fi
+  if [[ -n "${WORKER_TUNNEL_GUARD_MONITOR_PID:-}" ]] && kill -0 "$WORKER_TUNNEL_GUARD_MONITOR_PID" >/dev/null 2>&1; then
+    terminate_pid "$WORKER_TUNNEL_GUARD_MONITOR_PID"
+  fi
+  stop_pid_file_process "${WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE:-}"
+  stop_pid_file_process "${WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE:-}"
+  WORKER_TUNNEL_GUARD_MONITOR_PID=""
+  WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
+  WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE=""
+  WORKER_TUNNEL_GUARD_CHILD_PID=""
+}
+
+start_worker_tunnel_guard() {
+  if [[ "${TAKYON_OPERATOR_TUNNELS_MANAGED:-0}" == "1" ]]; then
+    WORKER_TUNNEL_GUARD_MONITOR_PID=""
+    WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
+    WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE=""
+    WORKER_TUNNEL_GUARD_CHILD_PID=""
+    return 0
+  fi
+
+  mkdir -p "$LOCAL_PROD_ROOT/logs"
+  local timestamp
+  timestamp="$(date +%Y%m%d-%H%M%S)"
+  local tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
+  local dashboard_tunnel_log="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.log"
+  WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
+  WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.pid"
+
+  trap cleanup_worker_tunnel_guard EXIT INT TERM
+
+  ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy
+  ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" dashboard_tunnel_healthy
+
+  monitor_console_tunnels "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" >>"$tunnel_log" 2>&1 &
+  WORKER_TUNNEL_GUARD_MONITOR_PID="$!"
+}
+
 require_docker_for_worker() {
   if [[ "${TERMINAL_ENV:-docker}" != "docker" ]]; then
     return 0
@@ -888,6 +940,8 @@ cmd_worker() {
   local concurrency="10"
   local concurrency_set="0"
   local operator_user_id=""
+  local worker_pid=""
+  local worker_status="0"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --operator-user-id)
@@ -926,6 +980,8 @@ cmd_worker() {
     die "worker concurrency must be a positive integer"
   fi
   OPERATOR_USER_ID_OVERRIDE="$operator_user_id"
+  require_files
+  start_worker_tunnel_guard
   load_operator_env
   require_tunnel
   cmd_preflight
@@ -944,13 +1000,29 @@ cmd_worker() {
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-1}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-900}"
   cd "$RUNTIME_DIR"
-  exec_takyon_cli worker \
+  if [[ "${TAKYON_OPERATOR_TUNNELS_MANAGED:-0}" == "1" ]]; then
+    exec_takyon_cli worker \
+      --worker-id "$worker_id" \
+      --user-id "$(resolved_operator_user_id)"
+  fi
+  run_takyon_cli worker \
     --worker-id "$worker_id" \
-    --user-id "$(resolved_operator_user_id)"
+    --user-id "$(resolved_operator_user_id)" &
+  worker_pid="$!"
+  WORKER_TUNNEL_GUARD_CHILD_PID="$worker_pid"
+  if wait "$worker_pid"; then
+    worker_status="0"
+  else
+    worker_status="$?"
+  fi
+  WORKER_TUNNEL_GUARD_CHILD_PID=""
+  return "$worker_status"
 }
 
 cmd_worker_once() {
   local operator_user_id=""
+  local worker_pid=""
+  local worker_status="0"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --operator-user-id)
@@ -981,15 +1053,32 @@ cmd_worker_once() {
     shift || true
   done
   OPERATOR_USER_ID_OVERRIDE="$operator_user_id"
+  require_files
+  start_worker_tunnel_guard
   load_operator_env
   require_tunnel
   cmd_preflight
   require_docker_for_worker
   cd "$RUNTIME_DIR"
-  exec_takyon_cli worker \
+  if [[ "${TAKYON_OPERATOR_TUNNELS_MANAGED:-0}" == "1" ]]; then
+    exec_takyon_cli worker \
+      --once \
+      --worker-id "mac-operator-$(hostname -s)-once-$$" \
+      --user-id "$(resolved_operator_user_id)"
+  fi
+  run_takyon_cli worker \
     --once \
     --worker-id "mac-operator-$(hostname -s)-once-$$" \
-    --user-id "$(resolved_operator_user_id)"
+    --user-id "$(resolved_operator_user_id)" &
+  worker_pid="$!"
+  WORKER_TUNNEL_GUARD_CHILD_PID="$worker_pid"
+  if wait "$worker_pid"; then
+    worker_status="0"
+  else
+    worker_status="$?"
+  fi
+  WORKER_TUNNEL_GUARD_CHILD_PID=""
+  return "$worker_status"
 }
 
 console_usage() {
@@ -1140,7 +1229,7 @@ cmd_console() {
   load_operator_env
   cmd_preflight
   echo "Starting local worker pool: concurrency=$concurrency (log: $worker_log)"
-  "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
+  TAKYON_OPERATOR_TUNNELS_MANAGED=1 "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
   worker_pid="$!"
   sleep 1
   if kill -0 "$worker_pid" >/dev/null 2>&1; then

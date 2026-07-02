@@ -25,6 +25,19 @@ export function defaultSubscribePlanKey(): string {
   return "";
 }
 
+/** Human-readable "$N/month" label for the default subscribe plan, derived from the published
+ *  plan catalog's `priceCents` + `billingInterval`. Returns "" if no priced plan is published. */
+export function defaultPlanPriceLabel(): string {
+  const plan = productPlans[0];
+  if (!plan) return "";
+  const cents = Number(plan.priceCents ?? plan.price_cents ?? Number.NaN);
+  if (!Number.isFinite(cents)) return "";
+  const dollars = cents / 100;
+  const amount = Number.isInteger(dollars) ? String(dollars) : dollars.toFixed(2);
+  const interval = String(plan.billingInterval ?? plan.billing_interval ?? "month").trim() || "month";
+  return `$${amount}/${interval}`;
+}
+
 /** Errors thrown by the kit's action runner carry classification metadata. */
 export interface TakyonActionError extends Error {
   kind?: string;

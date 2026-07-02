@@ -217,9 +217,11 @@ def test_materialized_subuser_kit_seeds_monthly_app_starter_for_app_shells(tmp_p
     assert '"auth": "declared"' in surface_context
     assert '"checkout": "declared"' in surface_context
     hooks = (workspace_root / "src" / "lib" / "hooks.ts").read_text(encoding="utf-8")
+    takyon_lib = (workspace_root / "src" / "lib" / "takyon.ts").read_text(encoding="utf-8")
     support_source = (workspace_root / "src" / "screens" / "support.tsx").read_text(encoding="utf-8")
     assert "useViewerAccess" in hooks
     assert "resolveViewerCta" in hooks
+    assert "export function defaultPlanPriceLabel" in takyon_lib
     assert "Frequently asked questions" in support_source
     assert "Privacy policy" in support_source
     assert 'aria-hidden="true"' not in support_source
