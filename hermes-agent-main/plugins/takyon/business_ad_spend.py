@@ -117,6 +117,33 @@ def get_policy(conn, business_slug: str, channel: str, slug: str) -> BusinessAdS
     return _policy_from_row(row)
 
 
+def list_policies(conn, business_slug: str, *, statuses=None) -> list[BusinessAdSpendPolicy]:
+    """All ad-spend policies for a business, newest-updated first. Optionally filter to a
+    set of ``statuses`` (e.g. non-terminal ones for the wake pulse). Returns an empty list
+    when the business has no funded campaigns."""
+    if statuses:
+        rows = conn.execute(
+            f"""
+            select {_POLICY_COLUMNS}
+            from business_ad_spend_policies
+            where business_slug = %s and status = any(%s)
+            order by updated_at desc
+            """,
+            (business_slug, list(statuses)),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            select {_POLICY_COLUMNS}
+            from business_ad_spend_policies
+            where business_slug = %s
+            order by updated_at desc
+            """,
+            (business_slug,),
+        ).fetchall()
+    return [_policy_from_row(row) for row in rows or []]
+
+
 def upsert_policy(
     conn,
     *,
