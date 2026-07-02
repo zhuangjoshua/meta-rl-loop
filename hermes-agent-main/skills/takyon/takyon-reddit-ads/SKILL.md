@@ -211,6 +211,7 @@ The smallest truthful end-to-end Reddit path is:
   `operation: "pause"`. To change pace, use `operation: "set_budget"` with `daily_budget_usd`.
 7. **Sync metrics** — call `business_reddit_ad_insights_sync` with `level: "campaign"` (or `ad_group` / `ad`) to persist Reddit delivery metrics under `metrics/reddit-ads/<slug>/`.
 8. **Keep state truthful** — if a live step fails after some objects were created, the tool writes a `partial_failed` receipt with the IDs that exist. Surface that blocker; do not claim success.
+9. **Re-sync on a later review wake** — Reddit delivery does not flow into Takyon on its own. On a subsequent wake, check the pulse's `active_ad_campaigns`: if a live campaign shows `needs_sync: true` (or a stale `insights_synced_ago`), call `business_reddit_ad_insights_sync` again to refresh delivery metrics *before* judging performance or changing the campaign.
 
 ## Output Format
 
