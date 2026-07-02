@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from plugins.takyon import app_identity, app_profiles
+from plugins.takyon import app_identity, app_profiles, plan_composition
 
 # tier → rank for resolving the effective tier; LOWER wins.
 _TIER_RANK = {"owner": 0, "paid": 1, "pro": 1}
@@ -45,6 +45,11 @@ _UNENTITLING_TIERS = {"", "free", "none", app_identity.UNENTITLED_TIER}
 # idempotently re-passed unchanged, but no new non-month plan can be minted.
 _MONTH_SPELLINGS = {"", "month", "monthly", "mo", "per_month"}
 _GATEWAY_ALLOWLIST_METADATA_KEYS = ("features", "model_allowlist", "models")
+
+# UC4 composition receipt lives under this jsonb metadata key on the plan row (additive; no
+# migration). A plan written from a PlanComposition stores its full derivation here so the
+# composed economics are auditable and the composition is re-derivable.
+_COMPOSITION_METADATA_KEY = "takyon_plan_composition"
 
 # Statuses that actually confer a tier; everything else (cancelled, past_due, …) does not.
 _ACTIVE_STATUSES = ("active", "trialing")
@@ -304,6 +309,14 @@ def upsert_plan_policy(
         # FAIL-LOUD budget cap (replaces the old silent clamp): the included AI budget may not
         # exceed 100% of the monthly price — a plan that spends more than it charges is a
         # money-shape error the operator must resolve explicitly, never a silent adjustment.
+        #
+        # UC4 (plan §2.7): this TRANSITIONAL freehand path validates against the SAME margin
+        # invariant the composer enforces — one path, no silent second rail. The historical cap is
+        # exactly the margin invariant at margin_floor=0 (COGS must not exceed 100% of price), and
+        # it is *conservative*: it compares the BILLED budget (retail, marked-up) directly to price,
+        # while the composer's invariant compares REALIZED COGS (< billed) to price. So a freehand
+        # write that clears this cap always clears the composer's floor-0 margin too — and a violation
+        # here is a genuine margin violation, surfaced fail-loud (never clamped).
         cap = _monthly_plan_price_cap_microusd(price)
         if budget > cap:
             raise InvalidPlan(
@@ -311,6 +324,12 @@ def upsert_plan_policy(
                 f"({cap} microUSD = 100% of price_cents={price}). Lower the budget or raise "
                 "the price; the budget is no longer silently clamped."
             )
+        # Belt-and-suspenders: run the SAME shared invariant the composed-write path uses. At
+        # margin_floor=0 with realized COGS <= billed budget <= price, this always passes once the
+        # cap above passed — but it guarantees both write paths funnel through one invariant function.
+        plan_composition.assert_price_meets_margin(
+            price, budget, margin_floor=0.0
+        )
     # Grandfather guard: a plan_key with active/trialing subscribers has FROZEN economic terms.
     # Re-pricing it in place would silently mutate existing (grandfathered) users — including the
     # AI-budget gate the runtime resolves from the live plan row — because entitlements reference
@@ -402,6 +421,80 @@ def upsert_plan_policy(
             ),
         ).fetchone()
     return _plan_from_row(row)
+
+
+def upsert_plan_from_composition(
+    conn,
+    business_slug: str,
+    plan_key: str,
+    composition: "plan_composition.PlanComposition",
+    *,
+    tier: str | None = None,
+    currency: str = "usd",
+    stripe_product_id: str | None = None,
+    stripe_price_id: str | None = None,
+    source: str = "takyon",
+    notes: str = "",
+    metadata: dict | None = None,
+) -> PlanPolicy:
+    """Write a plan whose economics are DERIVED from a `PlanComposition` (UC4 keystone, plan §2.7).
+
+    The CEO's authority moves up a level: it chooses priced components and (within policy) a margin
+    — it never types the numbers. This calls `plan_composition.compose_plan`, then persists the
+    DERIVED `price_cents` / `included_ai_budget_microusd` / `metadata.features` / model_allowlist,
+    and stores the composition + full derivation receipt under `metadata['takyon_plan_composition']`
+    (additive; uses the existing jsonb column, no migration).
+
+    It funnels through `upsert_plan_policy`, so EVERY existing invariant is preserved unchanged:
+      * monthly-only (interval is 'month' by construction — the composer is monthly-only);
+      * the shared margin invariant (re-validated freehand-style on the derived numbers);
+      * `GrandfatheredPlanFrozen` — a composed RE-PRICE of a plan_key with active subscribers is
+        refused exactly as a freehand re-price is; the caller mints a NEW plan_key version
+        (`plan_key-v2`) whose row carries the receipt showing the component-level delta. A composed
+        write never mutates a live plan_key's economics.
+
+    A metered component with an unpriced model raises `plan_composition.UnpricedAllowance`; a
+    margin-floor violation raises `plan_composition.MarginFloorViolation` (both fail closed, with
+    figures) BEFORE any row is written.
+    """
+    composed = plan_composition.compose_plan(composition)
+
+    # Fold the DERIVED gateway grants (features / model_allowlist) into metadata so the AI gateway
+    # reads the same allowlist the composition granted. `credits` / `rails` ride along for audit.
+    meta = dict(metadata or {})
+    if composed.features:
+        meta["features"] = dict(composed.features)
+    if composed.model_allowlist:
+        meta["model_allowlist"] = list(composed.model_allowlist)
+    if composed.credits:
+        meta.setdefault("credits", {}).update(composed.credits)
+    if composed.rails:
+        meta["rails"] = list(composed.rails)
+    # Store the composition + receipt so the derivation is auditable and re-derivable.
+    meta[_COMPOSITION_METADATA_KEY] = {
+        "receipt": composed.receipt,
+        "total_cogs_microusd_month": composed.total_cogs_microusd_month,
+        "margin_floor": composed.margin_floor,
+        "price_cents": composed.price_cents,
+        "included_ai_budget_microusd": composed.included_ai_budget_microusd,
+    }
+
+    return upsert_plan_policy(
+        conn,
+        business_slug,
+        plan_key,
+        tier=tier,
+        price_cents=composed.price_cents,
+        currency=currency,
+        billing_interval="month",  # composer is monthly-only by construction
+        included_ai_budget_microusd=composed.included_ai_budget_microusd,
+        included_action_quota=0,
+        stripe_product_id=stripe_product_id,
+        stripe_price_id=stripe_price_id,
+        source=source,
+        notes=notes,
+        metadata=meta,
+    )
 
 
 def get_plan_policy(conn, business_slug: str, plan_key: str) -> PlanPolicy | None:
