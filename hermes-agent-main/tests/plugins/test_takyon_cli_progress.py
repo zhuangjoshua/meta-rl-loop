@@ -6,7 +6,7 @@ import os
 import sqlite3
 from types import SimpleNamespace
 
-from plugins.takyon import cli, worker
+from plugins.takyon import cli, core as takyon_core, worker
 
 
 class _FakeStore:
@@ -542,6 +542,123 @@ def test_worker_run_ceo_turn_treats_runtime_progress_as_activity_for_inactivity_
     assert cost_usd == 0.0
     assert cost_status == "ok"
     assert turn_completed is True
+    assert wait_calls["count"] >= 2
+
+
+def test_claude_worker_progress_notifies_activity_sink_even_for_duplicates():
+    progress_lines: list[str] = []
+    activity_lines: list[str] = []
+    token = takyon_core._LAST_CLAUDE_WORKER_PROGRESS_LINE.set("")
+    try:
+        with takyon_core._bound_claude_worker_progress(progress_lines.append):
+            with takyon_core._bound_claude_worker_activity(activity_lines.append):
+                takyon_core._emit_claude_worker_progress("Building and testing the product")
+                takyon_core._emit_claude_worker_progress("Building and testing the product")
+                takyon_core._emit_claude_worker_progress("Editing the product site")
+    finally:
+        takyon_core._LAST_CLAUDE_WORKER_PROGRESS_LINE.reset(token)
+
+    assert progress_lines == [
+        "Building and testing the product",
+        "Editing the product site",
+    ]
+    assert activity_lines == [
+        "Building and testing the product",
+        "Building and testing the product",
+        "Editing the product site",
+    ]
+
+
+def test_worker_run_ceo_turn_treats_claude_worker_progress_as_activity_for_inactivity_guard(monkeypatch):
+    wait_calls = {"count": 0}
+
+    class FakeProgress:
+        def __init__(self):
+            self.nested_lines: list[str] = []
+            self._idle = 9999.0
+
+        def tool_progress(self, *_args, **_kwargs):
+            pass
+
+        def tool_started(self, *_args, **_kwargs):
+            pass
+
+        def tool_generating(self, *_args, **_kwargs):
+            pass
+
+        def tool_completed(self, *_args, **_kwargs):
+            pass
+
+        def activity(self, *_args, **_kwargs):
+            pass
+
+        def stream_delta(self, *_args, **_kwargs):
+            pass
+
+        def finish_stream(self):
+            pass
+
+        def seconds_since_activity(self):
+            return self._idle
+
+        def nested_activity(self, line: str):
+            self.nested_lines.append(line)
+            self._idle = 0.0
+
+    class FakeAgent:
+        def __init__(self):
+            self.session_estimated_cost_usd = 0.0
+            self.session_cost_status = "ok"
+            self._memory_nudge_interval = 0
+            self._skill_nudge_interval = 0
+            self.activity_callback = None
+            self.suppress_status_output = False
+
+        def get_activity_summary(self):
+            return {"seconds_since_activity": 9999.0}
+
+        def run_conversation(self, _prompt, stream_callback=None):
+            return {"final_response": "Done", "completed": True}
+
+    def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
+        return FakeAgent()
+
+    def fake_wait(fs, timeout=None):
+        wait_calls["count"] += 1
+        if wait_calls["count"] == 1:
+            takyon_core._emit_claude_worker_progress("Building and testing the product")
+            return set(), set(fs)
+        return set(fs), set()
+
+    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+    monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
+    monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
+    monkeypatch.setattr(
+        "takyon_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {"provider": "anthropic", "api_mode": "anthropic_messages"},
+    )
+    monkeypatch.setattr("plugins.takyon.operator_gateway.build_operator_gateway_agent", fake_builder)
+    monkeypatch.setattr(concurrent.futures, "wait", fake_wait)
+
+    progress = FakeProgress()
+    response, cost_usd, cost_status, turn_completed = worker._run_ceo_turn(
+        slug="demo",
+        system_prompt="ceo",
+        user_prompt="ship it",
+        toolsets=["takyon"],
+        max_turns=3,
+        inactivity_limit=1,
+        progress=progress,
+    )
+
+    assert response == "Done"
+    assert cost_usd == 0.0
+    assert cost_status == "ok"
+    assert turn_completed is True
+    assert progress.nested_lines == ["Building and testing the product"]
     assert wait_calls["count"] >= 2
 
 

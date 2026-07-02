@@ -6828,6 +6828,11 @@ _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
 _CLAUDE_WORKER_PROGRESS_SINK: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "takyon_claude_worker_progress_sink", default=None
 )
+# Separate from the human-facing progress sink: a caller may want every worker activity tick to keep
+# an outer inactivity watchdog alive even when the visible progress line is de-duplicated.
+_CLAUDE_WORKER_ACTIVITY_SINK: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "takyon_claude_worker_activity_sink", default=None
+)
 # Last progress line emitted in the current (per-reader-thread) context, so consecutive duplicate
 # phase lines — e.g. many "Editing the product site" tool ticks in a row — record only once until the
 # phase actually changes (BUG #17 de-dup; the line set is small + de-identified).
@@ -6852,6 +6857,33 @@ def _bound_claude_worker_progress(sink: Any):
         _CLAUDE_WORKER_PROGRESS_SINK.reset(token)
 
 
+@contextmanager
+def _bound_claude_worker_activity(sink: Any):
+    """Bind a callback that treats each Claude-worker progress tick as real activity."""
+    if not callable(sink):
+        yield
+        return
+    token = _CLAUDE_WORKER_ACTIVITY_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _CLAUDE_WORKER_ACTIVITY_SINK.reset(token)
+
+
+def _notify_claude_worker_activity(line: str) -> None:
+    """Best-effort activity tick for every worker progress event, even de-duplicated ones."""
+    text = str(line or "").strip()
+    if not text:
+        return
+    sink = _CLAUDE_WORKER_ACTIVITY_SINK.get()
+    if not callable(sink):
+        return
+    try:
+        sink(_truncate_text(text, 240))
+    except Exception:
+        pass
+
+
 def _emit_claude_worker_progress(line: str) -> None:
     """Push one concise human progress line into the bound worker-progress sink, if any.
 
@@ -6860,6 +6892,7 @@ def _emit_claude_worker_progress(line: str) -> None:
     text = str(line or "").strip()
     if not text:
         return
+    _notify_claude_worker_activity(text)
     if text == _LAST_CLAUDE_WORKER_PROGRESS_LINE.get():
         return
     sink = _CLAUDE_WORKER_PROGRESS_SINK.get()

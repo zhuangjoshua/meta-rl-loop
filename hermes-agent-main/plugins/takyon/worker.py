@@ -40,6 +40,7 @@ import re
 import socket
 import threading
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -884,6 +885,7 @@ class _RuntimeProgress:
         self.kind = kind
         self.command = command
         self._last_activity = ""
+        self._last_nested_activity = ""
         self._last_tool_generating = ""
         self._stream_buffer = ""
         self._stream_open = False
@@ -1027,6 +1029,14 @@ class _RuntimeProgress:
         self._last_activity = text
         self.emit(f"agent -> {text}")
 
+    def nested_activity(self, line: str) -> None:
+        text = _normalize_worker_progress_text(line)
+        self._touch_activity()
+        if not text or text == self._last_nested_activity:
+            return
+        self._last_nested_activity = text
+        self.emit(f"worker -> {text}")
+
     def tool_progress(
         self,
         event_type: str,
@@ -1113,7 +1123,7 @@ def _run_ceo_turn(
         _require_agent_model_config,
         _takyon_reasoning_config,
     )
-    from .core import TakyonStore, load_takyon_env
+    from .core import TakyonStore, _bound_claude_worker_activity, load_takyon_env
     from .operator_gateway import build_operator_gateway_agent
 
     load_takyon_env()
@@ -1185,39 +1195,52 @@ def _run_ceo_turn(
     # Run on a worker thread and watch the agent's own activity tracker, so a hung turn is caught
     # without killing a healthy long-running one. (Mirrors cron/scheduler.py's inactivity guard.)
     limit = inactivity_limit if inactivity_limit and inactivity_limit > 0 else None
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    ctx = contextvars.copy_context()
-    run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}
-    future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
-    timed_out = False
-    try:
-        if limit is None:
-            result = future.result()
-        else:
-            result = None
-            while True:
-                done, _ = concurrent.futures.wait({future}, timeout=5.0)
-                if done:
-                    result = future.result()
-                    break
-                idle = 0.0
-                if hasattr(agent, "get_activity_summary"):
-                    try:
-                        idle = float(agent.get_activity_summary().get("seconds_since_activity", 0.0))
-                    except Exception:
-                        idle = 0.0
-                if progress is not None:
-                    try:
-                        idle = min(idle, float(progress.seconds_since_activity()))
-                    except Exception:
-                        pass
-                if idle >= limit:
-                    timed_out = True
-                    break
-    finally:
-        if progress is not None:
-            progress.finish_stream()
-        pool.shutdown(wait=False, cancel_futures=True)
+    def _claude_worker_activity(line: str) -> None:
+        if progress is None:
+            return
+        nested = getattr(progress, "nested_activity", None)
+        if callable(nested):
+            nested(line)
+
+    worker_activity_binding = (
+        _bound_claude_worker_activity(_claude_worker_activity)
+        if progress is not None
+        else nullcontext()
+    )
+    with worker_activity_binding:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        ctx = contextvars.copy_context()
+        run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}
+        future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
+        timed_out = False
+        try:
+            if limit is None:
+                result = future.result()
+            else:
+                result = None
+                while True:
+                    done, _ = concurrent.futures.wait({future}, timeout=5.0)
+                    if done:
+                        result = future.result()
+                        break
+                    idle = 0.0
+                    if hasattr(agent, "get_activity_summary"):
+                        try:
+                            idle = float(agent.get_activity_summary().get("seconds_since_activity", 0.0))
+                        except Exception:
+                            idle = 0.0
+                    if progress is not None:
+                        try:
+                            idle = min(idle, float(progress.seconds_since_activity()))
+                        except Exception:
+                            pass
+                    if idle >= limit:
+                        timed_out = True
+                        break
+        finally:
+            if progress is not None:
+                progress.finish_stream()
+            pool.shutdown(wait=False, cancel_futures=True)
 
     if timed_out:
         if hasattr(agent, "interrupt"):
