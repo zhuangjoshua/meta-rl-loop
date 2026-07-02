@@ -7,6 +7,13 @@ _Last updated: 2026-07-02, by Claude. This file is updated as stages move._
 
 ---
 
+## Parallel build wave (2026-07-02, operator "go fast") — 4 agents in flight
+Independent file clusters, each in its own worktree off origin/main, verified + landed individually (baseline-diff + proof) as they return — NOT batched:
+- **Stage 3 RuntimeContext** (`takyon-stage3`) — host-role collapse onto the enum views + cache scoping + spawn threading. environment.py keystone hand-written.
+- **Stage 5 composition engine** (`takyon-stage5b`) — PricedComponent/compose_plan (derived pricing, margin invariant fail-loud), wired into the plan-write path.
+- **§6b ChannelPublisher** (`takyon-channel`) — one generic outreach handler + CHANNEL_REGISTRY; X/Reddit duplicate handlers collapse; money envelope lifted verbatim.
+- **§6b CreativeProviderSpec** (`takyon-creative`) — money-gate-as-type-invariant registry; fixes the live logo receipt/priced-model divergence.
+
 ## Where we are right now
 
 **Stage 0 (safety net) — ✅ net in place, re-verified 2026-07-02 10:20.** All three nets green in one run: `scripts/run_tests.sh` on the three characterization files → **29 passed** (15 host-role + 9 import-guard + 5 claim-affinity on the live PG rig at 54331 + tokenless safebox at 8377, both still up from the rig build). The earlier `billing_accounts` "permission denied on SELECT" puzzle is RESOLVED — it was `SELECT … FOR UPDATE`, which requires UPDATE privilege; migration 0044 deliberately revoked UPDATE on `billing_accounts` from `takyon_operator_runtime`, so the billing path correctly requires the `takyon_safebox_authority` role. Not a rig bug — it's the prod money-privilege model working as designed. This role topology IS the Stage-3 dev-DB foundation ("dev with prod role names"), so it's reused, not throwaway.
@@ -96,11 +103,9 @@ _**Mixed-version window (expected, closing):** the E2E's strict reservation was 
 - ⛔ **Structural deploy-rail gap surfaced (your decision):** every future migration that ALTERs an early table hits this same wall. One-time fixes possible: (a) deposit an owner-capable migration DSN into the safebox, or (b) `ALTER TABLE ... OWNER TO takyon_migration` for the app tables (run once as postgres). Recommend (b) — keeps role-scoped DSNs, no new super-credential in custody.
 - **Remaining for ✅:** run 0059 in the Supabase SQL editor (after your sign-in) → live CLI E2E on Stage-2 code (strict session reservation observed in the jobs row + kill-session spill observed live) → land on main → deploy both hosts → progress ✅ with proofs.
 
-### Stage 3 + 3b — RuntimeContext + env provisioner · ⬜ 🔑Auth0 → **UC3 ships**
-- ⬜ `environment.py` (RuntimeContext.from_env, 7 slices, HostRole enum)
-- ⬜ Env-scope the process-global caches (security-critical) + prod-literal boot assertion
-- ⬜ Thread context into the isolated-turn subprocess spawn
-- ⬜ `takyon env create|status|destroy` over `environments/*.yaml` (idempotent, receipted)
+### Stage 3 + 3b — RuntimeContext + env provisioner · 🟡 IN BUILD (worktree `takyon-stage3`) → **UC3 ships**
+- 🟡 `environment.py` WRITTEN (keystone, by hand): `HostRole` exposing the three PINNED divergent views (canonical/serving/bare — the Stage-0 truth table is the contract, zero cells change), `RuntimeContext.from_env` with the 7 slices, lazy `current_context()` (prod-identical when unbound), `cache_scope()` for R3 cache partitioning, `assert_not_prod_leakage` fail-loud boot gate over the prod literals.
+- 🟡 Mechanical wiring delegated (background agent): 5 normalizer collapse
 - **Proof:** clean slate → `takyon env create dev` → browser dashboard at `localhost:9119` → fresh business with real Stripe test checkout → **DB assertion: zero prod-plane rows changed**; `dev2` with zero human steps.
 
 ### Stage 4a — subuser box unblocked · ✅ DONE (landed ee6f8a4f, deployed all THREE hosts 2026-07-02) → most of **UC2**
