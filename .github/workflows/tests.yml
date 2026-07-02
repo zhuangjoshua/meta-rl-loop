@@ -45,14 +45,15 @@ jobs:
           PGPASSWORD: postgres
         run: |
           python - <<'PY'
+          import importlib.util
           import psycopg
           from pathlib import Path
 
-          from plugins.takyon.db.runner import (
-              assert_migration_topology,
-              migration_files,
-              run_migrations,
-          )
+          runner_path = Path("plugins/takyon/db/runner.py")
+          spec = importlib.util.spec_from_file_location("takyon_db_runner", runner_path)
+          runner = importlib.util.module_from_spec(spec)
+          assert spec.loader is not None
+          spec.loader.exec_module(runner)
 
           admin_dsn = "postgresql://postgres:postgres@localhost:5432/postgres"
           dbname = "takyon_migration_ci"
@@ -80,10 +81,10 @@ jobs:
 
           migration_dsn = f"postgresql://takyon_migration:{role_password}@localhost:5432/{dbname}"
           with psycopg.connect(migration_dsn, autocommit=True, prepare_threshold=None) as conn:
-              assert_migration_topology(conn)
-              first = run_migrations(conn)
-              second = run_migrations(conn)
-              expected = [path.name for path in migration_files()]
+              runner.assert_migration_topology(conn)
+              first = runner.run_migrations(conn)
+              second = runner.run_migrations(conn)
+              expected = [path.name for path in runner.migration_files()]
               assert first == expected
               assert second == expected
               print(f"migrations_ok count={len(first)} last={first[-1]}")
