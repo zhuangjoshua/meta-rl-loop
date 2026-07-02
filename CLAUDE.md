@@ -39,8 +39,9 @@ Fast path for ordinary code/docs/UI changes:
 1. Run only the focused local checks needed for the touched surface, plus `git diff --check`.
 2. Stage only intended files, commit in the outer repo, and `git push origin main`.
 3. Immediately run `gh run list --repo tejdiv/takyon-workspace --branch main --limit 5`, then `gh run watch <run-id> --repo tejdiv/takyon-workspace --exit-status`.
-4. If the workflow passes, report the run id and any direct smoke checks. Do not also do manual VPS/Vercel deploys.
-5. If the workflow fails, inspect `gh run view <run-id> --log-failed`, patch the failing tracked rail, push again, and watch the new run. Use manual SSH/rsync only for emergency rollback or when the operator explicitly asks.
+4. **A green run does NOT prove the VPS runtime updated.** GitHub runners cannot SSH to the VPS hosts, so the workflow's operator/sub-user/safebox deploy legs skip with `::warning::… VPS SSH is not reachable from this GitHub runner; skipping remote deploy.` (verified live on run 28617202057, 2026-07-02). Check the run log for those warnings: if the VPS legs skipped (today they always do from GitHub), activate the runtime manually — full-tree rsync to BOTH hosts (operator `137.184.75.57`, sub-user `134.209.123.8`, key `~/.ssh/takyon_argon_alpha14`): `COPYFILE_DISABLE=1 rsync -rt --no-perms --no-owner --no-group --checksum --exclude='.git' --exclude='.venv' --exclude='venv' --exclude='node_modules' --exclude='__pycache__' --exclude='*.pyc' --exclude='._*' --exclude='.DS_Store' --exclude='.env' --exclude='secrets' --exclude='logs' --exclude='tmp' hermes-agent-main/ root@HOST:/opt/takyon/hermes-agent-main/`, then on each host delete `._*` sidecars, `py_compile` the touched files, restart the services (operator: `takyon-dashboard.service` + `takyon-worker.service`; sub-user: `takyon-subuser.service`), and verify `is-active` + a source-level check. Never restart a worker while it holds a running job (check `jobs` for rows locked by that host first).
+5. If the workflow fails, inspect `gh run view <run-id> --log-failed`, patch the failing tracked rail, push again, and watch the new run.
+6. Report the run id, the VPS activation evidence (rsync + restart + is-active), and direct smoke checks. Push main AND activate the runtime — one without the other is not a deploy.
 
 ## User Terms
 
