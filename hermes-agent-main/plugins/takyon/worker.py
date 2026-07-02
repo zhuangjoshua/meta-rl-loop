@@ -87,6 +87,73 @@ def _normalize_worker_progress_text(value: Any, *, limit: int = 220) -> str:
     return _truncate_worker_text(text, limit=limit)
 
 
+def _is_ceo_inactivity_timeout(exc: BaseException) -> bool:
+    if not isinstance(exc, TimeoutError):
+        return False
+    return "inactivity limit" in str(exc).lower()
+
+
+def _open_operator_lifecycle_conn():
+    import psycopg
+
+    from .core import load_takyon_env
+    from .runtime_app import assert_takyon_pg_role, configure_takyon_pg_session, resolve_database_url
+
+    load_takyon_env()
+    resolved_url = resolve_database_url(None, plane="operator")
+    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+    assert_takyon_pg_role(conn, "operator")
+    configure_takyon_pg_session(conn, bypass=True)
+    return conn
+
+
+def _best_effort_terminalize_owned_timeout(job: Job, *, error: str) -> str | None:
+    """Fail/requeue an inactivity-timed-out CEO job immediately if this worker still owns it.
+
+    Normal handler failures are finalized by ``jobs.run_one`` after the handler raises. The inactivity
+    watchdog is special: if the worker unwinds badly after timing out a live CEO turn, relying only on
+    the outer failure path can leave the durable row ``running`` until the 15-minute stale-claim
+    sweeper. This helper mirrors that failure finalization early, under the current claim, so the row
+    releases immediately when possible.
+    """
+    worker_id = str(getattr(job, "locked_by", "") or "").strip()
+    job_id = str(getattr(job, "id", "") or "").strip()
+    if not worker_id or not job_id:
+        return None
+
+    estimate_cents = int(((job.payload or {}).get("estimate_cents", 0) or 0))
+    reservation_key = f"job:{job_id}:{int(getattr(job, 'attempts', 0) or 0)}"
+    conn = None
+    try:
+        conn = _open_operator_lifecycle_conn()
+        if estimate_cents > 0:
+            try:
+                billing.refund(conn, reservation_key)
+            except Exception as refund_exc:  # noqa: BLE001 - row finalization outranks refund hiccups
+                _log.warning(
+                    "worker: refund failed during timeout finalization for job %s (non-fatal): %s",
+                    job_id,
+                    refund_exc,
+                )
+        return jobs.fail_if_still_owned(
+            conn,
+            job_id,
+            worker_id=worker_id,
+            error=error,
+            retryable=True,
+        )
+    except Exception as finalizer_exc:  # noqa: BLE001 - outer run_one path still exists as fallback
+        _log.warning(
+            "worker: timeout finalizer could not terminalize job %s (non-fatal fallback to run_one): %s",
+            job_id,
+            finalizer_exc,
+        )
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _parse_jsonish_output(text: str) -> dict[str, Any]:
     raw = str(text or "").strip()
     if not raw:
@@ -1344,6 +1411,14 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                     progress=progress,
                 )
     except Exception as exc:
+        if _is_ceo_inactivity_timeout(exc):
+            status = _best_effort_terminalize_owned_timeout(job, error=str(exc))
+            if status:
+                _log.warning(
+                    "worker: ceo_wake inactivity timeout terminalized durable job %s as %s before bubbling",
+                    getattr(job, "id", ""),
+                    status,
+                )
         _record_runtime_event(
             slug,
             kind="ceo_wake",
@@ -1463,6 +1538,14 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     progress=progress,
                 )
     except Exception as exc:
+        if _is_ceo_inactivity_timeout(exc):
+            status = _best_effort_terminalize_owned_timeout(job, error=str(exc))
+            if status:
+                _log.warning(
+                    "worker: ceo_bootstrap inactivity timeout terminalized durable job %s as %s before bubbling",
+                    getattr(job, "id", ""),
+                    status,
+                )
         _record_runtime_event(
             slug,
             kind="ceo_bootstrap",

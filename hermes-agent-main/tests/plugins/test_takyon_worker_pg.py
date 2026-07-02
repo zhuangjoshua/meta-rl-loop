@@ -1093,6 +1093,105 @@ def test_ceo_wake_handler_syncs_partial_workspace_on_failed_turn(monkeypatch, tm
     assert (resumed / "product" / "surface.md").read_text() == "partial surface\n"
 
 
+def test_ceo_wake_timeout_calls_owned_timeout_finalizer(monkeypatch):
+    import contextlib
+
+    from plugins.takyon import cli as takyon_cli
+    import gateway.session_context as session_context
+
+    events: list[tuple[str, str]] = []
+    finalized: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield "/tmp/fake-workspace"
+
+    @contextlib.contextmanager
+    def _fake_bound_op(*_a, **_k):
+        yield
+
+    class _FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def _ceo_cron_prompt(self, _slug):
+            return "Wake business now."
+
+        def _ceo_cron_toolsets(self):
+            return ["takyon", "web", "skills"]
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+    monkeypatch.setattr(core, "_bound_operator_task_context", _fake_bound_op)
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(takyon_cli, "_load_ceo_prompt", lambda: "CEO prompt")
+    monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
+    monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        worker,
+        "_record_runtime_event",
+        lambda _slug, *, kind, status, **_kw: events.append((status, kind)),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_best_effort_terminalize_owned_timeout",
+        lambda job, *, error: finalized.update(job_id=str(job.id), error=error) or "queued",
+    )
+    monkeypatch.setattr(
+        worker,
+        "_run_ceo_turn",
+        lambda **_kw: (_ for _ in ()).throw(
+            TimeoutError("CEO wake for business:acme idle past 600s inactivity limit")
+        ),
+    )
+
+    with pytest.raises(TimeoutError):
+        worker.ceo_wake_handler(SimpleNamespace(id="job-timeout", business_slug="acme", payload={}, locked_by="w1"))
+
+    assert finalized["job_id"] == "job-timeout"
+    assert ("failed", "ceo_wake") in events
+
+
+def test_best_effort_terminalize_owned_timeout_requeues_running_job(pg_conn):
+    slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
+    queued = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_bootstrap",
+        idempotency_key="timeout-job",
+        payload={"estimate_cents": 500},
+        max_attempts=2,
+    )
+    claimed = jobs.claim_one(pg_conn, worker_id="w-timeout")
+    assert claimed is not None and claimed.id == queued.id
+
+    reservation_key = f"job:{claimed.id}:{claimed.attempts}"
+    jobs._set_reserved_key(pg_conn, claimed.id, reservation_key)
+    billing.reserve(
+        pg_conn,
+        uid,
+        500,
+        reservation_key,
+        business_slug=slug,
+        job_id=str(claimed.id),
+    )
+
+    status = worker._best_effort_terminalize_owned_timeout(
+        claimed,
+        error="CEO wake for business wedge idle past 600s inactivity limit",
+    )
+
+    assert status == "queued"
+    job = jobs.get_job(pg_conn, claimed.id)
+    assert job is not None
+    assert job.status == "queued"
+    assert job.locked_by is None
+    assert job.error["reason"] == "handler_error"
+    bal = billing.get_billing_balances(pg_conn, uid)
+    assert bal.reserved_cents == 0
+    assert bal.allowance_used_cents == 0
+
+
 def test_refresh_business_surface_after_bootstrap_uses_declared_surface(monkeypatch):
     seen: dict[str, object] = {}
 
@@ -1629,6 +1728,31 @@ def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
     with pytest.raises(RuntimeError) as exc:
         worker.ceo_bootstrap_handler(job)
     assert "iteration budget" in str(exc.value)
+
+
+def test_bootstrap_timeout_calls_owned_timeout_finalizer(monkeypatch):
+    captured = _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "unknown"}},
+        run_turn=lambda **_kw: (_ for _ in ()).throw(
+            TimeoutError("CEO wake for business:acme idle past 600s inactivity limit")
+        ),
+    )
+    finalized: dict[str, Any] = {}
+    monkeypatch.setattr(
+        worker,
+        "_best_effort_terminalize_owned_timeout",
+        lambda job, *, error: finalized.update(job_id=str(job.id), error=error) or "queued",
+    )
+    job = SimpleNamespace(id="job-timeout", business_slug="acme", payload={}, locked_by="w1")
+
+    with pytest.raises(TimeoutError):
+        worker.ceo_bootstrap_handler(job)
+
+    assert finalized["job_id"] == "job-timeout"
+    assert "inactivity limit" in finalized["error"]
+    assert ("failed", "ceo_bootstrap") in captured["events"]
 
 
 def test_bootstrap_workflow_goal_published_without_real_action_requeues(monkeypatch):
