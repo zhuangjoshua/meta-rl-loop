@@ -115,9 +115,11 @@ _No new infrastructure._
 - ⬜ If insufficient: broker replicas with per-replica key enrollment/revocation
 - **Proof:** sustained target-RPS, safebox p95 flat; or kill-one-broker → zero dropped calls.
 
-### Stage 5 — compositional pricing + monthly-only · ⬜ (parallelizable) → **UC4 ships**
-_Independent file cluster — can run alongside the compute stages._
-- ⬜ Monthly-only enforcement + fail-loud cap + legacy purge (dead SQLite branches, phantom quota, shims)
+### Stage 5 — compositional pricing + monthly-only · 🟡 SLICE 1 LANDED on main (998e2aca→1638ac90); deploy pending → **UC4 ships**
+_Independent file cluster — ran alongside Stage 2 exactly as planned._
+- ✅ **Monthly-only enforcement + fail-loud cap + legacy purge (the standalone Q13 slice) — landed, net-negative diff (+279/−298).**
+  **Proof wired in:** new writes refuse `interval != 'month'` at `upsert_plan_policy` (the one path both chat/bootstrap plan writes flow through) with the frozen-legacy-row identical-re-pass escape; the silent budget clamp is now a refusal carrying the exact figures in BOTH copies' place (duplicate cap collapsed onto the one `app_entitlements` copy — core delegates); checkout always `subscription`; Stripe prices always monthly-recurring; pulse-MRR month-only; OpenMeter one_time skip + P1Y cadence deleted; dead SQLite plan branches + unreachable `_init_db` DDL + orphaned `_plan_validation_warnings` + 0-valued free-floor shim deleted. 12-test rig suite (`test_takyon_monthly_only_pg.py`, no safebox dependency) green + invariant pins hardened to absent-or-zero. Affected-suite failure set byte-identical to main baseline. Closes the live unbounded-COGS exposure (D2+D4: year/one_time budgets were uncapped by construction — those intervals no longer exist).
+  _Deferred honestly: `included_action_quota` purge (30 refs — UC4's `per_unit` CostBasis replaces it structurally in the composition work below)._
 - ⬜ `PricedComponent`/`PlanComposition`/`compose_plan` (derived price/budget/gates, margin invariant)
 - ⬜ Money-shape gate at the tool choke point (covers chat + bootstrap paths)
 - ⬜ **Real Shopify integration (operator ruling — acceptance is real, not a stand-in):** connect a $0 Partner dev store via the existing Composio broker (Shopify toolkit confirmed; zero new runtime credential) 🔑; read the store's real plan fee via Admin GraphQL through the safebox; `/api/webhooks/shopify` rail (new HMAC verifier, safebox-side verification, existing provider-keyed dedup — no migration)
