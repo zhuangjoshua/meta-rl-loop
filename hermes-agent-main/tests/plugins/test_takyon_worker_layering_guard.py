@@ -27,6 +27,9 @@ _FORBIDDEN: dict[str, set[str]] = {
     "worker": {"cli"},
     "worker_pool": {"cli"},
     "turn_runtime": {"cli", "worker"},
+    # claim_scope is a queue-plane leaf (Stage 2): jobs/worker_pool/cli all import it, so it
+    # must never import back up the stack (or into the money rails).
+    "claim_scope": {"cli", "worker", "worker_pool", "core", "jobs", "billing"},
 }
 
 

@@ -1403,7 +1403,12 @@ def test_run_worker_loop_configures_operator_pg_session_before_draining(monkeypa
     drained = worker.run_worker_loop(worker_id="w1", once=True)
 
     assert drained == 0
-    assert seen[:3] == ["assert:operator", "configure:True", "drain"]
+    # Stage 2: WorkerPool.run() opens a short-lived pool-registration connection first (also
+    # role-asserted + configured). The pinned invariant is unchanged: the DRAIN connection is
+    # asserted into the operator role and session-configured immediately before drain_tick.
+    assert "drain" in seen
+    drain_at = seen.index("drain")
+    assert seen[drain_at - 2 : drain_at] == ["assert:operator", "configure:True"]
 
 
 def test_run_worker_loop_uses_multiple_threads_when_configured(monkeypatch):
@@ -2018,3 +2023,96 @@ def test_x_publish_outreach_handler_posts_link_reply_when_body_only_contains_des
     ]
     assert calls[1]["arguments"]["text"] == "https://acme.example.com/?utm_source=x&utm_medium=social&utm_campaign=acme"
     assert calls[1]["arguments"]["reply_in_reply_to_tweet_id"] == "tweet-root"
+
+
+def test_worker_pool_run_passes_pool_identity_to_drain(monkeypatch):
+    """Stage 2 regression pin: the run() drain loop must present the pool's claim identity —
+    without it an exclusive session pool can never claim its own strictly-reserved jobs
+    (stranding them while the pool's lease is alive)."""
+    import psycopg as _psycopg
+
+    from plugins.takyon import core, runtime_app
+    from plugins.takyon import worker_pool as wp
+
+    seen: list[dict] = []
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+        def execute(self, *_a, **_k):  # pool registration touches worker_pools
+            class _Cur:
+                def fetchone(self):
+                    return ("x",)
+
+            return _Cur()
+
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
+    monkeypatch.setattr(runtime_app, "assert_takyon_pg_role", lambda *_a, **_k: None)
+    monkeypatch.setattr(runtime_app, "configure_takyon_pg_session", lambda *_a, **_k: None)
+
+    def _fake_drain_tick(_conn, *, stop, **kw):
+        seen.append(kw)
+        stop.set()
+        return {"dispatched": 0, "requeued": 0, "usage_holds_released": 0, "drained": 0,
+                "completed": 0, "blocked": 0, "failed": 0}
+
+    monkeypatch.setattr(worker, "drain_tick", _fake_drain_tick)
+
+    pool = wp.WorkerPool(worker_id="w-ident", pool_id="pool-ident", exclusive=True, once=True)
+    pool.run()
+
+    assert seen, "drain_tick never called"
+    assert seen[0]["claim_pool_id"] == "pool-ident"
+    assert seen[0]["exclusive_pool"] is True
+
+
+def test_worker_pool_heartbeat_thread_starts_even_if_initial_registration_fails(monkeypatch):
+    """Stage 2 regression pin (found live: RLS denied the first registration and the pool then
+    NEVER registered): the heartbeat loop is the registration retry path, so it must start
+    whenever registration is wanted — not only after a successful first attempt."""
+    import psycopg as _psycopg
+
+    from plugins.takyon import core, runtime_app
+    from plugins.takyon import worker_pool as wp
+
+    class _FailingConn:
+        def close(self):
+            pass
+
+        def execute(self, *_a, **_k):
+            raise RuntimeError("rls denied")
+
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_app, "resolve_database_url", lambda *a, **k: "postgresql://fake")
+    monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FailingConn())
+    monkeypatch.setattr(runtime_app, "assert_takyon_pg_role", lambda *_a, **_k: None)
+    monkeypatch.setattr(runtime_app, "configure_takyon_pg_session", lambda *_a, **_k: None)
+
+    started: list[str] = []
+    real_thread = threading.Thread
+
+    class _SpyThread(real_thread):
+        def start(self):
+            started.append(self.name)
+            if self.name == "takyon-pool-heartbeat":
+                return  # don't actually run the loop in the test
+            return super().start()
+
+    monkeypatch.setattr(threading, "Thread", _SpyThread)
+
+    def _fake_drain_tick(_conn, *, stop, **_kw):
+        stop.set()
+        return {"dispatched": 0, "requeued": 0, "usage_holds_released": 0, "drained": 0,
+                "completed": 0, "blocked": 0, "failed": 0}
+
+    monkeypatch.setattr(worker, "drain_tick", _fake_drain_tick)
+
+    pool = wp.WorkerPool(worker_id="w-heal", pool_id="pool-heal", once=True)
+    pool.run()
+
+    assert "takyon-pool-heartbeat" in started, (
+        "heartbeat/self-heal thread must start even when initial registration fails"
+    )

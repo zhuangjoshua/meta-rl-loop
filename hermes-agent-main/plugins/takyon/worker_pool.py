@@ -64,7 +64,12 @@ class WorkerPool:
         max_jobs: int | None = None,
         database_url: str | None = None,
         handlers: HandlerRegistry | None = None,
+        pool_id: str | None = None,
+        exclusive: bool = False,
+        register: bool = True,
     ) -> None:
+        from . import claim_scope as _cs
+
         self.worker_id = worker_id or f"worker-{socket.gethostname()}-{os.getpid()}"
         self._explicit_size = size
         self.dispatch = dispatch
@@ -75,6 +80,28 @@ class WorkerPool:
         self.max_jobs = max_jobs
         self.database_url = database_url
         self._handlers = handlers
+        # Pool identity (Stage 2, UC1): the registry row this pool heartbeats and the identity
+        # its claims present to the reservation predicate. Precedence: explicit pool_id arg,
+        # then an EXPLICIT worker_id (a lane that names its worker owns that identity — e.g.
+        # `worker --once` inside a console session must NOT adopt, register as, and later
+        # decommission the session's pool row), then the session env the operator-prod script
+        # exports, then this pool's own worker id.
+        env_pool = str(os.getenv(_cs.POOL_ID_ENV) or "").strip()
+        explicit_worker = str(worker_id or "").strip()
+        self.pool_id = (
+            str(pool_id or "").strip() or explicit_worker or env_pool or self.worker_id
+        )
+        env_exclusive = str(os.getenv(_cs.POOL_EXCLUSIVE_ENV) or "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        # Env-declared exclusivity binds only the pool the env actually names — a differently
+        # named lane in the same shell (worker --once) must not become an exclusive pool with
+        # an empty reservation set (it would claim nothing at all).
+        self.exclusive = bool(exclusive) or (env_exclusive and self.pool_id == env_pool and bool(env_pool))
+        self.register = register
+        self.pool_lease_seconds = max(
+            120.0, float(os.getenv("TAKYON_WORKER_POOL_LEASE_SECONDS") or 300.0)
+        )
 
     # ── lane factories (the four compute paths, plan A.4) ─────────────────────────────
 
@@ -129,13 +156,21 @@ class WorkerPool:
         kinds: Sequence[str] | None = None,
         handlers: HandlerRegistry | None = None,
     ) -> "WorkerPool":
-        """The interactive shell's inline single-claim lane (size=1, no wake dispatch)."""
+        """The interactive shell's inline single-claim lane (size=1, no wake dispatch). It
+        presents the SESSION pool identity (when one is declared) so it can claim the
+        session-reserved wakes the shell itself enqueues; it never registers a pool row
+        (the session's worker pool owns that lease)."""
+        from . import claim_scope as _cs
+
+        session_pool = str(os.getenv(_cs.POOL_ID_ENV) or "").strip() or None
         return cls(
             worker_id=worker_id or f"cli-wake-{os.getpid()}",
             size=1,
             dispatch=False,
             kinds=kinds,
             handlers=handlers,
+            pool_id=session_pool,
+            register=False,
         )
 
     # ── topology ───────────────────────────────────────────────────────────────────────
@@ -181,6 +216,8 @@ class WorkerPool:
             handlers=self.handlers,
             kinds=self.kinds,
             owner_user_id=self.owner_user_id,
+            claim_pool_id=self.pool_id,
+            exclusive_pool=self.exclusive,
             dispatch=self.dispatch if dispatch is None else dispatch,
             stop=stop,
             max_jobs=self.max_jobs if max_jobs is None else max_jobs,
@@ -197,6 +234,8 @@ class WorkerPool:
             handlers=self.handlers,
             kinds=self.kinds,
             owner_user_id=self.owner_user_id,
+            claim_pool_id=self.pool_id,
+            exclusive_pool=False,
         )
 
     # ── the process shell (body lifted verbatim from worker.run_worker_loop) ───────────
@@ -239,6 +278,92 @@ class WorkerPool:
         max_jobs = self.max_jobs
 
         stop = threading.Event()
+
+        def _pool_conn():
+            conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+            if not database_url:
+                assert_takyon_pg_role(conn, "operator")
+                configure_takyon_pg_session(conn, bypass=True)
+            return conn
+
+        # ── pool registry lifecycle (Stage 2, UC1) ───────────────────────────────────
+        # Register this pool's heartbeated lease row; a daemon thread renews it on its own
+        # connection so a long-running handler never lets the lease lapse (a lapsed lease
+        # spills the pool's STRICT reservations to other workers — correct when the pool is
+        # dead, wrong when it is merely busy). Registration failure degrades loudly, never
+        # fatally: the pool still drains, but its strict reservations spill as if it were
+        # down until the row exists.
+        registered = False
+        if self.register:
+            try:
+                conn = _pool_conn()
+                try:
+                    from . import claim_scope as _cs
+
+                    _cs.register_pool(
+                        conn,
+                        pool_id=self.pool_id,
+                        owner_user_id=self.owner_user_id,
+                        exclusive=self.exclusive,
+                        concurrency=concurrency,
+                        lease_seconds=self.pool_lease_seconds,
+                    )
+                    registered = True
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001 — degraded, not fatal; the heartbeat loop retries
+                _log.error(
+                    "worker[%s]: pool registration failed (%s); strict reservations for pool "
+                    "%s will spill as if the pool were down until the registry row exists "
+                    "(heartbeat loop keeps retrying registration)",
+                    worker_id,
+                    exc,
+                    self.pool_id,
+                )
+
+        def _pool_heartbeat_loop() -> None:
+            from . import claim_scope as _cs
+
+            interval = max(15.0, self.pool_lease_seconds / 4.0)
+            drained_marked = False
+            while not stop.wait(interval):
+                try:
+                    conn = _pool_conn()
+                    try:
+                        if not _cs.heartbeat_pool(
+                            conn, self.pool_id, lease_seconds=self.pool_lease_seconds
+                        ):
+                            _cs.register_pool(
+                                conn,
+                                pool_id=self.pool_id,
+                                owner_user_id=self.owner_user_id,
+                                exclusive=self.exclusive,
+                                concurrency=concurrency,
+                                lease_seconds=self.pool_lease_seconds,
+                            )
+                    finally:
+                        conn.close()
+                except Exception as exc:  # noqa: BLE001 — transient DB outage must not kill the pool
+                    _log.warning("worker[%s]: pool heartbeat failed: %s", worker_id, exc)
+            # Stop requested: mark draining (in-flight work finishes; reservations held).
+            if not drained_marked:
+                try:
+                    conn = _pool_conn()
+                    try:
+                        from . import claim_scope as _cs2
+
+                        _cs2.begin_drain(conn, self.pool_id)
+                    finally:
+                        conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        pool_heartbeat_thread: threading.Thread | None = None
+        if self.register:
+            pool_heartbeat_thread = threading.Thread(
+                target=_pool_heartbeat_loop, name="takyon-pool-heartbeat", daemon=True
+            )
+            pool_heartbeat_thread.start()
 
         def _request_stop(signum, _frame):
             _log.info(
@@ -298,6 +423,8 @@ class WorkerPool:
                         handlers=self.handlers,
                         kinds=self.kinds,
                         owner_user_id=self.owner_user_id,
+                        claim_pool_id=self.pool_id,
+                        exclusive_pool=self.exclusive,
                         dispatch=allow_dispatch,
                         stop=stop,
                         max_jobs=max_jobs,
@@ -325,8 +452,25 @@ class WorkerPool:
             concurrency,
             str(self.owner_user_id or "").strip() or "*",
         )
+        def _decommission() -> None:
+            if not self.register:
+                return
+            try:
+                conn = _pool_conn()
+                try:
+                    from . import claim_scope as _cs
+
+                    _cs.decommission_pool(conn, self.pool_id)
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("worker[%s]: pool decommission failed: %s", worker_id, exc)
+
         if concurrency == 1:
-            return _run_loop(thread_worker_id=worker_id, allow_dispatch=self.dispatch)
+            try:
+                return _run_loop(thread_worker_id=worker_id, allow_dispatch=self.dispatch)
+            finally:
+                _decommission()
 
         totals = [0 for _ in range(concurrency)]
         errors: list[BaseException] = []
@@ -358,6 +502,7 @@ class WorkerPool:
         for thread in threads:
             thread.join()
 
+        _decommission()
         if errors:
             raise errors[0]
         return sum(totals)

@@ -76,21 +76,34 @@ _TERMINAL = ("completed", "blocked", "failed", "cancelled")
 # is derived from kind in SQL (no schema change, dispatch_due_wakes untouched).
 _LANE_SQL = "(case when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' else {a}.kind end)"
 
-# Fresh create-time bootstrap can carry a short-lived worker affinity hint in its payload:
-# a local operator shell may request "claim this first on workers whose id starts with X, then let
-# anyone drain it after N seconds". This keeps same-owner sibling workers on other machines from
-# hijacking a just-created business immediately, without stranding the job if the preferred machine
-# disappears. Requeues renew the grace window off ``updated_at`` so a healthy local retry does not
-# immediately spill over to a sibling machine just because the original enqueue is old.
-_PREFERRED_WORKER_PREFIX_SQL = "coalesce(j.payload->>'preferred_worker_id_prefix', '')"
-_PREFERRED_WORKER_PREFIX_BASE_SQL = f"regexp_replace({_PREFERRED_WORKER_PREFIX_SQL}, '-+$', '')"
-_PREFERRED_WORKER_WINDOW_SQL = (
-    "(case "
-    "when coalesce(j.payload->>'preferred_worker_claim_seconds', '') ~ '^[0-9]+(\\.[0-9]+)?$' "
-    "then greatest(0.0, (j.payload->>'preferred_worker_claim_seconds')::double precision) "
-    "else 0.0 end)"
+# Session ownership (modularization Stage 2, UC1): a job may be RESERVED for a worker pool via
+# the indexed reservation columns stamped at enqueue from a ClaimScope (claim_scope.py). The old
+# payload-hint affinity (payload->>'preferred_worker_id_prefix' + grace-window LIKE matching) is
+# GONE — 'after_lease' reproduces exactly that first-claim-then-spill behavior as a config value,
+# and 'strict' pins the job to the owning pool while that pool's registry lease is alive (spilling,
+# not stranding, when the pool dies). Requeues renew the after_lease window off updated_at so a
+# healthy local retry does not immediately spill to a sibling machine (commit f899da41's contract).
+_RESERVATION_GATE_SQL = (
+    "and ("
+    "  j.reserved_pool_id is null "
+    "  or j.reserved_pool_id = %s "
+    "  or (j.reservation_policy = 'after_lease' "
+    "      and j.reservation_expires_at is not null "
+    "      and j.reservation_expires_at <= now()) "
+    "  or (j.reservation_policy = 'strict' and not exists ("
+    "        select 1 from worker_pools p "
+    "        where p.pool_id = j.reserved_pool_id "
+    "          and p.status in ('joining', 'active', 'draining') "
+    "          and p.lease_expires_at > now())) "
+    ") "
 )
-_PREFERRED_WORKER_QUEUE_TIME_SQL = "greatest(j.created_at, j.updated_at)"
+_RESERVED_FOR_ME_ORDER_SQL = "case when j.reserved_pool_id = %s then 0 else 1 end, "
+_RENEW_AFTER_LEASE_SQL = (
+    "reservation_expires_at = case "
+    "when reservation_policy = 'after_lease' and reservation_lease_seconds is not null "
+    "then now() + (reservation_lease_seconds * interval '1 second') "
+    "else reservation_expires_at end"
+)
 
 # The columns of a jobs row, in one place so every SELECT projects the same Job.
 _COLS = (
@@ -217,21 +230,46 @@ def enqueue(
     idempotency_key: str,
     payload: dict[str, Any] | None = None,
     max_attempts: int = 5,
+    claim_scope: "ClaimScope | None" = None,
 ) -> Job:
     """Place a job on the queue. Idempotent on ``idempotency_key``: a replay returns the EXISTING job
-    unchanged (one effect), never a second row. ``payload`` may carry ``estimate_cents`` (the budget
-    run_one reserves before running) and any handler input."""
+    unchanged (one effect — a replay never re-stamps the reservation), never a second row. ``payload``
+    may carry ``estimate_cents`` (the budget run_one reserves before running) and any handler input.
+    ``claim_scope`` reserves the job for a worker pool (see claim_scope.py for the policies)."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
+    reserved_pool_id = None
+    reservation_policy = "any"
+    lease_seconds = None
+    if claim_scope is not None and claim_scope.fallback != "any":
+        reserved_pool_id = str(claim_scope.pool_id or "").strip() or None
+        if reserved_pool_id is not None:
+            reservation_policy = claim_scope.fallback
+            if claim_scope.fallback == "after_lease":
+                lease_seconds = max(0.0, float(claim_scope.lease_seconds or 0.0)) or None
     _refresh_job_lifecycle_session(conn)
     body = json.dumps(payload or {})
     with conn.transaction():
         row = conn.execute(
-            "insert into jobs (business_slug, kind, idempotency_key, payload, max_attempts) "
-            "values (%s, %s, %s, %s::jsonb, %s) "
+            "insert into jobs (business_slug, kind, idempotency_key, payload, max_attempts, "
+            " reserved_pool_id, reservation_policy, reservation_lease_seconds, reservation_expires_at) "
+            "values (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, "
+            " case when %s::double precision is not null "
+            "  then now() + (%s::double precision * interval '1 second') else null end) "
             "on conflict (idempotency_key) do nothing "
             f"returning {_COLS}",
-            (business_slug, kind, idempotency_key, body, max_attempts),
+            (
+                business_slug,
+                kind,
+                idempotency_key,
+                body,
+                max_attempts,
+                reserved_pool_id,
+                reservation_policy,
+                lease_seconds,
+                lease_seconds,
+                lease_seconds,
+            ),
         ).fetchone()
         if row is not None:
             return _row_to_job(row)
@@ -264,6 +302,8 @@ def claim_one(
     worker_id: str,
     kinds: list[str] | tuple[str, ...] | None = None,
     owner_user_id: str | None = None,
+    claim_pool_id: str | None = None,
+    exclusive_pool: bool = False,
 ) -> Job | None:
     """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
     ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
@@ -271,7 +311,12 @@ def claim_one(
     against each other, while other kinds run in their own lane alongside them. Lock one row with
     ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to 'running', stamp
     locked_by/locked_at, and increment attempts. Returns the claimed job, or None if the queue is
-    empty. The whole claim is one transaction; the row is committed 'running' before this returns."""
+    empty. The whole claim is one transaction; the row is committed 'running' before this returns.
+
+    ``claim_pool_id`` is the claiming pool's registry identity: reserved jobs are honored via the
+    indexed reservation predicate (own reservations first, then unreserved, then expired/orphaned
+    spills — see claim_scope.py). ``exclusive_pool=True`` claims ONLY jobs reserved for this pool
+    (UC1: a session-owned pool does nobody else's work)."""
     _refresh_job_lifecycle_session(conn)
     lane_gate = (
         "and not exists ("
@@ -282,7 +327,9 @@ def claim_one(
     )
     min_queue_age_seconds = max(0.0, float(os.getenv("TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS") or 0.0))
     owner_filter = str(owner_user_id or "").strip()
-    worker_filter = str(worker_id or "").strip()
+    pool_filter = str(claim_pool_id or "").strip()
+    if exclusive_pool and not pool_filter:
+        raise ValueError("exclusive_pool=True requires claim_pool_id")
     age_gate = ""
     if min_queue_age_seconds > 0:
         age_gate = "and j.created_at <= (now() - (%s::double precision * interval '1 second')) "
@@ -294,72 +341,40 @@ def claim_one(
             "  where b.slug = j.business_slug and b.owner_user_id = %s"
             ") "
         )
-    preferred_match = (
-        "("
-        f"%s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
-        f"or %s = {_PREFERRED_WORKER_PREFIX_BASE_SQL}"
-        ")"
-    )
-    preferred_gate = (
-        "and ("
-        f"  {_PREFERRED_WORKER_PREFIX_SQL} = '' "
-        f"  or {preferred_match} "
-        f"  or {_PREFERRED_WORKER_WINDOW_SQL} <= 0 "
-        f"  or {_PREFERRED_WORKER_QUEUE_TIME_SQL} <= "
-        f"     (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second'))"
-        ") "
-    )
-    preferred_order = (
-        "case "
-        f"when {_PREFERRED_WORKER_PREFIX_SQL} <> '' "
-        f" and {_PREFERRED_WORKER_WINDOW_SQL} > 0 "
-        f" and {preferred_match} "
-        f" and {_PREFERRED_WORKER_QUEUE_TIME_SQL} > "
-        f"     (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second')) "
-        "then 0 else 1 end, "
-    )
+    reservation_gate = _RESERVATION_GATE_SQL
+    exclusive_gate = ""
+    if exclusive_pool:
+        exclusive_gate = "and j.reserved_pool_id = %s "
 
     with conn.transaction():
+        params: list[Any] = []
+        kind_gate = ""
         if kinds:
-            params: list[Any] = [list(kinds)]
-            if min_queue_age_seconds > 0:
-                params.append(min_queue_age_seconds)
-            if owner_filter:
-                params.append(owner_filter)
-            params.extend((worker_filter, worker_filter, worker_filter, worker_filter))
-            picked = conn.execute(
-                "select j.id from jobs j "
-                "where j.status = 'queued' and j.kind = any(%s) "
-                + age_gate
-                + owner_gate
-                + preferred_gate
-                + lane_gate
-                + "order by "
-                + preferred_order
-                + "case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
-                "for update skip locked limit 1",
-                tuple(params),
-            ).fetchone()
-        else:
-            params = []
-            if min_queue_age_seconds > 0:
-                params.append(min_queue_age_seconds)
-            if owner_filter:
-                params.append(owner_filter)
-            params.extend((worker_filter, worker_filter, worker_filter, worker_filter))
-            picked = conn.execute(
-                "select j.id from jobs j "
-                "where j.status = 'queued' "
-                + age_gate
-                + owner_gate
-                + preferred_gate
-                + lane_gate
-                + "order by "
-                + preferred_order
-                + "case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
-                "for update skip locked limit 1",
-                tuple(params),
-            ).fetchone()
+            kind_gate = "and j.kind = any(%s) "
+            params.append(list(kinds))
+        if min_queue_age_seconds > 0:
+            params.append(min_queue_age_seconds)
+        if owner_filter:
+            params.append(owner_filter)
+        params.append(pool_filter)  # reservation gate
+        if exclusive_pool:
+            params.append(pool_filter)  # exclusive gate
+        params.append(pool_filter)  # reserved-for-me ordering
+        picked = conn.execute(
+            "select j.id from jobs j "
+            "where j.status = 'queued' "
+            + kind_gate
+            + age_gate
+            + owner_gate
+            + reservation_gate
+            + exclusive_gate
+            + lane_gate
+            + "order by "
+            + _RESERVED_FOR_ME_ORDER_SQL
+            + "case when j.kind = 'ceo_bootstrap' then 0 else 1 end, j.created_at "
+            "for update skip locked limit 1",
+            tuple(params),
+        ).fetchone()
         if picked is None:
             return None
         row = conn.execute(
@@ -443,7 +458,8 @@ def fail(conn, job_id: str, *, error: str, retryable: bool = True) -> str:
         if retryable and attempts < max_attempts:
             conn.execute(
                 "update jobs set status = 'queued', error = %s::jsonb, "
-                "locked_by = null, locked_at = null, updated_at = now() where id = %s",
+                "locked_by = null, locked_at = null, updated_at = now(), "
+                f"{_RENEW_AFTER_LEASE_SQL} where id = %s",
                 (err, job_id),
             )
             return "requeued"
@@ -482,7 +498,8 @@ def fail_if_still_owned(
         if retryable and attempts < max_attempts:
             conn.execute(
                 "update jobs set status = 'queued', error = %s::jsonb, "
-                "locked_by = null, locked_at = null, updated_at = now() where id = %s",
+                "locked_by = null, locked_at = null, updated_at = now(), "
+                f"{_RENEW_AFTER_LEASE_SQL} where id = %s",
                 (err, job_id),
             )
             return "queued"
@@ -503,7 +520,8 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
     _refresh_job_lifecycle_session(conn)
     with conn.transaction():
         requeued = conn.execute(
-            "update jobs set status = 'queued', locked_by = null, locked_at = null, updated_at = now() "
+            "update jobs set status = 'queued', locked_by = null, locked_at = null, updated_at = now(), "
+            f"{_RENEW_AFTER_LEASE_SQL} "
             "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
             "and attempts < max_attempts",
             (older_than_seconds,),
@@ -528,6 +546,8 @@ def run_one(
     handlers: Mapping[str, Handler],
     kinds: list[str] | tuple[str, ...] | None = None,
     owner_user_id: str | None = None,
+    claim_pool_id: str | None = None,
+    exclusive_pool: bool = False,
     heartbeat_interval_seconds: float = 15.0,
     heartbeat_conn_factory: Callable[[], Any] | None = None,
 ) -> JobOutcome | None:
@@ -542,7 +562,14 @@ def run_one(
       4. run            — handler(job). Raises ⇒ refund the hold, then fail/requeue.
       5. settle         — clamp actual ≤ reserved, settle (releases the remainder), complete.
     """
-    job = claim_one(conn, worker_id=worker_id, kinds=kinds, owner_user_id=owner_user_id)
+    job = claim_one(
+        conn,
+        worker_id=worker_id,
+        kinds=kinds,
+        owner_user_id=owner_user_id,
+        claim_pool_id=claim_pool_id,
+        exclusive_pool=exclusive_pool,
+    )
     if job is None:
         return None
 

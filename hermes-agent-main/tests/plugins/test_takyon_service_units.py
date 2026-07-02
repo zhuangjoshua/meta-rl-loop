@@ -148,18 +148,21 @@ def test_operator_prod_script_targets_the_exact_active_local_worker_pool():
     worker = src.split("cmd_worker() {", 1)[1].split("cmd_worker_once() {", 1)[0]
     console = src.split("cmd_console() {", 1)[1].split("cmd_vps_worker() {", 1)[0]
 
+    # Stage 2 (ClaimScope): the pool-id rail replaced the prefix-hint rail entirely.
+    assert "TAKYON_PREFERRED_WORKER" not in src
     assert 'ACTIVE_LOCAL_WORKER_PREFIX_FILE=' in src
-    assert "local_worker_prefix_for_pid() {" in src
-    assert "record_active_local_worker_prefix() {" in src
-    assert "active_local_worker_prefix() {" in src
-    assert "resolve_preferred_worker_id_prefix() {" in src
-    assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="${TAKYON_PREFERRED_WORKER_ID_PREFIX:-mac-operator-$(hostname -s)-}"' not in load
-    assert 'preferred_worker_prefix="$(resolve_preferred_worker_id_prefix)"' in load
-    assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="$preferred_worker_prefix"' in load
-    assert 'worker_prefix="$(record_active_local_worker_prefix "$$" || true)"' in worker
+    assert "local_worker_pool_id_for_pid() {" in src
+    assert "record_active_local_worker_pool() {" in src
+    assert "active_local_worker_pool_id() {" in src
+    assert "resolve_local_worker_pool_id() {" in src
+    assert 'local_worker_pool="$(resolve_local_worker_pool_id)"' in load
+    assert 'export TAKYON_WORKER_POOL_ID="$local_worker_pool"' in load
+    assert 'worker_id="${TAKYON_WORKER_POOL_ID:-$(local_worker_pool_id_for_pid "$$")}"' in worker
+    assert 'export TAKYON_WORKER_POOL_ID="$worker_id"' in worker
     assert '--worker-id "$worker_id"' in worker
-    assert 'worker_prefix="$(record_active_local_worker_prefix "$worker_pid" || true)"' in console
-    assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"' in console
+    assert 'export TAKYON_WORKER_POOL_ID="$session_pool_id"' in console
+    assert 'export TAKYON_WORKER_POOL_EXCLUSIVE="${TAKYON_WORKER_POOL_EXCLUSIVE:-1}"' in console
+    assert 'record_active_local_worker_pool "$worker_pid" "$session_pool_id"' in console
 
 
 def test_operator_prod_script_handles_empty_local_worker_pool_under_nounset():

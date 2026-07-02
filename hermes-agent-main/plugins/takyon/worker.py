@@ -2747,6 +2747,8 @@ def drain_tick(
     handlers: Mapping[str, jobs.Handler] | None = None,
     kinds: list[str] | tuple[str, ...] | None = None,
     owner_user_id: str | None = None,
+    claim_pool_id: str | None = None,
+    exclusive_pool: bool = False,
     dispatch: bool = True,
     stop: threading.Event | None = None,
     max_jobs: int | None = None,
@@ -2795,6 +2797,8 @@ def drain_tick(
             handlers=handlers,
             kinds=kinds,
             owner_user_id=owner_user_id,
+            claim_pool_id=claim_pool_id,
+            exclusive_pool=exclusive_pool,
             heartbeat_conn_factory=heartbeat_conn_factory,
         )
         if outcome is None:

@@ -20109,6 +20109,22 @@ class TakyonStore:
                     from . import jobs as worker_jobs
                 except ImportError:  # pragma: no cover - alternate load path when run as a top-level package
                     from plugins.takyon import jobs as worker_jobs
+                try:
+                    from .claim_scope import session_claim_scope as _session_claim_scope
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon.claim_scope import session_claim_scope as _session_claim_scope
+                # Session ownership (Stage 2): sub-jobs spawned from a session-owned turn get
+                # first-claim-then-spill affinity to the session pool — NEVER strict, so a busy
+                # single-thread pool cannot deadlock a parent turn waiting on its own sub-job.
+                _mirror_scope = _session_claim_scope()
+                if _mirror_scope is not None and _mirror_scope.fallback == "strict":
+                    from dataclasses import replace as _dc_replace
+
+                    _mirror_scope = _dc_replace(
+                        _mirror_scope,
+                        fallback="after_lease",
+                        lease_seconds=_mirror_scope.lease_seconds or 3600.0,
+                    )
                 with self._leaf_conn(conn) as raw:
                     worker_job = worker_jobs.enqueue(
                         raw,
@@ -20117,6 +20133,7 @@ class TakyonStore:
                         idempotency_key=f"work-request:{job_id}",
                         payload=payload,
                         max_attempts=max_attempts,
+                        claim_scope=_mirror_scope,
                     )
                 worker_job_id = str(worker_job.id)
             event_payload = {"job_id": job_id, "kind": op.get("kind"), "reason": reason}

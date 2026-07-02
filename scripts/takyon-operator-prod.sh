@@ -74,39 +74,45 @@ resolved_operator_user_id() {
   printf '%s' "$DEFAULT_OPERATOR_USER_ID"
 }
 
-local_worker_prefix_for_pid() {
+# Stage 2 (ClaimScope): pool identity replaces the old worker-id-prefix affinity hint. The
+# pool id is a plain worker id (no trailing dash); durable ownership lives in the Postgres
+# worker_pools registry + jobs reservation columns, enforced by claim_one. The sidecar file
+# below is only a LOCAL DISCOVERY hint so a plain `shell` (no console-started worker) binds
+# its enqueues to the Mac's active pool; process liveness is checked before trusting it.
+local_worker_pool_id_for_pid() {
   local pid="${1:-}"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  printf 'mac-operator-%s-%s-' "$(hostname -s)" "$pid"
+  printf 'mac-operator-%s-%s' "$(hostname -s)" "$pid"
 }
 
-record_active_local_worker_prefix() {
+record_active_local_worker_pool() {
   local pid="${1:-}"
-  local prefix=""
-  prefix="$(local_worker_prefix_for_pid "$pid")" || return 1
+  local pool_id="${2:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  if [[ -z "$pool_id" ]]; then
+    pool_id="$(local_worker_pool_id_for_pid "$pid")" || return 1
+  fi
   mkdir -p "$LOCAL_PROD_ROOT"
-  printf '%s %s\n' "$pid" "$prefix" >"$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
+  printf '%s %s\n' "$pid" "$pool_id" >"$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
   chmod 600 "$ACTIVE_LOCAL_WORKER_PREFIX_FILE" 2>/dev/null || true
-  printf '%s' "$prefix"
+  printf '%s' "$pool_id"
 }
 
-active_local_worker_prefix() {
+active_local_worker_pool_id() {
   [[ -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE" ]] || return 0
 
   local stored_pid=""
-  local stored_prefix=""
-  local worker_id=""
+  local stored_pool=""
   local command_text=""
   local direct_worker_match="0"
   local wrapper_worker_match="0"
-  read -r stored_pid stored_prefix <"$ACTIVE_LOCAL_WORKER_PREFIX_FILE" || true
-  if [[ ! "$stored_pid" =~ ^[0-9]+$ ]] || [[ -z "$stored_prefix" ]]; then
+  read -r stored_pid stored_pool <"$ACTIVE_LOCAL_WORKER_PREFIX_FILE" || true
+  if [[ ! "$stored_pid" =~ ^[0-9]+$ ]] || [[ -z "$stored_pool" ]]; then
     rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
     return 0
   fi
 
-  worker_id="${stored_prefix%-}"
-  if [[ -z "$worker_id" ]] || ! kill -0 "$stored_pid" >/dev/null 2>&1; then
+  if ! kill -0 "$stored_pid" >/dev/null 2>&1; then
     rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
     return 0
   fi
@@ -114,7 +120,7 @@ active_local_worker_prefix() {
   if command -v ps >/dev/null 2>&1; then
     command_text="$(ps -p "$stored_pid" -o command= 2>/dev/null || true)"
     if [[ -n "$command_text" ]]; then
-      [[ "$command_text" == *"worker --worker-id ${worker_id}"* ]] && direct_worker_match="1"
+      [[ "$command_text" == *"worker --worker-id ${stored_pool}"* ]] && direct_worker_match="1"
       [[ "$command_text" == *"takyon-operator-prod.sh worker"* ]] && wrapper_worker_match="1"
     fi
     if [[ -n "$command_text" ]] && [[ "$direct_worker_match" != "1" ]] && [[ "$wrapper_worker_match" != "1" ]]; then
@@ -123,15 +129,15 @@ active_local_worker_prefix() {
     fi
   fi
 
-  printf '%s' "$stored_prefix"
+  printf '%s' "$stored_pool"
 }
 
-resolve_preferred_worker_id_prefix() {
-  if [[ -n "${TAKYON_PREFERRED_WORKER_ID_PREFIX:-}" ]]; then
-    printf '%s' "$TAKYON_PREFERRED_WORKER_ID_PREFIX"
+resolve_local_worker_pool_id() {
+  if [[ -n "${TAKYON_WORKER_POOL_ID:-}" ]]; then
+    printf '%s' "$TAKYON_WORKER_POOL_ID"
     return 0
   fi
-  active_local_worker_prefix
+  active_local_worker_pool_id
 }
 
 die() {
@@ -345,7 +351,6 @@ load_operator_env() {
   require_files
   ensure_operator_runtime_deps
   ensure_home
-  local preferred_worker_prefix=""
   # shellcheck disable=SC1090
   eval "$(fetch_operator_env_exports)"
 
@@ -370,9 +375,12 @@ load_operator_env() {
   fi
   export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-supabase_s3}"
   export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
-  preferred_worker_prefix="$(resolve_preferred_worker_id_prefix)"
-  export TAKYON_PREFERRED_WORKER_ID_PREFIX="$preferred_worker_prefix"
-  export TAKYON_PREFERRED_WORKER_CLAIM_SECONDS="${TAKYON_PREFERRED_WORKER_CLAIM_SECONDS:-3600}"
+  # Stage 2 (ClaimScope): one pool-id env binds this session's enqueues to the Mac's active
+  # worker pool via the jobs reservation columns (claim_scope.session_claim_scope).
+  local_worker_pool="$(resolve_local_worker_pool_id)"
+  if [[ -n "$local_worker_pool" ]]; then
+    export TAKYON_WORKER_POOL_ID="$local_worker_pool"
+  fi
   export TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE="${TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE:-true}"
   export TERMINAL_CONTAINER_PERSISTENT="${TERMINAL_CONTAINER_PERSISTENT:-false}"
   unset TAKYON_DOCKER_BINARY TAKYON_DOCKER_BROKER_URL TAKYON_DOCKER_BROKER_TOKEN
@@ -987,15 +995,10 @@ cmd_worker() {
   cmd_preflight
   require_docker_for_worker
   stop_local_workers_background
-  local worker_prefix=""
   local worker_id=""
-  worker_prefix="$(record_active_local_worker_prefix "$$" || true)"
-  if [[ -n "$worker_prefix" ]]; then
-    export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"
-    worker_id="${worker_prefix%-}"
-  else
-    worker_id="mac-operator-$(hostname -s)-$$"
-  fi
+  worker_id="${TAKYON_WORKER_POOL_ID:-$(local_worker_pool_id_for_pid "$$")}"
+  record_active_local_worker_pool "$$" "$worker_id" >/dev/null || true
+  export TAKYON_WORKER_POOL_ID="$worker_id"
   export TAKYON_WORKER_CONCURRENCY="$concurrency"
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-1}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-900}"
@@ -1228,16 +1231,19 @@ cmd_console() {
 
   load_operator_env
   cmd_preflight
-  echo "Starting local worker pool: concurrency=$concurrency (log: $worker_log)"
+  # Stage 2 (UC1): the console session OWNS its pool. Mint the pool id up front so the worker
+  # child and the shell share one identity; exclusive means this pool claims ONLY this
+  # session's jobs and this session's jobs are claimable only by it while the pool lives
+  # (kill the console -> the pool's registry lease lapses -> jobs SPILL, never strand).
+  local session_pool_id="mac-operator-$(hostname -s)-$$"
+  export TAKYON_WORKER_POOL_ID="$session_pool_id"
+  export TAKYON_WORKER_POOL_EXCLUSIVE="${TAKYON_WORKER_POOL_EXCLUSIVE:-1}"
+  echo "Starting local worker pool: concurrency=$concurrency pool=$session_pool_id exclusive=$TAKYON_WORKER_POOL_EXCLUSIVE (log: $worker_log)"
   TAKYON_OPERATOR_TUNNELS_MANAGED=1 "$0" worker "$concurrency" --user-id "$(resolved_operator_user_id)" >"$worker_log" 2>&1 &
   worker_pid="$!"
   sleep 1
   if kill -0 "$worker_pid" >/dev/null 2>&1; then
-    local worker_prefix=""
-    worker_prefix="$(record_active_local_worker_prefix "$worker_pid" || true)"
-    if [[ -n "$worker_prefix" ]]; then
-      export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"
-    fi
+    record_active_local_worker_pool "$worker_pid" "$session_pool_id" >/dev/null || true
     local_worker_started="1"
   else
     worker_pid=""

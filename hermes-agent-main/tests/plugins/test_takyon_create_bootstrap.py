@@ -282,7 +282,7 @@ def test_create_does_not_read_summary_before_enqueue(monkeypatch):
     assert result["bootstrap_job"]["job_id"] == "job-no-summary-read"
 
 
-def test_enqueue_pg_ceo_bootstrap_stamps_preferred_worker_claim(monkeypatch):
+def test_enqueue_pg_ceo_bootstrap_binds_session_claim_scope(monkeypatch):
     captured: dict[str, object] = {}
 
     class _Ctx:
@@ -299,14 +299,14 @@ def test_enqueue_pg_ceo_bootstrap_stamps_preferred_worker_claim(monkeypatch):
         def _leaf_conn(self, _conn):
             return _Ctx()
 
-    monkeypatch.setenv("TAKYON_PREFERRED_WORKER_ID_PREFIX", "mac-operator-Local-")
-    monkeypatch.setenv("TAKYON_PREFERRED_WORKER_CLAIM_SECONDS", "90")
+    monkeypatch.setenv("TAKYON_WORKER_POOL_ID", "mac-operator-Local-123")
+    monkeypatch.setenv("TAKYON_WORKER_POOL_EXCLUSIVE", "1")
 
     from plugins.takyon import jobs as takyon_jobs
 
     monkeypatch.setattr(takyon_jobs, "list_jobs", lambda *_a, **_k: [])
 
-    def fake_enqueue(_raw, slug, kind, *, idempotency_key, payload, max_attempts):
+    def fake_enqueue(_raw, slug, kind, *, idempotency_key, payload, max_attempts, claim_scope=None):
         captured.update(
             {
                 "slug": slug,
@@ -314,6 +314,7 @@ def test_enqueue_pg_ceo_bootstrap_stamps_preferred_worker_claim(monkeypatch):
                 "payload": dict(payload),
                 "max_attempts": max_attempts,
                 "idempotency_key": idempotency_key,
+                "claim_scope": claim_scope,
             }
         )
         return SimpleNamespace(id="job-pref", status="queued")
@@ -338,20 +339,27 @@ def test_enqueue_pg_ceo_bootstrap_stamps_preferred_worker_claim(monkeypatch):
         "schedule": "every 6h",
         "max_turns": 7,
         "estimate_cents": takyon_cli._operator_turn_estimate_cents(),
-        "preferred_worker_id_prefix": "mac-operator-Local-",
-        "preferred_worker_claim_seconds": 90,
     }
+    scope = captured["claim_scope"]
+    assert scope is not None
+    assert scope.pool_id == "mac-operator-Local-123"
+    assert scope.fallback == "strict"  # console session pools are exclusive -> strict binding
     assert result["job_id"] == "job-pref"
 
 
-def test_bootstrap_preferred_worker_claim_defaults_to_one_hour(monkeypatch):
-    monkeypatch.setenv("TAKYON_PREFERRED_WORKER_ID_PREFIX", "mac-operator-Local-")
-    monkeypatch.delenv("TAKYON_PREFERRED_WORKER_CLAIM_SECONDS", raising=False)
+def test_session_claim_scope_defaults(monkeypatch):
+    from plugins.takyon.claim_scope import session_claim_scope
 
-    assert takyon_cli._bootstrap_preferred_worker_claim_payload() == {
-        "preferred_worker_id_prefix": "mac-operator-Local-",
-        "preferred_worker_claim_seconds": 3600,
-    }
+    monkeypatch.setenv("TAKYON_WORKER_POOL_ID", "mac-operator-Local-123")
+    monkeypatch.delenv("TAKYON_WORKER_POOL_EXCLUSIVE", raising=False)
+    scope = session_claim_scope()
+    assert scope is not None
+    assert scope.pool_id == "mac-operator-Local-123"
+    assert scope.fallback == "after_lease"  # non-exclusive session: first-claim-then-spill
+    assert scope.lease_seconds == 3600.0  # the old grace-window default, preserved
+
+    monkeypatch.delenv("TAKYON_WORKER_POOL_ID", raising=False)
+    assert session_claim_scope() is None  # no session pool -> unreserved (dashboard/VPS lanes)
 
 
 def test_bootstrap_goal_requests_product_workflow_for_featureful_saas_goal():
