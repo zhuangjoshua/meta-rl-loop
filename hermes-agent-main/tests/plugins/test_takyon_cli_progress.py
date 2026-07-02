@@ -545,6 +545,73 @@ def test_worker_run_ceo_turn_treats_runtime_progress_as_activity_for_inactivity_
     assert wait_calls["count"] >= 2
 
 
+def test_worker_run_ceo_turn_applies_retry_floor_without_lowering_higher_config(monkeypatch):
+    class FakeAgent:
+        def __init__(self, retries):
+            self.session_estimated_cost_usd = 0.0
+            self.session_cost_status = "ok"
+            self._memory_nudge_interval = 0
+            self._skill_nudge_interval = 0
+            self._api_max_retries = retries
+            self.activity_callback = None
+            self.suppress_status_output = False
+
+        def run_conversation(self, _prompt, stream_callback=None):
+            return {"final_response": "Done", "completed": True}
+
+    captured: dict[str, object] = {}
+
+    def _install_common_stubs():
+        monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
+        monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+        monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
+        monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+        monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
+        monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
+        monkeypatch.setattr(
+            "takyon_cli.runtime_provider.resolve_runtime_provider",
+            lambda requested=None, target_model=None: {"provider": "anthropic", "api_mode": "anthropic_messages"},
+        )
+
+    _install_common_stubs()
+
+    def fake_builder_low(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
+        agent = FakeAgent(3)
+        captured["low"] = agent
+        return agent
+
+    monkeypatch.setattr("plugins.takyon.operator_gateway.build_operator_gateway_agent", fake_builder_low)
+    worker._run_ceo_turn(
+        slug="demo",
+        system_prompt="ceo",
+        user_prompt="ship it",
+        toolsets=["takyon"],
+        max_turns=3,
+        inactivity_limit=0,
+        api_retry_floor=6,
+    )
+    assert captured["low"]._api_max_retries == 6
+
+    _install_common_stubs()
+
+    def fake_builder_high(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
+        agent = FakeAgent(8)
+        captured["high"] = agent
+        return agent
+
+    monkeypatch.setattr("plugins.takyon.operator_gateway.build_operator_gateway_agent", fake_builder_high)
+    worker._run_ceo_turn(
+        slug="demo",
+        system_prompt="ceo",
+        user_prompt="ship it",
+        toolsets=["takyon"],
+        max_turns=3,
+        inactivity_limit=0,
+        api_retry_floor=6,
+    )
+    assert captured["high"]._api_max_retries == 8
+
+
 def test_runtime_event_tail_prints_ceo_stream_only():
     class Store:
         def __init__(self):

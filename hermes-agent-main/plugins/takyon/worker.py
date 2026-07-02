@@ -60,6 +60,10 @@ _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker. Keep the worker-loop default aligned with
 # jobs.requeue_stale so dead local workers do not strand create/bootstrap jobs for hours.
 _STALE_SECONDS = 900
+# Fresh /create bootstrap is the operator critical path. A brief upstream model overload should be
+# absorbed inside the SAME CEO turn instead of burning the whole bootstrap job's only retry and
+# failing the business after a few seconds of bad luck.
+_BOOTSTRAP_API_RETRY_FLOOR = 6
 # Release product-AI usage holds whose provider call crashed before settle/release.
 _APP_USAGE_HOLD_TTL_SECONDS = 3600
 _X_POST_CHAR_LIMIT = 280
@@ -1015,6 +1019,7 @@ def _run_ceo_turn(
     toolsets: list[str],
     max_turns: int,
     inactivity_limit: float,
+    api_retry_floor: int = 0,
     progress: _RuntimeProgress | None = None,
 ) -> tuple[str, float, str]:
     """Run ONE CEO wake turn for ``business:<slug>`` and return ``(final_response, cost_usd,
@@ -1091,6 +1096,14 @@ def _run_ceo_turn(
     agent._skill_nudge_interval = 0
     agent.suppress_status_output = True
     agent.activity_callback = progress.activity if progress is not None else None
+    if api_retry_floor > 0:
+        try:
+            agent._api_max_retries = max(
+                int(getattr(agent, "_api_max_retries", 0) or 0),
+                int(api_retry_floor),
+            )
+        except (TypeError, ValueError):
+            agent._api_max_retries = int(api_retry_floor)
     # Stream each model response (mid-loop assistant message) to the business chat as
     # its own bubble, the instant it completes — so a long bootstrap/wake reads like a
     # live agent conversation (a message per step), not a single end-of-turn summary.
@@ -1446,6 +1459,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     toolsets=toolsets,
                     max_turns=max_turns,
                     inactivity_limit=inactivity_limit,
+                    api_retry_floor=_BOOTSTRAP_API_RETRY_FLOOR,
                     progress=progress,
                 )
     except Exception as exc:
