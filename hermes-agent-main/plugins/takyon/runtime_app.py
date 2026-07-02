@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 from .ai_gateway import build_ai_gateway_router, get_gateway_conn
 from .control_api import build_control_router, get_control_conn
 from .creative_gateway import build_creative_gateway_router
-from . import safebox
+from . import environment, safebox
 
 # Production database authority is plane-specific. Generic DATABASE_URL remains accepted only for
 # explicit test/maintenance calls and local/unset host-role compatibility; a production host role must
@@ -64,19 +64,6 @@ _DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 _ALLOW_POSTGRES_OUTSIDE_VPS_ENV = "TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"
 _ALLOW_LEGACY_DB_ROLES_ENV = "TAKYON_ALLOW_LEGACY_DB_ROLES"
 _CONNECT_TIMEOUT_ENV = "TAKYON_POSTGRES_CONNECT_TIMEOUT_SECONDS"
-_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
-_HOST_ROLE_ALIASES = {
-    "": "",
-    "all": "combined",
-    "combined": "combined",
-    "default": "combined",
-    "operator": "operator",
-    "dashboard": "operator",
-    "subuser": "subuser",
-    "app": "subuser",
-    "product": "subuser",
-    "safebox": "safebox",
-}
 _APPROVED_REMOTE_POSTGRES_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
 _APPROVED_REMOTE_POSTGRES_HOME_PREFIXES = (Path("/opt/takyon/.takyon"),)
 _LOOPBACK_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -121,8 +108,8 @@ def _database_plane_roles(plane: str) -> tuple[str, ...]:
 
 
 def _normalized_host_role() -> str:
-    raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
-    return _HOST_ROLE_ALIASES.get(raw, raw)
+    # Thin shim over the one role truth table (Stage 3): runtime_app uses the canonical view.
+    return environment.HostRole.canonical()
 
 
 def _normalize_database_plane(plane: str | None) -> str:
@@ -320,7 +307,9 @@ def assert_takyon_pg_role(conn, plane: str) -> tuple[str, str]:
 
 
 # Process-static memo of resolved no-explicit DB-URL env values (see resolve_database_url).
-_resolved_database_url_env_values: dict[str, str] = {}
+# Keyed by (environment.cache_scope(), plane cache key) — plan R3: a dev-scoped instance must
+# never read a prod-scoped memoised DSN out of this process-global map.
+_resolved_database_url_env_values: dict[tuple[str, str], str] = {}
 
 
 def reset_database_url_cache() -> None:
@@ -330,7 +319,8 @@ def reset_database_url_cache() -> None:
 
 
 def _first_configured_database_url(env_names: tuple[str, ...], *, cache_key: str) -> str:
-    value = _resolved_database_url_env_values.get(cache_key, "")
+    scoped_key = (environment.cache_scope(), cache_key)
+    value = _resolved_database_url_env_values.get(scoped_key, "")
     if not value:
         try:
             env_values = safebox.load_env()
@@ -341,7 +331,7 @@ def _first_configured_database_url(env_names: tuple[str, ...], *, cache_key: str
             if value:
                 break
         if value:
-            _resolved_database_url_env_values[cache_key] = value
+            _resolved_database_url_env_values[scoped_key] = value
     return value
 
 

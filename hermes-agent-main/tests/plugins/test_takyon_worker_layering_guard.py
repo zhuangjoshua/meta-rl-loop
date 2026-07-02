@@ -58,6 +58,19 @@ def _first_party_imports(module_name: str) -> set[str]:
     return found
 
 
+def test_environment_is_a_first_party_leaf():
+    """environment.py (Stage 3 RuntimeContext keystone) must stay a LEAF: every module —
+    including safebox/core/runtime_app and the caches partitioned by cache_scope() — may import
+    it, so it may import NO first-party module at all (forbidden = every plugins.takyon module,
+    module-level and lazy alike)."""
+    imports = _first_party_imports("environment")
+    assert not imports, (
+        f"environment.py imports first-party module(s) {sorted(imports)} — the RuntimeContext "
+        f"keystone must stay a stdlib-only leaf so any module (safebox, core, runtime_app, "
+        f"conftests, tui_gateway) can import it without cycles or heavyweight package pulls."
+    )
+
+
 @pytest.mark.parametrize("module_name", sorted(_FORBIDDEN))
 def test_worker_plane_layering(module_name):
     imports = _first_party_imports(module_name)

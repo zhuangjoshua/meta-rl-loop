@@ -21,6 +21,8 @@ from urllib.parse import urlsplit
 
 from croniter import croniter
 
+from . import environment
+
 
 _ACTION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _OUTBOUND_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$")
@@ -69,7 +71,6 @@ _ACTION_STDOUT_LIMIT = 256 * 1024
 _ACTION_STDERR_LIMIT = 16 * 1024
 _ACTION_MIN_INTERVAL_SECONDS = 15 * 60
 _ACTION_CONTEXT_PREFIX = "/api/takyon/apps/{business}"
-_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 # Platform rails a server-side action may call. The action runs where these rails are reachable and
 # the SERVER is the authority (validate_session + plan/budget per rail), so the shared client's
 # ensureRail() — a browser-side UX guard keyed on the product's declared UI features — must not
@@ -262,7 +263,9 @@ class RailsBase:
 
 
 def _normalized_host_role() -> str:
-    return str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
+    # Thin shim over the one role truth table (Stage 3): app_actions gates on exact spellings,
+    # so it uses the bare (no-alias) view.
+    return environment.HostRole.bare()
 
 
 def _operator_host_requires_action_sandbox() -> bool:

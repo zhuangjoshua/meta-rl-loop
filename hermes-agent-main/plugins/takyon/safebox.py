@@ -50,6 +50,7 @@ from takyon_cli.config import (
     managed_error,
 )
 
+from . import environment
 from .user_api_keys import hash_api_key, is_well_formed, key_prefix
 from .business_credits import (
     CreativeCreditBalances,
@@ -111,7 +112,9 @@ _MANAGED_SECRET_TIMEOUT_ENV = "TAKYON_MANAGED_SECRET_TIMEOUT_SECONDS"
 _MANAGED_SECRET_CACHE_ENV = "TAKYON_MANAGED_SECRET_CACHE_SECONDS"
 _MANAGED_SECRET_CACHE_DEFAULT_SECONDS = 60.0
 _MANAGED_SECRET_MUTEX = threading.RLock()
-_MANAGED_SECRET_CACHE: dict[str, tuple[float, str]] = {}
+# Keyed by (environment.cache_scope(), secret name) — plan R3: a dev-scoped instance must never
+# read a prod-scoped cached secret out of this process-global map. Values stay (monotonic, value).
+_MANAGED_SECRET_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
 
 
 class RemoteSafeboxError(RuntimeError):
@@ -177,7 +180,9 @@ def _remote_enabled() -> bool:
 
 
 def _normalized_host_role() -> str:
-    return str(os.environ.get(_HOST_ROLE_ENV) or "").strip().lower()
+    # Thin shim over the one role truth table (Stage 3): safebox gates on the exact "safebox"
+    # spelling, so it uses the bare (no-alias) view.
+    return environment.HostRole.bare()
 
 
 def _local_authority_enabled() -> bool:
@@ -368,9 +373,10 @@ def _managed_secret_argv(name: str) -> list[str]:
 def _read_managed_secret(name: str) -> str:
     ttl = _managed_secret_cache_seconds()
     now = time.monotonic()
+    cache_key = (environment.cache_scope(), name)
     if ttl > 0:
         with _MANAGED_SECRET_MUTEX:
-            cached = _MANAGED_SECRET_CACHE.get(name)
+            cached = _MANAGED_SECRET_CACHE.get(cache_key)
             if cached and now - cached[0] <= ttl:
                 return cached[1]
 
@@ -394,7 +400,7 @@ def _read_managed_secret(name: str) -> str:
     value = str(completed.stdout or "").strip()
     if ttl > 0 and value:
         with _MANAGED_SECRET_MUTEX:
-            _MANAGED_SECRET_CACHE[name] = (time.monotonic(), value)
+            _MANAGED_SECRET_CACHE[cache_key] = (time.monotonic(), value)
     return value
 
 

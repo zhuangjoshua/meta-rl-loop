@@ -64,7 +64,7 @@ from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
 from .app_runtime_constants import APP_SESSION_COOKIE
-from . import app_supabase_auth, composio_distribution, safebox
+from . import app_supabase_auth, composio_distribution, environment, safebox
 
 
 TAKYON_TOOLSET = "takyon"
@@ -84,19 +84,6 @@ CURRENT_BUSINESS_CAPABILITY_VERSION = 1
 BUSINESS_UPGRADE_RECEIPT = "metrics/receipts/upgrades/takyon-business-upgrade-v1.json"
 TAKYON_BUSINESS_ROOTS = ("product", "distribution", "research", "metrics")
 _ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS_ENV = "TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS"
-_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
-_HOST_ROLE_ALIASES = {
-    "": "",
-    "all": "combined",
-    "combined": "combined",
-    "default": "combined",
-    "operator": "operator",
-    "dashboard": "operator",
-    "subuser": "subuser",
-    "app": "subuser",
-    "product": "subuser",
-    "safebox": "safebox",
-}
 _APPROVED_REMOTE_WORKSPACE_SYNC_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
 _APPROVED_REMOTE_WORKSPACE_HOME_PREFIXES = (Path("/opt/takyon/.takyon"),)
 TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
@@ -173,8 +160,8 @@ def operator_identity_mode() -> str:
 
 
 def _normalized_host_role() -> str:
-    raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
-    return _HOST_ROLE_ALIASES.get(raw, raw)
+    # Thin shim over the one role truth table (Stage 3): core uses the canonical view.
+    return environment.HostRole.canonical()
 
 
 def _resolved_takyon_home() -> Path | None:
@@ -757,7 +744,9 @@ _ACTIVE_DATABASE_PLANE: contextvars.ContextVar[str] = contextvars.ContextVar(
 def _postgres_pool(dsn: str, *, plane: str = "") -> _PostgresPool:
     dsn_key = str(dsn or "").strip()
     plane_key = str(plane or "").strip().lower()
-    key = f"{plane_key}\0{dsn_key}"
+    # Registry key composes environment.cache_scope() (plan R3: a dev-scoped instance must never
+    # reuse a prod-scoped pool) with the Stage-4a plane key (e.g. "app-http") and the DSN.
+    key = f"{environment.cache_scope()}\0{plane_key}\0{dsn_key}"
     with _POSTGRES_POOLS_LOCK:
         pool = _POSTGRES_POOLS.get(key)
         if pool is None:
@@ -8327,21 +8316,25 @@ def _candidate_env_files() -> list[Path]:
     return paths
 
 
-_loaded_env_paths: set[Path] = set()
+# Keyed by (environment.cache_scope(), resolved path) — plan R3: the once-per-process guard is
+# per environment scope, so a rebound scope re-reads its own env files instead of inheriting
+# another scope's "already loaded" state.
+_loaded_env_paths: set[tuple[str, Path]] = set()
 
 
 def load_takyon_env() -> list[str]:
     """Load explicit Takyon env files without overriding process env."""
     loaded: list[str] = []
+    scope = environment.cache_scope()
     for path in _candidate_env_files():
         try:
             resolved = path.resolve()
         except OSError:
             continue
-        if resolved in _loaded_env_paths or not resolved.exists() or not resolved.is_file():
+        if (scope, resolved) in _loaded_env_paths or not resolved.exists() or not resolved.is_file():
             continue
         load_dotenv(dotenv_path=resolved, override=False, encoding="utf-8")
-        _loaded_env_paths.add(resolved)
+        _loaded_env_paths.add((scope, resolved))
         loaded.append(str(resolved))
     return loaded
 

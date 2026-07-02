@@ -91,6 +91,7 @@ from plugins.takyon.core import (
     _is_reserved_public_subdomain,
 )
 from plugins.takyon.meta_ads_v2 import handle_business_meta_ad_insights_sync
+from plugins.takyon import environment as _environment
 from plugins.takyon import safebox as takyon_safebox
 
 TAKYON_APP_SESSION_COOKIE = APP_SESSION_COOKIE
@@ -1154,21 +1155,9 @@ def _request_has_dashboard_api_auth(request: Request) -> bool:
         return _has_valid_auth0_dashboard_session(request.headers)
     return _has_valid_session_token(request)
 
-_HOST_ROLE_ENV = "TAKYON_HOST_ROLE"
 _HOST_ROLE_COMBINED = "combined"
 _HOST_ROLE_OPERATOR = "operator"
 _HOST_ROLE_SUBUSER = "subuser"
-_HOST_ROLE_ALIASES = {
-    "": _HOST_ROLE_COMBINED,
-    "all": _HOST_ROLE_COMBINED,
-    "combined": _HOST_ROLE_COMBINED,
-    "default": _HOST_ROLE_COMBINED,
-    "operator": _HOST_ROLE_OPERATOR,
-    "dashboard": _HOST_ROLE_OPERATOR,
-    "subuser": _HOST_ROLE_SUBUSER,
-    "app": _HOST_ROLE_SUBUSER,
-    "product": _HOST_ROLE_SUBUSER,
-}
 _APP_PLANE_PATH_PREFIXES: tuple[str, ...] = (
     "/api/takyon/apps/",
     "/site/",
@@ -1193,8 +1182,9 @@ _PRODUCT_HOST_DENIED_PATH_PREFIXES: tuple[str, ...] = (
 
 
 def _host_role() -> str:
-    raw = str(os.getenv(_HOST_ROLE_ENV) or "").strip().lower()
-    return _HOST_ROLE_ALIASES.get(raw, _HOST_ROLE_COMBINED)
+    # Thin shim over the one role truth table (Stage 3): the HTTP server uses the serving view
+    # (no safebox/worker aliases; unknown/empty resolves to "combined").
+    return _environment.HostRole.serving()
 
 
 def _is_app_plane_path(path: str) -> bool:

@@ -11,20 +11,22 @@ _BLOCKED_TEST_PG_HOST_ROLES = frozenset({"operator", "subuser", "safebox"})
 
 
 def _normalized_host_role() -> str:
-    raw = str(os.environ.get("TAKYON_HOST_ROLE") or "").strip().lower()
-    aliases = {
-        "": "",
-        "all": "combined",
-        "combined": "combined",
-        "default": "combined",
-        "operator": "operator",
-        "dashboard": "operator",
-        "subuser": "subuser",
-        "app": "subuser",
-        "product": "subuser",
-        "safebox": "safebox",
-    }
-    return aliases.get(raw, raw)
+    # Delegates to the one role truth table (Stage 3): plugins/takyon/environment.py::HostRole
+    # .canonical. Loaded by file path because conftest import must stay light — a plain
+    # ``import plugins.takyon.environment`` would pull the whole plugins.takyon package
+    # (core/cli) into every collection. environment.py is a stdlib-only leaf.
+    import importlib.util
+    import sys
+
+    mod = sys.modules.get("plugins.takyon.environment")
+    if mod is None:
+        path = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "environment.py"
+        spec = importlib.util.spec_from_file_location("_takyon_environment_conftest", path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod  # dataclasses resolves types via sys.modules[cls.__module__]
+        spec.loader.exec_module(mod)
+    return mod.HostRole.canonical()
 
 
 def _resolve_test_pg_dsn() -> str | None:

@@ -2377,6 +2377,14 @@ def _run_isolated_gateway_turn(
         max_iterations_override=max_iterations_override,
         agent_config_overrides=agent_config_overrides,
     )
+    child_env = os.environ.copy()
+    # Plan R4: the detached turn worker must carry the parent's RuntimeContext explicitly
+    # (TAKYON_ENV + TAKYON_HOME), not rely on ambient env inheritance.
+    from plugins.takyon.environment import current_context
+
+    _ctx = current_context()
+    child_env["TAKYON_ENV"] = _ctx.name
+    child_env["TAKYON_HOME"] = str(_ctx.home)
     proc = subprocess.Popen(
         [sys.executable, "-m", "tui_gateway.isolated_turn_worker"],
         stdin=subprocess.PIPE,
@@ -2385,7 +2393,7 @@ def _run_isolated_gateway_turn(
         text=True,
         bufsize=1,
         cwd=os.getcwd(),
-        env=os.environ.copy(),
+        env=child_env,
     )
     session["takyon_turn_proc"] = proc
     session.pop("takyon_turn_interrupted", None)
