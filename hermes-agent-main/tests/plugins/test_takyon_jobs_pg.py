@@ -148,6 +148,26 @@ def test_claim_one_prefers_matching_worker_prefix_during_grace_window(pg_conn):
     assert claimed.locked_by == "mac-operator-Local-123"
 
 
+def test_claim_one_matches_single_thread_worker_id_against_recorded_prefix(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    preferred = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_bootstrap",
+        idempotency_key="preferred-bootstrap",
+        payload={
+            "preferred_worker_id_prefix": "mac-operator-Local-123-",
+            "preferred_worker_claim_seconds": 120,
+        },
+    )
+
+    claimed = jobs.claim_one(pg_conn, worker_id="mac-operator-Local-123")
+
+    assert claimed is not None
+    assert claimed.id == preferred.id
+    assert claimed.locked_by == "mac-operator-Local-123"
+
+
 def test_claim_one_skips_nonmatching_worker_prefix_until_grace_window_expires(pg_conn):
     first_slug, _uid = _provision_business(pg_conn)
     second_slug, _uid2 = _provision_business(pg_conn)

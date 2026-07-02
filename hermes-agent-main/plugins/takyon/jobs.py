@@ -83,6 +83,7 @@ _LANE_SQL = "(case when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' els
 # disappears. Requeues renew the grace window off ``updated_at`` so a healthy local retry does not
 # immediately spill over to a sibling machine just because the original enqueue is old.
 _PREFERRED_WORKER_PREFIX_SQL = "coalesce(j.payload->>'preferred_worker_id_prefix', '')"
+_PREFERRED_WORKER_PREFIX_BASE_SQL = f"regexp_replace({_PREFERRED_WORKER_PREFIX_SQL}, '-+$', '')"
 _PREFERRED_WORKER_WINDOW_SQL = (
     "(case "
     "when coalesce(j.payload->>'preferred_worker_claim_seconds', '') ~ '^[0-9]+(\\.[0-9]+)?$' "
@@ -293,10 +294,16 @@ def claim_one(
             "  where b.slug = j.business_slug and b.owner_user_id = %s"
             ") "
         )
+    preferred_match = (
+        "("
+        f"%s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
+        f"or %s = {_PREFERRED_WORKER_PREFIX_BASE_SQL}"
+        ")"
+    )
     preferred_gate = (
         "and ("
         f"  {_PREFERRED_WORKER_PREFIX_SQL} = '' "
-        f"  or %s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
+        f"  or {preferred_match} "
         f"  or {_PREFERRED_WORKER_WINDOW_SQL} <= 0 "
         f"  or {_PREFERRED_WORKER_QUEUE_TIME_SQL} <= "
         f"     (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second'))"
@@ -306,7 +313,7 @@ def claim_one(
         "case "
         f"when {_PREFERRED_WORKER_PREFIX_SQL} <> '' "
         f" and {_PREFERRED_WORKER_WINDOW_SQL} > 0 "
-        f" and %s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
+        f" and {preferred_match} "
         f" and {_PREFERRED_WORKER_QUEUE_TIME_SQL} > "
         f"     (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second')) "
         "then 0 else 1 end, "
@@ -319,8 +326,7 @@ def claim_one(
                 params.append(min_queue_age_seconds)
             if owner_filter:
                 params.append(owner_filter)
-            params.append(worker_filter)
-            params.append(worker_filter)
+            params.extend((worker_filter, worker_filter, worker_filter, worker_filter))
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' and j.kind = any(%s) "
@@ -340,8 +346,7 @@ def claim_one(
                 params.append(min_queue_age_seconds)
             if owner_filter:
                 params.append(owner_filter)
-            params.append(worker_filter)
-            params.append(worker_filter)
+            params.extend((worker_filter, worker_filter, worker_filter, worker_filter))
             picked = conn.execute(
                 "select j.id from jobs j "
                 "where j.status = 'queued' "
