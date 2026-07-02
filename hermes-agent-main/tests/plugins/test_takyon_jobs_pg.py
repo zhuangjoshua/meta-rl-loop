@@ -570,6 +570,21 @@ def test_run_one_heartbeats_while_handler_is_running(pg_conn, monkeypatch):
     assert heartbeat_calls and heartbeat_calls[0][1] == "w1"
 
 
+def test_heartbeat_requires_the_same_worker_claim(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")
+    claimed = jobs.claim_one(pg_conn, worker_id="w1")
+    assert claimed is not None
+
+    with pytest.raises(jobs.JobNotRunning):
+        jobs.heartbeat(pg_conn, claimed.id, worker_id="w2")
+
+    job = jobs.get_job(pg_conn, claimed.id)
+    assert job is not None
+    assert job.status == "running"
+    assert job.locked_by == "w1"
+
+
 def test_run_one_uses_isolated_heartbeat_connection(pg_conn, monkeypatch):
     slug, _uid = _provision_business(pg_conn)
     jobs.enqueue(pg_conn, slug, "ceo_wake", idempotency_key="j")

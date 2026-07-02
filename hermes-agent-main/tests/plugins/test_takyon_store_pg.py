@@ -801,6 +801,54 @@ def test_new_business_workspace_commit_runs_after_business_row_is_visible(pg_sto
         ).fetchone()[0] == 1
 
 
+def test_business_upsert_can_skip_initial_workspace_sync_for_create_chokepoint(pg_store, pg_store_dsn, monkeypatch):
+    monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|operator-skip-initial-sync")
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        control_plane.ensure_platform_owner(conn)
+
+    called: list[str] = []
+
+    def _unexpected_workspace_commit(self, conn, slug, **kwargs):
+        called.append(slug)
+        raise AssertionError("initial workspace sync should be skipped for this upsert")
+
+    monkeypatch.setattr(
+        takyon_core.TakyonStore,
+        "_commit_business_workspace_revision",
+        _unexpected_workspace_commit,
+    )
+
+    result = pg_store.commit(
+        scope="business:skipco",
+        operations=[
+            {
+                "action": "business.upsert",
+                "business": "skipco",
+                "name": "Skip Co",
+                "skip_initial_workspace_sync": True,
+            }
+        ],
+        idempotency_key="p83-skip-initial-sync-1",
+        reason="p8.3 skip initial sync",
+        actor="test",
+    )
+
+    assert result["success"] is True
+    assert called == []
+    with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
+        row = conn.execute(
+            "select slug, head_revision from businesses where slug = %s",
+            ("skipco",),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "skipco"
+        assert int(row[1] or 0) == 0
+        assert conn.execute(
+            "select count(*) from idempotency_keys where key = %s",
+            ("p83-skip-initial-sync-1",),
+        ).fetchone()[0] == 1
+
+
 def test_business_upsert_blocks_when_platform_owner_unprovisioned(pg_store, pg_store_dsn, monkeypatch):
     # Invariant #8: no NULL/fake owner. With the configured platform sub NOT provisioned, business.upsert
     # blocks with an actionable reason AND leaves no half-created business row (the commit rolls back).

@@ -2232,7 +2232,7 @@ def _bootstrap_preferred_worker_claim_payload() -> dict[str, Any]:
         except ValueError:
             grace_seconds = 0
     if grace_seconds <= 0:
-        grace_seconds = 120
+        grace_seconds = 3600
     return {
         "preferred_worker_id_prefix": prefix,
         "preferred_worker_claim_seconds": grace_seconds,
@@ -4438,6 +4438,24 @@ def _business_exists(store: TakyonStore, slug: str) -> bool:
     return str(business.get("slug") or "").strip() == slug
 
 
+def _business_upsert_commit_persisted_slug(result: Any, slug: str) -> bool:
+    slug = _slugify(slug)
+    if not slug or not isinstance(result, dict):
+        return False
+    results = result.get("results")
+    if not isinstance(results, list):
+        return False
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("action") or "").strip() != "business.upsert":
+            continue
+        item_slug = _slugify(str(item.get("business") or item.get("slug") or slug))
+        if item_slug == slug:
+            return True
+    return False
+
+
 def _require_current_business(current_business: str | None) -> str:
     if not current_business:
         raise SystemExit("Select a business first with /use <business> or create one with /create <business> <goal>.")
@@ -5927,6 +5945,11 @@ def run_takyon_command(
                 "name": raw_name,
                 "goal": goal,
                 "mode": mode,
+                # Fresh create only needs the business row before bootstrap can start. The initial
+                # stub workspace (empty roots + seeded strategy) is non-authoritative and the
+                # bootstrap worker will commit the real first revision; skipping the create-time
+                # first-workspace sync keeps `/create` from wedging before it can even enqueue.
+                "skip_initial_workspace_sync": True,
             }
             business_result = store.commit(
                 scope=_scope_for_business(slug),
@@ -5935,9 +5958,11 @@ def run_takyon_command(
                 reason="operator initialized business",
                 actor="operator",
             )
-            active = store.read(scope=_scope_for_business(slug), query="summary")
-            business_record = (active.get("business") or {}) if isinstance(active, dict) else {}
-            if str(business_record.get("slug") or "").strip() != slug:
+            # `takyon create` must enqueue the first bootstrap job immediately after the durable
+            # business write. A fresh-business `summary` read triggers projection/live-truth work
+            # that can stall the operator rail before any bootstrap job exists, so use the durable
+            # commit receipt itself as the persistence proof at this chokepoint.
+            if not _business_upsert_commit_persisted_slug(business_result, slug):
                 raise RuntimeError(f"business creation did not persist for {slug}")
             _operator_create_balance_finalize(create_charge, settle=True)
             create_charge = None

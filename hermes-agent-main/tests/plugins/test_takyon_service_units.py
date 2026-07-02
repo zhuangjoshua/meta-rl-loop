@@ -162,6 +162,15 @@ def test_operator_prod_script_targets_the_exact_active_local_worker_pool():
     assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"' in console
 
 
+def test_operator_prod_script_handles_empty_local_worker_pool_under_nounset():
+    src = (ROOT / "scripts/takyon-operator-prod.sh").read_text()
+
+    collect = src.split("collect_local_worker_pids() {", 1)[1].split("_wait_for_local_worker_exit() {", 1)[0]
+    assert 'if [[ "${#pids[@]}" -eq 0 ]]; then' in collect
+    assert "return 0" in collect
+    assert "printf '%s\\n' \"${pids[@]}\"" in collect
+
+
 def test_app_control_blocker_matches_operator_runtime_text_timestamp():
     src = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0045_app_runtime_identity_ports.sql").read_text()
 

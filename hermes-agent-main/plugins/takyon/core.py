@@ -18005,6 +18005,7 @@ class TakyonStore:
                 str(item.get("action") or "") == "business.upsert"
                 and str(item.get("business_slug") or "").strip()
                 and not bool(item.get("business_existed"))
+                and not _boolish(item.get("skip_initial_workspace_sync"), default=False)
                 for item in staged
             )
 
@@ -18019,13 +18020,19 @@ class TakyonStore:
                     result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
                     results.append(result)
                     action_name = str(item.get("action") or "").strip()
+                    skip_workspace_commit = (
+                        action_name == "business.upsert"
+                        and str(item.get("business_slug") or "").strip()
+                        and not bool(item.get("business_existed"))
+                        and _boolish(item.get("skip_initial_workspace_sync"), default=False)
+                    )
                     if action_name.startswith("app.") or action_name in {
                         "artifact.write",
                         "artifact.patch",
                         "memory.write",
                         "workspace.upsert",
                         "business.upsert",
-                    }:
+                    } and not skip_workspace_commit:
                         slug = str(item.get("business_slug") or "").strip()
                         if slug:
                             normalized = _slugify(slug)

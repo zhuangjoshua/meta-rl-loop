@@ -377,12 +377,16 @@ def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
     with conn.transaction():
         updated = conn.execute(
             "update jobs set locked_at = now(), updated_at = now() "
-            "where id = %s and status = 'running'",
-            (job_id,),
+            "where id = %s and status = 'running' and locked_by = %s",
+            (job_id, worker_id),
         ).rowcount
     if updated == 0:
-        row = conn.execute("select status from jobs where id = %s", (job_id,)).fetchone()
-        if row is not None and str(row[0]) == "running":
+        row = conn.execute("select status, locked_by from jobs where id = %s", (job_id,)).fetchone()
+        if (
+            row is not None
+            and str(row[0]) == "running"
+            and str(row[1] or "") == worker_id
+        ):
             return
         raise JobNotRunning(job_id)
 
@@ -611,11 +615,16 @@ def run_one(
         warning_window_seconds = max(300.0, float(heartbeat_interval_seconds or 0) * 20.0)
         window_seconds = min(warning_window_seconds, stale_seconds / 2.0)
         row = lifecycle_conn.execute(
-            "select status, locked_at > now() - (%s::double precision * interval '1 second') "
+            "select status, locked_by, locked_at > now() - (%s::double precision * interval '1 second') "
             "from jobs where id = %s",
             (window_seconds, job.id),
         ).fetchone()
-        return bool(row is not None and str(row[0]) == "running" and row[1])
+        return bool(
+            row is not None
+            and str(row[0]) == "running"
+            and str(row[1] or "") == worker_id
+            and row[2]
+        )
 
     try:
         wait_timeout = (

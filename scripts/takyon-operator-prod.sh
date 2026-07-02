@@ -366,7 +366,7 @@ load_operator_env() {
   export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
   preferred_worker_prefix="$(resolve_preferred_worker_id_prefix)"
   export TAKYON_PREFERRED_WORKER_ID_PREFIX="$preferred_worker_prefix"
-  export TAKYON_PREFERRED_WORKER_CLAIM_SECONDS="${TAKYON_PREFERRED_WORKER_CLAIM_SECONDS:-120}"
+  export TAKYON_PREFERRED_WORKER_CLAIM_SECONDS="${TAKYON_PREFERRED_WORKER_CLAIM_SECONDS:-3600}"
   export TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE="${TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE:-true}"
   export TERMINAL_CONTAINER_PERSISTENT="${TERMINAL_CONTAINER_PERSISTENT:-false}"
   unset TAKYON_DOCKER_BINARY TAKYON_DOCKER_BROKER_URL TAKYON_DOCKER_BROKER_TOKEN
@@ -729,6 +729,9 @@ collect_local_worker_pids() {
     [[ "$pid" != "$$" ]] || continue
     pids+=("$pid")
   done < <(local_worker_pids)
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
   printf '%s\n' "${pids[@]}"
 }
 
