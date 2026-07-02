@@ -1192,6 +1192,46 @@ def test_best_effort_terminalize_owned_timeout_requeues_running_job(pg_conn):
     assert bal.allowance_used_cents == 0
 
 
+def test_best_effort_terminalize_owned_timeout_refunds_with_estimate(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    class _FakeConn:
+        def close(self) -> None:
+            calls.append(("close", "conn"))
+
+    def _fake_refund(conn, reservation_key):
+        assert isinstance(conn, _FakeConn)
+        calls.append(("refund", reservation_key))
+
+    def _fake_fail_if_still_owned(conn, job_id, *, worker_id, error, retryable):
+        assert isinstance(conn, _FakeConn)
+        calls.append(("fail", job_id))
+        assert worker_id == "w-timeout"
+        assert error == "idle timeout"
+        assert retryable is True
+        return "queued"
+
+    monkeypatch.setattr(worker, "_open_operator_lifecycle_conn", lambda: _FakeConn())
+    monkeypatch.setattr(worker.billing, "refund", _fake_refund)
+    monkeypatch.setattr(worker.jobs, "fail_if_still_owned", _fake_fail_if_still_owned)
+
+    claimed = SimpleNamespace(
+        id="job-timeout",
+        attempts=2,
+        locked_by="w-timeout",
+        payload={"estimate_cents": 500},
+    )
+
+    status = worker._best_effort_terminalize_owned_timeout(claimed, error="idle timeout")
+
+    assert status == "queued"
+    assert calls == [
+        ("refund", "job:job-timeout:2"),
+        ("fail", "job-timeout"),
+        ("close", "conn"),
+    ]
+
+
 def test_refresh_business_surface_after_bootstrap_uses_declared_surface(monkeypatch):
     seen: dict[str, object] = {}
 
