@@ -6,7 +6,7 @@ import os
 import sqlite3
 from types import SimpleNamespace
 
-from plugins.takyon import cli, core as takyon_core, worker
+from plugins.takyon import cli, core as takyon_core, turn_runtime, worker
 
 
 class _FakeStore:
@@ -417,8 +417,8 @@ def test_worker_run_ceo_turn_wires_reasoning_config_and_callback(monkeypatch):
         captured["agent_kwargs"] = agent_kwargs
         return FakeAgent()
 
-    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
-    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(turn_runtime, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
     monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
     monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
@@ -515,8 +515,8 @@ def test_worker_run_ceo_turn_treats_runtime_progress_as_activity_for_inactivity_
             return set(), set(fs)
         return set(fs), set()
 
-    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
-    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(turn_runtime, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
     monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
     monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
@@ -630,8 +630,8 @@ def test_worker_run_ceo_turn_treats_claude_worker_progress_as_activity_for_inact
             return set(), set(fs)
         return set(fs), set()
 
-    monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
-    monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+    monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(turn_runtime, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
     monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
     monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
@@ -679,8 +679,8 @@ def test_worker_run_ceo_turn_applies_retry_floor_without_lowering_higher_config(
     captured: dict[str, object] = {}
 
     def _install_common_stubs():
-        monkeypatch.setattr(cli, "_read_model_config", lambda _store: {"provider": "anthropic"})
-        monkeypatch.setattr(cli, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
+        monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+        monkeypatch.setattr(turn_runtime, "_require_agent_model_config", lambda _cfg, model_override="": "claude-sonnet-5")
         monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
         monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
         monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)

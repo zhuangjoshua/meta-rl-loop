@@ -10366,7 +10366,7 @@ def cmd_worker(args):
     drain queued jobs through the budget-gated run_one cycle. Requires TAKYON_OPERATOR_DATABASE_URL
     (Postgres control plane); raises loudly if unconfigured. This is the Phase-6 worker plane process — the
     Postgres-native replacement for the legacy file-cron CEO wakeups."""
-    from plugins.takyon.worker import run_worker_loop
+    from plugins.takyon.worker_pool import WorkerPool
 
     try:
         kinds = [
@@ -10377,7 +10377,7 @@ def cmd_worker(args):
         min_queue_age = getattr(args, "min_queue_age", None)
         if min_queue_age is not None:
             os.environ["TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS"] = str(max(0.0, float(min_queue_age)))
-        drained = run_worker_loop(
+        drained = WorkerPool.local_threads(
             worker_id=getattr(args, "worker_id", None),
             poll_interval=getattr(args, "poll_interval", None),
             dispatch=not getattr(args, "no_dispatch", False),
@@ -10385,7 +10385,7 @@ def cmd_worker(args):
             owner_user_id=getattr(args, "owner_user_id", None),
             once=getattr(args, "once", False),
             max_jobs=getattr(args, "max_jobs", None),
-        )
+        ).run()
     except Exception as e:  # invariant #8: a missing operator DSN (or any startup failure) is loud.
         print(f"✗ worker could not start: {e}")
         sys.exit(1)

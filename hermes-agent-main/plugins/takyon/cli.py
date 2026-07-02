@@ -28,8 +28,50 @@ from .core import (
     upgrade_businesses,
 )
 
+# Re-export shim (modularization Stage 1): these helpers moved verbatim to
+# turn_runtime.py so worker.py stops importing the interactive CLI module.
+# Kept as re-exports until every shell/test caller is proven moved.
+from .turn_runtime import (  # noqa: F401
+    _BOOTSTRAP_CUSTOMER_ACTION_RE,
+    _BOOTSTRAP_FEATURE_NOUN_RE,
+    _BOOTSTRAP_PRODUCT_BASE_DOMAIN,
+    _BOOTSTRAP_PRODUCT_SHAPE_RE,
+    _BOOTSTRAP_WORKFLOW_REQUEST_RE,
+    _CEO_PROMPT_PATH,
+    _DEFAULT_BOOTSTRAP_MAX_TURNS,
+    _WORKFLOW_BOOTSTRAP_MAX_TURNS,
+    _bootstrap_goal_requests_product_workflow,
+    _bootstrap_public_site_url,
+    _bootstrap_turn_cap_for_goal,
+    _business_artifact_path,
+    _business_bootstrap_instruction,
+    _business_root,
+    _business_workspace_execution_context,
+    _ceo_bootstrap_turn_config,
+    _ceo_prompt_for_bootstrap,
+    _config_bool,
+    _config_path,
+    _harness_root,
+    _load_ceo_prompt,
+    _load_harness_settings,
+    _normalize_progress_text,
+    _parse_tool_json_result,
+    _pulse_progress_lines,
+    _read_business_progress_lines,
+    _read_model_config,
+    _reasoning_progress_callback,
+    _require_agent_model_config,
+    _shell_analytics_line,
+    _shell_int,
+    _shell_metric_value,
+    _shell_money_cents,
+    _shell_progress_config,
+    _strip_fenced_block,
+    _takyon_reasoning_config,
+    _tool_progress_lines,
+)
 
-_CEO_PROMPT_PATH = Path(__file__).parent / "prompts" / "ceo.md"
+
 _TAKYON_SKILL_ALIASES = {
     "market-research": "takyon-market-research",
     "build-product": "takyon-product",
@@ -40,70 +82,10 @@ _TAKYON_SKILL_ALIASES = {
     "business-metrics": "takyon-business-metrics",
 }
 _TAKYON_SKILL_PREFIX = "takyon-"
-_DEFAULT_BOOTSTRAP_MAX_TURNS = 30
-_WORKFLOW_BOOTSTRAP_MAX_TURNS = 60
-_BOOTSTRAP_PRODUCT_BASE_DOMAIN = "coscale.app"
-_BOOTSTRAP_WORKFLOW_REQUEST_RE = re.compile(
-    r"\b("
-    r"real\s+(?:customer\s+)?ai\s+workflow|"
-    r"customer\s+ai\s+workflow|"
-    r"in-?app\s+workflow|"
-    r"product\s+workflow|"
-    r"app\s+action|"
-    r"backend\s+action|"
-    r"signed-?in\s+(?:subscriber|user|customer)\s+enters?|"
-    r"receives?\s+(?:five|[0-9]+)\s+"
-    r")\b",
-    re.IGNORECASE,
-)
-_BOOTSTRAP_PRODUCT_SHAPE_RE = re.compile(
-    r"\b("
-    r"saas|software|app|application|platform|tool|assistant|copilot|service|portal|dashboard|"
-    r"generator|tracker|planner|coach"
-    r")\b",
-    re.IGNORECASE,
-)
-_BOOTSTRAP_CUSTOMER_ACTION_RE = re.compile(
-    r"\b("
-    r"helps?|lets?|allows?|enables?|"
-    r"customers?\s+can|users?\s+can|subscribers?\s+can|"
-    r"enter(?:s|ing)?|upload(?:s|ing)?|draft(?:s|ing)?|generate(?:s|d|ing)?|"
-    r"track(?:s|ing)?|plan(?:s|ning)?|calculate(?:s|ing)?|analy[sz]e(?:s|d|ing)?|"
-    r"compare(?:s|d|ing)?|organize(?:s|d|ing)?|summari[sz]e(?:s|d|ing)?|"
-    r"rewrite(?:s|d|ing)?|convert(?:s|ed|ing)?|automate(?:s|d|ing)?|"
-    r"dispute(?:s|d|ing)?|quote(?:s|d|ing)?|schedule(?:s|d|ing)?|"
-    r"transcribe(?:s|d|ing)?|classif(?:y|ies|ied|ying)|extract(?:s|ed|ing)?"
-    r")\b",
-    re.IGNORECASE,
-)
-_BOOTSTRAP_FEATURE_NOUN_RE = re.compile(
-    r"\b("
-    r"automation|generator|planner|tracker|calculator|assistant|copilot|workflow|"
-    r"report(?:s)?|letter(?:s)?|evidence|deadline(?:s)?|timeline|analysis|"
-    r"summary|summaries|quiz(?:zes)?|flashcards?|invoice(?:s)?|proposal(?:s)?|"
-    r"resume(?:s)?|forecast(?:s)?"
-    r")\b",
-    re.IGNORECASE,
-)
 
 
-def _bootstrap_goal_requests_product_workflow(goal: str) -> bool:
-    text = " ".join(str(goal or "").split())
-    if not text:
-        return False
-    if _BOOTSTRAP_WORKFLOW_REQUEST_RE.search(text):
-        return True
-    if not _BOOTSTRAP_PRODUCT_SHAPE_RE.search(text):
-        return False
-    if _BOOTSTRAP_CUSTOMER_ACTION_RE.search(text):
-        return True
-    return " with " in text.lower() and bool(_BOOTSTRAP_FEATURE_NOUN_RE.search(text))
 
 
-def _bootstrap_turn_cap_for_goal(goal: str) -> int:
-    if _bootstrap_goal_requests_product_workflow(goal):
-        return _WORKFLOW_BOOTSTRAP_MAX_TURNS
-    return _DEFAULT_BOOTSTRAP_MAX_TURNS
 
 
 def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
@@ -117,11 +99,6 @@ def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
     return max(1, min(raw, cap))
 
 
-def _bootstrap_public_site_url(slug: str) -> str:
-    base = str(_company_base_domain() or "").strip().lower()
-    if not base or base == "fourmanifold.com":
-        base = _BOOTSTRAP_PRODUCT_BASE_DOMAIN
-    return f"https://{_slugify(slug)}.{base}/"
 
 
 _CREATE_NAME_LLM_PROMPT = (
@@ -208,13 +185,6 @@ def _deduped_worker_note_text(text: Any, *, last_text: str = "") -> str:
     return note
 
 
-def _normalize_progress_text(value: Any, *, limit: int | None = None) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if not text or text in {"(empty)", "_thinking"}:
-        return ""
-    if limit is not None and limit > 0 and len(text) > limit:
-        return text[: max(1, limit - 3)].rstrip() + "..."
-    return text
 
 
 def _reasoning_progress_text(name: str | None, preview: str | None) -> str:
@@ -222,25 +192,8 @@ def _reasoning_progress_text(name: str | None, preview: str | None) -> str:
     return _normalize_progress_text(candidate, limit=220)
 
 
-def _takyon_reasoning_config(effort: str | None = None) -> dict[str, Any]:
-    level = str(effort or "").strip().lower()
-    if level in {"off", "none", "disable", "disabled"}:
-        return {"enabled": False}
-    if level not in {"minimal", "low", "medium", "high", "max", "xhigh"}:
-        level = "medium"
-    return {"enabled": True, "effort": level}
 
 
-def _reasoning_progress_callback(progress: Any) -> Callable[[str], None] | None:
-    if progress is None:
-        return None
-
-    def _callback(text: str) -> None:
-        note = _normalize_progress_text(text, limit=220)
-        if note:
-            progress.tool_progress("reasoning.available", "_thinking", note, None)
-
-    return _callback
 
 
 def _follow_chat_matches_stream(streamed_text: str, chat_text: str) -> bool:
@@ -907,12 +860,8 @@ def _format_operation_result(item: Any) -> str:
     return json.dumps(item, indent=2, ensure_ascii=False)
 
 
-def _business_root(slug: str) -> Path:
-    return TakyonStore()._business_root(slug).resolve()
 
 
-def _business_artifact_path(slug: str, path: str) -> Path:
-    return (_business_root(slug) / str(path or "").lstrip("/")).resolve()
 
 
 def _scope_for_business(slug: str) -> str:
@@ -1393,23 +1342,6 @@ def _shell_create_argv(command: str, raw_args: str) -> list[str]:
     return argv
 
 
-@contextlib.contextmanager
-def _business_workspace_execution_context(
-    slug: str,
-    *,
-    operator_user_id: str | None = None,
-    sync_on_exception: bool = False,
-):
-    from .core import TakyonStore, _mounted_canonical_business_workspace
-
-    load_takyon_env()
-    store = TakyonStore(operator_user_id=operator_user_id)
-    with _mounted_canonical_business_workspace(
-        store,
-        slug,
-        owner_label=str(operator_user_id or slug),
-    ) as (workspace_home, _backend, _base_revision):
-        yield workspace_home
 
 
 def _parse_business_start_args(
@@ -1932,246 +1864,21 @@ def _operator_budget_finalize(
         conn.close()
 
 
-def _business_bootstrap_instruction(
-    slug: str,
-    goal: str,
-    active_mode: str,
-    *,
-    business_name: str = "",
-) -> str:
-    goal_text = goal or "Use current business state and evidence to define the business goal."
-    workflow_requested = _bootstrap_goal_requests_product_workflow(goal_text)
-    effective_mode = "live" if str(active_mode or "").strip().lower() != "live" else "live"
-    lines = [
-        f"Bootstrap business:{slug} now.",
-        "",
-        "This is an operational create/build request. Execute immediately.",
-        "Do not respond with instructions, checklists, or 'want me to start?'.",
-        "",
-        f"Canonical business name: {business_name or slug}",
-        f"Business goal: {goal_text}",
-        f"Mode: {effective_mode}",
-        f"Explicit product workflow requested: {'yes' if workflow_requested else 'no'}",
-        "",
-        "## Execution rules",
-        "",
-        "Fresh create. Business state is empty.",
-        "- Do NOT call business_read_business, business_read_file, or business_list_files before acting.",
-        "- Do NOT call todo or update task lists at any point.",
-        "- Do NOT call skills_list.",
-        "- Load only takyon-market-research, takyon-brand-logo, takyon-x, and takyon-distribution via skill_view. Do not load any other skill during bootstrap.",
-        "- After completing each step, move to the next immediately.",
-        "- Use exactly the business name above. Do not invent a second company, umbrella brand, or product name.",
-        "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (researching the market, designing the product, putting the site online, drafting the launch post) — never the runtime plumbing.",
-        "- Curated update channel: the customer sees ONLY the curated update you post with business_post_operator_update, never your raw assistant reasoning. Keep ALL planning, deliberation, tool choreography, and chain-of-thought internal. At the very start of this turn, call business_post_operator_update with a warm headline, a 1-2 sentence summary, and a milestones plan covering the steps below — e.g. {title: \"Research the market\", category: RESEARCH, status: running}, {title: \"Design and build the product site\", category: PRODUCT, status: queued}, {title: \"Put the launch post out\", category: LAUNCH, status: queued}. Re-post the update (flipping each milestone's status) as you complete research, then the product build, then the X post, and when anything blocks. The milestones become the customer's Tasks cards; do not narrate low-level tool calls yourself.",
-        "- Never surface raw internal platform/tool/runtime strings in the visible reply. Do not quote TAKYON_* flags, docker path diagnostics, workspace-mode errors, or similar internals; summarize blockers in normal operator language instead.",
-        "- Forbidden in any customer-visible sentence: \"bootstrap\", \"site worker\", \"scaffold\"/\"scaffolding\", \"upsert\"/\"upserted\", \"provision\"/\"provisioned\", \"app account\", \"workspace exists\"/\"workspace ready\" (say \"your company space\" instead), \"runtime\", \"surface contract\", \"app shell\", \"kit\", any tool name (business_upsert_*, business_claude_agent_task, etc.), and verbatim tool/web-access limitations like \"publicly cached\".",
-        "- If a web or tool capability is limited, say it plainly to the customer, e.g. \"I'm working from the sources I can reach right now\", without naming the mechanism.",
-        "- These forbidden terms apply only to the VISIBLE reply shown to the customer. The internal directives in this instruction (which deliberately use words like bootstrap, surface contract, scaffold, upsert, and tool names to steer you) are not customer-visible and stay as written.",
-        "",
-        "## Steps",
-        "",
-        "### 1. Minimal landing brief (from the idea alone — NO web research yet)",
-        "Goal: get the customer a real, branded landing page live FAST. Derive the landing brief from the BUSINESS IDEA ALONE plus the provided design/style packs — do NOT do any web research before the first landing publishes.",
-        "Do NOT load takyon-market-research in this step, and do NOT call web_search, web_extract, web_tools, business_web_search, Tavily, or any other live-evidence/market-research tool before the 2a landing pass. That web-extract pass is the slowest part of bootstrap and would delay the customer's first paint by minutes; it is deferred entirely to step 3 (after the landing is live).",
-        "From the idea (and the canonical business name and goal above), reason out and pin down: the business name, a one-line tagline, the core value proposition, who the customer is (ICP / audience), the core problem the product solves, the offer, the brand tone, and one launch angle. This is straightforward derivation from the idea, not research — no sources are required for a truthful, branded landing.",
-        "Write that into research/strategy.md as the initial landing brief. Mark it as the idea-only fast pass; you will deepen and source-back it in step 3 after the landing is live.",
-        "Keep the landing TRUTHFUL: a landing built from the idea alone is fine, but do NOT fabricate statistics, customer counts, testimonials, named partners, awards, or evidence-backed claims you have not verified. Stick to the product's own value proposition and offer. Deeper, source-backed claims come later in step 3 and the X post.",
-        "Stop as soon as you have enough of the brief for truthful, branded landing copy, then move straight to step 2. The deeper market/X research is deferred to step 3 so it overlaps the rest of bootstrap instead of blocking the first landing publish.",
-        "",
-        "### 2. Product surface + landing build (publish the landing FIRST)",
-        "Call business_upsert_app_surface_contract with:",
-        "- source_path: product/site",
-        "- runtime_features: auth, account, profile, checkout",
-        "- routes: / (landing page), /app (sign-in + subscription gate), and /app/profile (account page)",
-        "- If `Explicit product workflow requested: yes`, do NOT try to declare `generate` directly here. The product worker must implement the workflow as real `product/site/actions/<name>.ts` files and UI calls; the refresh pass derives the actions/generate rails from the source.",
-        "",
-        "This seeds the COMPLETE app kit up front (landing, the /app access shell, the /app/profile account page, support, and the shared auth/checkout/account rails). The two build passes below only change WHEN each screen is customized and published; they never change the final fileset. The end state must be the same complete app kit as a single-pass build.",
-        "",
-        "If the app shell is monthly paid, call business_upsert_app_plan for the canonical `monthly` plan before the site worker runs so the existing checkout rail has a real plan object to use.",
-        "- Use the researched monthly price when it is already known.",
-        "- Set `included_ai_budget_microusd` together with `price_cents`.",
-        "- If pricing is not settled yet, keep the canonical starter monthly plan instead of leaving checkout planless.",
-        "",
-        "#### 2.0. Instant branded first-paint (a real branded landing LIVE in ~2-3 minutes, before the design pass)",
-        "Publish a real, deterministic, branded landing the customer sees almost immediately — no design model involved. TWO steps:",
-        "- Call business_write_instant_landing with the step-1 brief: business; eyebrow (a 2-4 word kicker, e.g. the product category); headline (the punchy one-line tagline); subhead (one truthful sentence on the core value proposition); primary_cta (usually \"Continue with Google\"); features (2-4 {title, body} points drawn from the brief, truthful — no fabricated stats); accent (a brand-fitting hex like #0e7c66, or omit for the clean default); idempotency_key. This pins the brief; the publish step then renders a real designed landing.tsx + themed tokens.css from it automatically (so the publish gate accepts it).",
-        "- Then call business_refresh_product_surface with source_path `product/site` to build and PUBLISH that instant landing right now. Confirm the result's publish status is `published` with a real public_url — that is the customer's fast first paint, a real branded page in ~2-3 minutes.",
-        "- Best-effort, never blocks bootstrap: a `detached: true` result is NOT a blocker (re-call business_refresh_product_surface with the SAME idempotency_key to collect the published result). If it returns a real blocker, record it in research/strategy.md and CONTINUE to 2a anyway. Do not stop bootstrap for the instant pass.",
-        "",
-        "#### 2a. Build and publish the polished landing page",
-        "Now upgrade that fast first-paint into the full, polished, custom landing so the site looks bespoke, not templated. Call business_claude_agent_task with:",
-        "- workspace: product/site",
-        "- instruction: Use the pinned Vite scaffold materialized in the workspace as the runtime rail base. Keep the shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts` while making the landing page business-specific. Choose one coherent visual direction from the brief and the provided style packs, then follow it consistently without blending packs.",
-        '- guidance_skills: pass exactly TWO — "claude-design" (the base design method) PLUS the single style pack that best fits this business, chosen from the brief by product type: "claude-design-stripe" (fintech / payments / B2B / commerce), "claude-design-openai" (AI / productivity / prosumer / serious tools), "claude-design-doodle" (playful / casual / pet / kid-adjacent), or "claude-design-superhuman" (executive / speed / focus / power-user). If the fit is unclear, use "claude-design-openai". Pass ONLY "claude-design" plus the one you chose — do NOT pass the other style packs — so the site worker carries one coherent direction instead of all six.',
-        "- Scope this pass to ONLY the landing route `/`: customize `src/screens/landing.tsx` so it is a truthful, branded landing page. Do NOT edit `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, or `src/screens/profile.tsx` in this pass — those are customized in 2b.",
-        "- Keep the shared Vite route skeleton and the seeded `/app`, `/app/profile`, and support routes intact; do not delete or stub any seeded screen. They stay as the seeded app kit until 2b refines them.",
-        "- refresh_surface: true",
-        "- max_turns: 24 — the landing pass edits ONLY `src/screens/landing.tsx`, so it needs far fewer turns than the full 2b app-shell pass. A tight budget keeps the customer's first paint fast; the runtime auto-escalates the cap and retries once on a genuine turn-cap hit, so a tight landing cap is self-healing, not a quality risk.",
-        "- effort: low — the landing is ONE well-specified, design-pack-guided screen; low effort is sufficient and materially faster per turn. (Pass NOTHING here for 2b so the heavier app-shell pass keeps the default effort.)",
-        "- timeout_ms: 480000 — an 8-minute ceiling so a wandering worker can never stall the customer's first paint for the full 20-minute default; the auto-escalation retry covers the rare genuine need.",
-        "- model: PASS NOTHING — keep the default Sonnet model for the landing pass. The landing is the customer's first impression, so do NOT downgrade to a cheaper/faster model (e.g. Haiku) to shave time: landing QUALITY takes priority over speed, and a first paint in roughly five minutes is acceptable. The `max_turns: 24` and `effort: low` levers above keep this pass reasonably fast without lowering the model itself.",
-        "",
-        "This 2a pass with `refresh_surface: true` PUBLISHES AND SERVES the landing immediately on its own: the worker's `surface_refresh.publish.status` should come back `published` and the live site at the customer host serves the new landing right away, with the still-seeded real `/app` access shell shipping behind sign-in until 2b refines it. The landing does NOT wait for 2b to be served — confirm `surface_refresh.publish.status == \"published\"` and a real `public_url` in this pass's structured result before continuing.",
-        "",
-        "Inspect the structured result from this first business_claude_agent_task. Trust only its exact success/blocker and surface_refresh publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, the rest of the app kit, or X.",
-        "A `detached: true` result (status `queued` or `running`, with a re-attach note) is NOT a blocker and NOT a failure — the build is simply still running on the worker plane. Do NOT record it as a blocker and do NOT stop the bootstrap. Re-call business_claude_agent_task with the SAME workspace, instruction, and idempotency_key to re-attach and collect the published result; repeat until it returns either `surface_refresh.publish.status == \"published\"` (continue) or a real blocker (then stop). Only an explicit blocker/error stops the landing.",
-        "",
-        "#### 2a.1. Register Search Console (immediately after the landing publishes)",
-        "As soon as 2a reports `surface_refresh.publish.status == \"published\"` for the landing, register the live site with Google Search Console — do this BEFORE 2b so the single fast idempotent call is front-loaded onto the already-live landing instead of being pushed past the budget by the heavier 2b pass.",
-        f'Call business_register_search_console with the business, site_url "{_bootstrap_public_site_url(slug)}", and a fresh idempotency_key. Do not rely on inferred public_url here. It injects the google-site-verification META tag onto BOTH the live published landing and the source template (so Google can verify it now AND the 2b appkit publish carries the tag forward), then registers the URL-prefix property.',
-        "This is live-only, key-behind-TK, and fails closed on its own: if it returns blocked_search_console_unconfigured (the verification key is not provisioned) or any other blocker, record that exact blocker in research/strategy.md and continue to 2b — do not fabricate a verification and do not stop the whole build for it.",
-        "",
-        "#### 2b. Add the real logo, then finish the /app access shell + profile",
-        "Once the landing page has published in 2a:",
-        "",
-        "First — BEFORE the X launch (step 3) and BEFORE any other creative-credit spend (ads, UGC) — generate the real brand logo. This step is REQUIRED: do NOT skip it, do NOT defer it past the X launch, and do NOT spend a creative credit on anything else until the logo is generated. The fresh business's starter creative credits are reserved for the logo first; the X launch and any ad/UGC creative come only AFTER the logo is generated (or it returns an explicit blocker), so the logo can never be starved of credits. Load takyon-brand-logo (skill_view) and follow its procedure: assemble `business_context` ({name, category, tone}) from the research you wrote in research/strategy.md (do not invent brand voice), then call business_generate_logo with the business, a fresh idempotency_key, and that business_context. The tool publishes /brand-logo.png plus a real PNG favicon onto the live site AND chains a republish so the favicon and header pick up the generated logo. business_generate_logo is live-only and creative-credit gated: ONLY if it returns an explicit insufficient-credits or unconfigured-provider blocker do you record that exact blocker in research/strategy.md, leave the seeded monogram placeholder, and continue with the rest of 2b — in every other case you MUST generate the logo here before proceeding. Do not fabricate a logo and do not stop the whole build for it.",
-        "",
-        "Then finish the access shell and account page in a SECOND business_claude_agent_task with:",
-        "- workspace: product/site",
-        "- instruction: Use the same pinned Vite scaffold and the same single coherent visual direction you chose for the landing page in 2a — match the landing brand exactly, do not introduce a second style. Keep the shared runtime wiring through `src/lib/takyon.ts` and `src/lib/hooks.ts`.",
-        '- guidance_skills: pass exactly the SAME two packs you used in 2a — "claude-design" plus the one style pack you selected for the landing — so the /app shell matches the landing brand. Do NOT pass a different or additional style pack.',
-        "- instruction addendum: for `/app` and `/app/profile`, keep subscription/account truth on the shared AppKit hooks in `src/lib/hooks.ts`. Treat the account rail as `user` plus `entitlements[]`, and do not hand-roll gates from legacy fields like `has_active_subscription`, nested `subscription.status`, or ad hoc `client.account()` parsing.",
-        "- Scope this pass to the access shell and account page on the EXISTING seeded auth + checkout rails:",
-        "  - Make `/app` a thin sign-in/subscription access gate by refining `src/screens/app-layout.tsx` and `src/screens/app-home.tsx`.",
-        "  - Make `/app/profile` the truthful account/subscription page in `src/screens/profile.tsx` on the existing account + profile rails.",
-        "- Do not edit `src/screens/landing.tsx` again unless a small correction is required to keep it consistent with the brand; 2a already published it.",
-        "- Do not spend bootstrap time editing `src/screens/support.tsx` unless explicitly asked.",
-        "- Keep the shared Vite route skeleton intact unless a small route-level correction is required for correctness.",
-        "- If `Explicit product workflow requested: no`, stop once `/`, `/app`, and `/app/profile` are truthful and publishable.",
-        "- If `Explicit product workflow requested: yes`, do NOT stop at the access shell. In this SAME second business_claude_agent_task, extend `/app` into the requested real signed-in subscribed customer workflow while keeping the landing, checkout, and profile/account rails intact.",
-        "- For that workflow-required path, implement the backend behavior as one or more real `product/site/actions/<name>.ts` files that default-export async `(payload, ctx) => result` and call `ctx.generate(...)` for AI output.",
-        "- For that workflow-required path, call the action from `/app` through the shared runtime client (`createActionRunner`/`invokeAction`). Do not use provider SDKs, provider env vars, direct provider URLs, mock outputs, fixtures, static canned AI responses, browser-only fake generation, localStorage as authority, or unsupported server routes.",
-        "- For that workflow-required path, render honest loading, success, and error states; on budget/entitlement errors, show the runtime-provided path to subscribe/upgrade instead of retrying or faking success.",
-        "",
-        "This must NOT look like a generic starter kit, membership template, or placeholder SaaS shell.",
-        'Do not leave generic copy such as "membership pricing", "what is included", "simple pricing", "offer", or similar starter text anywhere customer-visible.',
-        "Keep Hermes/Takyon runtime rails for auth, account, profile, and checkout intact.",
-        "But replace generic starter copy, generic starter sections, and generic starter-shell presentation with product-specific content and UI on the first pass.",
-        "Keep /app present and wired through the existing Hermes app kit runtime rails for sign-in, subscription, account, and profile access.",
-        "If `Explicit product workflow requested: no`, do NOT build a bespoke product application, custom backend workflow, domain-specific dashboard, fake coach/product tabs, sample domain data, charts, or invented in-app flows in this pass.",
-        "If `Explicit product workflow requested: yes`, the requested signed-in workflow is REQUIRED in this pass, but do not expand past that one real workflow into extra tabs, speculative dashboards, unsupported backend capabilities, or fake data.",
-        "",
-        "For /:",
-        "- Write ICP-specific copy immediately.",
-        "- The hero, problem, features, pricing, and CTA must reflect the researched customer and pain.",
-        "- The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like.",
-        "",
-        "For /app:",
-        "- Keep the existing AppKit auth, checkout/subscription, account, and profile flows.",
-        "- Make the existing sign-in, subscription, account, and profile surfaces polished, branded, and customer-specific instead of generic starter UI.",
-        "- You may restyle and refine those surfaces so they match the landing page brand.",
-        "- Keep access decisions on the shared `src/lib/hooks.ts` helpers; prefer `useViewerAccess()` and `resolveViewerCta()` over screen-local subscription parsing.",
-        "- Treat runtime account truth as `user` plus `entitlements[]`; do not gate from legacy fields like `has_active_subscription`, nested `subscription.status`, or bespoke `client.account()` adapters in the screens.",
-        "- If `Explicit product workflow requested: no`, do not invent product-specific tabs, custom product workflows, domain objects, or unsupported backend capabilities.",
-        "- If `Explicit product workflow requested: yes`, the requested workflow is not invented extra scope; it is required, but it still must use the shared product action/generate rails and real receipts.",
-        "- Do not fake persistence, fake synced records, fake AI results, or fake customer data.",
-        "",
-        "Implementation bias:",
-        "- Edit the seeded thin access/account surfaces in place first.",
-        "- Preserve `_takyon/*`, `src/lib/takyon.ts`, `src/lib/hooks.ts`, and the existing runtime rail behavior.",
-        "- Prefer upgrading the existing auth/account/profile shell over creating a new app architecture.",
-        "",
-        "Constraints:",
-        "- Keep auth, account, profile, and checkout wired to Hermes/Takyon rails.",
-        "- Do not expose runtime-internal wording to customers.",
-        "- Do not invent unsupported backend capabilities.",
-        "- The result should be publishable and product-specific on the first pass.",
-        "- Always pass `refresh_surface: true`.",
-        "- If `Explicit product workflow requested: yes`, this SAME second pass owns the real workflow build, so also pass `model: claude-sonnet-5`, `effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`.",
-        "",
-        "Inspect the structured result from business_claude_agent_task.",
-        "Trust only its exact success/blocker and surface_refresh publish status for product completion.",
-        "If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there.",
-        "Do not paraphrase a different platform diagnosis and do not continue to X as if the product build completed.",
-        "",
-        "#### 2c. Workflow verification gate, when explicitly requested",
-        "If `Explicit product workflow requested: no`, skip this step.",
-        "If `Explicit product workflow requested: yes`, do NOT start a third product build pass here. This step is only the verification gate for the workflow you just built in 2b.",
-        "Use the business goal as the source of truth for the customer workflow. Example shape: a signed-in subscribed customer enters the requested input, triggers a real product action, and receives the requested AI output.",
-        "Verify that `/app` is wired to at least one real non-underscore HTTP action file under `product/site/actions/`, and that the named action exists as customer-facing UI code rather than as an orphan backend file.",
-        "Do NOT call business_invoke_app_action during ceo_bootstrap; app action execution requires a real signed-in subscribed product-user session and is verified immediately after bootstrap completes.",
-        "If the action file is missing, schedule-only, placeholder-only, or the UI never calls it, record the exact blocker in research/strategy.md and stop bootstrap there. Do not proceed to X or final completion with a published access shell and no real workflow.",
-        "",
-        "Once the product site is published, register its public URL with the operator's Search Console service account so the new site is owned and trackable from day one:",
-        f"- Call business_seo_add_property with site_url \"{_bootstrap_public_site_url(slug)}\".",
-        "- This is internal plumbing: never mention search console, indexing, ownership, or the tool name in any customer-visible sentence, and do not give it its own milestone card.",
-        "- If it is blocked (the Search Console service-account secret is not configured in Safebox, or the URL is not under an owner-verified parent property), record the exact blocker in research/strategy.md and continue the remaining steps; do not fake success and do not abort bootstrap for it.",
-        "",
-        "### 3. Deepen research with real evidence (now the landing is live)",
-        "The landing is already published and registered, so the heavier market/X research no longer blocks the customer seeing their site. This is the FIRST web-evidence pass of the whole bootstrap — none ran before the landing. Load takyon-market-research (skill_view) and run its FULL procedure now, including the live web_search + web_extract evidence gathering it requires, to deepen research/strategy.md beyond the idea-only landing brief from step 1: expand the customer/problem evidence with sourced findings, validate the offer and pricing, and lock the X angle.",
-        "Update research/strategy.md in place; this deeper pass informs the X post in step 4 and the later in-app workflow. Keep all claims truthful and evidence-backed; stop once the X claims are sound.",
-        "",
-        "### 4. X post",
-        "Load takyon-x (skill_view) and execute its procedure to draft and publish one X post about this business.",
-        "Use research findings to make the post truthful and compelling.",
-        "Before any live X publish or paid creative/ad action, call business_read_channel_credit_budgets. If the required bucket cannot cover the action cost, record that exact blocker in research/strategy.md and stop before enqueueing or launching the spendful step.",
-        "For broader distribution-thread execution, load takyon-distribution.",
-        "",
-        "## Constraints",
-        "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
-        "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable.",
-        "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked. If the operator explicitly asked for one, build and verify it in step 2c before launch/distribution.",
-        "Missing credentials, budget authority, or provider gates are blockers; hard-fail instead of creating fake receipts.",
-        "If any business_* tool says the business does not exist, stop immediately and report a platform provisioning failure.",
-        "Do not retry business_write_file, and do not call business_create_workspace to paper over a missing business row.",
-        "If a later non-product step is blocked, record the exact blocker and stop that step without inventing a fake success.",
-        "",
-        "## Final response",
-        "Concise status only: business filesystem root, what was created, what is blocked or missing.",
-        "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
-        "If `Explicit product workflow requested: yes`, the final response must include the action name and the workflow-verification result or the exact blocker. Never say the real workflow is \"coming soon\" after marking bootstrap complete; note that live action execution is the post-bootstrap signed-in subscriber verification step.",
-        "If `Explicit product workflow requested: no` and only the landing + access shell were required, close by naming the next business move in warm, customer-facing language: the live site is a real starting point, and the next step is to build out the post-sign-in product experience. If `Explicit product workflow requested: yes`, close on the verified live workflow instead. Do NOT name any internal skill or tool; describe the work, not the runtime.",
-    ]
-    return "\n".join(lines)
 
 
-def _ceo_bootstrap_turn_config(
-    slug: str,
-    goal: str,
-    active_mode: str,
-    *,
-    business_name: str = "",
-) -> dict[str, Any]:
-    return {
-        "user_prompt": _business_bootstrap_instruction(
-            slug,
-            goal,
-            active_mode,
-            business_name=business_name,
-        ),
-        "ephemeral_system_prompt": _ceo_prompt_for_bootstrap(),
-        # Same CEO toolset as the interactive/cron turns: ``takyon-authority`` carries the spendful
-        # business methods this first-business turn legitimately drives (e.g. app-plan/access-shell
-        # provisioning). They stay quarantined in their own toolset (never folded into ``takyon``) so
-        # they cannot leak into generic Hermes/sub-agent/product-runtime contexts; the tools are
-        # fail-closed money gates and worker-only operations self-guard against session-bound calls.
-        "enabled_toolsets": ["takyon", "takyon-authority", "web", "skills"],
-        "disabled_toolsets": [
-            "cronjob",
-            "messaging",
-            "clarify",
-            "memory",
-            "session_search",
-            "terminal",
-            "file",
-            "browser",
-            "code_execution",
-        ],
-        "load_soul_identity": False,
-        "skip_memory": True,
-        "skip_context_files": True,
-        "max_turns": _bootstrap_turn_cap_for_goal(goal),
-    }
 
 
 def _run_pg_ceo_wake_once(store: TakyonStore, slug: str, *, run_inline: bool = True) -> dict[str, Any]:
     try:
-        from . import jobs, worker
+        from . import jobs
+        from .worker_pool import WorkerPool
     except ImportError:  # pragma: no cover - alternate load path as a top-level package
-        from plugins.takyon import jobs, worker
+        from plugins.takyon import jobs
+        from plugins.takyon.worker_pool import WorkerPool
 
-    worker_id = f"cli-wake-{os.getpid()}"
+    # The shell's inline compute lane: a size-1, dispatch-less pool claiming only this
+    # wake kind (modularization Stage 1 — same claim path, one constructor).
+    pool = WorkerPool.inline(kinds=["ceo_wake"])
     job_key = _idempotency_key("operator-wake-now", slug, uuid.uuid4().hex)
 
     with store._connect() as conn:
@@ -2191,12 +1898,7 @@ def _run_pg_ceo_wake_once(store: TakyonStore, slug: str, *, run_inline: bool = T
                 for _ in range(20):
                     if record is not None and record.status in {"completed", "blocked", "failed"}:
                         break
-                    outcome = jobs.run_one(
-                        raw,
-                        worker_id=worker_id,
-                        handlers=worker.HANDLERS,
-                        kinds=["ceo_wake"],
-                    )
+                    outcome = pool.run_one_inline(raw)
                     record = jobs.get_job(raw, job.id)
                     if outcome is None and record is not None and record.status in {"queued", "running"}:
                         continue
@@ -2892,18 +2594,8 @@ Takyon skills through Takyon:
 """
 
 
-def _harness_root() -> Path:
-    return Path(os.getenv("TAKYON_HARNESS_ROOT") or Path(__file__).parent / "harness").resolve()
 
 
-def _load_harness_settings() -> dict[str, Any]:
-    path = _harness_root() / "settings.json"
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"invalid Takyon harness settings {path}: {exc}") from exc
 
 
 def _control_slash_commands() -> list[dict[str, Any]]:
@@ -3362,20 +3054,6 @@ def _shell_history_config() -> dict[str, Any]:
     }
 
 
-def _shell_progress_config() -> dict[str, Any]:
-    settings = _load_harness_settings()
-    ui = settings.get("ui") if isinstance(settings.get("ui"), dict) else {}
-    progress = ui.get("progress") if isinstance(ui.get("progress"), dict) else {}
-    try:
-        max_lines = int(progress.get("maxLinesPerTool", 6))
-    except (TypeError, ValueError):
-        max_lines = 6
-    return {
-        "enabled": _config_bool(progress.get("enabled"), default=True),
-        "show_business_root": _config_bool(progress.get("showBusinessRoot"), default=True),
-        "show_durable_writes": _config_bool(progress.get("showDurableWrites"), default=True),
-        "max_lines": max(1, min(max_lines, 8)),
-    }
 
 
 def _raw_hermes_default() -> bool:
@@ -3462,30 +3140,10 @@ def _format_shell_history(history: list[dict[str, str]] | None) -> str:
     return "\n\n".join(lines).strip()
 
 
-def _parse_tool_json_result(result: Any) -> dict[str, Any]:
-    if isinstance(result, dict):
-        return result
-    if not isinstance(result, str):
-        return {}
-    try:
-        loaded = json.loads(result)
-    except json.JSONDecodeError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
 
 
-def _shell_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value or default)
-    except (TypeError, ValueError):
-        return default
 
 
-def _shell_money_cents(value: Any) -> str:
-    cents = _shell_int(value)
-    sign = "-" if cents < 0 else ""
-    cents = abs(cents)
-    return f"{sign}${cents // 100}.{cents % 100:02d}"
 
 
 def _credits_usage() -> str:
@@ -3816,253 +3474,14 @@ def _handle_credits_command(
     raise SystemExit(_credits_usage())
 
 
-def _shell_metric_value(stats: dict[str, Any], *names: str) -> int | None:
-    for name in names:
-        if name not in stats:
-            continue
-        value = stats.get(name)
-        if isinstance(value, dict):
-            for key in ("value", "count", "total"):
-                if key in value:
-                    return _shell_int(value.get(key))
-            continue
-        return _shell_int(value)
-    return None
 
 
-def _shell_analytics_line(analytics: dict[str, Any], *, prefix: str = "traffic") -> str:
-    if not analytics:
-        return f"{prefix} -> unavailable"
-    if not analytics.get("configured"):
-        reason = str(analytics.get("reason") or "not configured").strip()
-        return f"{prefix} -> not configured ({reason})"
-    if analytics.get("ok") is False:
-        reason = str(analytics.get("reason") or "provider unavailable").strip()
-        return f"{prefix} -> unavailable ({reason})"
-    stats = analytics.get("stats") if isinstance(analytics.get("stats"), dict) else {}
-    visitors = _shell_metric_value(stats, "visitors", "uniques", "unique_visitors")
-    visits = _shell_metric_value(stats, "visits", "sessions")
-    pageviews = _shell_metric_value(stats, "pageviews", "views")
-    days = _shell_int(analytics.get("window_days") or analytics.get("days") or 0)
-    window = f"{days}d " if days else ""
-    parts = []
-    if visitors is not None:
-        parts.append(f"visitors={visitors}")
-    if visits is not None:
-        parts.append(f"visits={visits}")
-    if pageviews is not None:
-        parts.append(f"pageviews={pageviews}")
-    if not parts:
-        return f"{prefix} -> {window}configured, no counted stats"
-    return f"{prefix} -> {window}{' '.join(parts)}"
 
 
-def _read_business_progress_lines(data: dict[str, Any], args: dict[str, Any]) -> list[str]:
-    business = data.get("business") if isinstance(data.get("business"), dict) else {}
-    app = data.get("app") if isinstance(data.get("app"), dict) else {}
-    slug = str(
-        business.get("slug")
-        or data.get("business")
-        or args.get("business")
-        or ""
-    ).strip()
-    name = str(business.get("name") or slug or "business").strip()
-    lines: list[str] = []
-    if slug or name:
-        lines.append(f"state -> {name}{f' ({slug})' if slug and slug != name else ''}")
-
-    product = app.get("product_surface") if isinstance(app.get("product_surface"), dict) else {}
-    surface = app.get("surface_contract") if isinstance(app.get("surface_contract"), dict) else {}
-    publish_status = str(product.get("publish_status") or surface.get("publish_status") or "").strip()
-    public_url = str(product.get("public_url") or surface.get("publish_target") or "").strip()
-    if publish_status or public_url:
-        details = " ".join(part for part in (publish_status, public_url) if part)
-        lines.append(f"product -> {details}")
-
-    users = app.get("customers") if isinstance(app.get("customers"), list) else []
-    entitlements = app.get("entitlements") if isinstance(app.get("entitlements"), list) else []
-    paid = sum(
-        1
-        for item in entitlements
-        if isinstance(item, dict)
-        and str(item.get("status") or "").lower() in {"active", "trialing"}
-        and str(item.get("tier") or "").lower() in {"paid", "pro", "team", "owner"}
-    )
-    revenue = app.get("revenue") if isinstance(app.get("revenue"), dict) else {}
-    usage = app.get("usage_this_period") if isinstance(app.get("usage_this_period"), dict) else {}
-    if users or entitlements or revenue or usage:
-        lines.append(
-            "app -> "
-            f"users={len(users)} paid={paid} "
-            f"revenue={_shell_money_cents(revenue.get('amount_paid_cents'))} "
-            f"usage_events={_shell_int(usage.get('events'))}"
-        )
-
-    jobs = data.get("jobs") if isinstance(data.get("jobs"), list) else []
-    if jobs:
-        queued = sum(1 for item in jobs if isinstance(item, dict) and str(item.get("status") or "").lower() == "queued")
-        latest = next((item for item in jobs if isinstance(item, dict)), {})
-        latest_kind = str(latest.get("kind") or latest.get("job_type") or latest.get("type") or "job").strip()
-        latest_status = str(latest.get("status") or "unknown").strip()
-        lines.append(f"jobs -> queued={queued} latest={latest_kind}:{latest_status}")
-
-    controls = data.get("controls") if isinstance(data.get("controls"), list) else []
-    wake_state = next(
-        (
-            str(item.get("state") or item.get("status") or "").strip()
-            for item in controls
-            if isinstance(item, dict) and str(item.get("scope") or "").startswith(f"business:{slug}")
-        ),
-        "",
-    )
-    if wake_state:
-        lines.append(f"controls -> {wake_state}")
-    return lines
 
 
-def _pulse_progress_lines(data: dict[str, Any]) -> list[str]:
-    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
-    state = data.get("current_state") if isinstance(data.get("current_state"), dict) else {}
-    product = state.get("product_surface") if isinstance(state.get("product_surface"), dict) else {}
-    lines = [
-        "pulse -> "
-        f"users={_shell_int(summary.get('users'))} "
-        f"paid={_shell_int(summary.get('paid_customers'))} "
-        f"mrr={_shell_money_cents(summary.get('mrr_cents'))}/mo "
-        f"revenue={_shell_money_cents(summary.get('revenue_cents'))} "
-        f"usage_events={_shell_int(summary.get('usage_events'))} "
-        f"queued_jobs={_shell_int(summary.get('queued_jobs'))} "
-        f"unresolved={_shell_int(summary.get('unresolved_inbound'))}"
-    ]
-    publish_status = str(product.get("publish_status") or product.get("status") or "").strip()
-    public_url = str(product.get("public_url") or "").strip()
-    blocker = str(product.get("publish_blocker") or "").strip()
-    if publish_status or public_url:
-        lines.append(f"product -> {' '.join(part for part in (publish_status, public_url) if part)}")
-    if blocker and blocker.lower() not in {"none", "null"}:
-        lines.append(f"blocker -> {blocker}")
-    analytics = data.get("web_analytics") if isinstance(data.get("web_analytics"), dict) else {}
-    if analytics:
-        lines.append(_shell_analytics_line(analytics))
-    return lines
 
 
-def _tool_progress_lines(name: str, args: dict[str, Any], result: Any) -> list[str]:
-    if not str(name or "").startswith("business_"):
-        return []
-    config = _shell_progress_config()
-    data = _parse_tool_json_result(result)
-    if str(name or "") == "business_read_business":
-        return _read_business_progress_lines(data, args)
-    if str(name or "") == "business_calculate_pulse":
-        return _pulse_progress_lines(data)
-    if str(name or "") == "business_read_app_analytics":
-        return [_shell_analytics_line(data)]
-    results = data.get("results") if isinstance(data.get("results"), list) else []
-    if not results and data.get("action"):
-        results = [data]
-    if not results and data.get("success") and str(name or "") == "business_create_app_checkout":
-        business = str(data.get("business") or args.get("business") or "").strip()
-        lines = []
-        if business:
-            lines.append(f"checkout intent created for business:{business}")
-            if str(data.get("external_side_effects") or "") == "suppressed":
-                checkout_id = str(data.get("checkout_intent_id") or "")
-                if checkout_id:
-                    lines.append(f"checkout receipt -> {_business_artifact_path(business, f'metrics/receipts/app-checkout/{checkout_id}.json')}")
-        return lines
-    if not results and str(name or "") == "business_claude_agent_task":
-        business = str(data.get("business") or args.get("business") or "").strip()
-        workspace = str(data.get("workspace") or args.get("workspace") or ".").strip() or "."
-        lines = []
-        if business:
-            lines.append(f"agent workspace -> {_business_artifact_path(business, workspace)}")
-            surface_refresh = data.get("surface_refresh") if isinstance(data.get("surface_refresh"), dict) else {}
-            if surface_refresh:
-                status = surface_refresh.get("status") or "unrefreshed"
-                receipt = surface_refresh.get("receipt_path") or ""
-                suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
-                lines.append(f"product publish check {status}{suffix}")
-            agent_record = data.get("agent_record") if isinstance(data.get("agent_record"), dict) else {}
-            for line in _tool_progress_lines("business_record_agent", {"business": business}, agent_record)[:1]:
-                lines.append(line)
-        return lines
-    if not results and str(name or "") == "business_refresh_product_surface":
-        business = str(data.get("business") or args.get("business") or "").strip()
-        surface_refresh = data.get("surface_refresh") if isinstance(data.get("surface_refresh"), dict) else {}
-        if business and surface_refresh:
-            status = surface_refresh.get("status") or "unrefreshed"
-            receipt = surface_refresh.get("receipt_path") or ""
-            suffix = f" -> {_business_artifact_path(business, receipt)}" if receipt else ""
-            return [f"product publish check {status}{suffix}"]
-    lines: list[str] = []
-    seen_root: set[str] = set()
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        action = str(item.get("action") or "")
-        business = str(item.get("business") or item.get("business_slug") or args.get("business") or "").strip()
-        if config["show_business_root"] and business and business not in seen_root and action == "business.upsert":
-            seen_root.add(business)
-            lines.append(f"business:{business} filesystem -> {_business_root(business)}")
-        if not config["show_durable_writes"]:
-            continue
-        if action in {"artifact.write", "artifact.patch", "memory.write"}:
-            path = str(item.get("path") or "")
-            if business and path:
-                lines.append(f"file -> {_business_artifact_path(business, path)}")
-        elif action == "workspace.upsert":
-            workspace = str(item.get("workspace") or "")
-            if business and workspace:
-                lines.append(f"workspace -> {_business_artifact_path(business, workspace)}")
-        elif action == "outreach.local_publish":
-            artifact = str(item.get("artifact") or "")
-            if business and artifact:
-                lines.append(f"local outreach -> {_business_artifact_path(business, artifact)}")
-            receipt = str(item.get("receipt") or "")
-            if business and receipt:
-                lines.append(f"receipt -> {_business_artifact_path(business, receipt)}")
-        elif action == "app.surface.upsert":
-            if business:
-                lines.append(f"product surface -> {_business_artifact_path(business, 'product/surface.md')}")
-        elif action == "app.surface.publish_result":
-            if business:
-                status = str(item.get("publish_status") or "not_published")
-                url = str(item.get("public_url") or item.get("publish_target") or "")
-                suffix = f" ({url})" if url else ""
-                lines.append(f"app surface publish {status} for business:{business}{suffix}")
-        elif action == "app.plan.upsert":
-            if business:
-                plan = str(item.get("plan_key") or "")
-                suffix = f" ({plan})" if plan else ""
-                lines.append(f"app plan policy updated for business:{business}{suffix}")
-        elif action in {"app.customer.upsert", "app.entitlement.upsert"}:
-            if business:
-                lines.append(f"app customer/entitlement state updated for business:{business}")
-        elif action == "app.usage.record":
-            if business:
-                lines.append(f"app usage recorded for business:{business}")
-        elif action in {"conversation.thread.upsert", "conversation.message.record"}:
-            path = str(item.get("file") or "")
-            if business and path:
-                lines.append(f"conversation -> {_business_artifact_path(business, path)}")
-        elif action == "business.mode.set":
-            if business:
-                lines.append(f"business:{business} mode -> {item.get('mode')}")
-        elif action == "business.focus.set":
-            if business:
-                lines.append(f"business:{business} work focus -> {item.get('work_focus') or 'all'}")
-        elif action == "cron.ensure_ceo_wakeup":
-            if business:
-                state = "enabled" if item.get("enabled") else "paused"
-                lines.append(f"wake schedule {state} -> business:{business} {item.get('schedule') or item.get('cron_job')}")
-        elif action == "job.enqueue":
-            if business:
-                lines.append(f"job queued -> business:{business} {item.get('job') or item.get('id') or ''}".rstrip())
-        elif action == "agent.record":
-            if business:
-                lines.append(f"agent record -> business:{business} {item.get('agent_run') or item.get('id') or ''}".rstrip())
-    return lines
 
 
 class _ShellProgress:
@@ -4597,108 +4016,16 @@ def _format_ceo_focus(current_business: str | None, store: TakyonStore, model: s
     return "\n".join(lines)
 
 
-def _config_path(store: TakyonStore) -> Path:
-    return store.root / "config.yaml"
 
 
 def _secrets_path(store: TakyonStore) -> Path:
     return store.root.parent / "secrets" / ".env"
 
 
-def _read_model_config(store: TakyonStore) -> dict[str, str]:
-    path = _config_path(store)
-    provider = ""
-    model = ""
-    claude_agent_model = ""
-    response_style = ""
-    show_agent_activity = ""
-    shell_enhanced_input = ""
-    auto_schedule_ceo_on_create = ""
-    default_ceo_schedule = ""
-    if path.exists():
-        try:
-            import yaml  # type: ignore
-
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            model_data = data.get("model") or {}
-            provider = str(model_data.get("provider") or "")
-            model = str(model_data.get("default") or model_data.get("model") or "")
-            claude_agent_model = str(
-                model_data.get("claude_agent_default")
-                or model_data.get("deep_work_default")
-                or ""
-            )
-            conversation_data = data.get("conversation") or {}
-            if isinstance(conversation_data, dict):
-                response_style = str(conversation_data.get("response_style") or "")
-                show_agent_activity = str(conversation_data.get("show_agent_activity") or "")
-            shell_data = data.get("shell") or {}
-            if isinstance(shell_data, dict):
-                shell_enhanced_input = str(shell_data.get("enhanced_input") or "")
-            business_data = data.get("business") or {}
-            if isinstance(business_data, dict):
-                auto_schedule_ceo_on_create = str(business_data.get("auto_schedule_ceo_on_create") or "")
-                default_ceo_schedule = str(business_data.get("default_ceo_schedule") or "")
-        except Exception:
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("provider:"):
-                    provider = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("default:"):
-                    model = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("claude_agent_default:"):
-                    claude_agent_model = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("response_style:"):
-                    response_style = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("show_agent_activity:"):
-                    show_agent_activity = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("enhanced_input:"):
-                    shell_enhanced_input = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("auto_schedule_ceo_on_create:"):
-                    auto_schedule_ceo_on_create = stripped.split(":", 1)[1].strip()
-                if stripped.startswith("default_ceo_schedule:"):
-                    default_ceo_schedule = stripped.split(":", 1)[1].strip()
-    return {
-        "provider": provider,
-        "model": model,
-        "claude_agent_model": claude_agent_model,
-        "response_style": response_style,
-        "show_agent_activity": show_agent_activity,
-        "shell_enhanced_input": shell_enhanced_input,
-        "auto_schedule_ceo_on_create": auto_schedule_ceo_on_create,
-        "default_ceo_schedule": default_ceo_schedule,
-        "path": str(path),
-    }
 
 
-def _config_bool(value: Any, *, default: bool = False) -> bool:
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on", "enabled"}:
-        return True
-    if text in {"0", "false", "no", "off", "disabled"}:
-        return False
-    return default
 
 
-def _require_agent_model_config(config: dict[str, str], *, model_override: str | None = None) -> str:
-    provider = config.get("provider", "")
-    resolved_model = model_override or os.getenv("TAKYON_MODEL", "") or config.get("model", "")
-    if provider and resolved_model:
-        return resolved_model
-    missing = []
-    if not provider:
-        missing.append("model.provider")
-    if not resolved_model:
-        missing.append("model.default")
-    path = config.get("path") or str(_config_path(TakyonStore()))
-    raise TakyonError(
-        f"Takyon model config missing {', '.join(missing)} in {path}. "
-        "Run `takyon model set <provider> <model>` or copy the workspace config into this TAKYON_HOME."
-    )
 
 
 def _write_model_config(store: TakyonStore, provider: str, model: str) -> dict[str, str]:
@@ -5496,28 +4823,10 @@ def _run_agent(
     return response
 
 
-def _load_ceo_prompt() -> str:
-    return _CEO_PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def _strip_fenced_block(text: str, name: str) -> str:
-    """Drop an HTML-comment-fenced span (``<!-- name:START -->`` … ``<!-- name:END -->``)
-    from a prompt. Lets one rule in the shared ceo.md be scoped to a single turn kind in
-    code without forking the file. No-op if the fence is absent."""
-    start, end = f"<!-- {name}:START -->", f"<!-- {name}:END -->"
-    i, j = text.find(start), text.find(end)
-    if i == -1 or j == -1 or j < i:
-        return text
-    j += len(end)
-    if j < len(text) and text[j] == "\n":
-        j += 1
-    return text[:i] + text[j:]
 
 
-def _ceo_prompt_for_bootstrap() -> str:
-    # Bootstrap runs the standard build sequence under its own instruction, not a single
-    # operator request to inspect — so drop the per-request completion-discipline rule.
-    return _strip_fenced_block(_load_ceo_prompt(), "COMPLETION-DISCIPLINE")
 
 
 def run_takyon_command(

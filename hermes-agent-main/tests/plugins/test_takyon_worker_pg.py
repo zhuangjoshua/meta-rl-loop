@@ -29,6 +29,7 @@ import pytest
 psycopg = pytest.importorskip("psycopg")
 
 from plugins.takyon import app_usage, billing, core, jobs, wakes, worker  # noqa: E402
+from plugins.takyon import turn_runtime
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import RuntimeNotConfigured  # noqa: E402
 from plugins.takyon import storage  # noqa: E402
@@ -1017,7 +1018,7 @@ def test_ceo_wake_handler_binds_owner_before_loading_prompt(monkeypatch):
 
     monkeypatch.setattr(core, "TakyonStore", _FakeStore)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
-    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
     monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
@@ -1123,8 +1124,8 @@ def test_ceo_wake_timeout_calls_owned_timeout_finalizer(monkeypatch):
     monkeypatch.setattr(core, "TakyonStore", _FakeStore)
     monkeypatch.setattr(core, "_bound_operator_task_context", _fake_bound_op)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
-    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
-    monkeypatch.setattr(takyon_cli, "_load_ceo_prompt", lambda: "CEO prompt")
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(turn_runtime, "_load_ceo_prompt", lambda: "CEO prompt")
     monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
     monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -1578,7 +1579,7 @@ def _install_bootstrap_handler_stubs(
     def _fake_workspace(*_a, **_k):
         yield "/tmp/fake-workspace"
 
-    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(
         takyon_cli,
         "_ceo_bootstrap_turn_config",
@@ -1649,7 +1650,7 @@ def test_ceo_bootstrap_handler_binds_owner_before_loading_summary(monkeypatch):
     monkeypatch.setattr(core, "TakyonStore", _FakeStore)
     monkeypatch.setattr(core, "_bound_operator_task_context", _fake_bound_op)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
-    monkeypatch.setattr(takyon_cli, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(
         takyon_cli,
         "_ceo_bootstrap_turn_config",

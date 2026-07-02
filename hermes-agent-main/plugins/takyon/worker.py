@@ -1068,7 +1068,7 @@ class _RuntimeProgress:
         args: dict[str, object],
         result: object,
     ) -> None:
-        from .cli import _tool_progress_lines
+        from .turn_runtime import _tool_progress_lines
 
         lines = _tool_progress_lines(name, args if isinstance(args, dict) else {}, result)
         for line in lines[:2]:
@@ -1117,7 +1117,7 @@ def _run_ceo_turn(
 
     from takyon_cli.runtime_provider import resolve_runtime_provider
 
-    from .cli import (
+    from .turn_runtime import (
         _read_model_config,
         _reasoning_progress_callback,
         _require_agent_model_config,
@@ -1374,7 +1374,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     prompt is the stable ``prompts/ceo.md`` via ``cli._load_ceo_prompt``."""
     from gateway.session_context import clear_session_vars, set_session_vars
 
-    from .cli import _business_workspace_execution_context, _load_ceo_prompt
+    from .turn_runtime import _business_workspace_execution_context, _load_ceo_prompt
     from .core import TakyonStore, _bound_operator_task_context
 
     slug = job.business_slug
@@ -1489,7 +1489,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
 def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     from gateway.session_context import clear_session_vars, set_session_vars
 
-    from .cli import (
+    from .turn_runtime import (
         _business_workspace_execution_context,
         _ceo_bootstrap_turn_config,
     )
@@ -1646,9 +1646,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     # and the published source still has no real HTTP action backing `/app`. In that workflow case a
     # published access shell is incomplete and must requeue rather than settling a fake "done".
     try:
-        from .cli import _bootstrap_goal_requests_product_workflow
+        from .turn_runtime import _bootstrap_goal_requests_product_workflow
     except Exception:
-        from plugins.takyon.cli import _bootstrap_goal_requests_product_workflow
+        from plugins.takyon.turn_runtime import _bootstrap_goal_requests_product_workflow
 
     workflow_requested = _bootstrap_goal_requests_product_workflow(goal)
     real_http_actions = _bootstrap_real_http_actions(store, slug) if workflow_requested else set()
@@ -2557,7 +2557,7 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
     try:
         from gateway.session_context import clear_session_vars, set_session_vars
 
-        from .cli import _business_workspace_execution_context
+        from .turn_runtime import _business_workspace_execution_context
         from .core import _bound_operator_task_context
 
         with _business_workspace_execution_context(
@@ -2839,144 +2839,24 @@ def run_worker_loop(
     max_jobs: int | None = None,
     database_url: str | None = None,
 ) -> int:
-    """Run the worker process loop until SIGTERM/SIGINT (or ``once``/``max_jobs``). Opens a fresh
-    per-tick psycopg connection (autocommit, ``prepare_threshold=None`` — the SAME pgbouncer-safe
-    settings as ``runtime_app``) so a dropped connection only costs one tick; reconnects next tick.
-    A SIGTERM stops pulling NEW jobs between jobs and exits cleanly — a job killed mid-turn is left
-    'running' and reclaimed by ``requeue_stale`` on the next worker (its reservation refunded), so an
-    interrupted wake is safe. Returns the total number of jobs drained."""
-    import psycopg
+    """Back-compat entrypoint: construct the one worker constructor and run it.
 
-    from .core import load_takyon_env
-    from .runtime_app import assert_takyon_pg_role, configure_takyon_pg_session, resolve_database_url
+    The process loop moved verbatim to ``worker_pool.WorkerPool.run()`` (modularization
+    Stage 1) — size/dispatcher/identity are constructor topology there. Callers that
+    already hold this signature (scripts, tests) keep working; new call sites should
+    construct a ``WorkerPool`` lane factory directly."""
+    from .worker_pool import WorkerPool
 
-    load_takyon_env()
-    # Mark this process as the worker plane: core's worker-deferral dispatcher must run tools INLINE
-    # here (the surrounding job is already durable; deferring again would starve the drain threads
-    # waiting on their own sub-jobs).
-    os.environ["TAKYON_WORKER_PROCESS"] = "1"
-    resolved_url = resolve_database_url(
-        database_url,
-        plane=None if database_url else "operator",
-    )  # invariant #8: raises if unconfigured
-    worker_id = worker_id or f"worker-{socket.gethostname()}-{os.getpid()}"
-    interval = poll_interval if poll_interval is not None else _env_float(
-        "TAKYON_WORKER_POLL_SECONDS", _DEFAULT_POLL_SECONDS
-    )
-    concurrency = 1 if once or max_jobs is not None else max(1, _env_int("TAKYON_WORKER_CONCURRENCY", 2))
-
-    stop = threading.Event()
-
-    def _request_stop(signum, _frame):
-        _log.info("worker[%s]: signal %s received; finishing current job then stopping", worker_id, signum)
-        stop.set()
-
-    import signal
-
-    for _sig in (signal.SIGTERM, signal.SIGINT):
-        try:
-            signal.signal(_sig, _request_stop)
-        except (ValueError, OSError):
-            # Not on the main thread (e.g. under a test harness) — skip signal install.
-            pass
-
-    def _run_loop(*, thread_worker_id: str, allow_dispatch: bool) -> int:
-        import psycopg
-
-        def _heartbeat_conn_factory():
-            hb_conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
-            if not database_url:
-                assert_takyon_pg_role(hb_conn, "operator")
-                configure_takyon_pg_session(hb_conn, bypass=True)
-            return hb_conn
-
-        total_drained = 0
-        while not stop.is_set():
-            conn = None
-            try:
-                conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
-                if not database_url:
-                    assert_takyon_pg_role(conn, "operator")
-                    configure_takyon_pg_session(conn, bypass=True)
-            except Exception as exc:  # noqa: BLE001 — transient DB outage must not crash the daemon
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
-                _log.warning(
-                    "worker[%s]: DB connect failed (%s); retrying in %.0fs",
-                    thread_worker_id,
-                    exc,
-                    interval,
-                )
-                stop.wait(interval)
-                continue
-            try:
-                counts = drain_tick(
-                    conn,
-                    worker_id=thread_worker_id,
-                    kinds=kinds,
-                    owner_user_id=owner_user_id,
-                    dispatch=allow_dispatch,
-                    stop=stop,
-                    max_jobs=max_jobs,
-                    heartbeat_conn_factory=_heartbeat_conn_factory,
-                )
-                total_drained += counts["drained"]
-            except Exception as exc:  # noqa: BLE001 — a tick failure must not crash the daemon
-                _log.exception("worker[%s]: tick failed: %s", thread_worker_id, exc)
-            finally:
-                conn.close()
-
-            if once or (max_jobs is not None and total_drained >= max_jobs):
-                break
-            stop.wait(interval)
-        _log.info("worker[%s]: stopped (drained %d job(s) this run)", thread_worker_id, total_drained)
-        return total_drained
-
-    _log.info(
-        "worker[%s]: starting (dispatch=%s poll=%.0fs concurrency=%d owner=%s)",
-        worker_id,
-        dispatch,
-        interval,
-        concurrency,
-        str(owner_user_id or "").strip() or "*",
-    )
-    if concurrency == 1:
-        return _run_loop(thread_worker_id=worker_id, allow_dispatch=dispatch)
-
-    totals = [0 for _ in range(concurrency)]
-    errors: list[BaseException] = []
-
-    def _thread_main(index: int) -> None:
-        thread_worker_id = f"{worker_id}-{index + 1}"
-        try:
-            totals[index] = _run_loop(
-                thread_worker_id=thread_worker_id,
-                allow_dispatch=dispatch and index == 0,
-            )
-        except BaseException as exc:  # pragma: no cover - defensive last resort
-            errors.append(exc)
-            stop.set()
-
-    threads = [
-        threading.Thread(
-            target=_thread_main,
-            args=(index,),
-            name=f"takyon-worker-{index + 1}",
-            daemon=True,
-        )
-        for index in range(concurrency)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    if errors:
-        raise errors[0]
-    return sum(totals)
+    return WorkerPool.local_threads(
+        worker_id=worker_id,
+        poll_interval=poll_interval,
+        dispatch=dispatch,
+        kinds=kinds,
+        owner_user_id=owner_user_id,
+        once=once,
+        max_jobs=max_jobs,
+        database_url=database_url,
+    ).run()
 
 
 def _env_float(name: str, default: float) -> float:

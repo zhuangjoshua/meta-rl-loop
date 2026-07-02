@@ -1980,13 +1980,12 @@ def _start_dashboard_worker_if_postgres() -> None:
 
         def _run_dashboard_worker() -> None:
             try:
-                from plugins.takyon.worker import run_worker_loop
+                from plugins.takyon.worker_pool import WorkerPool
 
-                run_worker_loop(
+                WorkerPool.embedded(
                     worker_id=f"dashboard-worker-{os.getpid()}",
                     poll_interval=_dashboard_worker_poll_seconds(),
-                    dispatch=True,
-                )
+                ).run()
             except Exception as exc:  # noqa: BLE001 - keep the dashboard alive and log the failure
                 _log.exception("Dashboard embedded worker exited: %s", exc)
 

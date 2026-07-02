@@ -170,7 +170,7 @@ def test_worker_tool_handler_binds_workspace_root_into_session(monkeypatch):
 
     monkeypatch.setattr(takyon_worker, "_business_owner_user_id", lambda slug: "user-123")
     monkeypatch.setattr(takyon_worker, "_update_work_request", lambda *args, **kwargs: None)
-    monkeypatch.setattr("plugins.takyon.cli._business_workspace_execution_context", _workspace)
+    monkeypatch.setattr("plugins.takyon.turn_runtime._business_workspace_execution_context", _workspace)
     monkeypatch.setattr("gateway.session_context.set_session_vars", _set_session_vars)
     monkeypatch.setattr("gateway.session_context.clear_session_vars", _clear_session_vars)
     monkeypatch.setattr(takyon_core, "_bound_operator_task_context", _bound_context)
