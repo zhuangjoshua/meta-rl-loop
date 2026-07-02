@@ -36,8 +36,12 @@ def _policy(**overrides):
 
 
 def test_billing_cadence_guard_rejects_one_time():
-    with pytest.raises(openmeter_backend.OpenMeterConfigurationError, match="recurring"):
+    # Monthly-only (plan §2.7): every non-month cadence is refused. Assert the BEHAVIOR on the
+    # stable word 'monthly', not the pre-slice 'recurring' wording.
+    with pytest.raises(openmeter_backend.OpenMeterConfigurationError, match="monthly"):
         openmeter_backend.billing_cadence_for("one_time")
+    with pytest.raises(openmeter_backend.OpenMeterConfigurationError, match="monthly"):
+        openmeter_backend.billing_cadence_for("year")
 
 
 def test_sync_customer_uses_key_filter_and_customer_id(monkeypatch):
