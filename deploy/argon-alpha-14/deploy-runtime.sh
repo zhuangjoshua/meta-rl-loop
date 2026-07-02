@@ -213,7 +213,6 @@ PY"
   done
 }
 
-run_remote_migrations
 wait_for_remote_runtime_idle
 
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
@@ -221,6 +220,8 @@ TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
 TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
 TAKYON_STOP_CORE_SERVICES=1 \
   "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
+
+run_remote_migrations
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
