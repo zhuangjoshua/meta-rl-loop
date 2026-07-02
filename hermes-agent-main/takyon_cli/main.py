@@ -10458,7 +10458,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "cron", "curator", "dashboard", "debug", "doctor",
-        "dump", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "env", "fallback", "gateway", "hooks", "import", "insights",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "postinstall", "profile", "proxy",
         "send", "sessions", "setup",
@@ -10752,6 +10752,39 @@ def main():
     )
     migrate_xai.set_defaults(func=cmd_migrate_xai)
     migrate_parser.set_defaults(func=cmd_migrate)
+
+    # =========================================================================
+    # env command — stand up / inspect / tear down a prod-shaped isolated
+    # environment's twins (modularization Stage 3b, UC3 backend half).
+    # =========================================================================
+    from takyon_cli.env import cmd_env
+
+    env_parser = subparsers.add_parser(
+        "env",
+        help="Provision, inspect, or destroy an isolated Takyon environment (dev/hermetic)",
+        description=(
+            "Stand up a prod-shaped, fully-isolated environment's twins (own Supabase control "
+            "plane, dev safebox, Stripe TEST webhook, Auth0 dev app, optional Cloudflare/droplet). "
+            "Idempotent and receipted; fails closed naming the exact alias to deposit when a "
+            "credential is absent. Refuses name=prod."
+        ),
+    )
+    env_subparsers = env_parser.add_subparsers(dest="env_action")
+    for _action, _help in (
+        ("create", "Stand up the environment's twins (idempotent; re-run = no-op)"),
+        ("status", "Report the environment's current state without side effects"),
+        ("destroy", "Tear down the environment's twins (refuses live state unless --force)"),
+    ):
+        _sub = env_subparsers.add_parser(_action, help=_help)
+        _sub.add_argument("env_name", help="Environment name (e.g. dev); refuses 'prod'")
+        if _action == "destroy":
+            _sub.add_argument(
+                "--force",
+                action="store_true",
+                help="Override the live-nodes/non-empty-ledger destroy guard",
+            )
+        _sub.set_defaults(func=cmd_env)
+    env_parser.set_defaults(func=cmd_env)
 
     # =========================================================================
     # gateway command

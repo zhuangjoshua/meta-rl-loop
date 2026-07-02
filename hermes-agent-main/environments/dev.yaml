@@ -1,0 +1,140 @@
+# Takyon environment manifest — DEV (modularization plan §2.6 / Stage 3b, UC3).
+#
+# This is a DECLARATIVE description of one prod-SHAPED, fully-ISOLATED environment. It
+# names the twins the EnvironmentProvisioner stands up; it does NOT contain any secret.
+# Every credential resolves at run time via the safebox authority route (never os.environ),
+# and the provisioner FAILS CLOSED — naming the exact alias to deposit — when one is absent.
+#
+# Operator ruling (2026-07-02): DEV GETS ITS OWN SUPABASE PROJECT as its control plane.
+# The `database.dsn_env` below therefore points at a SEPARATE Supabase project's migration
+# DSN, provisioned with prod-named roles via topology.sql — never dev tables inside prod.
+#
+# The prod-literal guard (environment.assert_not_prod_leakage / PROD_LITERALS) is armed over
+# every resolved target: a dev manifest that resolves a prod IP/host/DSN refuses to provision.
+
+# ── identity ────────────────────────────────────────────────────────────────────────────
+name: dev                     # TAKYON_ENV; must not be "prod" (the CLI + provisioner refuse prod)
+description: >-
+  Prod-shaped, fully-isolated dev environment: own Supabase control plane (prod-named roles),
+  own dev safebox, Stripe TEST mode, capped model/media/search keys, dev domains. Runs the real
+  gates against twin infrastructure — the same code, differing only in what the slices point at.
+
+# ── domains ─────────────────────────────────────────────────────────────────────────────
+# Dev domains are *.dev / localtest — never the prod company base or dashboard host.
+domains:
+  company_base: dev.coscale.app     # per-business product sites: <slug>.dev.coscale.app
+  dashboard_host: ""                # empty = local serving (localhost:9119); set a *.dev host to publish a public twin
+  # A public dev twin (DNS + Auth0 callbacks + R2 worker route) is OPTIONAL and gated by
+  # cloudflare.enabled below; local serving first (plan Q9 recommendation).
+
+# ── plan caps (hard per-environment budget ceilings; dev spends REAL money on test-mode keys) ──
+# These are POLICY, enforced by the runtime spend gates — the provisioner records them into the
+# env config so the dev safebox and usage rail cap dev spend independently of prod.
+plans:
+  # Per-environment monthly budget ceiling for AI/media/search spend across ALL dev businesses.
+  # A hard cap so a runaway dev loop cannot burn the shared provider accounts.
+  environment_monthly_budget_usd: 50
+  # Default subuser plan seed for dev businesses (monthly-only, per operator ruling).
+  default_subuser_plan_price_usd: 19
+  default_subuser_included_ai_budget_usd: 5
+
+# ── twins to provision ────────────────────────────────────────────────────────────────────
+# Each block declares one twin. `enabled: false` skips that step entirely (status still reports it
+# as "disabled"). Optional infra (droplet, cloudflare) is OFF by default — local serving first.
+
+# (a) DB — dev's OWN Supabase project as its control plane. topology.sql + run_migrations applied
+#     as takyon_migration against the dev migration DSN. The DSN is resolved from the safebox by
+#     alias (NEVER a literal in this file), and asserted NOT to be a prod literal before any DDL.
+database:
+  enabled: true
+  provider: supabase                       # documentation: dev has its own Supabase project
+  # Safebox alias holding the dev MIGRATION DSN (takyon_migration login). The provisioner resolves
+  # this via safebox.first_env_backed_value(...) on the operator-authority host — never os.environ.
+  # FAIL-CLOSED message names this exact alias when absent.
+  dsn_alias: TAKYON_DEV_MIGRATION_DATABASE_URL
+  # Roles are prod-named (topology.sql). No relaxed/legacy role flags in dev — the gate stays enforced.
+  apply_topology: true
+  apply_migrations: true
+
+# (b) dev safebox — a SECOND instance of our own safebox code with its own token + .env key set.
+#     The provisioner VERIFIES the alias set is present (reports which are missing; never invents a
+#     value). The dev safebox itself is stood up out of band (its own process/container); this step
+#     asserts it holds the aliases the dev runtime will need.
+safebox:
+  enabled: true
+  # Base URL of the DEV safebox instance (asserted NOT to be a prod literal). Resolved from this
+  # alias so the value never sits in the manifest.
+  url_alias: TAKYON_DEV_SAFEBOX_URL
+  # The alias set the dev safebox MUST hold for dev to run prod-shaped. Grouped by purpose. The
+  # provisioner reports EACH missing alias with the deposit instruction; it seeds none of them.
+  required_aliases:
+    # Stripe TEST mode (a built-in parallel universe in the same Stripe account).
+    stripe:
+      - STRIPE_SECRET_KEY            # MUST be a sk_test_… key in dev (asserted test-mode)
+      - STRIPE_WEBHOOK_SECRET        # dev subuser app webhook signing secret (whsec_…)
+      - STRIPE_BILLING_WEBHOOK_SECRET  # dev operator/control-plane billing webhook signing secret
+    # Capped model / media / search provider keys (shared accounts, dev budget caps per plans.*).
+    providers:
+      - GEMINI_API_KEY               # or TAKYON_GEMINI_API_KEY / GOOGLE_API_KEY (gemini alias set)
+      - FAL_KEY                      # media generation
+      - TAVILY_API_KEY               # web search/extract
+    # Auth0 dev application (see auth0 block) — the client secret the dev app uses.
+    auth0:
+      - AUTH0_CLIENT_SECRET
+      - AUTH0_SECRET
+
+# (c) Auth0 dev APPLICATION — a new application (client id/secret, callback URLs) in the SAME tenant,
+#     created via the Management API. The mgmt token is the one credential the safebox does NOT yet
+#     hold (plan §2.6): a human deposits TAKYON_AUTH0_MGMT_TOKEN once, then this is autonomous.
+auth0:
+  enabled: true
+  # Alias holding the Auth0 Management API token (Applications: create/read scope). FAIL-CLOSED
+  # naming this exact alias when absent.
+  mgmt_token_alias: TAKYON_AUTH0_MGMT_TOKEN
+  # Alias holding the Auth0 tenant domain (e.g. dev-xxxx.us.auth0.com). Public config, still resolved
+  # from the safebox so the manifest stays value-free.
+  domain_alias: AUTH0_DOMAIN
+  application_name: "Takyon Dev"
+  # Callback / logout URLs the dev application allows. Local-serving defaults; extend for a public twin.
+  callback_urls:
+    - http://localhost:9119/callback
+    - http://localhost:9119/api/auth/callback
+  logout_urls:
+    - http://localhost:9119
+  web_origins:
+    - http://localhost:9119
+
+# (d) Cloudflare dev DNS / R2 — OPTIONAL (off by default; local serving first, plan Q9). When enabled,
+#     creates *.dev DNS records + a second R2 bucket + a worker route in the SAME Cloudflare account.
+#     The safebox ALREADY holds CLOUDFLARE_API_TOKEN (used by the prod product-edge-route today).
+cloudflare:
+  enabled: false
+  token_alias: CLOUDFLARE_API_TOKEN
+  zone_name: dev.coscale.app
+  r2_bucket: takyon-dev-product           # a second bucket, isolated from prod's
+  edge_worker: takyon-product-worker-dev  # a dev worker route
+
+# (e) Stripe TEST webhook — register a webhook endpoint against the TEST-mode Stripe key (the safebox
+#     holds STRIPE_SECRET_KEY; the provisioner asserts it is a test key before registering).
+stripe:
+  enabled: true
+  # Where Stripe should deliver dev webhook events. Local serving = a tunnel/localhost; a public twin
+  # would use the dev dashboard host. Asserted NOT to be a prod literal.
+  webhook_url: http://localhost:9119/api/webhooks/stripe
+  # Event types the dev endpoint subscribes to (mirrors the prod subuser app webhook surface).
+  enabled_events:
+    - checkout.session.completed
+    - customer.subscription.updated
+    - customer.subscription.deleted
+    - invoice.paid
+    - invoice.payment_failed
+
+# (f) DigitalOcean droplet — OPTIONAL dev compute (off by default; dev starts LOCAL, plan §2.6/Q7).
+#     DO is the OTHER credential the safebox does not yet hold: a human deposits TAKYON_DO_API_TOKEN
+#     once. When enabled, cloud-init runs the node bootstrap with TAKYON_ENV=dev.
+droplet:
+  enabled: false
+  token_alias: TAKYON_DO_API_TOKEN
+  region: nyc3
+  size: s-2vcpu-4gb
+  name: takyon-dev-1

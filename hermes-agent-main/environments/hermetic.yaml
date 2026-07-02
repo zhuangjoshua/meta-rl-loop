@@ -1,0 +1,50 @@
+# Takyon environment manifest — HERMETIC (modularization plan §2.1 / Stage 3b, CI/fast profile).
+#
+# The fully-STUBBED flavor: the ONLY profile that relaxes a gate. All infra is off, secrets are stub,
+# providers are stub. This is the CI / fast-local-test descendant of today's local PG rig — it never
+# serves as the dev experience (dev is prod-shaped; hermetic is not).
+#
+# Every twin below is `enabled: false`: `takyon env create hermetic` is a no-op that RECEIPTS each
+# skipped twin as "disabled" rather than reaching for any credential. Nothing here touches the network.
+
+name: hermetic
+description: >-
+  All-stub CI/fast profile. No real twins, no provider calls, no infra. DB is loopback with the
+  role gates relaxed (require_role_gates=False in RuntimeContext); everything else is stubbed off.
+
+domains:
+  company_base: localtest.me
+  dashboard_host: ""
+
+plans:
+  environment_monthly_budget_usd: 0        # stub spend policy: no real money ever
+  default_subuser_plan_price_usd: 19
+  default_subuser_included_ai_budget_usd: 5
+
+# Loopback DB, role gates relaxed. `dsn_alias` still points at a hermetic-only alias so the same
+# code path resolves it — but with enabled:false the provisioner does not apply topology/migrations
+# (the local PG rig / conftest owns hermetic schema application).
+database:
+  enabled: false
+  provider: loopback
+  dsn_alias: TAKYON_HERMETIC_DATABASE_URL
+  apply_topology: false
+  apply_migrations: false
+
+# No safebox instance — stub authority. No aliases required.
+safebox:
+  enabled: false
+  url_alias: ""
+  required_aliases: {}
+
+auth0:
+  enabled: false
+
+cloudflare:
+  enabled: false
+
+stripe:
+  enabled: false
+
+droplet:
+  enabled: false
