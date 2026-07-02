@@ -1,0 +1,90 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  migration-topology:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install migration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]==3.3.4"
+
+      - name: Replay migrations as non-superuser migration role
+        working-directory: hermes-agent-main
+        env:
+          PGHOST: localhost
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: postgres
+        run: |
+          python - <<'PY'
+          import psycopg
+          from pathlib import Path
+
+          from plugins.takyon.db.runner import (
+              assert_migration_topology,
+              migration_files,
+              run_migrations,
+          )
+
+          admin_dsn = "postgresql://postgres:postgres@localhost:5432/postgres"
+          dbname = "takyon_migration_ci"
+          role_password = "migration"
+
+          with psycopg.connect(admin_dsn, autocommit=True) as admin:
+              admin.execute(f'drop database if exists "{dbname}" with (force)')
+              admin.execute(
+                  """
+                  do $$
+                  begin
+                    if not exists (select 1 from pg_roles where rolname = 'takyon_migration') then
+                      create role takyon_migration login password 'migration';
+                    else
+                      alter role takyon_migration login password 'migration';
+                    end if;
+                  end $$;
+                  """
+              )
+              admin.execute(f'create database "{dbname}" owner takyon_migration')
+
+          db_admin_dsn = f"postgresql://postgres:postgres@localhost:5432/{dbname}"
+          with psycopg.connect(db_admin_dsn, autocommit=True) as admin:
+              admin.execute(Path("plugins/takyon/db/topology.sql").read_text())
+
+          migration_dsn = f"postgresql://takyon_migration:{role_password}@localhost:5432/{dbname}"
+          with psycopg.connect(migration_dsn, autocommit=True, prepare_threshold=None) as conn:
+              assert_migration_topology(conn)
+              first = run_migrations(conn)
+              second = run_migrations(conn)
+              expected = [path.name for path in migration_files()]
+              assert first == expected
+              assert second == expected
+              print(f"migrations_ok count={len(first)} last={first[-1]}")
+          PY

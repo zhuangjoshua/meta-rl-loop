@@ -40,6 +40,7 @@ def _resolve_test_pg_dsn() -> str | None:
 # the tests/plugins suite still collects in environments without psycopg.
 _DSN = _resolve_test_pg_dsn()
 _DB_DIR = Path(__file__).resolve().parents[2] / "plugins" / "takyon" / "db"
+TOPOLOGY_SQL = _DB_DIR / "topology.sql"
 # Manual, gated polsia2 teardown — lives OUTSIDE migrations/ so it is never swept.
 RETIRE_POLSIA2_SQL = _DB_DIR / "retire_polsia2_public.sql"
 
@@ -67,6 +68,7 @@ def _throwaway_db(worker_id):
         admin.execute(f'create database "{dbname}"')
     conn = psycopg.connect(_DSN, dbname=dbname, autocommit=True)
     configure_takyon_pg_session(conn, bypass=True)
+    conn.execute(TOPOLOGY_SQL.read_text())
     try:
         yield conn
     finally:

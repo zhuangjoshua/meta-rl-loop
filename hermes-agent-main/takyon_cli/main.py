@@ -10717,11 +10717,16 @@ def main():
 
     migrate_parser = subparsers.add_parser(
         "migrate",
-        help="Migrate configuration for retired models or deprecated settings",
+        help="Run database migrations or retired-model config migrations",
         description=(
-            "Diagnose and (optionally) rewrite the active config.yaml to "
-            "replace references to retired models or deprecated settings."
+            "Run the tracked Takyon Postgres migration rail. Use subcommands "
+            "for one-off retired-model config migrations."
         ),
+    )
+    migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate the migration rail and print the migration file list without executing SQL files",
     )
     migrate_subparsers = migrate_parser.add_subparsers(dest="migrate_type")
 

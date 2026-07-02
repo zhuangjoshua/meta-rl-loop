@@ -157,20 +157,8 @@ run_remote_migrations() {
   ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
     "set -euo pipefail
     if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
-      env TAKYON_HOME=/opt/takyon/.takyon HOME=/root PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
-        '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from plugins.takyon.core import load_takyon_env
-from plugins.takyon.db.runner import run_migrations
-from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
-import psycopg
-
-load_takyon_env()
-migration_database_url = resolve_database_url(plane='migration')
-with psycopg.connect(migration_database_url, autocommit=True, prepare_threshold=None) as conn:
-    assert_takyon_pg_role(conn, 'migration')
-    conn.execute('select set_config(\$\$statement_timeout\$\$, \$\$0\$\$, false)')
-    run_migrations(conn)
-PY
+      runuser -u takyon -- env TAKYON_HOME=/opt/takyon/.takyon HOME=/opt/takyon PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+        '$TAKYON_REMOTE_RUNTIME/.venv/bin/takyon-cli' migrate
     fi"
 }
 

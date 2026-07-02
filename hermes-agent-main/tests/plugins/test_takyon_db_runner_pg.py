@@ -15,7 +15,12 @@ import pytest
 
 pytest.importorskip("psycopg")
 
-from plugins.takyon.db.runner import migration_files, run_migrations  # noqa: E402
+from plugins.takyon.db.runner import (  # noqa: E402
+    MigrationTopologyError,
+    assert_migration_topology,
+    migration_files,
+    run_migrations,
+)
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -55,6 +60,27 @@ def test_run_migrations_is_idempotent(pg_conn_raw):
     assert first == second
     assert _table_exists(pg_conn_raw, "users")
     assert _table_exists(pg_conn_raw, "app_gateway_keys")
+
+
+def test_assert_migration_topology_accepts_prepared_migration_role(pg_conn_raw):
+    pg_conn_raw.execute("set role takyon_migration")
+    try:
+        assert_migration_topology(pg_conn_raw)
+    finally:
+        pg_conn_raw.execute("reset role")
+
+
+def test_assert_migration_topology_reports_public_owner_fix(pg_conn_raw):
+    pg_conn_raw.execute("create table public.bad_owner(id integer)")
+
+    pg_conn_raw.execute("set role takyon_migration")
+    try:
+        with pytest.raises(MigrationTopologyError) as exc:
+            assert_migration_topology(pg_conn_raw)
+    finally:
+        pg_conn_raw.execute("reset role")
+
+    assert "ALTER TABLE public.bad_owner OWNER TO takyon_migration;" in str(exc.value)
 
 
 def test_migration_files_are_ordered_and_nonempty():

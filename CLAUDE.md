@@ -34,6 +34,8 @@ When the operator asks to push or deploy Takyon, keep the three rails distinct:
 
 The deployment workflow is tracked at `.github/workflows/deploy.yml`: pushing `main` should run the dashboard web build, compile Python, redeploy the current Vercel `app.fourmanifold.com` frontdoor when `VERCEL_TOKEN` is configured, rsync the active runtime to the VPS, restart `takyon-dashboard.service`, apply tracked Caddy only when `deploy/argon-alpha-14/Caddyfile` changed, and verify the public dashboard host. Required GitHub secrets are `TAKYON_VPS_HOST`, `TAKYON_VPS_USER`, `TAKYON_VPS_SSH_KEY`, and optional Vercel metadata secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`. After pushing, verify the workflow with `gh run list` / `gh run watch`; if it fails or has not run, do not assume production updated.
 
+Production Postgres migrations must run through the VPS migration DSN as `takyon_migration`; do not store a `postgres`/owner DSN in Safebox or on any host. The tracked command is `takyon migrate` from the operator VPS rail; it resolves `TAKYON_MIGRATION_DATABASE_URL`, asserts the `takyon_migration` role/topology, replays every idempotent migration file, and prints the schema fingerprint. The required Supabase topology is codified in `hermes-agent-main/plugins/takyon/db/topology.sql`: public Takyon-owned tables, routines, sequences, views, and non-array types are owned by `takyon_migration`, and `takyon_migration` holds `WITH ADMIN OPTION` membership on `takyon_app`, `takyon_app_runtime`, `takyon_operator_runtime`, `takyon_safebox_authority`, and `takyon_runtime`. This was repaired on 2026-07-02 because early prod objects had been created manually as `postgres`; future migrations should assume the tracked runner can replay all migration files autonomously under `takyon_migration`.
+
 Fast path for ordinary code/docs/UI changes:
 
 1. Run only the focused local checks needed for the touched surface, plus `git diff --check`.
@@ -196,9 +198,9 @@ When the operator wants live monitoring, run the shell in a terminal visible to 
 
 For the dashboard/product experience (`app.fourmanifold.com` and the live `<slug>.fourmanifold.com` product site), the **final** acceptance check for ANY change set is a **brand-new business created end-to-end through the browser UI**, exercised as a real user across every change. Poking at an existing business — signing in, re-running a tool, reloading a page — is **debugging/exploration only**; it is NOT the acceptance gate, because existing businesses were built under older code and skip the current bootstrap path. The loop is: batch fixes → deploy to BOTH hosts (operator + subuser) → create ONE fresh business in the browser → verify all changes on it as a user → fix what failed → create ANOTHER fresh business → repeat until clean. Never declare a change done on existing-business checks alone.
 
-### Parallel build agents run on Opus 4.8
+### Parallel build agents inherit the session model — never a cheaper tier
 
-When fanning out implementation work to parallel agents (the Workflow tool or the Agent tool), pin them to **Opus 4.8** (`model: 'opus'`). Do not let a parallel lane silently run on a cheaper tier.
+When fanning out implementation work to parallel agents (the Workflow tool or the Agent tool), **omit the `model:` parameter** so every lane inherits the session's model. Do not pin lanes to a different model — pinning `model: 'opus'` on a Fable 5 session is a downgrade, and the operator has explicitly ruled it out (2026-07-02: "stay on fable"). The invariant is: no lane ever runs on a tier below the session model.
 
 ## Agent Behavior
 
