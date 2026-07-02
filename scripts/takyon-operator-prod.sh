@@ -664,7 +664,7 @@ local_worker_pids() {
   } | awk '!seen[$0]++'
 }
 
-stop_local_workers() {
+collect_local_worker_pids() {
   local pids=()
   local pid
   while IFS= read -r pid; do
@@ -672,15 +672,14 @@ stop_local_workers() {
     [[ "$pid" != "$$" ]] || continue
     pids+=("$pid")
   done < <(local_worker_pids)
+  printf '%s\n' "${pids[@]}"
+}
 
-  if [[ "${#pids[@]}" -eq 0 ]]; then
-    return 0
-  fi
-
-  local grace_seconds
-  grace_seconds="$(local_worker_stop_grace_seconds)"
-  echo "Stopping existing local worker pool(s): ${pids[*]} (grace ${grace_seconds}s)" >&2
-  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+_wait_for_local_worker_exit() {
+  local grace_seconds="$1"
+  shift || true
+  local pids=("$@")
+  [[ "${#pids[@]}" -gt 0 ]] || return 0
 
   local alive=()
   local _wait
@@ -701,6 +700,46 @@ stop_local_workers() {
     echo "Force-stopping local worker pool(s) after ${grace_seconds}s: ${alive[*]}" >&2
     kill -KILL "${alive[@]}" >/dev/null 2>&1 || true
   fi
+}
+
+stop_local_workers() {
+  local pids=()
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pids+=("$pid")
+  done < <(collect_local_worker_pids)
+
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local grace_seconds
+  grace_seconds="$(local_worker_stop_grace_seconds)"
+  echo "Stopping existing local worker pool(s): ${pids[*]} (grace ${grace_seconds}s)" >&2
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  _wait_for_local_worker_exit "$grace_seconds" "${pids[@]}"
+}
+
+stop_local_workers_background() {
+  local pids=()
+  local pid
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pids+=("$pid")
+  done < <(collect_local_worker_pids)
+
+  if [[ "${#pids[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  local grace_seconds
+  grace_seconds="$(local_worker_stop_grace_seconds)"
+  echo "Stopping existing local worker pool(s): ${pids[*]} (grace ${grace_seconds}s; replacement starts immediately)" >&2
+  kill -TERM "${pids[@]}" >/dev/null 2>&1 || true
+  (
+    _wait_for_local_worker_exit "$grace_seconds" "${pids[@]}"
+  ) >/dev/null 2>&1 &
 }
 
 cmd_safebox_tunnel() {
@@ -831,7 +870,7 @@ cmd_worker() {
   require_tunnel
   cmd_preflight
   require_docker_for_worker
-  stop_local_workers
+  stop_local_workers_background
   export TAKYON_WORKER_CONCURRENCY="$concurrency"
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-1}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-900}"
