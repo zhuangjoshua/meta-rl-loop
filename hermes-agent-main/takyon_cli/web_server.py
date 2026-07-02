@@ -2117,6 +2117,19 @@ def _takyon_app_tool(raw: str) -> tuple[int, dict[str, Any]]:
     return int(HTTPStatus.OK), payload
 
 
+async def _takyon_app_tool_off_loop(handler: Any, args: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Run a synchronous ``handle_business_*`` tool off the event loop.
+
+    Every app-plane tool handler does real I/O inline (Postgres round-trips, storage/provider
+    calls), so calling it directly from an async endpoint would stall every other customer on
+    this process for the duration — the same head-of-line blocking the action-invoke path
+    already avoids with asyncio.to_thread (see the actions branch of ``_takyon_app_post``).
+    ``app_runtime_database_plane`` binding survives: to_thread copies the current contextvars.
+    """
+    raw = await asyncio.to_thread(handler, args)
+    return _takyon_app_tool(raw)
+
+
 def _takyon_app_json(status: int | HTTPStatus, payload: dict[str, Any]) -> JSONResponse:
     return JSONResponse(status_code=int(status), content=payload)
 
@@ -2157,7 +2170,7 @@ def _takyon_app_check_sql_rate_limit_for_session(
     from plugins.takyon import app_identity as takyon_app_identity
     from plugins.takyon import rate_limit as takyon_rate_limit
     from plugins.takyon.core import _db_backend
-    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured, assert_takyon_pg_role
+    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured
 
     if _db_backend() != "postgres":
         raise HTTPException(
@@ -2172,22 +2185,21 @@ def _takyon_app_check_sql_rate_limit_for_session(
             detail="app rate limiting authority is not configured",
         ) from exc
     try:
-        import psycopg
+        import psycopg  # noqa: F401 - availability probe; the pool factory imports it again
     except Exception as exc:
         raise HTTPException(
             status_code=503,
             detail="app rate limiting authority requires psycopg",
         ) from exc
 
-    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
     try:
-        try:
-            assert_takyon_pg_role(conn, "app")
-        except DatabaseRoleMismatch as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="app database authority role mismatch",
-            ) from exc
+        conn = _takyon_app_pool_acquire(resolved_url)
+    except DatabaseRoleMismatch as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="app database authority role mismatch",
+        ) from exc
+    try:
         app_user = takyon_app_identity.validate_session(conn, business, session_token)
         if app_user is None:
             raise HTTPException(status_code=401, detail="invalid app session")
@@ -2198,7 +2210,7 @@ def _takyon_app_check_sql_rate_limit_for_session(
             window_seconds=window_seconds,
         )
     finally:
-        conn.close()
+        _takyon_app_pool(resolved_url).release(conn)
     if not result.allowed:
         raise HTTPException(
             status_code=429,
@@ -2431,6 +2443,49 @@ def _takyon_owner_token_on_app_plane(request: Request) -> bool:
     return auth.startswith("Bearer tk_")
 
 
+# Dedicated pool plane for app-plane HTTP request connections. The core store pools the same
+# DSN under plane "app"/"operator" with autocommit=False dict_row connections; the request path
+# opens autocommit=True tuple-row connections, so the two configurations must never share a pool
+# key or a checkout could hand one path the other's connection shape.
+_APP_PLANE_POOL_PLANE = "app-http"
+
+
+def _takyon_app_pool(resolved_url: str):
+    """Per-process shared pool for app-plane request connections (extends core's registry).
+
+    Sized by ``TAKYON_PG_POOL_SIZE`` (default 8) PER PROCESS — with ``TAKYON_UVICORN_WORKERS=N``
+    each worker holds its own pool, so total DB connections scale as N x pool size against the
+    Supavisor pooler role.
+    """
+    from plugins.takyon.core import _postgres_pool
+
+    return _postgres_pool(resolved_url, plane=_APP_PLANE_POOL_PLANE)
+
+
+def _takyon_app_pool_acquire(resolved_url: str):
+    """Checkout an app-plane connection with the fresh-connect session semantics the call sites
+    had: autocommit, prepare_threshold=None (pgbouncer/Supavisor safe), RLS GUCs cleared with
+    bypass OFF, and the connection asserted onto the app authority plane. Raises
+    ``DatabaseRoleMismatch`` exactly like the previous per-request connects. Return the
+    connection with ``_takyon_app_pool(resolved_url).release(conn)`` — the pool's release resets
+    ROLE and the takyon RLS GUCs, so per-request session state never leaks across checkouts."""
+    import psycopg
+
+    from plugins.takyon.runtime_app import assert_takyon_pg_role, configure_takyon_pg_session
+
+    pool = _takyon_app_pool(resolved_url)
+    conn = pool.acquire(
+        lambda: psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
+    )
+    try:
+        configure_takyon_pg_session(conn, bypass=False)
+        assert_takyon_pg_role(conn, "app")
+    except Exception:
+        pool.release(conn, discard=True)
+        raise
+    return conn
+
+
 def _takyon_app_broker_generate(
     *,
     business: str,
@@ -2442,7 +2497,7 @@ def _takyon_app_broker_generate(
         broker_message_for_business,
     )
     from plugins.takyon.core import _db_backend
-    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured, assert_takyon_pg_role
+    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured
 
     if _db_backend() != "postgres":
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
@@ -2459,22 +2514,21 @@ def _takyon_app_broker_generate(
         }
 
     try:
-        import psycopg
+        import psycopg  # noqa: F401 - availability probe; the pool factory imports it again
     except Exception:
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
             "success": False,
             "error": "app generate authority requires psycopg",
         }
 
-    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
     try:
-        try:
-            assert_takyon_pg_role(conn, "app")
-        except DatabaseRoleMismatch:
-            return int(HTTPStatus.SERVICE_UNAVAILABLE), {
-                "success": False,
-                "error": "app database authority role mismatch",
-            }
+        conn = _takyon_app_pool_acquire(resolved_url)
+    except DatabaseRoleMismatch:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app database authority role mismatch",
+        }
+    try:
         payload = broker_message_for_business(
             conn,
             business_slug=business,
@@ -2486,7 +2540,7 @@ def _takyon_app_broker_generate(
     except GatewayMessageError as exc:
         return exc.status_code, _takyon_app_gateway_error_payload(exc.detail)
     finally:
-        conn.close()
+        _takyon_app_pool(resolved_url).release(conn)
 
 
 def _takyon_app_broker_search(
@@ -2503,7 +2557,7 @@ def _takyon_app_broker_search(
         broker_search_for_business,
     )
     from plugins.takyon.core import _db_backend
-    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured, assert_takyon_pg_role
+    from plugins.takyon.runtime_app import DatabaseRoleMismatch, RuntimeNotConfigured
 
     if _db_backend() != "postgres":
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
@@ -2520,22 +2574,21 @@ def _takyon_app_broker_search(
         }
 
     try:
-        import psycopg
+        import psycopg  # noqa: F401 - availability probe; the pool factory imports it again
     except Exception:
         return int(HTTPStatus.SERVICE_UNAVAILABLE), {
             "success": False,
             "error": "app search authority requires psycopg",
         }
 
-    conn = psycopg.connect(resolved_url, autocommit=True, prepare_threshold=None)
     try:
-        try:
-            assert_takyon_pg_role(conn, "app")
-        except DatabaseRoleMismatch:
-            return int(HTTPStatus.SERVICE_UNAVAILABLE), {
-                "success": False,
-                "error": "app database authority role mismatch",
-            }
+        conn = _takyon_app_pool_acquire(resolved_url)
+    except DatabaseRoleMismatch:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {
+            "success": False,
+            "error": "app database authority role mismatch",
+        }
+    try:
         payload = broker_search_for_business(
             conn,
             business_slug=business,
@@ -2547,7 +2600,7 @@ def _takyon_app_broker_search(
     except GatewayMessageError as exc:
         return exc.status_code, _takyon_app_gateway_error_payload(exc.detail)
     finally:
-        conn.close()
+        _takyon_app_pool(resolved_url).release(conn)
 
 
 def _takyon_media_status_payload(
@@ -2630,10 +2683,10 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
-        status, payload = _takyon_app_tool(handle_business_read_app_session({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_session, {
             "business": business,
             "session_token": token,
-        }))
+        })
         if (
             status == int(HTTPStatus.BAD_REQUEST)
             and str(payload.get("error") or "").strip().lower() == "app account not found"
@@ -2648,10 +2701,10 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.OK, {"success": True, "authenticated": False})
-        status, payload = _takyon_app_tool(handle_business_read_app_account({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_account, {
             "business": business,
             "session_token": token,
-        }))
+        })
         if (
             status == int(HTTPStatus.BAD_REQUEST)
             and str(payload.get("error") or "").strip().lower() == "app account not found"
@@ -2666,10 +2719,10 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_read_app_profile({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_profile, {
             "business": business,
             "session_token": token,
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts and parts[0] == "directory":
@@ -2677,26 +2730,26 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
         if parts == ["directory"]:
-            _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
-            status, payload = _takyon_app_tool(handle_business_list_app_directory_entries({
+            await asyncio.to_thread(_takyon_app_rate_limit_directory_lookup, business=business, session_token=token)
+            status, payload = await _takyon_app_tool_off_loop(handle_business_list_app_directory_entries, {
                 "business": business,
                 "session_token": token,
                 "limit": request.query_params.get("limit"),
-            }))
+            })
             return _takyon_app_json(status, payload)
         if parts == ["directory", "me"]:
-            status, payload = _takyon_app_tool(handle_business_read_app_directory_entry({
+            status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_directory_entry, {
                 "business": business,
                 "session_token": token,
-            }))
+            })
             return _takyon_app_json(status, payload)
         if len(parts) == 2:
-            _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
-            status, payload = _takyon_app_tool(handle_business_read_app_directory_entry({
+            await asyncio.to_thread(_takyon_app_rate_limit_directory_lookup, business=business, session_token=token)
+            status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_directory_entry, {
                 "business": business,
                 "session_token": token,
                 "app_user_id": parts[1],
-            }))
+            })
             if status != int(HTTPStatus.OK):
                 return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
             return _takyon_app_json(status, payload)
@@ -2707,7 +2760,7 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
         try:
-            result = app_media_get_bytes(business, parts[1], token)
+            result = await asyncio.to_thread(app_media_get_bytes, business, parts[1], token)
         except Exception as exc:
             error = str(exc).lower()
             if "app account not found" in error:
@@ -2724,20 +2777,20 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
         if len(parts) == 1:
-            status, payload = _takyon_app_tool(handle_business_list_app_records({
+            status, payload = await _takyon_app_tool_off_loop(handle_business_list_app_records, {
                 "business": business,
                 "session_token": token,
                 "record_type": request.query_params.get("record_type") or request.query_params.get("type"),
                 "limit": request.query_params.get("limit"),
-            }))
+            })
             return _takyon_app_json(status, payload)
         if len(parts) == 3:
-            status, payload = _takyon_app_tool(handle_business_read_app_record({
+            status, payload = await _takyon_app_tool_off_loop(handle_business_read_app_record, {
                 "business": business,
                 "session_token": token,
                 "record_type": parts[1],
                 "record_id": parts[2],
-            }))
+            })
             return _takyon_app_json(status, payload)
         return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
 
@@ -2745,12 +2798,12 @@ async def _takyon_app_get(request: Request, business: str, route: str) -> Respon
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_list_app_connections({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_list_app_connections, {
             "business": business,
             "session_token": token,
             "state": request.query_params.get("state"),
             "limit": request.query_params.get("limit"),
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts == ["checkout"]:
@@ -2811,13 +2864,13 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         if upload is None or not hasattr(upload, "read"):
             return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "missing file field"})
         content = await upload.read()
-        status, payload = _takyon_app_tool(handle_business_upload_app_media({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_upload_app_media, {
             "business": business,
             "session_token": token,
             "filename": getattr(upload, "filename", "") or "",
             "mime": getattr(upload, "content_type", "") or form.get("mime") or "",
             "content": content,
-        }))
+        })
         status, payload = _takyon_media_status_payload(status, payload)
         return _takyon_app_json(status, payload)
     try:
@@ -2828,11 +2881,11 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         # Supabase Auth (Google/email) sign-in: the browser completes the Supabase OAuth flow and
         # POSTs the Supabase access_token here; the runtime verifies it server-side and returns the
         # Takyon app session_token (the credential the client then presents).
-        status, payload = _takyon_app_tool(handle_business_supabase_login({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_supabase_login, {
             "business": business,
             "access_token": body.get("access_token") or body.get("accessToken"),
             "name": body.get("name"),
-        }))
+        })
         response = _takyon_app_json(status, payload)
         if status == int(HTTPStatus.OK):
             session_token = str(payload.get("session_token") or "").strip()
@@ -2844,11 +2897,11 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         token = _takyon_app_session_token(request)
         account: dict[str, Any] = {}
         if token:
-            _account_status, account = _takyon_app_tool(handle_business_read_app_account({
+            _account_status, account = await _takyon_app_tool_off_loop(handle_business_read_app_account, {
                 "business": business,
                 "session_token": token,
-            }))
-        status, payload = _takyon_app_tool(handle_business_create_app_checkout({
+            })
+        status, payload = await _takyon_app_tool_off_loop(handle_business_create_app_checkout, {
             "business": business,
             "session_token": token,
             "plan_key": body.get("plan_key") or body.get("planKey") or body.get("price_key") or body.get("priceKey"),
@@ -2858,7 +2911,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "app_user_id": (account.get("user") or {}).get("id"),
             "origin": _takyon_app_origin(request, body),
             "metadata": body.get("metadata") or {},
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts == ["account"]:
@@ -2872,10 +2925,10 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             token = _takyon_app_session_token(request)
             if not token:
                 return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-            status, payload = _takyon_app_tool(handle_business_cancel_app_subscription({
+            status, payload = await _takyon_app_tool_off_loop(handle_business_cancel_app_subscription, {
                 "business": business,
                 "session_token": token,
-            }))
+            })
             return _takyon_app_json(status, payload)
         return _takyon_app_json(
             HTTPStatus.BAD_REQUEST,
@@ -2886,7 +2939,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_upsert_app_profile({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_upsert_app_profile, {
             "business": business,
             "session_token": token,
             "display_name": body["display_name"] if "display_name" in body else body.get("displayName"),
@@ -2895,14 +2948,14 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "attributes": body["attributes"] if "attributes" in body else None,
             "metadata": body["metadata"] if "metadata" in body else None,
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"profile:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts == ["directory", "me"]:
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_upsert_app_directory_entry({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_upsert_app_directory_entry, {
             "business": business,
             "session_token": token,
             "display_name": body["display_name"] if "display_name" in body else body.get("displayName"),
@@ -2910,15 +2963,15 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "bio": body["bio"] if "bio" in body else body.get("bio"),
             "attributes": body["attributes"] if "attributes" in body else None,
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"directory:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts == ["records", "query"]:
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
-        status, payload = _takyon_app_tool(handle_business_list_app_records({
+        await asyncio.to_thread(_takyon_app_rate_limit_directory_lookup, business=business, session_token=token)
+        status, payload = await _takyon_app_tool_off_loop(handle_business_list_app_records, {
             "business": business,
             "session_token": token,
             "record_type": body.get("record_type") or body.get("type"),
@@ -2926,14 +2979,14 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "sort": body.get("sort"),
             "cursor": body.get("cursor"),
             "limit": body.get("limit"),
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts and parts[0] == "records":
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_upsert_app_record({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_upsert_app_record, {
             "business": business,
             "session_token": token,
             "record_type": parts[1] if len(parts) >= 2 else body.get("record_type") or body.get("type"),
@@ -2942,7 +2995,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "data": body.get("data"),
             "metadata": body.get("metadata"),
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"record:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts == ["connections"]:
@@ -2956,14 +3009,14 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             .replace("-", "_")
         )
         if action_value not in {"block", "unblock"}:
-            _takyon_app_rate_limit_directory_lookup(business=business, session_token=token)
-        status, payload = _takyon_app_tool(handle_business_act_on_app_connection({
+            await asyncio.to_thread(_takyon_app_rate_limit_directory_lookup, business=business, session_token=token)
+        status, payload = await _takyon_app_tool_off_loop(handle_business_act_on_app_connection, {
             "business": business,
             "session_token": token,
             "target_app_user_id": body.get("target_app_user_id") or body.get("targetAppUserId") or body.get("target_id") or body.get("targetId"),
             "connection_action": body.get("action") or body.get("state"),
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"connection:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         if status != int(HTTPStatus.OK) and str(payload.get("error") or "") == "app connection target not found":
             return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
         return _takyon_app_json(status, payload)
@@ -2972,10 +3025,10 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        account_status, account = _takyon_app_tool(handle_business_read_app_account({
+        account_status, account = await _takyon_app_tool_off_loop(handle_business_read_app_account, {
             "business": business,
             "session_token": token,
-        }))
+        })
         if account_status != int(HTTPStatus.OK):
             return _takyon_app_json(account_status, account)
         user = account.get("user") or {}
@@ -2993,7 +3046,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
                     "error": "priced app usage must flow through metered server brokers",
                 },
             )
-        status, payload = _takyon_app_tool(handle_business_record_app_usage({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_record_app_usage, {
             "business": business,
             "app_user_id": user.get("id"),
             "app_user_tier": user.get("tier"),
@@ -3009,14 +3062,18 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "model": body.get("model"),
             "metadata": body.get("metadata") or {},
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"usage:{business}:{user.get('id')}:{uuid.uuid4().hex}",
-        }))
+        })
         return _takyon_app_json(status, payload)
 
     if parts == ["generate"]:
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_broker_generate(
+        # The broker runs a safebox→provider HTTP round-trip (up to 180s) synchronously. Run it
+        # OFF the event loop — exactly like the action-invoke path below — so one slow provider
+        # call cannot stall every other customer request on this process.
+        status, payload = await asyncio.to_thread(
+            _takyon_app_broker_generate,
             business=business,
             body=body,
             session_token=token,
@@ -3027,7 +3084,9 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_broker_search(
+        # Same off-loop rule as /generate: the search broker holds a safebox→Tavily HTTP call.
+        status, payload = await asyncio.to_thread(
+            _takyon_app_broker_search,
             business=business,
             body=body,
             session_token=token,
@@ -3038,7 +3097,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_send_app_email({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_send_app_email, {
             "business": business,
             "session_token": token,
             "app_user_id": body.get("app_user_id") or body.get("recipient_app_user_id"),
@@ -3047,7 +3106,7 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             "html": body.get("html") or body.get("html_body"),
             "purpose": body.get("purpose"),
             "idempotency_key": body.get("idempotency_key") or body.get("idempotencyKey") or f"email:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         status, payload = _takyon_email_status_payload(status, payload)
         return _takyon_app_json(status, payload)
 
@@ -3059,7 +3118,8 @@ async def _takyon_app_post(request: Request, business: str, route: str) -> Respo
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
         action_name = parts[1]
         try:
-            _takyon_app_rate_limit_action_invoke(
+            await asyncio.to_thread(
+                _takyon_app_rate_limit_action_invoke,
                 business=business,
                 session_token=token,
                 action_name=action_name,
@@ -3110,10 +3170,10 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
             response = _takyon_app_json(HTTPStatus.OK, {"success": True, "revoked": False})
             _takyon_app_clear_session_cookie(response)
             return response
-        status, payload = _takyon_app_tool(handle_business_delete_app_session({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_delete_app_session, {
             "business": business,
             "session_token": token,
-        }))
+        })
         response = _takyon_app_json(status, payload)
         _takyon_app_clear_session_cookie(response)
         return response
@@ -3121,33 +3181,33 @@ async def _takyon_app_delete(request: Request, business: str, route: str) -> Res
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_disable_app_directory_entry({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_disable_app_directory_entry, {
             "business": business,
             "session_token": token,
             "idempotency_key": f"directory-delete:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         return _takyon_app_json(status, payload)
     if parts and parts[0] == "records" and len(parts) == 3:
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_delete_app_record({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_delete_app_record, {
             "business": business,
             "session_token": token,
             "record_type": parts[1],
             "record_id": parts[2],
             "idempotency_key": f"record-delete:{business}:{uuid.uuid4().hex}",
-        }))
+        })
         return _takyon_app_json(status, payload)
     if parts and parts[0] == "media" and len(parts) == 2:
         token = _takyon_app_session_token(request)
         if not token:
             return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
-        status, payload = _takyon_app_tool(handle_business_delete_app_media({
+        status, payload = await _takyon_app_tool_off_loop(handle_business_delete_app_media, {
             "business": business,
             "session_token": token,
             "media_id": parts[1],
-        }))
+        })
         status, payload = _takyon_media_status_payload(status, payload)
         return _takyon_app_json(status, payload)
     return _takyon_app_json(HTTPStatus.NOT_FOUND, {"success": False, "error": "not found"})
@@ -10791,13 +10851,15 @@ def _mount_postgres_runtime_routes() -> None:
                 conn.close()
 
         def app_conn():
-            conn = psycopg.connect(app_url, autocommit=True, prepare_threshold=None)
+            # Per-request app-plane connections come from the shared pool (Stage 4a): the
+            # ai-gateway is hit by product actions' ctx.generate hairpins, so a fresh
+            # remote-pooler connect per request costs latency and connection churn under load.
+            # _takyon_app_pool_acquire applies the same configure/assert this helper did inline.
+            conn = _takyon_app_pool_acquire(app_url)
             try:
-                configure_takyon_pg_session(conn, bypass=False)
-                assert_takyon_pg_role(conn, "app")
                 yield conn
             finally:
-                conn.close()
+                _takyon_app_pool(app_url).release(conn)
 
         if mount_operator:
             app.include_router(build_control_router())
@@ -10825,6 +10887,44 @@ _mount_postgres_runtime_routes()
 _mount_plugin_api_routes()
 
 mount_spa(app)
+
+
+_UVICORN_WORKERS_ENV = "TAKYON_UVICORN_WORKERS"
+_WORKER_BOUND_HOST_ENV = "TAKYON_UVICORN_BOUND_HOST"
+_WORKER_BOUND_PORT_ENV = "TAKYON_UVICORN_BOUND_PORT"
+
+# Workers mode (subuser plane): uvicorn workers import this module fresh in their own
+# processes, so the app.state assignments start_server() makes never run there. The parent
+# stashes the bound interface in the environment before uvicorn.run; picking it up here at
+# import keeps host_header_middleware's Host validation (DNS-rebinding defence,
+# GHSA-ppp5-vxwm-4cf7) active inside every worker instead of silently disabling it.
+_worker_bound_host = str(os.getenv(_WORKER_BOUND_HOST_ENV) or "").strip()
+if _worker_bound_host:
+    app.state.bound_host = _worker_bound_host
+    try:
+        app.state.bound_port = int(str(os.getenv(_WORKER_BOUND_PORT_ENV) or "").strip() or "0") or None
+    except ValueError:
+        app.state.bound_port = None
+
+
+def _subuser_uvicorn_workers(role: str) -> int:
+    """Resolve the uvicorn worker count — >1 ONLY for the stateless subuser plane.
+
+    The operator/combined dashboard keeps module-global state (PTY sessions, the embedded
+    dashboard worker thread, in-process pub/sub) that cannot span processes, so it must stay
+    single-process regardless of the env knob.
+    """
+    if role != _HOST_ROLE_SUBUSER:
+        return 1
+    raw = str(os.getenv(_UVICORN_WORKERS_ENV) or "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        _log.warning("Invalid %s=%r; staying single-process", _UVICORN_WORKERS_ENV, raw)
+        return 1
+    return value if value > 1 else 1
 
 
 def start_server(
@@ -10917,4 +11017,20 @@ def start_server(
     # proxy_headers=False so _ws_client_is_allowed sees the real connection peer
     # rather than X-Forwarded-For's rewritten value (which would defeat the
     # loopback gate when behind a reverse proxy).
+    workers = _subuser_uvicorn_workers(role)
+    if workers > 1:
+        # Stage 4a: N stateless workers remove the subuser plane's single-process ceiling.
+        # workers>1 requires an import-string target; each worker re-imports this module, so
+        # the bound interface rides the environment (see the module-level pickup above).
+        os.environ[_WORKER_BOUND_HOST_ENV] = host
+        os.environ[_WORKER_BOUND_PORT_ENV] = str(port)
+        uvicorn.run(
+            "takyon_cli.web_server:app",
+            host=host,
+            port=port,
+            log_level="warning",
+            proxy_headers=False,
+            workers=workers,
+        )
+        return
     uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)

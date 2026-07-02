@@ -31,10 +31,16 @@ Environment=TAKYON_HOST_ROLE=safebox
 # transport token and TAKYON_SAFEBOX_OPERATOR_TOKEN. Do not widen to 10.116.0.0/20; the sub-user host is
 # 10.116.0.3 and must not mint operator capabilities or touch private workspace/provider infrastructure.
 Environment=TAKYON_SAFEBOX_OPERATOR_CLIENTS=10.116.0.18
+# Stage 4a: 2 stateless uvicorn workers so long provider brokering (Anthropic/Tavily/creative
+# calls up to 180s) cannot exhaust one process. Safe for multi-process: every safebox handler is
+# sync `def` (threadpool-run) and all mutable authority state (single-use nonces, usage/billing
+# ledgers) lives in Postgres, not process memory. Set after the EnvironmentFiles so the unit's
+# value wins.
+Environment=TAKYON_UVICORN_WORKERS=2
 # Bind the VPC interface only (10.116.0.2 is this host's private address — the same address the
 # operator/subuser planes are pointed at via TAKYON_SAFEBOX_URL). Never bind 0.0.0.0: the public
 # interface must not expose the secret authority even with token auth in front of it.
-ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 10.116.0.2 --port 8000
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 10.116.0.2 --port 8000 --workers ${TAKYON_UVICORN_WORKERS}
 Restart=always
 RestartSec=5
 
