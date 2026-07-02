@@ -1256,7 +1256,7 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     from gateway.session_context import clear_session_vars, set_session_vars
 
     from .cli import _business_workspace_execution_context, _load_ceo_prompt
-    from .core import TakyonStore, _bound_operator_task_context
+    from .core import TakyonStore, _bound_operator_task_context, _refresh_stale_live_ad_campaigns
 
     slug = job.business_slug
     owner_user_id = _business_owner_user_id(slug)
@@ -1304,6 +1304,22 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
             # (_refuse_on_autonomous_wake). Bootstrap sets "ceo_bootstrap" and chat sets nothing,
             # so neither is refused. The marker is read in this turn, before any worker job is
             # enqueued, so a wake-spawned edit is refused at source.
+            #
+            # Pre-wake ad refresh: pull fresh delivery insights for LIVE + STALE ad campaigns so the
+            # pulse the CEO reads this turn is current, instead of relying on it to remember to sync.
+            # Best-effort — a failed/slow refresh must never break the wake.
+            try:
+                _ad_refresh = _refresh_stale_live_ad_campaigns(slug)
+                if int(_ad_refresh.get("refreshed") or 0):
+                    _record_runtime_event(
+                        slug,
+                        kind="ceo_wake",
+                        status="running",
+                        detail=f"Pre-wake refreshed insights for {_ad_refresh['refreshed']} live ad campaign(s).",
+                        command=f"/wake {slug}",
+                    )
+            except Exception:
+                pass
             with _bound_operator_task_context(task_kind="ceo_wake"):
                 final_response, cost_usd, cost_status, _turn_completed = _run_ceo_turn(
                     slug=slug,

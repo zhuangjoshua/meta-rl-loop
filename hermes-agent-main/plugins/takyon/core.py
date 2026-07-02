@@ -16241,6 +16241,10 @@ class TakyonStore:
         # Best-effort web analytics, computed before the DB connection opens so a
         # provider call never holds a SQLite connection. Never raises.
         web_analytics = _business_analytics_summary(slug)
+        # Active ad campaigns + insights staleness — computed before the pulse connection opens
+        # (its own short-lived connection). Never raises. Lets the CEO see a live paid bet whose
+        # delivery insights need a business_<channel>_ad_insights_sync before deciding.
+        active_ad_campaigns = _pulse_active_ad_campaigns(slug, now_dt)
 
         with self._connect() as conn:
             business = self._ensure_business(conn, slug)
@@ -16608,6 +16612,7 @@ class TakyonStore:
                     "support-burden-by-tier",
                 ],
                 "recent_event_types": recent_event_types,
+                "active_ad_campaigns": active_ad_campaigns,
                 "evidence_strength": {
                     "score": evidence_score,
                     "scale": "0 none, 1 operator hypothesis, 2 market evidence, 3 user reply, 4 usage, 5 paid revenue",
@@ -27301,6 +27306,149 @@ def _load_ad_spend_policy(
         return backend.get_policy(conn, business, channel, slug)
 
 
+def _list_ad_spend_policies(business: str, *, statuses=None):
+    backend = _business_ad_spend_backend()
+    store = _store()
+    with store._connect() as conn:
+        return backend.list_policies(conn, business, statuses=statuses)
+
+
+# Wake pulse surfaces active ad campaigns so the CEO sees paid bets whose delivery insights
+# have gone stale. Ad spend/insights only enter Takyon on an explicit
+# business_<channel>_ad_insights_sync (never automatically), so a live campaign that hasn't
+# been synced within this window is flagged needs_sync. Overridable per-deployment.
+def _ad_insights_stale_seconds() -> int:
+    raw = os.environ.get("TAKYON_AD_INSIGHTS_STALE_SECONDS")
+    try:
+        value = int(raw) if raw not in (None, "") else 43200  # 12h
+    except (TypeError, ValueError):
+        value = 43200
+    return max(60, value)
+
+
+# Non-terminal ad-spend policy statuses ("completed" is settled/terminal).
+_PULSE_AD_CAMPAIGN_STATUSES = ("reserved", "created_paused", "active", "paused")
+# Statuses where delivery is (or was) live, so stale insights are worth re-syncing.
+_PULSE_AD_LIVE_STATUSES = frozenset({"active", "paused"})
+
+
+def _humanize_age_seconds(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h ago"
+    if hours:
+        return f"{hours}h {minutes}m ago"
+    if minutes:
+        return f"{minutes}m ago"
+    return "just now"
+
+
+def _pulse_active_ad_campaigns(slug: str, now_dt: datetime) -> list[dict[str, Any]]:
+    """Best-effort: surface a business's non-terminal ad campaigns + insights staleness for the
+    wake pulse, so the CEO can re-sync a live campaign before judging it. Never raises — returns
+    [] on any error (e.g. the ad-spend policy table is Postgres-only, absent under SQLite)."""
+    try:
+        policies = _list_ad_spend_policies(slug, statuses=_PULSE_AD_CAMPAIGN_STATUSES)
+    except Exception:
+        return []
+    stale_seconds = _ad_insights_stale_seconds()
+    out: list[dict[str, Any]] = []
+    for policy in policies or []:
+        try:
+            metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+            synced_raw = metadata.get("insights_synced_at")
+            synced_dt = _parse_iso_datetime(synced_raw) if synced_raw else None
+            if synced_dt is not None:
+                age_seconds = (now_dt - synced_dt).total_seconds()
+                synced_ago = _humanize_age_seconds(age_seconds)
+            else:
+                age_seconds = None
+                synced_ago = "never synced"
+            is_live = str(policy.status or "") in _PULSE_AD_LIVE_STATUSES
+            needs_sync = is_live and (age_seconds is None or age_seconds > stale_seconds)
+            spend_cents = int(policy.last_synced_spend_cents or 0)
+            out.append({
+                "channel": policy.channel,
+                "slug": policy.slug,
+                "status": policy.status,
+                "provider_campaign_id": policy.provider_campaign_id,
+                "daily_budget_usd": round(int(policy.daily_budget_cents or 0) / 100, 2),
+                "total_budget_usd": round(int(policy.total_budget_cents or 0) / 100, 2),
+                # None (not 0) when the policy has no reconciled spend yet, so the CEO is not
+                # misled into reading "$0 spent" for a campaign that simply hasn't synced.
+                "last_synced_spend_usd": round(spend_cents / 100, 2) if spend_cents > 0 else None,
+                "insights_synced_at": synced_dt.isoformat() if synced_dt is not None else None,
+                "insights_synced_ago": synced_ago,
+                "needs_sync": needs_sync,
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _wake_ad_refresh_enabled() -> bool:
+    """Kill-switch for the pre-wake ad refresh. Default on; set TAKYON_WAKE_AD_REFRESH=0 to disable
+    (auto-firing insights syncs) per-deployment without a redeploy."""
+    raw = os.environ.get("TAKYON_WAKE_AD_REFRESH")
+    return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
+    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE reddit campaign of this
+    business, pull fresh delivery insights via the EXISTING (gated) insights-sync tool, so the pulse
+    the CEO reads this wake is already current instead of relying on the agent to remember. Never
+    raises — a failed or skipped refresh must never break the wake. Bounded to reddit live+stale
+    campaigns (meta has no policy rows yet). Reuses the shared staleness threshold; disable with
+    TAKYON_WAKE_AD_REFRESH=0."""
+    summary: dict[str, Any] = {"checked": 0, "refreshed": 0, "skipped": 0, "errors": 0, "campaigns": []}
+    if not _wake_ad_refresh_enabled():
+        summary["disabled"] = True
+        return summary
+    try:
+        policies = _list_ad_spend_policies(slug, statuses=list(_PULSE_AD_LIVE_STATUSES))
+    except Exception:
+        return summary
+    stale_seconds = _ad_insights_stale_seconds()
+    now_dt = datetime.now(timezone.utc)
+    hour_bucket = now_dt.strftime("%Y%m%dT%H")  # fresh key each wake; dedups retries within the hour
+    for policy in policies or []:
+        if str(policy.channel or "") != "reddit":
+            summary["skipped"] += 1
+            continue
+        summary["checked"] += 1
+        try:
+            metadata = policy.metadata if isinstance(policy.metadata, dict) else {}
+            synced_raw = metadata.get("insights_synced_at")
+            synced_dt = _parse_iso_datetime(synced_raw) if synced_raw else None
+            if synced_dt is not None and (now_dt - synced_dt).total_seconds() <= stale_seconds:
+                summary["skipped"] += 1
+                continue  # fresh enough — no refresh needed
+            campaign_slug = policy.slug
+            raw = handle_business_reddit_ad_insights_sync({
+                "business": slug,
+                "slug": campaign_slug,
+                "level": "campaign",
+                "idempotency_key": f"wake-refresh:{campaign_slug}:campaign:{hour_bucket}",
+            })
+            ok = False
+            try:
+                ok = bool(json.loads(raw).get("success"))
+            except Exception:
+                ok = False
+            if ok:
+                summary["refreshed"] += 1
+                summary["campaigns"].append(campaign_slug)
+            else:
+                summary["errors"] += 1
+        except Exception:
+            summary["errors"] += 1
+            continue
+    return summary
+
+
 def _upsert_ad_spend_policy(
     business: str,
     *,
@@ -30790,7 +30938,7 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
                     status="completed",
                     last_synced_spend_cents=synced_spend_cents,
                     settled_credits=settled_credits,
-                    metadata_patch={"settled_at": _now()},
+                    metadata_patch={"settled_at": _now(), "insights_synced_at": _now()},
                 )
                 # D9 belt: stop the live ad group at the reserved cap (see the meta twin).
                 try:
@@ -30819,6 +30967,7 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
                     channel="reddit",
                     slug=slug,
                     last_synced_spend_cents=synced_spend_cents,
+                    metadata_patch={"insights_synced_at": _now()},
                 )
         sync_receipt = {
             **base_receipt,
