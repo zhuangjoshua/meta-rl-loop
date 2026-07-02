@@ -51,7 +51,9 @@ def test_no_plan_returns_zero_not_a_floor():
     # No active paid plan ⇒ 0 budget (reserve refuses → 402), never a positive free floor. The
     # legacy $0.50 floor constant is neutralized to 0.
     assert g._user_weekly_budget_microusd(None) == 0
-    assert g._DEFAULT_USER_MONTHLY_BUDGET_MICROUSD == 0
+    # The 0-valued shim was deleted in the monthly-only purge; absent-or-zero both mean "no
+    # floor" — only a positive value would violate invariant 9.
+    assert getattr(g, "_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD", 0) == 0
 
 
 def test_resolver_never_returns_none_only_a_concrete_int():

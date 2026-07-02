@@ -38,20 +38,12 @@ _TIER_RANK = {"owner": 0, "paid": 1, "pro": 1}
 _DEFAULT_TIER_RANK = 5
 _UNENTITLING_TIERS = {"", "free", "none", app_identity.UNENTITLED_TIER}
 
-_VALID_BILLING_INTERVALS = {"month", "year", "one_time"}
-_BILLING_INTERVAL_ALIASES = {
-    "monthly": "month",
-    "mo": "month",
-    "per_month": "month",
-    "annual": "year",
-    "annually": "year",
-    "yearly": "year",
-    "yr": "year",
-    "per_year": "year",
-    "once": "one_time",
-    "one-time": "one_time",
-    "single": "one_time",
-}
+# Subuser plans are MONTHLY-ONLY (operator decision, 2026-07-02; modularization plan §2.7).
+# The whole interval axis is gone: new writes refuse any non-month interval, and the only
+# normalization left is accepting the common month spellings. Frozen legacy non-month rows
+# (all with zero active subscribers per the 2026-07-02 prod check) remain readable and may be
+# idempotently re-passed unchanged, but no new non-month plan can be minted.
+_MONTH_SPELLINGS = {"", "month", "monthly", "mo", "per_month"}
 _GATEWAY_ALLOWLIST_METADATA_KEYS = ("features", "model_allowlist", "models")
 
 # Statuses that actually confer a tier; everything else (cancelled, past_due, …) does not.
@@ -152,7 +144,7 @@ def _normalize_plan_key(value: str) -> str:
 
 def _normalize_billing_interval(value: str) -> str:
     raw = str(value or "month").strip().lower().replace("-", "_")
-    return _BILLING_INTERVAL_ALIASES.get(raw, raw)
+    return "month" if raw in _MONTH_SPELLINGS else raw
 
 
 def _contains_unlimited(value) -> bool:
@@ -277,10 +269,9 @@ def upsert_plan_policy(
     if price < 0:
         raise InvalidPlan("plan price must be non-negative")
     interval = _normalize_billing_interval(billing_interval)
-    if interval not in _VALID_BILLING_INTERVALS:
-        raise InvalidPlan("billing_interval must be one of: month, year, one_time")
-    # Read the current row once: it both supplies the budget default (when omitted) and lets the
-    # grandfather guard below compare incoming vs. live economic terms.
+    # Read the current row once: it supplies the budget default (when omitted), lets the
+    # grandfather guard compare incoming vs. live economic terms, and identifies the one legal
+    # non-month case — an idempotent re-pass of a frozen legacy row's identical terms.
     existing = get_plan_policy(conn, business_slug, key)
     budget_source = (
         existing.included_ai_budget_microusd
@@ -290,13 +281,36 @@ def upsert_plan_policy(
     budget = int(float(budget_source or 0))
     if budget < 0:
         raise InvalidPlan("included_ai_budget_microusd must be non-negative")
-    if interval == "month":
-        cap = _monthly_plan_price_cap_microusd(price)
-        if budget > cap:
-            budget = cap
     quota = int(included_action_quota if included_action_quota is not None else 0)
     if quota < 0:
         raise InvalidPlan("included_action_quota must be non-negative")
+    is_identical_repass = existing is not None and (
+        str(existing.tier or "").strip().casefold() == tier_value.strip().casefold()
+        and int(existing.price_cents) == price
+        and str(existing.currency or "usd").lower() == str(currency or "usd").lower()
+        and str(existing.billing_interval) == interval
+        and int(existing.included_ai_budget_microusd) == budget
+        and int(existing.included_action_quota) == quota
+    )
+    if not is_identical_repass:
+        # MONTHLY-ONLY: subuser plans are recurring monthly subscriptions, full stop. One-time
+        # purchases belong to the order money shape, never app_plan_policies (plan §2.7 ruling).
+        if interval != "month":
+            raise InvalidPlan(
+                f"billing_interval must be 'month' (got {interval!r}): subuser plans are "
+                "monthly-only. One-time or annual pricing is not a plan; a frozen legacy "
+                "non-month row can only be re-passed with identical terms."
+            )
+        # FAIL-LOUD budget cap (replaces the old silent clamp): the included AI budget may not
+        # exceed 100% of the monthly price — a plan that spends more than it charges is a
+        # money-shape error the operator must resolve explicitly, never a silent adjustment.
+        cap = _monthly_plan_price_cap_microusd(price)
+        if budget > cap:
+            raise InvalidPlan(
+                f"included_ai_budget_microusd ({budget}) exceeds the plan's monthly price cap "
+                f"({cap} microUSD = 100% of price_cents={price}). Lower the budget or raise "
+                "the price; the budget is no longer silently clamped."
+            )
     # Grandfather guard: a plan_key with active/trialing subscribers has FROZEN economic terms.
     # Re-pricing it in place would silently mutate existing (grandfathered) users — including the
     # AI-budget gate the runtime resolves from the live plan row — because entitlements reference

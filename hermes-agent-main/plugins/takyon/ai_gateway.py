@@ -344,12 +344,10 @@ def _model_allowed(plan, model: str) -> bool:
     return False
 
 
-# Invariant 9 (GOAL_RULES §3): the $0.50 per-user free-tier FLOOR IS REMOVED. There is no free
-# allowance — budget is plan-derived-or-0. This name is retained only as a 0-valued back-compat
-# shim (value 0 == "no floor"); it is NOT referenced by `_user_weekly_budget_microusd` and must
-# never be reintroduced as a positive fallback. The per-user limit is the active PAID subscription's
-# `included_ai_budget_microusd` pro-rated to the weekly window; no plan ⇒ 0 ⇒ reserve refuses (402).
-_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD = 0
+# Invariant 9 (GOAL_RULES §3): the $0.50 per-user free-tier FLOOR IS REMOVED — budget is
+# plan-derived-or-0; no free allowance may ever be reintroduced as a positive fallback.
+# (The 0-valued `_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD` back-compat shim was deleted in the
+# monthly-only legacy purge, plan §2.7 — nothing referenced it.)
 
 
 # Pro-rate the MONTHLY plan allowance onto the WEEKLY usage window. Operator decision (2026-06-20):

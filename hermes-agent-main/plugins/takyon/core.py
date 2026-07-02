@@ -11817,24 +11817,8 @@ def _refresh_product_surface_path(
 
 def _normalize_billing_interval(value: Any) -> str:
     raw = str(value or "month").strip().lower().replace("-", "_")
-    aliases = {
-        "monthly": "month",
-        "mo": "month",
-        "per_month": "month",
-        "annual": "year",
-        "annually": "year",
-        "yearly": "year",
-        "yr": "year",
-        "per_year": "year",
-        "once": "one_time",
-        "one-time": "one_time",
-        "single": "one_time",
-    }
-    return aliases.get(raw, raw)
-
-
-def _monthly_plan_price_cap_microusd(price_cents: Any) -> int:
-    return max(0, int(float(price_cents or 0)) * 10_000)
+    # Monthly-only (plan §2.7): the interval axis is gone; only month spellings normalize.
+    return "month" if raw in {"", "month", "monthly", "mo", "per_month"} else raw
 
 
 def _normalize_included_ai_budget_microusd(
@@ -11845,41 +11829,22 @@ def _normalize_included_ai_budget_microusd(
     tier: Any,
     default: int = 0,
 ) -> int:
+    # ONE cap, always applied, FAIL-LOUD (plan §2.7): the canonical copy lives in
+    # app_entitlements; the old second copy here silently clamped — a plan that spends more
+    # than it charges must be refused with the figures, never silently adjusted.
+    from .app_entitlements import _monthly_plan_price_cap_microusd
+
     budget = int(float(default if value in {None, ""} else value))
     if budget < 0:
         raise TakyonError("included_ai_budget_microusd must be non-negative")
-    interval = _normalize_billing_interval(billing_interval or "month")
-    tier_value = _file_slug(str(tier or "").strip().lower(), str(tier or ""))
-    if interval == "month":
-        cap = _monthly_plan_price_cap_microusd(price_cents)
-        if budget > cap:
-            return cap
-    return budget
-
-
-def _plan_validation_warnings(
-    plan_key: str, tier: str, quota: int, metadata: dict[str, Any]
-) -> list[str]:
-    warnings: list[str] = []
-    normalized_key = _file_slug(plan_key, plan_key)
-    normalized_tier = _file_slug(tier, tier)
-    if normalized_tier and normalized_key and normalized_tier not in normalized_key and normalized_key not in {"plan"}:
-        warnings.append("plan_key and entitlement tier differ; this can be valid for billing variants but should be intentional")
-    def contains_unlimited(value: Any) -> bool:
-        if isinstance(value, str):
-            return "unlimited" in value.lower()
-        if isinstance(value, (int, float)):
-            return value < 0
-        if isinstance(value, dict):
-            return any(contains_unlimited(item) for item in value.values())
-        if isinstance(value, list):
-            return any(contains_unlimited(item) for item in value)
-        return False
-    if contains_unlimited(metadata) and quota > 0:
-        warnings.append(
-            "metadata suggests an unlimited entitlement but included_action_quota is finite"
+    cap = _monthly_plan_price_cap_microusd(price_cents)
+    if budget > cap:
+        raise TakyonError(
+            f"included_ai_budget_microusd ({budget}) exceeds the plan's monthly price cap "
+            f"({cap} microUSD = 100% of price_cents={int(float(price_cents or 0))}). Lower "
+            "the budget or raise the price; the budget is no longer silently clamped."
         )
-    return warnings
+    return budget
 
 
 _BRAIN_COMPLETION_MARKERS = (
@@ -14393,28 +14358,6 @@ class TakyonStore:
               updated_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
             );
-            CREATE TABLE IF NOT EXISTS app_plan_policies (
-              id TEXT PRIMARY KEY,
-              business_slug TEXT NOT NULL,
-              plan_key TEXT NOT NULL,
-              tier TEXT NOT NULL DEFAULT 'unentitled',
-              price_cents INTEGER NOT NULL DEFAULT 0,
-              currency TEXT NOT NULL DEFAULT 'usd',
-              billing_interval TEXT NOT NULL DEFAULT 'month',
-              included_ai_budget_microusd INTEGER NOT NULL DEFAULT 0,
-              included_action_quota INTEGER NOT NULL DEFAULT 0,
-              stripe_product_id TEXT,
-              stripe_price_id TEXT,
-              stripe_payment_link_id TEXT,
-              stripe_payment_link_url TEXT,
-              source TEXT NOT NULL DEFAULT 'takyon',
-              notes TEXT,
-              metadata_json TEXT,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              UNIQUE (business_slug, plan_key),
-              FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
-            );
             CREATE TABLE IF NOT EXISTS app_surface_contracts (
               business_slug TEXT PRIMARY KEY,
               status TEXT NOT NULL DEFAULT 'draft',
@@ -16513,7 +16456,6 @@ class TakyonStore:
                 """
                 SELECT COALESCE(SUM(
                     CASE
-                      WHEN p.billing_interval = 'year' THEN p.price_cents / 12.0
                       WHEN p.billing_interval = 'month' THEN p.price_cents
                       ELSE 0
                     END
@@ -18496,60 +18438,25 @@ class TakyonStore:
                             "price_status": "unset",
                         }
                     }
-                    if _db_backend() == "postgres":
-                        leaves = self._app_leaves()
-                        try:
-                            with self._leaf_conn(conn) as raw:
-                                leaves["entitlements"].upsert_plan_policy(
-                                    raw,
-                                    slug,
-                                    DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
-                                    tier=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
-                                    price_cents=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS,
-                                    currency="usd",
-                                    billing_interval="month",
-                                    included_ai_budget_microusd=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
-                                    included_action_quota=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
-                                    source="takyon_starter",
-                                    notes="",
-                                    metadata=bootstrap_plan_metadata,
-                                )
-                        except leaves["entitlements"].EntitlementError as exc:
-                            raise TakyonError(str(exc)) from exc
-                    else:
-                        now = _now()
-                        conn.execute(
-                            """
-                            INSERT INTO app_plan_policies (
-                              id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
-                              included_ai_budget_microusd, included_action_quota,
-                              stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
-                              source, notes, metadata_json, created_at, updated_at
-                            )
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(business_slug, plan_key) DO NOTHING
-                            """,
-                            (
-                                uuid.uuid4().hex,
+                    leaves = self._app_leaves()
+                    try:
+                        with self._leaf_conn(conn) as raw:
+                            leaves["entitlements"].upsert_plan_policy(
+                                raw,
                                 slug,
                                 DEFAULT_BOOTSTRAP_MONTHLY_PLAN_KEY,
-                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
-                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS,
-                                "usd",
-                                "month",
-                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
-                                DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
-                                None,
-                                None,
-                                None,
-                                None,
-                                "takyon_starter",
-                                "",
-                                _json_dumps(bootstrap_plan_metadata),
-                                now,
-                                now,
-                            ),
-                        )
+                                tier=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_TIER,
+                                price_cents=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_PRICE_CENTS,
+                                currency="usd",
+                                billing_interval="month",
+                                included_ai_budget_microusd=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_AI_BUDGET_MICROUSD,
+                                included_action_quota=DEFAULT_BOOTSTRAP_MONTHLY_PLAN_INCLUDED_ACTION_QUOTA,
+                                source="takyon_starter",
+                                notes="",
+                                metadata=bootstrap_plan_metadata,
+                            )
+                    except leaves["entitlements"].EntitlementError as exc:
+                        raise TakyonError(str(exc)) from exc
                     seeded_bootstrap_monthly_plan = True
             notes = _canonical_bootstrap_surface_notes(
                 op.get("notes") if op.get("notes") is not None else existing.get("notes"),
@@ -18812,29 +18719,18 @@ class TakyonStore:
                 raise TakyonError("billing_interval must be one of: month, year, one_time")
             included_ai_budget_default = 0
             if op.get("included_ai_budget_microusd") in {None, ""}:
-                if _db_backend() == "postgres":
-                    leaves = self._app_leaves()
-                    try:
-                        with self._leaf_conn(conn) as raw:
-                            existing_policy = leaves["entitlements"].get_plan_policy(
-                                raw, slug, plan_key
-                            )
-                    except leaves["entitlements"].EntitlementError as exc:
-                        raise TakyonError(str(exc)) from exc
-                    if existing_policy is not None:
-                        included_ai_budget_default = int(
-                            existing_policy.included_ai_budget_microusd
+                leaves = self._app_leaves()
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        existing_policy = leaves["entitlements"].get_plan_policy(
+                            raw, slug, plan_key
                         )
-                else:
-                    existing_row = conn.execute(
-                        "SELECT included_ai_budget_microusd FROM app_plan_policies "
-                        "WHERE business_slug = ? AND plan_key = ?",
-                        (slug, plan_key),
-                    ).fetchone()
-                    if existing_row is not None:
-                        included_ai_budget_default = int(
-                            existing_row["included_ai_budget_microusd"] or 0
-                        )
+                except leaves["entitlements"].EntitlementError as exc:
+                    raise TakyonError(str(exc)) from exc
+                if existing_policy is not None:
+                    included_ai_budget_default = int(
+                        existing_policy.included_ai_budget_microusd
+                    )
             included_ai_budget_microusd = _normalize_included_ai_budget_microusd(
                 op.get("included_ai_budget_microusd"),
                 price_cents=price_cents,
@@ -18847,119 +18743,55 @@ class TakyonStore:
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
-            if _db_backend() == "postgres":
-                # Canonical Postgres plan write: app_entitlements.upsert_plan_policy owns app_plan_policies
-                # (migration 0006 dropped the dead stripe_payment_link_* columns) and folds plan-validation
-                # warnings into metadata itself, so pass the RAW metadata dict — folding here too would
-                # double the warnings. plan_key is re-read from the persisted policy for receipt fidelity.
-                leaves = leaves or self._app_leaves()
-                try:
-                    with self._leaf_conn(conn) as raw:
-                        policy = leaves["entitlements"].upsert_plan_policy(
-                            raw,
-                            slug,
-                            plan_key,
-                            tier=tier,
-                            price_cents=price_cents,
-                            currency=str(op.get("currency") or "usd").lower(),
-                            billing_interval=interval,
-                            included_ai_budget_microusd=included_ai_budget_microusd,
-                            included_action_quota=included_action_quota,
-                            stripe_product_id=op.get("stripe_product_id"),
-                            stripe_price_id=op.get("stripe_price_id"),
-                            source=str(op.get("source") or "takyon"),
-                            notes=str(op.get("notes") or ""),
-                            metadata=metadata,
-                        )
-                except leaves["entitlements"].EntitlementError as exc:
-                    raise TakyonError(str(exc)) from exc
-                plan_key = policy.plan_key
-                persisted_plan = self._row_to_dict(
-                    conn.execute(
-                        "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",
-                        (slug, plan_key),
-                    ).fetchone()
-                )
-                if (
-                    _effective_business_mode(op.get("business_mode")) == "live"
-                    and int(persisted_plan.get("price_cents") or 0) > 0
-                    and not str(persisted_plan.get("stripe_price_id") or "").strip()
-                ):
-                    business = self._ensure_business(conn, slug)
-                    persisted_plan = _ensure_stripe_price(
-                        conn,
-                        slug,
-                        persisted_plan,
-                        str(business.get("name") or slug),
-                    )
-            else:
-                warnings = _plan_validation_warnings(
-                    plan_key, tier, included_action_quota, metadata
-                )
-                if warnings:
-                    validation = metadata.get("takyon_plan_validation") if isinstance(metadata.get("takyon_plan_validation"), dict) else {}
-                    metadata = {
-                        **metadata,
-                        "takyon_plan_validation": {
-                            **validation,
-                            "status": "warning",
-                            "warnings": [*validation.get("warnings", []), *warnings] if isinstance(validation.get("warnings"), list) else warnings,
-                        },
-                    }
-                now = _now()
-                plan_id = op.get("id") or uuid.uuid4().hex
-                conn.execute(
-                    """
-                    INSERT INTO app_plan_policies (
-                      id, business_slug, plan_key, tier, price_cents, currency, billing_interval,
-                      included_ai_budget_microusd, included_action_quota,
-                      stripe_product_id, stripe_price_id, stripe_payment_link_id, stripe_payment_link_url,
-                      source, notes, metadata_json, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(business_slug, plan_key) DO UPDATE SET
-                      tier = excluded.tier,
-                      price_cents = excluded.price_cents,
-                      currency = excluded.currency,
-                      billing_interval = excluded.billing_interval,
-                      included_ai_budget_microusd = excluded.included_ai_budget_microusd,
-                      included_action_quota = excluded.included_action_quota,
-                      stripe_product_id = COALESCE(excluded.stripe_product_id, app_plan_policies.stripe_product_id),
-                      stripe_price_id = COALESCE(excluded.stripe_price_id, app_plan_policies.stripe_price_id),
-                      stripe_payment_link_id = COALESCE(excluded.stripe_payment_link_id, app_plan_policies.stripe_payment_link_id),
-                      stripe_payment_link_url = COALESCE(excluded.stripe_payment_link_url, app_plan_policies.stripe_payment_link_url),
-                      source = excluded.source,
-                      notes = excluded.notes,
-                      metadata_json = excluded.metadata_json,
-                      updated_at = excluded.updated_at
-                    """,
-                    (
-                        plan_id,
+            # Canonical Postgres plan write: app_entitlements.upsert_plan_policy owns app_plan_policies
+            # (migration 0006 dropped the dead stripe_payment_link_* columns) and folds plan-validation
+            # warnings into metadata itself, so pass the RAW metadata dict — folding here too would
+            # double the warnings. plan_key is re-read from the persisted policy for receipt fidelity.
+            leaves = leaves or self._app_leaves()
+            try:
+                with self._leaf_conn(conn) as raw:
+                    policy = leaves["entitlements"].upsert_plan_policy(
+                        raw,
                         slug,
                         plan_key,
-                        tier,
-                        price_cents,
-                        str(op.get("currency") or "usd").lower(),
-                        interval,
-                        included_ai_budget_microusd,
-                        included_action_quota,
-                        op.get("stripe_product_id"),
-                        op.get("stripe_price_id"),
-                        op.get("stripe_payment_link_id"),
-                        op.get("stripe_payment_link_url"),
-                        str(op.get("source") or "takyon"),
-                        str(op.get("notes") or ""),
-                        _json_dumps(metadata),
-                        now,
-                        now,
-                    ),
+                        tier=tier,
+                        price_cents=price_cents,
+                        currency=str(op.get("currency") or "usd").lower(),
+                        billing_interval=interval,
+                        included_ai_budget_microusd=included_ai_budget_microusd,
+                        included_action_quota=included_action_quota,
+                        stripe_product_id=op.get("stripe_product_id"),
+                        stripe_price_id=op.get("stripe_price_id"),
+                        source=str(op.get("source") or "takyon"),
+                        notes=str(op.get("notes") or ""),
+                        metadata=metadata,
+                    )
+            except leaves["entitlements"].EntitlementError as exc:
+                raise TakyonError(str(exc)) from exc
+            plan_key = policy.plan_key
+            persisted_plan = self._row_to_dict(
+                conn.execute(
+                    "SELECT * FROM app_plan_policies WHERE business_slug = ? AND plan_key = ?",
+                    (slug, plan_key),
+                ).fetchone()
+            )
+            if (
+                _effective_business_mode(op.get("business_mode")) == "live"
+                and int(persisted_plan.get("price_cents") or 0) > 0
+                and not str(persisted_plan.get("stripe_price_id") or "").strip()
+            ):
+                business = self._ensure_business(conn, slug)
+                persisted_plan = _ensure_stripe_price(
+                    conn,
+                    slug,
+                    persisted_plan,
+                    str(business.get("name") or slug),
                 )
             self._rewrite_app_files(conn, slug)
             event_payload = {"plan_key": plan_key, "price_cents": price_cents}
-            if _db_backend() == "postgres" and "persisted_plan" in locals():
-                event_payload["stripe_price_id"] = persisted_plan.get("stripe_price_id")
+            event_payload["stripe_price_id"] = persisted_plan.get("stripe_price_id")
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload=event_payload)
-            return {"action": action, "business": slug, "plan_key": plan_key, **({"stripe_price_id": persisted_plan.get("stripe_price_id")} if _db_backend() == "postgres" and "persisted_plan" in locals() else {})}
+            return {"action": action, "business": slug, "plan_key": plan_key, "stripe_price_id": persisted_plan.get("stripe_price_id")}
 
         if action == "app.customer.upsert":
             email = _normalize_email(str(op.get("email") or ""))
@@ -21176,14 +21008,6 @@ def _pg_sync_openmeter_access_projection(
             or getattr(latest_billing, "stripe_subscription_id", None)
             or ""
         ).strip()
-    if policy is not None and str(policy.billing_interval or "").strip().lower() == "one_time":
-        return {
-            "configured": True,
-            "ok": False,
-            "scope": "access",
-            "app_user_id": app_user_id,
-            "error": "OpenMeter mirror currently skips one_time app plans",
-        }
     backend.sync_customer(
         business_slug=business,
         app_user_id=user.id,
@@ -21484,8 +21308,8 @@ def _ensure_stripe_price(conn: sqlite3.Connection, slug: str, plan: dict[str, An
         "metadata[plan_key]": plan["plan_key"],
         "metadata[source]": metadata["source"],
     }
-    if plan.get("billing_interval") != "one_time":
-        price_params["recurring[interval]"] = "year" if plan.get("billing_interval") == "year" else "month"
+    # Monthly-only: every subuser plan is a monthly recurring subscription price.
+    price_params["recurring[interval]"] = "month"
     price = _stripe_request("prices", price_params)
     conn.execute(
         "UPDATE app_plan_policies SET stripe_product_id = ?, stripe_price_id = ?, updated_at = ? WHERE business_slug = ? AND plan_key = ?",
@@ -24894,7 +24718,9 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     canonical_base = _product_publish_target(business).rstrip("/")
                     success_url = f"{canonical_base}/app?checkout=success"
                     cancel_url = f"{canonical_base}/app?checkout=cancel"
-                    mode = "payment" if plan.get("billing_interval") == "one_time" else "subscription"
+                    # Monthly-only: subuser plans are subscriptions, full stop. One-time
+                    # purchases ride the order money shape, never app_plan_policies.
+                    mode = "subscription"
                     client_reference_id = uuid.uuid4().hex
                     checkout_metadata = dict(args.get("metadata") or {})
                     intent = store._row_to_dict(

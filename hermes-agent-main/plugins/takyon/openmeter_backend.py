@@ -99,13 +99,13 @@ def plan_key_for(business_slug: str, plan_key: str) -> str:
 
 
 def billing_cadence_for(interval: str) -> str:
+    # Monthly-only (plan §2.7): P1Y died with the year interval; the 2026-07-02 prod check
+    # confirmed zero active non-month subscribers, so no read-side year handling remains.
     raw = str(interval or "").strip().lower()
     if raw == "month":
         return "P1M"
-    if raw == "year":
-        return "P1Y"
     raise OpenMeterConfigurationError(
-        "OpenMeter mirror currently supports recurring app plans only"
+        "OpenMeter mirror supports monthly app plans only (subuser plans are monthly-only)"
     )
 
 

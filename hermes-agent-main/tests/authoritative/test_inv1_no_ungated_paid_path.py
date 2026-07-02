@@ -59,7 +59,6 @@ from plugins.takyon.ai_gateway import (
     broker_provider_call,
     _require_active_entitlement,
     _user_weekly_budget_microusd,
-    _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD,
 )
 from plugins.takyon.app_usage import (
     reserve_usage,
@@ -377,7 +376,11 @@ def test_default_user_floor_constant_is_removed_to_zero():
     snapshot — it asserts the invariant that the per-user budget can never fall back to a free
     floor (the companion `test_gap4_centralized_per_user_floor_is_unified_to_plan_or_zero` proves
     the resolver no longer references it at all)."""
-    assert _DEFAULT_USER_MONTHLY_BUDGET_MICROUSD == 0
+    import plugins.takyon.ai_gateway as _g
+
+    # Deleted in the monthly-only purge: absent-or-zero both satisfy the no-floor invariant;
+    # any positive reintroduction fails here.
+    assert getattr(_g, "_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD", 0) == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
