@@ -38,6 +38,10 @@ Independent file clusters, each in its own worktree off origin/main, verified + 
 
 ---
 
+## Chrome sign-on — IN PROGRESS (2026-07-02, operator present)
+- ✅ **Supabase dev project CREATED** — `four-manifold-dev`, ref `yykgovdzzjwwiandpyje`, org Four Manifold **Pro** (operator chose Pro over Free for always-on/stable, ~$10/mo, isolated project), region us-east-2 (Ohio), Micro compute. URL `https://yykgovdzzjwwiandpyje.supabase.co`. **Security hardening applied at create:** "Automatically expose new tables" UNCHECKED (control-plane tables must not auto-expose to the public Data API; migrations set explicit grants); auto-RLS-trigger off (our migrations/topology own RLS policies). Provisioning; connection string (→ dev safebox `TAKYON_DEV_MIGRATION_DATABASE_URL`) captured next, then `takyon env create dev` runs topology.sql + migrations to make it prod-shaped.
+- ⬜ Auth0 mgmt token · ⬜ DO token · ⬜ Shopify — next in the runbook after the dev DB is stood up.
+
 ## Sign-on moments (the only Chrome help needed) — 🔑
 
 Three, all one-time-ever:
