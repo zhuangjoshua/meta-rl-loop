@@ -1234,6 +1234,32 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "xai": ("XAI_API_KEY",),
 }
 
+
+def _overlay_creative_provider_alias_rows() -> None:
+    """Fold the CreativeProviderSpec registry's key-alias rows INTO ``_API_ENV_ALIASES``.
+
+    The creative/media provider seam (creative_provider_registry.py) is the source of
+    truth for which safebox env aliases each creative provider resolves. Deriving the
+    alias rows here means adding a creative provider extends BOTH the safebox key
+    boundary AND ``provider_key_denylist()`` (which auto-builds from ``_API_ENV_ALIASES``)
+    with no second list to hand-sync — plan §6b item 2's "aliases build FROM the spec".
+    Existing rows are unioned (order-preserving), never clobbered, so this is additive
+    and idempotent. Import is local: the registry imports ``safebox`` (a leaf), so a
+    module-level import here would be fine, but keeping it in a function makes the
+    dependency direction obvious and defers it past core's own bootstrapping."""
+    from . import creative_provider_registry as _cpr
+
+    for provider, aliases in _cpr.creative_provider_alias_rows().items():
+        existing = _API_ENV_ALIASES.get(provider, ())
+        merged = list(existing)
+        for alias in aliases:
+            if alias not in merged:
+                merged.append(alias)
+        _API_ENV_ALIASES[provider] = tuple(merged)
+
+
+_overlay_creative_provider_alias_rows()
+
 # Provider-name buckets within _API_ENV_ALIASES that are INFRASTRUCTURE secrets, NOT paid-provider
 # keys. DB DSNs are deliberately NOT an infra egress provider anymore: each process gets exactly one
 # least-privilege DSN in its own service env, and /v1/env must not let a shared transport token fetch
@@ -25845,30 +25871,37 @@ def _creative_credit_balances_and_budget_snapshot(
     return balances, budget_snapshot
 
 
-_LOGO_IMAGE_PROVIDER = "google"
-_LOGO_IMAGE_MODEL = "gemini-2.5-flash-image"
+# Brand-logo provider/model — DERIVED from the CreativeProviderSpec registry so the
+# receipt stamps the SAME model the safebox actually renders. Previously this hardcoded
+# 'gemini-2.5-flash-image' while creative_gateway._GEMINI_IMAGE_MODEL rendered
+# 'gemini-3.1-flash-image' (plan §6b item 2's live truthfulness bug: the receipt was
+# factually wrong; prices coincided so it was silent, and it would mis-cost on the next
+# price change). Binding both to the spec makes receipt-model == priced-model ==
+# rendered-model by construction. ``pricing_key`` is (usage_pricing vendor='google',
+# model); ``provider`` on the receipt is the same vendor name for the priced cost.
+from .creative_provider_registry import _GEMINI_LOGO_IMAGE as _LOGO_SPEC
+
+_LOGO_IMAGE_PROVIDER = _LOGO_SPEC.pricing_provider  # 'google' (usage_pricing vendor)
+_LOGO_IMAGE_MODEL = _LOGO_SPEC.model  # 'gemini-3.1-flash-image' (== the rendered model)
 
 
 def _logo_provider_cost_usd() -> float:
     """Exact per-image provider cost for the brand-logo model.
 
-    Resolved from the canonical pricing table (agent.usage_pricing); an unpriced
-    model is refused so the receipt can never claim a fabricated cost. This is
-    the single source of truth for the logo provider cost — no second hardcoded
-    table in a skill or channel tool (GOAL_RULES §4 / CLAUDE.md billing rules).
+    Resolved from the canonical pricing table (agent.usage_pricing) via the creative
+    provider spec's ``pricing_key`` — the ONE price SSOT. An unpriced model is refused
+    so the receipt can never claim a fabricated cost and no unpriced paid model is ever
+    callable (GOAL_RULES §4 / CLAUDE.md billing rules).
     """
-    from agent import usage_pricing
-
-    entry = usage_pricing._OFFICIAL_DOCS_PRICING.get(
-        (_LOGO_IMAGE_PROVIDER, _LOGO_IMAGE_MODEL)
+    from .creative_provider_registry import (
+        CreativeProviderUnpriced,
+        resolve_priced_model_cost_usd,
     )
-    request_cost = getattr(entry, "request_cost", None) if entry is not None else None
-    if request_cost is None:
-        raise TakyonError(
-            f"{_LOGO_IMAGE_PROVIDER}/{_LOGO_IMAGE_MODEL} is not priced in usage_pricing; "
-            "brand logo generation is refused (no unpriced provider spend)"
-        )
-    return float(request_cost)
+
+    try:
+        return resolve_priced_model_cost_usd(_LOGO_SPEC)
+    except CreativeProviderUnpriced as exc:
+        raise TakyonError(str(exc)) from exc
 
 
 # A UGC video ad is two provider calls: one reference still (gpt-image-2) and the

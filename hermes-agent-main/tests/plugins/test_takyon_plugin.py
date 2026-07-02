@@ -5682,10 +5682,19 @@ def test_business_generate_logo_unconfigured_key_surfaces_blocked(tmp_path, monk
 def test_logo_provider_cost_is_priced_in_usage_pricing():
     from agent import usage_pricing
 
-    entry = usage_pricing._OFFICIAL_DOCS_PRICING.get(("google", "gemini-2.5-flash-image"))
+    from plugins.takyon import creative_gateway
+
+    # The receipt-priced model must equal the model the safebox actually RENDERS
+    # (creative_gateway._GEMINI_IMAGE_MODEL). This was 'gemini-2.5-flash-image' on the
+    # receipt while the render used 'gemini-3.1-flash-image' — a truthfulness bug the
+    # CreativeProviderSpec registry fixed by deriving both from one spec (§6b item 2).
+    assert takyon_core._LOGO_IMAGE_MODEL == creative_gateway._GEMINI_IMAGE_MODEL
+    entry = usage_pricing._OFFICIAL_DOCS_PRICING.get(
+        (takyon_core._LOGO_IMAGE_PROVIDER, takyon_core._LOGO_IMAGE_MODEL)
+    )
     assert entry is not None
     assert entry.request_cost is not None
-    # core resolves the exact priced cost (no second hardcoded table)
+    # core resolves the exact priced cost from the ONE SSOT (no second hardcoded table)
     assert takyon_core._logo_provider_cost_usd() == float(entry.request_cost)
 
 
