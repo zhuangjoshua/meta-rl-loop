@@ -64,7 +64,13 @@ from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
 from .app_runtime_constants import APP_SESSION_COOKIE
-from . import app_supabase_auth, composio_distribution, environment, safebox
+from . import (
+    app_supabase_auth,
+    channel_registry as _channel_registry,
+    composio_distribution,
+    environment,
+    safebox,
+)
 
 
 TAKYON_TOOLSET = "takyon"
@@ -1212,16 +1218,23 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "openrouter": ("OPENROUTER_API_KEY",),
     "parallel": ("PARALLEL_API_KEY",),
     "postmark": ("POSTMARK_SERVER_TOKEN", "POSTMARK_FROM_EMAIL"),
-    "reddit": ("COMPOSIO_API_KEY",),
+    # The outreach-publish CHANNEL composio alias rows (reddit / twitter / x / x_social) are DERIVED
+    # from the ChannelPublisher registry below — a channel declares its Composio name spellings once on
+    # its descriptor (``env_alias_names``) instead of repeating the ``("COMPOSIO_API_KEY",)`` row per
+    # channel here. ``reddit_ads`` / ``metaads`` / ``meta`` are ad-plane composio providers, NOT
+    # outreach-publish channels, so they stay literal.
     "reddit_ads": ("COMPOSIO_API_KEY",),
     "stripe": ("STRIPE_SECRET_KEY",),
     "tavily": ("TAVILY_API_KEY",),
-    "twitter": ("COMPOSIO_API_KEY",),
     "vercel": ("VERCEL_TOKEN",),
-    "x": ("COMPOSIO_API_KEY",),
-    "x_social": ("COMPOSIO_API_KEY",),
     "xai": ("XAI_API_KEY",),
 }
+# Fold in the per-channel Composio alias rows from the ChannelPublisher registry. Each channel's key
+# resolves under COMPOSIO_API_KEY, matching the pre-extraction literal rows byte-for-byte.
+for _channel in _channel_registry.CHANNEL_REGISTRY.values():
+    for _alias_name in _channel.env_alias_names:
+        _API_ENV_ALIASES.setdefault(_alias_name, ("COMPOSIO_API_KEY",))
+del _channel, _alias_name
 
 
 def _overlay_creative_provider_alias_rows() -> None:
@@ -8473,8 +8486,10 @@ def _x_aggregate_post_snapshots(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _is_x_provider_name(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return text in {"x", "twitter", "x_social"}
+    # X's Composio name spellings are declared once on its ChannelPublisher descriptor (aliases:
+    # ("x", "twitter", "x_social")); this predicate reads them from the registry instead of a second
+    # hardcoded set, so a channel's provider-name spellings live in exactly one place.
+    return _channel_registry.is_channel_provider_name("x", value)
 
 
 def _command_version(command: list[str], *, timeout_seconds: int = 10) -> str | None:
@@ -28892,12 +28907,16 @@ _META_VALID_CTA = {
     "BOOK_TRAVEL", "CONTACT_US", "APPLY_NOW", "GET_QUOTE", "WATCH_MORE",
     "NO_BUTTON", "ORDER_NOW", "SEE_MENU", "INSTALL_MOBILE_APP",
 }
+# Per-action creative-credit facts. The X/Reddit **outreach-publish** rows are DERIVED from the
+# ChannelPublisher registry (channel_registry.CHANNEL_REGISTRY) — the single source of truth for those
+# channels — so the cost / cost-env / bucket / audience for a channel are declared once on its
+# descriptor, not hand-synced across four parallel dicts here. Ad-launch / media-spend / generation
+# actions (meta_ad_*, reddit_ad_*, *_generate) are not outreach-publish channels and stay literal.
 _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
     "logo_generate": 2,
-    "x_publish_outreach": 1,
-    "reddit_publish_outreach": 1,
+    **{c.credit_action: c.credit_cost_default for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": 1,
     "reddit_ad_launch": 1,
     # Variable ad media spend is reserved through the same safebox creative gate with units equal to
@@ -28910,14 +28929,12 @@ _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
     "logo_generate": "TAKYON_CREATIVE_CREDITS_LOGO",
-    "x_publish_outreach": "TAKYON_CREATIVE_CREDITS_X_POST",
-    "reddit_publish_outreach": "TAKYON_CREATIVE_CREDITS_REDDIT_POST",
+    **{c.credit_action: c.credit_cost_env for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
     "reddit_ad_launch": "TAKYON_CREATIVE_CREDITS_REDDIT_LAUNCH",
 }
 _CREATIVE_CREDIT_ACTION_DEFAULT_BUCKETS = {
-    "x_publish_outreach": "x",
-    "reddit_publish_outreach": "reddit",
+    **{c.credit_action: c.budget_bucket for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "meta",
     "reddit_ad_launch": "reddit",
     "meta_ad_media_spend": "meta",
@@ -28927,8 +28944,7 @@ _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "logo_generate": "creative.logo",
     "ugc_ad_generate": "creative.ugc",
     "static_ad_generate": "creative.static_ad",
-    "x_publish_outreach": "creative.x_publish",
-    "reddit_publish_outreach": "creative.reddit_publish",
+    **{c.credit_action: c.credit_audience for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "creative.meta_ad_launch",
     "reddit_ad_launch": "creative.reddit_ad_launch",
     "meta_ad_media_spend": "creative.meta_ad_media_spend",

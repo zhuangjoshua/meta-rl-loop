@@ -43,10 +43,13 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from . import app_usage, billing, composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
+
+if TYPE_CHECKING:
+    from .channel_registry import ChannelPublisher
 
 _log = logging.getLogger("takyon.worker")
 
@@ -1798,34 +1801,51 @@ def _write_x_posted_marker(slug: str, job_id: str, marker: Mapping[str, Any]) ->
         pass
 
 
-def x_publish_outreach_handler(job: Job) -> JobRunResult:
+def channel_publish_outreach_handler(job: Job, channel: "ChannelPublisher") -> JobRunResult:
+    """The ONE generic outreach-publish money envelope, shared by every ``ChannelPublisher``.
+
+    The creative-credit reserve → publish → commit/release skeleton is byte-identical across X and
+    Reddit (verified against the pre-extraction handlers); only the ``action`` / ``budget_bucket``
+    scalars, the per-channel reservation/commit/release metadata, and the publish body itself differ,
+    and those live behind ``channel``'s descriptor callables (see ``channel_registry.py``). Adding a
+    channel is one ``ChannelPublisher`` — this envelope is never forked.
+
+    Money-safety invariant (unchanged from the two originals): reserve once; on success commit; on a
+    failure after a real side effect commit-partial (never refund a shipped post); on a failure with
+    no side effect release; a finalization failure re-raises with both errors. Provider/receipt/marker
+    calls resolve through this ``worker`` module + ``core`` so existing monkeypatches still apply."""
     from . import business_credits as takyon_business_credits
     from . import core as takyon_core
+    from .channel_registry import PublishContext
 
     payload = job.payload or {}
     slug = job.business_slug
     body = str(payload.get("body") or "").strip()
-    if not body:
+    # Per-channel required-input guards (X: body; Reddit: subreddit-or-thread) run in publish()/here.
+    if channel.slug == "x" and not body:
         raise RuntimeError("x publish job is missing a body")
+    if channel.slug == "reddit":
+        subreddit = str(payload.get("subreddit") or "").strip()
+        thread_external_id = str(payload.get("thread_external_id") or "").strip()
+        if not thread_external_id and not subreddit:
+            raise RuntimeError("reddit publish job is missing a subreddit or thread_external_id")
 
     work_request_id = str(payload.get("work_request_id") or "").strip()
-    reply_to = str(payload.get("thread_external_id") or "").strip()
-    reservation_key = f"x-publish:{job.id}"
+    reservation_key = f"{channel.slug}-publish:{job.id}"
+    action = channel.credit_action
+    bucket = channel.budget_bucket
     reservation: dict[str, Any] | None = None
     credit_result: dict[str, Any] | None = None
     finalized = False
 
-    # Idempotency guard (money-gate integrity): if this exact job already shipped its
-    # tweet on a prior attempt (the publish succeeded but the post-publish receipt write
-    # failed and marked the job 'failed · needs retry'), a retry must NOT re-tweet or
-    # re-charge a credit. The marker captures the already-posted segments; re-entry skips
-    # posting/reservation and only re-runs the receipt recording.
-    posted_marker = _read_x_posted_marker(slug, str(job.id))
-    already_posted_segments: list[dict[str, Any]] = []
-    if isinstance(posted_marker, dict):
-        raw_segments = posted_marker.get("thread_posts")
-        if isinstance(raw_segments, list):
-            already_posted_segments = [seg for seg in raw_segments if isinstance(seg, dict)]
+    ctx = PublishContext(
+        job=job,
+        slug=slug,
+        payload=payload,
+        body=body,
+        work_request_id=work_request_id,
+        reservation_key=reservation_key,
+    )
 
     if work_request_id:
         _update_work_request(
@@ -1835,73 +1855,20 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             payload_updates={"worker_job_id": str(job.id)},
         )
 
-    # Fully-posted retry: the tweet(s) already shipped and credits were already committed
-    # on the first attempt. Do NOT reserve/charge again. Re-derive the published result and
-    # (re)write the receipt artifacts so the job can reach a clean terminal state idempotently.
-    if already_posted_segments and bool(posted_marker.get("credits_committed")):
-        post_id = str(posted_marker.get("post_id") or "").strip()
-        post_url = str(posted_marker.get("post_url") or "").strip()
-        provider_response = dict(posted_marker.get("provider_response") or {})
-        media_records = [dict(m) for m in (posted_marker.get("media") or []) if isinstance(m, dict)]
-        credits_charged = int(posted_marker.get("credits_charged") or 0)
-        budget_bucket = str(posted_marker.get("budget_bucket") or "x").strip() or "x"
-        artifacts = _record_x_publish_result(
-            slug,
-            job_id=str(job.id),
-            payload=payload,
-            post_id=post_id or str(job.id),
-            post_url=post_url,
-            provider_response=provider_response,
-            media=media_records,
-            credits_charged=credits_charged,
-            budget_bucket=budget_bucket,
-            channel_budget=posted_marker.get("channel_budget"),
-        )
-        if work_request_id:
-            _update_work_request(
-                slug,
-                work_request_id,
-                status="completed",
-                payload_updates={
-                    "artifact_path": artifacts["artifact"],
-                    "receipt_path": artifacts["receipt"],
-                    "post_id": post_id,
-                    "post_url": post_url,
-                    "credits_charged": credits_charged,
-                    "budget_bucket": budget_bucket,
-                    "idempotent_replay": True,
-                },
-            )
-        return JobRunResult(
-            result={
-                "business_slug": slug,
-                "provider": "x",
-                "post_id": post_id,
-                "post_url": post_url,
-                "artifact_path": artifacts["artifact"],
-                "receipt_path": artifacts["receipt"],
-                "credits_charged": credits_charged,
-                "budget_bucket": budget_bucket,
-                "idempotent_replay": True,
-            },
-            actual_cost_cents=0,
-        )
+    # Idempotency guard (money-gate integrity): if this exact job already shipped AND committed on a
+    # prior attempt, re-derive + re-write the receipt without re-posting/re-charging. X's durable
+    # posted-marker drives this; Reddit's hook is a no-op (nothing to replay).
+    replay_result = channel.replay_if_complete(ctx)
+    if replay_result is not None:
+        return replay_result
 
     try:
         reservation = takyon_core._reserve_creative_credits(
             slug,
-            action="x_publish_outreach",
+            action=action,
             reservation_key=reservation_key,
-            budget_bucket="x",
-            metadata={
-                "business": slug,
-                "action": "x_publish_outreach",
-                "job_id": str(job.id),
-                "work_request_id": work_request_id or None,
-                "channel": "x",
-                "provider": "x",
-                "thread_external_id": reply_to or None,
-            },
+            budget_bucket=bucket,
+            metadata=channel.reservation_metadata(ctx),
         )
     except takyon_business_credits.InsufficientCreativeCredits as exc:
         if work_request_id:
@@ -1909,7 +1876,7 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                 slug,
                 work_request_id,
                 status="failed",
-                payload_updates={"worker_error": str(exc), "budget_bucket": "x"},
+                payload_updates={"worker_error": str(exc), "budget_bucket": bucket},
             )
         raise RuntimeError(str(exc)) from exc
     except takyon_core.CreativeCreditBudgetExceeded as exc:
@@ -1926,234 +1893,29 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             )
         raise RuntimeError(str(exc)) from exc
 
-    post_id = ""
-    thread_posts: list[dict[str, Any]] = []
-    # Re-entry after a partial publish (some segments tweeted, then the process died before
-    # commit): resume from the durable marker so already-posted segments are NOT re-tweeted.
-    if already_posted_segments:
-        thread_posts = [dict(seg) for seg in already_posted_segments]
-        post_id = str(posted_marker.get("post_id") or "").strip()
-        provider_response_seed = posted_marker.get("provider_response")
-        provider_response_resume = dict(provider_response_seed) if isinstance(provider_response_seed, dict) else {}
-    else:
-        provider_response_resume = {}
-    posted_index_to_id = {
-        int(seg.get("index")): str(seg.get("post_id") or "")
-        for seg in thread_posts
-        if isinstance(seg.get("index"), int)
-    }
+    ctx.reservation = reservation
+    outcome = None
     try:
-        segments = _split_x_thread_segments(body)
-        if not segments:
-            raise RuntimeError("x publish job is missing a body")
-        provider_response: dict[str, Any] = provider_response_resume
-        media_ids: list[str] = []
-        media_records: list[dict[str, Any]] = []
-        for raw_rel in payload.get("media_paths") or []:
-            rel = takyon_core._safe_relpath(str(raw_rel or ""), field="media_paths").as_posix()
-            abs_path = takyon_core._store()._resolve_business_file(slug, rel)
-            if not abs_path.is_file():
-                raise RuntimeError(f"media file not found: {rel}")
-            descriptor = composio_distribution.upload_file_descriptor(
-                toolkit_slug="twitter",
-                tool_slug="TWITTER_UPLOAD_MEDIA",
-                file_path=abs_path,
-                timeout=180.0,
-            )
-            response = composio_distribution.twitter_execute_tool(
-                "TWITTER_UPLOAD_MEDIA",
-                arguments={
-                    # [composio-schema] Confirm TWITTER_UPLOAD_MEDIA uses the media file argument name "media".
-                    "media": descriptor,
-                },
-                timeout=180.0,
-            )
-            media_id = _extract_x_media_id(response)
-            if not media_id:
-                raise RuntimeError(f"X media upload returned no media id for {rel}")
-            media_ids.append(media_id)
-            media_records.append({"path": rel, "media_id": media_id})
-        current_reply_to = reply_to
-        for index, segment in enumerate(segments):
-            # Idempotency: if this segment already shipped on a prior attempt, do not re-tweet it.
-            if index in posted_index_to_id:
-                current_reply_to = posted_index_to_id[index] or current_reply_to
-                continue
-            arguments: dict[str, Any] = {"text": segment}
-            if current_reply_to:
-                arguments["reply_in_reply_to_tweet_id"] = current_reply_to
-            if index == 0 and media_ids:
-                # [composio-schema] Confirm TWITTER_CREATION_OF_A_POST uses the flattened media_media_ids argument.
-                arguments["media_media_ids"] = list(media_ids)
-            response = composio_distribution.twitter_execute_tool(
-                "TWITTER_CREATION_OF_A_POST",
-                arguments=arguments,
-                timeout=120.0,
-            )
-            current_post_id = _extract_x_post_id(response) or (post_id if post_id else str(job.id))
-            if not post_id:
-                post_id = current_post_id
-                provider_response = dict(response)
-            thread_posts.append(
-                {
-                    "index": index,
-                    "post_id": current_post_id,
-                    "body": segment,
-                    "reply_to": current_reply_to,
-                    "media": list(media_records) if index == 0 and media_records else [],
-                    "provider_response": dict(response),
-                }
-            )
-            posted_index_to_id[index] = current_post_id
-            current_reply_to = current_post_id
-            # Durably mark each shipped segment immediately so a crash/retry between this
-            # tweet and the credit commit cannot re-post it.
-            _write_x_posted_marker(
-                slug,
-                str(job.id),
-                {
-                    "job_id": str(job.id),
-                    "post_id": post_id,
-                    "thread_posts": thread_posts,
-                    "media": media_records,
-                    "provider_response": provider_response,
-                    "credits_committed": False,
-                },
-            )
-        # Acquisition rail (takyon-x skill contract: "no link in the tweet body — the link goes
-        # in a reply"). Nothing used to post that reply, so destination_url only ever reached the
-        # receipt and never the timeline — an X post with no path to the product. Post the link
-        # now as one reply to the thread tail. It rides the SAME creative-credit reservation as
-        # the thread (one outreach action = its segments + its link reply), so it is not a
-        # separately gated paid call. Idempotent across retries via the durable posted-marker
-        # (the appended entry carries kind="link" so a resume never re-posts it).
-        destination_url = str(payload.get("destination_url") or "").strip()
-        link_already_posted = any(
-            isinstance(seg, dict) and seg.get("kind") == "link" for seg in thread_posts
-        )
-        body_urls = {
-            normalized
-            for normalized in (
-                takyon_core._normalize_destination_url(raw.rstrip(".,!?;:"))
-                for raw in re.findall(r"https?://[^\s<>()\[\]{}\"']+", body)
-            )
-            if normalized
-        }
-        destination_root = takyon_core._normalize_destination_url(
-            destination_url.split("?", 1)[0].split("#", 1)[0]
-        )
-        destination_candidates = {candidate for candidate in (destination_url, destination_root) if candidate}
-        link_in_body = any(candidate in body_urls for candidate in destination_candidates)
-        if destination_url and current_reply_to and not link_already_posted and not link_in_body:
-            link_text = _compose_x_link_reply(
-                destination_url,
-                label=str(payload.get("destination_label") or "").strip(),
-            )
-            link_response = composio_distribution.twitter_execute_tool(
-                "TWITTER_CREATION_OF_A_POST",
-                arguments={
-                    "text": link_text,
-                    "reply_in_reply_to_tweet_id": current_reply_to,
-                },
-                timeout=120.0,
-            )
-            link_post_id = _extract_x_post_id(link_response)
-            thread_posts.append(
-                {
-                    "index": len(thread_posts),
-                    "kind": "link",
-                    "post_id": link_post_id or "",
-                    "body": link_text,
-                    "reply_to": current_reply_to,
-                    "media": [],
-                    "provider_response": dict(link_response),
-                }
-            )
-            if link_post_id:
-                current_reply_to = link_post_id
-            # Durably extend the marker so a crash before the credit commit cannot re-post the
-            # link reply on retry.
-            _write_x_posted_marker(
-                slug,
-                str(job.id),
-                {
-                    "job_id": str(job.id),
-                    "post_id": post_id,
-                    "thread_posts": thread_posts,
-                    "media": media_records,
-                    "provider_response": provider_response,
-                    "credits_committed": False,
-                },
-            )
-        if len(thread_posts) > 1:
-            provider_response["thread_posts"] = thread_posts
-        elif media_records:
-            provider_response["media"] = media_records
+        outcome = channel.publish(ctx)
         credit_result = takyon_core._commit_creative_credits(
             reservation_key,
-            action="x_publish_outreach",
-            budget_bucket="x",
-            metadata={
-                "business": slug,
-                "action": "x_publish_outreach",
-                "job_id": str(job.id),
-                "work_request_id": work_request_id or None,
-                "channel": "x",
-                "provider": "x",
-                "post_id": post_id,
-                "thread_post_count": len(thread_posts),
-            },
+            action=action,
+            budget_bucket=bucket,
+            metadata=channel.commit_metadata(ctx, outcome),
         )
         finalized = True
-        whoami = composio_distribution.twitter_execute_tool(
-            "TWITTER_USER_LOOKUP_ME",
-            arguments={"user_fields": ["username"]},
-            timeout=30.0,
-        )
-        username = _extract_x_username(whoami)
-        post_url = (
-            f"https://x.com/{username}/status/{post_id}"
-            if username
-            else f"https://x.com/i/web/status/{post_id}"
-        )
-        # Tweet shipped AND credits committed. Persist the terminal marker BEFORE the
-        # post-publish receipt write — that artifact write is the step that historically
-        # failed under the mirror race. If it fails now, a retry replays from this marker
-        # without re-tweeting or re-charging.
-        _committed_budget_bucket = str(
-            (credit_result or {}).get("budget_bucket")
-            or (reservation or {}).get("budget_bucket")
-            or "x"
-        ).strip() or "x"
-        _committed_credits = int(
-            (credit_result or {}).get("actual_credits")
-            or (reservation or {}).get("requested_credits")
-            or 0
-        )
-        _write_x_posted_marker(
-            slug,
-            str(job.id),
-            {
-                "job_id": str(job.id),
-                "post_id": post_id,
-                "post_url": post_url,
-                "thread_posts": thread_posts,
-                "media": media_records,
-                "provider_response": provider_response,
-                "credits_committed": True,
-                "credits_charged": _committed_credits,
-                "budget_bucket": _committed_budget_bucket,
-                "channel_budget": (credit_result or {}).get("channel_budget"),
-            },
-        )
-        artifacts = _record_x_publish_result(
-            slug,
+        outcome.extra["credit_result"] = credit_result
+        post_id = outcome.post_id
+        post_url = channel.finalize_post_url(ctx, outcome)
+        artifacts = channel.record_result(
+            ctx,
+            outcome,
             job_id=str(job.id),
             payload=payload,
             post_id=post_id,
             post_url=post_url,
-            provider_response=provider_response,
-            media=media_records,
+            provider_response=outcome.provider_response,
+            media=outcome.media,
             credits_charged=int(
                 (credit_result or {}).get("actual_credits")
                 or (reservation or {}).get("requested_credits")
@@ -2162,9 +1924,9 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
             budget_bucket=str(
                 (credit_result or {}).get("budget_bucket")
                 or (reservation or {}).get("budget_bucket")
-                or "x"
+                or bucket
             ).strip()
-            or "x",
+            or bucket,
             channel_budget=(credit_result or {}).get("channel_budget"),
         )
         if work_request_id:
@@ -2185,16 +1947,16 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                     "budget_bucket": str(
                         (credit_result or {}).get("budget_bucket")
                         or (reservation or {}).get("budget_bucket")
-                        or "x"
+                        or bucket
                     ).strip()
-                    or "x",
+                    or bucket,
                     "channel_budget": (credit_result or {}).get("channel_budget", {}),
                 },
             )
         return JobRunResult(
             result={
                 "business_slug": slug,
-                "provider": "x",
+                "provider": channel.slug,
                 "post_id": post_id,
                 "post_url": post_url,
                 "artifact_path": artifacts["artifact"],
@@ -2209,51 +1971,35 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                 "budget_bucket": str(
                     (credit_result or {}).get("budget_bucket")
                     or (reservation or {}).get("budget_bucket")
-                    or "x"
+                    or bucket
                 ).strip()
-                or "x",
+                or bucket,
                 "channel_budget": (credit_result or {}).get("channel_budget", {}),
             },
             actual_cost_cents=0,
         )
     except Exception as exc:
         finalization_error: Exception | None = None
+        # Recover partial progress: on a publish failure ``outcome`` is None but the body may have
+        # shipped side effects (X thread segments), tracked on ``ctx.partial`` — so commit-partial
+        # (never refund a shipped post), exactly as the originals' ``if thread_posts:`` did.
+        effective_outcome = outcome if outcome is not None else ctx.partial
+        posted = bool(effective_outcome is not None and effective_outcome.posted)
         if reservation is not None and not finalized:
             try:
-                if thread_posts:
+                if posted:
                     credit_result = takyon_core._commit_creative_credits(
                         reservation_key,
-                        action="x_publish_outreach",
-                        budget_bucket="x",
-                        metadata={
-                            "business": slug,
-                            "action": "x_publish_outreach",
-                            "status": "partial_failed",
-                            "job_id": str(job.id),
-                            "work_request_id": work_request_id or None,
-                            "channel": "x",
-                            "provider": "x",
-                            "post_id": post_id or None,
-                            "thread_post_count": len(thread_posts),
-                            "thread_posts": thread_posts,
-                            "error": str(exc),
-                        },
+                        action=action,
+                        budget_bucket=bucket,
+                        metadata=channel.partial_failed_metadata(ctx, effective_outcome, exc),
                     )
                 else:
                     credit_result = takyon_core._release_creative_credits(
                         reservation_key,
-                        action="x_publish_outreach",
-                        budget_bucket="x",
-                        metadata={
-                            "business": slug,
-                            "action": "x_publish_outreach",
-                            "status": "failed",
-                            "job_id": str(job.id),
-                            "work_request_id": work_request_id or None,
-                            "channel": "x",
-                            "provider": "x",
-                            "error": str(exc),
-                        },
+                        action=action,
+                        budget_bucket=bucket,
+                        metadata=channel.release_metadata(ctx, exc),
                     )
                 finalized = True
             except Exception as release_exc:
@@ -2265,18 +2011,18 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                 status="failed",
                 payload_updates={
                     "worker_error": str(exc),
-                    "post_id": post_id or None,
+                    "post_id": (effective_outcome.post_id if effective_outcome is not None else "") or None,
                     "credits_charged": int(
                         (credit_result or {}).get("actual_credits")
-                        or ((reservation or {}).get("requested_credits") if thread_posts else 0)
+                        or ((reservation or {}).get("requested_credits") if posted else 0)
                         or 0
                     ),
                     "budget_bucket": str(
                         (credit_result or {}).get("budget_bucket")
                         or (reservation or {}).get("budget_bucket")
-                        or "x"
+                        or bucket
                     ).strip()
-                    or "x",
+                    or bucket,
                     "channel_budget": (credit_result or {}).get("channel_budget", {}),
                 },
             )
@@ -2285,271 +2031,20 @@ def x_publish_outreach_handler(job: Job) -> JobRunResult:
                 f"{exc} (credit finalization also failed: {finalization_error})"
             ) from exc
         raise
+
+
+def x_publish_outreach_handler(job: Job) -> JobRunResult:
+    """X outreach publish — the generic envelope dispatched with the X ``ChannelPublisher``."""
+    from .channel_registry import X_CHANNEL
+
+    return channel_publish_outreach_handler(job, X_CHANNEL)
 
 
 def reddit_publish_outreach_handler(job: Job) -> JobRunResult:
-    from . import business_credits as takyon_business_credits
-    from . import core as takyon_core
+    """Reddit outreach publish — the generic envelope dispatched with the Reddit ``ChannelPublisher``."""
+    from .channel_registry import REDDIT_CHANNEL
 
-    payload = job.payload or {}
-    slug = job.business_slug
-    body = str(payload.get("body") or "").strip()
-    title = str(payload.get("title") or payload.get("subject") or "").strip()
-    post_kind = str(payload.get("post_kind") or "").strip() or "self"
-    subreddit = str(payload.get("subreddit") or "").strip()
-    url = str(payload.get("url") or "").strip()
-    thread_external_id = str(payload.get("thread_external_id") or "").strip()
-    if not thread_external_id and not subreddit:
-        raise RuntimeError("reddit publish job is missing a subreddit or thread_external_id")
-
-    work_request_id = str(payload.get("work_request_id") or "").strip()
-    reservation_key = f"reddit-publish:{job.id}"
-    reservation: dict[str, Any] | None = None
-    credit_result: dict[str, Any] | None = None
-    finalized = False
-    if work_request_id:
-        _update_work_request(
-            slug,
-            work_request_id,
-            status="running",
-            payload_updates={"worker_job_id": str(job.id)},
-        )
-
-    try:
-        reservation = takyon_core._reserve_creative_credits(
-            slug,
-            action="reddit_publish_outreach",
-            reservation_key=reservation_key,
-            budget_bucket="reddit",
-            metadata={
-                "business": slug,
-                "action": "reddit_publish_outreach",
-                "job_id": str(job.id),
-                "work_request_id": work_request_id or None,
-                "channel": "reddit",
-                "provider": "reddit",
-                "thread_external_id": thread_external_id or None,
-                "subreddit": subreddit or None,
-            },
-        )
-    except takyon_business_credits.InsufficientCreativeCredits as exc:
-        if work_request_id:
-            _update_work_request(
-                slug,
-                work_request_id,
-                status="failed",
-                payload_updates={"worker_error": str(exc), "budget_bucket": "reddit"},
-            )
-        raise RuntimeError(str(exc)) from exc
-    except takyon_core.CreativeCreditBudgetExceeded as exc:
-        if work_request_id:
-            _update_work_request(
-                slug,
-                work_request_id,
-                status="failed",
-                payload_updates={
-                    "worker_error": str(exc),
-                    "budget_bucket": exc.bucket,
-                    "channel_budget": exc.channel_budget,
-                },
-            )
-        raise RuntimeError(str(exc)) from exc
-
-    provider_response: dict[str, Any] = {}
-    post_id = ""
-    post_url = ""
-    try:
-        if thread_external_id:
-            provider_response = composio_distribution.reddit_execute_tool(
-                "REDDIT_POST_REDDIT_COMMENT",
-                arguments={
-                    # [composio-schema] Confirm REDDIT_POST_REDDIT_COMMENT uses thing_id and text.
-                    "thing_id": thread_external_id,
-                    "text": body,
-                },
-                timeout=120.0,
-            )
-        else:
-            arguments: dict[str, Any] = {
-                "subreddit": subreddit,
-                "title": title,
-                # [composio-schema] Confirm REDDIT_CREATE_REDDIT_POST uses kind with values self/link.
-                "kind": "self" if post_kind == "self" else "link",
-            }
-            if post_kind == "self":
-                # [composio-schema] Confirm REDDIT_CREATE_REDDIT_POST uses text for self-post bodies.
-                arguments["text"] = body
-            else:
-                arguments["url"] = url
-            provider_response = composio_distribution.reddit_execute_tool(
-                "REDDIT_CREATE_REDDIT_POST",
-                arguments=arguments,
-                timeout=120.0,
-            )
-        publish_ref = _extract_reddit_publish_ref(provider_response)
-        post_id = str(publish_ref.get("post_id") or "").strip()
-        post_url = str(publish_ref.get("post_url") or "").strip()
-        if not post_id:
-            raise RuntimeError("Reddit publish returned no post id")
-
-        credit_result = takyon_core._commit_creative_credits(
-            reservation_key,
-            action="reddit_publish_outreach",
-            budget_bucket="reddit",
-            metadata={
-                "business": slug,
-                "action": "reddit_publish_outreach",
-                "job_id": str(job.id),
-                "work_request_id": work_request_id or None,
-                "channel": "reddit",
-                "provider": "reddit",
-                "post_id": post_id,
-                "subreddit": subreddit or None,
-                "post_kind": post_kind,
-            },
-        )
-        finalized = True
-        artifacts = _record_reddit_publish_result(
-            slug,
-            job_id=str(job.id),
-            payload=payload,
-            post_id=post_id,
-            post_url=post_url,
-            provider_response=provider_response,
-            credits_charged=int(
-                (credit_result or {}).get("actual_credits")
-                or (reservation or {}).get("requested_credits")
-                or 0
-            ),
-            budget_bucket=str(
-                (credit_result or {}).get("budget_bucket")
-                or (reservation or {}).get("budget_bucket")
-                or "reddit"
-            ).strip()
-            or "reddit",
-            channel_budget=(credit_result or {}).get("channel_budget"),
-        )
-        if work_request_id:
-            _update_work_request(
-                slug,
-                work_request_id,
-                status="completed",
-                payload_updates={
-                    "artifact_path": artifacts["artifact"],
-                    "receipt_path": artifacts["receipt"],
-                    "post_id": post_id,
-                    "post_url": post_url,
-                    "credits_charged": int(
-                        (credit_result or {}).get("actual_credits")
-                        or (reservation or {}).get("requested_credits")
-                        or 0
-                    ),
-                    "budget_bucket": str(
-                        (credit_result or {}).get("budget_bucket")
-                        or (reservation or {}).get("budget_bucket")
-                        or "reddit"
-                    ).strip()
-                    or "reddit",
-                    "channel_budget": (credit_result or {}).get("channel_budget", {}),
-                },
-            )
-        return JobRunResult(
-            result={
-                "business_slug": slug,
-                "provider": "reddit",
-                "post_id": post_id,
-                "post_url": post_url,
-                "artifact_path": artifacts["artifact"],
-                "receipt_path": artifacts["receipt"],
-                "credits_charged": int(
-                    (credit_result or {}).get("actual_credits")
-                    or (reservation or {}).get("requested_credits")
-                    or 0
-                ),
-                "balance_credits": (credit_result or {}).get("balance_credits"),
-                "reserved_credits": (credit_result or {}).get("reserved_credits"),
-                "budget_bucket": str(
-                    (credit_result or {}).get("budget_bucket")
-                    or (reservation or {}).get("budget_bucket")
-                    or "reddit"
-                ).strip()
-                or "reddit",
-                "channel_budget": (credit_result or {}).get("channel_budget", {}),
-            },
-            actual_cost_cents=0,
-        )
-    except Exception as exc:
-        finalization_error: Exception | None = None
-        if reservation is not None and not finalized:
-            try:
-                if post_id:
-                    credit_result = takyon_core._commit_creative_credits(
-                        reservation_key,
-                        action="reddit_publish_outreach",
-                        budget_bucket="reddit",
-                        metadata={
-                            "business": slug,
-                            "action": "reddit_publish_outreach",
-                            "status": "partial_failed",
-                            "job_id": str(job.id),
-                            "work_request_id": work_request_id or None,
-                            "channel": "reddit",
-                            "provider": "reddit",
-                            "post_id": post_id,
-                            "post_url": post_url or None,
-                            "subreddit": subreddit or None,
-                            "post_kind": post_kind,
-                            "error": str(exc),
-                        },
-                    )
-                else:
-                    credit_result = takyon_core._release_creative_credits(
-                        reservation_key,
-                        action="reddit_publish_outreach",
-                        budget_bucket="reddit",
-                        metadata={
-                            "business": slug,
-                            "action": "reddit_publish_outreach",
-                            "status": "failed",
-                            "job_id": str(job.id),
-                            "work_request_id": work_request_id or None,
-                            "channel": "reddit",
-                            "provider": "reddit",
-                            "subreddit": subreddit or None,
-                            "post_kind": post_kind,
-                            "error": str(exc),
-                        },
-                    )
-                finalized = True
-            except Exception as release_exc:
-                finalization_error = release_exc
-        if work_request_id:
-            _update_work_request(
-                slug,
-                work_request_id,
-                status="failed",
-                payload_updates={
-                    "worker_error": str(exc),
-                    "post_id": post_id or None,
-                    "credits_charged": int(
-                        (credit_result or {}).get("actual_credits")
-                        or ((reservation or {}).get("requested_credits") if post_id else 0)
-                        or 0
-                    ),
-                    "budget_bucket": str(
-                        (credit_result or {}).get("budget_bucket")
-                        or (reservation or {}).get("budget_bucket")
-                        or "reddit"
-                    ).strip()
-                    or "reddit",
-                    "channel_budget": (credit_result or {}).get("channel_budget", {}),
-                },
-            )
-        if finalization_error is not None:
-            raise RuntimeError(
-                f"{exc} (credit finalization also failed: {finalization_error})"
-            ) from exc
-        raise
+    return channel_publish_outreach_handler(job, REDDIT_CHANNEL)
 
 
 def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobRunResult:
