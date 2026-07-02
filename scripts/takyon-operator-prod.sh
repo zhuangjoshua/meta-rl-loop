@@ -26,6 +26,7 @@ LOCAL_DASHBOARD_PORT="${TAKYON_LOCAL_DASHBOARD_PORT:-9129}"
 LOCAL_DASHBOARD_URL="${TAKYON_LOCAL_DASHBOARD_URL:-http://127.0.0.1:${LOCAL_DASHBOARD_PORT}}"
 CONTAINER_SAFEBOX_URL="${TAKYON_CONTAINER_SAFEBOX_URL:-http://host.docker.internal:${LOCAL_SAFEBOX_PORT}}"
 LOCAL_PROD_ROOT="${TAKYON_OPERATOR_PROD_ROOT:-$HOME/.takyon-fourmanifold-operator-prod}"
+ACTIVE_LOCAL_WORKER_PREFIX_FILE="${TAKYON_OPERATOR_ACTIVE_WORKER_PREFIX_FILE:-$LOCAL_PROD_ROOT/active-local-worker-prefix}"
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
 DEFAULT_OPERATOR_USER_ID="${TAKYON_OPERATOR_DEFAULT_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
 OPERATOR_USER_ID_OVERRIDE=""
@@ -71,6 +72,60 @@ resolved_operator_user_id() {
     return 0
   fi
   printf '%s' "$DEFAULT_OPERATOR_USER_ID"
+}
+
+local_worker_prefix_for_pid() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf 'mac-operator-%s-%s-' "$(hostname -s)" "$pid"
+}
+
+record_active_local_worker_prefix() {
+  local pid="${1:-}"
+  local prefix=""
+  prefix="$(local_worker_prefix_for_pid "$pid")" || return 1
+  mkdir -p "$LOCAL_PROD_ROOT"
+  printf '%s %s\n' "$pid" "$prefix" >"$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
+  chmod 600 "$ACTIVE_LOCAL_WORKER_PREFIX_FILE" 2>/dev/null || true
+  printf '%s' "$prefix"
+}
+
+active_local_worker_prefix() {
+  [[ -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE" ]] || return 0
+
+  local stored_pid=""
+  local stored_prefix=""
+  local worker_id=""
+  local command_text=""
+  read -r stored_pid stored_prefix <"$ACTIVE_LOCAL_WORKER_PREFIX_FILE" || true
+  if [[ ! "$stored_pid" =~ ^[0-9]+$ ]] || [[ -z "$stored_prefix" ]]; then
+    rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
+    return 0
+  fi
+
+  worker_id="${stored_prefix%-}"
+  if [[ -z "$worker_id" ]] || ! kill -0 "$stored_pid" >/dev/null 2>&1; then
+    rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
+    return 0
+  fi
+
+  if command -v ps >/dev/null 2>&1; then
+    command_text="$(ps -p "$stored_pid" -o command= 2>/dev/null || true)"
+    if [[ -n "$command_text" ]] && [[ "$command_text" != *"worker --worker-id ${worker_id}"* ]]; then
+      rm -f "$ACTIVE_LOCAL_WORKER_PREFIX_FILE"
+      return 0
+    fi
+  fi
+
+  printf '%s' "$stored_prefix"
+}
+
+resolve_preferred_worker_id_prefix() {
+  if [[ -n "${TAKYON_PREFERRED_WORKER_ID_PREFIX:-}" ]]; then
+    printf '%s' "$TAKYON_PREFERRED_WORKER_ID_PREFIX"
+    return 0
+  fi
+  active_local_worker_prefix
 }
 
 die() {
@@ -284,6 +339,7 @@ load_operator_env() {
   require_files
   ensure_operator_runtime_deps
   ensure_home
+  local preferred_worker_prefix=""
   # shellcheck disable=SC1090
   eval "$(fetch_operator_env_exports)"
 
@@ -308,7 +364,8 @@ load_operator_env() {
   fi
   export TAKYON_STORAGE_BACKEND="${TAKYON_STORAGE_BACKEND:-supabase_s3}"
   export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
-  export TAKYON_PREFERRED_WORKER_ID_PREFIX="${TAKYON_PREFERRED_WORKER_ID_PREFIX:-mac-operator-$(hostname -s)-}"
+  preferred_worker_prefix="$(resolve_preferred_worker_id_prefix)"
+  export TAKYON_PREFERRED_WORKER_ID_PREFIX="$preferred_worker_prefix"
   export TAKYON_PREFERRED_WORKER_CLAIM_SECONDS="${TAKYON_PREFERRED_WORKER_CLAIM_SECONDS:-120}"
   export TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE="${TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE:-true}"
   export TERMINAL_CONTAINER_PERSISTENT="${TERMINAL_CONTAINER_PERSISTENT:-false}"
@@ -871,12 +928,21 @@ cmd_worker() {
   cmd_preflight
   require_docker_for_worker
   stop_local_workers_background
+  local worker_prefix=""
+  local worker_id=""
+  worker_prefix="$(record_active_local_worker_prefix "$$" || true)"
+  if [[ -n "$worker_prefix" ]]; then
+    export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"
+    worker_id="${worker_prefix%-}"
+  else
+    worker_id="mac-operator-$(hostname -s)-$$"
+  fi
   export TAKYON_WORKER_CONCURRENCY="$concurrency"
   export TAKYON_WORKER_POLL_SECONDS="${TAKYON_WORKER_POLL_SECONDS:-1}"
   export TAKYON_WORKER_STALE_SECONDS="${TAKYON_WORKER_STALE_SECONDS:-900}"
   cd "$RUNTIME_DIR"
   exec_takyon_cli worker \
-    --worker-id "mac-operator-$(hostname -s)-$$" \
+    --worker-id "$worker_id" \
     --user-id "$(resolved_operator_user_id)"
 }
 
@@ -1075,6 +1141,11 @@ cmd_console() {
   worker_pid="$!"
   sleep 1
   if kill -0 "$worker_pid" >/dev/null 2>&1; then
+    local worker_prefix=""
+    worker_prefix="$(record_active_local_worker_prefix "$worker_pid" || true)"
+    if [[ -n "$worker_prefix" ]]; then
+      export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"
+    fi
     local_worker_started="1"
   else
     worker_pid=""

@@ -183,7 +183,8 @@ def test_claim_one_allows_nonmatching_worker_prefix_after_grace_window_expires(p
         },
     )
     pg_conn.execute(
-        "update jobs set created_at = now() - interval '5 minutes', updated_at = now() where id = %s",
+        "update jobs set created_at = now() - interval '5 minutes', "
+        "updated_at = now() - interval '5 minutes' where id = %s",
         (preferred.id,),
     )
 
@@ -192,6 +193,31 @@ def test_claim_one_allows_nonmatching_worker_prefix_after_grace_window_expires(p
     assert claimed is not None
     assert claimed.id == preferred.id
     assert claimed.locked_by == "mac-operator-Other-123"
+
+
+def test_claim_one_renews_preferred_worker_window_after_requeue(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    preferred = jobs.enqueue(
+        pg_conn,
+        slug,
+        "ceo_bootstrap",
+        idempotency_key="preferred-bootstrap",
+        payload={
+            "preferred_worker_id_prefix": "mac-operator-Local-",
+            "preferred_worker_claim_seconds": 120,
+        },
+    )
+    pg_conn.execute(
+        "update jobs set created_at = now() - interval '10 minutes', updated_at = now() where id = %s",
+        (preferred.id,),
+    )
+
+    assert jobs.claim_one(pg_conn, worker_id="mac-operator-Other-123") is None
+
+    claimed = jobs.claim_one(pg_conn, worker_id="mac-operator-Local-456")
+    assert claimed is not None
+    assert claimed.id == preferred.id
+    assert claimed.locked_by == "mac-operator-Local-456"
 
 
 def test_claim_one_prioritizes_bootstrap_over_older_wake(pg_conn):

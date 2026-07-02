@@ -141,6 +141,27 @@ def test_operator_deploy_drain_probe_survives_ssh_double_quoted_string():
     assert "assert_takyon_pg_role(conn, 'operator')" in drain
 
 
+def test_operator_prod_script_targets_the_exact_active_local_worker_pool():
+    src = (ROOT / "scripts/takyon-operator-prod.sh").read_text()
+
+    load = src.split("load_operator_env() {", 1)[1].split("unset_raw_runtime_authority_env() {", 1)[0]
+    worker = src.split("cmd_worker() {", 1)[1].split("cmd_worker_once() {", 1)[0]
+    console = src.split("cmd_console() {", 1)[1].split("cmd_vps_worker() {", 1)[0]
+
+    assert 'ACTIVE_LOCAL_WORKER_PREFIX_FILE=' in src
+    assert "local_worker_prefix_for_pid() {" in src
+    assert "record_active_local_worker_prefix() {" in src
+    assert "active_local_worker_prefix() {" in src
+    assert "resolve_preferred_worker_id_prefix() {" in src
+    assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="${TAKYON_PREFERRED_WORKER_ID_PREFIX:-mac-operator-$(hostname -s)-}"' not in load
+    assert 'preferred_worker_prefix="$(resolve_preferred_worker_id_prefix)"' in load
+    assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="$preferred_worker_prefix"' in load
+    assert 'worker_prefix="$(record_active_local_worker_prefix "$$" || true)"' in worker
+    assert '--worker-id "$worker_id"' in worker
+    assert 'worker_prefix="$(record_active_local_worker_prefix "$worker_pid" || true)"' in console
+    assert 'export TAKYON_PREFERRED_WORKER_ID_PREFIX="$worker_prefix"' in console
+
+
 def test_app_control_blocker_matches_operator_runtime_text_timestamp():
     src = (ROOT / "hermes-agent-main/plugins/takyon/db/migrations/0045_app_runtime_identity_ports.sql").read_text()
 

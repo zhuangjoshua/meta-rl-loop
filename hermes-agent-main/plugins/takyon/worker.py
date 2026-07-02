@@ -817,6 +817,13 @@ class _RuntimeProgress:
         self._stream_buffer = ""
         self._stream_open = False
         self._stream_last_emit = 0.0
+        self._last_activity_monotonic = time.monotonic()
+
+    def _touch_activity(self) -> None:
+        self._last_activity_monotonic = time.monotonic()
+
+    def seconds_since_activity(self) -> float:
+        return max(0.0, time.monotonic() - self._last_activity_monotonic)
 
     def _record_trace(
         self,
@@ -854,6 +861,7 @@ class _RuntimeProgress:
         text = str(line or "").strip()
         if not text:
             return
+        self._touch_activity()
         self.finish_stream()
         _record_runtime_event(
             self.slug,
@@ -871,6 +879,7 @@ class _RuntimeProgress:
         text = str(delta or "")
         if not text:
             return
+        self._touch_activity()
         self._stream_open = True
         self._stream_buffer += text
         now = time.monotonic()
@@ -943,6 +952,7 @@ class _RuntimeProgress:
         text = str(desc or "").strip()
         if not text or text == self._last_activity:
             return
+        self._touch_activity()
         self._last_activity = text
         self.emit(f"agent -> {text}")
 
@@ -956,6 +966,7 @@ class _RuntimeProgress:
     ) -> None:
         if not name:
             return
+        self._touch_activity()
         if event_type == "tool.started":
             self._last_tool_generating = ""
             suffix = f" · {preview}" if preview else ""
@@ -1115,6 +1126,11 @@ def _run_ceo_turn(
                         idle = float(agent.get_activity_summary().get("seconds_since_activity", 0.0))
                     except Exception:
                         idle = 0.0
+                if progress is not None:
+                    try:
+                        idle = min(idle, float(progress.seconds_since_activity()))
+                    except Exception:
+                        pass
                 if idle >= limit:
                     timed_out = True
                     break

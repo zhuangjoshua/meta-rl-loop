@@ -80,7 +80,8 @@ _LANE_SQL = "(case when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' els
 # a local operator shell may request "claim this first on workers whose id starts with X, then let
 # anyone drain it after N seconds". This keeps same-owner sibling workers on other machines from
 # hijacking a just-created business immediately, without stranding the job if the preferred machine
-# disappears. Jobs without the hint are unaffected.
+# disappears. Requeues renew the grace window off ``updated_at`` so a healthy local retry does not
+# immediately spill over to a sibling machine just because the original enqueue is old.
 _PREFERRED_WORKER_PREFIX_SQL = "coalesce(j.payload->>'preferred_worker_id_prefix', '')"
 _PREFERRED_WORKER_WINDOW_SQL = (
     "(case "
@@ -88,6 +89,7 @@ _PREFERRED_WORKER_WINDOW_SQL = (
     "then greatest(0.0, (j.payload->>'preferred_worker_claim_seconds')::double precision) "
     "else 0.0 end)"
 )
+_PREFERRED_WORKER_QUEUE_TIME_SQL = "greatest(j.created_at, j.updated_at)"
 
 # The columns of a jobs row, in one place so every SELECT projects the same Job.
 _COLS = (
@@ -296,7 +298,8 @@ def claim_one(
         f"  {_PREFERRED_WORKER_PREFIX_SQL} = '' "
         f"  or %s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
         f"  or {_PREFERRED_WORKER_WINDOW_SQL} <= 0 "
-        f"  or j.created_at <= (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second'))"
+        f"  or {_PREFERRED_WORKER_QUEUE_TIME_SQL} <= "
+        f"     (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second'))"
         ") "
     )
     preferred_order = (
@@ -304,7 +307,8 @@ def claim_one(
         f"when {_PREFERRED_WORKER_PREFIX_SQL} <> '' "
         f" and {_PREFERRED_WORKER_WINDOW_SQL} > 0 "
         f" and %s like ({_PREFERRED_WORKER_PREFIX_SQL} || '%%') "
-        f" and j.created_at > (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second')) "
+        f" and {_PREFERRED_WORKER_QUEUE_TIME_SQL} > "
+        f"     (now() - ({_PREFERRED_WORKER_WINDOW_SQL} * interval '1 second')) "
         "then 0 else 1 end, "
     )
 
