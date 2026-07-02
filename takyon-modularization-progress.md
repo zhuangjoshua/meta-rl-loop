@@ -103,12 +103,14 @@ _**Mixed-version window (expected, closing):** the E2E's strict reservation was 
 - ⬜ `takyon env create|status|destroy` over `environments/*.yaml` (idempotent, receipted)
 - **Proof:** clean slate → `takyon env create dev` → browser dashboard at `localhost:9119` → fresh business with real Stripe test checkout → **DB assertion: zero prod-plane rows changed**; `dev2` with zero human steps.
 
-### Stage 4a — subuser box unblocked · 🟡 IN BUILD (worktree `takyon-stage4a`, background build agent; Q16 "ship soon" adopted) → most of **UC2**
-_No new infrastructure. Constraints pinned: process-model changes ONLY (no auth/session/entitlement/webhook logic, role allowlist untouched — subuser security priority one); workers=N gated to the stateless subuser role via import-string (operator dashboard keeps module state → stays single-process); one shared conn pool extended, never a second pooling layer._
-- 🟡 `asyncio.to_thread` the blocking `/generate`//search + inline I/O handlers (mirror of the action path's existing pattern)
-- 🟡 `uvicorn workers=N` (subuser role + env gate; tracked service unit updated; Supavisor pooler role already provisioned)
-- 🟡 Pool the 3+ per-request fresh psycopg.connects (workers-aware sizing; per-site session semantics preserved)
-- 🟡 Same fixes on the safebox app (+ its tracked unit), with a module-global-state audit before enabling workers
+### Stage 4a — subuser box unblocked · ✅ DONE (landed ee6f8a4f, deployed all THREE hosts 2026-07-02) → most of **UC2**
+**Proof wired in:**
+- ✅ Event loop unblocked: `/generate`+`/search` (the 180s safebox→provider calls) + all 33 I/O-bound app-plane dispatch sites run via `asyncio.to_thread` (Stripe webhook handler deliberately untouched — webhook-logic constraint). 6 hermetic pins incl. broker-runs-off-loop.
+- ✅ `uvicorn workers=2` LIVE on the subuser box: supervisor + 2 spawned workers observed in the process tree (env via the tracked unit); product `/api` probes fast through the workers. Role-gated: the operator dashboard provably stays single-process (pin test). Workers-mode hardening: bound-host env stash keeps the DNS-rebinding host-header defence armed in every worker.
+- ✅ Per-request connects pooled through core's existing `_PostgresPool` under a dedicated `app-http` plane key (brokers, sql rate-limit, ai-gateway DI); checkout preserves exact fresh-connect session semantics, release resets ROLE + RLS GUCs.
+- ✅ Safebox: audited — all handlers sync `def` (Starlette threadpool already off-loop; honest no-op skip), no module-global mutable state → `workers=2` enabled via the tracked unit and **observed live: two worker pids serving healthz/session-token/`/v1/messages` 200s** under real traffic.
+- ✅ No security drift: process-model only; role allowlist/auth/session/entitlement/webhook logic untouched; web_server failure set strictly better than main baseline; safebox suites 83/83.
+- 📋 Full p95 head-of-line load proof deferred to the Stage-3 dev environment per plan (prod got the zero-risk probes only).
 - **Proof:** a stubbed 30s AI call no longer moves p95 of concurrent reads on the box.
 
 ### Stage 4b — N subuser replicas behind VPC LB · ⬜ 🔑DO → **UC2 ships**
