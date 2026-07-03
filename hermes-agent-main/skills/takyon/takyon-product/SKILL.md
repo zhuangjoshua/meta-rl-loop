@@ -82,7 +82,7 @@ The platform contract for product source — action-file shape, `user` + `entitl
 5. Delegate ONE bounded `business_claude_agent_task` on `product/site/`:
    - `business`, fresh `idempotency_key`, `workspace: product/site`, `refresh_surface: true`.
    - `instruction`: name the concrete product goal for this phase in business terms (the real customer job for `/app`, the specific flow/screen/price to change, the brand/offer to land on the landing page) plus the business + research context. Do NOT restate the platform contract — it is injected.
-   - `guidance_skills`: pass the design packs when you want a coherent visual direction (e.g. `claude-design` plus one style pack).
+   - `guidance_skills`: pass `claude-design` plus exactly ONE style pack chosen from the brief — `claude-design-openai` (calm AI/prosumer), `claude-design-stripe` (premium commercial/fintech), `claude-design-superhuman` (executive speed/focus), `claude-design-doodle` (playful consumer), `claude-design-brutalist` (dev tools, security/infra, technical/terminal brands). Reuse the pack recorded in the business design brief on later passes instead of re-choosing. On UI-refresh passes over an existing surface, add `claude-refresh-audit` so the worker audits before editing.
    - **Un-nerf the worker per call.** Pass a stronger model and a higher turn/budget/time ceiling than the tool defaults, because this is the highest-leverage product pass and a tight default budget makes the worker bail mid-build:
      - `model` — override the `claude-sonnet-5` product default only when a task needs a different lane for a specific reason.
      - `max_turns` — above the product default of 60 (cap 90), so a real workflow build finishes in one warm pass instead of hitting the turn cap.

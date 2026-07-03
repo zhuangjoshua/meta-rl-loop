@@ -16,6 +16,7 @@ Use this skill for outward-facing `product/site` work when visual quality matter
 - `claude-design-stripe`
 - `claude-design-superhuman`
 - `claude-design-doodle`
+- `claude-design-brutalist`
 
 Do not mix multiple style skills in the same worker run.
 
@@ -36,6 +37,7 @@ Choose one coherent visual direction from the available style packs before build
 - `claude-design-stripe`: premium commercial, fintech, infra, or polished B2B marketing
 - `claude-design-superhuman`: premium productivity, speed, focus, executive-feeling software
 - `claude-design-doodle`: whimsical playful consumer, pets, kids, casual social, deliberately lighthearted products
+- `claude-design-brutalist`: raw industrial/terminal precision for dev tools, security/infra, telemetry dashboards, experimental technical brands
 
 ## Workflow
 
@@ -62,6 +64,39 @@ Choose one coherent visual direction from the available style packs before build
 - Do not let a widened container get neutralized by capping both hero columns around the same mid-`500px` width. One side should push wider so the composition actually spans the page.
 - On wide monitors, outer gutters should not dominate the composition. If they do, widen the layout or reduce side padding before touching the copy.
 - For very wide screens, slightly asymmetrical hero splits such as `58/42` or `60/40` often feel better than a perfect `50/50` when the proof rail is otherwise reading too polite.
+
+## Layout Discipline
+
+Failing any of these is shipping broken work:
+
+- The hero must fit the initial viewport: headline max 2 lines on desktop, subtext max 20 words, CTAs visible without scrolling. If the copy overflows, cut copy or reduce scale; never let the hero force a scroll to find the CTA.
+- Plan headline size and hero asset together. A 4-line hero headline is a font-size error, not a copy-length error. Reserve the biggest display scales for 3-5 word headlines.
+- Hero top padding caps around `6rem` desktop; content floating halfway down the viewport reads as a layout bug, not intentional space.
+- Hero stack max 4 text elements: at most one eyebrow or brand strip, headline, subtext, CTAs (1 primary + max 1 secondary). Trust micro-strips, pricing teasers, feature bullets, and avatar rows move to their own sections below.
+- Logo walls ("Trusted by") live under the hero, never inside it.
+- Navigation renders on one line at desktop, max ~80px tall. A two-line desktop nav is broken design.
+- Eyebrow restraint: max 1 eyebrow (small uppercase tracking label) per 3 sections, hero included. If a section has one, the next two do not. Usually drop it; the headline alone is enough.
+- Once a layout family is used for a section (3-column cards, full-width quote, split text+image), it appears at most once more on the page. Max 2 consecutive image/text zigzag splits; the 3rd consecutive split fails review.
+- A bento/feature grid has exactly as many cells as there is content — never a blank filler tile — and needs background variety: at least 2-3 cells with a real image, tint, or pattern, not uniform white-on-white cards.
+- No split-header pattern (big left headline + small floating right paragraph) by default; stack headline over body at ~65ch instead.
+- Content density: per section, short headline (≤8 words) + short support (≤25 words) + one visual or CTA. Lists over 5 items need a different component (grouped chunks, card grid, tabs, carousel), not a longer list with a hairline under every row.
+- Quotes: max 3 lines, attribution is name + role, real typographic quotes or none.
+- One theme per page: sections never flip between light and dark mid-scroll. Background tints within the same family are fine; a cream section inside a dark page is broken.
+- Declare the mobile collapse for every multi-column layout explicitly; never assume the framework handles it.
+
+## Anti-Slop Tells
+
+Banned patterns unless the brief explicitly asks for one — these are the signatures of AI-generated design:
+
+- Visual: no neon/outer glows, no pure `#000000`, no oversaturated accents, no gradient text on large headers, no glassmorphism-by-default, no custom cursors.
+- Layout: no three identical feature cards in a row as the default feature section; use zigzag, asymmetric grid, or a different family.
+- Content: no "John Doe"/generic names, no egg avatars, no fake-perfect numbers (`99.99%`, `50%`) — organic data reads real (`47.2%`); no startup-slop brand names ("Acme", "Nexus", "SmartFlow"); no filler verbs ("Elevate", "Seamless", "Unleash", "Next-Gen", "Revolutionize").
+- Hero and labels: no version labels (`BETA`, `v2.0`, `EARLY ACCESS`) as default eyebrows; no section-number eyebrows (`01 / Capabilities`); no scroll cues ("Scroll to explore"); no decoration text strips (`DESIGN · BUILD · SHIP`) at the hero bottom; no locale/time/weather strips.
+- Fake previews: never build fake product UI out of styled `<div>`s in the hero — use a real screenshot, real component, or nothing; no fake version footers inside mock screenshots.
+- Copy: no "Quietly trusted by" social-proof headers; no mock-poetic section labels ("From the field", "On our desks") — plain functional labels; no micro-meta sentences under eyebrows; no generic step labels ("Step 1 / Step 2") — the verb is the label.
+- Separators: middle-dot (`·`) rationed to max 1 per metadata line; no decorative colored status dots unless they convey real semantic state; no hairline borders on every row of a long list.
+- Em-dash ban: zero em/en dashes (`—`, `–`) anywhere visible — headlines, body, quotes, captions, buttons. Use a period, comma, colon, or plain hyphen. One visible em-dash fails review.
+- Copy self-audit before finishing: re-read every visible string; rewrite anything grammatically broken, unclear in referent, or that reads like an LLM trying to sound thoughtful. Plain copy beats cute copy.
 
 ## Marketing Surfaces
 
@@ -91,6 +126,16 @@ Before finishing, check:
 - Does the page have one memorable quality?
 - Are states, spacing, and hierarchy resolved enough to feel intentionally designed?
 
+Then run the mechanical pass — each of these is a countable check, not a vibe:
+
+- Hero fits the first viewport with CTA visible; headline ≤2 lines; ≤4 hero text elements.
+- Eyebrow count ≤ ceil(sections / 3); no section-number or version-label eyebrows.
+- No 3 consecutive image/text split sections; ≥4 distinct layout families on a long page.
+- Zero em/en dashes visible anywhere on the page.
+- Zero fake div-built screenshots, fake-perfect numbers, or "John Doe" content.
+- Every visible string re-read and rewritten if broken, unclear, or AI-cute.
+- One page theme; no section flips between light and dark.
+
 ## Hard Rules
 
 - Use this skill with the shared style packs, but commit to one coherent visual direction in the artifact.
@@ -109,3 +154,5 @@ This skill was adapted from the copied Open Design files under:
 - `references/open-design/saas-landing/`
 - `references/open-design/dashboard/`
 - `references/open-design/critique/`
+
+The `Layout Discipline` and `Anti-Slop Tells` sections are curated from taste-skill (https://github.com/Leonxlnx/taste-skill), MIT License, Copyright (c) 2026 Leonxlnx.

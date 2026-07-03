@@ -1,0 +1,88 @@
+---
+name: claude-refresh-audit
+description: Audit-first method for upgrading an EXISTING product surface to premium quality without breaking functionality. Pass alongside claude-design on UI-refresh passes.
+version: 1.0.0
+author: Four Manifold
+license: MIT
+platforms: [linux, macos]
+tags: [design, redesign, audit, refresh, frontend]
+---
+
+# Claude Refresh Audit
+
+Use this when the task is improving an EXISTING surface, not building a new one. It provides the audit method; the visual direction still comes from `claude-design` plus the business's chosen style pack.
+
+## When To Use
+
+- UI refresh or redesign passes on an existing `product/site`
+- "make it look better / more premium" requests against shipped pages
+- de-slopping a surface that reads as generic AI output
+
+Do not use for first builds; `claude-design` and the style pack own those.
+
+## Audit Method
+
+1. Scan: read the existing source; identify the styling method and current design patterns before touching anything.
+2. Diagnose: run the audit checklists below; list every generic pattern, weak point, and missing state found.
+3. Fix: apply targeted upgrades inside the existing stack. Do not rewrite from scratch; improve what is there, in small reviewable changes.
+
+## Design Audit
+
+Typography:
+- default fonts or Inter-everywhere; headlines without presence (increase display size, tighten tracking, reduce leading)
+- body text wider than ~65ch; only 400/700 weights (introduce 500/600 hierarchy)
+- proportional figures in data UI (use `font-variant-numeric: tabular-nums`)
+- orphaned last-line words (fix with `text-wrap: balance`)
+
+Color and surfaces:
+- pure `#000000` backgrounds (use off-black/charcoal); oversaturated accents; more than one accent color (pick one, remove the rest)
+- mixed warm and cool grays; purple/blue "AI gradient" aesthetic (the most common AI fingerprint)
+- untinted generic box-shadows; inconsistent lighting direction across shadows
+- a random dark section inside a light page (commit to one theme; contrast via same-family shades)
+- flat empty sections with zero depth (add subtle texture, imagery, or ambient background)
+
+Layout:
+- everything centered and symmetrical (break with offsets, mixed ratios, left-aligned headers)
+- three equal card columns as the feature row (replace with zigzag, asymmetric grid, or horizontal scroll)
+- `height: 100vh` sections (use `min-height: 100dvh`); no max-width container; uniform border-radius everywhere
+- CTAs at random heights in card groups (pin buttons to card bottoms); misaligned shared elements across side-by-side columns
+- mathematically-centered icons/text that look optically off (nudge 1-2px)
+
+Interactivity and states:
+- missing hover/active/pressed feedback; zero-duration transitions (use 200-300ms)
+- missing focus rings (accessibility requirement, not optional)
+- generic spinners instead of skeleton loaders; missing empty states and inline error states; `window.alert()` anywhere
+- dead `#` links; no active-page indication in nav; instant anchor jumps (add `scroll-behavior: smooth`)
+- animations on `top/left/width/height` (switch to `transform`/`opacity`)
+
+Content:
+- "John Doe" names, fake-round numbers (`99.99%`), "Acme Corp" brands, Lorem Ipsum
+- AI copy cliches ("Elevate", "Seamless", "Unleash", "Next-Gen", "Delve"); passive voice; "Oops!" errors; Title Case On Everything
+- identical blog dates; reused avatars for different people
+
+Components and icons:
+- border+shadow+white default cards; always filled+ghost button pairs; pill badges everywhere; accordion FAQs; 3-tower pricing with height as the only emphasis; modals for simple actions; 4-column footer link farms
+- Lucide/Feather-only icons (differentiate with Phosphor/Heroicons); cliche metaphors (rocketship=launch, shield=security); inconsistent stroke widths; missing favicon
+
+Code quality:
+- div soup (use semantic `<nav>/<main>/<article>/<section>`); inline styles mixed with the styling system; hardcoded pixel widths; missing alt text; `z-index: 9999`; commented-out dead code; imports that do not exist in the dependency file
+
+## Fix Priority
+
+1. Fonts and type scale (biggest visible lift per line changed)
+2. Color discipline: one accent, one gray family, one theme
+3. Layout breaks: kill the three-card row, fix container width, align card internals
+4. States: hover, focus, loading, empty, error
+5. Content pass: names, numbers, copy register
+6. Texture and depth last; they polish, they do not rescue
+
+## Rules
+
+- Work with the existing stack; check the dependency file before using anything.
+- Never break functionality for aesthetics; behavior-preserving diffs only.
+- Keep changes small and reviewable; no wholesale rewrites.
+- The chosen style pack wins conflicts: its tokens, fonts, and posture override any suggestion here.
+
+## Local Sources
+
+Adapted from taste-skill `redesign-skill` (https://github.com/Leonxlnx/taste-skill), MIT License, Copyright (c) 2026 Leonxlnx. See `LICENSE` in this folder.
