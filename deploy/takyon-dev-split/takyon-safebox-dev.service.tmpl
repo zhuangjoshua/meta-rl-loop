@@ -1,0 +1,42 @@
+[Unit]
+Description=Takyon Safebox (dev)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Mirrors deploy/takyon-safebox/takyon-safebox.service (prod): dedicated takyon user, tree
+# read-only, VPC-bind only. Dev differences ONLY: TAKYON_ENV=dev and the dev VPC bind address.
+# The dev safebox is a SINGLETON secret authority, deliberately not replicated (plan §2.5).
+User=takyon
+Group=takyon
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
+WorkingDirectory=/opt/takyon/hermes-agent-main
+# The app reads TAKYON_SAFEBOX_TOKEN from process env and FAILS CLOSED (401-everything) when it
+# is missing — provision it in the env file before deploying this unit.
+EnvironmentFile=-/opt/takyon/.takyon/.env
+UnsetEnvironment=DATABASE_URL POSTGRES_URL POSTGRES_PRISMA_URL POSTGRES_URL_NON_POOLING
+UnsetEnvironment=TAKYON_OPERATOR_DATABASE_URL TAKYON_APP_DATABASE_URL TAKYON_MIGRATION_DATABASE_URL MIGRATION_DATABASE_URL TAKYON_RUNTIME_DATABASE_URL
+UnsetEnvironment=TAKYON_DEV_OPERATOR_DATABASE_URL TAKYON_DEV_RUNTIME_DATABASE_URL TAKYON_DEV_MIGRATION_DATABASE_URL TAKYON_DEV_ADMIN_DATABASE_URL
+UnsetEnvironment=TAKYON_DO_API_TOKEN
+Environment=TAKYON_HOME=/opt/takyon/.takyon
+Environment=HOME=/opt/takyon
+Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_ENV=dev
+Environment=TAKYON_HOST_ROLE=safebox
+# Stage 4a parity (and the 4c headroom subject): 2 stateless uvicorn workers — every safebox
+# handler is sync `def` (threadpool-run) and all mutable authority state lives in Postgres.
+Environment=TAKYON_UVICORN_WORKERS=2
+# Bind the dev VPC interface only — never 0.0.0.0; the public interface must not expose the
+# secret authority even with token auth in front of it (same rule as prod).
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host __BIND_IP__ --port 8000 --workers ${TAKYON_UVICORN_WORKERS}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

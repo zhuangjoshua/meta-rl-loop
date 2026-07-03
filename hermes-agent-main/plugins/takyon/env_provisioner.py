@@ -59,7 +59,8 @@ STATUS_DELETED = "deleted"      # destroy removed the resource
 class StepReceipt:
     """One structured, append-only receipt for a single provisioning step."""
 
-    resource: str                       # 'database' | 'safebox' | 'auth0' | 'cloudflare' | 'stripe' | 'droplet' | 'config'
+    resource: str                       # 'database' | 'safebox' | 'auth0' | 'cloudflare' | 'stripe' | 'vpc' |
+                                        # 'ssh_key' | 'droplets' | 'load_balancer' | 'firewall' | 'node_registry' | 'config'
     status: str                         # one of the STATUS_* constants above
     action: str                         # 'create' | 'status' | 'destroy'
     detail: str = ""                    # human-readable outcome
@@ -194,6 +195,9 @@ class EnvironmentProvisioner:
         # Per-run cache for a Management API token minted from client credentials, so one run's
         # create+destroy mints at most once. Never persisted.
         self._auth0_minted_token: str = ""
+        # Per-run DigitalOcean state threaded between the DO steps (vpc -> droplets -> lb ->
+        # firewall -> node registry). IDs only, never a credential. Reset per create()/destroy().
+        self._do_state: dict[str, Any] = {}
 
     # -- receipts I/O ------------------------------------------------------------------------
 
@@ -260,7 +264,15 @@ class EnvironmentProvisioner:
         receipts.append(self._append_receipt(self._create_auth0()))
         receipts.append(self._append_receipt(self._create_cloudflare()))
         receipts.append(self._append_receipt(self._create_stripe()))
-        receipts.append(self._append_receipt(self._create_droplet()))
+        # DigitalOcean dev-split twins (Stage 4b): order matters — the droplets join the VPC,
+        # the LB fronts the droplets (by role tag), the firewall references the LB id, and the
+        # node registry enrolls the created replicas.
+        receipts.append(self._append_receipt(self._create_vpc()))
+        receipts.append(self._append_receipt(self._create_ssh_key()))
+        receipts.append(self._append_receipt(self._create_droplets()))
+        receipts.append(self._append_receipt(self._create_load_balancer()))
+        receipts.append(self._append_receipt(self._create_firewall()))
+        receipts.append(self._append_receipt(self._register_replica_nodes()))
         receipts.append(self._append_receipt(self._write_config(receipts)))
         return ProvisionResult(name=self.name, action="create", receipts=tuple(receipts))
 
@@ -636,59 +648,535 @@ class EnvironmentProvisioner:
             data={"webhook_endpoint_id": (created or {}).get("id"), "events": len(events)},
         )
 
-    # (f) DigitalOcean droplet — optional dev compute, gated by manifest.droplet.enabled.
-    def _create_droplet(self) -> StepReceipt:
-        cfg = self.manifest.get("droplet") or {}
-        if not cfg.get("enabled", False):
-            return StepReceipt("droplet", STATUS_DISABLED, "create", "droplet twin disabled in manifest")
+    # ── (f) DigitalOcean dev split (Stage 4b): VPC + ssh key + N replicas + LB + firewall ──────
+    #
+    # Every resource is idempotent (looked up by name/tag before create), receipted, and tagged
+    # `takyon-env-<name>` so destroy() can sweep EXACTLY what this rail created. The subuser
+    # security model is identical to prod: replicas never hold operator/safebox DSNs, and the
+    # firewall admits :9119/:80 only from the LB (plus the env's own tagged droplets) and :22
+    # only from the operator's deposited CIDR.
 
-        token_alias = str(cfg.get("token_alias") or "TAKYON_DO_API_TOKEN").strip()
-        token = self._resolve_alias(token_alias)
+    _DO_BASE = "https://api.digitalocean.com/v2"
+
+    @property
+    def env_tag(self) -> str:
+        """The tag on every DO resource this environment owns; destroy sweeps this tag."""
+        return f"takyon-env-{self.name}"
+
+    def role_tag(self, role: str) -> str:
+        return f"{self.env_tag}-{str(role or '').strip().lower()}"
+
+    def _do_token_or_blocked(self, resource: str, action: str = "create") -> tuple[str, StepReceipt | None]:
+        """Resolve the DigitalOcean API token for a DO step, fail-closed. The alias chain is the
+        block's own ``token_alias``, then the droplets block's, then TAKYON_DO_API_TOKEN."""
+        cfg = self.manifest.get(resource) or {}
+        droplets_cfg = self.manifest.get("droplets") or {}
+        alias = str(
+            cfg.get("token_alias") or droplets_cfg.get("token_alias") or "TAKYON_DO_API_TOKEN"
+        ).strip()
+        token = self._resolve_alias(alias)
         if not token:
-            return StepReceipt(
-                "droplet", STATUS_BLOCKED, "create",
-                f"DigitalOcean API token not deposited (alias {token_alias}); "
-                "deposit TAKYON_DO_API_TOKEN once to enable autonomous dev droplet creation",
-                deposit=token_alias,
+            return "", StepReceipt(
+                resource, STATUS_BLOCKED, action,
+                f"DigitalOcean API token not deposited (alias {alias}); deposit it once to enable "
+                "autonomous dev compute provisioning",
+                deposit=alias,
             )
-        name = str(cfg.get("name") or f"takyon-{self.name}-1").strip()
-        base = "https://api.digitalocean.com/v2"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        return token, None
 
-        # === REAL DigitalOcean API calls (gated) ===
-        # Idempotent: look up an existing droplet by name before creating one.
+    def _do_headers(self, token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def _guard_do_block(self, cfg: Mapping[str, Any]) -> None:
+        """Prod-literal guard over a whole DO manifest block (names, ranges, urls)."""
+        self._assert_not_prod(json.dumps(dict(cfg), sort_keys=True, default=str))
+
+    # (f1) VPC — dev droplets live in their OWN network, never the prod VPC (10.116.0.0/20).
+    def _create_vpc(self) -> StepReceipt:
+        cfg = self.manifest.get("vpc") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("vpc", STATUS_DISABLED, "create", "vpc twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("vpc")
+        if blocked is not None:
+            return blocked
+        self._guard_do_block(cfg)
+        name = str(cfg.get("name") or f"takyon-{self.name}-vpc").strip()
+        region = str(cfg.get("region") or "nyc3").strip()
+        headers = self._do_headers(token)
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/vpcs?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("vpc", STATUS_ERROR, "create", f"vpc list failed: {exc}")
+        for v in (listed.get("vpcs") or []) if isinstance(listed, dict) else []:
+            if isinstance(v, dict) and str(v.get("name") or "") == name:
+                self._do_state["vpc_id"] = v.get("id")
+                return StepReceipt(
+                    "vpc", STATUS_EXISTS, "create", f"vpc {name!r} already exists",
+                    data={"vpc_id": v.get("id"), "ip_range": v.get("ip_range")},
+                )
+        body = {"name": name, "region": region}
+        ip_range = str(cfg.get("ip_range") or "").strip()
+        if ip_range:
+            body["ip_range"] = ip_range
+        try:
+            created = self.http.request("POST", f"{self._DO_BASE}/vpcs", headers=headers, body=body)
+        except Exception as exc:
+            return StepReceipt("vpc", STATUS_ERROR, "create", f"vpc create failed: {exc}")
+        vpc = (created or {}).get("vpc") if isinstance(created, dict) else {}
+        self._do_state["vpc_id"] = (vpc or {}).get("id")
+        return StepReceipt(
+            "vpc", STATUS_CREATED, "create", f"created dev vpc {name!r}",
+            data={"vpc_id": (vpc or {}).get("id"), "ip_range": (vpc or {}).get("ip_range") or ip_range},
+        )
+
+    # (f2) dedicated ssh key — the operator generates the keypair locally; the manifest points at
+    # the PUBLIC half (never a secret). Registered by name, idempotent.
+    def _create_ssh_key(self) -> StepReceipt:
+        cfg = self.manifest.get("ssh_key") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("ssh_key", STATUS_DISABLED, "create", "ssh_key twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("ssh_key")
+        if blocked is not None:
+            return blocked
+        name = str(cfg.get("name") or f"takyon-{self.name}-split").strip()
+        headers = self._do_headers(token)
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/account/keys?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("ssh_key", STATUS_ERROR, "create", f"ssh key list failed: {exc}")
+        for k in (listed.get("ssh_keys") or []) if isinstance(listed, dict) else []:
+            if isinstance(k, dict) and str(k.get("name") or "") == name:
+                self._do_state["ssh_key_id"] = k.get("id")
+                return StepReceipt(
+                    "ssh_key", STATUS_EXISTS, "create", f"ssh key {name!r} already registered",
+                    data={"ssh_key_id": k.get("id"), "fingerprint": k.get("fingerprint")},
+                )
+        pub_path = Path(str(cfg.get("public_key_path") or "")).expanduser()
+        if not str(cfg.get("public_key_path") or "").strip() or not pub_path.exists():
+            return StepReceipt(
+                "ssh_key", STATUS_BLOCKED, "create",
+                f"public key not found at ssh_key.public_key_path ({pub_path}); generate the dev "
+                "split keypair first (ssh-keygen -t ed25519 -N '' -f ~/.ssh/takyon_dev_split)",
+            )
+        try:
+            created = self.http.request(
+                "POST", f"{self._DO_BASE}/account/keys", headers=headers,
+                body={"name": name, "public_key": pub_path.read_text().strip()},
+            )
+        except Exception as exc:
+            return StepReceipt("ssh_key", STATUS_ERROR, "create", f"ssh key create failed: {exc}")
+        key = (created or {}).get("ssh_key") if isinstance(created, dict) else {}
+        self._do_state["ssh_key_id"] = (key or {}).get("id")
+        return StepReceipt(
+            "ssh_key", STATUS_CREATED, "create", f"registered dev ssh key {name!r}",
+            data={"ssh_key_id": (key or {}).get("id"), "fingerprint": (key or {}).get("fingerprint")},
+        )
+
+    # (f3) droplets — the REPLICATED subuser split (count × name_prefix-N) plus the optional
+    # singleton dev safebox host (the secret authority is deliberately NOT replicated).
+    def _create_droplets(self) -> StepReceipt:
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("droplets", STATUS_DISABLED, "create", "droplets twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("droplets")
+        if blocked is not None:
+            return blocked
+        self._guard_do_block(cfg)
+
+        role = str(cfg.get("role") or "subuser").strip().lower()
+        count = max(1, int(cfg.get("count") or 1))
+        prefix = str(cfg.get("name_prefix") or f"takyon-{self.name}-{role}").strip()
+        region = str(cfg.get("region") or "nyc3").strip()
+        size = str(cfg.get("size") or "s-1vcpu-2gb").strip()
+        headers = self._do_headers(token)
+
+        # Desired set: the N replicas, plus the singleton safebox host when declared.
+        desired: list[dict[str, Any]] = [
+            {"name": f"{prefix}-{i}", "role": role, "size": size} for i in range(1, count + 1)
+        ]
+        sb_host = cfg.get("safebox_host") or {}
+        if sb_host.get("enabled", False):
+            desired.append({
+                "name": str(sb_host.get("name") or f"takyon-{self.name}-safebox").strip(),
+                "role": "safebox",
+                "size": str(sb_host.get("size") or size).strip(),
+            })
+
+        # Idempotent: list the account's droplets and match the manifest-derived EXACT names.
+        # (Name-exact matching works on tokens without tag scope too; the env tag is still
+        # attempted on create, and the tags a droplet actually carries are recorded.)
         try:
             listed = self.http.request(
-                "GET", f"{base}/droplets?" + urllib.parse.urlencode({"name": name}), headers=headers
+                "GET", f"{self._DO_BASE}/droplets?per_page=200", headers=headers
             )
         except Exception as exc:
-            return StepReceipt("droplet", STATUS_ERROR, "create", f"droplet list failed: {exc}")
-        for d in (listed.get("droplets") or []) if isinstance(listed, dict) else []:
-            if isinstance(d, dict) and str(d.get("name") or "") == name:
-                return StepReceipt(
-                    "droplet", STATUS_EXISTS, "create",
-                    f"droplet {name!r} already exists",
-                    data={"droplet_id": d.get("id")},
-                )
-        body = {
-            "name": name,
-            "region": str(cfg.get("region") or "nyc3"),
-            "size": str(cfg.get("size") or "s-2vcpu-4gb"),
-            "image": "ubuntu-24-04-x64",
-            # cloud-init runs the node bootstrap with TAKYON_ENV=dev (plan §2.6): a dev droplet
-            # registers itself into the dev pool registry like any other node.
-            "user_data": "#cloud-config\nruncmd:\n  - echo 'TAKYON_ENV=dev' >> /etc/environment\n",
-            "tags": [f"takyon-env-{self.name}"],
+            return StepReceipt("droplets", STATUS_ERROR, "create", f"droplet list failed: {exc}")
+        existing = {
+            str(d.get("name") or ""): d
+            for d in ((listed.get("droplets") or []) if isinstance(listed, dict) else [])
+            if isinstance(d, dict)
         }
-        try:
-            created = self.http.request("POST", f"{base}/droplets", headers=headers, body=body)
-        except Exception as exc:
-            return StepReceipt("droplet", STATUS_ERROR, "create", f"droplet create failed: {exc}")
-        droplet = (created or {}).get("droplet") if isinstance(created, dict) else {}
+
+        results: list[dict[str, Any]] = []
+        created_any = False
+        for spec in desired:
+            name = spec["name"]
+            if name in existing:
+                d = existing[name]
+                results.append({
+                    "name": name, "role": spec["role"], "droplet_id": d.get("id"),
+                    "created": False, "tagged": self.env_tag in (d.get("tags") or []),
+                })
+                continue
+            body: dict[str, Any] = {
+                "name": name,
+                "region": region,
+                "size": spec["size"],
+                "image": str(cfg.get("image") or "ubuntu-24-04-x64"),
+                # cloud-init marks the node's environment; the real runtime bootstrap (rsync +
+                # venv + unit) is the tracked deploy rail, mirroring how prod hosts deploy.
+                "user_data": f"#cloud-config\nruncmd:\n  - echo 'TAKYON_ENV={self.name}' >> /etc/environment\n",
+                "tags": [self.env_tag, self.role_tag(spec["role"])],
+            }
+            if self._do_state.get("vpc_id"):
+                body["vpc_uuid"] = self._do_state["vpc_id"]
+            if self._do_state.get("ssh_key_id"):
+                body["ssh_keys"] = [self._do_state["ssh_key_id"]]
+            tagged = True
+            try:
+                created = self.http.request("POST", f"{self._DO_BASE}/droplets", headers=headers, body=body)
+            except Exception as exc:
+                # Scope fallback: a token WITHOUT tag:create (the dev token deliberately holds
+                # tag read-only) cannot mint the env tag at droplet create. Fall back to an
+                # untagged create — idempotency + destroy remain safe because both also match
+                # the manifest-derived exact names — and record tagged=false in the receipt.
+                if "tag" not in str(exc).lower():
+                    return StepReceipt(
+                        "droplets", STATUS_ERROR, "create", f"droplet create failed for {name!r}: {exc}",
+                        data={"droplets": results},
+                    )
+                body.pop("tags", None)
+                tagged = False
+                try:
+                    created = self.http.request("POST", f"{self._DO_BASE}/droplets", headers=headers, body=body)
+                except Exception as exc2:
+                    return StepReceipt(
+                        "droplets", STATUS_ERROR, "create", f"droplet create failed for {name!r}: {exc2}",
+                        data={"droplets": results},
+                    )
+            droplet = (created or {}).get("droplet") if isinstance(created, dict) else {}
+            results.append({
+                "name": name, "role": spec["role"], "droplet_id": (droplet or {}).get("id"),
+                "created": True, "tagged": tagged,
+            })
+            created_any = True
+
+        self._do_state["droplets"] = results
+        replica_names = [r["name"] for r in results if r["role"] == role]
         return StepReceipt(
-            "droplet", STATUS_CREATED, "create",
-            f"created dev droplet {name!r}",
-            data={"droplet_id": (droplet or {}).get("id")},
+            "droplets",
+            STATUS_CREATED if created_any else STATUS_EXISTS,
+            "create",
+            f"{len(replica_names)} {role} replica(s) "
+            + (f"+ safebox host " if sb_host.get("enabled", False) else "")
+            + ("provisioned" if created_any else "already present"),
+            data={"droplets": results, "tag": self.env_tag},
+        )
+
+    # (f4) load balancer — fronts the replicas by ROLE TAG (a future replica joins by tag, no LB
+    # edit), health-checked on the app plane's /healthz.
+    def _create_load_balancer(self) -> StepReceipt:
+        cfg = self.manifest.get("load_balancer") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("load_balancer", STATUS_DISABLED, "create", "load_balancer twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("load_balancer")
+        if blocked is not None:
+            return blocked
+        self._guard_do_block(cfg)
+
+        droplets_cfg = self.manifest.get("droplets") or {}
+        role = str(droplets_cfg.get("role") or "subuser").strip().lower()
+        name = str(cfg.get("name") or f"takyon-{self.name}-{role}-lb").strip()
+        region = str(cfg.get("region") or droplets_cfg.get("region") or "nyc3").strip()
+        headers = self._do_headers(token)
+
+        # Backend membership: tag-membership when the replicas actually carry the env tags (a
+        # future replica then joins by tag, no LB edit); explicit droplet_ids when the token
+        # lacks tag scope and the replicas are untagged (the recorded scope fallback above).
+        replicas = [
+            d for d in (self._do_state.get("droplets") or [])
+            if d.get("role") != "safebox" and d.get("droplet_id")
+        ]
+        replica_ids = [d["droplet_id"] for d in replicas]
+        tagged_mode = bool(replicas) and all(d.get("tagged") for d in replicas)
+
+        try:
+            listed = self.http.request(
+                "GET", f"{self._DO_BASE}/load_balancers?per_page=200", headers=headers
+            )
+        except Exception as exc:
+            return StepReceipt("load_balancer", STATUS_ERROR, "create", f"load balancer list failed: {exc}")
+
+        rules = list(cfg.get("forwarding_rules") or []) or [
+            {"entry_port": 80, "entry_protocol": "http", "target_port": 9119, "target_protocol": "http"},
+        ]
+        forwarding = [
+            {
+                "entry_protocol": str(r.get("entry_protocol") or "http"),
+                "entry_port": int(r.get("entry_port") or 80),
+                "target_protocol": str(r.get("target_protocol") or "http"),
+                "target_port": int(r.get("target_port") or 9119),
+            }
+            for r in rules if isinstance(r, dict)
+        ]
+        hc = cfg.get("health_check") or {}
+        body: dict[str, Any] = {
+            "name": name,
+            "region": region,
+            "forwarding_rules": forwarding,
+            "health_check": {
+                "protocol": str(hc.get("protocol") or "http"),
+                "port": int(hc.get("port") or 9119),
+                "path": str(hc.get("path") or "/healthz"),
+                "check_interval_seconds": int(hc.get("check_interval_seconds") or 10),
+                "response_timeout_seconds": int(hc.get("response_timeout_seconds") or 5),
+                "healthy_threshold": int(hc.get("healthy_threshold") or 3),
+                "unhealthy_threshold": int(hc.get("unhealthy_threshold") or 3),
+            },
+        }
+        if tagged_mode or not replica_ids:
+            body["tag"] = self.role_tag(role)
+        else:
+            body["droplet_ids"] = replica_ids
+        if self._do_state.get("vpc_id"):
+            body["vpc_uuid"] = self._do_state["vpc_id"]
+
+        for lb in (listed.get("load_balancers") or []) if isinstance(listed, dict) else []:
+            if not (isinstance(lb, dict) and str(lb.get("name") or "") == name):
+                continue
+            self._do_state["lb_id"] = lb.get("id")
+            # Idempotent reuse — but converge (full PUT of the same desired spec, which keeps
+            # the LB id + IP) when the live LB drifted from the manifest: missing replica ids
+            # (e.g. first created against a tag a scope-limited token cannot mint), or a
+            # health-check/forwarding change (e.g. tightened eviction thresholds).
+            have = set(lb.get("droplet_ids") or [])
+            members_stale = bool(replica_ids) and not tagged_mode and not set(replica_ids) <= have
+            live_hc = lb.get("health_check") or {}
+            hc_stale = any(live_hc.get(k) != v for k, v in body["health_check"].items())
+            live_rules = [
+                {k: r.get(k) for k in ("entry_protocol", "entry_port", "target_protocol", "target_port")}
+                for r in (lb.get("forwarding_rules") or []) if isinstance(r, dict)
+            ]
+            rules_stale = live_rules != forwarding
+            if members_stale or hc_stale or rules_stale:
+                try:
+                    self.http.request(
+                        "PUT", f"{self._DO_BASE}/load_balancers/{urllib.parse.quote(str(lb.get('id')))}",
+                        headers=headers, body=body,
+                    )
+                except Exception as exc:
+                    return StepReceipt("load_balancer", STATUS_ERROR, "create",
+                                       f"load balancer converge failed: {exc}")
+                drift = ", ".join(
+                    part for part, stale in (
+                        ("membership", members_stale), ("health check", hc_stale),
+                        ("forwarding rules", rules_stale),
+                    ) if stale
+                )
+                return StepReceipt(
+                    "load_balancer", STATUS_EXISTS, "create",
+                    f"load balancer {name!r} reused; converged {drift}",
+                    data={"lb_id": lb.get("id"), "ip": lb.get("ip"), "droplet_ids": replica_ids},
+                )
+            return StepReceipt(
+                "load_balancer", STATUS_EXISTS, "create", f"load balancer {name!r} already exists",
+                data={"lb_id": lb.get("id"), "ip": lb.get("ip"), "tag": lb.get("tag"),
+                      "droplet_ids": sorted(have)},
+            )
+
+        try:
+            created = self.http.request("POST", f"{self._DO_BASE}/load_balancers", headers=headers, body=body)
+        except Exception as exc:
+            return StepReceipt("load_balancer", STATUS_ERROR, "create", f"load balancer create failed: {exc}")
+        lb = (created or {}).get("load_balancer") if isinstance(created, dict) else {}
+        self._do_state["lb_id"] = (lb or {}).get("id")
+        backend = f"tag {self.role_tag(role)!r}" if "tag" in body else f"{len(replica_ids)} replica id(s)"
+        return StepReceipt(
+            "load_balancer", STATUS_CREATED, "create",
+            f"created load balancer {name!r} fronting {backend}",
+            data={"lb_id": (lb or {}).get("id"), "forwarding_rules": forwarding},
+        )
+
+    # (f5) firewall — applied to the env's droplets by tag: :22 from the operator's deposited
+    # CIDR only, :80/:9119 from the LB (+ the env's own droplets), :8000 (dev safebox) from the
+    # env's own droplets only. Everything else inbound is denied by DO's default-deny.
+    def _create_firewall(self) -> StepReceipt:
+        cfg = self.manifest.get("firewall") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("firewall", STATUS_DISABLED, "create", "firewall twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("firewall")
+        if blocked is not None:
+            return blocked
+        self._guard_do_block(cfg)
+
+        name = str(cfg.get("name") or f"takyon-{self.name}-fw").strip()
+        headers = self._do_headers(token)
+
+        # Membership: env tag when the droplets carry it; explicit droplet ids in the recorded
+        # scope fallback (token without tag:create → untagged droplets).
+        env_droplets = [d for d in (self._do_state.get("droplets") or []) if d.get("droplet_id")]
+        env_ids = [d["droplet_id"] for d in env_droplets]
+        tagged_mode = bool(env_droplets) and all(d.get("tagged") for d in env_droplets)
+
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/firewalls?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("firewall", STATUS_ERROR, "create", f"firewall list failed: {exc}")
+        lb_uid = str(self._do_state.get("lb_id") or "")
+        for fw in (listed.get("firewalls") or []) if isinstance(listed, dict) else []:
+            if isinstance(fw, dict) and str(fw.get("name") or "") == name:
+                self._do_state["firewall_id"] = fw.get("id")
+                have = set(fw.get("droplet_ids") or [])
+                members_stale = bool(env_ids) and not tagged_mode and not set(env_ids) <= have
+                # A recreated LB gets a NEW uid; rules referencing the old one silently block
+                # its health checks — converge whenever the current LB uid is absent.
+                referenced_uids = {
+                    uid
+                    for rule in (fw.get("inbound_rules") or []) if isinstance(rule, dict)
+                    for uid in ((rule.get("sources") or {}).get("load_balancer_uids") or [])
+                }
+                rules_stale = bool(lb_uid) and lb_uid not in referenced_uids
+                if not members_stale and not rules_stale:
+                    return StepReceipt(
+                        "firewall", STATUS_EXISTS, "create", f"firewall {name!r} already exists",
+                        data={"firewall_id": fw.get("id")},
+                    )
+                converge = self._firewall_body(cfg, name, env_ids, tagged_mode)
+                if isinstance(converge, StepReceipt):
+                    return converge
+                try:
+                    self.http.request(
+                        "PUT", f"{self._DO_BASE}/firewalls/{urllib.parse.quote(str(fw.get('id')))}",
+                        headers=headers, body=converge,
+                    )
+                except Exception as exc:
+                    return StepReceipt("firewall", STATUS_ERROR, "create",
+                                       f"firewall converge failed: {exc}")
+                return StepReceipt(
+                    "firewall", STATUS_EXISTS, "create",
+                    f"firewall {name!r} reused; converged "
+                    + ("membership" if members_stale else "")
+                    + (" and " if members_stale and rules_stale else "")
+                    + ("LB rule sources" if rules_stale else ""),
+                    data={"firewall_id": fw.get("id"), "droplet_ids": env_ids},
+                )
+
+        body = self._firewall_body(cfg, name, env_ids, tagged_mode)
+        if isinstance(body, StepReceipt):
+            return body
+        ssh_cidrs = body["inbound_rules"][0]["sources"]["addresses"]
+        lb_uids = [lb_uid] if lb_uid else []
+        try:
+            created = self.http.request("POST", f"{self._DO_BASE}/firewalls", headers=headers, body=body)
+        except Exception as exc:
+            return StepReceipt("firewall", STATUS_ERROR, "create", f"firewall create failed: {exc}")
+        fw = (created or {}).get("firewall") if isinstance(created, dict) else {}
+        self._do_state["firewall_id"] = (fw or {}).get("id")
+        target = f"tag {self.env_tag!r}" if "tags" in body else f"{len(env_ids)} droplet id(s)"
+        return StepReceipt(
+            "firewall", STATUS_CREATED, "create",
+            f"created firewall {name!r} over {target} (ssh from {len(ssh_cidrs)} cidr(s), "
+            f"app ports from {'the LB' if lb_uids else 'env droplets only'})",
+            data={"firewall_id": (fw or {}).get("id")},
+        )
+
+    def _firewall_body(self, cfg: Mapping[str, Any], name: str, env_ids: list,
+                       tagged_mode: bool) -> "dict[str, Any] | StepReceipt":
+        """The DESIRED firewall spec (shared by create + converge). Returns a blocked receipt
+        when the operator SSH CIDR is not deposited — an absent deposit must not widen :22."""
+        ssh_alias = str(cfg.get("ssh_allow_alias") or "TAKYON_DEV_SSH_ALLOW_CIDR").strip()
+        ssh_raw = self._resolve_alias(ssh_alias)
+        if not ssh_raw:
+            return StepReceipt(
+                "firewall", STATUS_BLOCKED, "create",
+                f"operator SSH CIDR not deposited (alias {ssh_alias}); deposit e.g. <your-ip>/32 "
+                "so :22 stays closed to everyone else",
+                deposit=ssh_alias,
+            )
+        ssh_cidrs = [c.strip() for c in ssh_raw.split(",") if c.strip()]
+        lb_uids = [self._do_state["lb_id"]] if self._do_state.get("lb_id") else []
+        own = {"tags": [self.env_tag]} if (tagged_mode or not env_ids) else {"droplet_ids": env_ids}
+        inbound: list[dict[str, Any]] = [
+            {"protocol": "tcp", "ports": "22", "sources": {"addresses": ssh_cidrs}},
+            {"protocol": "tcp", "ports": "9119",
+             "sources": {"load_balancer_uids": lb_uids, **own} if lb_uids else dict(own)},
+            {"protocol": "tcp", "ports": "80",
+             "sources": {"load_balancer_uids": lb_uids, **own} if lb_uids else dict(own)},
+            # dev safebox (:8000) is VPC-internal only: reachable from the env's own droplets.
+            {"protocol": "tcp", "ports": "8000", "sources": dict(own)},
+        ]
+        outbound = [
+            {"protocol": "tcp", "ports": "all", "destinations": {"addresses": ["0.0.0.0/0", "::/0"]}},
+            {"protocol": "udp", "ports": "all", "destinations": {"addresses": ["0.0.0.0/0", "::/0"]}},
+            {"protocol": "icmp", "destinations": {"addresses": ["0.0.0.0/0", "::/0"]}},
+        ]
+        body: dict[str, Any] = {"name": name, "inbound_rules": inbound, "outbound_rules": outbound}
+        if tagged_mode or not env_ids:
+            body["tags"] = [self.env_tag]
+        else:
+            body["droplet_ids"] = env_ids
+        return body
+
+    # (f6) node registry — enroll each replica in the environment's worker_pools registry (the
+    # Stage-2 pool registry doubling as the Stage-4 replica/node registry, plan §A.5). The
+    # subuser role CANNOT write worker_pools (migration 0059 revokes it — deliberately), so
+    # enrollment is done here by the provisioning authority over the migration DSN. Per-replica
+    # credential enrollment (plan Stage 4b security bullet) supersedes this when it lands.
+    def _register_replica_nodes(self) -> StepReceipt:
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("node_registry", STATUS_SKIPPED, "create", "no droplets twin — nothing to enroll")
+        replicas = [d for d in (self._do_state.get("droplets") or []) if d.get("role") != "safebox"]
+        if not replicas:
+            return StepReceipt("node_registry", STATUS_SKIPPED, "create", "no replicas provisioned this run")
+
+        db_cfg = self.manifest.get("database") or {}
+        dsn_alias = str(db_cfg.get("dsn_alias") or "").strip()
+        dsn = self._resolve_alias(dsn_alias) if dsn_alias else ""
+        if not dsn:
+            return StepReceipt(
+                "node_registry", STATUS_BLOCKED, "create",
+                f"cannot enroll replicas: dev control-plane DSN not deposited (alias {dsn_alias or 'unset'})",
+                deposit=dsn_alias or None,
+            )
+        self._assert_not_prod(dsn)
+        lease = float(cfg.get("node_lease_seconds") or 7 * 86400)
+        try:
+            import psycopg
+            from . import claim_scope
+            with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
+                for rep in replicas:
+                    claim_scope.register_pool(
+                        conn,
+                        pool_id=str(rep["name"]),
+                        hostname=str(rep["name"]),
+                        exclusive=False,
+                        concurrency=1,
+                        capabilities={
+                            "env": self.name,
+                            "role": str(rep.get("role") or ""),
+                            "replica": True,
+                            "droplet_id": rep.get("droplet_id"),
+                        },
+                        lease_seconds=lease,
+                    )
+        except Exception as exc:
+            return StepReceipt("node_registry", STATUS_ERROR, "create", f"replica enrollment failed: {exc}")
+        names = [str(r["name"]) for r in replicas]
+        return StepReceipt(
+            "node_registry", STATUS_CREATED, "create",
+            f"enrolled {len(names)} replica node(s) in worker_pools: {', '.join(names)}",
+            data={"registered": names, "lease_seconds": lease},
         )
 
     # Write the resolved pointers a dev RuntimeContext.from_env reads. Never writes a secret VALUE —
@@ -777,9 +1265,16 @@ class EnvironmentProvisioner:
                             deposit=None if has else id_alias)
             )
 
+        droplets_alias = str(
+            (self.manifest.get("droplets") or {}).get("token_alias") or "TAKYON_DO_API_TOKEN"
+        ).strip()
         for resource, alias_key, default_alias in (
             ("cloudflare", "token_alias", "CLOUDFLARE_API_TOKEN"),
-            ("droplet", "token_alias", "TAKYON_DO_API_TOKEN"),
+            ("vpc", "token_alias", droplets_alias),
+            ("ssh_key", "token_alias", droplets_alias),
+            ("droplets", "token_alias", droplets_alias),
+            ("load_balancer", "token_alias", droplets_alias),
+            ("firewall", "token_alias", droplets_alias),
         ):
             cfg = self.manifest.get(resource) or {}
             if not cfg.get("enabled", False):
@@ -834,13 +1329,22 @@ class EnvironmentProvisioner:
         receipts.append(self._append_receipt(self._destroy_auth0()))
         # Stripe test webhook removal (idempotent).
         receipts.append(self._append_receipt(self._destroy_stripe()))
-        # DB + safebox + cloudflare + droplet destruction is intentionally NOT automated here: deleting
-        # a Supabase project / R2 bucket / droplet is a high-blast-radius act better done deliberately.
+        # DigitalOcean dev-split teardown IS automated (Stage 4b): every droplet/LB/firewall this
+        # rail created carries the env tag, so the sweep deletes EXACTLY the tagged set (plus the
+        # manifest-named ssh key + vpc, which DO cannot tag). Reverse creation order so the VPC
+        # is empty by the time it is removed.
+        receipts.append(self._append_receipt(self._destroy_firewall()))
+        receipts.append(self._append_receipt(self._destroy_load_balancer()))
+        receipts.append(self._append_receipt(self._destroy_droplets()))
+        receipts.append(self._append_receipt(self._decommission_replica_nodes()))
+        receipts.append(self._append_receipt(self._destroy_ssh_key()))
+        receipts.append(self._append_receipt(self._destroy_vpc()))
+        # DB + safebox + cloudflare destruction is intentionally NOT automated here: deleting a
+        # Supabase project / R2 bucket is a high-blast-radius act better done deliberately.
         # We receipt them as skipped with the manual pointer rather than silently doing nothing.
         for resource, note in (
             ("database", "drop the dev Supabase project manually (high blast radius); receipts record what was applied"),
             ("cloudflare", "delete the dev R2 bucket / DNS records manually if created"),
-            ("droplet", "destroy the dev droplet manually via the DO console/API if created"),
         ):
             if (self.manifest.get(resource) or {}).get("enabled", False):
                 receipts.append(self._append_receipt(StepReceipt(resource, STATUS_SKIPPED, "destroy", note)))
@@ -948,6 +1452,208 @@ class EnvironmentProvisioner:
             return StepReceipt("stripe", STATUS_ERROR, "destroy", f"stripe webhook delete failed: {exc}")
         return StepReceipt("stripe", STATUS_DELETED, "destroy", f"deleted stripe test webhook for {webhook_url}",
                            data={"webhook_endpoint_id": ep_id})
+
+    # ── DigitalOcean teardown (tag-anchored: only the env's own resources are touched) ───────
+
+    def _destroy_firewall(self) -> StepReceipt:
+        cfg = self.manifest.get("firewall") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("firewall", STATUS_DISABLED, "destroy", "firewall twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("firewall", "destroy")
+        if blocked is not None:
+            return blocked
+        headers = self._do_headers(token)
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/firewalls?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("firewall", STATUS_ERROR, "destroy", f"firewall list failed: {exc}")
+        name = str(cfg.get("name") or f"takyon-{self.name}-fw").strip()
+        deleted: list[str] = []
+        for fw in (listed.get("firewalls") or []) if isinstance(listed, dict) else []:
+            if not isinstance(fw, dict):
+                continue
+            # Ours = targets the env tag, or carries the manifest name. Never touch anything else.
+            if self.env_tag in (fw.get("tags") or []) or str(fw.get("name") or "") == name:
+                try:
+                    self.http.request(
+                        "DELETE", f"{self._DO_BASE}/firewalls/{urllib.parse.quote(str(fw.get('id')))}",
+                        headers=headers,
+                    )
+                except Exception as exc:
+                    return StepReceipt("firewall", STATUS_ERROR, "destroy", f"firewall delete failed: {exc}")
+                deleted.append(str(fw.get("id")))
+        if not deleted:
+            return StepReceipt("firewall", STATUS_SKIPPED, "destroy", "no env-tagged firewall found")
+        return StepReceipt("firewall", STATUS_DELETED, "destroy",
+                           f"deleted {len(deleted)} firewall(s)", data={"firewall_ids": deleted})
+
+    def _destroy_load_balancer(self) -> StepReceipt:
+        cfg = self.manifest.get("load_balancer") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("load_balancer", STATUS_DISABLED, "destroy", "load_balancer twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("load_balancer", "destroy")
+        if blocked is not None:
+            return blocked
+        headers = self._do_headers(token)
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/load_balancers?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("load_balancer", STATUS_ERROR, "destroy", f"load balancer list failed: {exc}")
+        droplets_cfg = self.manifest.get("droplets") or {}
+        role = str(droplets_cfg.get("role") or "subuser").strip().lower()
+        name = str(cfg.get("name") or f"takyon-{self.name}-{role}-lb").strip()
+        deleted: list[str] = []
+        for lb in (listed.get("load_balancers") or []) if isinstance(listed, dict) else []:
+            if not isinstance(lb, dict):
+                continue
+            # Ours = fronts one of the env's role tags, or carries the manifest name.
+            backend_tag = str(lb.get("tag") or "")
+            if backend_tag.startswith(f"{self.env_tag}-") or backend_tag == self.env_tag \
+                    or str(lb.get("name") or "") == name:
+                try:
+                    self.http.request(
+                        "DELETE", f"{self._DO_BASE}/load_balancers/{urllib.parse.quote(str(lb.get('id')))}",
+                        headers=headers,
+                    )
+                except Exception as exc:
+                    return StepReceipt("load_balancer", STATUS_ERROR, "destroy", f"load balancer delete failed: {exc}")
+                deleted.append(str(lb.get("id")))
+        if not deleted:
+            return StepReceipt("load_balancer", STATUS_SKIPPED, "destroy", "no env load balancer found")
+        return StepReceipt("load_balancer", STATUS_DELETED, "destroy",
+                           f"deleted {len(deleted)} load balancer(s)", data={"lb_ids": deleted})
+
+    def _destroy_droplets(self) -> StepReceipt:
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("droplets", STATUS_DISABLED, "destroy", "droplets twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("droplets", "destroy")
+        if blocked is not None:
+            return blocked
+        headers = self._do_headers(token)
+        # Deletable set = the env TAG set ∪ the manifest-derived EXACT names (covers droplets a
+        # tag-scope-limited token had to create untagged). Both selectors are provably ours;
+        # nothing else in the account is ever touched.
+        role = str(cfg.get("role") or "subuser").strip().lower()
+        prefix = str(cfg.get("name_prefix") or f"takyon-{self.name}-{role}").strip()
+        count = max(1, int(cfg.get("count") or 1))
+        owned_names = {f"{prefix}-{i}" for i in range(1, count + 1)}
+        sb_host = cfg.get("safebox_host") or {}
+        if sb_host.get("enabled", False):
+            owned_names.add(str(sb_host.get("name") or f"takyon-{self.name}-safebox").strip())
+        try:
+            listed = self.http.request(
+                "GET", f"{self._DO_BASE}/droplets?per_page=200", headers=headers
+            )
+        except Exception as exc:
+            return StepReceipt("droplets", STATUS_ERROR, "destroy", f"droplet list failed: {exc}")
+        deleted: list[dict[str, Any]] = []
+        for d in (listed.get("droplets") or []) if isinstance(listed, dict) else []:
+            if not isinstance(d, dict):
+                continue
+            if self.env_tag not in (d.get("tags") or []) and str(d.get("name") or "") not in owned_names:
+                continue
+            try:
+                self.http.request(
+                    "DELETE", f"{self._DO_BASE}/droplets/{urllib.parse.quote(str(d.get('id')))}",
+                    headers=headers,
+                )
+            except Exception as exc:
+                return StepReceipt("droplets", STATUS_ERROR, "destroy",
+                                   f"droplet delete failed for {d.get('name')!r}: {exc}",
+                                   data={"deleted": deleted})
+            deleted.append({"name": d.get("name"), "droplet_id": d.get("id")})
+        if not deleted:
+            return StepReceipt("droplets", STATUS_SKIPPED, "destroy",
+                               f"no droplets tagged {self.env_tag!r} or named {sorted(owned_names)}")
+        return StepReceipt("droplets", STATUS_DELETED, "destroy",
+                           f"deleted {len(deleted)} env droplet(s)",
+                           data={"deleted": deleted, "tag": self.env_tag})
+
+    def _decommission_replica_nodes(self) -> StepReceipt:
+        """Best-effort: flip the env's replica rows in worker_pools to 'decommissioned' so the dev
+        control plane (which destroy deliberately leaves standing) does not show ghost nodes."""
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("node_registry", STATUS_DISABLED, "destroy", "droplets twin disabled in manifest")
+        db_cfg = self.manifest.get("database") or {}
+        dsn = self._resolve_alias(str(db_cfg.get("dsn_alias") or ""))
+        if not dsn:
+            return StepReceipt("node_registry", STATUS_SKIPPED, "destroy", "dev DSN absent; nothing to decommission")
+        try:
+            self._assert_not_prod(dsn)
+            import psycopg
+            with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
+                row = conn.execute(
+                    "update worker_pools set status = 'decommissioned', updated_at = now()"
+                    " where capabilities->>'env' = %s and status <> 'decommissioned'"
+                    " returning pool_id",
+                    (self.name,),
+                ).fetchall()
+        except Exception as exc:
+            return StepReceipt("node_registry", STATUS_ERROR, "destroy", f"node decommission failed: {exc}")
+        if not row:
+            return StepReceipt("node_registry", STATUS_SKIPPED, "destroy", "no live env nodes registered")
+        return StepReceipt("node_registry", STATUS_DELETED, "destroy",
+                           f"decommissioned {len(row)} node row(s)")
+
+    def _destroy_ssh_key(self) -> StepReceipt:
+        cfg = self.manifest.get("ssh_key") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("ssh_key", STATUS_DISABLED, "destroy", "ssh_key twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("ssh_key", "destroy")
+        if blocked is not None:
+            return blocked
+        headers = self._do_headers(token)
+        name = str(cfg.get("name") or f"takyon-{self.name}-split").strip()
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/account/keys?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("ssh_key", STATUS_ERROR, "destroy", f"ssh key list failed: {exc}")
+        key_id = next(
+            (k.get("id") for k in ((listed.get("ssh_keys") or []) if isinstance(listed, dict) else [])
+             if isinstance(k, dict) and str(k.get("name") or "") == name),
+            None,
+        )
+        if key_id is None:
+            return StepReceipt("ssh_key", STATUS_SKIPPED, "destroy", f"no ssh key named {name!r}")
+        try:
+            self.http.request("DELETE", f"{self._DO_BASE}/account/keys/{urllib.parse.quote(str(key_id))}",
+                              headers=headers)
+        except Exception as exc:
+            return StepReceipt("ssh_key", STATUS_ERROR, "destroy", f"ssh key delete failed: {exc}")
+        return StepReceipt("ssh_key", STATUS_DELETED, "destroy", f"deleted ssh key {name!r}",
+                           data={"ssh_key_id": key_id})
+
+    def _destroy_vpc(self) -> StepReceipt:
+        cfg = self.manifest.get("vpc") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("vpc", STATUS_DISABLED, "destroy", "vpc twin disabled in manifest")
+        token, blocked = self._do_token_or_blocked("vpc", "destroy")
+        if blocked is not None:
+            return blocked
+        headers = self._do_headers(token)
+        name = str(cfg.get("name") or f"takyon-{self.name}-vpc").strip()
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/vpcs?per_page=200", headers=headers)
+        except Exception as exc:
+            return StepReceipt("vpc", STATUS_ERROR, "destroy", f"vpc list failed: {exc}")
+        vpc_id = next(
+            (v.get("id") for v in ((listed.get("vpcs") or []) if isinstance(listed, dict) else [])
+             if isinstance(v, dict) and str(v.get("name") or "") == name),
+            None,
+        )
+        if vpc_id is None:
+            return StepReceipt("vpc", STATUS_SKIPPED, "destroy", f"no vpc named {name!r}")
+        try:
+            self.http.request("DELETE", f"{self._DO_BASE}/vpcs/{urllib.parse.quote(str(vpc_id))}",
+                              headers=headers)
+        except Exception as exc:
+            # DO refuses to delete a VPC while members are still tearing down; that is a re-run,
+            # not a leak — the droplets above were already deleted.
+            return StepReceipt("vpc", STATUS_ERROR, "destroy",
+                               f"vpc delete failed (droplet teardown may still be in flight; re-run destroy): {exc}")
+        return StepReceipt("vpc", STATUS_DELETED, "destroy", f"deleted vpc {name!r}", data={"vpc_id": vpc_id})
 
     def _destroy_local_state(self) -> StepReceipt:
         if not self.env_dir.exists():

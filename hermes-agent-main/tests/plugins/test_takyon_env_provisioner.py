@@ -45,14 +45,21 @@ class FakeSafebox:
 
 
 class FakeHttp(ep.HttpTransport):
-    """Records requests; returns queued responses keyed by (METHOD, url-substring)."""
+    """Records requests (including JSON bodies); returns queued responses keyed by
+    (METHOD, url-substring)."""
 
     def __init__(self, responses: dict[tuple[str, str], object] | None = None):
         self.responses = dict(responses or {})
         self.calls: list[tuple[str, str]] = []
+        self.requests: list[dict] = []
 
     def request(self, method, url, *, headers=None, body=None, form=None):
         self.calls.append((method, url))
+        # Copy the body: the provisioner may mutate its dict after a refused call (scope fallback).
+        self.requests.append({
+            "method": method, "url": url,
+            "body": dict(body) if isinstance(body, dict) else body, "form": form,
+        })
         for (m, sub), resp in self.responses.items():
             if m == method and sub in url:
                 return resp
@@ -75,8 +82,17 @@ def _provisioner(name="dev", *, safebox_values=None, http=None, manifest=None, h
 def test_dev_manifest_parses_and_has_required_keys():
     data = ep.load_manifest("dev")
     assert data["name"] == "dev"
-    for key in ("domains", "database", "safebox", "auth0", "cloudflare", "stripe", "droplet", "plans"):
+    for key in ("domains", "database", "safebox", "auth0", "cloudflare", "stripe", "plans",
+                "vpc", "ssh_key", "droplets", "load_balancer", "firewall"):
         assert key in data, f"dev.yaml missing {key}"
+    # Stage 4b dev split: two subuser replicas behind the LB, singleton safebox host.
+    assert data["droplets"]["count"] == 2
+    assert data["droplets"]["role"] == "subuser"
+    assert data["droplets"]["safebox_host"]["enabled"] is True
+    assert data["load_balancer"]["enabled"] is True
+    assert data["load_balancer"]["health_check"]["path"] == "/healthz"
+    # The dev VPC must not be the prod VPC range.
+    assert not str(data["vpc"]["ip_range"]).startswith("10.116.")
     # The DB step targets a dev migration DSN by ALIAS, never a literal.
     assert data["database"]["dsn_alias"] == "TAKYON_DEV_MIGRATION_DATABASE_URL"
     assert data["database"]["enabled"] is True
@@ -91,7 +107,8 @@ def test_dev_manifest_parses_and_has_required_keys():
 def test_hermetic_manifest_all_disabled():
     data = ep.load_manifest("hermetic")
     assert data["name"] == "hermetic"
-    for twin in ("database", "safebox", "auth0", "cloudflare", "stripe", "droplet"):
+    for twin in ("database", "safebox", "auth0", "cloudflare", "stripe",
+                 "vpc", "ssh_key", "droplets", "load_balancer", "firewall"):
         assert (data.get(twin) or {}).get("enabled", False) is False
 
 
@@ -608,3 +625,384 @@ def test_database_without_admin_dsn_skips_topology_and_says_so(monkeypatch):
     assert "run_migrations asserts" in receipt.detail
     # only the migration DSN was connected
     assert {dsn for dsn, _ in log} == {"postgresql://takyon_migration@dev-host/db"}
+
+
+# ── Stage 4b: replicated droplets + LB + firewall + ssh key + vpc + node enrollment ─────────
+
+
+def _do_manifest(tmp_path=None, **over):
+    """A dev manifest with the Stage-4b DigitalOcean split enabled and everything else off."""
+    pub = "ssh-ed25519 AAAA-test-key dev-split"
+    key_path = ""
+    if tmp_path is not None:
+        p = tmp_path / "takyon_dev_split.pub"
+        p.write_text(pub)
+        key_path = str(p)
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {"enabled": False},
+        "safebox": {"enabled": False},
+        "vpc": {"enabled": True, "name": "takyon-dev-vpc", "region": "nyc3", "ip_range": "10.200.0.0/24"},
+        "ssh_key": {"enabled": True, "name": "takyon-dev-split", "public_key_path": key_path},
+        "droplets": {
+            "enabled": True, "count": 2, "role": "subuser", "name_prefix": "takyon-dev-subuser",
+            "size": "s-1vcpu-2gb", "region": "nyc3", "token_alias": "TAKYON_DO_API_TOKEN",
+            "safebox_host": {"enabled": True, "name": "takyon-dev-safebox", "size": "s-1vcpu-1gb"},
+        },
+        "load_balancer": {
+            "enabled": True, "name": "takyon-dev-subuser-lb",
+            "health_check": {"path": "/healthz", "port": 9119},
+        },
+        "firewall": {"enabled": True, "name": "takyon-dev-split-fw",
+                     "ssh_allow_alias": "TAKYON_DEV_SSH_ALLOW_CIDR"},
+    }
+    manifest.update(over)
+    return manifest
+
+
+_DO_VALUES = {"TAKYON_DO_API_TOKEN": "do-token", "TAKYON_DEV_SSH_ALLOW_CIDR": "203.0.113.7/32"}
+
+
+def test_droplets_fail_closed_missing_do_token():
+    """Every DO step blocks naming the exact token alias — and makes NO provider call."""
+    http = FakeHttp()
+    prov = _provisioner(manifest=_do_manifest(), safebox_values={}, http=http)
+    for step in (prov._create_vpc, prov._create_ssh_key, prov._create_droplets,
+                 prov._create_load_balancer, prov._create_firewall):
+        receipt = step()
+        assert receipt.status == ep.STATUS_BLOCKED, receipt.resource
+        assert receipt.deposit == "TAKYON_DO_API_TOKEN"
+    assert http.calls == []
+
+
+def test_droplets_create_replicated_creates_only_missing(tmp_path):
+    """count=2 + safebox host with replica 1 already tagged: only replica 2 + the safebox host
+    are created; the receipt names all three with distinct identities."""
+    http = FakeHttp(responses={
+        ("GET", "/droplets?"): {"droplets": [{"id": 101, "name": "takyon-dev-subuser-1"}]},
+        ("POST", "/droplets"): {"droplet": {"id": 999}},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    receipt = prov._create_droplets()
+    assert receipt.status == ep.STATUS_CREATED
+    by_name = {d["name"]: d for d in receipt.data["droplets"]}
+    assert set(by_name) == {"takyon-dev-subuser-1", "takyon-dev-subuser-2", "takyon-dev-safebox"}
+    assert by_name["takyon-dev-subuser-1"]["created"] is False
+    assert by_name["takyon-dev-subuser-2"]["created"] is True
+    assert by_name["takyon-dev-safebox"]["role"] == "safebox"
+    posts = [r for r in http.requests if r["method"] == "POST"]
+    assert len(posts) == 2
+    for post in posts:
+        assert "takyon-env-dev" in post["body"]["tags"]
+
+
+def test_droplets_create_is_idempotent_when_all_exist(tmp_path):
+    http = FakeHttp(responses={
+        ("GET", "/droplets?"): {"droplets": [
+            {"id": 101, "name": "takyon-dev-subuser-1"},
+            {"id": 102, "name": "takyon-dev-subuser-2"},
+            {"id": 103, "name": "takyon-dev-safebox"},
+        ]},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    receipt = prov._create_droplets()
+    assert receipt.status == ep.STATUS_EXISTS
+    assert all(m == "GET" for m, _ in http.calls)
+
+
+class _TagScopeDeniedHttp(FakeHttp):
+    """Mimics the dev token's real scope set (tag is READ-ONLY): droplet create WITH tags is
+    refused exactly the way the DO API refuses it; untagged create succeeds."""
+
+    def request(self, method, url, *, headers=None, body=None, form=None):
+        if method == "POST" and url.endswith("/droplets") and (body or {}).get("tags"):
+            self.calls.append((method, url))
+            self.requests.append({"method": method, "url": url, "body": dict(body), "form": form})
+            raise ep.EnvironmentProvisionError(
+                'http POST https://api.digitalocean.com/v2/droplets -> 403: '
+                '{"id":"forbidden","message":"You are missing the required permission tag:create."}'
+            )
+        return super().request(method, url, headers=headers, body=body, form=form)
+
+
+def test_droplets_create_falls_back_untagged_on_missing_tag_scope(tmp_path):
+    """A token without tag:create (the deliberate dev grant) still provisions: the create retries
+    untagged and the receipt records tagged=false, so LB/firewall/destroy switch to id/name anchors."""
+    http = _TagScopeDeniedHttp(responses={
+        ("GET", "/droplets?"): {"droplets": []},
+        ("POST", "/droplets"): {"droplet": {"id": 555}},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    receipt = prov._create_droplets()
+    assert receipt.status == ep.STATUS_CREATED
+    assert all(d["tagged"] is False for d in receipt.data["droplets"])
+    untagged_posts = [r for r in http.requests
+                      if r["method"] == "POST" and not (r["body"] or {}).get("tags")]
+    assert len(untagged_posts) == 3  # two replicas + the safebox host
+
+
+def test_load_balancer_uses_droplet_ids_when_replicas_untagged(tmp_path):
+    http = FakeHttp(responses={
+        ("GET", "/load_balancers"): {"load_balancers": []},
+        ("POST", "/load_balancers"): {"load_balancer": {"id": "lb-2"}},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    prov._do_state["droplets"] = [
+        {"name": "takyon-dev-subuser-1", "role": "subuser", "droplet_id": 201, "tagged": False},
+        {"name": "takyon-dev-subuser-2", "role": "subuser", "droplet_id": 202, "tagged": False},
+        {"name": "takyon-dev-safebox", "role": "safebox", "droplet_id": 203, "tagged": False},
+    ]
+    receipt = prov._create_load_balancer()
+    assert receipt.status == ep.STATUS_CREATED
+    body = next(r for r in http.requests if r["method"] == "POST")["body"]
+    assert body["droplet_ids"] == [201, 202]  # replicas only, never the safebox host
+    assert "tag" not in body
+
+
+def test_firewall_uses_droplet_ids_when_untagged(tmp_path):
+    http = FakeHttp(responses={
+        ("GET", "/firewalls"): {"firewalls": []},
+        ("POST", "/firewalls"): {"firewall": {"id": "fw-2"}},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    prov._do_state["lb_id"] = "lb-2"
+    prov._do_state["droplets"] = [
+        {"name": "takyon-dev-subuser-1", "role": "subuser", "droplet_id": 201, "tagged": False},
+        {"name": "takyon-dev-subuser-2", "role": "subuser", "droplet_id": 202, "tagged": False},
+        {"name": "takyon-dev-safebox", "role": "safebox", "droplet_id": 203, "tagged": False},
+    ]
+    receipt = prov._create_firewall()
+    assert receipt.status == ep.STATUS_CREATED
+    body = next(r for r in http.requests if r["method"] == "POST")["body"]
+    rules = {r["ports"]: r["sources"] for r in body["inbound_rules"]}
+    assert rules["22"] == {"addresses": ["203.0.113.7/32"]}
+    assert rules["9119"] == {"load_balancer_uids": ["lb-2"], "droplet_ids": [201, 202, 203]}
+    assert rules["8000"] == {"droplet_ids": [201, 202, 203]}
+    assert body["droplet_ids"] == [201, 202, 203]
+    assert "tags" not in body
+
+
+def test_load_balancer_create_then_reuse(tmp_path):
+    """First run creates the LB (role-tag backend, /healthz check, 80→9119); a run against an
+    account where it exists reuses it with no POST."""
+    http = FakeHttp(responses={
+        ("GET", "/load_balancers"): {"load_balancers": []},
+        ("POST", "/load_balancers"): {"load_balancer": {"id": "lb-1"}},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    receipt = prov._create_load_balancer()
+    assert receipt.status == ep.STATUS_CREATED
+    post = next(r for r in http.requests if r["method"] == "POST")
+    assert post["body"]["tag"] == "takyon-env-dev-subuser"
+    assert post["body"]["health_check"]["path"] == "/healthz"
+    assert post["body"]["forwarding_rules"] == [
+        {"entry_protocol": "http", "entry_port": 80, "target_protocol": "http", "target_port": 9119},
+    ]
+    assert prov._do_state["lb_id"] == "lb-1"
+
+    http2 = FakeHttp(responses={
+        ("GET", "/load_balancers"): {"load_balancers": [
+            {"id": "lb-1", "name": "takyon-dev-subuser-lb", "ip": "192.0.2.10",
+             "tag": "takyon-env-dev-subuser",
+             "forwarding_rules": [{"entry_protocol": "http", "entry_port": 80,
+                                   "target_protocol": "http", "target_port": 9119}],
+             "health_check": {"protocol": "http", "port": 9119, "path": "/healthz",
+                              "check_interval_seconds": 10, "response_timeout_seconds": 5,
+                              "healthy_threshold": 3, "unhealthy_threshold": 3}},
+        ]},
+    })
+    prov2 = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http2)
+    receipt2 = prov2._create_load_balancer()
+    assert receipt2.status == ep.STATUS_EXISTS
+    assert receipt2.data["lb_id"] == "lb-1"
+    assert all(m == "GET" for m, _ in http2.calls)
+
+
+def test_load_balancer_converges_health_check_drift(tmp_path):
+    """A manifest health-check change (e.g. tightened eviction thresholds) converges the LIVE LB
+    via PUT — same LB id, same IP, no recreate."""
+    manifest = _do_manifest(tmp_path)
+    manifest["load_balancer"]["health_check"] = {
+        "path": "/healthz", "port": 9119,
+        "check_interval_seconds": 3, "unhealthy_threshold": 2, "healthy_threshold": 2,
+    }
+    http = FakeHttp(responses={
+        ("GET", "/load_balancers"): {"load_balancers": [
+            {"id": "lb-1", "name": "takyon-dev-subuser-lb", "ip": "192.0.2.10",
+             "forwarding_rules": [{"entry_protocol": "http", "entry_port": 80,
+                                   "target_protocol": "http", "target_port": 9119}],
+             "health_check": {"protocol": "http", "port": 9119, "path": "/healthz",
+                              "check_interval_seconds": 10, "response_timeout_seconds": 5,
+                              "healthy_threshold": 3, "unhealthy_threshold": 3}},
+        ]},
+    })
+    prov = _provisioner(manifest=manifest, safebox_values=_DO_VALUES, http=http)
+    receipt = prov._create_load_balancer()
+    assert receipt.status == ep.STATUS_EXISTS
+    assert "health check" in receipt.detail
+    put = next(r for r in http.requests if r["method"] == "PUT")
+    assert put["url"].endswith("/load_balancers/lb-1")
+    assert put["body"]["health_check"]["check_interval_seconds"] == 3
+    assert put["body"]["health_check"]["unhealthy_threshold"] == 2
+
+
+def test_firewall_fails_closed_without_ssh_cidr(tmp_path):
+    """No deposited operator CIDR → blocked naming the alias; :22 is never silently widened."""
+    http = FakeHttp(responses={("GET", "/firewalls"): {"firewalls": []}})
+    prov = _provisioner(
+        manifest=_do_manifest(tmp_path),
+        safebox_values={"TAKYON_DO_API_TOKEN": "do-token"},  # token but NO CIDR
+        http=http,
+    )
+    receipt = prov._create_firewall()
+    assert receipt.status == ep.STATUS_BLOCKED
+    assert receipt.deposit == "TAKYON_DEV_SSH_ALLOW_CIDR"
+    assert not any(m == "POST" for m, _ in http.calls)
+
+
+def test_firewall_rules_lock_down_ports(tmp_path):
+    """:22 only from the deposited CIDR, :9119/:80 from the LB + env droplets, :8000 from the
+    env's own droplets only."""
+    http = FakeHttp(responses={
+        ("GET", "/firewalls"): {"firewalls": []},
+        ("POST", "/firewalls"): {"firewall": {"id": "fw-1"}},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    prov._do_state["lb_id"] = "lb-1"
+    receipt = prov._create_firewall()
+    assert receipt.status == ep.STATUS_CREATED
+    body = next(r for r in http.requests if r["method"] == "POST")["body"]
+    rules = {r["ports"]: r["sources"] for r in body["inbound_rules"]}
+    assert rules["22"] == {"addresses": ["203.0.113.7/32"]}
+    assert rules["9119"] == {"load_balancer_uids": ["lb-1"], "tags": ["takyon-env-dev"]}
+    assert rules["80"] == {"load_balancer_uids": ["lb-1"], "tags": ["takyon-env-dev"]}
+    assert rules["8000"] == {"tags": ["takyon-env-dev"]}
+    assert body["tags"] == ["takyon-env-dev"]
+
+
+def test_firewall_converges_stale_lb_uid(tmp_path):
+    """A recreated LB gets a new uid; the existing firewall's rules must be converged (PUT) or
+    the LB's health checks stay silently blocked."""
+    http = FakeHttp(responses={
+        ("GET", "/firewalls"): {"firewalls": [{
+            "id": "fw-1", "name": "takyon-dev-split-fw", "droplet_ids": [201, 202, 203],
+            "inbound_rules": [
+                {"protocol": "tcp", "ports": "80",
+                 "sources": {"load_balancer_uids": ["lb-OLD"], "droplet_ids": [201, 202, 203]}},
+            ],
+        }]},
+    })
+    prov = _provisioner(manifest=_do_manifest(tmp_path), safebox_values=_DO_VALUES, http=http)
+    prov._do_state["lb_id"] = "lb-NEW"
+    prov._do_state["droplets"] = [
+        {"name": "takyon-dev-subuser-1", "role": "subuser", "droplet_id": 201, "tagged": False},
+        {"name": "takyon-dev-subuser-2", "role": "subuser", "droplet_id": 202, "tagged": False},
+        {"name": "takyon-dev-safebox", "role": "safebox", "droplet_id": 203, "tagged": False},
+    ]
+    receipt = prov._create_firewall()
+    assert receipt.status == ep.STATUS_EXISTS
+    assert "converged" in receipt.detail
+    put = next(r for r in http.requests if r["method"] == "PUT")
+    rules = {r["ports"]: r["sources"] for r in put["body"]["inbound_rules"]}
+    assert rules["80"]["load_balancer_uids"] == ["lb-NEW"]
+
+
+def test_replica_nodes_enroll_in_worker_pools(tmp_path, monkeypatch):
+    """Provisioned replicas (NOT the safebox host) enroll in the dev worker_pools registry over
+    the migration DSN — the subuser role itself cannot write that table (migration 0059)."""
+    import sys as _sys
+
+    log: list[tuple[str, str]] = []
+    monkeypatch.setitem(_sys.modules, "psycopg", _fake_psycopg(log))
+    manifest = _do_manifest(
+        tmp_path,
+        database={"enabled": True, "dsn_alias": "TAKYON_DEV_MIGRATION_DATABASE_URL"},
+    )
+    http = FakeHttp(responses={
+        ("GET", "/droplets?"): {"droplets": [
+            {"id": 101, "name": "takyon-dev-subuser-1"},
+            {"id": 102, "name": "takyon-dev-subuser-2"},
+            {"id": 103, "name": "takyon-dev-safebox"},
+        ]},
+    })
+    prov = _provisioner(
+        manifest=manifest,
+        safebox_values={**_DO_VALUES,
+                        "TAKYON_DEV_MIGRATION_DATABASE_URL": "postgresql://takyon_migration@dev-host/db"},
+        http=http,
+    )
+    assert prov._create_droplets().status == ep.STATUS_EXISTS
+    receipt = prov._register_replica_nodes()
+    assert receipt.status == ep.STATUS_CREATED
+    assert receipt.data["registered"] == ["takyon-dev-subuser-1", "takyon-dev-subuser-2"]
+    inserts = [sql for _dsn, sql in log if sql.startswith("insert into worker_pools")]
+    assert len(inserts) == 2
+
+
+def test_destroy_deletes_tagged_resources_only(tmp_path, monkeypatch):
+    """destroy --force sweeps EXACTLY the env-tagged droplets/LB/firewall (+ the manifest-named
+    ssh key and vpc) — a foreign droplet/LB/key in the same account is never touched."""
+    manifest = _do_manifest(tmp_path)
+    manifest["auth0"] = {"enabled": False}
+    manifest["stripe"] = {"enabled": False}
+    http = FakeHttp(responses={
+        # Account-wide listing: ours are selected by env tag OR manifest-derived exact name;
+        # the prod droplets (untagged, different names) must never be touched.
+        ("GET", "/droplets?"): {"droplets": [
+            {"id": 101, "name": "takyon-dev-subuser-1", "tags": ["takyon-env-dev"]},
+            {"id": 102, "name": "takyon-dev-subuser-2", "tags": []},   # untagged (scope fallback)
+            {"id": 103, "name": "takyon-dev-safebox", "tags": []},
+            {"id": 900, "name": "takyon-subuser", "tags": []},         # PROD — must survive
+            {"id": 901, "name": "takyon-safebox", "tags": []},         # PROD — must survive
+        ]},
+        ("GET", "/firewalls"): {"firewalls": [
+            {"id": "fw-1", "name": "takyon-dev-split-fw", "tags": ["takyon-env-dev"]},
+            {"id": "fw-prod", "name": "fourmanifold-edge", "tags": ["prod-edge"]},
+        ]},
+        ("GET", "/load_balancers"): {"load_balancers": [
+            {"id": "lb-1", "name": "takyon-dev-subuser-lb", "tag": "takyon-env-dev-subuser"},
+            {"id": "lb-other", "name": "some-other-lb", "tag": "unrelated"},
+        ]},
+        ("GET", "/account/keys"): {"ssh_keys": [
+            {"id": 7, "name": "takyon-dev-split"},
+            {"id": 8, "name": "operator-laptop"},
+        ]},
+        ("GET", "/vpcs"): {"vpcs": [
+            {"id": "vpc-1", "name": "takyon-dev-vpc"},
+            {"id": "vpc-prod", "name": "default-nyc1"},
+        ]},
+    })
+    prov = _provisioner(manifest=manifest, safebox_values=_DO_VALUES, http=http, home=tmp_path)
+    monkeypatch.setattr(prov, "_live_state_summary", lambda: None)
+    result = prov.destroy(force=True)
+    deletes = sorted(url for m, url in http.calls if m == "DELETE")
+    assert deletes == sorted([
+        f"{ep.EnvironmentProvisioner._DO_BASE}/firewalls/fw-1",
+        f"{ep.EnvironmentProvisioner._DO_BASE}/load_balancers/lb-1",
+        f"{ep.EnvironmentProvisioner._DO_BASE}/droplets/101",
+        f"{ep.EnvironmentProvisioner._DO_BASE}/droplets/102",
+        f"{ep.EnvironmentProvisioner._DO_BASE}/droplets/103",
+        f"{ep.EnvironmentProvisioner._DO_BASE}/account/keys/7",
+        f"{ep.EnvironmentProvisioner._DO_BASE}/vpcs/vpc-1",
+    ])
+    by_resource = {r.resource: r for r in result.receipts}
+    assert by_resource["droplets"].status == ep.STATUS_DELETED
+    assert by_resource["load_balancer"].status == ep.STATUS_DELETED
+    assert by_resource["firewall"].status == ep.STATUS_DELETED
+    assert by_resource["ssh_key"].status == ep.STATUS_DELETED
+    assert by_resource["vpc"].status == ep.STATUS_DELETED
+
+
+def test_destroy_do_steps_fail_closed_missing_token(tmp_path, monkeypatch):
+    manifest = _do_manifest(tmp_path)
+    manifest["auth0"] = {"enabled": False}
+    manifest["stripe"] = {"enabled": False}
+    http = FakeHttp()
+    prov = _provisioner(manifest=manifest, safebox_values={}, http=http, home=tmp_path)
+    monkeypatch.setattr(prov, "_live_state_summary", lambda: None)
+    result = prov.destroy(force=True)
+    blocked = {r.resource for r in result.receipts if r.status == ep.STATUS_BLOCKED}
+    assert {"droplets", "load_balancer", "firewall", "ssh_key", "vpc"} <= blocked
+    assert http.calls == []
+    assert not result.ok

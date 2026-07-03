@@ -141,12 +141,70 @@ stripe:
     - invoice.paid
     - invoice.payment_failed
 
-# (f) DigitalOcean droplet — OPTIONAL dev compute (off by default; dev starts LOCAL, plan §2.6/Q7).
-#     DO is the OTHER credential the safebox does not yet hold: a human deposits TAKYON_DO_API_TOKEN
-#     once. When enabled, cloud-init runs the node bootstrap with TAKYON_ENV=dev.
-droplet:
-  enabled: false
-  token_alias: TAKYON_DO_API_TOKEN
+# (f) DigitalOcean dev split (Stage 4b) — the two-replica subuser plane behind a VPC LB, plus the
+#     singleton dev safebox host. Operator approved the recurring dev cost (2026-07-02, ~$30/mo
+#     scale, smallest viable sizes, destroyable). Every resource is tagged `takyon-env-dev`;
+#     `takyon env destroy dev --force` sweeps exactly the tagged set (plus the named ssh key/vpc,
+#     which DO cannot tag). The token deposit is TAKYON_DO_API_TOKEN — one deposit, autonomous after.
+
+# (f1) Dedicated VPC — dev droplets NEVER join the prod VPC (10.116.0.0/20); the prod-literal guard
+#      also refuses any resolved prod address.
+vpc:
+  enabled: true
+  name: takyon-dev-vpc
   region: nyc3
-  size: s-2vcpu-4gb
-  name: takyon-dev-1
+  ip_range: 10.200.0.0/24
+
+# (f2) Dedicated deploy key (public half only; generate with
+#      `ssh-keygen -t ed25519 -N '' -f ~/.ssh/takyon_dev_split`).
+ssh_key:
+  enabled: true
+  name: takyon-dev-split
+  public_key_path: ~/.ssh/takyon_dev_split.pub
+
+# (f3) Replicated subuser droplets + the singleton dev safebox host (the secret authority is
+#      deliberately NOT replicated — plan §2.5). Smallest sizes that fit the runtime.
+droplets:
+  enabled: true
+  count: 2
+  role: subuser
+  name_prefix: takyon-dev-subuser
+  size: s-1vcpu-2gb            # 2 uvicorn workers of the app plane need >1GB headroom
+  region: nyc3
+  token_alias: TAKYON_DO_API_TOKEN
+  safebox_host:
+    enabled: true
+    name: takyon-dev-safebox
+    size: s-1vcpu-1gb          # safebox_app is lighter; VPC-internal only (:8000 via the firewall)
+
+# (f4) VPC load balancer fronting the replicas BY ROLE TAG (takyon-env-dev-subuser): a future
+#      replica joins by tag, no LB edit. Targets each replica's Caddy on :80 (prod topology:
+#      uvicorn stays on loopback behind Caddy — deploy/takyon-dev-split/Caddyfile.dev), health-
+#      checked on the app plane's /healthz through that same front.
+load_balancer:
+  enabled: true
+  name: takyon-dev-subuser-lb
+  region: nyc3
+  forwarding_rules:
+    - entry_port: 80
+      entry_protocol: http
+      target_port: 80
+      target_protocol: http
+  health_check:
+    protocol: http
+    port: 80
+    path: /healthz
+    # Tight eviction: a hard-killed replica black-holes leastconn traffic until eviction, so
+    # keep the detection window small (~2×3s; measured 36s at the DO defaults of 3×10s).
+    check_interval_seconds: 3
+    response_timeout_seconds: 3
+    unhealthy_threshold: 2
+    healthy_threshold: 2
+
+# (f5) Firewall over every takyon-env-dev droplet: :22 only from the operator CIDR deposited under
+#      ssh_allow_alias (fail-closed — no deposit, no firewall, never an open :22), :80/:9119 only
+#      from the LB + the env's own droplets, :8000 (dev safebox) only from the env's own droplets.
+firewall:
+  enabled: true
+  name: takyon-dev-split-fw
+  ssh_allow_alias: TAKYON_DEV_SSH_ALLOW_CIDR

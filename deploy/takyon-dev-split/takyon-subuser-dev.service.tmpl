@@ -1,0 +1,52 @@
+[Unit]
+Description=Takyon Sub-user Runtime (dev split replica)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Mirrors deploy/takyon-subuser/takyon-subuser.service (prod) — same least-privilege model,
+# same role gates, same UnsetEnvironment list, same loopback uvicorn bind behind Caddy :80
+# (deploy/takyon-dev-split/Caddyfile.dev; the DO LB forwards/health-checks :80 over the VPC).
+# Dev differences ONLY: TAKYON_ENV=dev, the dev base domain, the dev safebox VPC address, and
+# the per-replica node name.
+User=takyon
+Group=takyon
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
+WorkingDirectory=/opt/takyon/hermes-agent-main
+EnvironmentFile=-/opt/takyon/.takyon/.env
+# Product runtime may read non-secret runtime config from the env file, but paid-provider
+# credentials must stay behind the safebox/broker authority and must not be resident in
+# sub-user process env — identical to prod.
+UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY OPENAI_KEY AZURE_OPENAI_API_KEY AZURE_OPENAI_KEY TAVILY_API_KEY TAKYON_GEMINI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY FAL_KEY FAL_API_KEY REPLICATE_API_TOKEN COMPOSIO_API_KEY AUTH0_CLIENT_SECRET AUTH0_SECRET STRIPE_SECRET_KEY POSTMARK_SERVER_TOKEN SUPABASE_S3_SECRET_ACCESS_KEY R2_S3_SECRET_ACCESS_KEY CLOUDFLARE_API_TOKEN VERCEL_TOKEN
+UnsetEnvironment=DATABASE_URL POSTGRES_URL POSTGRES_PRISMA_URL POSTGRES_URL_NON_POOLING SUPABASE_JWT_SECRET SUPABASE_SERVICE_ROLE_KEY STRIPE_WEBHOOK_SECRET STRIPE_BILLING_WEBHOOK_SECRET TAKYON_SAFEBOX_OPERATOR_TOKEN
+UnsetEnvironment=TAKYON_OPERATOR_DATABASE_URL TAKYON_SAFEBOX_DATABASE_URL TAKYON_MIGRATION_DATABASE_URL MIGRATION_DATABASE_URL TAKYON_RUNTIME_DATABASE_URL
+# Dev twins of the authority DSNs must not be resident either (the replica holds ONLY the dev
+# runtime/app-plane DSN).
+UnsetEnvironment=TAKYON_DEV_OPERATOR_DATABASE_URL TAKYON_DEV_SAFEBOX_DATABASE_URL TAKYON_DEV_MIGRATION_DATABASE_URL TAKYON_DEV_ADMIN_DATABASE_URL
+UnsetEnvironment=TAKYON_CAP_SIGNING_KEY TAKYON_DO_API_TOKEN
+Environment=TAKYON_HOME=/opt/takyon/.takyon
+Environment=HOME=/opt/takyon
+Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
+Environment=TAKYON_DB_BACKEND=postgres
+Environment=TAKYON_ENV=dev
+Environment=TAKYON_HOST_ROLE=subuser
+Environment=TAKYON_NODE_NAME=__NODE_NAME__
+Environment=PUBLIC_COMPANY_BASE_DOMAIN=dev.coscale.app
+Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
+Environment=TAKYON_SAFEBOX_URL=http://__SAFEBOX_VPC_IP__:8000
+Environment=TAKYON_PROVIDER_BROKER=1
+# Stage 4a parity: 2 stateless uvicorn workers per replica.
+Environment=TAKYON_UVICORN_WORKERS=2
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

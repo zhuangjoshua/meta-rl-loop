@@ -1,0 +1,25 @@
+# Dev-split replica Caddyfile (Stage 4b) — mirrors the PROD topology (uvicorn stays on
+# loopback, Caddy fronts :80; the DO load balancer forwards/health-checks :80 over the VPC),
+# without prod's Cloudflare-origin allowlist/TLS/rate-limit blocks: on dev the tracked
+# takyon-env-dev firewall already restricts :80 to the LB + the env's own droplets, and there
+# is no public DNS in front. Host header passes through untouched — the app plane parses the
+# business slug out of it exactly as on prod.
+{
+	auto_https off
+}
+
+:80 {
+	# The DO LB health check probes with Host: cloud.digitalocean.com, which the app's
+	# DNS-rebinding defence (host_header_middleware) rightly rejects on a loopback bind.
+	# Pin Host to loopback for the health path ONLY — real app-plane traffic keeps its
+	# product Host so the dispatcher can resolve <slug>.dev.coscale.app.
+	@health path /healthz
+	handle @health {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host 127.0.0.1
+		}
+	}
+	handle {
+		reverse_proxy 127.0.0.1:9119
+	}
+}

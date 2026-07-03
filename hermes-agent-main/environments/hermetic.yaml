@@ -46,5 +46,17 @@ cloudflare:
 stripe:
   enabled: false
 
-droplet:
+vpc:
+  enabled: false
+
+ssh_key:
+  enabled: false
+
+droplets:
+  enabled: false
+
+load_balancer:
+  enabled: false
+
+firewall:
   enabled: false
