@@ -16,6 +16,7 @@ transaction/connection-pool strategy the caller chooses.
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from dataclasses import dataclass
@@ -25,6 +26,12 @@ from .user_api_keys import (
     generate_api_key,
     key_prefix,
 )
+
+_log = logging.getLogger(__name__)
+
+# SQLSTATE 42501 (insufficient_privilege) — matched by code, not by class, so this module keeps
+# taking psycopg connections without importing psycopg itself.
+_INSUFFICIENT_PRIVILEGE = "42501"
 
 
 @dataclass(frozen=True)
@@ -68,28 +75,50 @@ def _ensure_starter_allowance(conn, user_id: str, *, session_token: str | None =
     This keeps "your first company is on the house" honest for both fresh Auth0
     users and the local platform owner, without resetting any account that has
     already received allowance or spend.
-    """
+
+    Degrade, not fail (UC3 dev-twin acceptance): the precheck row-locks the ``billing_accounts``
+    row, and ``SELECT … FOR UPDATE`` needs table UPDATE — which migration 0044 revoked from every
+    runtime login role (``takyon_operator_runtime`` included; money-ledger writes go through the
+    Safebox authority / SECURITY DEFINER ports instead, see 0038/0056). No later migration or
+    topology grant restores it, so on the split planes — the prod operator host and every
+    prod-shaped twin alike — this precheck raises ``insufficient_privilege`` (SQLSTATE 42501).
+    That is a cosmetic limitation of the courtesy starter grant, not a provisioning failure: the
+    owner/key/account provisioning that leads here has already succeeded, and skipping the grant
+    moves no money (spend gates keep failing closed on an empty allowance). So 42501 degrades to
+    the documented warning below and returns 0; every other error still raises."""
     included_cents = _starter_allowance_cents()
     if included_cents <= 0:
         return 0
-    with conn.transaction():
-        acct = conn.execute(
-            "select allowance_included_cents, allowance_used_cents "
-            "from billing_accounts where user_id = %s for update",
-            (user_id,),
-        ).fetchone()
-        if acct is None:
-            raise RuntimeError(f"billing account missing for user {user_id}")
-        included = int(acct[0] or 0)
-        used = int(acct[1] or 0)
-        if included > 0 or used > 0:
-            return included
-        existing_entry = conn.execute(
-            "select 1 from billing_entries where user_id = %s limit 1",
-            (user_id,),
-        ).fetchone()
-        if existing_entry is not None:
-            return included
+    try:
+        with conn.transaction():
+            acct = conn.execute(
+                "select allowance_included_cents, allowance_used_cents "
+                "from billing_accounts where user_id = %s for update",
+                (user_id,),
+            ).fetchone()
+            if acct is None:
+                raise RuntimeError(f"billing account missing for user {user_id}")
+            included = int(acct[0] or 0)
+            used = int(acct[1] or 0)
+            if included > 0 or used > 0:
+                return included
+            existing_entry = conn.execute(
+                "select 1 from billing_entries where user_id = %s limit 1",
+                (user_id,),
+            ).fetchone()
+            if existing_entry is not None:
+                return included
+    except Exception as exc:
+        if str(getattr(exc, "sqlstate", "") or "") != _INSUFFICIENT_PRIVILEGE:
+            raise
+        _log.warning(
+            "starter allowance skipped for user %s: this plane's DB role cannot row-lock "
+            "billing_accounts (SQLSTATE 42501; migration 0044 revoked money-table UPDATE from "
+            "runtime roles). Cosmetic — provisioning already succeeded and no allowance moves; "
+            "grant allowance through the Safebox authority instead.",
+            user_id,
+        )
+        return 0
     return int(safebox.grant_starter_allowance(conn, user_id, session_token=session_token))
 
 

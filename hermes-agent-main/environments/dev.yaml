@@ -87,6 +87,14 @@ safebox:
     auth0:
       - AUTH0_CLIENT_SECRET
       - AUTH0_SECRET
+    # Supabase Auth for the DEV project — the subuser login rail. handle_business_supabase_login
+    # verifies product JWTs via app_supabase_auth, which resolves the project URL as SUPABASE_URL
+    # and the public/browser key as SUPABASE_ANON_KEY (both vendable public config, never the
+    # service-role key). Without these the dev twin has NO session-minting rail, so `takyon env
+    # status dev` must truthfully report them missing until the dev project's values are deposited.
+    supabase_auth:
+      - SUPABASE_URL                 # the DEV Supabase project URL (https://<ref>.supabase.co)
+      - SUPABASE_ANON_KEY            # the DEV project's anon/publishable browser key
 
 # (c) Auth0 dev APPLICATION — a new application (client id/secret, callback URLs) in the SAME tenant,
 #     created via the Management API. The mgmt credential is the one the safebox does NOT hold by

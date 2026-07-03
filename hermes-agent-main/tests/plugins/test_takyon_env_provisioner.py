@@ -102,6 +102,13 @@ def test_dev_manifest_parses_and_has_required_keys():
     assert data["auth0"]["mgmt_client_id_alias"] == "TAKYON_AUTH0_MGMT_CLIENT_ID"
     assert data["auth0"]["mgmt_client_secret_alias"] == "TAKYON_AUTH0_MGMT_CLIENT_SECRET"
     assert data["auth0"]["mgmt_token_alias"] == "TAKYON_AUTH0_MGMT_TOKEN"
+    # Subuser login rail (UC3 dev gap): the dev safebox must hold the DEV Supabase project's auth
+    # config — the EXACT aliases app_supabase_auth resolves for handle_business_supabase_login —
+    # so `takyon env status dev` truthfully reports them missing until deposited.
+    assert data["safebox"]["required_aliases"]["supabase_auth"] == [
+        "SUPABASE_URL",
+        "SUPABASE_ANON_KEY",
+    ]
 
 
 def test_hermetic_manifest_all_disabled():

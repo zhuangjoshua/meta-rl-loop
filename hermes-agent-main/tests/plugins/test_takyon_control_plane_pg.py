@@ -15,6 +15,7 @@ from psycopg import errors as pg_errors  # noqa: E402
 from plugins.takyon import safebox  # noqa: E402
 from plugins.takyon.billing import get_billing_balances, open_billing_account  # noqa: E402
 from plugins.takyon.control_plane import (  # noqa: E402
+    _ensure_starter_allowance,
     get_or_create_user,
     mint_api_key,
     provision_user_on_first_login,
@@ -63,6 +64,49 @@ def test_provision_grants_starter_allowance_to_existing_empty_account(pg_conn, m
     assert balances.allowance_included_cents == 250
     assert balances.allowance_remaining_cents == 250
     assert grants == 1
+
+
+def test_starter_allowance_degrades_to_warning_without_row_lock_privilege(pg_conn, monkeypatch, caplog):
+    """UC3 dev-twin acceptance gap: the boot-time platform-owner seed's starter-allowance precheck
+    does ``SELECT … FOR UPDATE`` on billing_accounts, which needs table UPDATE — revoked from
+    ``takyon_operator_runtime`` by migration 0044 (and never restored by 0045+/topology.sql: money
+    writes go through the Safebox authority / SECURITY DEFINER ports, see 0056). So on the operator
+    plane — prod and the dev twin alike — the precheck raises insufficient_privilege. It must
+    degrade to the documented cosmetic warning (return 0, no raise), never fail provisioning."""
+    import logging
+
+    sub = _sub()
+    monkeypatch.setenv("TAKYON_STARTER_ALLOWANCE_CENTS", "250")
+    uid, _ = get_or_create_user(pg_conn, sub, "locked@example.com")
+
+    pg_conn.execute("set role takyon_operator_runtime")
+    try:
+        with caplog.at_level(logging.WARNING, logger="plugins.takyon.control_plane"):
+            granted = _ensure_starter_allowance(pg_conn, uid)
+    finally:
+        pg_conn.execute("reset role")
+
+    assert granted == 0
+    assert any(
+        "starter allowance skipped" in rec.message and "billing_accounts" in rec.message
+        for rec in caplog.records
+    ), "the degrade must be a visible, documented warning"
+    # Nothing moved: no allowance grant entry exists for this user.
+    grants = pg_conn.execute(
+        "select count(*) from billing_entries where user_id = %s",
+        (uid,),
+    ).fetchone()[0]
+    assert grants == 0
+
+
+def test_starter_allowance_non_privilege_errors_still_raise(pg_conn, monkeypatch):
+    """Only insufficient_privilege degrades. A genuinely missing billing account (provisioning
+    invariant violation) keeps raising — the degrade must not become a blanket swallow."""
+    sub = _sub()
+    monkeypatch.setenv("TAKYON_STARTER_ALLOWANCE_CENTS", "250")
+    uid, _ = get_or_create_user(pg_conn, sub, "no-account@example.com")
+    with pytest.raises(RuntimeError, match="billing account missing"):
+        _ensure_starter_allowance(pg_conn, uid)
 
 
 def test_mint_then_resolve_round_trip(pg_conn):

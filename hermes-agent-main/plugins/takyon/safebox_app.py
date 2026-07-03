@@ -196,15 +196,28 @@ def _app_media_storage_key(business: str, media_id: str) -> str:
     return f"media/{_require_safe_slug(business)}/{_require_safe_media_id(media_id)}"
 
 
-def _domain_business_slug(domain: str) -> str:
-    name = str(domain or "").strip().lower().strip(".")
-    base = str(
+def _company_base_domain() -> str:
+    """The allowed product-host base domain for THIS environment (UC3 environment seam).
+
+    Resolution is exactly the ``PUBLIC_COMPANY_BASE_DOMAIN`` / ``TAKYON_COMPANY_BASE_DOMAIN``
+    config this safebox host already honors for product-host scoping (``_domain_business_slug``):
+    process env first, then the safebox env store. Unset everywhere -> ``coscale.app``, so prod
+    behavior is byte-identical. Only an environment that EXPLICITLY declares its base domain
+    (``environments/dev.yaml`` ``domains.company_base`` -> the dev safebox's env) shifts which
+    product hosts are acceptable — and only to that single declared base; every other host keeps
+    failing closed."""
+    return str(
         os.environ.get("PUBLIC_COMPANY_BASE_DOMAIN")
         or safebox.load_env().get("PUBLIC_COMPANY_BASE_DOMAIN")
         or os.environ.get("TAKYON_COMPANY_BASE_DOMAIN")
         or safebox.load_env().get("TAKYON_COMPANY_BASE_DOMAIN")
         or "coscale.app"
     ).strip().lower().strip(".")
+
+
+def _domain_business_slug(domain: str) -> str:
+    name = str(domain or "").strip().lower().strip(".")
+    base = _company_base_domain()
     suffix = f".{base}"
     if name == base or not name.endswith(suffix):
         raise HTTPException(status_code=403, detail="domain_not_product_scoped")
@@ -241,7 +254,9 @@ def _require_app_checkout_redirect_url(raw_url: str, *, business: str) -> None:
         raise HTTPException(status_code=403, detail="stripe_redirect_not_allowed")
     parsed = urllib.parse.urlsplit(url)
     host = str(parsed.hostname or "").strip().lower()
-    expected_host = f"{_require_safe_slug(business)}.coscale.app"
+    # Env-aware product host: <slug>.<declared company base>, defaulting to <slug>.coscale.app
+    # (prod byte-identical when nothing is declared — see _company_base_domain).
+    expected_host = f"{_require_safe_slug(business)}.{_company_base_domain()}"
     path = str(parsed.path or "")
     if (
         parsed.scheme != "https"

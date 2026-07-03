@@ -1399,3 +1399,122 @@ def test_provider_route_fails_closed_without_signing_key(monkeypatch):
     )
     assert resp.status_code == 503
     assert resp.json()["detail"] == "capability_signing_unconfigured"
+
+
+# ── checkout redirect host scoping (UC3 dev gap: env-aware product base domain) ──────────────────
+#
+# _require_app_checkout_redirect_url is the subuser-money redirect gate: Stripe Checkout success/
+# cancel URLs may only point at THIS business's product host under the environment's declared
+# company base domain. The first block CHARACTERIZES the prod-default accept/reject behavior
+# (nothing declared -> coscale.app, byte-identical before and after the environment seam); the
+# second block pins that a dev twin's base domain is honored ONLY when the environment explicitly
+# declares it (environments/dev.yaml domains.company_base -> PUBLIC_COMPANY_BASE_DOMAIN on the dev
+# safebox), and that everything else keeps failing closed.
+
+
+def _clear_declared_company_base(monkeypatch):
+    monkeypatch.delenv("PUBLIC_COMPANY_BASE_DOMAIN", raising=False)
+    monkeypatch.delenv("TAKYON_COMPANY_BASE_DOMAIN", raising=False)
+    monkeypatch.setattr(safebox_app.safebox, "load_env", lambda: {})
+
+
+def _redirect_allowed(url: str, business: str = "climblog") -> bool:
+    from fastapi import HTTPException
+
+    try:
+        safebox_app._require_app_checkout_redirect_url(url, business=business)
+        return True
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        assert exc.detail == "stripe_redirect_not_allowed"
+        return False
+
+
+def test_checkout_redirect_prod_default_accepts_only_business_coscale_app(monkeypatch):
+    """Characterization: with no base domain declared anywhere, the ONLY acceptable redirect host
+    is https://<slug>.coscale.app with an /app path — exactly today's prod behavior."""
+    _clear_declared_company_base(monkeypatch)
+    assert _redirect_allowed("https://climblog.coscale.app/app")
+    assert _redirect_allowed("https://climblog.coscale.app/app?checkout=success")
+    assert _redirect_allowed("https://climblog.coscale.app/app/settings?checkout=cancel")
+
+
+def test_checkout_redirect_prod_default_rejects_everything_else(monkeypatch):
+    _clear_declared_company_base(monkeypatch)
+    for url in (
+        "",  # empty
+        "https://climblog.coscale.app/app one two",  # interior whitespace (outer whitespace is stripped)
+        "http://climblog.coscale.app/app",  # scheme
+        "https://user:pw@climblog.coscale.app/app",  # userinfo
+        "https://other.coscale.app/app",  # another business's host
+        "https://coscale.app/app",  # bare base domain
+        "https://climblog.coscale.app/",  # not the /app surface
+        "https://climblog.coscale.app/application",  # /app prefix trick
+        "https://climblog.coscale.app.evil.example/app",  # suffix trick
+        "https://evil.example/app?next=climblog.coscale.app",  # off-platform
+        "https://climblog.dev.coscale.app/app",  # dev twin host is NOT acceptable undeclared
+    ):
+        assert not _redirect_allowed(url), f"must reject {url!r}"
+
+
+def test_checkout_redirect_honors_declared_dev_company_base(monkeypatch):
+    """A dev twin that explicitly declares its base domain (environments/dev.yaml
+    domains.company_base -> PUBLIC_COMPANY_BASE_DOMAIN) accepts <slug>.dev.coscale.app — and ONLY
+    that base: the prod base and every other host keep failing closed."""
+    _clear_declared_company_base(monkeypatch)
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "dev.coscale.app")
+    assert _redirect_allowed("https://climblog.dev.coscale.app/app")
+    assert _redirect_allowed("https://climblog.dev.coscale.app/app?checkout=success")
+    for url in (
+        "https://climblog.coscale.app/app",  # ONE base at a time: prod base no longer matches
+        "https://other.dev.coscale.app/app",
+        "http://climblog.dev.coscale.app/app",
+        "https://climblog.dev.coscale.app/",
+        "https://climblog.dev.coscale.app.evil.example/app",
+    ):
+        assert not _redirect_allowed(url), f"must reject {url!r}"
+
+
+def test_checkout_redirect_honors_base_declared_in_safebox_env_store(monkeypatch):
+    """The dev safebox declares the base via its env store (safebox.load_env), the same source
+    _domain_business_slug already honors — the process env stays empty."""
+    monkeypatch.delenv("PUBLIC_COMPANY_BASE_DOMAIN", raising=False)
+    monkeypatch.delenv("TAKYON_COMPANY_BASE_DOMAIN", raising=False)
+    monkeypatch.setattr(
+        safebox_app.safebox, "load_env", lambda: {"PUBLIC_COMPANY_BASE_DOMAIN": "dev.coscale.app"}
+    )
+    assert _redirect_allowed("https://climblog.dev.coscale.app/app")
+    assert not _redirect_allowed("https://climblog.coscale.app/app")
+
+
+def test_generic_stripe_checkout_accepts_declared_dev_base_redirects(client, monkeypatch):
+    """Route-level proof for the dev twin: with dev.coscale.app declared, the SAME checkout
+    intent authority path mints the session for <slug>.dev.coscale.app redirect URLs."""
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "dev.coscale.app")
+
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutConn(("cust_X", "customer@example.com", "created", "price_123"))
+
+    calls: list[str] = []
+
+    def _stripe(path, params=None, *, method="POST"):
+        calls.append(path)
+        if path == "prices/price_123":
+            return {"metadata": {"business": "climblog", "source": "takyon_app"}}
+        if path == "checkout/sessions":
+            return {"id": "cs_test_dev", "url": "https://checkout.stripe.test/cs_test_dev"}
+        pytest.fail(f"unexpected stripe path: {path}")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    request = _checkout_request()
+    request["params"]["success_url"] = "https://climblog.dev.coscale.app/app?checkout=success"
+    request["params"]["cancel_url"] = "https://climblog.dev.coscale.app/app?checkout=cancel"
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=request)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == "cs_test_dev"
+    assert calls == ["prices/price_123", "checkout/sessions"]
