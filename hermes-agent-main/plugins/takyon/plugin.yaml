@@ -29,6 +29,7 @@ provides_tools:
   - business_read_app_profile
   - business_create_app_checkout
   - business_record_stripe_webhook
+  - business_connect_shopify
   - business_record_app_usage
   - business_enqueue_job
   - business_x_publish_outreach

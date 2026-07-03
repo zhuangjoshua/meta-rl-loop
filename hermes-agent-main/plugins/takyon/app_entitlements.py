@@ -470,9 +470,13 @@ def upsert_plan_from_composition(
         meta.setdefault("credits", {}).update(composed.credits)
     if composed.rails:
         meta["rails"] = list(composed.rails)
-    # Store the composition + receipt so the derivation is auditable and re-derivable.
+    # Store the composition + receipt so the derivation is auditable and re-derivable. The
+    # serialized composition is what makes a webhook-driven recompose possible (UC4 leg 2):
+    # `shopify_util._process_shop_update` reads it back via `composition_from_dict`, swaps the
+    # changed component's cost basis, and re-runs compose → a NEW plan_key version.
     meta[_COMPOSITION_METADATA_KEY] = {
         "receipt": composed.receipt,
+        "composition": plan_composition.composition_to_dict(composition),
         "total_cogs_microusd_month": composed.total_cogs_microusd_month,
         "margin_floor": composed.margin_floor,
         "price_cents": composed.price_cents,

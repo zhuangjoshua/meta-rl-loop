@@ -975,6 +975,12 @@ class _StripeAppWebhookVerifyBody(BaseModel):
     signature: str
 
 
+class _ShopifyAppWebhookBody(BaseModel):
+    raw_body: str
+    hmac_sha256: str
+    topic: str = ""
+
+
 class _AppCheckoutReconcileBody(BaseModel):
     session_id: str
     business_slug: str | None = None
@@ -3561,6 +3567,35 @@ def build_safebox_app() -> FastAPI:
 
         with _safebox_db_conn() as conn:
             return app_payments.record_webhook_and_process(conn, event)
+
+    @app.post("/v1/shopify/app-webhook/process")
+    def process_shopify_app_webhook(
+        body: _ShopifyAppWebhookBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # UC4 Shopify shop/update rail — the Shopify analogue of the Stripe app-webhook process
+        # route above: HMAC verification (X-Shopify-Hmac-Sha256 over the raw body, shared secret
+        # read LOCALLY on the safebox, never vended) and the pricing-affecting recompose run
+        # TOGETHER on the safebox, so a plan_key version is only ever minted from a genuinely
+        # signed shop/update. Dedup (provider='shopify', content-derived event id) happens inside
+        # record_webhook_and_process BEFORE any state change. Fail-closed: missing secret → 503,
+        # bad HMAC → 401; an unverified body is never parsed into effects.
+        _require_internal_token(authorization)
+        try:
+            safebox.verify_shopify_app_webhook(body.raw_body, body.hmac_sha256)
+        except safebox.ShopifyAppWebhookUnconfigured as exc:
+            raise HTTPException(status_code=503, detail="shopify_webhook_unconfigured") from exc
+        except safebox.ShopifyAppWebhookInvalidSignature as exc:
+            raise HTTPException(status_code=401, detail="invalid_signature") from exc
+        from . import shopify_util
+
+        try:
+            with _safebox_db_conn() as conn:
+                return shopify_util.record_webhook_and_process(
+                    conn, topic=body.topic, raw_body=body.raw_body
+                )
+        except shopify_util.ShopifyWebhookInvalidEvent as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/v1/stripe/app-checkout/reconcile")
     def reconcile_stripe_app_checkout(

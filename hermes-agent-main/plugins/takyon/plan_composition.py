@@ -556,6 +556,115 @@ def _realized_from_billed(billed_microusd: int) -> int:
     return int(realized)
 
 
+# ── serialization (round-trip; used to store a composition on the plan row so a webhook-driven
+# recompose can re-derive it with an updated component cost basis — UC4 leg 2) ────────────────────
+
+
+def composition_to_dict(composition: PlanComposition) -> dict:
+    """Serialize a `PlanComposition` to a deterministic JSON-safe dict. `composition_from_dict`
+    round-trips it exactly; validation on rebuild rides the frozen dataclasses' __post_init__, so a
+    tampered/malformed stored composition fails closed instead of composing garbage."""
+    components = []
+    for component in composition.components:
+        basis = component.cost_basis
+        basis_data: dict = {"kind": basis.kind}
+        if basis.kind == "metered":
+            allowance = basis.allowance
+            basis_data["allowance"] = {
+                "model": allowance.model,
+                "provider": allowance.provider,
+                "base_url": allowance.base_url,
+                "input_tokens": int(allowance.input_tokens),
+                "output_tokens": int(allowance.output_tokens),
+                "cache_read_tokens": int(allowance.cache_read_tokens),
+                "cache_write_tokens": int(allowance.cache_write_tokens),
+                "request_count": int(allowance.request_count),
+            }
+        elif basis.kind == "fixed":
+            basis_data["fee_microusd_month"] = int(basis.fee_microusd_month)
+        else:  # per_unit
+            basis_data["unit_cost_microusd"] = int(basis.unit_cost_microusd)
+            basis_data["included_units"] = int(basis.included_units)
+        components.append(
+            {
+                "kind": component.kind,
+                "key": component.key,
+                "cost_basis": basis_data,
+                "grants": dict(component.grants),
+            }
+        )
+    return {
+        "components": components,
+        "margin_policy": {
+            "margin_floor": float(composition.margin_policy.margin_floor),
+            "rounding": composition.margin_policy.rounding,
+        },
+        "floor_price_microusd": int(composition.floor_price_microusd),
+    }
+
+
+def composition_from_dict(data: dict) -> PlanComposition:
+    """Rebuild a `PlanComposition` from `composition_to_dict` output. Raises `InvalidComponent` /
+    `InvalidMarginPolicy` (fail closed) on anything malformed — never composes a guessed shape."""
+    if not isinstance(data, dict):
+        raise InvalidComponent("composition data must be an object")
+    raw_components = data.get("components")
+    if not isinstance(raw_components, (list, tuple)) or not raw_components:
+        raise InvalidComponent("composition data needs a non-empty components list")
+    components: list[PricedComponent] = []
+    for raw in raw_components:
+        if not isinstance(raw, dict):
+            raise InvalidComponent("each component must be an object")
+        basis_data = raw.get("cost_basis")
+        if not isinstance(basis_data, dict):
+            raise InvalidComponent("each component needs a cost_basis object")
+        kind = str(basis_data.get("kind") or "")
+        if kind == "metered":
+            allowance_data = basis_data.get("allowance")
+            if not isinstance(allowance_data, dict):
+                raise InvalidComponent("metered cost basis needs an allowance object")
+            allowance = MeteredAllowance(
+                model=str(allowance_data.get("model") or ""),
+                provider=allowance_data.get("provider"),
+                base_url=allowance_data.get("base_url"),
+                input_tokens=int(allowance_data.get("input_tokens") or 0),
+                output_tokens=int(allowance_data.get("output_tokens") or 0),
+                cache_read_tokens=int(allowance_data.get("cache_read_tokens") or 0),
+                cache_write_tokens=int(allowance_data.get("cache_write_tokens") or 0),
+                request_count=int(allowance_data.get("request_count") or 0),
+            )
+            basis = CostBasis.metered(allowance)
+        elif kind == "fixed":
+            basis = CostBasis.fixed(int(basis_data.get("fee_microusd_month") or 0))
+        elif kind == "per_unit":
+            basis = CostBasis.per_unit(
+                int(basis_data.get("unit_cost_microusd") or 0),
+                int(basis_data.get("included_units") or 0),
+            )
+        else:
+            raise InvalidComponent(f"unknown cost basis kind: {kind!r}")
+        grants = raw.get("grants")
+        components.append(
+            PricedComponent(
+                kind=str(raw.get("kind") or ""),
+                key=str(raw.get("key") or ""),
+                cost_basis=basis,
+                grants=dict(grants) if isinstance(grants, dict) else {},
+            )
+        )
+    policy_data = data.get("margin_policy")
+    policy_data = policy_data if isinstance(policy_data, dict) else {}
+    policy = MarginPolicy(
+        margin_floor=float(policy_data.get("margin_floor") or 0.0),
+        rounding=str(policy_data.get("rounding") or "cent"),  # type: ignore[arg-type]
+    )
+    return PlanComposition(
+        components=tuple(components),
+        margin_policy=policy,
+        floor_price_microusd=int(data.get("floor_price_microusd") or 0),
+    )
+
+
 def _build_receipt(
     *,
     price_microusd: int,

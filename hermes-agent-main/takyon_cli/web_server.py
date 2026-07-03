@@ -1169,6 +1169,7 @@ _APP_PLANE_PATH_PREFIXES: tuple[str, ...] = (
 _APP_PLANE_EXACT_PATHS: frozenset[str] = frozenset({
     "/api/product-tls/ask",
     "/api/webhooks/stripe",
+    "/api/webhooks/shopify",
 })
 _OPERATOR_ONLY_HTTP_PATH_PREFIXES: tuple[str, ...] = (
     "/api/pty",
@@ -1223,6 +1224,7 @@ def _is_public_api_path(path: str) -> bool:
     return path.startswith((
         "/api/takyon/apps/",
         "/api/webhooks/stripe",
+        "/api/webhooks/shopify",
     ))
 
 
@@ -3335,6 +3337,49 @@ async def takyon_app_stripe_webhook(request: Request):
             "stripe_signature": request.headers.get("stripe-signature") or "",
         }))
     return _takyon_app_json(status, payload)
+
+
+@app.post("/api/webhooks/shopify")
+async def takyon_app_shopify_webhook(request: Request):
+    """UC4 Shopify shop/update rail — sits beside /api/webhooks/stripe as its own public route.
+
+    This plane only FORWARDS: the raw body + X-Shopify-Hmac-Sha256 header ride to the safebox,
+    where the shared secret lives, the HMAC is verified, and the dedup + plan recompose run on the
+    safebox DB role (safebox.process_shopify_app_webhook). No secret, no verification, and no plan
+    write ever happens on this runtime plane. Fail-closed: unverifiable → 401, missing secret /
+    unreachable authority → 503, oversized/invalid body → 4xx — never processed. The response is
+    deliberately minimal (no internals reflected on a public route)."""
+    from plugins.takyon import shopify_util as takyon_shopify_util
+
+    raw = await request.body()
+    if len(raw) > takyon_shopify_util.SHOPIFY_WEBHOOK_MAX_BODY_BYTES:
+        return _takyon_app_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False})
+    try:
+        # Strict decode: the HMAC is computed over these exact bytes (re-encoded safebox-side), so
+        # a lossy errors="replace" decode would corrupt verification instead of failing it cleanly.
+        raw_body = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"ok": False})
+    hmac_header = request.headers.get("x-shopify-hmac-sha256") or ""
+    topic = request.headers.get("x-shopify-topic") or ""
+    try:
+        outcome = await asyncio.to_thread(
+            takyon_safebox.process_shopify_app_webhook, raw_body, hmac_header, topic
+        )
+    except takyon_safebox.ShopifyAppWebhookInvalidSignature:
+        return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "invalid_signature"})
+    except takyon_safebox.ShopifyAppWebhookUnconfigured:
+        return _takyon_app_json(
+            HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "shopify_webhook_unconfigured"}
+        )
+    except takyon_safebox.SafeboxAuthorityUnavailable:
+        return _takyon_app_json(
+            HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "shopify_webhook_unconfigured"}
+        )
+    except takyon_safebox.RemoteSafeboxError:
+        return _takyon_app_json(HTTPStatus.BAD_GATEWAY, {"ok": False})
+    deduplicated = bool(outcome.get("deduplicated")) if isinstance(outcome, dict) else False
+    return _takyon_app_json(HTTPStatus.OK, {"ok": True, "deduplicated": deduplicated})
 
 
 @app.get("/healthz")

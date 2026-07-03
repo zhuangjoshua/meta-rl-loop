@@ -25431,6 +25431,171 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_connect_shopify(args: dict, **_: Any) -> str:
+    """UC4 Shopify connection tool (modularization plan §2.7 Stage 5, 'Shopify slices').
+
+    Initiates/attaches the Composio Shopify connected account for one business through the EXISTING
+    Composio broker (COMPOSIO_API_KEY stays in the safebox; token custody stays in Composio — zero
+    new runtime credential, no os.environ reads) and records the myshopify domain + connected-account
+    id in canonical business state (businesses.metadata_json['takyon_shopify'], receipted via a
+    business event). When the connection is ACTIVE it also performs the cost-basis read — the store's
+    live plan via Admin GraphQL through the broker, mapped by the explicit plan_name→fee table
+    (unknown plan = recorded as unmapped, never a guessed fee). Idempotent: re-running adopts the
+    now-ACTIVE account after the operator completes the OAuth redirect and refreshes the plan read.
+    Fail-closed: missing COMPOSIO_API_KEY/broker → shopify_composio_unconfigured before any write."""
+    try:
+        _refuse_on_autonomous_wake("Shopify connection changes")
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        try:
+            from . import shopify_util
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import shopify_util
+        try:
+            shop_domain = shopify_util.normalize_shop_domain(args.get("shop_domain"))
+        except shopify_util.ShopifyError as exc:
+            raise TakyonError(str(exc)) from exc
+        partner_dev_fee_raw = args.get("partner_dev_fee_microusd")
+        partner_dev_fee: int | None = None
+        if partner_dev_fee_raw not in {None, ""}:
+            partner_dev_fee = int(float(partner_dev_fee_raw))
+            if partner_dev_fee < 0:
+                raise TakyonError("partner_dev_fee_microusd must be non-negative")
+        store = _store()
+        store.enforce_operator_business_access(business)
+        # Credential gate BEFORE any provider call or state change (alias 'composio' →
+        # COMPOSIO_API_KEY, satisfied locally or by a reachable safebox broker; fail-closed).
+        try:
+            _require_api_access(
+                {
+                    "action": "business_connect_shopify",
+                    "business": business,
+                    "requires_api": ["composio"],
+                }
+            )
+        except TakyonError as exc:
+            raise TakyonError(f"shopify_composio_unconfigured: {exc}") from exc
+        user_id = str(args.get("composio_user_id") or "").strip() or shopify_util.default_composio_user_id()
+        try:
+            connection = shopify_util.connect_shopify(
+                shop_domain=shop_domain,
+                user_id=user_id,
+                connected_account_id=args.get("connected_account_id"),
+                auth_config_id=args.get("auth_config_id"),
+                callback_url=args.get("callback_url"),
+            )
+        except shopify_util.ShopifyComposioUnconfigured as exc:
+            raise TakyonError(str(exc)) from exc
+        except shopify_util.ShopifyError as exc:
+            raise TakyonError(f"shopify_connect_failed: {exc}") from exc
+
+        plan_info: dict[str, Any] | None = None
+        plan_fee_microusd: int | None = None
+        plan_fee_error = ""
+        if connection.get("status") == "active":
+            # The cost-basis read: live plan from the REAL store through the broker → the explicit
+            # fee map. An unmapped plan records the refusal (the connection still lands) — the
+            # composer stays fail-closed because no fee ever gets invented here.
+            try:
+                basis, plan_info = shopify_util.read_shop_plan_cost_basis(
+                    shop_domain=shop_domain,
+                    connected_account_id=str(connection.get("connected_account_id") or ""),
+                    partner_dev_fee_microusd=partner_dev_fee,
+                )
+                plan_fee_microusd = int(basis.fee_microusd_month)
+            except shopify_util.ShopifyPlanUnmapped as exc:
+                plan_fee_error = str(exc)
+            except shopify_util.ShopifyError as exc:
+                plan_fee_error = f"shopify_plan_read_failed: {exc}"
+
+        now = _now()
+        record: dict[str, Any] = {
+            "shop_domain": shop_domain,
+            "connected_account_id": str(connection.get("connected_account_id") or ""),
+            "composio_user_id": user_id,
+            "status": str(connection.get("status") or ""),
+            "source": str(connection.get("source") or ""),
+            "updated_at": now,
+        }
+        if connection.get("redirect_url"):
+            record["redirect_url"] = connection["redirect_url"]
+        if connection.get("auth_config_id"):
+            record["auth_config_id"] = connection["auth_config_id"]
+        if partner_dev_fee is not None:
+            record["partner_dev_fee_microusd"] = partner_dev_fee
+        if plan_info is not None:
+            record["plan"] = {
+                "plan_name": plan_info.get("plan_name"),
+                "partner_development": bool(plan_info.get("partner_development")),
+                "fee_microusd_month": plan_fee_microusd,
+                "observed_at": now,
+            }
+        if plan_fee_error:
+            record["plan_fee_error"] = plan_fee_error
+
+        with store._connect() as conn:
+            existing = store._ensure_business(conn, business)
+            metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            prior = metadata.get(shopify_util.SHOPIFY_CONNECTION_METADATA_KEY)
+            prior = prior if isinstance(prior, dict) else {}
+            if "connected_at" in prior and prior.get("shop_domain") == shop_domain:
+                record.setdefault("connected_at", prior.get("connected_at"))
+                if partner_dev_fee is None and prior.get("partner_dev_fee_microusd") is not None:
+                    record["partner_dev_fee_microusd"] = prior.get("partner_dev_fee_microusd")
+            else:
+                record["connected_at"] = now
+            metadata = {**metadata, shopify_util.SHOPIFY_CONNECTION_METADATA_KEY: record}
+            conn.execute(
+                "UPDATE businesses SET metadata_json = ?, updated_at = ? WHERE slug = ?",
+                (_json_dumps(metadata), now, business),
+            )
+            store._record_event(
+                conn,
+                scope=f"business:{business}/app",
+                business_slug=business,
+                event_type="shopify.connection.upsert",
+                payload={
+                    "shop_domain": shop_domain,
+                    "connected_account_id": record["connected_account_id"],
+                    "status": record["status"],
+                    "plan": record.get("plan"),
+                    "plan_fee_error": plan_fee_error or None,
+                    "idempotency_key": idempotency_key,
+                    "reason": args.get("reason") or "connect shopify store",
+                    "actor": args.get("actor") or "agent",
+                },
+            )
+
+        result: dict[str, Any] = {
+            "success": True,
+            "action": "business_connect_shopify",
+            "business": business,
+            "shop_domain": shop_domain,
+            "connected_account_id": record["connected_account_id"],
+            "status": record["status"],
+            "shopify_store_component_key": shopify_util.SHOPIFY_STORE_COMPONENT_KEY,
+        }
+        if record.get("redirect_url"):
+            result["redirect_url"] = record["redirect_url"]
+            result["next_step"] = (
+                "Complete the Shopify OAuth at redirect_url, then re-run business_connect_shopify "
+                "to adopt the ACTIVE connection and read the store plan."
+            )
+        if plan_info is not None:
+            result["plan"] = record.get("plan")
+            result["cost_basis"] = {
+                "kind": "fixed",
+                "fee_microusd_month": plan_fee_microusd,
+            }
+        if plan_fee_error:
+            result["plan_fee_error"] = plan_fee_error
+        return tool_result(result)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_record_app_usage(args: dict, **_: Any) -> str:
     store = _store()
     operation = {
@@ -34531,6 +34696,40 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Verify and reconcile Stripe webhook events into app checkout sessions, entitlements, subscription status, and revenue.",
         "handler": handle_business_record_stripe_webhook,
         "schema": _schema("business_record_stripe_webhook", "Record/reconcile Stripe webhook.", {"raw_body": {"type": "string"}, "stripe_signature": {"type": "string"}, "event": {"type": "object"}, "event_payload": {"type": "object"}}, []),
+    },
+    {
+        "name": "business_connect_shopify",
+        "description": (
+            "Connect a real Shopify store to this business through the existing Composio broker "
+            "(token custody in Composio; COMPOSIO_API_KEY stays in the safebox — no new runtime "
+            "credential). Adopts an ACTIVE Composio shopify connected account or initiates the "
+            "OAuth (returns redirect_url; re-run after authorizing to adopt it), records the "
+            "myshopify domain + connected-account id in canonical business state, and reads the "
+            "store's current plan via Admin GraphQL to derive the fixed monthly shopify_store "
+            "cost basis through the explicit plan-name→fee map (unknown plans are refused, never "
+            "priced by guess). Scope is the per-store platform fee only — no orders, fulfillment, "
+            "or catalog. Fails closed with shopify_composio_unconfigured when the Composio key/"
+            "broker is unavailable."
+        ),
+        "handler": handle_business_connect_shopify,
+        "requires_api": ["composio"],
+        "schema": _schema(
+            "business_connect_shopify",
+            "Connect a Shopify store and read its plan-fee cost basis.",
+            {
+                "business": _BUSINESS_PROP,
+                "shop_domain": {"type": "string", "description": "The store's *.myshopify.com domain, e.g. ourmanifold-uc4-test.myshopify.com."},
+                "connected_account_id": {"type": "string", "description": "Optional explicit Composio connected-account id when several ACTIVE shopify connections exist."},
+                "auth_config_id": {"type": "string", "description": "Optional explicit Composio shopify auth-config id for OAuth initiation."},
+                "callback_url": {"type": "string", "description": "Optional OAuth callback URL override for the initiation flow."},
+                "composio_user_id": {"type": "string", "description": "Optional Composio entity user id; defaults to the platform operator entity."},
+                "partner_dev_fee_microusd": {"type": "integer", "description": "Explicit monthly test fee (microUSD) for partner-development/dev stores, which have no public price. Without it a dev store's plan read refuses rather than guessing."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "shop_domain", "idempotency_key"],
+        ),
     },
     {
         "name": "business_record_app_usage",

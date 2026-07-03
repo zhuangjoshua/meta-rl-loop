@@ -150,6 +150,14 @@ class StripeAppWebhookInvalidSignature(RuntimeError):
     """The presented Stripe app (flow-B) webhook signature failed verification."""
 
 
+class ShopifyAppWebhookUnconfigured(RuntimeError):
+    """Shopify app webhook verification is unavailable because Safebox lacks the shared secret."""
+
+
+class ShopifyAppWebhookInvalidSignature(RuntimeError):
+    """The presented X-Shopify-Hmac-Sha256 failed verification against the raw body."""
+
+
 class Auth0AuthorityUnconfigured(RuntimeError):
     """Auth0 authority is unavailable because Safebox lacks required config/secrets."""
 
@@ -2670,6 +2678,78 @@ def verify_stripe_app_webhook(raw_body: str, signature: str) -> dict[str, Any]:
         raise StripeAppWebhookInvalidSignature("invalid_signature") from exc
     event = json.loads(body)
     return event if isinstance(event, dict) else {}
+
+
+def verify_shopify_app_webhook(raw_body: str, hmac_header: str) -> dict[str, Any]:
+    """Verify one Shopify app webhook (X-Shopify-Hmac-Sha256, base64 HMAC-SHA256 over the raw
+    body) on SAFEBOX AUTHORITY ONLY and return the parsed event.
+
+    Mirrors ``verify_stripe_app_webhook``'s local leg: the shared secret is resolved from the
+    safebox's LOCAL env authority (``SHOPIFY_WEBHOOK_SECRET`` aliases) and never leaves it. This
+    function deliberately has NO remote leg — a runtime plane must not resolve the secret at all;
+    it calls :func:`process_shopify_app_webhook`, which forwards raw body + header to the safebox
+    route where THIS verification runs. Fails closed: missing secret/authority raises
+    ``ShopifyAppWebhookUnconfigured``, a bad HMAC raises ``ShopifyAppWebhookInvalidSignature``;
+    it NEVER returns an unverified event."""
+    from . import shopify_util
+
+    if _remote_enabled() and not _local_authority_enabled():
+        raise ShopifyAppWebhookUnconfigured(
+            "shopify webhook verification runs only on safebox authority; "
+            "use process_shopify_app_webhook from runtime planes"
+        )
+    body = str(raw_body or "")
+    try:
+        secret = first_env_backed_value(*shopify_util.SHOPIFY_WEBHOOK_SECRET_ALIASES)
+    except SafeboxAuthorityUnavailable as exc:
+        raise ShopifyAppWebhookUnconfigured("shopify_webhook_unconfigured") from exc
+    if not secret:
+        raise ShopifyAppWebhookUnconfigured("shopify_webhook_unconfigured")
+    try:
+        shopify_util.verify_webhook_hmac(body, hmac_header, secret)
+    except shopify_util.ShopifyWebhookUnconfigured as exc:
+        raise ShopifyAppWebhookUnconfigured("shopify_webhook_unconfigured") from exc
+    except shopify_util.ShopifyWebhookInvalidSignature as exc:
+        raise ShopifyAppWebhookInvalidSignature("invalid_signature") from exc
+    try:
+        event = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        raise ShopifyAppWebhookInvalidSignature("invalid_body") from exc
+    return event if isinstance(event, dict) else {}
+
+
+def process_shopify_app_webhook(raw_body: str, hmac_header: str, topic: str) -> dict[str, Any]:
+    """Verify and process one Shopify app webhook through Safebox authority.
+
+    Mirrors ``process_stripe_app_webhook``: a runtime plane forwards the RAW body + HMAC header +
+    topic to ``/v1/shopify/app-webhook/process``; the safebox resolves the shared secret locally,
+    verifies the HMAC, and only then runs the dedup + shop/update recompose on its own DB role in
+    the same signed-event path. The runtime plane never holds the secret and never writes plan
+    rows itself. Fail-closed mapping: 503 → ShopifyAppWebhookUnconfigured, 400/401 →
+    ShopifyAppWebhookInvalidSignature."""
+    body = str(raw_body or "")
+    presented = str(hmac_header or "").strip()
+    topic_value = str(topic or "").strip()
+    if _remote_enabled() and not _local_authority_enabled():
+        try:
+            payload = _remote_json(
+                "POST",
+                "/v1/shopify/app-webhook/process",
+                {"raw_body": body, "hmac_sha256": presented, "topic": topic_value},
+                timeout=30.0,
+            )
+        except RemoteSafeboxError as exc:
+            if exc.status_code == 503:
+                raise ShopifyAppWebhookUnconfigured("shopify_webhook_unconfigured") from exc
+            if exc.status_code in {400, 401}:
+                raise ShopifyAppWebhookInvalidSignature("invalid_signature") from exc
+            raise
+        return payload if isinstance(payload, dict) else {}
+    verify_shopify_app_webhook(body, presented)
+    from . import shopify_util
+
+    with _creative_credit_conn(None) as conn:
+        return shopify_util.record_webhook_and_process(conn, topic=topic_value, raw_body=body)
 
 
 def grant_credits(
