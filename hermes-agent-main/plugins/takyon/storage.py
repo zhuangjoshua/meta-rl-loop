@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -310,6 +311,21 @@ def _read_file_bytes(path: Path) -> bytes:
     if size > MAX_OBJECT_BYTES:
         raise StorageError(f"object too large to sync ({size} bytes > {MAX_OBJECT_BYTES}): {path}")
     return path.read_bytes()
+
+
+def _bounded_sync_concurrency(raw: str | None) -> int:
+    try:
+        value = int(str(raw or "").strip() or 12)
+    except ValueError:
+        value = 12
+    return max(1, min(value, 32))
+
+
+# Bounded fan-out for sync_up's per-file PUTs. A dozen concurrent small-object requests is well
+# within what the safebox broker and the S3-compatible stores absorb; the cap exists so a laptop
+# rail cannot open an unbounded connection burst through the broker tunnel.
+# TAKYON_STORAGE_SYNC_CONCURRENCY=1 restores the fully serial behavior.
+_SYNC_PUT_CONCURRENCY = _bounded_sync_concurrency(os.getenv("TAKYON_STORAGE_SYNC_CONCURRENCY"))
 
 
 def _sync_path_excluded(rel: str) -> bool:
@@ -1320,6 +1336,7 @@ def sync_up(
 
     uploaded: list[str] = []
     skipped: list[str] = []
+    to_upload: list[tuple[str, str]] = []
     for rel, dg in sorted(local.items()):
         if excluded and _sync_rel_matches_prefix(rel, excluded):
             skipped.append(rel)
@@ -1328,8 +1345,31 @@ def sync_up(
         if remote.get(full) == dg:
             skipped.append(rel)
             continue
-        backend.put(full, _read_file_bytes(src / rel), digest=dg)
-        uploaded.append(rel)
+        to_upload.append((rel, dg))
+
+    # Upload changed files CONCURRENTLY, not one-by-one. The old serial loop priced a first push
+    # of a materialized scaffold workspace (hundreds of small files) at file-count x round-trip
+    # latency — measured 115-144s per commit from a Mac console rail (~300 files x ~0.4s RTT,
+    # strictly serialized), during which the commit held the business scope and serialized every
+    # concurrent turn behind it. PUTs to distinct keys are independent on every backend (boto3
+    # clients are thread-safe; the safebox broker calls are stateless per-request HTTP), and the
+    # per-file CAS digests are unchanged, so concurrency changes wall-clock only, never semantics.
+    # Fail-closed contract is the same as the serial loop: any PUT failure raises out of sync_up
+    # with a partial (idempotent, digest-keyed) upload that the next sync heals.
+    if to_upload:
+        workers = min(_SYNC_PUT_CONCURRENCY, len(to_upload))
+        if workers <= 1:
+            for rel, dg in to_upload:
+                backend.put(prefix + rel, _read_file_bytes(src / rel), digest=dg)
+        else:
+            def _put_one(item: tuple[str, str]) -> None:
+                rel, dg = item
+                backend.put(prefix + rel, _read_file_bytes(src / rel), digest=dg)
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for _ in pool.map(_put_one, to_upload):
+                    pass
+        uploaded.extend(rel for rel, _ in to_upload)
 
     deleted: list[str] = []
     if delete_remote:
