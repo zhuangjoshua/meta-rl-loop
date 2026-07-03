@@ -421,11 +421,16 @@ def connect_shopify(
             f"and none/many match {domain}; pass connected_account_id explicitly"
         )
 
-    # None active → initiate. Body shape follows Composio v3.1 connected-account creation
-    # (UNVERIFIED-OFFLINE; single constant path above — a rejection surfaces the raw Composio
-    # error and is validated in the live acceptance run).
+    # None active → initiate. Body shape validated in the live acceptance run (2026-07-03):
+    # Composio v3.1 connected-account creation for Shopify REQUIRES the store subdomain as a
+    # connection input field. The auth-config's `expected_input_fields` names it `subdomain`
+    # (Composio's `GET auth_configs/<id>` → `[{"name":"subdomain","displayName":"Store Subdomain",
+    # "legacy_template_name":"shop",...,"required":true}]`), and it must ride under `connection.data`
+    # (proven live: `connection.data.subdomain` returned a redirect_url; top-level and `.val` did
+    # not). Omitting it makes Composio 400 "Missing required fields: Store Subdomain" before any OAuth.
     resolved_auth_config = _resolve_auth_config_id(auth_config_id)
-    connection: dict[str, Any] = {"user_id": user_id}
+    subdomain = domain.removesuffix(".myshopify.com")
+    connection: dict[str, Any] = {"user_id": user_id, "data": {"subdomain": subdomain}}
     if str(callback_url or "").strip():
         connection["callback_url"] = str(callback_url).strip()
     payload = _composio_request(

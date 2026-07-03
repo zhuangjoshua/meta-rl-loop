@@ -275,6 +275,10 @@ def test_connect_initiates_when_no_active_account(monkeypatch):
             body = kwargs.get("json_body") or {}
             assert body["auth_config"] == {"id": "ac_shopify_1"}
             assert body["connection"]["user_id"] == "takyon_prod_operator"
+            # Live-acceptance finding (2026-07-03): Shopify's connected-account creation REQUIRES
+            # the store subdomain under connection.data — Composio 400s "Missing required fields:
+            # Store Subdomain" without it. subdomain = the shop name minus ".myshopify.com".
+            assert body["connection"]["data"] == {"subdomain": "ourmanifold-uc4-test"}
             return {"id": "ca_new", "status": "INITIALIZING", "redirect_url": "https://composio/oauth"}
         raise AssertionError(f"unexpected call {method} {path}")
 
