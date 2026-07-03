@@ -152,6 +152,31 @@ with psycopg.connect(
 PY
 }
 
+# Keep the dev twin's schema current with the repo. It DRIFTS when new migration files land (a
+# fresh `git pull` that adds 0062 money_shape, say) because the twin was bootstrapped earlier — and
+# unlike prod (where `takyon migrate` is a deliberate deploy step) the dev twin should self-heal so a
+# CLI bootstrap never runs against a stale schema (the money_shape drift that broke dev /create).
+# Gated on the migration FILE COUNT via a marker: a current twin is a zero-cost skip; when new files
+# appear, the TRACKED `takyon migrate` rail replays every migration idempotently as takyon_migration
+# against TAKYON_DEV_MIGRATION_DATABASE_URL (additive/nullable, so re-running is always safe).
+ensure_dev_schema_current() {
+  local repo_sig marker
+  repo_sig="$(ls "$RUNTIME_DIR/plugins/takyon/db/migrations/"*.sql 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "${repo_sig:-0}" -gt 0 ]] || return 0
+  marker="$OPERATOR_HOME/.dev-schema-migrated"
+  [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$repo_sig" ]] && return 0
+  echo "dev twin schema: $repo_sig migration files vs marker — running tracked migrate…" >&2
+  if env TAKYON_ENV=dev TAKYON_HOST_ROLE=operator TAKYON_HOME="$OPERATOR_HOME" \
+       TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1 \
+       TAKYON_DEV_MIGRATION_DATABASE_URL="$(_dev_store_get TAKYON_DEV_MIGRATION_DATABASE_URL)" \
+       "$TAKYON_ENTRY" migrate >/dev/null 2>&1; then
+    printf '%s' "$repo_sig" > "$marker"
+    echo "dev twin schema current." >&2
+  else
+    echo "warning: dev migrate rail failed — schema may be stale; run: TAKYON_ENV=dev takyon migrate" >&2
+  fi
+}
+
 # The dev mirror of load_operator_env: identical exports + ClaimScope pool-id + raw-secret scrub,
 # but sourced from the dev store with TAKYON_ENV=dev (resolve_database_url picks the TAKYON_DEV_*
 # twins + fails closed on any prod literal). No SSH, no tunnel — the dev Safebox runs locally.
@@ -161,6 +186,7 @@ load_dev_operator_env() {
     cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
   fi
   ensure_dev_safebox_up
+  ensure_dev_schema_current
   export TAKYON_ENV=dev
   export TAKYON_HOME="$OPERATOR_HOME"
   export TAKYON_HOST_ROLE=operator
