@@ -555,19 +555,19 @@ def _referenced_action_names_in_source(site_root: Path, *, limit: int = 300) -> 
 # rails and are intentionally omitted here; `actions` is derived separately from on-disk
 # action files. The kit (`_takyon`) — which DEFINES these methods — is skipped by
 # _ACTION_SCAN_SKIP_DIRS, so only real call sites in app source match.
-_RUNTIME_RAIL_USAGE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("records", re.compile(r"\b(?:listRecords|getRecord|saveRecord|deleteRecord)\s*\(")),
-    (
-        "directory",
-        re.compile(
-            r"\b(?:listDirectory|getDirectoryMe|getDirectoryEntry|updateDirectoryMe|disableDirectoryMe)\s*\("
-        ),
-    ),
-    ("media", re.compile(r"\b(?:uploadMedia|deleteMedia)\s*\(")),
-    ("connections", re.compile(r"\b(?:listConnections|actOnConnection)\s*\(")),
-    ("generate", re.compile(r"\b(?:ctx|client|runtime|rt)\.generate\s*\(")),
-    ("search", re.compile(r"\b(?:ctx|client|runtime|rt)\.search\s*\(")),
-)
+def _runtime_rail_usage_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """The (rail, regex) source-scanner pairs, DERIVED from the RuntimeRail registry.
+
+    Stage 6: the per-rail scanner regex is built from each rail's declared
+    ``RuntimeRail.client_methods`` in ``plugins.takyon.core`` — the single source of
+    truth for which runtime-client methods a rail exposes — so the scanned method set can
+    never drift from the declared rail. Imported lazily to avoid an import cycle (core is
+    heavy and imports this module indirectly). The emitted regexes are byte-equivalent to
+    the pre-Stage-6 hand-written literals; a characterization test pins that equivalence.
+    """
+    from . import core as _core
+
+    return _core.runtime_rail_usage_patterns()
 
 
 def referenced_runtime_rails_in_source(site_root: Path, *, limit: int = 400) -> set[str]:
@@ -582,7 +582,7 @@ def referenced_runtime_rails_in_source(site_root: Path, *, limit: int = 400) -> 
     used: set[str] = set()
     if not site_root.exists():
         return used
-    pending = list(_RUNTIME_RAIL_USAGE_PATTERNS)
+    pending = list(_runtime_rail_usage_patterns())
     scanned = 0
     for path in sorted(site_root.rglob("*")):
         if scanned >= limit or not pending:

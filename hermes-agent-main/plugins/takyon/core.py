@@ -34,6 +34,7 @@ import urllib.request
 import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from textwrap import dedent
@@ -547,6 +548,300 @@ ALWAYS_ON_RUNTIME_RAILS: tuple[str, ...] = ("analytics",)
 _BUILD_DERIVED_RAILS: frozenset[str] = frozenset(
     {"actions", "records", "directory", "media", "connections", "generate", "search"}
 )
+
+
+# ---------------------------------------------------------------------------
+# RuntimeRail registry — the ONE routing source of truth (Stage 6 §2.5 / §6b item 3)
+# ---------------------------------------------------------------------------
+#
+# Before Stage 6 the subuser-facing app-plane HTTP surface was described in three
+# separate, unenforced places that could silently drift apart:
+#   1. PRODUCT_RUNTIME_RAILS[...]["endpoints"] — worker-facing documentation of what
+#      routes exist, which was hand-maintained and did NOT actually drive dispatch.
+#   2. The hand-written ``if parts == [...]`` chain in takyon_cli/web_server.py — the
+#      REAL routing, ~500 lines of per-rail if/elif with method + auth-tier gating
+#      inlined into each branch.
+#   3. The source-scanner regexes (app_actions._RUNTIME_RAIL_USAGE_PATTERNS) that
+#      decide which rails a built product declares — keyed on client-method names that
+#      lived nowhere else, an unenforced cross-file naming contract.
+#
+# The RuntimeRail registry below makes (2) and (3) DERIVE from one authoritative object
+# per rail. ``RUNTIME_RAILS[name].routes`` is the real app-plane routing table (method /
+# path-pattern / handler key / AUTH TIER); the web_server dispatcher is now a generic
+# loop over ``APP_PLANE_ROUTE_TABLE`` instead of hand-written branches.
+# ``RUNTIME_RAILS[name].client_methods`` are the runtime-client method names the source
+# scanner keys on — the scanner regexes are BUILT from these strings, so drift between
+# the declared rail and the scanned rail is impossible by construction.
+#
+# ``PRODUCT_RUNTIME_RAILS`` is preserved verbatim as the worker-facing metadata surface
+# (owner_skill / tools / endpoints / worker_contract), and each RuntimeRail wraps its
+# dict entry so ``.endpoints`` is now a field on the same object that owns routing — no
+# longer a free-floating literal. An invariant test (see the characterization suite)
+# asserts every declared ``endpoints`` entry maps to a real dispatch route, so the
+# documentation can never again lie about the routing.
+
+# Auth tiers for an app-plane route. These are the byte-identical gating semantics the
+# old per-branch dispatcher enforced inline:
+#   PUBLIC_OPTIONAL  — no session token required; token is read if present, its absence
+#                      yields a 200 "authenticated:false" (never 401). The handler owns
+#                      the no-token path. (GET session, GET account.)
+#   PUBLIC_NO_TOKEN  — route is reachable with no session token and never 401s on its
+#                      absence (auth/session POST mints a session; checkout proceeds with
+#                      an empty token; DELETE session clears the cookie). Handler-owned.
+#   SESSION_REQUIRED — a missing session token yields 401 "missing app session" BEFORE
+#                      the handler runs. This is the common tier for every mutating /
+#                      customer-scoped route.
+APP_AUTH_PUBLIC_OPTIONAL = "public_optional"
+APP_AUTH_PUBLIC_NO_TOKEN = "public_no_token"
+APP_AUTH_SESSION_REQUIRED = "session_required"
+_APP_AUTH_TIERS: frozenset[str] = frozenset(
+    {APP_AUTH_PUBLIC_OPTIONAL, APP_AUTH_PUBLIC_NO_TOKEN, APP_AUTH_SESSION_REQUIRED}
+)
+
+
+@dataclass(frozen=True)
+class RailRoute:
+    """One dispatchable app-plane route.
+
+    ``method``      — uppercase HTTP method (GET/POST/DELETE).
+    ``pattern``     — the app-plane route path pattern as a tuple of parts. A literal part
+                      matches itself; a ``<name>`` part matches exactly one path segment
+                      and binds it under ``name``. Matching is against
+                      ``_takyon_app_route_parts(route)`` (empty segments already stripped).
+    ``handler_key`` — the stable dispatch key the web_server route table maps to the
+                      bespoke handler body. It is NOT the tool name — several routes read
+                      an account first, apply a priced-spend guard, run a broker off-loop,
+                      etc. — it is the identity of the dispatch branch.
+    ``auth_tier``   — one of the APP_AUTH_* constants above; the generic dispatcher
+                      enforces it uniformly before invoking the handler body.
+    """
+
+    method: str
+    pattern: tuple[str, ...]
+    handler_key: str
+    auth_tier: str
+
+    def __post_init__(self) -> None:  # pragma: no cover - trivial invariant guard
+        if self.auth_tier not in _APP_AUTH_TIERS:
+            raise ValueError(f"unknown auth_tier {self.auth_tier!r} for {self.handler_key}")
+
+    def matches(self, method: str, parts: list[str]) -> dict[str, str] | None:
+        """Return the bound path params if (method, parts) matches this route, else None."""
+        if method != self.method or len(parts) != len(self.pattern):
+            return None
+        bound: dict[str, str] = {}
+        for pat, part in zip(self.pattern, parts):
+            if pat.startswith("<") and pat.endswith(">"):
+                bound[pat[1:-1]] = part
+            elif pat != part:
+                return None
+        return bound
+
+
+@dataclass(frozen=True)
+class RuntimeRail:
+    """One product runtime rail owning its routing, scanner methods, and metadata.
+
+    ``routes``          — the real app-plane dispatch routes this rail owns (may be empty
+                          for pure worker-guidance rails such as analytics/billing).
+    ``client_methods``  — the runtime-client method names (browser + ctx) that a built
+                          product calls to use this rail. The source scanner's per-rail
+                          regex is BUILT from these, so a rail is scanned for exactly the
+                          methods it declares. Empty for rails that are not source-derived.
+    ``build_derived``   — whether the rail's declaration is derived from built product
+                          source (mirrors _BUILD_DERIVED_RAILS).
+    ``dependencies``    — the rails this rail requires (mirrors _RUNTIME_FEATURE_DEPENDENCIES).
+    ``metadata``        — the verbatim PRODUCT_RUNTIME_RAILS entry (owner_skill / tools /
+                          endpoints / worker_contract) so ``.endpoints`` etc. live on the
+                          same object that owns routing.
+    """
+
+    name: str
+    routes: tuple[RailRoute, ...] = ()
+    client_methods: tuple[str, ...] = ()
+    build_derived: bool = False
+    dependencies: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def owner_skill(self) -> str:
+        return str(self.metadata.get("owner_skill") or "")
+
+    @property
+    def endpoints(self) -> list[tuple[str, str]]:
+        return list(self.metadata.get("endpoints") or [])
+
+
+# Per-rail dispatch routes. Transcribed 1:1 from the hand-written app-plane dispatcher in
+# takyon_cli/web_server.py (_takyon_app_get / _takyon_app_post / _takyon_app_delete). Each
+# route names the dispatch handler_key the web_server route table binds to the (unchanged)
+# bespoke branch body, plus the byte-identical auth tier the old inline gate enforced.
+_RAIL_ROUTES: dict[str, tuple[RailRoute, ...]] = {
+    "auth": (
+        RailRoute("POST", ("auth", "session"), "auth_session_post", APP_AUTH_PUBLIC_NO_TOKEN),
+        RailRoute("GET", ("session",), "session_get", APP_AUTH_PUBLIC_OPTIONAL),
+        RailRoute("DELETE", ("session",), "session_delete", APP_AUTH_PUBLIC_NO_TOKEN),
+    ),
+    "account": (
+        RailRoute("GET", ("account",), "account_get", APP_AUTH_PUBLIC_OPTIONAL),
+        RailRoute("POST", ("account",), "account_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "profile": (
+        RailRoute("GET", ("profile",), "profile_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("profile",), "profile_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "directory": (
+        RailRoute("GET", ("directory",), "directory_list_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("GET", ("directory", "me"), "directory_me_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("GET", ("directory", "<app_user_id>"), "directory_entry_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("directory", "me"), "directory_me_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("DELETE", ("directory", "me"), "directory_me_delete", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "records": (
+        RailRoute("GET", ("records",), "records_list_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("GET", ("records", "<record_type>", "<record_id>"), "record_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("records", "query"), "records_query_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("records",), "records_upsert_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("records", "<record_type>"), "records_upsert_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("records", "<record_type>", "<record_id>"), "records_upsert_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("DELETE", ("records", "<record_type>", "<record_id>"), "record_delete", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "actions": (
+        RailRoute("POST", ("actions", "<name>"), "action_invoke_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "media": (
+        RailRoute("POST", ("media",), "media_upload_post", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("GET", ("media", "<media_id>"), "media_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("DELETE", ("media", "<media_id>"), "media_delete", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "email": (
+        RailRoute("POST", ("email", "send"), "email_send_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "connections": (
+        RailRoute("GET", ("connections",), "connections_list_get", APP_AUTH_SESSION_REQUIRED),
+        RailRoute("POST", ("connections",), "connections_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "checkout": (
+        RailRoute("GET", ("checkout",), "checkout_get", APP_AUTH_PUBLIC_NO_TOKEN),
+        RailRoute("POST", ("checkout",), "checkout_post", APP_AUTH_PUBLIC_NO_TOKEN),
+    ),
+    "usage": (
+        RailRoute("POST", ("usage",), "usage_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "generate": (
+        RailRoute("POST", ("generate",), "generate_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+    "search": (
+        RailRoute("POST", ("search",), "search_post", APP_AUTH_SESSION_REQUIRED),
+    ),
+}
+
+# Runtime-client method names the source scanner keys on, per rail. The scanner regex for
+# a rail is BUILT from these (see app_actions.runtime_rail_usage_patterns), so the scanned
+# method set and the declared rail are one source of truth. Only the source-derived data /
+# media / AI / social rails carry these; the always-seeded shell rails do not (they are
+# declared regardless of source scanning), matching the pre-Stage-6 scanner exactly.
+_RAIL_CLIENT_METHODS: dict[str, tuple[str, ...]] = {
+    "records": ("listRecords", "getRecord", "saveRecord", "deleteRecord"),
+    "directory": (
+        "listDirectory",
+        "getDirectoryMe",
+        "getDirectoryEntry",
+        "updateDirectoryMe",
+        "disableDirectoryMe",
+    ),
+    "media": ("uploadMedia", "deleteMedia"),
+    "connections": ("listConnections", "actOnConnection"),
+    "generate": (".generate",),
+    "search": (".search",),
+}
+
+
+def _build_runtime_rails() -> dict[str, "RuntimeRail"]:
+    rails: dict[str, RuntimeRail] = {}
+    for name, meta in PRODUCT_RUNTIME_RAILS.items():
+        rails[name] = RuntimeRail(
+            name=name,
+            routes=_RAIL_ROUTES.get(name, ()),
+            client_methods=_RAIL_CLIENT_METHODS.get(name, ()),
+            build_derived=name in _BUILD_DERIVED_RAILS,
+            dependencies=_RUNTIME_FEATURE_DEPENDENCIES.get(name, ()),
+            metadata=meta,
+        )
+    return rails
+
+
+# The authoritative RuntimeRail object registry (one fat object per rail).
+RUNTIME_RAILS: dict[str, RuntimeRail] = _build_runtime_rails()
+
+
+def _build_app_plane_route_table() -> tuple[RailRoute, ...]:
+    """Flatten every rail's routes into one ordered dispatch table.
+
+    Order matters exactly as in the old hand-written chain: a more specific literal route
+    must be tried before a less specific parametric one at the same depth (e.g. POST
+    ``records/query`` before POST ``records/<record_type>``; POST ``actions/<name>`` — a
+    fixed arity — before any generic tail). The generic dispatcher scans this table in
+    order and dispatches the first match, reproducing the first-match semantics of the
+    old ``if parts == [...]`` cascade.
+
+    Precedence is stabilized by (specificity, rail order):
+      1. literal-heavy patterns first (fewer ``<...>`` wildcards wins),
+      2. then longer patterns before shorter ones,
+      3. then the rail declaration order in RUNTIME_RAILS as the final tiebreak.
+    """
+    flat: list[tuple[int, int, int, RailRoute]] = []
+    for rail_index, rail in enumerate(RUNTIME_RAILS.values()):
+        for route in rail.routes:
+            wildcards = sum(1 for p in route.pattern if p.startswith("<"))
+            # (wildcards asc, length desc, rail order asc)
+            flat.append((wildcards, -len(route.pattern), rail_index, route))
+    flat.sort(key=lambda item: (item[0], item[1], item[2]))
+    return tuple(item[3] for item in flat)
+
+
+# The single ordered app-plane dispatch table the web_server generic loop scans.
+APP_PLANE_ROUTE_TABLE: tuple[RailRoute, ...] = _build_app_plane_route_table()
+
+
+def match_app_plane_route(method: str, parts: list[str]) -> tuple[RailRoute, dict[str, str]] | None:
+    """First-match dispatch resolution over APP_PLANE_ROUTE_TABLE.
+
+    Returns (route, bound_path_params) or None when no route matches (the caller then
+    returns the byte-identical 404 the old dispatcher returned as its fall-through tail).
+    """
+    for route in APP_PLANE_ROUTE_TABLE:
+        bound = route.matches(method, parts)
+        if bound is not None:
+            return route, bound
+    return None
+
+
+def runtime_rail_usage_patterns() -> tuple[tuple[str, "re.Pattern[str]"], ...]:
+    """Source-scanner (rail, regex) pairs BUILT from each rail's declared client_methods.
+
+    This is the ONE derivation the app_actions source scanner consumes, so the scanned
+    method set can never drift from the declared rail. A client method beginning with a
+    ``.`` (``.generate`` / ``.search``) is a member access on the runtime client and is
+    matched with the historical ``(?:ctx|client|runtime|rt)`` receiver alternation; every
+    other method is a bare call name matched with a word boundary. The emitted regexes are
+    byte-equivalent to the pre-Stage-6 _RUNTIME_RAIL_USAGE_PATTERNS literals.
+    """
+    patterns: list[tuple[str, re.Pattern[str]]] = []
+    for name, rail in RUNTIME_RAILS.items():
+        methods = rail.client_methods
+        if not methods:
+            continue
+        member = [m[1:] for m in methods if m.startswith(".")]
+        bare = [m for m in methods if not m.startswith(".")]
+        alts: list[str] = []
+        if bare:
+            alts.append(r"\b(?:" + "|".join(bare) + r")\s*\(")
+        for m in member:
+            alts.append(r"\b(?:ctx|client|runtime|rt)\." + m + r"\s*\(")
+        patterns.append((name, re.compile("|".join(alts))))
+    return tuple(patterns)
+
 
 # Product chat tone presets — the operator-selectable VOICE for the customer-facing
 # product chat/assistant (the Litebulb-built product app's AI surface), NOT the operator
