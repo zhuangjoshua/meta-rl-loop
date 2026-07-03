@@ -60,6 +60,30 @@ psycopg = pytest.importorskip("psycopg")
 from plugins.takyon import business_credits  # noqa: E402
 from plugins.takyon import control_plane  # noqa: E402
 from plugins.takyon import core as takyon_core  # noqa: E402
+from plugins.takyon import safebox  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _local_safebox_authority(monkeypatch):
+    """Route money/provisioning authority through the LOCAL safebox path for this suite.
+
+    Post authority-split, ``business_credits.*`` / ``billing.*`` / ``control_plane`` mint+open
+    operations delegate to the REMOTE safebox whenever ``TAKYON_SAFEBOX_URL`` is set (and the
+    operator-authority routes additionally demand ``TAKYON_SAFEBOX_OPERATOR_TOKEN``, which the
+    hermetic harness scrubs) — but the shared test-rig safebox writes to its OWN control plane, so
+    those calls could never land rows in this suite's per-test throwaway DB anyway. The
+    local-authority path runs the same SECURITY DEFINER ledger SQL on the store's own connection,
+    which is exactly the engine these tests exercise; the remote plane split has its own suites."""
+    monkeypatch.setattr(safebox, "_local_authority_enabled", lambda: True)
+    # The throwaway test databases connect as the superuser; accept the tracked legacy-role opt-in
+    # (the same cutover switch the rig safebox itself runs with) so the Stage-4a ledger role gates
+    # (`assert_takyon_pg_role`) admit that session. Plane-role enforcement has its own suites.
+    monkeypatch.setenv("TAKYON_ALLOW_LEGACY_DB_ROLES", "1")
+    # Neutralize the on-disk env-file load. Store commit paths (publish targets / credential gates)
+    # legitimately call core.load_takyon_env(), but on a configured dev workspace that loads
+    # ../secrets/.env INTO THE PROCESS ENV (PUBLIC_COMPANY_BASE_DOMAIN, prod DATABASE_URL, ...),
+    # permanently poisoning every later test in the same xdist worker process.
+    monkeypatch.setattr(takyon_core, "load_takyon_env", lambda *a, **k: [])
 
 
 def _seed_owned_business(dsn: str, slug: str, *, mode: str = "test") -> None:
@@ -133,8 +157,16 @@ def _direct_business_fk_tables(dsn: str) -> set[str]:
 
 
 @pytest.fixture
-def pg_store(pg_store_dsn, tmp_path):
-    """A TakyonStore wired to a migrated throwaway Postgres DB."""
+def pg_store(pg_store_dsn, tmp_path, monkeypatch):
+    """A TakyonStore wired to a migrated throwaway Postgres DB.
+
+    Force the LOCAL workspace storage backend: since the canonicalization spine, a store commit
+    also commits a canonical workspace revision, and the default rig backend resolves supabase_s3,
+    whose revision commits are gated to VPS hosts ("workspace commits are disallowed for the
+    configured backend on this host"). Same pattern as the auth-rls pg_store fixture — orthogonal
+    to the SQL seam under test."""
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
     return takyon_core.TakyonStore(root=tmp_path, database_url=pg_store_dsn)
 
 
@@ -461,13 +493,22 @@ def test_app_budget_set_op_is_removed_invariant9(pg_store, pg_store_dsn):
         assert row[1] == "paused"
 
 
-def test_app_plan_upsert_delegates_drops_payment_link_cols_and_folds_warnings_once(pg_store, pg_store_dsn):
+def test_app_plan_upsert_delegates_drops_payment_link_cols_and_folds_warnings_once(pg_store, pg_store_dsn, monkeypatch):
     # app.plan.upsert delegates to app_entitlements.upsert_plan_policy. Three things the delegation
     # exists to get right: (1) the leaf owns plan_key normalization, so the receipt reflects the
     # PERSISTED key ("Pro Plan" -> "pro-plan"); (2) migration 0006 dropped the dead
     # stripe_payment_link_* columns the SQLite INSERT still lists, so they must be ABSENT on PG;
     # (3) the leaf folds plan-validation warnings into metadata itself — the store passes RAW
     # metadata so the warning lands EXACTLY ONCE, not doubled.
+    #
+    # A paid plan upsert also ensures a live Stripe price (_ensure_stripe_price). Stub the Stripe
+    # transport at the request seam so this hermetic test never needs STRIPE_SECRET_KEY (same
+    # pattern as test_takyon_control_api_pg's stripe_request fakes).
+    monkeypatch.setattr(
+        takyon_core,
+        "_stripe_request",
+        lambda path, params, **_k: {"id": f"{path.rstrip('s')}_test_planco"},
+    )
     _seed_owned_business(pg_store_dsn, "planco", mode="test")
     result = _commit_one(
         pg_store, "planco",
@@ -532,12 +573,14 @@ def test_app_customer_upsert_delegates_to_app_identity_forcing_active(pg_store, 
 def test_app_entitlement_upsert_email_autoprovisions_and_syncs_tier(pg_store, pg_store_dsn):
     # app.entitlement.upsert delegates to app_entitlements.grant_entitlement, which auto-provisions
     # the sub-user from email (no recursive customer.upsert needed on PG) and atomically resyncs
-    # app_users.tier. A non-billing source ("internal") legitimately grants a paid tier.
+    # app_users.tier. The anti-fake-billing rail now requires Stripe evidence on EVERY
+    # access-bearing grant (no "internal" backdoor tier), so the grant carries a customer id — the
+    # delegation/auto-provision/tier-sync behavior under test is unchanged.
     _seed_owned_business(pg_store_dsn, "entco", mode="test")
     result = _commit_one(
         pg_store, "entco",
         {"action": "app.entitlement.upsert", "business": "entco", "email": "vip@example.com",
-         "tier": "pro", "source": "internal"},
+         "tier": "pro", "source": "stripe", "stripe_customer_id": "cus_ent_1"},
         "stageB-ent-1",
     )
     assert result["success"] is True
@@ -558,7 +601,7 @@ def test_app_entitlement_upsert_email_autoprovisions_and_syncs_tier(pg_store, pg
             "select tier, status, source from app_entitlements where business_slug = %s and app_user_id = %s",
             ("entco", user_id),
         ).fetchone()
-        assert erow == ("pro", "active", "internal")
+        assert erow == ("pro", "active", "stripe")
         prow = conn.execute(
             "select id::text from app_user_profiles where business_slug = %s and id = %s",
             ("entco", user_id),
@@ -669,7 +712,7 @@ def test_app_usage_record_budget_cap_is_enforced_atomically(pg_store, pg_store_d
         assert int(rows[0][0]) == 900
 
 
-def test_app_reads_round_trip_after_delegated_writes(pg_store, pg_store_dsn):
+def test_app_reads_round_trip_after_delegated_writes(pg_store, pg_store_dsn, monkeypatch):
     # After a full set of delegated app.* writes, the store's own read path (query="app", which calls
     # _app_summary) and calculate_pulse must both round-trip the Postgres rows back through dict_row +
     # the backend-agnostic metadata-column select. This is the read-side proof for Stage B.
@@ -680,6 +723,12 @@ def test_app_reads_round_trip_after_delegated_writes(pg_store, pg_store_dsn):
     # positive-cost records are now refused).
     from plugins.takyon import app_usage
 
+    # The paid plan write ensures a live Stripe price; stub the Stripe transport seam (hermetic).
+    monkeypatch.setattr(
+        takyon_core,
+        "_stripe_request",
+        lambda path, params, **_k: {"id": f"{path.rstrip('s')}_test_rtco"},
+    )
     _seed_owned_business(pg_store_dsn, "rtco", mode="test")
     with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
         app_usage.set_app_budget(conn, "rtco", hard_limit_microusd=9_000_000, status="active")
@@ -748,10 +797,12 @@ def test_business_upsert_lands_owned_business_with_resolved_platform_owner(pg_st
         owner_id, raw_key = control_plane.ensure_platform_owner(conn)
     assert raw_key and raw_key.startswith("tk_")  # one-time key surfaced ONLY by the bootstrap
 
+    # Business mode "test" was retired (1ca115be "Make Takyon app surfaces live-only ..."):
+    # _requested_business_mode hard-fails on "test"; all businesses run live.
     result = pg_store.commit(
         scope="business:ownedco",
         operations=[{"action": "business.upsert", "business": "ownedco", "name": "Owned Co",
-                     "goal": "ship", "mode": "test"}],
+                     "goal": "ship", "mode": "live"}],
         idempotency_key="p83-create-1", reason="p8.3", actor="test",
     )
     assert result["success"] is True
@@ -763,7 +814,7 @@ def test_business_upsert_lands_owned_business_with_resolved_platform_owner(pg_st
         ).fetchone()
         assert row is not None
         assert str(row[0]) == owner_id  # owned by the resolved platform owner (NOT a fabricated owner)
-        assert row[1] == "Owned Co" and row[2] == "ship" and row[3] == "test" and row[4] == "active"
+        assert row[1] == "Owned Co" and row[2] == "ship" and row[3] == "live" and row[4] == "active"
         # The unification payoff: the owner's opaque API key now lists the shell-created business.
         principal = control_plane.resolve_api_key(conn, raw_key)
         assert principal is not None and "ownedco" in principal.business_slugs
@@ -867,13 +918,15 @@ def test_business_upsert_blocks_when_platform_owner_unprovisioned(pg_store, pg_s
 
 def test_business_upsert_update_path_preserves_owner_on_postgres(pg_store, pg_store_dsn, monkeypatch):
     # The existing-business UPDATE branch never touches owner_user_id, so it runs unchanged on PG and
-    # must preserve the original owner while updating the mutable fields (name/goal/mode).
+    # must preserve the original owner while updating the mutable fields (name/goal). Mode "test"
+    # was retired (1ca115be) — "live" is the only accepted mode, so mode mutability is no longer a
+    # meaningful facet here.
     monkeypatch.setenv("TAKYON_PLATFORM_OWNER_SUB", "auth0|operator-update")
     with psycopg.connect(pg_store_dsn, autocommit=True) as conn:
         owner_id, _ = control_plane.ensure_platform_owner(conn)
     pg_store.commit(
         scope="business:upco",
-        operations=[{"action": "business.upsert", "business": "upco", "name": "Up Co", "goal": "g1", "mode": "test"}],
+        operations=[{"action": "business.upsert", "business": "upco", "name": "Up Co", "goal": "g1", "mode": "live"}],
         idempotency_key="p83-up-1", reason="p8.3", actor="test",
     )
     pg_store.commit(
@@ -1020,7 +1073,7 @@ def test_seed_platform_owner_via_store_is_idempotent_and_enables_create(pg_store
     result = pg_store.commit(
         scope="business:flipco",
         operations=[{"action": "business.upsert", "business": "flipco", "name": "Flip Co",
-                     "goal": "g", "mode": "test"}],
+                     "goal": "g", "mode": "live"}],
         idempotency_key="p84-create-1", reason="p8.4", actor="test",
     )
     assert result["success"] is True

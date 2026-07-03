@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -28,12 +30,68 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
-from plugins.takyon import app_usage, billing, core, jobs, wakes, worker  # noqa: E402
+from plugins.takyon import app_usage, billing, core, jobs, safebox, wakes, worker  # noqa: E402
 from plugins.takyon import turn_runtime
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
 from plugins.takyon.runtime_app import RuntimeNotConfigured  # noqa: E402
 from plugins.takyon import storage  # noqa: E402
 from gateway.session_context import get_session_env  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _local_safebox_authority(monkeypatch):
+    """Route money/provisioning authority through the LOCAL safebox path for this suite.
+
+    Post authority-split (f0e2ae2a), ``provision_user_on_first_login`` / ``billing.*`` mint+open
+    operations delegate to the REMOTE safebox whenever ``TAKYON_SAFEBOX_URL`` is set — but the shared
+    test-rig safebox writes to its OWN control plane (a different database) and its operator route
+    token is scrubbed by the hermetic env, so those setup calls can never land rows in the per-test
+    throwaway DB. The local-authority path runs the same SECURITY DEFINER ledger SQL on the SAME
+    connection the test lent, which is exactly what these tests exercise (queue/ledger engine, not
+    the plane split — that boundary has its own suites)."""
+    monkeypatch.setattr(safebox, "_local_authority_enabled", lambda: True)
+    # The throwaway test databases connect as the superuser; accept the tracked legacy-role opt-in
+    # (the same cutover switch the rig safebox itself runs with) so the Stage-4a ledger role gates
+    # (`assert_takyon_pg_role`) admit that session. Plane-role enforcement has its own suites.
+    monkeypatch.setenv("TAKYON_ALLOW_LEGACY_DB_ROLES", "1")
+    # Neutralize the on-disk env-file load for the whole suite. Several worker paths (the workspace
+    # execution context, run_worker_loop, the lifecycle conn) legitimately call load_takyon_env()
+    # first — but on a configured dev workspace that loads ../secrets/.env INTO THE PROCESS ENV
+    # (PUBLIC_COMPANY_BASE_DOMAIN, prod DATABASE_URL, ...), permanently poisoning every later test in
+    # the same xdist worker (observed: the app-plane routing suite's product-host mapping 400s once a
+    # worker_pg test has run). Tests that need env values set them explicitly via monkeypatch.
+    monkeypatch.setattr(core, "load_takyon_env", lambda *a, **k: [])
+    monkeypatch.setattr(turn_runtime, "load_takyon_env", lambda *a, **k: [])
+
+
+@pytest.fixture
+def operator_plane_store(pg_conn, monkeypatch):
+    """Bind the operator-plane store seam to THIS test's throwaway database.
+
+    Stage 4a made the Postgres store open its own per-request pooled connections from the plane DSN
+    (``resolve_database_url(plane="operator")`` → ``TAKYON_OPERATOR_DATABASE_URL``) and assert the
+    operator DB role on each one. The throwaway rig DB has no plane DSN in env and connects as the
+    superuser, so hand every store the EXPLICIT test DSN instead — the tracked test/maintenance path
+    that skips the plane-role assert, exactly like the ``pg_store`` fixtures. Patching the
+    ``core.TakyonStore`` name covers both ``core._store()`` (drain-tick action dispatch) and the
+    call-time ``from .core import TakyonStore`` sites (ceo_wake_handler, turn_runtime's workspace
+    context). The store's workspace half is pinned to the local backend so no remote sync gate runs.
+    """
+    dsn = pg_conn.info.dsn
+    tmp_root = Path(tempfile.mkdtemp(prefix="takyon-worker-pg-store-"))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_root / "bucket"))
+    orig_store_cls = core.TakyonStore
+
+    def _make_store(*args, **kwargs):
+        kwargs.setdefault("database_url", dsn)
+        return orig_store_cls(*args, **kwargs)
+
+    monkeypatch.setattr(core, "TakyonStore", _make_store)
+    try:
+        yield _make_store
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def _provision_business(conn, *, allowance_cents: int = 0) -> tuple[str, str]:
@@ -74,7 +132,7 @@ def _due_now() -> datetime:
 # ── PG: drain_tick end-to-end ──────────────────────────────────────────────────────────────────────
 
 
-def test_drain_tick_dispatches_due_wake_then_drains_it(pg_conn):
+def test_drain_tick_dispatches_due_wake_then_drains_it(pg_conn, operator_plane_store):
     # The headline path: one tick turns a due schedule into a queued job AND drains it to completion.
     slug, _uid = _provision_business(pg_conn)
     wakes.upsert_wake_schedule(pg_conn, slug, interval_seconds=3600, next_run_at=_due_now())
@@ -92,7 +150,7 @@ def test_drain_tick_dispatches_due_wake_then_drains_it(pg_conn):
     assert enqueued[0].status == "completed"
 
 
-def test_second_tick_is_noop_after_cursor_advances(pg_conn):
+def test_second_tick_is_noop_after_cursor_advances(pg_conn, operator_plane_store):
     # The drain loop must not re-fire the same wake every tick: dispatch advances next_run_at past
     # now(), so the immediate next tick finds nothing due and an empty queue.
     slug, _uid = _provision_business(pg_conn)
@@ -108,7 +166,7 @@ def test_second_tick_is_noop_after_cursor_advances(pg_conn):
     assert len(handler.calls) == 1  # the wake ran exactly once across both ticks
 
 
-def test_drain_tick_settles_true_cost_through_run_one(pg_conn):
+def test_drain_tick_settles_true_cost_through_run_one(pg_conn, operator_plane_store):
     # Money flows the real flow-A path: the schedule payload carries estimate_cents, run_one reserves
     # it on the owner, the handler reports the TRUE cost, and the ledger settles to that true cost.
     slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
@@ -126,7 +184,7 @@ def test_drain_tick_settles_true_cost_through_run_one(pg_conn):
     assert bal.reserved_cents == 0  # the remainder of the hold was released
 
 
-def test_drain_tick_counts_blocked_on_exhausted_budget(pg_conn):
+def test_drain_tick_counts_blocked_on_exhausted_budget(pg_conn, operator_plane_store):
     # Invariant #8 surfaced through the tick: a wake whose estimate the owner cannot cover is BLOCKED,
     # the handler never runs, and the tick counts it as blocked (not completed).
     slug, _uid = _provision_business(pg_conn)  # zero allowance
@@ -300,7 +358,7 @@ def test_drain_tick_reconciles_orphaned_usage_holds(pg_conn, monkeypatch):
     assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 0
 
 
-def test_drain_tick_uses_real_registry_for_ceo_wake(pg_conn, monkeypatch):
+def test_drain_tick_uses_real_registry_for_ceo_wake(pg_conn, operator_plane_store, monkeypatch):
     # With no explicit handlers, the tick consults worker.HANDLERS — proving ceo_wake is wired. We
     # stub the model turn at the run seam so no provider is called.
     slug, _uid = _provision_business(pg_conn)
@@ -395,7 +453,12 @@ def test_bootstrap_final_surface_refresh_skips_redundant_republish(monkeypatch):
         job_id="job-1",
     )
 
-    assert result is None
+    # The contract under test: NO redundant republish runs. Since 0c693c65 ("Fix local operator
+    # bootstrap parity") the skip returns a structured already-published receipt (instead of None)
+    # so callers can see WHY nothing ran — the refresh handler still must never be invoked.
+    assert isinstance(result, dict)
+    assert result["note"] == "already_published_no_source_changes"
+    assert result["publish"]["status"] == "published"
     assert called["count"] == 0
 
 
@@ -502,22 +565,46 @@ def test_composio_requirement_accepts_safebox_backed_key(monkeypatch):
     assert core._missing_env_for_requirement("x") == []
 
 
-@pytest.mark.parametrize("requirement", ("x", "meta", "reddit", "reddit_ads"))
+@pytest.mark.parametrize("requirement", ("x", "reddit", "reddit_ads"))
 def test_composio_requirement_reports_missing_api_key(monkeypatch, requirement):
     monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
     monkeypatch.setattr(core.safebox, "read_env_backed_value", lambda _key: "")
     assert core._missing_env_for_requirement(requirement) == ["COMPOSIO_API_KEY"]
 
 
-def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
+def test_meta_requirement_reports_missing_key_aliases(monkeypatch):
+    # The Meta ads plane deliberately resolves its own Graph/MCP token aliases FIRST and only falls
+    # back to Composio (core._API_ENV_ALIASES["meta"], commit 9566afc4 "Replace Meta Ads v2 with
+    # rebuilt Graph+MCP path"). The missing-credential report is one slash-joined alias entry that
+    # must name both the Meta token route and the Composio fallback.
+    monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
+    monkeypatch.setattr(core.safebox, "read_env_backed_value", lambda _key: "")
+    missing = core._missing_env_for_requirement("meta")
+    assert len(missing) == 1
+    aliases = missing[0].split("/")
+    assert "META_MCP_OAUTH_TOKEN" in aliases
+    assert "COMPOSIO_API_KEY" in aliases
+
+
+def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch, tmp_path):
     # The handler converts the turn's true USD cost to integer cents for settlement and packages the
     # response. $0.0734 → 7 cents.
+    import contextlib
+
     captured: dict = {}
 
     def _fake_turn(*, slug, system_prompt, user_prompt, toolsets, max_turns, inactivity_limit, **_kw):
         captured.update(slug=slug, toolsets=toolsets, max_turns=max_turns)
         return "the CEO did things", 0.0734, "exact", True
 
+    # Stage 4a: mounting the real canonical workspace needs the operator-plane DB (head-revision
+    # read). This unit test pins the handler's cost/plumbing contract, not the mount — fake the
+    # workspace context (the established in-file pattern; the mount has its own PG coverage above).
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield str(tmp_path)
+
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
     job = SimpleNamespace(business_slug="acme", payload={})
@@ -527,8 +614,10 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch):
     assert result.result["business_slug"] == "acme"
     assert result.result["final_response"] == "the CEO did things"
     assert result.result["cost_status"] == "exact"
-    # The handler sourced the canonical wake toolsets (not an invented list).
-    assert captured["toolsets"] == ["takyon", "web", "skills", "todo"]
+    # The handler sourced the canonical wake toolsets (not an invented list). The CEO wake
+    # deliberately carries the quarantined spendful toolset too (1826f007 "Fix keystone
+    # toolset-gating: give CEO the takyon-authority toolset").
+    assert captured["toolsets"] == ["takyon", core.TAKYON_AUTHORITY_TOOLSET, "web", "skills", "todo"]
     assert captured["max_turns"] == worker._DEFAULT_MAX_TURNS
 
 
@@ -755,12 +844,20 @@ def test_x_publish_outreach_handler_uploads_media_once_and_attaches_to_first_pos
     media_path = seed / "product" / "ads" / "hero.png"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"png")
-    storage.sync_up(backend, "acme", seed)
+    # Canonicalization spine: the store's business mirror materializes from an IMMUTABLE keyed
+    # workspace revision whose head pointer lives in the operator control plane. Seed revision 1
+    # and pin the head-revision read (the one DB touch on this path) so the media file resolves
+    # through the real mirror without a database.
+    storage.write_workspace_revision(backend, "acme", 1, seed)
+
+    class _RevisionPinnedStore(core.TakyonStore):
+        def _business_head_revision(self, slug: str) -> int:
+            return 1
 
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
-    monkeypatch.setattr(core, "_store", lambda: core.TakyonStore(tmp_path, operator_user_id=""))
+    monkeypatch.setattr(core, "_store", lambda: _RevisionPinnedStore(tmp_path, operator_user_id=""))
 
     monkeypatch.setattr(
         core,
@@ -845,12 +942,18 @@ def test_x_publish_outreach_handler_releases_credits_when_media_upload_fails(mon
     media_path = seed / "product" / "ads" / "hero.png"
     media_path.parent.mkdir(parents=True, exist_ok=True)
     media_path.write_bytes(b"png")
-    storage.sync_up(backend, "acme", seed)
+    # See the media-attach test above: seed an immutable workspace revision and pin the store's
+    # head-revision read so the media file resolves through the real mirror without a database.
+    storage.write_workspace_revision(backend, "acme", 1, seed)
+
+    class _RevisionPinnedStore(core.TakyonStore):
+        def _business_head_revision(self, slug: str) -> int:
+            return 1
 
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
-    monkeypatch.setattr(core, "_store", lambda: core.TakyonStore(tmp_path, operator_user_id=""))
+    monkeypatch.setattr(core, "_store", lambda: _RevisionPinnedStore(tmp_path, operator_user_id=""))
 
     monkeypatch.setattr(
         core,
@@ -975,13 +1078,22 @@ def test_reddit_publish_outreach_handler_posts_and_records_receipt(monkeypatch):
     assert recorded["credits_charged"] == 1
 
 
-def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch):
+def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch, tmp_path):
+    import contextlib
+
     captured: dict = {}
 
     def _fake_turn(*, max_turns, **_kw):
         captured["max_turns"] = max_turns
         return "", 0.0, "none", True
 
+    # Stage 4a: the real workspace mount reads the operator-plane DB; this test pins only the
+    # max_turns payload plumbing, so fake the workspace context (in-file pattern).
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield str(tmp_path)
+
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
     worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={"max_turns": 7}))
@@ -999,7 +1111,11 @@ def test_ceo_wake_handler_binds_owner_before_loading_prompt(monkeypatch):
     class _FakeStore:
         def __init__(self, *args, **kwargs):
             self.operator_user_id = kwargs.get("operator_user_id")
-            seen["store_operator_user_id"] = self.operator_user_id
+            # setdefault: the contract under test is that the FIRST store (the one the wake prompt
+            # is read from) binds the owner. Later incidental stores in the same handler (e.g. the
+            # pre-wake ad-insights refresh building core._store()) must not clobber the recording —
+            # same pattern as test_refresh_business_surface_after_bootstrap_binds_operator_identity.
+            seen.setdefault("store_operator_user_id", self.operator_user_id)
 
         def _ceo_cron_prompt(self, slug: str) -> str:
             assert slug == "acme"
@@ -1153,7 +1269,19 @@ def test_ceo_wake_timeout_calls_owned_timeout_finalizer(monkeypatch):
     assert ("failed", "ceo_wake") in events
 
 
-def test_best_effort_terminalize_owned_timeout_requeues_running_job(pg_conn):
+def test_best_effort_terminalize_owned_timeout_requeues_running_job(pg_conn, monkeypatch):
+    # Stage 4a: the timeout finalizer opens its OWN operator-plane lifecycle connection from the
+    # plane DSN. Point that seam at this test's throwaway database (the job/ledger rows live there);
+    # the finalizer's SQL and the requeue/refund contract under test stay fully real.
+    def _test_lifecycle_conn():
+        from plugins.takyon.runtime_app import configure_takyon_pg_session
+
+        conn = psycopg.connect(pg_conn.info.dsn, autocommit=True, prepare_threshold=None)
+        configure_takyon_pg_session(conn, bypass=True)
+        return conn
+
+    monkeypatch.setattr(worker, "_open_operator_lifecycle_conn", _test_lifecycle_conn)
+
     slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
     queued = jobs.enqueue(
         pg_conn,
@@ -1345,7 +1473,16 @@ def test_refresh_business_surface_after_bootstrap_skips_missing_source_path(monk
     assert worker._refresh_business_surface_after_bootstrap("acme", job_id="job-1") is None
 
 
-def test_zero_cost_turn_reports_zero_cents(monkeypatch):
+def test_zero_cost_turn_reports_zero_cents(monkeypatch, tmp_path):
+    import contextlib
+
+    # Stage 4a: the real workspace mount reads the operator-plane DB; this test pins only the
+    # zero-cost conversion, so fake the workspace context (in-file pattern).
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield str(tmp_path)
+
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("", 0.0, "none", True))
     result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
@@ -1426,7 +1563,8 @@ def test_run_worker_loop_uses_multiple_threads_when_configured(monkeypatch):
     monkeypatch.setattr(
         __import__("plugins.takyon.runtime_app", fromlist=["resolve_database_url"]),
         "resolve_database_url",
-        lambda _database_url=None: "postgresql://fake",
+        # Stage 3: resolve_database_url gained the plane= kwarg — the stub must accept it.
+        lambda *a, **k: "postgresql://fake",
     )
     monkeypatch.setattr(_psycopg, "connect", lambda *a, **k: _FakeConn())
 

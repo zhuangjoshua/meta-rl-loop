@@ -175,6 +175,10 @@ def test_auth0_login_state_and_session_verify_are_safebox_owned(monkeypatch):
 def test_auth0_callback_route_signs_session_after_safebox_verification(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
+    # /v1/auth0/* routes are operator-authority: they need the route-specific operator token AND an
+    # explicit client allowlist on top of the shared transport token.
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_CLIENTS", "testclient")
     monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
     monkeypatch.setenv("AUTH0_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
@@ -207,9 +211,13 @@ def test_auth0_callback_route_signs_session_after_safebox_verification(monkeypat
     monkeypatch.setattr(safebox, "_auth0_verify_id_token", fake_verify)
 
     client = TestClient(build_safebox_app())
+    headers = {
+        "Authorization": "Bearer test-token",
+        "X-Takyon-Operator-Token": "operator-route-token",
+    }
     resp = client.post(
         "/v1/auth0/callback",
-        headers={"Authorization": "Bearer test-token"},
+        headers=headers,
         json={
             "code": "ok",
             "state": "state-1",
@@ -227,7 +235,7 @@ def test_auth0_callback_route_signs_session_after_safebox_verification(monkeypat
     assert "cookie-signing-secret" not in resp.text
     verify = client.post(
         "/v1/auth0/session/verify",
-        headers={"Authorization": "Bearer test-token"},
+        headers=headers,
         json={"session_token": body["session_token"], "now": 1010},
     )
     assert verify.status_code == 200
@@ -237,6 +245,8 @@ def test_auth0_callback_route_signs_session_after_safebox_verification(monkeypat
 def test_auth0_callback_route_rejects_disallowed_email(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "test-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_CLIENTS", "testclient")
     monkeypatch.setenv("AUTH0_SECRET", "cookie-signing-secret")
     monkeypatch.setenv("AUTH0_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("AUTH0_DOMAIN", "example.us.auth0.com")
@@ -264,7 +274,10 @@ def test_auth0_callback_route_rejects_disallowed_email(monkeypatch):
     client = TestClient(build_safebox_app())
     resp = client.post(
         "/v1/auth0/callback",
-        headers={"Authorization": "Bearer test-token"},
+        headers={
+            "Authorization": "Bearer test-token",
+            "X-Takyon-Operator-Token": "operator-route-token",
+        },
         json={
             "code": "ok",
             "state": "state-1",
@@ -796,9 +809,13 @@ def test_pg_checkout_recovery_uses_safebox_reconcile_when_remote(monkeypatch):
     monkeypatch.setattr(safebox, "_use_remote_authority", lambda: True)
     monkeypatch.setattr(safebox, "reconcile_app_checkout_session", _fake_reconcile)
 
+    class _OperatorPlaneStore:
+        # Recovery only runs for operator-plane stores; an app-plane read never reconciles checkout.
+        _database_plane = "operator"
+
     conn = takyon_core._PGConn(_FakePG())
     result = takyon_core._maybe_reconcile_pg_completed_checkout(
-        object(),
+        _OperatorPlaneStore(),
         conn,
         "acme",
         {"id": "app-user-1", "email": "Buyer@Example.com"},
@@ -823,7 +840,15 @@ def test_pg_checkout_recovery_uses_safebox_reconcile_when_remote(monkeypatch):
 def test_remote_safebox_creative_credit_reserve_maps_insufficient_credits(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
 
-    def _fake_remote(method: str, path: str, payload=None):
+    # A runtime-plane direct reserve is a CLOSED rail: creative spend must route through the
+    # authoritative safebox creative gate (/v1/creative/reserve), never a runtime-side reservation.
+    with pytest.raises(safebox.CreativeGateRefused, match="creative_credit_spend_requires_creative_gate"):
+        safebox.reserve_credits(None, "acme", 5, "resv-1")
+
+    # The gate client surfaces the safebox's structured insufficient-credits refusal (402 with
+    # requested/available detail) so callers can still report exactly what was missing.
+    def _fake_remote(method: str, path: str, payload=None, **_kwargs):
+        assert (method, path) == ("POST", "/v1/creative/reserve")
         raise safebox.RemoteSafeboxError(
             "blocked",
             status_code=402,
@@ -838,11 +863,17 @@ def test_remote_safebox_creative_credit_reserve_maps_insufficient_credits(monkey
 
     monkeypatch.setattr(safebox, "_remote_json", _fake_remote)
 
-    with pytest.raises(safebox.InsufficientCreativeCredits) as exc:
-        safebox.reserve_credits(None, "acme", 5, "resv-1")
+    with pytest.raises(safebox.CreativeGateRefused) as exc:
+        safebox.creative_reserve(
+            business="acme",
+            operator_user_id="user-1",
+            action="business_generate_logo",
+            reservation_key="resv-1",
+        )
 
-    assert exc.value.requested_credits == 5
-    assert exc.value.available_credits == 3
+    assert exc.value.status_code == 402
+    assert exc.value.payload["requested_credits"] == 5
+    assert exc.value.payload["available_credits"] == 3
 
 
 def test_creative_credit_access_requires_remote_or_safebox_host(monkeypatch):
@@ -871,37 +902,42 @@ def test_safebox_app_fails_closed_when_token_is_unconfigured(tmp_path, monkeypat
     assert any_bearer.status_code == 401
 
     # Local test rigs may opt out EXPLICITLY (hermetic pytest envs scrub *_TOKEN vars). Once auth is
-    # bypassed, an INFRA secret still serves over /v1/env (a provider key would 404 — see the
-    # provider-denylist test below).
+    # bypassed, an ALLOWLISTED infra config name still serves over /v1/env (a provider key or DB DSN
+    # would 404 — see the egress-allowlist test below).
     monkeypatch.setenv("TAKYON_SAFEBOX_ALLOW_TOKENLESS", "1")
-    monkeypatch.setenv("DATABASE_URL", "postgres://infra-serves")
-    allowed = client.get("/v1/env/DATABASE_URL")
+    monkeypatch.setenv("POSTMARK_FROM_EMAIL", "hello@infra-serves.example")
+    allowed = client.get("/v1/env/POSTMARK_FROM_EMAIL")
     assert allowed.status_code == 200
-    assert allowed.json() == {"value": "postgres://infra-serves"}
+    assert allowed.json() == {"value": "hello@infra-serves.example"}
 
 
 def test_safebox_app_requires_internal_token_and_serves_infra_read_only(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("AUTH0_DOMAIN", "provisioned-on-host.us.auth0.com")
     monkeypatch.setenv("DATABASE_URL", "postgres://provisioned-on-host")
 
     client = TestClient(build_safebox_app())
 
     # Auth required.
-    assert client.get("/v1/env/DATABASE_URL").status_code == 401
+    assert client.get("/v1/env/AUTH0_DOMAIN").status_code == 401
 
     headers = {"Authorization": "Bearer shared-token"}
-    # Infra secrets (provisioned out-of-band on the safebox host) READ back over /v1/env.
-    read_back = client.get("/v1/env/DATABASE_URL", headers=headers)
+    # Allowlisted infra config (provisioned out-of-band on the safebox host) READS back over /v1/env.
+    read_back = client.get("/v1/env/AUTH0_DOMAIN", headers=headers)
     assert read_back.status_code == 200
-    assert read_back.json() == {"value": "postgres://provisioned-on-host"}
+    assert read_back.json() == {"value": "provisioned-on-host.us.auth0.com"}
 
-    # But WRITING env over HTTP is refused — no runtime plane provisions secrets this way, which closes
-    # the DATABASE_URL clobber/DoS vector. The stored value is unchanged.
-    saved = client.post("/v1/env/DATABASE_URL", json={"value": "postgres://attacker"}, headers=headers)
+    # DB authority DSNs are NOT vendable over /v1/env: each runtime plane gets its own
+    # least-privilege DSN locally, and the shared transport token is not DB authority.
+    assert client.get("/v1/env/DATABASE_URL", headers=headers).status_code == 404
+
+    # And WRITING env over HTTP is refused — no runtime plane provisions secrets this way, which
+    # closes the env clobber/DoS vector. The stored value is unchanged.
+    saved = client.post("/v1/env/AUTH0_DOMAIN", json={"value": "attacker.us.auth0.com"}, headers=headers)
     assert saved.status_code == 403
-    assert client.get("/v1/env/DATABASE_URL", headers=headers).json() == {"value": "postgres://provisioned-on-host"}
+    assert client.get("/v1/env/AUTH0_DOMAIN", headers=headers).json() == {"value": "provisioned-on-host.us.auth0.com"}
 
 
 def test_v1_env_routes_refuse_provider_keys_but_serve_infra(tmp_path, monkeypatch):
@@ -927,23 +963,27 @@ def test_v1_env_routes_refuse_provider_keys_but_serve_infra(tmp_path, monkeypatc
         assert resp.status_code == 404, provider_key
         assert "leaked-secret-should-not-vend" not in resp.text
 
-    # An INFRA secret still serves.
-    monkeypatch.setenv("DATABASE_URL", "postgres://infra")
-    infra = client.get("/v1/env/DATABASE_URL", headers=headers)
+    # An ALLOWLISTED infra config name still serves. DB authority DSNs do NOT (each plane gets its
+    # own least-privilege DSN locally — the transport token is not DB authority).
+    monkeypatch.setenv("POSTMARK_FROM_EMAIL", "hello@infra.example")
+    infra = client.get("/v1/env/POSTMARK_FROM_EMAIL", headers=headers)
     assert infra.status_code == 200
-    assert infra.json() == {"value": "postgres://infra"}
+    assert infra.json() == {"value": "hello@infra.example"}
+    monkeypatch.setenv("DATABASE_URL", "postgres://never-vends")
+    dsn = client.get("/v1/env/DATABASE_URL", headers=headers)
+    assert dsn.status_code == 404
+    assert "never-vends" not in dsn.text
 
     # /v1/env/first filters denied aliases out, then resolves the first non-denied value. The denied
-    # ANTHROPIC_API_KEY (first in the list) is skipped; the infra POSTGRES_URL alias resolves.
-    monkeypatch.delenv("POSTGRES_URL", raising=False)
-    monkeypatch.setenv("POSTGRES_URL", "postgres://pg-alias")
+    # ANTHROPIC_API_KEY (first in the list) is skipped; the allowlisted infra alias resolves.
+    monkeypatch.setenv("SUPABASE_S3_REGION", "us-east-2")
     first_mixed = client.post(
         "/v1/env/first",
-        json={"keys": ["ANTHROPIC_API_KEY", "POSTGRES_URL"]},
+        json={"keys": ["ANTHROPIC_API_KEY", "SUPABASE_S3_REGION"]},
         headers=headers,
     )
     assert first_mixed.status_code == 200
-    assert first_mixed.json() == {"value": "postgres://pg-alias"}
+    assert first_mixed.json() == {"value": "us-east-2"}
 
     # first asking ONLY for denied keys refuses.
     first_denied = client.post(
@@ -961,14 +1001,20 @@ def test_v1_env_routes_refuse_provider_keys_but_serve_infra(tmp_path, monkeypatc
     assert "ANTHROPIC_API_KEY" not in listed
     assert "OPENAI_API_KEY" not in listed
 
-    # The denylist is the single canonical source.
+    # The denylist is the single canonical source for provider keys, and the egress gate is the
+    # canonical read for what /v1/env may vend: provider keys and DB authority DSNs are refused,
+    # allowlisted infra config serves.
     assert "ANTHROPIC_API_KEY" in core.provider_key_denylist()
-    assert "DATABASE_URL" not in core.provider_key_denylist()
+    assert core.env_egress_allowed("DATABASE_URL") is False
+    assert core.env_egress_allowed("POSTMARK_FROM_EMAIL") is True
 
 
 def test_safebox_app_requires_internal_token_and_reads_creative_credit_balance(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    # /v1/creative-credits/* routes are operator-authority on top of the shared transport token.
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_CLIENTS", "testclient")
     monkeypatch.setattr(
         safebox,
         "_local_get_business_credit_balances",
@@ -984,7 +1030,10 @@ def test_safebox_app_requires_internal_token_and_reads_creative_credit_balance(m
     unauthorized = client.get("/v1/creative-credits/acme")
     assert unauthorized.status_code == 401
 
-    headers = {"Authorization": "Bearer shared-token"}
+    headers = {
+        "Authorization": "Bearer shared-token",
+        "X-Takyon-Operator-Token": "operator-route-token",
+    }
     read_back = client.get("/v1/creative-credits/acme", headers=headers)
     assert read_back.status_code == 200
     assert read_back.json() == {
@@ -999,6 +1048,8 @@ def test_safebox_app_requires_internal_token_and_creates_creative_credit_checkou
 
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_CLIENTS", "testclient")
     monkeypatch.setattr(
         control_api,
         "create_creative_credit_checkout_session",
@@ -1027,7 +1078,10 @@ def test_safebox_app_requires_internal_token_and_creates_creative_credit_checkou
     )
     assert unauthorized.status_code == 401
 
-    headers = {"Authorization": "Bearer shared-token"}
+    headers = {
+        "Authorization": "Bearer shared-token",
+        "X-Takyon-Operator-Token": "operator-route-token",
+    }
     response = client.post(
         "/v1/creative-credits/checkout",
         headers=headers,
@@ -1055,11 +1109,18 @@ def test_safebox_app_requires_internal_token_and_creates_creative_credit_checkou
 def test_safebox_app_refuses_arbitrary_creative_credit_grant(monkeypatch):
     monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
     monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_TOKEN", "operator-route-token")
+    monkeypatch.setenv("TAKYON_SAFEBOX_OPERATOR_CLIENTS", "testclient")
 
     client = TestClient(build_safebox_app())
+    # Even a FULLY authorized operator client cannot mint credits by fiat — grants must derive from a
+    # verified checkout/webhook.
     response = client.post(
         "/v1/creative-credits/grant",
-        headers={"Authorization": "Bearer shared-token"},
+        headers={
+            "Authorization": "Bearer shared-token",
+            "X-Takyon-Operator-Token": "operator-route-token",
+        },
         json={
             "business_slug": "acme",
             "credits": 999999,
@@ -1134,11 +1195,23 @@ def test_safebox_app_processes_app_webhook_after_signature_verify(monkeypatch):
     calls = []
 
     class _Conn:
+        def execute(self, *a, **k):
+            # Tolerates the session-config set_config call and the role probe alike.
+            return self
+
+        def fetchone(self):
+            # The webhook path asserts its connection presents the safebox DB authority role
+            # (assert_takyon_pg_role) before any processing — answer the role probe accordingly.
+            return {
+                "session_user": "takyon_safebox_authority",
+                "current_user": "takyon_safebox_authority",
+            }
+
         def close(self):
             pass
 
     monkeypatch.setattr("psycopg.connect", lambda *a, **k: _Conn())
-    monkeypatch.setattr("plugins.takyon.runtime_app.resolve_database_url", lambda: "postgres://owner")
+    monkeypatch.setattr("plugins.takyon.runtime_app.resolve_database_url", lambda *a, **k: "postgres://owner")
 
     def _fake_process(conn, event):
         calls.append((conn, event))

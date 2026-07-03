@@ -49,6 +49,21 @@ OWNER_TOKEN = "Bearer tk_attacksurface1234567890123456789012345678901234"
 SESSION_COOKIE = "takyon_app_session=session_123"
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_product_base_domain(monkeypatch):
+    """Pin the product-host mapping to the clean-process default (coscale.app).
+
+    The characterization host ``mathflow.coscale.app`` resolves through
+    ``web_server._company_base_domain()``, which reads PUBLIC_COMPANY_BASE_DOMAIN /
+    TAKYON_COMPANY_BASE_DOMAIN from the process env. Another suite in the same xdist worker can
+    legitimately hit ``core.load_takyon_env()`` and pull a configured workspace's on-disk env
+    (e.g. PUBLIC_COMPANY_BASE_DOMAIN=fourmanifold.com) into os.environ — after which every request
+    here 400s at the Host-header middleware. Scrub the overrides so this suite always
+    characterizes the same contract a clean process does."""
+    monkeypatch.delenv("PUBLIC_COMPANY_BASE_DOMAIN", raising=False)
+    monkeypatch.delenv("TAKYON_COMPANY_BASE_DOMAIN", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Handler stub harness
 # ---------------------------------------------------------------------------

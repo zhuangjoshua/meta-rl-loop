@@ -37,6 +37,18 @@ BUSINESS = "mathflow"
 BASE = f"/api/takyon/apps/{BUSINESS}"
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_product_base_domain(monkeypatch):
+    """Pin the product-host mapping to the clean-process default (coscale.app).
+
+    Same rationale as the app-plane characterization suite: a sibling suite in the same xdist
+    worker can pull a configured workspace's on-disk env (PUBLIC_COMPANY_BASE_DOMAIN=...) into
+    os.environ via core.load_takyon_env(), after which ``mathflow.coscale.app`` stops resolving as
+    a product host and every request 400s at the Host-header middleware."""
+    monkeypatch.delenv("PUBLIC_COMPANY_BASE_DOMAIN", raising=False)
+    monkeypatch.delenv("TAKYON_COMPANY_BASE_DOMAIN", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # 1. Equivalence invariants
 # ---------------------------------------------------------------------------
