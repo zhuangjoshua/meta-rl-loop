@@ -69,9 +69,27 @@ break prod?" gate — the thing dev is *for*.
 - Do NOT regress the existing isolation guarantees: prod-literal boot guard, separate Supabase,
   Stripe TEST, transaction-pooler (:6543) runtime DSNs, subuser-zero-operator-authority.
 
-## Open questions for the operator
-1. Branch model: a long-lived `dev` branch ahead of `main`, or per-env pinned SHAs with no
-   standing branch? (Branch is simpler to reason about; SHA-pin is more explicit.)
-2. Auto-deploy dev on push to `dev`, or explicit `takyon env deploy dev`?
-3. Is a dedicated **dev operator droplet** approved (~$12-24/mo on top of the existing dev
-   subuser/safebox droplets), or reuse one of the existing dev droplets for the operator role?
+## Decisions (operator, 2026-07-03) — LOCKED
+1. **Branch model: a long-lived `dev` branch ahead of `main`.** Land changes on `dev`, test on
+   the dev env, promote = fast-forward `main` to the dev-green SHA.
+2. **Dev deploy: explicit `takyon env deploy dev`** (deterministic; not auto-on-push).
+3. **Dev operator host: reuse an existing dev droplet** (no new dedicated operator droplet) —
+   run `takyon-dashboard.service`+`takyon-worker.service` on one of the existing dev droplets.
+
+## Implementation order (against the locked decisions)
+- **S1. `dev` branch** — create `dev` from `main` (they start identical). `main` = live prod;
+  `dev` = integration, ahead. Dev-first changes (incl. Codex's dedicated-hosts work) land here.
+- **S2. `code_revision` on env config + revision-aware deploy** — `environments/dev.yaml` gets
+  `code_revision: dev`; `deploy/*/deploy-runtime.sh` ships a specific SHA (`git archive`), not
+  the working tree; `takyon env deploy dev` deploys dev.yaml's pin to the reused dev droplet(s).
+- **S3. `takyon env promote dev`** — ff `main` to the tested dev SHA + trigger prod deploy +
+  `takyon migrate`. Prod only ever receives a dev-green revision.
+- **S4. Dev services on the reused droplet** — dashboard+worker+safebox as systemd at the dev
+  rev; Mac `-dev.sh` demotes to a thin client. (Codex's safebox→droplet work is part of this.)
+
+## Coordination note (2026-07-03)
+Codex has **uncommitted** edits to `env_provisioner.py` + `scripts/takyon-operator-prod.sh` (its
+dev-safebox→droplet remote rail = part of S4). S2/S3 touch the same files, so the keystone build
+must NOT clobber that. Clean path: Codex commits its S4 work onto the **`dev` branch** (its first
+dev-first change), then the keystone (S2/S3) builds on top — or Codex pauses and one agent owns
+the whole sequence.
