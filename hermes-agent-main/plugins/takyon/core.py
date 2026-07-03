@@ -12949,7 +12949,20 @@ def _product_public_asset_publish_roots(store: "TakyonStore", business: str) -> 
     publish = publish_receipt.get("publish") if isinstance(publish_receipt.get("publish"), dict) else {}
     publish_root_text = str(publish.get("publish_root") or "").strip()
     if publish_root_text:
-        add(Path(publish_root_text))
+        # The publish receipt records the ABSOLUTE publish_root of whichever host ran the publish.
+        # Business work moves between rails (Mac operator console vs VPS), so replaying a foreign
+        # host's absolute root here made asset staging try to mkdir paths like /Users/... on the
+        # VPS and fail EACCES (2026-07-03 reddit-launch incident). Honor the recorded root only
+        # when it lives under THIS host's canonical publish base; the local site root added above
+        # already covers this host, and the public-URL reachability probe remains the hard gate,
+        # so skipping a foreign root can never fake a successful staging.
+        try:
+            candidate = Path(publish_root_text).expanduser().resolve()
+            local_base = _product_publish_root()
+            if local_base in (candidate, *candidate.parents):
+                add(candidate)
+        except OSError:
+            pass
 
     return roots
 
