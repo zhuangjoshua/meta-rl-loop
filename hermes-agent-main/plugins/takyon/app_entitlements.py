@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from plugins.takyon import app_identity, app_profiles, plan_composition
+from plugins.takyon import app_identity, app_profiles, money_shape, plan_composition
 
 # tier → rank for resolving the effective tier; LOWER wins.
 _TIER_RANK = {"owner": 0, "paid": 1, "pro": 1}
@@ -261,12 +261,27 @@ def upsert_plan_policy(
     source: str = "takyon",
     notes: str = "",
     metadata: dict | None = None,
+    money_shape_task_kind: str = "",
 ) -> PlanPolicy:
     """Create or update a plan in the business's catalog, idempotent on (business_slug, plan_key).
     Every field overwrites on conflict EXCEPT `stripe_product_id`/`stripe_price_id`, which are
     COALESCE-preserved (a re-upsert that omits them keeps the prior linkage) — matching the SQLite
-    upsert (core.py:5207). Unknown business → ForeignKeyViolation (fail loud)."""
+    upsert (core.py:5207). Unknown business → ForeignKeyViolation (fail loud).
+
+    MONEY-SHAPE GATE (UC4, plan §2.7 — closes the Roomier hole on EVERY path): a plan write is a
+    SUBSCRIPTION-shape write (an `app_plan_policies` row is a recurring monthly plan). Before any
+    write, this validates against the business's DECLARED money shape via
+    `money_shape.assert_write_matches_shape`. On a `credit_packs`/`cogs_passthrough` business it
+    REFUSES (`MoneyShapeViolation`) naming declared vs attempted — fired on chat, bootstrap, AND wake
+    (unlike the wake-only `_refuse_on_autonomous_wake`). `money_shape_task_kind` only labels the
+    refusal; the gate never relaxes for any kind. Because this is the ONE choke point every plan write
+    (freehand and composed) funnels through, the gate cannot be dodged by picking a different path."""
     key = _normalize_plan_key(plan_key)
+    # Money-shape gate FIRST — before any economics validation or write. A plan is a subscription
+    # offer; refuse it on a non-subscription business (the Roomier hole, closed on every task kind).
+    money_shape.assert_write_matches_shape(
+        conn, business_slug, money_shape.SUBSCRIPTION, task_kind=money_shape_task_kind
+    )
     tier_value = str(tier or key or "paid").strip()
     if tier_value.lower() in _UNENTITLING_TIERS:
         raise InvalidPlan("free plan tiers are unsupported; unpaid users must have no entitlement")
@@ -436,6 +451,7 @@ def upsert_plan_from_composition(
     source: str = "takyon",
     notes: str = "",
     metadata: dict | None = None,
+    money_shape_task_kind: str = "",
 ) -> PlanPolicy:
     """Write a plan whose economics are DERIVED from a `PlanComposition` (UC4 keystone, plan §2.7).
 
@@ -498,6 +514,7 @@ def upsert_plan_from_composition(
         source=source,
         notes=notes,
         metadata=meta,
+        money_shape_task_kind=money_shape_task_kind,
     )
 
 

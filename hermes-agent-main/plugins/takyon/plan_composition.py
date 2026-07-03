@@ -707,3 +707,96 @@ def _build_receipt(
         "realized_margin": round(float(margin_realized), 6),
         "derivation_lines": lines,
     }
+
+
+# ── spec parsing (the CEO tool schema → PlanComposition) ────────────────────────────
+
+
+def _require_mapping(value, what: str) -> dict:
+    if not isinstance(value, dict):
+        raise InvalidComponent(f"{what} must be an object (got {type(value).__name__})")
+    return value
+
+
+def _cost_basis_from_spec(spec: dict) -> CostBasis:
+    """Parse one cost-basis object from the tool schema. Fail closed on any malformed shape — a bad
+    basis must never silently become a default (which would derive a wrong price)."""
+    kind = str(spec.get("kind") or "").strip().lower()
+    if kind == "metered":
+        allowance_spec = _require_mapping(spec.get("allowance"), "metered cost_basis.allowance")
+        allowance = MeteredAllowance(
+            model=str(allowance_spec.get("model") or ""),
+            provider=(str(allowance_spec["provider"]) if allowance_spec.get("provider") else None),
+            base_url=(str(allowance_spec["base_url"]) if allowance_spec.get("base_url") else None),
+            input_tokens=int(allowance_spec.get("input_tokens") or 0),
+            output_tokens=int(allowance_spec.get("output_tokens") or 0),
+            cache_read_tokens=int(allowance_spec.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(allowance_spec.get("cache_write_tokens") or 0),
+            request_count=int(allowance_spec.get("request_count") or 0),
+        )
+        return CostBasis.metered(allowance)
+    if kind == "fixed":
+        return CostBasis.fixed(int(spec.get("fee_microusd_month") or 0))
+    if kind == "per_unit":
+        return CostBasis.per_unit(
+            int(spec.get("unit_cost_microusd") or 0),
+            int(spec.get("included_units") or 0),
+        )
+    raise InvalidComponent(
+        f"unknown cost_basis kind {spec.get('kind')!r}; must be metered, fixed, or per_unit"
+    )
+
+
+def _component_from_spec(spec: dict) -> PricedComponent:
+    _require_mapping(spec, "component")
+    basis = _cost_basis_from_spec(_require_mapping(spec.get("cost_basis"), "component.cost_basis"))
+    grants = spec.get("grants") or {}
+    if not isinstance(grants, dict):
+        raise InvalidComponent("component.grants must be an object")
+    return PricedComponent(
+        kind=str(spec.get("kind") or "").strip() or "component",
+        key=str(spec.get("key") or "").strip(),
+        cost_basis=basis,
+        grants=dict(grants),
+    )
+
+
+def composition_from_spec(spec) -> PlanComposition:
+    """Parse the CEO tool's `composition` input (a plain JSON-shaped dict) into a `PlanComposition`.
+
+    This is the "adding a feature = adding a PricedComponent" surface: the CEO passes a list of
+    priced components + a margin policy; the price/budget/features are DERIVED by `compose_plan`.
+    Fail-closed by construction — any malformed component, unknown cost-basis kind, bad margin policy,
+    or empty list raises `InvalidComponent`/`InvalidMarginPolicy` BEFORE any plan row is written, so a
+    broken composition never persists a broken plan.
+
+    Shape (mirrors the dataclasses):
+        {
+          "components": [
+            {"kind": "ai_allowance", "key": "ai_allowance",
+             "cost_basis": {"kind": "metered", "allowance": {"model": ..., "input_tokens": ...}},
+             "grants": {"model_allowlist": [...], "features": {...}}},
+            {"kind": "external_fee", "key": "shopify_store",
+             "cost_basis": {"kind": "fixed", "fee_microusd_month": 9000000}, "grants": {"rail": "shopify"}}
+          ],
+          "margin_policy": {"margin_floor": 0.30, "rounding": "dollar"},
+          "floor_price_microusd": 0
+        }
+    """
+    spec = _require_mapping(spec, "composition")
+    raw_components = spec.get("components")
+    if not isinstance(raw_components, (list, tuple)) or not raw_components:
+        raise InvalidComponent("composition.components must be a non-empty list")
+    components = tuple(_component_from_spec(_require_mapping(c, "component")) for c in raw_components)
+    policy_spec = spec.get("margin_policy") or {}
+    if not isinstance(policy_spec, dict):
+        raise InvalidMarginPolicy("composition.margin_policy must be an object")
+    policy = MarginPolicy(
+        margin_floor=float(policy_spec.get("margin_floor") or 0.0),
+        rounding=str(policy_spec.get("rounding") or "cent"),
+    )
+    return PlanComposition(
+        components=components,
+        margin_policy=policy,
+        floor_price_microusd=int(spec.get("floor_price_microusd") or 0),
+    )

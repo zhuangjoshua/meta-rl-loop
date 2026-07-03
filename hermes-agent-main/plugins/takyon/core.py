@@ -8436,6 +8436,17 @@ def _refuse_on_autonomous_wake(action: str) -> None:
         )
 
 
+def _money_shape_error() -> type[Exception]:
+    """The `money_shape.MoneyShapeError` base class, lazily imported so a raised money-shape violation
+    (the Roomier-hole refusal) surfaces as a clean TakyonError at the plan-write choke point. Lazy so
+    the SQLite-only path pays no import cost."""
+    try:
+        from . import money_shape as _money_shape
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import money_shape as _money_shape
+    return _money_shape.MoneyShapeError
+
+
 def _refuse_product_file_edit_on_autonomous_wake(path: Any) -> None:
     """Block product-SOURCE writes (product/site/...) on a wake. Research/metrics/memory writes and
     distribution/creative receipts + assets (product/public-assets, product/brand, product/static-ads,
@@ -19065,64 +19076,113 @@ class TakyonStore:
                 raise TakyonError(
                     "free plan tiers are unsupported; unpaid users must have no entitlement"
                 )
-            price_cents = int(float(op.get("price_cents") or op.get("price_usd_cents") or 0))
-            leaves = None
-            if price_cents < 0:
-                raise TakyonError("plan price must be non-negative")
-            interval = _normalize_billing_interval(op.get("billing_interval") or "month")
-            if interval not in {"month", "year", "one_time"}:
-                raise TakyonError("billing_interval must be one of: month, year, one_time")
-            included_ai_budget_default = 0
-            if op.get("included_ai_budget_microusd") in {None, ""}:
-                leaves = self._app_leaves()
-                try:
-                    with self._leaf_conn(conn) as raw:
-                        existing_policy = leaves["entitlements"].get_plan_policy(
-                            raw, slug, plan_key
-                        )
-                except leaves["entitlements"].EntitlementError as exc:
-                    raise TakyonError(str(exc)) from exc
-                if existing_policy is not None:
-                    included_ai_budget_default = int(
-                        existing_policy.included_ai_budget_microusd
-                    )
-            included_ai_budget_microusd = _normalize_included_ai_budget_microusd(
-                op.get("included_ai_budget_microusd"),
-                price_cents=price_cents,
-                billing_interval=interval,
-                tier=tier,
-                default=included_ai_budget_default,
-            )
-            quota_raw = op.get("included_action_quota")
-            included_action_quota = int(0 if quota_raw in {None, ""} else quota_raw)
+            leaves = self._app_leaves()
+            # The money-shape gate + the leaf's own invariants fire on EVERY task kind; the kind only
+            # labels the money-shape refusal (chat/bootstrap/wake all validated, unlike the wake ban).
+            money_shape_task_kind = _active_operator_task_kind()
             metadata = op.get("metadata") or {}
             if not isinstance(metadata, dict):
                 metadata = {"value": metadata}
-            # Canonical Postgres plan write: app_entitlements.upsert_plan_policy owns app_plan_policies
-            # (migration 0006 dropped the dead stripe_payment_link_* columns) and folds plan-validation
-            # warnings into metadata itself, so pass the RAW metadata dict — folding here too would
-            # double the warnings. plan_key is re-read from the persisted policy for receipt fidelity.
-            leaves = leaves or self._app_leaves()
-            try:
-                with self._leaf_conn(conn) as raw:
-                    policy = leaves["entitlements"].upsert_plan_policy(
-                        raw,
-                        slug,
-                        plan_key,
-                        tier=tier,
-                        price_cents=price_cents,
-                        currency=str(op.get("currency") or "usd").lower(),
-                        billing_interval=interval,
-                        included_ai_budget_microusd=included_ai_budget_microusd,
-                        included_action_quota=included_action_quota,
-                        stripe_product_id=op.get("stripe_product_id"),
-                        stripe_price_id=op.get("stripe_price_id"),
-                        source=str(op.get("source") or "takyon"),
-                        notes=str(op.get("notes") or ""),
-                        metadata=metadata,
-                    )
-            except leaves["entitlements"].EntitlementError as exc:
-                raise TakyonError(str(exc)) from exc
+            # UC4 (plan §2.7): a `composition` input routes through app_entitlements.upsert_plan_from_composition
+            # so price/budget/features are DERIVED from priced components under the margin policy —
+            # "adding a feature = adding a PricedComponent". The freehand price_cents/budget path stays
+            # as the transitional (still margin-gated) path. A malformed composition fails CLOSED
+            # (InvalidComponent/InvalidMarginPolicy) before any row is written.
+            composition_spec = op.get("composition")
+            derivation_receipt: dict[str, Any] | None = None
+            if composition_spec not in (None, "", {}):
+                try:
+                    from . import plan_composition as _plan_composition
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon import plan_composition as _plan_composition
+                try:
+                    composition = _plan_composition.composition_from_spec(composition_spec)
+                except _plan_composition.CompositionError as exc:
+                    raise TakyonError(f"invalid plan composition: {exc}") from exc
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        policy = leaves["entitlements"].upsert_plan_from_composition(
+                            raw,
+                            slug,
+                            plan_key,
+                            composition,
+                            tier=tier,
+                            currency=str(op.get("currency") or "usd").lower(),
+                            stripe_product_id=op.get("stripe_product_id"),
+                            stripe_price_id=op.get("stripe_price_id"),
+                            source=str(op.get("source") or "takyon"),
+                            notes=str(op.get("notes") or ""),
+                            metadata=metadata,
+                            money_shape_task_kind=money_shape_task_kind,
+                        )
+                except (
+                    leaves["entitlements"].EntitlementError,
+                    _plan_composition.CompositionError,
+                    _money_shape_error(),
+                ) as exc:
+                    raise TakyonError(str(exc)) from exc
+                price_cents = int(policy.price_cents)
+                composition_meta = (
+                    policy.metadata.get("takyon_plan_composition")
+                    if isinstance(policy.metadata, dict)
+                    else None
+                )
+                if isinstance(composition_meta, dict):
+                    derivation_receipt = composition_meta.get("receipt")
+            else:
+                price_cents = int(float(op.get("price_cents") or op.get("price_usd_cents") or 0))
+                if price_cents < 0:
+                    raise TakyonError("plan price must be non-negative")
+                interval = _normalize_billing_interval(op.get("billing_interval") or "month")
+                if interval not in {"month", "year", "one_time"}:
+                    raise TakyonError("billing_interval must be one of: month, year, one_time")
+                included_ai_budget_default = 0
+                if op.get("included_ai_budget_microusd") in {None, ""}:
+                    try:
+                        with self._leaf_conn(conn) as raw:
+                            existing_policy = leaves["entitlements"].get_plan_policy(
+                                raw, slug, plan_key
+                            )
+                    except leaves["entitlements"].EntitlementError as exc:
+                        raise TakyonError(str(exc)) from exc
+                    if existing_policy is not None:
+                        included_ai_budget_default = int(
+                            existing_policy.included_ai_budget_microusd
+                        )
+                included_ai_budget_microusd = _normalize_included_ai_budget_microusd(
+                    op.get("included_ai_budget_microusd"),
+                    price_cents=price_cents,
+                    billing_interval=interval,
+                    tier=tier,
+                    default=included_ai_budget_default,
+                )
+                quota_raw = op.get("included_action_quota")
+                included_action_quota = int(0 if quota_raw in {None, ""} else quota_raw)
+                # Canonical Postgres plan write: app_entitlements.upsert_plan_policy owns app_plan_policies
+                # (migration 0006 dropped the dead stripe_payment_link_* columns) and folds plan-validation
+                # warnings into metadata itself, so pass the RAW metadata dict — folding here too would
+                # double the warnings. plan_key is re-read from the persisted policy for receipt fidelity.
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        policy = leaves["entitlements"].upsert_plan_policy(
+                            raw,
+                            slug,
+                            plan_key,
+                            tier=tier,
+                            price_cents=price_cents,
+                            currency=str(op.get("currency") or "usd").lower(),
+                            billing_interval=interval,
+                            included_ai_budget_microusd=included_ai_budget_microusd,
+                            included_action_quota=included_action_quota,
+                            stripe_product_id=op.get("stripe_product_id"),
+                            stripe_price_id=op.get("stripe_price_id"),
+                            source=str(op.get("source") or "takyon"),
+                            notes=str(op.get("notes") or ""),
+                            metadata=metadata,
+                            money_shape_task_kind=money_shape_task_kind,
+                        )
+                except (leaves["entitlements"].EntitlementError, _money_shape_error()) as exc:
+                    raise TakyonError(str(exc)) from exc
             plan_key = policy.plan_key
             persisted_plan = self._row_to_dict(
                 conn.execute(
@@ -19145,8 +19205,23 @@ class TakyonStore:
             self._rewrite_app_files(conn, slug)
             event_payload = {"plan_key": plan_key, "price_cents": price_cents}
             event_payload["stripe_price_id"] = persisted_plan.get("stripe_price_id")
+            if derivation_receipt is not None:
+                event_payload["composed"] = True
             self._record_event(conn, scope=f"business:{slug}/app", business_slug=slug, event_type=action, payload=event_payload)
-            return {"action": action, "business": slug, "plan_key": plan_key, "stripe_price_id": persisted_plan.get("stripe_price_id")}
+            result = {
+                "action": action,
+                "business": slug,
+                "plan_key": plan_key,
+                "price_cents": int(persisted_plan.get("price_cents") or price_cents),
+                "included_ai_budget_microusd": int(persisted_plan.get("included_ai_budget_microusd") or 0),
+                "stripe_price_id": persisted_plan.get("stripe_price_id"),
+            }
+            if derivation_receipt is not None:
+                # UC4: the CEO sees "components → derived price". The full derivation receipt is
+                # surfaced so the operator/CEO can audit that the price/budget were DERIVED, not typed.
+                result["composed"] = True
+                result["derivation_receipt"] = derivation_receipt
+            return result
 
         if action == "app.customer.upsert":
             email = _normalize_email(str(op.get("email") or ""))
@@ -21698,6 +21773,70 @@ _REQUIRES_ENV_PROP = {
     "description": "Explicit environment variables required for this operation",
 }
 
+# UC4 (plan §2.7): the CEO passes priced COMPONENTS and a margin policy; price_cents and
+# included_ai_budget_microusd are then DERIVED, not typed. "Adding a feature = adding a
+# PricedComponent." When `composition` is present the raw price_cents/included_ai_budget_microusd
+# inputs are ignored in favor of the derived numbers.
+_COMPOSITION_PROP = {
+    "type": "object",
+    "description": (
+        "Optional. Derive this plan's price and AI budget from priced COMPONENTS under a margin "
+        "policy instead of typing raw numbers (the authoritative UC4 path — a hallucinated price is "
+        "impossible because the numbers are derived). When present, price_cents and "
+        "included_ai_budget_microusd are IGNORED and computed from the components. A malformed "
+        "composition is refused before any plan is written. Monthly-only by construction."
+    ),
+    "properties": {
+        "components": {
+            "type": "array",
+            "description": "The priced building blocks. Add a feature by adding a component.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "description": "ai_allowance | external_fee | feature_rail | credit_grant | quota"},
+                    "key": {"type": "string", "description": "Stable component key, e.g. ai_allowance, shopify_store"},
+                    "cost_basis": {
+                        "type": "object",
+                        "description": "The component's monthly cost shape.",
+                        "properties": {
+                            "kind": {"type": "string", "description": "metered | fixed | per_unit"},
+                            "allowance": {
+                                "type": "object",
+                                "description": "For kind=metered: the month's AI inference, priced via usage_pricing (the ONE cost SSOT).",
+                                "properties": {
+                                    "model": {"type": "string"},
+                                    "provider": {"type": "string"},
+                                    "input_tokens": {"type": "integer"},
+                                    "output_tokens": {"type": "integer"},
+                                    "cache_read_tokens": {"type": "integer"},
+                                    "cache_write_tokens": {"type": "integer"},
+                                    "request_count": {"type": "integer"},
+                                },
+                            },
+                            "fee_microusd_month": {"type": "integer", "description": "For kind=fixed: the external recurring/per-seat fee, µUSD/month."},
+                            "unit_cost_microusd": {"type": "integer", "description": "For kind=per_unit."},
+                            "included_units": {"type": "integer", "description": "For kind=per_unit."},
+                        },
+                    },
+                    "grants": {
+                        "type": "object",
+                        "description": "What this component turns on: features, model_allowlist, rail, credits.",
+                    },
+                },
+            },
+        },
+        "margin_policy": {
+            "type": "object",
+            "description": "The margin floor (fraction of price that must remain after COGS) + price-point rounding.",
+            "properties": {
+                "margin_floor": {"type": "number", "description": "In [0,1). 0.30 means COGS may be at most 70% of price."},
+                "rounding": {"type": "string", "description": "cent | dollar | none"},
+            },
+        },
+        "floor_price_microusd": {"type": "integer", "description": "Optional operator-chosen price point the derived price must meet or exceed."},
+    },
+}
+
 
 def handle_business_list_businesses(args: dict, **_: Any) -> str:
     try:
@@ -22466,6 +22605,11 @@ def handle_business_refresh_product_surface(args: dict, **_: Any) -> str:
 
 
 def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
+    # The money-shape gate fires downstream at the DB-authoritative choke point (upsert_plan_policy)
+    # on EVERY task kind. The wake ban here is the pre-existing, wake-only refusal for the whole
+    # subscription/plan-change surface; it stays. (A wake never reaches the money-shape gate because
+    # this raises first — but on a chat/bootstrap turn, which the wake ban lets through, the
+    # money-shape gate is the layer that closes the Roomier hole.)
     _refuse_on_autonomous_wake("subscription/plan changes")
     operation = {
         "action": "app.plan.upsert",
@@ -22482,6 +22626,11 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
         "source": args.get("source") or "takyon",
         "notes": args.get("notes") or "",
         "metadata": args.get("metadata") or {},
+        # UC4: a composition input DERIVES price/budget/features from priced components under a margin
+        # policy. When present, the raw price_cents/included_ai_budget_microusd inputs are ignored in
+        # favor of the derived numbers (the transitional freehand path is only used when composition
+        # is absent).
+        "composition": args.get("composition"),
     }
     return _commit_tool(args, operation)
 
@@ -34402,7 +34551,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_upsert_app_plan",
         "description": "Create or update a business product app plan policy, including Stripe price linkage and included usage.",
         "handler": handle_business_upsert_app_plan,
-        "schema": _schema("business_upsert_app_plan", "Create/update a product app plan. A plan with active subscribers has its economic terms (tier, price, currency, interval, included AI budget, action quota) FROZEN: to change pricing, create a new plan_key and route new checkout to it — existing subscribers stay grandfathered on the old plan_key.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string", "description": "Stable id of the price offer. Treat it as an immutable version: never re-price a plan_key that has subscribers; mint a new one (e.g. 'pro-2') for new pricing."}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "price_cents": {"type": "integer"}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized."}, "included_ai_budget_microusd": {"type": "integer", "description": "Included AI budget for the plan, denominated in microusd. For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
+        "schema": _schema("business_upsert_app_plan", "Create/update a product app plan (a recurring SUBSCRIPTION offer; refused on a credit-packs or COGS-pass-through business). PREFER passing `composition` (priced components + margin policy) so price and AI budget are DERIVED, never typed — adding a feature is adding a component. A plan with active subscribers has its economic terms FROZEN: to change pricing, create a new plan_key and route new checkout to it — existing subscribers stay grandfathered on the old plan_key.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string", "description": "Stable id of the price offer. Treat it as an immutable version: never re-price a plan_key that has subscribers; mint a new one (e.g. 'pro-2') for new pricing."}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "composition": _COMPOSITION_PROP, "price_cents": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). Still margin-gated: refused if the AI budget exceeds the price."}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized. Subuser plans are monthly-only; non-month is refused for new plans."}, "included_ai_budget_microusd": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_customer",
