@@ -1,0 +1,70 @@
+name: Forward main to dev
+
+# The one-directional code-gate invariant (operator, 2026-07-03):
+#   prod (main) --> dev   is AUTOMATIC   (this workflow)
+#   dev --> prod (main)   is NEVER automatic; only `takyon env promote dev`
+#     (a deliberate fast-forward of main to a dev-green SHA).
+#
+# Why: `dev` is the pre-prod integration branch and must ALWAYS be a superset of
+# what is live in prod, so you never test a change on dev against stale prod code.
+# Every commit that reaches `main` (a promote, or a direct hotfix) is force-carried
+# into `dev` here. The reverse never happens automatically — that is the whole point
+# of the gate: prod only ever receives a revision that already ran green on dev.
+#
+# This workflow only fires on pushes to `main`, and only ever pushes `dev`, so it can
+# never loop (a dev push triggers nothing) and never deploys anything to prod.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  # Serialize with itself so two rapid main pushes can't race the dev push.
+  group: forward-main-to-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  forward:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out dev (the branch we keep ahead of main)
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Identify the forward bot
+        run: |
+          git config user.name  "takyon-forward-bot"
+          git config user.email "takyon-forward-bot@users.noreply.github.com"
+
+      - name: Forward main -> dev (merge; fail closed on conflict)
+        run: |
+          set -euo pipefail
+          git fetch origin main:refs/remotes/origin/main
+
+          # If dev already contains every commit on main, there is nothing to do
+          # (this is the no-op case right after a promote, when main == dev).
+          if git merge-base --is-ancestor origin/main HEAD; then
+            echo "dev already contains main ($(git rev-parse --short origin/main)) — nothing to forward."
+            exit 0
+          fi
+
+          # dev is ahead of / diverged from main: merge main's new commits in. When
+          # dev == ancestor of main this fast-forwards; when both moved it makes a
+          # merge commit. A real content conflict (dev and main edited the same lines)
+          # fails the run so a human reconciles — dev must never silently drop prod code.
+          if git merge --no-edit -m "auto-forward: main (prod) -> dev [$(git rev-parse --short origin/main)]" origin/main; then
+            git push origin HEAD:dev
+            echo "Forwarded main ($(git rev-parse --short origin/main)) -> dev ($(git rev-parse --short HEAD))."
+          else
+            git merge --abort || true
+            echo "::error title=main->dev forward conflict::main and dev edited the same lines; auto-forward refused. Reconcile locally: git switch dev && git merge main (resolve) && git push origin dev. dev must stay a superset of main."
+            exit 1
+          fi

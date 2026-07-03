@@ -37,6 +37,16 @@ Two axes of isolation — dev has one, needs both:
 - Migrations ride the same promotion (already idempotent via `takyon migrate`), applied on dev
   first (dev is where a bad migration is caught), then prod at promote time.
 
+**The one-directional invariant (operator, 2026-07-03) — `dev` must ALWAYS be a superset of prod:**
+- **prod (`main`) → `dev` is AUTOMATIC.** Every commit that reaches `main` — a promote OR a direct
+  hotfix — is force-carried into `dev` by `.github/workflows/forward-main-to-dev.yml` (merge; fails
+  closed on a real content conflict so a human reconciles). You never test on dev against stale prod.
+- **`dev` → prod is NEVER automatic.** The only path from dev to prod is `takyon env promote dev`
+  (deliberate ff of `main` to a dev-green SHA). That asymmetry *is* the gate.
+- The forwarding workflow only fires on `main` pushes and only pushes `dev`, so it cannot loop and
+  never deploys to prod. It activates the first time `dev` is promoted onto `main` (the workflow file
+  rides that promote); until then `dev ⊇ main` is maintained by hand (it already is).
+
 ### 3. Dev on dedicated hosts, at the dev revision (finish the topology)
 Prod = 3 persistent systemd services (operator dashboard+worker, subuser, safebox) + optional
 Mac worker. Dev must match so it can *hold* its own pinned code persistently:
