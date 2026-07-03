@@ -84,6 +84,7 @@ ensure_dev_safebox_up() {
       TAKYON_SAFEBOX_OPERATOR_TOKEN="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)" \
       TAKYON_SAFEBOX_OPERATOR_CLIENTS="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_CLIENTS)" \
       TAKYON_CAP_SIGNING_KEY="$(_dev_store_get TAKYON_CAP_SIGNING_KEY)" \
+      TAKYON_OPERATOR_USAGE_GATE_DISABLED=1 \
       "$RUNTIME_DIR/.venv/bin/uvicorn" --app-dir "$RUNTIME_DIR" \
       "plugins.takyon.safebox_app:build_safebox_app" --factory --host "$host" --port "$port" \
       >"$OPERATOR_HOME/dev-safebox.log" 2>&1 & )
@@ -92,6 +93,63 @@ ensure_dev_safebox_up() {
     sleep 1
   done
   die "dev Safebox did not come up; see $OPERATOR_HOME/dev-safebox.log"
+}
+
+ensure_dev_operator_budget_ready() {
+  local operator_user_id="${1:-}"
+  [[ -n "$operator_user_id" ]] || return 0
+  [[ -x "$TAKYON_CLI_PYTHON" ]] || die "takyon CLI missing: expected $TAKYON_CLI_PYTHON"
+  # Dev shells/workers bind directly to an explicit operator user id (`josh`, `sai`, etc.) instead
+  # of coming through the dashboard/Auth0 first-login path. Seed that existing dev user's billing
+  # and custody rails up front so the first CLI bootstrap reserve cannot die on missing safebox
+  # account state. Dev-only and idempotent: zero-balance opens plus the one-time starter allowance.
+  env PYTHONPATH="$RUNTIME_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+    TAKYON_ENV=dev TAKYON_HOST_ROLE=safebox TAKYON_HOME="$DEV_STORE" \
+    TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1 \
+    TAKYON_DEV_OPERATOR_DATABASE_URL="$(_dev_store_get TAKYON_DEV_OPERATOR_DATABASE_URL)" \
+    TAKYON_DEV_RUNTIME_DATABASE_URL="$(_dev_store_get TAKYON_DEV_RUNTIME_DATABASE_URL)" \
+    TAKYON_DEV_SAFEBOX_DATABASE_URL="$(_dev_store_get TAKYON_DEV_SAFEBOX_DATABASE_URL)" \
+    TAKYON_DEV_MIGRATION_DATABASE_URL="$(_dev_store_get TAKYON_DEV_MIGRATION_DATABASE_URL)" \
+    "$TAKYON_CLI_PYTHON" - "$operator_user_id" <<'PY' >/dev/null
+from __future__ import annotations
+
+import sys
+
+import psycopg
+
+from plugins.takyon import safebox
+from plugins.takyon.runtime_app import assert_takyon_pg_role, resolve_database_url
+
+user_id = str(sys.argv[1] or "").strip()
+if not user_id:
+    raise SystemExit(0)
+
+with psycopg.connect(
+    resolve_database_url(plane="safebox"),
+    autocommit=False,
+    prepare_threshold=None,
+) as conn:
+    assert_takyon_pg_role(conn, "safebox")
+    row = conn.execute("select 1 from users where id = %s", (user_id,)).fetchone()
+    if row is None:
+        raise SystemExit(
+            f"dev operator user missing from users: {user_id}. "
+            "Log into the dev dashboard once or seed that operator account first."
+        )
+    safebox._local_open_billing_account(conn, user_id, allowance_included_cents=0)
+    safebox._local_open_custody_account(conn, user_id)
+    safebox._local_grant_starter_allowance(
+        conn,
+        user_id,
+        idempotency_subject=f"dev-operator:{user_id}",
+    )
+    billing_row = conn.execute(
+        "select 1 from billing_accounts where user_id = %s",
+        (user_id,),
+    ).fetchone()
+    if billing_row is None:
+        raise SystemExit(f"dev billing account missing after seed for {user_id}")
+PY
 }
 
 # The dev mirror of load_operator_env: identical exports + ClaimScope pool-id + raw-secret scrub,
@@ -121,7 +179,15 @@ load_dev_operator_env() {
   export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
   export TAKYON_STORAGE_BACKEND=local
   export TERMINAL_ENV="${TERMINAL_ENV:-local}"
+  # Operator usage gate — mirror PROD exactly. Prod runs with TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
+  # (verified live in the prod worker env), so the operator's OWN agent is never throttled when its
+  # allowance is exhausted (billing.py softens `insufficient_balance` ONLY when this is set; the
+  # ledger still records every reserve→settle). ensure_dev_operator_budget_ready (above) opens the
+  # billing/custody account + a starter allowance; this keeps the operator unthrottled like prod so
+  # a long dev bootstrap can never re-block on a spent allowance. Clear it to re-enable the gate.
+  export TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
   export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
+  ensure_dev_operator_budget_ready "$TAKYON_SESSION_USER_ID"
   # Stage 2 (ClaimScope): identical to prod — bind this session's enqueues to the Mac's pool.
   local local_worker_pool; local_worker_pool="$(resolve_local_worker_pool_id)"
   [[ -n "$local_worker_pool" ]] && export TAKYON_WORKER_POOL_ID="$local_worker_pool"
