@@ -75,8 +75,12 @@ ensure_dev_safebox_up() {
   # The operator-plane routes (billing reserve/settle, workspace, caps) check os.environ directly,
   # so the operator token + client allowlist + cap-signing key must be in the Safebox PROCESS env
   # (not only the store .env). This is what lets the dev worker's billing.reserve succeed.
-  ( cd "$RUNTIME_DIR" && env TAKYON_HOST_ROLE=safebox TAKYON_HOME="$DEV_STORE" \
+  ( cd "$RUNTIME_DIR" && env TAKYON_ENV=dev TAKYON_HOST_ROLE=safebox TAKYON_HOME="$DEV_STORE" \
       TAKYON_SAFEBOX_TOKEN="$token" TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1 \
+      TAKYON_DEV_OPERATOR_DATABASE_URL="$(_dev_store_get TAKYON_DEV_OPERATOR_DATABASE_URL)" \
+      TAKYON_DEV_RUNTIME_DATABASE_URL="$(_dev_store_get TAKYON_DEV_RUNTIME_DATABASE_URL)" \
+      TAKYON_DEV_SAFEBOX_DATABASE_URL="$(_dev_store_get TAKYON_DEV_SAFEBOX_DATABASE_URL)" \
+      TAKYON_DEV_MIGRATION_DATABASE_URL="$(_dev_store_get TAKYON_DEV_MIGRATION_DATABASE_URL)" \
       TAKYON_SAFEBOX_OPERATOR_TOKEN="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)" \
       TAKYON_SAFEBOX_OPERATOR_CLIENTS="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_CLIENTS)" \
       TAKYON_CAP_SIGNING_KEY="$(_dev_store_get TAKYON_CAP_SIGNING_KEY)" \
