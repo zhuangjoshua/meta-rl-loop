@@ -125,6 +125,7 @@ Do **not** treat "wait for API approval" as the default explanation unless Reddi
   **`business_reddit_ad_insights_sync`** (delivery metrics sync)
 - Upstream assets: an existing promoted `post_id`, a public image/video/carousel URL bundle, or a local business image/video bundle under `product/` that Takyon can stage to `product/public-assets/`
 - Upstream creative budget rule: when this skill routes upstream to `ugc-video-ad` or `static-ad-creative-generator`, pass `budget_bucket: "reddit"` or `ad_metadata.channel: "reddit"` so the creative spend lands on the Reddit business budget bucket
+- Upstream static-image spec rule: when this skill routes to `takyon-static-ad-creative-generator`, author the normal canonical static-ad schema, not a Reddit-launch plan or loose `{headline, subhead, style}` object. Set `platform: "reddit"`, `placement: "feed"`, a feed-safe ratio such as `1:1`, and fill the required `creative_id`, `aspect_ratio`, `goal`, `audience`, `strategy`, `visual`, `product`, `copy`, `layout`, `prompting`, and `qa` fields. Later map `copy.headline` to `post.headline`, `copy.primary_text` to `post.supplementary_text`/body, and `copy.cta` to `post.call_to_action`.
 - Safety: `daily_budget_usd` is capped by `TAKYON_REDDIT_MAX_DAILY_BUDGET_USD` (default 50), must meet the live minimum (`TAKYON_REDDIT_MIN_LIVE_BUDGET_USD`, default 5), live launch cannot exceed the reserved Reddit channel credits, test-mode businesses never call Reddit, and metrics sync is ad-platform only.
 - Default live budget rule: if `daily_budget_usd` is omitted, `business_reddit_ad_launch` derives a bounded daily pace and end time from the remaining Reddit channel credits after setup. Use `activate=false` only when you intentionally want a paused staged campaign.
 
@@ -134,7 +135,7 @@ The smallest truthful end-to-end Reddit path is:
 
 1. **Create a Reddit Ads developer application** and complete OAuth2 so Takyon has a refresh token.
 2. **Run preflight** with `business_reddit_ad_launch` `mode: "preflight"` to discover the business, ad account, profile, funding instrument, and pixel that the token can actually use.
-3. **Prepare the creative upstream** with `ugc-video-ad`, `static-ad-creative-generator`, or an existing promoted post. If the requested launch is `asset_kind: "image"` and there is no truthful image asset yet, stop and use `takyon-static-ad-creative-generator` until a real creative bundle exists under `product/static-ads/<slug>/`; do not use `placehold.co`, mock placeholders, or ad hoc fallback URLs as launch creative.
+3. **Prepare the creative upstream** with `ugc-video-ad`, `static-ad-creative-generator`, or an existing promoted post. If the requested launch is `asset_kind: "image"` and there is no truthful image asset yet, stop and use `takyon-static-ad-creative-generator` until a real creative bundle exists under `product/static-ads/<slug>/`; the upstream spec must be the canonical static-ad schema with `platform: "reddit"` and `placement: "feed"`, not a Reddit launch plan. Do not use `placehold.co`, mock placeholders, or ad hoc fallback URLs as launch creative.
 4. **If reusing an existing post**, launch with `asset_kind: "existing_post"` plus `post_id`.
 5. **If creating a new promoted post**, either provide public media URLs directly or point the `post` block at local business files (`image_path`, `video_path`, `media_path`, `thumbnail_path`) so Takyon can stage them onto the business publish target first.
 6. **Launch through** `business_reddit_ad_launch`.
@@ -179,7 +180,7 @@ The smallest truthful end-to-end Reddit path is:
   [templates/plan.json](templates/plan.json) with the campaign/ad-group/ad blocks and either:
   - `asset_kind: "existing_post"` plus `post_id`, or
   - `asset_kind: "image" | "video" | "carousel"` plus either public URLs under the `post` block or local business file paths (`image_path`, `video_path`, `media_path`, `thumbnail_path`) that Takyon can stage first.
-  If `asset_kind: "image"` and the business does not already have a truthful creative, route to `takyon-static-ad-creative-generator` first and prefer a generated local file such as `product/static-ads/<slug>/<creative>.png` on `post.image_path`. Do not put `placehold.co`, mock, fixture, or stub URLs into a live launch plan.
+  If `asset_kind: "image"` and the business does not already have a truthful creative, route to `takyon-static-ad-creative-generator` first and prefer a generated local file such as `product/static-ads/<slug>/<creative>.png` on `post.image_path`. The upstream spec must validate against `templates/ad-spec.schema.json` with `platform: "reddit"` and `placement: "feed"`; do not hand-write a loose spec or a launch-plan-shaped object. Do not put `placehold.co`, mock, fixture, or stub URLs into a live launch plan.
   For new promoted posts, the plan can also carry copy fields such as `headline`, `display_url`,
   `call_to_action`, and `supplementary_text`. If `post.destination_url` / `ad.click_url` is omitted,
   Takyon defaults the click destination to the business's canonical product URL.

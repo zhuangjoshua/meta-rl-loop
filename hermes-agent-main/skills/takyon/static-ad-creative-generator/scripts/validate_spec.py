@@ -24,14 +24,16 @@ SCHEMA_PATH = os.path.join(HERE, "..", "templates", "ad-spec.schema.json")
 
 VALID_PLACEMENTS = {
     "meta": {"feed", "story", "reels"},
+    "reddit": {"feed"},
 }
 
 # Common aspect ratios per placement (see references/platform-specs.md). Any W:H is allowed;
 # this only drives a soft warning when a ratio is unusual for the chosen placement.
 RECOMMENDED_RATIOS = {
-    "feed": {"1:1", "4:5", "1.91:1"},
-    "story": {"9:16"},
-    "reels": {"9:16"},
+    ("meta", "feed"): {"1:1", "4:5", "1.91:1"},
+    ("meta", "story"): {"9:16"},
+    ("meta", "reels"): {"9:16"},
+    ("reddit", "feed"): {"1:1", "4:5", "1.91:1"},
 }
 
 # --- policy lint vocabularies (keep in sync with references/policy-checks.md) ---
@@ -193,7 +195,7 @@ def lint_spec(spec: Dict) -> List[Tuple[str, str]]:
     # --- consistency (platform-specs.md) ---
     if platform in VALID_PLACEMENTS and placement not in VALID_PLACEMENTS[platform]:
         out.append(("warn", f"placement '{placement}' is not valid for platform '{platform}'"))
-    rec = RECOMMENDED_RATIOS.get(placement)
+    rec = RECOMMENDED_RATIOS.get((platform, placement))
     if rec and ar not in rec:
         out.append(("warn", f"aspect_ratio '{ar}' is unusual for placement '{placement}'; common: {', '.join(sorted(rec))}"))
     try:  # gpt-image-2 supports 1:3..3:1; flag out-of-range early (schema only checks the W:H shape)

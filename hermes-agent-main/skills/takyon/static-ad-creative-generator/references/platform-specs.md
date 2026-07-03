@@ -1,6 +1,6 @@
 # Platform Specs
 
-Constraints for Meta (Facebook + Instagram) static placements. Use these to set
+Constraints for Meta (Facebook + Instagram) and Reddit static placements. Use these to set
 `platform`, `placement`, `aspect_ratio`, `layout.safe_zones`, and to keep `copy` within
 readable limits. These are practical creative limits, not a substitute for each platform's
 current official spec sheet — verify before a paid launch.
@@ -14,9 +14,9 @@ spec per native ratio, or render one approved creative at several sizes with the
 
 | `aspect_ratio` | Shape | Best placements | Why |
 | --- | --- | --- | --- |
-| `1:1` | square | Meta feed | Safe everywhere, compact |
-| `4:5` | vertical | Meta feed (IG/FB) | Max mobile feed real estate without story chrome |
-| `1.91:1` | landscape | Meta feed / link / right-column | Wide link-style and desktop placements |
+| `1:1` | square | Meta feed, Reddit feed | Safe everywhere, compact |
+| `4:5` | vertical | Meta feed (IG/FB), Reddit feed | Max mobile feed real estate without story chrome |
+| `1.91:1` | landscape | Meta feed / link / right-column, Reddit feed | Wide link-style and desktop placements |
 | `9:16` | full vertical | Meta story/reels | Full-screen immersive |
 
 Match shape to surface: vertical/square for mobile feed, `1.91:1` for landscape/link/desktop,
@@ -71,11 +71,25 @@ Pillow). Ratios outside 1:3..3:1 are rejected with a clear error.
 - UGC, candid phone photography, before/after, and real demos outperform polished stock.
 - Avoid stocky "corporate handshake" energy; it screams ad and gets scrolled past.
 
+## Reddit
+
+### Placements
+- `feed` — promoted-post image creative in Reddit feeds. AR `1:1`, `4:5`, or `1.91:1`.
+
+### Safe zones
+- Keep the image readable as a promoted post thumbnail/feed card. Avoid tiny UI details and keep
+  critical text away from every edge by ~5%.
+
+### Copy guidance
+- `copy.headline` maps cleanly to the Reddit promoted-post headline.
+- `copy.primary_text` maps to body/supplementary text when the launch surface supports it.
+- `copy.cta` maps to the Reddit call-to-action value.
+
 ## Quick consistency rules (enforced by `validate_spec.py`)
 
-- `placement` must belong to `platform` (`feed/story/reels` → meta).
-- `aspect_ratio` unusual for the placement ⇒ soft warning (feed: `1:1`/`4:5`/`1.91:1`;
-  story/reels: `9:16`). Any `W:H` from 1:3 to 3:1 is allowed — the warning never blocks an
-  intentional choice.
+- `placement` must belong to `platform` (`feed/story/reels` → meta; `feed` → reddit).
+- `aspect_ratio` unusual for the platform placement ⇒ soft warning (Meta feed and Reddit feed:
+  `1:1`/`4:5`/`1.91:1`; Meta story/reels: `9:16`). Any `W:H` from 1:3 to 3:1 is allowed — the
+  warning never blocks an intentional choice.
 - `copy.overlay_text` longer than ~50 characters ⇒ readability warning.
 - `copy.headline` over 40 chars / `copy.primary_text` over 125 chars ⇒ truncation warning.

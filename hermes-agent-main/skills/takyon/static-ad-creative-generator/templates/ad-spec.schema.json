@@ -28,8 +28,8 @@
     },
     "platform": {
       "type": "string",
-      "enum": ["meta"],
-      "description": "Distribution platform. 'meta' covers Facebook + Instagram."
+      "enum": ["meta", "reddit"],
+      "description": "Distribution platform. 'meta' covers Facebook + Instagram; 'reddit' covers Reddit promoted-post image creative."
     },
     "placement": {
       "type": "string",
@@ -39,7 +39,7 @@
     "aspect_ratio": {
       "type": "string",
       "pattern": "^[0-9]{1,2}(\\.[0-9]{1,2})?:[0-9]{1,2}(\\.[0-9]{1,2})?$",
-      "description": "Target aspect ratio as 'W:H' (decimals allowed, e.g. 1.91:1). Any ratio from 1:3 to 3:1 is supported and sized automatically for gpt-image-2. Common ad ratios — Meta feed: 1:1, 4:5, 1.91:1; Meta story/reels: 9:16. One creative can be rendered at several ratios via the generator's --aspect-ratio flag. See references/platform-specs.md."
+      "description": "Target aspect ratio as 'W:H' (decimals allowed, e.g. 1.91:1). Any ratio from 1:3 to 3:1 is supported and sized automatically for gpt-image-2. Common ad ratios — Meta feed: 1:1, 4:5, 1.91:1; Meta story/reels: 9:16; Reddit feed: 1:1, 4:5, 1.91:1. One creative can be rendered at several ratios via the generator's --aspect-ratio flag. See references/platform-specs.md."
     },
     "goal": {
       "type": "string",

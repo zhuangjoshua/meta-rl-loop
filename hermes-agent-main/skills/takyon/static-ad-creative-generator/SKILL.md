@@ -9,14 +9,14 @@ platforms: [linux, macos]
 metadata:
   hermes:
     category: takyon
-    tags: [takyon, ads, performance-marketing, creative, static-ad, image-generation, meta, instagram, facebook, gpt-image]
+    tags: [takyon, ads, performance-marketing, creative, static-ad, image-generation, meta, reddit, instagram, facebook, gpt-image]
     related_skills: [takyon-meta-ads-v2, takyon-reddit-ads, takyon-distribution, ugc-video-ad]
     requires_toolsets: [takyon, takyon-authority]
     requires_tools: [business_read_business, business_read_file, business_list_files, business_static_ad_generate]
     routing:
       owns: Per-business static performance-ad image creative generation from brief to spec, prompt, QA bundle, and live image render.
       when_to_use:
-        - A business needs static image ad variants for Meta (Facebook/Instagram).
+        - A business needs static image ad variants for Meta (Facebook/Instagram) or Reddit.
         - The operator wants multiple ad angles as reviewable specs before or alongside paid distribution work.
         - The business needs a batch creative test matrix with real OpenAI renders.
       do_not_use_for:
@@ -40,7 +40,7 @@ required_credential_files: []
 ## Overview
 
 This skill turns a product/company input into **static performance-ad creative** for Meta
-(Facebook + Instagram). It is opinionated about *advertising*, not just imagery:
+(Facebook + Instagram) and Reddit. It is opinionated about *advertising*, not just imagery:
 marketing strategy is decided **first**, as a strict JSON **ad spec**, and only then is an
 image model asked to render it. The image backend never invents the angle, hook, audience,
 or proof.
@@ -64,7 +64,7 @@ the image-generation API call (real spend); every other stage is local and offli
 
 ## When to Use
 
-- Turning a product URL / description / brief into **static image ad variants** for Meta.
+- Turning a product URL / description / brief into **static image ad variants** for Meta or Reddit.
 - Generating multiple **ad angles** from one product as reviewable specs.
 - Producing a **strict, reviewable ad spec** before spending money on generation.
 - **Batch** producing a test matrix of creatives across angles, placements, and aspect ratios.
@@ -142,7 +142,7 @@ a *static performance-ad creative spec generator*.
 
 **Read first:** the product input / creative brief, then the relevant references
 (`angle-taxonomy.md` for angle choice, `hook-strategy.md` for the scroll-stopping frame,
-`platform-specs.md` for placement + size, `policy-checks.md` before writing copy). Specs are
+`platform-specs.md` for platform placement + size, `policy-checks.md` before writing copy). Specs are
 authored from `templates/ad-spec.template.json`.
 
 Choose a canonical publication directory first, for example:
@@ -202,6 +202,9 @@ python ${HERMES_SKILL_DIR}/scripts/batch_generate.py examples/example-batch.json
    makes the hook fair. Pick a `visual.template` that reinforces the same idea; keep
    `copy.overlay_text` short and sharp; set `layout` safe zones per
    `references/platform-specs.md`; fill `product.must_not_show`; pre-fill `qa` honestly.
+   For Reddit image ads, keep the same canonical schema, set `platform: "reddit"` and
+   `placement: "feed"`, and map `copy.headline`, `copy.primary_text`, and `copy.cta` to the
+   promoted-post launch fields later.
 6. **Validate.** `python ${HERMES_SKILL_DIR}/scripts/validate_spec.py <spec|batch|dir>`.
    Fix every ERROR; resolve each WARN.
 7. **Generate into the canonical directory.** Run `generate_image.py` /
