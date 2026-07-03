@@ -9,6 +9,13 @@
 }
 
 :80 {
+	# Node identity on EVERY response (rendered per replica by bootstrap-dev-droplet.sh and by
+	# the drain rail's front-converge step). The graceful-drain rejoin gate
+	# (EnvironmentProvisioner.rolling_restart, `takyon env restart <env>`) polls the LB until
+	# this header names the restarted node — positive proof the LB health check re-admitted it,
+	# since the v2 API exposes no per-member health.
+	header X-Takyon-Node "__NODE_NAME__"
+
 	# The DO LB health check probes with Host: cloud.digitalocean.com, which the app's
 	# DNS-rebinding defence (host_header_middleware) rightly rejects on a loopback bind.
 	# Pin Host to loopback for the health path ONLY — real app-plane traffic keeps its

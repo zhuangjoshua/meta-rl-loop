@@ -1013,3 +1013,306 @@ def test_destroy_do_steps_fail_closed_missing_token(tmp_path, monkeypatch):
     assert {"droplets", "load_balancer", "firewall", "ssh_key", "vpc"} <= blocked
     assert http.calls == []
     assert not result.ok
+
+
+# ── rolling restart (full-4b graceful drain): remove→restart→re-add, fail-closed, receipted ──
+
+
+class FakeRemote(ep.RemoteExec):
+    """Records SSH scripts per host; health/restart outcomes configurable per host ip."""
+
+    def __init__(self, events=None, *, unhealthy=(), fail_restart=()):
+        self.events = events if events is not None else []
+        self.unhealthy = set(unhealthy)
+        self.fail_restart = set(fail_restart)
+        self.scripts: list[tuple[str, str]] = []
+
+    def run(self, host, script, *, key_path, timeout=120.0):
+        kind = "restart" if "systemctl restart" in script else "health"
+        self.scripts.append((host, script))
+        self.events.append((kind, host))
+        if kind == "health":
+            if host in self.unhealthy:
+                return 0, "HEALTH app=000 front=000"
+            return 0, "HEALTH app=200 front=200"
+        if host in self.fail_restart:
+            return 1, "restart exploded"
+        return 0, "RESTART_OK app=200 front=200"
+
+
+class FakeLbHttp(ep.HttpTransport):
+    """Stateful DO fake for the drain flow: droplet listing + LB membership that actually mutates
+    on DELETE/POST …/droplets, so the membership polls see real state."""
+
+    def __init__(self, droplets, lb, events=None):
+        self.droplets = droplets
+        self.lb = lb
+        self.events = events if events is not None else []
+        self.calls: list[tuple[str, str]] = []
+
+    def request(self, method, url, *, headers=None, body=None, form=None):
+        self.calls.append((method, url))
+        if method == "GET" and "/droplets?" in url:
+            return {"droplets": self.droplets}
+        if method == "GET" and url.endswith("/load_balancers?per_page=200"):
+            return {"load_balancers": [self.lb]}
+        if method == "GET" and f"/load_balancers/{self.lb['id']}" in url:
+            return {"load_balancer": self.lb}
+        if url.endswith(f"/load_balancers/{self.lb['id']}/droplets"):
+            ids = list((body or {}).get("droplet_ids") or [])
+            if method == "DELETE":
+                self.lb["droplet_ids"] = [d for d in self.lb["droplet_ids"] if d not in ids]
+                self.events.extend(("lb_remove", d) for d in ids)
+            elif method == "POST":
+                self.lb["droplet_ids"] = list(self.lb["droplet_ids"]) + [
+                    d for d in ids if d not in self.lb["droplet_ids"]
+                ]
+                self.events.extend(("lb_add", d) for d in ids)
+            return {}
+        return {}
+
+
+class FakeProbe(ep.HttpProbe):
+    """LB front fake: answers 200 with X-Takyon-Node cycling over the CURRENT healthy member set
+    (mirrors round_robin over health-checked members). Optional forced statuses first."""
+
+    def __init__(self, lb, names_by_id, *, force_statuses=(), never_serve=()):
+        self.lb = lb
+        self.names = dict(names_by_id)
+        self.force = list(force_statuses)
+        self.never_serve = set(never_serve)
+        self.n = 0
+
+    def probe(self, url, *, host_header=None, timeout=8.0):
+        self.n += 1
+        if self.force:
+            status = self.force.pop(0)
+            if status != 200:
+                return status, {}
+        members = [self.names[i] for i in self.lb["droplet_ids"] if self.names.get(i)]
+        members = [m for m in members if m not in self.never_serve]
+        if not members:
+            return 503, {}
+        return 200, {"x-takyon-node": members[self.n % len(members)]}
+
+
+def _drain_fixtures():
+    droplets = [
+        {"id": 907, "name": "takyon-dev-subuser-1",
+         "networks": {"v4": [{"type": "private", "ip_address": "10.200.0.2"},
+                             {"type": "public", "ip_address": "203.0.113.11"}]}},
+        {"id": 918, "name": "takyon-dev-subuser-2",
+         "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.12"}]}},
+        {"id": 935, "name": "takyon-dev-safebox",
+         "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.13"}]}},
+    ]
+    lb = {"id": "lb-1", "name": "takyon-dev-subuser-lb", "ip": "203.0.113.99", "tag": "",
+          "status": "active", "droplet_ids": [907, 918]}
+    return droplets, lb
+
+
+def _drain_manifest(tmp_path, **over):
+    manifest = _do_manifest(tmp_path)
+    key = tmp_path / "takyon_dev_split"
+    key.write_text("not-a-real-key")
+    caddy = tmp_path / "Caddyfile.dev"
+    caddy.write_text(':80 {\n\theader X-Takyon-Node "__NODE_NAME__"\n\treverse_proxy 127.0.0.1:9119\n}\n')
+    manifest["rolling_restart"] = {
+        "private_key_path": str(key),
+        "caddy_template": str(caddy),
+        "grace_seconds": 0,
+        "rejoin_timeout_seconds": 10,
+        "service": "takyon-subuser.service",
+    }
+    manifest.update(over)
+    return manifest
+
+
+def _drain_provisioner(tmp_path, *, droplets=None, lb=None, safebox_values=None,
+                       remote=None, probe=None, manifest=None):
+    events: list = []
+    fixtures = _drain_fixtures()
+    droplets = fixtures[0] if droplets is None else droplets
+    lb = fixtures[1] if lb is None else lb
+    http = FakeLbHttp(droplets, lb, events)
+    remote = remote if remote is not None else FakeRemote(events)
+    remote.events = events
+    names = {d["id"]: d["name"] for d in droplets}
+    probe = probe if probe is not None else FakeProbe(lb, names)
+    prov = ep.EnvironmentProvisioner(
+        "dev",
+        home=tmp_path,
+        safebox_mod=FakeSafebox(safebox_values if safebox_values is not None else _DO_VALUES),
+        http=http,
+        manifest=manifest or _drain_manifest(tmp_path),
+        remote=remote,
+        probe=probe,
+        sleep=lambda _s: None,
+    )
+    return prov, http, remote, events
+
+
+def test_rolling_restart_fails_closed_missing_do_token(tmp_path):
+    prov, http, _remote, _events = _drain_provisioner(tmp_path, safebox_values={})
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert result.receipts[-1].status == ep.STATUS_BLOCKED
+    assert result.receipts[-1].deposit == "TAKYON_DO_API_TOKEN"
+    assert http.calls == []
+
+
+def test_rolling_restart_refuses_when_other_replica_unhealthy(tmp_path):
+    """The fail-closed keystone: replica 2 is not serving 200s locally, so draining replica 1
+    would leave zero healthy backends — the run must refuse BEFORE any LB mutation or restart."""
+    remote = FakeRemote(unhealthy={"203.0.113.12"})
+    prov, http, remote, events = _drain_provisioner(tmp_path, remote=remote)
+    result = prov.rolling_restart()
+    assert not result.ok
+    err = result.receipts[-1]
+    assert err.status == ep.STATUS_ERROR
+    assert "refusing to drain takyon-dev-subuser-1" in err.detail
+    assert "takyon-dev-subuser-2" in err.detail
+    # No LB membership mutation and no restart happened.
+    assert [e for e in events if e[0] in ("lb_remove", "lb_add", "restart")] == []
+    # The LB member set is untouched.
+    assert sorted(prov.http.lb["droplet_ids"]) == [907, 918]
+
+
+def test_rolling_restart_refuses_when_other_replica_not_lb_member(tmp_path):
+    droplets, lb = _drain_fixtures()
+    lb["droplet_ids"] = [907]  # replica 2 already out of the LB
+    prov, _http, _remote, events = _drain_provisioner(tmp_path, droplets=droplets, lb=lb)
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert "not an LB member" in result.receipts[-1].detail
+    assert [e for e in events if e[0] in ("lb_remove", "restart")] == []
+
+
+def test_rolling_restart_orders_remove_restart_readd_per_replica(tmp_path):
+    """The zero-loss ordering contract, per replica, sequentially: health-gate the OTHER replica →
+    LB remove → restart over SSH → LB re-add → (rejoin proof) — replica 2 starts only after
+    replica 1 is proven back."""
+    prov, http, remote, events = _drain_provisioner(tmp_path)
+    result = prov.rolling_restart()
+    assert result.ok, [r.to_dict() for r in result.receipts]
+    ordered = [e for e in events if e[0] in ("lb_remove", "restart", "lb_add")]
+    assert ordered == [
+        ("lb_remove", 907), ("restart", "203.0.113.11"), ("lb_add", 907),
+        ("lb_remove", 918), ("restart", "203.0.113.12"), ("lb_add", 918),
+    ]
+    # Both replicas ended back in the LB.
+    assert sorted(http.lb["droplet_ids"]) == [907, 918]
+    # The safebox host is never touched (not a replica).
+    assert all(host != "203.0.113.13" for host, _ in remote.scripts)
+    # Receipt trail: drain/restart/rejoin(+membership) per replica, then the summary.
+    kinds = [r.resource for r in result.receipts]
+    assert kinds == ["drain", "restart", "rejoin", "rejoin",
+                     "drain", "restart", "rejoin", "rejoin", "rolling_restart"]
+    assert all(r.action == "restart" for r in result.receipts)
+    assert result.receipts[-1].status == ep.STATUS_CREATED
+    # Receipts are appended to the env's receipts.jsonl.
+    lines = (tmp_path / "environments" / "dev" / "receipts.jsonl").read_text().strip().splitlines()
+    import json as _json
+    rows = [_json.loads(l) for l in lines]
+    assert [r["resource"] for r in rows] == kinds
+    assert all(r["action"] == "restart" for r in rows)
+
+
+def test_rolling_restart_renders_node_identity_into_caddy_front(tmp_path):
+    """Each replica's restart script converges the tracked Caddy template with ITS node name —
+    the header the rejoin gate reads."""
+    prov, _http, remote, _events = _drain_provisioner(tmp_path)
+    assert prov.rolling_restart().ok
+    restart_scripts = {host: script for host, script in remote.scripts if "systemctl restart" in script}
+    assert 'header X-Takyon-Node "takyon-dev-subuser-1"' in restart_scripts["203.0.113.11"]
+    assert 'header X-Takyon-Node "takyon-dev-subuser-2"' in restart_scripts["203.0.113.12"]
+    for script in restart_scripts.values():
+        assert "caddy validate" in script
+        assert "systemctl restart takyon-subuser.service" in script
+        assert "__NODE_NAME__" not in script
+
+
+def test_rolling_restart_leaves_failed_replica_out_of_lb(tmp_path):
+    """A replica that does not come back healthy is LEFT OUT of the LB (never re-add an unhealthy
+    node) and the run aborts — the surviving replica keeps serving."""
+    remote = FakeRemote(fail_restart={"203.0.113.11"})
+    prov, http, remote, events = _drain_provisioner(tmp_path, remote=remote)
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert ("lb_add", 907) not in events
+    assert http.lb["droplet_ids"] == [918]
+    assert "left OUT of the LB" in result.receipts[-1].detail
+    # Replica 2 was never drained.
+    assert ("lb_remove", 918) not in events
+
+
+def test_rolling_restart_refuses_tag_managed_lb(tmp_path):
+    droplets, lb = _drain_fixtures()
+    lb["tag"] = "takyon-env-dev-subuser"
+    prov, _http, _remote, events = _drain_provisioner(tmp_path, droplets=droplets, lb=lb)
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert "tag-managed" in result.receipts[-1].detail
+    assert [e for e in events if e[0] in ("lb_remove", "restart", "lb_add")] == []
+
+
+def test_rolling_restart_requires_two_replicas(tmp_path):
+    droplets, lb = _drain_fixtures()
+    droplets = [d for d in droplets if d["name"] != "takyon-dev-subuser-2"]
+    prov, _http, _remote, events = _drain_provisioner(tmp_path, droplets=droplets, lb=lb)
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert ">=2 replicas" in result.receipts[-1].detail
+    assert [e for e in events if e[0] in ("lb_remove", "restart")] == []
+
+
+def test_rolling_restart_aborts_on_non_200_during_rejoin_gate(tmp_path):
+    """Any non-200 through the LB during the rejoin gate violates the zero-loss contract → abort."""
+    droplets, lb = _drain_fixtures()
+    names = {d["id"]: d["name"] for d in droplets}
+    probe = FakeProbe(lb, names, force_statuses=[200, 503])  # preflight OK, first rejoin probe 503
+    prov, _http, _remote, _events = _drain_provisioner(tmp_path, droplets=droplets, lb=lb, probe=probe)
+    result = prov.rolling_restart()
+    assert not result.ok
+    err = result.receipts[-1]
+    assert err.resource == "rejoin"
+    assert "503" in err.detail
+    assert "zero-loss" in err.detail
+
+
+def test_rolling_restart_aborts_when_lb_never_routes_to_node(tmp_path):
+    """Membership re-added but the LB never actually routes to the node (header never shows it):
+    the gate must time out and abort BEFORE draining the next replica."""
+    droplets, lb = _drain_fixtures()
+    names = {d["id"]: d["name"] for d in droplets}
+    probe = FakeProbe(lb, names, never_serve={"takyon-dev-subuser-1"})
+    prov, _http, _remote, events = _drain_provisioner(tmp_path, droplets=droplets, lb=lb, probe=probe)
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert "never routed" in result.receipts[-1].detail
+    assert ("lb_remove", 918) not in events  # replica 2 untouched
+
+
+def test_rolling_restart_fails_closed_without_caddy_template(tmp_path):
+    manifest = _drain_manifest(tmp_path)
+    manifest["rolling_restart"]["caddy_template"] = str(tmp_path / "missing" / "Caddyfile.dev")
+    prov, http, _remote, _events = _drain_provisioner(tmp_path, manifest=manifest)
+    result = prov.rolling_restart()
+    assert not result.ok
+    assert "caddy front template not found" in result.receipts[-1].detail
+    assert http.calls == []  # refused before ANY provider call
+
+
+def test_dev_manifest_declares_rolling_restart_rail():
+    data = ep.load_manifest("dev")
+    rr = data.get("rolling_restart") or {}
+    assert rr.get("service") == "takyon-subuser.service"
+    assert float(rr.get("grace_seconds", 0)) > 0
+    assert float(rr.get("rejoin_timeout_seconds", 0)) >= 30
+
+
+def test_takyon_env_restart_subcommand_registered():
+    args = _parse_via_main(["env", "restart", "dev"])
+    assert args is not None, "takyon env restart dev did not dispatch to cmd_env"
+    assert getattr(args, "env_action") == "restart"
+    assert getattr(args, "env_name") == "dev"

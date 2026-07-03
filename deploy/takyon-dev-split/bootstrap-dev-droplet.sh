@@ -8,6 +8,18 @@
 #   deploy/takyon-dev-split/bootstrap-dev-droplet.sh <public-ip> subuser <node-name> <safebox-vpc-ip>
 #   deploy/takyon-dev-split/bootstrap-dev-droplet.sh <public-ip> safebox <node-name> <bind-vpc-ip>
 #
+# REDEPLOYING A LIVE SPLIT (graceful drain — the full-4b zero-loss rail): this script ends with a
+# HARD `systemctl restart`, which black-holes LB traffic for the health-check detection window
+# (~4.5s) on a serving replica. On a live split, either (a) rsync/stage new code with this script
+# ONLY while the replica is drained, or (b) preferred: sync code first, then activate it with
+#   takyon env restart dev
+# (`EnvironmentProvisioner.rolling_restart`): per replica it removes the node from the LB, waits
+# out in-flight requests, converges this Caddy front from the tracked template, restarts
+# takyon-subuser.service, health-verifies locally, re-adds to the LB, and PROVES the LB routes to
+# the node again (X-Takyon-Node) before touching the next replica. Fail-closed: it refuses to
+# start a drain unless every other replica is a healthy LB member. Zero requests lost on planned
+# restarts/deploys.
+#
 # Env:
 #   TAKYON_DEV_STORE  path to the dev store env file (default:
 #                     <workspace>/.takyon-dev-safebox/.env). Secrets are COPIED to the target
@@ -109,9 +121,12 @@ scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
 rm -f "$TMPENV"; trap - EXIT
 
 if [[ "$ROLE" == "subuser" ]]; then
-  echo "→ [$NODE_NAME] caddy front (:80 → loopback uvicorn, prod topology)"
+  echo "→ [$NODE_NAME] caddy front (:80 → loopback uvicorn, prod topology; node-identity header)"
+  TMPCADDY="$(mktemp)"
+  sed -e "s/__NODE_NAME__/$NODE_NAME/g" "$SCRIPT_DIR/Caddyfile.dev" > "$TMPCADDY"
   scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-    "$SCRIPT_DIR/Caddyfile.dev" "root@$HOST:/root/Caddyfile.staged"
+    "$TMPCADDY" "root@$HOST:/root/Caddyfile.staged"
+  rm -f "$TMPCADDY"
   "${SSH[@]}" "set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     command -v caddy >/dev/null || (apt-get update -qq && apt-get install -y -qq caddy)

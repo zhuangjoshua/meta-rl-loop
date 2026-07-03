@@ -18,13 +18,13 @@ from takyon_cli.colors import Colors, color
 def cmd_env(args: Any) -> int:
     """Dispatcher for ``takyon env <action> <name>``."""
     action = getattr(args, "env_action", None)
-    if action not in ("create", "status", "destroy"):
-        print("usage: takyon env {create|status|destroy} <name> [--force]", file=sys.stderr)
+    if action not in ("create", "status", "destroy", "restart"):
+        print("usage: takyon env {create|status|destroy|restart} <name> [--force]", file=sys.stderr)
         raise SystemExit(2)
 
     name = str(getattr(args, "env_name", "") or "").strip().lower()
     if not name:
-        print("usage: takyon env {create|status|destroy} <name>", file=sys.stderr)
+        print("usage: takyon env {create|status|destroy|restart} <name>", file=sys.stderr)
         raise SystemExit(2)
     if name == "prod":
         print(
@@ -50,6 +50,12 @@ def cmd_env(args: Any) -> int:
         result = provisioner.create()
     elif action == "status":
         result = provisioner.status()
+    elif action == "restart":
+        # Drain-aware rolling restart of the env's replicas (the full-4b graceful-drain rail):
+        # per replica remove-from-LB -> in-flight grace -> converge front + restart unit ->
+        # local health verify -> re-add -> proven back in rotation. Zero requests lost on
+        # planned restarts/deploys; fail-closed if the other replica cannot carry the traffic.
+        result = provisioner.rolling_restart()
     else:
         result = provisioner.destroy(force=bool(getattr(args, "force", False)))
 

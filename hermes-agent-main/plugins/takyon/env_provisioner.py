@@ -177,6 +177,9 @@ class EnvironmentProvisioner:
         safebox_mod: Any | None = None,
         http: "HttpTransport | None" = None,
         manifest: Mapping[str, Any] | None = None,
+        remote: "RemoteExec | None" = None,
+        probe: "HttpProbe | None" = None,
+        sleep: Any | None = None,
     ) -> None:
         self.name = _safe_env_name(name)
         if self.name == "prod":
@@ -192,6 +195,13 @@ class EnvironmentProvisioner:
             from . import safebox as safebox_mod  # type: ignore[no-redef]
         self.safebox = safebox_mod
         self.http = http or UrllibTransport()
+        # Rolling-restart transports (injectable so the drain tests run with zero network/SSH):
+        # `remote` runs a script on a replica as root over SSH; `probe` is a plain HTTP GET that
+        # ALSO returns response headers (the LB rejoin gate reads X-Takyon-Node); `sleep` is the
+        # grace/poll wait (tests inject a no-op).
+        self.remote = remote or SshRemoteExec()
+        self.probe = probe or UrllibProbe()
+        self._sleep = sleep or time.sleep
         # Per-run cache for a Management API token minted from client credentials, so one run's
         # create+destroy mints at most once. Never persisted.
         self._auth0_minted_token: str = ""
@@ -1209,6 +1219,452 @@ class EnvironmentProvisioner:
             data={"path": str(self.config_path)},
         )
 
+    # ── ROLLING RESTART — the full-4b graceful-drain rail ──────────────────────────────────────
+    #
+    # ``takyon env restart <name>`` is the tracked deploy-ACTIVATION rail for the replica split:
+    # after new code/config is rsynced to the replicas (deploy/takyon-dev-split/
+    # bootstrap-dev-droplet.sh), this drains and restarts them ONE AT A TIME so a planned
+    # restart/deploy loses ZERO requests (vs the ~4.5s LB health-check black-hole on a hard kill).
+    #
+    # Checked against the live DO API (REGIONAL lb-small): v2 load balancers expose NO draining
+    # state and NO per-member health — so the rail implements the drain itself:
+    #
+    #   per replica (fail-closed at every gate, receipted at every step):
+    #     0. refuse unless EVERY OTHER replica is an LB member and serving 200s locally
+    #        (:9119 app + :80 caddy front — the exact path the LB health-checks);
+    #     1. remove the replica from the LB (DELETE /v2/load_balancers/<id>/droplets) and poll
+    #        membership until the LB confirms it is out — new connections now only go elsewhere;
+    #     2. grace-wait for in-flight requests to complete (no LB drain signal exists to poll);
+    #     3. converge the caddy front from the tracked template (deploy/takyon-dev-split/
+    #        Caddyfile.dev — carries the X-Takyon-Node identity header the rejoin gate reads)
+    #        and restart the runtime unit; poll local healthz until 200. An unhealthy replica is
+    #        LEFT OUT of the LB and the run aborts — never re-add a node that is not serving;
+    #     4. re-add to the LB and poll membership until present;
+    #     5. rejoin gate: poll THROUGH the LB until X-Takyon-Node shows this node serving again
+    #        (positive proof the LB health check re-admitted it). Any non-200 during the gate
+    #        fails the run. Only then move to the next replica.
+    #
+    # The LB is droplet_ids-managed (the dev token lacks tag scope). A tag-managed LB is refused:
+    # de-tagging a droplet to drain it would also rip it out of the tag-anchored firewall.
+
+    def rolling_restart(
+        self,
+        *,
+        grace_seconds: float | None = None,
+        rejoin_timeout: float | None = None,
+    ) -> ProvisionResult:
+        """Drain-aware rolling restart across the environment's replicas. Zero-request-loss for
+        PLANNED restarts/deploys; fail-closed and receipted at every step."""
+        receipts: list[StepReceipt] = []
+
+        def _fail(receipt: StepReceipt) -> ProvisionResult:
+            receipts.append(self._append_receipt(receipt))
+            return ProvisionResult(name=self.name, action="restart", receipts=tuple(receipts))
+
+        cfg = self.manifest.get("rolling_restart") or {}
+        droplets_cfg = self.manifest.get("droplets") or {}
+        if not droplets_cfg.get("enabled", False) or not (self.manifest.get("load_balancer") or {}).get("enabled", False):
+            return _fail(StepReceipt(
+                "rolling_restart", STATUS_SKIPPED, "restart",
+                "no droplets+load_balancer twins in the manifest — nothing to roll",
+            ))
+        token, blocked = self._do_token_or_blocked("load_balancer", "restart")
+        if blocked is not None:
+            return _fail(blocked)
+        headers = self._do_headers(token)
+
+        role = str(droplets_cfg.get("role") or "subuser").strip().lower()
+        grace = float(grace_seconds if grace_seconds is not None else cfg.get("grace_seconds", 8.0))
+        rejoin_deadline = float(rejoin_timeout if rejoin_timeout is not None else cfg.get("rejoin_timeout_seconds", 120.0))
+        service = str(cfg.get("service") or f"takyon-{role}.service").strip()
+
+        # SSH key: the split's own deploy key (manifest ssh_key.public_key_path minus .pub),
+        # overridable via rolling_restart.private_key_path. Fail closed if absent.
+        key_path = Path(str(
+            cfg.get("private_key_path")
+            or str((self.manifest.get("ssh_key") or {}).get("public_key_path") or "").removesuffix(".pub")
+            or ""
+        )).expanduser()
+        if not str(key_path) or str(key_path) == "." or not key_path.exists():
+            return _fail(StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"replica ssh key not found at {key_path} — the drain rail restarts replicas over "
+                "SSH with the split's deploy key (manifest ssh_key.public_key_path minus .pub)",
+            ))
+
+        # Tracked caddy front template (carries the X-Takyon-Node identity header the rejoin gate
+        # reads). Lives in the workspace deploy rail for the split; fail closed when missing.
+        template = self._caddy_template_path(cfg)
+        if not template.exists():
+            return _fail(StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"tracked caddy front template not found at {template} — run from the workspace "
+                "checkout (deploy/takyon-dev-split/Caddyfile.dev is part of the split's deploy rail)",
+            ))
+        caddy_template = template.read_text()
+
+        # Resolve the replicas (manifest-derived exact names -> droplet id + public ip).
+        replicas, err = self._resolve_replicas(headers, droplets_cfg)
+        if err is not None:
+            return _fail(err)
+        if len(replicas) < 2:
+            return _fail(StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"graceful drain needs >=2 replicas so one keeps serving; found {len(replicas)} — "
+                "refusing (a single-replica restart is an outage, not a drain)",
+            ))
+
+        # Resolve the LB (by manifest name) and refuse tag-managed membership.
+        lb, err = self._resolve_lb(headers)
+        if err is not None:
+            return _fail(err)
+        if str(lb.get("tag") or ""):
+            return _fail(StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"load balancer {lb.get('name')!r} is tag-managed ({lb.get('tag')!r}) — draining by "
+                "de-tagging would also rip the droplet out of the tag-anchored firewall; refusing",
+            ))
+        lb_id = str(lb.get("id") or "")
+        lb_ip = str(lb.get("ip") or "")
+        if not lb_id or not lb_ip:
+            return _fail(StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"load balancer {lb.get('name')!r} has no id/ip yet (status {lb.get('status')!r})",
+            ))
+
+        for rep in replicas:
+            others = [r for r in replicas if r["name"] != rep["name"]]
+
+            # (0) fail-closed gate: every OTHER replica must be an LB member and healthy.
+            gate = self._other_replicas_healthy_gate(headers, lb_id, rep, others, key_path, lb_ip)
+            if gate is not None:
+                return _fail(gate)
+
+            # (1) drain: remove from the LB, poll membership until out, grace-wait for in-flight.
+            drain, was_member = self._drain_from_lb(headers, lb_id, rep, grace)
+            if drain.status == STATUS_ERROR:
+                return _fail(drain)
+            receipts.append(self._append_receipt(drain))
+
+            # (2+3) converge front + restart unit + local health verify (:9119 and :80).
+            restart = self._restart_replica(rep, key_path, service, caddy_template)
+            if restart.status == STATUS_ERROR:
+                # The replica is deliberately LEFT OUT of the LB: never re-add a node that is not
+                # provably serving. The other replica keeps taking traffic.
+                receipts.append(self._append_receipt(restart))
+                return _fail(StepReceipt(
+                    "rolling_restart", STATUS_ERROR, "restart",
+                    f"aborted: {rep['name']} did not come back healthy after restart and was left "
+                    f"OUT of the LB (the surviving replica(s) keep serving); fix the node, then "
+                    f"re-run `takyon env restart {self.name}`",
+                ))
+            receipts.append(self._append_receipt(restart))
+
+            # (4) re-add to the LB and poll membership until present.
+            readd = self._readd_to_lb(headers, lb_id, rep, was_member)
+            if readd.status == STATUS_ERROR:
+                return _fail(readd)
+            receipts.append(self._append_receipt(readd))
+
+            # (5) rejoin gate: poll THROUGH the LB until X-Takyon-Node shows this node serving.
+            rejoin = self._await_lb_routes_to(rep, lb_ip, rejoin_deadline)
+            if rejoin.status == STATUS_ERROR:
+                receipts.append(self._append_receipt(rejoin))
+                return ProvisionResult(name=self.name, action="restart", receipts=tuple(receipts))
+            receipts.append(self._append_receipt(rejoin))
+
+        receipts.append(self._append_receipt(StepReceipt(
+            "rolling_restart", STATUS_CREATED, "restart",
+            f"drain-aware rolling restart complete across {len(replicas)} replica(s) of "
+            f"{service}; every replica was drained from the LB before restart and proven back in "
+            "rotation before the next began",
+            data={"replicas": [r["name"] for r in replicas], "grace_seconds": grace},
+        )))
+        return ProvisionResult(name=self.name, action="restart", receipts=tuple(receipts))
+
+    def _caddy_template_path(self, cfg: Mapping[str, Any]) -> Path:
+        """The tracked replica-front template. Default: the workspace deploy rail for the split
+        (this file lives at <workspace>/hermes-agent-main/plugins/takyon/env_provisioner.py)."""
+        raw = str(cfg.get("caddy_template") or "").strip()
+        if raw:
+            p = Path(raw).expanduser()
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parents[3] / p
+            return p
+        return Path(__file__).resolve().parents[3] / "deploy" / "takyon-dev-split" / "Caddyfile.dev"
+
+    def _resolve_replicas(
+        self, headers: Mapping[str, str], droplets_cfg: Mapping[str, Any]
+    ) -> tuple[list[dict[str, Any]], StepReceipt | None]:
+        """Manifest-derived replica names -> [{name, droplet_id, public_ip}], sorted by name."""
+        role = str(droplets_cfg.get("role") or "subuser").strip().lower()
+        prefix = str(droplets_cfg.get("name_prefix") or f"takyon-{self.name}-{role}").strip()
+        count = max(1, int(droplets_cfg.get("count") or 1))
+        wanted = {f"{prefix}-{i}" for i in range(1, count + 1)}
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/droplets?per_page=200", headers=dict(headers))
+        except Exception as exc:
+            return [], StepReceipt("rolling_restart", STATUS_ERROR, "restart", f"droplet list failed: {exc}")
+        out: list[dict[str, Any]] = []
+        for d in (listed.get("droplets") or []) if isinstance(listed, dict) else []:
+            if not isinstance(d, dict) or str(d.get("name") or "") not in wanted:
+                continue
+            public_ip = next(
+                (str(n.get("ip_address") or "") for n in ((d.get("networks") or {}).get("v4") or [])
+                 if isinstance(n, dict) and n.get("type") == "public"),
+                "",
+            )
+            if not public_ip:
+                return [], StepReceipt(
+                    "rolling_restart", STATUS_ERROR, "restart",
+                    f"replica {d.get('name')!r} has no public IPv4 — cannot reach it over SSH to restart",
+                )
+            out.append({"name": str(d.get("name")), "droplet_id": d.get("id"), "public_ip": public_ip})
+        return sorted(out, key=lambda r: r["name"]), None
+
+    def _resolve_lb(self, headers: Mapping[str, str]) -> tuple[dict[str, Any], StepReceipt | None]:
+        cfg = self.manifest.get("load_balancer") or {}
+        droplets_cfg = self.manifest.get("droplets") or {}
+        role = str(droplets_cfg.get("role") or "subuser").strip().lower()
+        name = str(cfg.get("name") or f"takyon-{self.name}-{role}-lb").strip()
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/load_balancers?per_page=200", headers=dict(headers))
+        except Exception as exc:
+            return {}, StepReceipt("rolling_restart", STATUS_ERROR, "restart", f"load balancer list failed: {exc}")
+        for lb in (listed.get("load_balancers") or []) if isinstance(listed, dict) else []:
+            if isinstance(lb, dict) and str(lb.get("name") or "") == name:
+                return lb, None
+        return {}, StepReceipt(
+            "rolling_restart", STATUS_ERROR, "restart",
+            f"no load balancer named {name!r} — is the split provisioned (`takyon env create {self.name}`)?",
+        )
+
+    def _lb_member_ids(self, headers: Mapping[str, str], lb_id: str) -> set:
+        got = self.http.request(
+            "GET", f"{self._DO_BASE}/load_balancers/{urllib.parse.quote(lb_id)}", headers=dict(headers)
+        )
+        lb = (got or {}).get("load_balancer") if isinstance(got, dict) else {}
+        return set((lb or {}).get("droplet_ids") or [])
+
+    # The local health probe every gate uses: the app plane directly (:9119) AND the caddy front
+    # (:80) — the latter is byte-for-byte the path the DO LB health-checks over the VPC.
+    _REPLICA_HEALTH_SCRIPT = (
+        "set -u; "
+        "a=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:9119/healthz || echo 000); "
+        "b=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1/healthz || echo 000); "
+        "echo \"HEALTH app=$a front=$b\""
+    )
+
+    def _replica_locally_healthy(self, rep: Mapping[str, Any], key_path: Path) -> bool:
+        try:
+            rc, out = self.remote.run(
+                str(rep["public_ip"]), self._REPLICA_HEALTH_SCRIPT, key_path=str(key_path), timeout=30.0
+            )
+        except Exception:
+            return False
+        return rc == 0 and "app=200" in out and "front=200" in out
+
+    def _other_replicas_healthy_gate(
+        self,
+        headers: Mapping[str, str],
+        lb_id: str,
+        rep: Mapping[str, Any],
+        others: list[dict[str, Any]],
+        key_path: Path,
+        lb_ip: str,
+    ) -> StepReceipt | None:
+        """Fail-closed: refuse to start draining ``rep`` unless every OTHER replica is an LB member
+        and locally healthy, and the LB front itself answers 200."""
+        try:
+            members = self._lb_member_ids(headers, lb_id)
+        except Exception as exc:
+            return StepReceipt("rolling_restart", STATUS_ERROR, "restart", f"LB membership read failed: {exc}")
+        for other in others:
+            if other["droplet_id"] not in members:
+                return StepReceipt(
+                    "rolling_restart", STATUS_ERROR, "restart",
+                    f"refusing to drain {rep['name']}: {other['name']} is not an LB member — it "
+                    "would leave zero healthy backends",
+                )
+            if not self._replica_locally_healthy(other, key_path):
+                return StepReceipt(
+                    "rolling_restart", STATUS_ERROR, "restart",
+                    f"refusing to drain {rep['name']}: {other['name']} is not serving healthz 200 "
+                    "locally (:9119/:80) — it could not carry the traffic alone",
+                )
+        status, _ = self.probe.probe(f"http://{lb_ip}/healthz", timeout=8.0)
+        if status != 200:
+            return StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"refusing to drain {rep['name']}: the LB front {lb_ip} is not answering 200 "
+                f"(got {status})",
+            )
+        return None
+
+    def _drain_from_lb(
+        self, headers: Mapping[str, str], lb_id: str, rep: Mapping[str, Any], grace: float
+    ) -> tuple[StepReceipt, bool]:
+        """Remove ``rep`` from the LB, poll membership until the LB confirms it is out, then
+        grace-wait for in-flight requests (the v2 API exposes no drain state to poll)."""
+        droplet_id = rep["droplet_id"]
+        try:
+            members = self._lb_member_ids(headers, lb_id)
+        except Exception as exc:
+            return StepReceipt("rolling_restart", STATUS_ERROR, "restart", f"LB membership read failed: {exc}"), False
+        was_member = droplet_id in members
+        if was_member:
+            try:
+                self.http.request(
+                    "DELETE",
+                    f"{self._DO_BASE}/load_balancers/{urllib.parse.quote(lb_id)}/droplets",
+                    headers=dict(headers),
+                    body={"droplet_ids": [droplet_id]},
+                )
+            except Exception as exc:
+                return StepReceipt(
+                    "rolling_restart", STATUS_ERROR, "restart",
+                    f"LB removal of {rep['name']} failed: {exc}",
+                ), True
+            for _ in range(30):
+                try:
+                    if droplet_id not in self._lb_member_ids(headers, lb_id):
+                        break
+                except Exception:
+                    pass
+                self._sleep(2.0)
+            else:
+                return StepReceipt(
+                    "rolling_restart", STATUS_ERROR, "restart",
+                    f"LB never confirmed {rep['name']} out of the member set",
+                ), True
+        self._sleep(grace)
+        return StepReceipt(
+            "drain", STATUS_CREATED, "restart",
+            (f"removed {rep['name']} (droplet {droplet_id}) from the LB; membership converged; "
+             f"in-flight grace {grace:g}s")
+            if was_member else
+            f"{rep['name']} (droplet {droplet_id}) was already out of the LB (resuming an aborted "
+            f"roll); in-flight grace {grace:g}s",
+            data={"droplet_id": droplet_id, "was_member": was_member, "grace_seconds": grace},
+        ), was_member
+
+    def _restart_replica(
+        self, rep: Mapping[str, Any], key_path: Path, service: str, caddy_template: str
+    ) -> StepReceipt:
+        """While drained: converge the caddy front from the tracked template (rendered with this
+        node's name), restart the runtime unit, and poll local healthz until 200."""
+        rendered = caddy_template.replace("__NODE_NAME__", str(rep["name"]))
+        if "TAKYON_CADDY_EOF" in rendered:
+            return StepReceipt(
+                "restart", STATUS_ERROR, "restart",
+                "caddy template contains the heredoc sentinel TAKYON_CADDY_EOF — refusing",
+            )
+        script = (
+            "set -euo pipefail\n"
+            "cat > /etc/caddy/Caddyfile.staged <<'TAKYON_CADDY_EOF'\n"
+            f"{rendered}\n"
+            "TAKYON_CADDY_EOF\n"
+            "caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.staged >/dev/null 2>&1\n"
+            "mv /etc/caddy/Caddyfile.staged /etc/caddy/Caddyfile\n"
+            "systemctl reload caddy\n"
+            f"systemctl restart {service}\n"
+            "code=000\n"
+            "for _ in $(seq 1 60); do\n"
+            "  code=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:9119/healthz || echo 000)\n"
+            "  [ \"$code\" = \"200\" ] && break\n"
+            "  sleep 2\n"
+            "done\n"
+            "[ \"$code\" = \"200\" ]\n"
+            "front=$(curl -fsS -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1/healthz || echo 000)\n"
+            "[ \"$front\" = \"200\" ]\n"
+            f"systemctl is-active --quiet {service}\n"
+            "echo \"RESTART_OK app=$code front=$front\"\n"
+        )
+        try:
+            rc, out = self.remote.run(str(rep["public_ip"]), script, key_path=str(key_path), timeout=240.0)
+        except Exception as exc:
+            return StepReceipt("restart", STATUS_ERROR, "restart", f"{rep['name']} restart failed: {exc}")
+        if rc != 0 or "RESTART_OK" not in out:
+            return StepReceipt(
+                "restart", STATUS_ERROR, "restart",
+                f"{rep['name']} did not come back healthy after restart (rc={rc}): {out[-400:]}",
+            )
+        return StepReceipt(
+            "restart", STATUS_CREATED, "restart",
+            f"{rep['name']}: caddy front converged from the tracked template + {service} restarted; "
+            "local healthz 200 on :9119 and :80",
+            data={"droplet_id": rep["droplet_id"], "service": service},
+        )
+
+    def _readd_to_lb(
+        self, headers: Mapping[str, str], lb_id: str, rep: Mapping[str, Any], was_member: bool
+    ) -> StepReceipt:
+        droplet_id = rep["droplet_id"]
+        try:
+            self.http.request(
+                "POST",
+                f"{self._DO_BASE}/load_balancers/{urllib.parse.quote(lb_id)}/droplets",
+                headers=dict(headers),
+                body={"droplet_ids": [droplet_id]},
+            )
+        except Exception as exc:
+            return StepReceipt(
+                "rolling_restart", STATUS_ERROR, "restart",
+                f"re-adding {rep['name']} to the LB failed: {exc} — the node is healthy but out of "
+                f"rotation; re-run `takyon env restart {self.name}` (or `create`) to converge",
+            )
+        for _ in range(30):
+            try:
+                if droplet_id in self._lb_member_ids(headers, lb_id):
+                    return StepReceipt(
+                        "rejoin", STATUS_CREATED, "restart",
+                        f"re-added {rep['name']} to the LB member set",
+                        data={"droplet_id": droplet_id, "was_member": was_member},
+                    )
+            except Exception:
+                pass
+            self._sleep(2.0)
+        return StepReceipt(
+            "rolling_restart", STATUS_ERROR, "restart",
+            f"LB never confirmed {rep['name']} back in the member set",
+        )
+
+    def _await_lb_routes_to(
+        self, rep: Mapping[str, Any], lb_ip: str, rejoin_deadline: float
+    ) -> StepReceipt:
+        """Positive rejoin proof: poll THROUGH the LB until X-Takyon-Node (set by the tracked caddy
+        front) names this node — i.e. the LB health check re-admitted it and it is serving real
+        traffic again. Any non-200 during the gate fails the run (zero-loss is the contract)."""
+        seen: set[str] = set()
+        attempts = max(1, int(rejoin_deadline))
+        for attempt in range(attempts):
+            status, headers = self.probe.probe(f"http://{lb_ip}/healthz", timeout=8.0)
+            if status != 200:
+                return StepReceipt(
+                    "rejoin", STATUS_ERROR, "restart",
+                    f"LB returned {status} during the {rep['name']} rejoin gate (probe {attempt + 1}) "
+                    "— zero-loss contract violated; aborting the roll",
+                    data={"droplet_id": rep["droplet_id"], "probes": attempt + 1},
+                )
+            node = str((headers or {}).get("x-takyon-node") or "")
+            if node:
+                seen.add(node)
+            if node == rep["name"]:
+                return StepReceipt(
+                    "rejoin", STATUS_CREATED, "restart",
+                    f"{rep['name']} PROVEN back in rotation: the LB routed a request to it after "
+                    f"{attempt + 1} probe(s), all 200",
+                    data={"droplet_id": rep["droplet_id"], "probes": attempt + 1},
+                )
+            self._sleep(1.0)
+        return StepReceipt(
+            "rejoin", STATUS_ERROR, "restart",
+            f"{rep['name']} rejoined the member set but the LB never routed to it within "
+            f"{rejoin_deadline:g}s (nodes seen: {sorted(seen) or ['<no X-Takyon-Node header>']}); "
+            "aborting before draining the next replica",
+            data={"droplet_id": rep["droplet_id"], "nodes_seen": sorted(seen)},
+        )
+
     # ── STATUS ────────────────────────────────────────────────────────────────────────────────
 
     def status(self) -> ProvisionResult:
@@ -1683,6 +2139,66 @@ class HttpTransport:
         form: str | None = None,
     ) -> Any:  # pragma: no cover - interface
         raise NotImplementedError
+
+
+class RemoteExec:
+    """Runs a script on a replica as root over SSH. Injectable so the rolling-restart tests drive
+    the drain flow with a fake and zero SSH."""
+
+    def run(
+        self, host: str, script: str, *, key_path: str, timeout: float = 120.0
+    ) -> tuple[int, str]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class SshRemoteExec(RemoteExec):
+    """subprocess ssh with the split's deploy key. BatchMode: never prompts (fail-closed when the
+    key is not authorized)."""
+
+    def run(self, host: str, script: str, *, key_path: str, timeout: float = 120.0) -> tuple[int, str]:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "ssh", "-i", key_path,
+                "-o", "IdentitiesOnly=yes",
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=10",
+                f"root@{host}",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+class HttpProbe:
+    """A plain GET that returns (status_code, lowercased response headers). Distinct from
+    HttpTransport because the LB rejoin gate reads a response HEADER (X-Takyon-Node), which the
+    JSON transport deliberately does not expose."""
+
+    def probe(
+        self, url: str, *, host_header: str | None = None, timeout: float = 8.0
+    ) -> tuple[int, Mapping[str, str]]:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+class UrllibProbe(HttpProbe):
+    def probe(
+        self, url: str, *, host_header: str | None = None, timeout: float = 8.0
+    ) -> tuple[int, Mapping[str, str]]:
+        headers = {"Host": host_header} if host_header else {}
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return int(resp.status), {str(k).lower(): str(v) for k, v in resp.headers.items()}
+        except urllib.error.HTTPError as exc:
+            return int(exc.code), {str(k).lower(): str(v) for k, v in (exc.headers or {}).items()}
+        except Exception:
+            return 0, {}
 
 
 class UrllibTransport(HttpTransport):

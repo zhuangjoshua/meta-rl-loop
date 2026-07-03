@@ -216,3 +216,20 @@ firewall:
   enabled: true
   name: takyon-dev-split-fw
   ssh_allow_alias: TAKYON_DEV_SSH_ALLOW_CIDR
+
+# (f6) Drain-aware rolling restart — `takyon env restart dev` (the full-4b graceful-drain rail).
+#      Planned restarts/deploys lose ZERO requests: per replica the provisioner removes the node
+#      from the LB, waits out in-flight requests, converges the tracked Caddy front
+#      (deploy/takyon-dev-split/Caddyfile.dev — carries the X-Takyon-Node identity header),
+#      restarts the unit, health-verifies locally (:9119 + :80), re-adds it, and only proceeds
+#      once the LB provably routes to it again. Fail-closed: refuses to drain a replica unless
+#      every other replica is a healthy LB member. (Checked against the live DO v2 API: this LB
+#      type exposes no draining state and no per-member health — hence the remove→grace→re-add
+#      flow and the header-based rejoin proof.)
+rolling_restart:
+  # Seconds to wait for in-flight requests after the LB confirms the node out of the member set.
+  grace_seconds: 8
+  # Ceiling on the rejoin gate (LB health check re-admission is ~2×3s per f4 above).
+  rejoin_timeout_seconds: 120
+  # systemd unit restarted on each replica (defaults to takyon-<role>.service).
+  service: takyon-subuser.service
