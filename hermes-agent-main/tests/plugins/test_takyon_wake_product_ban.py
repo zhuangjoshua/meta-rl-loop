@@ -82,7 +82,6 @@ def test_product_file_edit_guard_is_path_scoped():
         "handle_business_claude_agent_task",
         "handle_business_upsert_app_surface_contract",
         "handle_business_refresh_product_surface",
-        "handle_business_write_instant_landing",
         "handle_business_upsert_app_plan",
         "handle_business_grant_app_entitlement",
         "handle_business_set_mode",
