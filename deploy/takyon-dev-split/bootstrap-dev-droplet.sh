@@ -40,9 +40,9 @@
 set -euo pipefail
 
 HOST="${1:?public ip}"
-ROLE="${2:?subuser|safebox}"
+ROLE="${2:?subuser|safebox|operator}"
 NODE_NAME="${3:?node name}"
-VPC_IP="${4:?safebox vpc ip (subuser) / bind vpc ip (safebox)}"
+VPC_IP="${4:?safebox vpc ip (subuser/operator) / bind vpc ip (safebox)}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -53,7 +53,10 @@ SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "ro
 
 [[ -f "$STORE" ]] || { echo "dev store not found: $STORE" >&2; exit 1; }
 [[ -f "$KEY" ]] || { echo "dev ssh key not found: $KEY" >&2; exit 1; }
-case "$ROLE" in subuser|safebox) ;; *) echo "role must be subuser|safebox" >&2; exit 1;; esac
+case "$ROLE" in subuser|safebox|operator) ;; *) echo "role must be subuser|safebox|operator" >&2; exit 1;; esac
+# For the operator role VPC_IP is the DEV SAFEBOX private VPC IP (the dashboard/worker resolve
+# provider secrets from http://$VPC_IP:8000). The claude-agent build image is overridable.
+DOCKER_IMAGE="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
 
 store_get() { grep -m1 "^$1=" "$STORE" | cut -d= -f2- || true; }
 
@@ -63,6 +66,39 @@ echo "→ [$NODE_NAME] preparing host"
   command -v rsync >/dev/null || (apt-get update -qq && apt-get install -y -qq rsync curl ca-certificates)
   install -d /opt/takyon /opt/takyon/.takyon /opt/takyon/.takyon/businesses /opt/takyon/.takyon/product-sites
 "
+
+if [[ "$ROLE" == "operator" ]]; then
+  echo "→ [$NODE_NAME] operator host prep (docker + user/linger + agent image) — mirrors prod bootstrap-host.sh"
+  "${SSH[@]}" "set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq docker.io ffmpeg
+    # deno for the product-action sandbox, installed where the ProtectHome=true units can reach it.
+    if ! command -v deno >/dev/null 2>&1 && [ ! -x /usr/local/bin/deno ]; then
+      curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y >/dev/null 2>&1 || true
+    fi
+    # Dedicated non-root takyon user. Docker authority lives ONLY in the broker unit (which has
+    # SupplementaryGroups=docker); the dashboard/worker reach docker via that broker.
+    if ! id -u takyon >/dev/null 2>&1; then
+      useradd --system --user-group --home-dir /opt/takyon --shell /usr/sbin/nologin takyon
+    fi
+    getent group docker >/dev/null || groupadd docker
+    id -nG takyon | grep -qw docker || usermod -aG docker takyon
+    takyon_uid=\$(id -u takyon)
+    # user-manager + cgroup delegation for the product-action systemd-run --user --scope carve-out.
+    loginctl enable-linger takyon
+    install -d /etc/systemd/system/user@.service.d
+    printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/delegate.conf
+    systemctl daemon-reload
+    systemctl restart \"user@\${takyon_uid}.service\" || true
+    systemctl enable docker >/dev/null
+    systemctl start docker
+    systemctl is-active --quiet docker
+    docker version >/dev/null
+    docker image inspect '$DOCKER_IMAGE' >/dev/null 2>&1 || docker pull '$DOCKER_IMAGE'
+    echo \"operator host prep OK: takyon uid=\$takyon_uid docker=\$(systemctl is-active docker)\"
+  "
+fi
 
 echo "→ [$NODE_NAME] rsync runtime tree"
 COPYFILE_DISABLE=1 rsync -rt --no-perms --no-owner --no-group --checksum --delete \
@@ -76,7 +112,7 @@ COPYFILE_DISABLE=1 rsync -rt --no-perms --no-owner --no-group --checksum --delet
 # --skip-build). A fresh worktree does not contain it; source it from TAKYON_WEB_DIST (default:
 # the tree's own takyon_cli/web_dist when present).
 WEB_DIST="${TAKYON_WEB_DIST:-$TREE/takyon_cli/web_dist}"
-if [[ "$ROLE" == "subuser" ]]; then
+if [[ "$ROLE" == "subuser" || "$ROLE" == "operator" ]]; then
   if [[ -d "$WEB_DIST" ]]; then
     echo "→ [$NODE_NAME] rsync built web dist ($WEB_DIST)"
     COPYFILE_DISABLE=1 rsync -rt --no-perms --no-owner --no-group --checksum --delete \
@@ -116,6 +152,17 @@ if [[ "$ROLE" == "subuser" ]]; then
     printf 'TAKYON_DEV_RUNTIME_DATABASE_URL=%s\n' "$(store_get TAKYON_DEV_RUNTIME_DATABASE_URL)"
     printf 'TAKYON_SAFEBOX_TOKEN=%s\n' "$(store_get TAKYON_DEV_SAFEBOX_TOKEN)"
   } > "$TMPENV"
+elif [[ "$ROLE" == "operator" ]]; then
+  # Operator plane: its OWN control-plane DSN + the migration DSN (for `takyon migrate` run on this
+  # host) + the safebox transport token + the operator AUTHORITY token. Provider/model keys stay
+  # behind the dev safebox (resolved via TAKYON_SAFEBOX_URL, never resident here). The operator
+  # token is forbidden on subuser hosts but REQUIRED here — this is an operator-trust host.
+  {
+    printf 'TAKYON_DEV_OPERATOR_DATABASE_URL=%s\n' "$(store_get TAKYON_DEV_OPERATOR_DATABASE_URL)"
+    printf 'TAKYON_DEV_MIGRATION_DATABASE_URL=%s\n' "$(store_get TAKYON_DEV_MIGRATION_DATABASE_URL)"
+    printf 'TAKYON_SAFEBOX_TOKEN=%s\n' "$(store_get TAKYON_DEV_SAFEBOX_TOKEN)"
+    printf 'TAKYON_SAFEBOX_OPERATOR_TOKEN=%s\n' "$(store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)"
+  } > "$TMPENV"
 else
   # Dev safebox = the dev store minus infra-only aliases (DO token, ssh cidr, mac-local safebox
   # url), plus its own transport token + cap signing key.
@@ -126,6 +173,38 @@ fi
 scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$TMPENV" "root@$HOST:/opt/takyon/.takyon/.env"
 rm -f "$TMPENV"; trap - EXIT
+
+if [[ "$ROLE" == "operator" ]]; then
+  echo "→ [$NODE_NAME] operator units (docker-broker + worker + dashboard) rendered + started"
+  # The units' BindPaths=/run/user/<uid> must use the ACTUAL takyon uid on THIS host (a fresh dev
+  # droplet rarely lands on prod's 995), so resolve it and render __TAKYON_UID__.
+  TAKYON_UID="$("${SSH[@]}" 'id -u takyon' | tr -d '[:space:]')"
+  [[ -n "$TAKYON_UID" ]] || { echo "could not resolve takyon uid on $HOST" >&2; exit 1; }
+  for u in docker-broker worker dashboard; do
+    SVC="takyon-$u.service"
+    TMPL="$SCRIPT_DIR/takyon-$u-dev.service.tmpl"
+    [[ -f "$TMPL" ]] || { echo "missing unit template: $TMPL" >&2; exit 1; }
+    TMPU="$(mktemp)"
+    sed -e "s/__NODE_NAME__/$NODE_NAME/g" -e "s/__SAFEBOX_VPC_IP__/$VPC_IP/g" -e "s/__TAKYON_UID__/$TAKYON_UID/g" "$TMPL" > "$TMPU"
+    scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TMPU" "root@$HOST:/etc/systemd/system/$SVC"
+    rm -f "$TMPU"
+  done
+  "${SSH[@]}" "set -euo pipefail
+    chown takyon:takyon /opt/takyon
+    chown -R takyon:takyon /opt/takyon/.takyon
+    chmod 600 /opt/takyon/.takyon/.env
+    systemctl daemon-reload
+    for SVC in takyon-docker-broker takyon-worker takyon-dashboard; do systemctl enable \$SVC.service >/dev/null; done
+    # Order: docker authority first, then the drain worker, then the dashboard front.
+    systemctl restart takyon-docker-broker.service; sleep 2
+    systemctl restart takyon-worker.service
+    systemctl restart takyon-dashboard.service
+    for _ in \$(seq 1 60); do curl -fsS http://127.0.0.1:9119/healthz >/dev/null 2>&1 && break; sleep 2; done
+    curl -fsS http://127.0.0.1:9119/healthz >/dev/null
+    echo \"$NODE_NAME: dashboard=\$(systemctl is-active takyon-dashboard.service) worker=\$(systemctl is-active takyon-worker.service) broker=\$(systemctl is-active takyon-docker-broker.service) + healthz OK\"
+  "
+  exit 0
+fi
 
 if [[ "$ROLE" == "subuser" ]]; then
   echo "→ [$NODE_NAME] caddy front (:80 → loopback uvicorn, prod topology; node-identity header)"

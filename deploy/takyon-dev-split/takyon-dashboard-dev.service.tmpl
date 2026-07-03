@@ -1,0 +1,67 @@
+[Unit]
+# DEV operator dashboard — the dev twin of deploy/argon-alpha-14/takyon-dashboard.service.
+# Same hardened posture; differs only in what the slices point at (TAKYON_ENV=dev, the dev safebox
+# VPC IP, dev domain, dev budget/pool). Rendered by bootstrap-dev-droplet.sh (operator role):
+#   __NODE_NAME__        -> the dev operator node name (takyon-dev-operator)
+#   __SAFEBOX_VPC_IP__   -> the dev safebox droplet's private VPC IP (:8000)
+Description=Takyon Dashboard (dev)
+After=network-online.target
+Wants=network-online.target
+After=docker.service
+Wants=docker.service
+After=takyon-docker-broker.service
+Wants=takyon-docker-broker.service
+
+[Service]
+Type=simple
+User=takyon
+Group=takyon
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=tmpfs
+BindPaths=/run/user/__TAKYON_UID__
+ProtectSystem=strict
+ReadWritePaths=/opt/takyon
+ReadOnlyPaths=/opt/takyon/hermes-agent-main
+WorkingDirectory=/opt/takyon/hermes-agent-main
+EnvironmentFile=-/opt/takyon/.takyon/.env
+EnvironmentFile=-/opt/takyon/secrets/.env
+# Paid-provider credentials + raw DSNs must stay behind the safebox/broker authority and must not
+# be resident in the dashboard process env. Same scrub as prod, PLUS the dev-named DSN twins the
+# operator plane must not hold (it keeps only TAKYON_DEV_OPERATOR_DATABASE_URL, its own plane DSN).
+UnsetEnvironment=ANTHROPIC_API_KEY ANTHROPIC_TOKEN CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY OPENAI_KEY AZURE_OPENAI_API_KEY AZURE_OPENAI_KEY TAVILY_API_KEY TAKYON_GEMINI_API_KEY GEMINI_API_KEY GOOGLE_API_KEY FAL_KEY FAL_API_KEY REPLICATE_API_TOKEN COMPOSIO_API_KEY AUTH0_CLIENT_SECRET AUTH0_SECRET STRIPE_SECRET_KEY POSTMARK_SERVER_TOKEN SUPABASE_S3_SECRET_ACCESS_KEY R2_S3_SECRET_ACCESS_KEY CLOUDFLARE_API_TOKEN VERCEL_TOKEN
+UnsetEnvironment=DATABASE_URL POSTGRES_URL POSTGRES_PRISMA_URL POSTGRES_URL_NON_POOLING SUPABASE_JWT_SECRET SUPABASE_SERVICE_ROLE_KEY STRIPE_WEBHOOK_SECRET STRIPE_BILLING_WEBHOOK_SECRET
+UnsetEnvironment=TAKYON_APP_DATABASE_URL TAKYON_SAFEBOX_DATABASE_URL TAKYON_MIGRATION_DATABASE_URL MIGRATION_DATABASE_URL TAKYON_RUNTIME_DATABASE_URL
+UnsetEnvironment=TAKYON_DEV_SAFEBOX_DATABASE_URL TAKYON_DEV_MIGRATION_DATABASE_URL TAKYON_DEV_RUNTIME_DATABASE_URL
+UnsetEnvironment=TAKYON_CAP_SIGNING_KEY
+Environment=TAKYON_HOME=/opt/takyon/.takyon
+Environment=HOME=/opt/takyon
+Environment=PYTHONUNBUFFERED=1
+Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
+Environment=TAKYON_OPERATOR_TASKS_VIA_WORKER=1
+Environment=TAKYON_REQUIRE_OPERATOR_IDENTITY=enforce
+Environment=TAKYON_ENV=dev
+Environment=TAKYON_HOST_ROLE=operator
+Environment=TAKYON_NODE_NAME=__NODE_NAME__
+Environment=TAKYON_PRODUCT_ACTIVATION_NODE=__NODE_NAME__
+Environment=PUBLIC_COMPANY_BASE_DOMAIN=dev.coscale.app
+# Dev serves product static locally (dev subuser split), not supabase_s3 — matches the Mac dev rail.
+Environment=TAKYON_STORAGE_BACKEND=local
+Environment=TAKYON_DASHBOARD_EMBEDDED_WORKER=0
+Environment=TAKYON_SAFEBOX_URL=http://__SAFEBOX_VPC_IP__:8000
+Environment=TAKYON_PROVIDER_BROKER=1
+Environment=TAKYON_DOCKER_BROKER_URL=http://127.0.0.1:8011
+Environment=TAKYON_DOCKER_BINARY=/opt/takyon/hermes-agent-main/scripts/takyon-docker-broker.py
+Environment=TERMINAL_ENV=docker
+Environment=TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE=true
+Environment=TERMINAL_CONTAINER_PERSISTENT=false
+Environment=TAKYON_DB_BACKEND=postgres
+# Dev twin budget/pool: usage gate off (dev agent runs $0), small PG pool for the dev pooler cap.
+Environment=TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
+Environment=TAKYON_PG_POOL_SIZE=3
+ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/takyon-cli dashboard --host 127.0.0.1 --port 9119 --no-open --skip-build --tui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
