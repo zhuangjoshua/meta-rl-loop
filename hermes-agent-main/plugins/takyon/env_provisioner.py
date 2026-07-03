@@ -34,6 +34,7 @@ import json
 import os
 import re
 import secrets as _secrets
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -131,6 +132,40 @@ class EnvironmentProvisionError(RuntimeError):
 # The manifests live next to the package root (hermes-agent-main/environments/*.yaml).
 _MANIFEST_DIR = Path(__file__).resolve().parents[2] / "environments"
 
+# The outer workspace git repo — the tracked source of every environment's `code_revision`.
+# hermes-agent-main/plugins/takyon/ -> hermes-agent-main -> <workspace root>.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _git(*args: str, cwd: Path | None = None) -> str | None:
+    """Run one git command in the workspace repo; return stripped stdout, or None on ANY failure
+    (not a git checkout, git missing, bad ref, non-zero exit). Never raises — code_revision
+    reporting/deploy is best-effort and must degrade cleanly on a deployed host that is not a
+    checkout of the workspace repo."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd or _REPO_ROOT), *args],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip()
+
+
+def _git_ok(*args: str, cwd: Path | None = None) -> bool:
+    """True iff the git command exits 0 (for boolean predicates like `merge-base --is-ancestor`,
+    where success prints nothing). Never raises."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd or _REPO_ROOT), *args],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0
+
 _REQUIRED_TOP_KEYS = ("name", "domains", "database", "safebox")
 
 
@@ -199,6 +234,8 @@ class EnvironmentProvisioner:
                 "refusing to provision name='prod' — the provisioner only stands up isolated twins"
             )
         self.manifest = dict(manifest) if manifest is not None else load_manifest(self.name)
+        # The git ref this env's hosts run (the code gate). Empty = env runs its host's own rev.
+        self.code_revision = str(self.manifest.get("code_revision") or "").strip()
         home_raw = str(home) if home is not None else str(os.getenv("TAKYON_HOME") or "").strip()
         self.home = Path(home_raw) if home_raw else Path.home() / ".takyon"
         # Lazy import keeps this module inert and cheap to import; safebox is a leaf.
@@ -2348,10 +2385,173 @@ class EnvironmentProvisioner:
 
     # ── STATUS ────────────────────────────────────────────────────────────────────────────────
 
+    # ── code revision (THE code gate) ──────────────────────────────────────────────────────
+    #
+    # dev pins the `dev` branch, kept AHEAD of `main` (prod). These three rails move code across
+    # the gate. All git-only (no safebox, no network) so they are safe to call anywhere and simply
+    # report is_git=False when the runtime is not a checkout of the workspace repo.
+
+    def _resolve_rev_info(self) -> dict[str, Any]:
+        """Compare this env's pinned code_revision against prod (main). Returns
+        {pinned_ref, is_git, pinned_sha, prod_sha, ahead, behind, diverged}. Never raises."""
+        ref = self.code_revision
+        info: dict[str, Any] = {
+            "pinned_ref": ref, "is_git": False, "pinned_sha": "", "prod_sha": "",
+            "ahead": 0, "behind": 0, "diverged": False,
+        }
+        if not ref:
+            return info
+        pinned = _git("rev-parse", "--short", ref)
+        prod = _git("rev-parse", "--short", "main")
+        if pinned is None or prod is None:
+            return info
+        info.update({"is_git": True, "pinned_sha": pinned, "prod_sha": prod})
+        # `--left-right --count main...ref` -> "<behind> <ahead>": left = commits main has that ref
+        # lacks (dev behind), right = commits ref has that main lacks (dev ahead).
+        counts = _git("rev-list", "--left-right", "--count", f"main...{ref}")
+        if counts:
+            parts = counts.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                behind, ahead = int(parts[0]), int(parts[1])
+                info.update({"behind": behind, "ahead": ahead, "diverged": behind > 0})
+        return info
+
+    def deploy(self, rev: str | None = None) -> ProvisionResult:
+        """Revision-aware deploy: materialize an EXACT git SHA (never the dirty working tree) for
+        this env's hosts. Staging the pinned rev via `git archive` is the mechanism that lets dev
+        run code prod does not have. Host activation (rsync + restart) runs only when a dev operator
+        host is DECLARED in the manifest; otherwise the staged rev is proven and the host leg is a
+        fail-closed 'not declared' receipt (S4 wires the host). Records the pin into env config."""
+        import tempfile
+
+        receipts: list[StepReceipt] = []
+        target_ref = str(rev or self.code_revision or "").strip()
+        if not target_ref:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_BLOCKED, "deploy",
+                "no --rev given and no code_revision pinned in the manifest",
+                deposit=f"environments/{self.name}.yaml: code_revision"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        sha = _git("rev-parse", target_ref)
+        if sha is None:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_BLOCKED, "deploy",
+                f"{target_ref!r} not resolvable — run deploy from the workspace git checkout"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        short = sha[:12]
+        tree_sha = _git("rev-parse", f"{sha}^{{tree}}") or ""
+        # Materialize the pinned SHA into a staging tarball — ships THAT revision, not the working
+        # tree. The git tree-hash is the deterministic deploy fingerprint (identical per SHA).
+        staged = Path(tempfile.mkdtemp(prefix=f"takyon-deploy-{self.name}-"))
+        tar_path = staged / "src.tar"
+        archived = _git("archive", "--format=tar", "-o", str(tar_path), sha)
+        if archived is None or not tar_path.exists() or tar_path.stat().st_size == 0:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_ERROR, "deploy", f"git archive of {short} failed"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        receipts.append(StepReceipt(
+            "code_revision", STATUS_CREATED, "deploy",
+            f"staged rev {short} (tree {tree_sha[:12]}) — the pinned revision, not the working tree",
+            data={"sha": sha, "ref": target_ref, "tree": tree_sha, "staging": str(staged)}))
+        # Record the pin into the env's resolved config (best-effort, non-secret).
+        try:
+            import yaml
+            self.env_dir.mkdir(parents=True, exist_ok=True)
+            cfg = {}
+            if self.config_path.exists():
+                cfg = yaml.safe_load(self.config_path.read_text()) or {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg["deployed_code_revision"] = {"ref": target_ref, "sha": sha, "tree": tree_sha}
+            self.config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        except Exception:
+            pass
+        # Host activation leg — only when a dev operator host is DECLARED (S4). No fake activation:
+        # an undeclared host is a fail-closed 'staged; host pending' receipt, not a pretend success.
+        op_cfg = self.manifest.get("operator_host") or {}
+        if not op_cfg.get("enabled", False):
+            receipts.append(StepReceipt(
+                "operator_host", STATUS_SKIPPED, "deploy",
+                "no dev operator host declared (manifest.operator_host) — staged rev is ready; "
+                "declare + wire the host (S4) to activate this revision"))
+        else:
+            receipts.append(StepReceipt(
+                "operator_host", STATUS_BLOCKED, "deploy",
+                "dev operator host declared but activation transport not yet wired (S4)",
+                deposit="S4: dev operator host rsync+restart"))
+        return ProvisionResult(self.name, "deploy", tuple(receipts))
+
+    def promote(self, confirm: bool = False) -> ProvisionResult:
+        """Promote this env's tested revision to prod: fast-forward `main` to the pinned ref. The
+        ONLY dev -> prod path. Refuses unless it is a clean fast-forward (main is an ancestor of the
+        ref) — prod must never silently lose commits or take a diverged merge. Dry by default:
+        reports the ff plan with NO side effect; `--confirm` performs `git push origin <ref>:main`,
+        which triggers the tracked prod deploy workflow. prod -> dev stays automatic + one-way."""
+        receipts: list[StepReceipt] = []
+        ref = self.code_revision or "dev"
+        dev_sha = _git("rev-parse", "--short", ref)
+        main_sha = _git("rev-parse", "--short", "main")
+        if dev_sha is None or main_sha is None:
+            receipts.append(StepReceipt(
+                "promote", STATUS_BLOCKED, "promote",
+                f"cannot resolve {ref}/main — run promote from the workspace git checkout"))
+            return ProvisionResult(self.name, "promote", tuple(receipts))
+        if not _git_ok("merge-base", "--is-ancestor", "main", ref):
+            receipts.append(StepReceipt(
+                "promote", STATUS_ERROR, "promote",
+                f"{ref} @ {dev_sha} is NOT a fast-forward of main @ {main_sha} (dev diverged) — "
+                "forward main->dev and reconcile before promoting"))
+            return ProvisionResult(self.name, "promote", tuple(receipts))
+        ahead = _git("rev-list", "--count", f"main..{ref}") or "0"
+        if ahead == "0":
+            receipts.append(StepReceipt(
+                "promote", STATUS_EXISTS, "promote",
+                f"prod (main) already at {ref} @ {dev_sha} — nothing to promote"))
+            return ProvisionResult(self.name, "promote", tuple(receipts))
+        if not confirm:
+            receipts.append(StepReceipt(
+                "promote", STATUS_EXISTS, "promote",
+                f"READY: fast-forward main {main_sha} -> {ref} {dev_sha} ({ahead} commit(s)). "
+                f"Re-run `takyon env promote {self.name} --confirm` to ff main and trigger the prod deploy.",
+                data={"dev_sha": dev_sha, "main_sha": main_sha, "ahead": int(ahead)}))
+            return ProvisionResult(self.name, "promote", tuple(receipts))
+        pushed = _git("push", "origin", f"{ref}:main")
+        if pushed is None:
+            receipts.append(StepReceipt(
+                "promote", STATUS_ERROR, "promote",
+                f"git push origin {ref}:main failed (not a ff, or no push perms)"))
+            return ProvisionResult(self.name, "promote", tuple(receipts))
+        receipts.append(StepReceipt(
+            "promote", STATUS_CREATED, "promote",
+            f"promoted: main fast-forwarded to {dev_sha}; the prod deploy workflow is triggered. "
+            "If migrations changed, run `takyon migrate` on the operator host.",
+            data={"promoted_sha": dev_sha, "ahead": int(ahead)}))
+        return ProvisionResult(self.name, "promote", tuple(receipts))
+
     def status(self) -> ProvisionResult:
         """Report the environment's current state WITHOUT any side effect. A nonexistent env is a clean
         report (every twin 'blocked'/'disabled'), never a crash."""
         receipts: list[StepReceipt] = []
+
+        # code_revision — THE code gate, reported first. dev must run a rev AHEAD of prod (main);
+        # this surfaces the pin + any drift with no side effect. Git-only; degrades to a literal
+        # report off a checkout (e.g. a deployed host that is not the workspace repo).
+        rev = self._resolve_rev_info()
+        if not rev["pinned_ref"]:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_DISABLED, "status",
+                "no code_revision pinned — env runs its deploy host's revision"))
+        elif not rev["is_git"]:
+            receipts.append(StepReceipt(
+                "code_revision", STATUS_EXISTS, "status",
+                f"pinned to {rev['pinned_ref']!r} (git comparison unavailable here)",
+                data={"pinned_ref": rev["pinned_ref"]}))
+        else:
+            detail = (f"pinned {rev['pinned_ref']} @ {rev['pinned_sha']}; prod main @ {rev['prod_sha']}; "
+                      f"dev {rev['ahead']} ahead, {rev['behind']} behind")
+            if rev["diverged"]:
+                detail += " — dev is BEHIND prod; forward main->dev (auto-workflow or `git merge main`)"
+            receipts.append(StepReceipt("code_revision", STATUS_EXISTS, "status", detail, data=rev))
 
         db_cfg = self.manifest.get("database") or {}
         if not db_cfg.get("enabled", False):

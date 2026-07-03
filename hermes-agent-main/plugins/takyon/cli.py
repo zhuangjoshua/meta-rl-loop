@@ -4901,11 +4901,29 @@ def run_takyon_command(
 
         from takyon_cli.env import cmd_env
 
+        _env_rest = argv[3:]
+
+        def _env_flag_val(flag: str) -> str:
+            for i, a in enumerate(_env_rest):
+                if a == flag and i + 1 < len(_env_rest):
+                    return _env_rest[i + 1]
+                if a.startswith(flag + "="):
+                    return a.split("=", 1)[1]
+            return ""
+
         cmd_env(SimpleNamespace(
             env_action=(argv[1].lower() if len(argv) >= 2 else None),
             env_name=(argv[2] if len(argv) >= 3 else ""),
-            node_name=next((a for a in argv[3:] if not a.startswith("-")), ""),
-            force="--force" in argv[3:],
+            # first positional after the name (a node for revoke-node/restart) — not a flag,
+            # and not the value consumed by --rev.
+            node_name=next(
+                (a for j, a in enumerate(_env_rest)
+                 if not a.startswith("-") and (j == 0 or _env_rest[j - 1] != "--rev")),
+                "",
+            ),
+            force="--force" in _env_rest,
+            rev=_env_flag_val("--rev"),
+            confirm="--confirm" in _env_rest,
         ))
         return None
 
