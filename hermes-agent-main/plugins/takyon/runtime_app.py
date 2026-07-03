@@ -374,6 +374,27 @@ def reset_database_url_cache() -> None:
     _resolved_database_url_env_values.clear()
 
 
+def _upgrade_legacy_dev_pooler_dsn(value: str, *, alias: str) -> str:
+    """Self-heal legacy dev-store Supabase shared-pooler DSNs.
+
+    Older dev stores were deposited with the IPv4 shared pooler on ``:5432`` (session mode). That
+    wedges ``scripts/takyon-operator-dev.sh console 10 --shells 10`` because ten worker threads +
+    heartbeats exhaust Supabase's 15-session cap before `/create` can do real work. The runtime is
+    already pgbouncer-safe (`prepare_threshold=None` everywhere), so dev should use the transaction
+    pooler on ``:6543`` instead. Keep this rewrite dev-only and scoped to the tracked
+    ``TAKYON_DEV_*DATABASE_URL`` aliases so prod and explicit one-off DSNs stay byte-identical.
+    """
+    raw = str(value or "").strip()
+    if environment.env_name() != "dev" or not raw or not str(alias or "").startswith("TAKYON_DEV_"):
+        return raw
+    return re.sub(
+        r"(@[^/?#:]+\.pooler\.supabase\.com):5432(?=([/?#]|$))",
+        r"\1:6543",
+        raw,
+        count=1,
+    )
+
+
 def _first_configured_database_url(env_names: tuple[str, ...], *, cache_key: str) -> str:
     scoped_key = (environment.cache_scope(), cache_key)
     value = _resolved_database_url_env_values.get(scoped_key, "")
@@ -385,6 +406,7 @@ def _first_configured_database_url(env_names: tuple[str, ...], *, cache_key: str
         for name in env_names:
             value = str(os.environ.get(name) or env_values.get(name) or "").strip()
             if value:
+                value = _upgrade_legacy_dev_pooler_dsn(value, alias=name)
                 break
         if value:
             _resolved_database_url_env_values[scoped_key] = value

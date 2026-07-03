@@ -22,6 +22,7 @@ from __future__ import annotations
 import pytest
 
 pytest.importorskip("psycopg")
+from psycopg.conninfo import conninfo_to_dict
 
 import plugins.takyon.runtime_app as runtime_app  # noqa: E402
 from plugins.takyon import environment, safebox  # noqa: E402
@@ -124,6 +125,31 @@ def test_dev_alias_resolves_from_the_takyon_home_env_file(monkeypatch):
         safebox, "load_env", lambda: {"TAKYON_DEV_OPERATOR_DATABASE_URL": _dsn("dev-store")}
     )
     assert resolve_database_url(plane="operator") == _dsn("dev-store")
+
+
+def test_dev_legacy_shared_pooler_alias_self_heals_to_transaction_pooler(monkeypatch):
+    monkeypatch.setenv("TAKYON_ENV", "dev")
+    legacy = (
+        "postgresql://takyon_operator_runtime.devref:pw@aws-1-us-east-2.pooler.supabase.com:5432/"
+        "postgres?sslmode=require"
+    )
+    monkeypatch.setattr(
+        safebox, "load_env", lambda: {"TAKYON_DEV_OPERATOR_DATABASE_URL": legacy}
+    )
+    resolved = conninfo_to_dict(resolve_database_url(plane="operator"))
+    assert resolved["host"] == "aws-1-us-east-2.pooler.supabase.com"
+    assert resolved["port"] == "6543"
+    assert resolved["dbname"] == "postgres"
+    assert resolved["user"] == "takyon_operator_runtime.devref"
+
+
+def test_dev_non_pooler_dsn_is_not_rewritten(monkeypatch):
+    monkeypatch.setenv("TAKYON_ENV", "dev")
+    direct = "postgresql://takyon_operator_runtime@db.dev.example:5432/postgres?connect_timeout=7"
+    monkeypatch.setattr(
+        safebox, "load_env", lambda: {"TAKYON_DEV_OPERATOR_DATABASE_URL": direct}
+    )
+    assert resolve_database_url(plane="operator") == direct
 
 
 @pytest.mark.parametrize("plane", sorted(_DEV_ALIAS))
