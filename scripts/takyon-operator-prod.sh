@@ -30,6 +30,37 @@ ACTIVE_LOCAL_WORKER_PREFIX_FILE="${TAKYON_OPERATOR_ACTIVE_WORKER_PREFIX_FILE:-$L
 OPERATOR_HOME="${TAKYON_OPERATOR_PROD_HOME:-$LOCAL_PROD_ROOT/operator}"
 DEFAULT_OPERATOR_USER_ID="${TAKYON_OPERATOR_DEFAULT_USER_ID:-150e4213-4006-4dc1-9cf3-ca7ab3b4696f}"
 OPERATOR_USER_ID_OVERRIDE=""
+
+# ── Named operator profiles ──────────────────────────────────────────────────────────────
+# Short name -> Takyon operator user-id, so you never paste a UUID:
+#   scripts/takyon-operator-prod.sh sai                    # = console 4 --user-id <sai> --shells 4
+#   scripts/takyon-operator-prod.sh josh 10 foo --shells 2 # name + your own console args
+#   scripts/takyon-operator-prod.sh console 4 --user sai --shells 4   # or as a --user flag
+# This case is the source of truth -- add a teammate with ONE line. Additions can also live
+# out-of-band in scripts/operator-users.conf ("<name> <uuid>" per line, '#' comments ok).
+resolve_operator_alias() {
+  local name="$1"
+  case "$name" in
+    sai)  printf '%s' 'c351355a-34f4-4885-8c60-429bf79bd7a5' ;;
+    josh) printf '%s' '150e4213-4006-4dc1-9cf3-ca7ab3b4696f' ;;
+    *)
+      local conf="$ROOT/scripts/operator-users.conf" n u
+      if [[ -f "$conf" ]]; then
+        while read -r n u _; do
+          [[ -z "$n" || "${n#\#}" != "$n" ]] && continue
+          [[ "$n" == "$name" ]] && { printf '%s' "$u"; return 0; }
+        done < "$conf"
+      fi
+      printf '%s' "$name"  # not a known profile -> pass through (raw UUIDs still work)
+      ;;
+  esac
+}
+
+# True only when the argument is a KNOWN profile name (resolves to a different value).
+is_operator_alias() {
+  local resolved; resolved="$(resolve_operator_alias "$1")"
+  [[ -n "$1" && "$resolved" != "$1" ]]
+}
 SSH_SERVER_ALIVE_INTERVAL="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_INTERVAL:-15}"
 SSH_SERVER_ALIVE_COUNT_MAX="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
 CONSOLE_TUNNEL_MONITOR_SECONDS="${TAKYON_OPERATOR_TUNNEL_MONITOR_SECONDS:-5}"
@@ -1169,6 +1200,15 @@ cmd_console() {
         operator_user_id="${1#*=}"
         [[ -n "$operator_user_id" ]] || console_usage
         ;;
+      --user)
+        shift || console_usage
+        [[ $# -gt 0 ]] || console_usage
+        operator_user_id="$(resolve_operator_alias "$1")"
+        ;;
+      --user=*)
+        operator_user_id="$(resolve_operator_alias "${1#*=}")"
+        [[ -n "$operator_user_id" ]] || console_usage
+        ;;
       --shells)
         shift || console_usage
         [[ $# -gt 0 ]] || console_usage
@@ -1309,6 +1349,8 @@ cmd_status() {
 usage() {
   cat <<EOF
 Usage:
+  scripts/takyon-operator-prod.sh <name>            # named operator profile → console 4 --shells 4
+                                                    #   e.g.  sai   josh   (see resolve_operator_alias)
   scripts/takyon-operator-prod.sh tunnel
   scripts/takyon-operator-prod.sh safebox-tunnel
   scripts/takyon-operator-prod.sh dashboard-tunnel
@@ -1404,6 +1446,17 @@ case "$command" in
     usage
     ;;
   *)
-    cmd_shell "$@"
+    # Named operator profile (sai / josh / scripts/operator-users.conf) → one-terminal console.
+    if is_operator_alias "$command"; then
+      resolved_user="$(resolve_operator_alias "$command")"
+      shift || true
+      if [[ $# -eq 0 ]]; then
+        cmd_console 4 --shells 4 --user-id "$resolved_user"
+      else
+        cmd_console "$@" --user-id "$resolved_user"
+      fi
+    else
+      cmd_shell "$@"
+    fi
     ;;
 esac
