@@ -22,7 +22,7 @@ _Last updated: 2026-07-03, by Claude. This file is updated as stages move._
 | 5 monthly-only slice | ✅ | 1638ac90± | live refusal probes on prod |
 | 5 composition engine | ✅ | 264d346d | derived pricing + margin invariant, 31 tests |
 | 5 money-shape gate | ✅ **re-verified live 2026-07-03** | 3bb96086 | 0062 applied on prod DB (money_shape col + operator_approvals tbl both exist); source on both hosts; **LIVE PROBE: real biz `cyclewise` reads default subscription, subscription write allowed, credit_packs write REFUSED** — Roomier hole closed on prod |
-| 5 Shopify wiring | ✅ wired+deployed · ⬜ live acceptance | 7620fc20 | deployed; webhook live fail-closed 503-unconfigured. Live Composio-connect→plan-fee→recompose acceptance run = **still pending** (agent hit a credits wall; not yet run) |
+| 5 Shopify wiring | ✅ wired+deployed · ⬜ live acceptance (🔑 one-time Composio setup) | 7620fc20 | deployed + fail-closed (verified: brokered Composio calls refuse until configured). Live acceptance BLOCKED on a **one-time human step**: create a Shopify auth-config/integration in the Composio dashboard (register the Shopify app creds) + OAuth the dev store `ourmanifold-uc4-test.myshopify.com`. The 2 unverified-offline constants (auth_configs list path, connect initiate body) validate on that first live call. NOT run — not claiming a pass. |
 | 6 RuntimeRail routing half | ✅ | a87ee4ea | live smoke on prod subuser dispatcher |
 | 6 BuildStep half | ⬜ | — | sequenced after canonicalization spine |
 | Test debt (5 suites) | ✅ | e1538bfb | 146→255 passing, zero wave regressions |
