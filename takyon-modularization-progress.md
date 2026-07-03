@@ -3,11 +3,33 @@
 Living status for the modularization build. Plan: [takyon-modularization-plan.md](takyon-modularization-plan.md).
 Legend: ⬜ not started · 🟡 in progress · ✅ done+proven · �las = needs your Chrome sign-on · ⛔ = blocked on a decision.
 
-_Last updated: 2026-07-02, by Claude. This file is updated as stages move._
+_Last updated: 2026-07-03, by Claude. This file is updated as stages move._
 
 ---
 
-## Parallel build wave (2026-07-02, operator "go fast") — 4 agents in flight
+## SCOREBOARD (2026-07-03) — canonical stage status, one line each
+| Stage | Status | Landed | Live proof |
+|---|---|---|---|
+| 0 safety net | ✅ | — | 29 characterization/guard tests green on the rig |
+| 1 WorkerPool | ✅ | cfe7270c | deployed; fresh business built via the pool, site 200 |
+| Migration rail (Codex) | ✅ | b058f4d6+ | replays all files as takyon_migration; ran on prod + dev |
+| 2 ClaimScope | ✅ | ab9e49f4 | UC1 shipped; acceptance rows observed on prod |
+| 3+3b RuntimeContext + env provisioner | ✅ | f9fcc518 + 3b | dev Supabase bootstrapped prod-shaped; `takyon env create dev` clean |
+| UC3 runtime (dev slices + dashboard) | ✅ | b94c0435 | dev dashboard 200 off the dev control plane |
+| 4a subuser unblock | ✅ | ee6f8a4f | 3 hosts, workers=2 live |
+| **4b dev replica split + LB** | **✅ dev-first (prod split after soak)** | **a48f22e5** | **2 replicas + LB 138.197.50.136 live on DO; ~4.5s failover; destroy dry-verified** |
+| **4c safebox headroom** | **✅ measured** | (receipts) | **6× target concurrency, 0 errors — no broker replicas needed** |
+| 5 monthly-only slice | ✅ | 1638ac90± | live refusal probes on prod |
+| 5 composition engine | ✅ | 264d346d | derived pricing + margin invariant, 31 tests |
+| 5 money-shape gate | 🟡 in build | (takyon-uc4 lane) | migration renumbers to 0061 |
+| 5 Shopify wiring | ✅ | 7620fc20 | deployed; webhook live fail-closed 503-unconfigured; acceptance run next |
+| 6 RuntimeRail routing half | ✅ | a87ee4ea | live smoke on prod subuser dispatcher |
+| 6 BuildStep half | ⬜ | — | sequenced after canonicalization spine |
+| Test debt (5 suites) | ✅ | e1538bfb | 146→255 passing, zero wave regressions |
+| Deploys | ✅ 2026-07-03 | b15a1c4b | ALL THREE hosts + `takyon migrate` (0060) |
+| Chrome sign-ons (4) | ✅ | — | dev DB · Auth0 M2M · DO token · Shopify dev store, all verified live |
+
+## Parallel build wave (2026-07-02, operator "go fast") — ✅ WAVE COMPLETE (all lanes landed; details below)
 Independent file clusters, each in its own worktree off origin/main, verified + landed individually (baseline-diff + proof) as they return — NOT batched:
 - **Stage 3 RuntimeContext** (`takyon-stage3`) — ✅ CODE HALF LANDED f9fcc518. `environment.py` (HostRole 3 views / RuntimeContext / cache_scope / boot assertion); 5 normalizers collapsed (characterization test unchanged+green — the agent self-corrected the serving-view worker-key against the truth table, the guardrail working); 4 process-global caches env-scoped (R3 security); spawn threading (R4). Behavior-preserving for prod. 58 guard tests green post-rebase. REMAINING for UC3: the dev-twin provisioner (Stage 3b) — dev's own Supabase project + topology.sql + dev safebox.
 - **Stage 5 composition engine** (`takyon-stage5b`) — ✅ LANDED 264d346d. `plan_composition.py`: PricedComponent/CostBasis/MarginPolicy/compose_plan — prices DERIVED (metered COGS via usage_pricing SSOT, unpriced=fail-closed), margin invariant fail-loud with figures; freehand write path now funnels through the SAME invariant. Wired via `upsert_plan_from_composition` (monthly-only + GrandfatheredPlanFrozen preserved). 31 tests green, baseline-clean. **HONEST SCOPE:** the ENGINE is hooked into the plan-write path; the CEO-facing "add a component" tool input (`business_upsert_app_plan` composition arg) + the money-shape gate at the tool choke point are the NEXT wiring step — UC4 does not "ship" until the CEO can drive it. Deploy batched with this wave.
@@ -136,10 +158,11 @@ _**Mixed-version window (expected, closing):** the E2E's strict reservation was 
 - ⛔ **Structural deploy-rail gap surfaced (your decision):** every future migration that ALTERs an early table hits this same wall. One-time fixes possible: (a) deposit an owner-capable migration DSN into the safebox, or (b) `ALTER TABLE ... OWNER TO takyon_migration` for the app tables (run once as postgres). Recommend (b) — keeps role-scoped DSNs, no new super-credential in custody.
 - **Remaining for ✅:** run 0059 in the Supabase SQL editor (after your sign-in) → live CLI E2E on Stage-2 code (strict session reservation observed in the jobs row + kill-session spill observed live) → land on main → deploy both hosts → progress ✅ with proofs.
 
-### Stage 3 + 3b — RuntimeContext + env provisioner · 🟡 IN BUILD (worktree `takyon-stage3`) → **UC3 ships**
-- 🟡 `environment.py` WRITTEN (keystone, by hand): `HostRole` exposing the three PINNED divergent views (canonical/serving/bare — the Stage-0 truth table is the contract, zero cells change), `RuntimeContext.from_env` with the 7 slices, lazy `current_context()` (prod-identical when unbound), `cache_scope()` for R3 cache partitioning, `assert_not_prod_leakage` fail-loud boot gate over the prod literals.
-- 🟡 Mechanical wiring delegated (background agent): 5 normalizer collapse
-- **Proof:** clean slate → `takyon env create dev` → browser dashboard at `localhost:9119` → fresh business with real Stripe test checkout → **DB assertion: zero prod-plane rows changed**; `dev2` with zero human steps.
+### Stage 3 + 3b — RuntimeContext + env provisioner · ✅ DONE (code f9fcc518 · provisioner + dev DB live 2026-07-03 · UC3 runtime half b94c0435) → **UC3 delivered**
+- ✅ `environment.py` landed: HostRole 3 pinned views (truth table unchanged), RuntimeContext 7 slices, cache_scope (R3), prod-leakage boot gate; 5 normalizers collapsed.
+- ✅ Stage 3b provisioner landed + ran clean end-to-end: `takyon env create dev` — dev's OWN Supabase project (four-manifold-dev) bootstrapped prod-shaped via the migration rail (59 migrations, prod-named roles), dev Auth0 app minted via the M2M credential, receipts + idempotent re-run. `takyon env status/destroy` live.
+- ✅ UC3 RUNTIME half landed: `TAKYON_ENV=dev` resolves `TAKYON_DEV_*` DB twins at the ONE seam (`resolve_database_url`), fail-closed naming the dev alias (never silent prod fallback), prod-literal armed at resolution + boot; unset/prod byte-identical (characterized first). **Live proof:** dev dashboard booted locally against the dev control plane — `GET /` 200, businesses API 200 returning a dev-DB-seeded platform-owner row; real dev safebox instance served the same seam.
+- ⬜ Remaining UC3 flourish (honest): fresh business + real Stripe TEST checkout created through the dev browser dashboard end-to-end (needs the 4 missing dev-safebox aliases — STRIPE_WEBHOOK_SECRET/STRIPE_BILLING_WEBHOOK_SECRET/AUTH0_CLIENT_SECRET/AUTH0_SECRET — then it's a run, not a build).
 
 ### Stage 4a — subuser box unblocked · ✅ DONE (landed ee6f8a4f, deployed all THREE hosts 2026-07-02) → most of **UC2**
 **Proof wired in:**
@@ -151,17 +174,15 @@ _**Mixed-version window (expected, closing):** the E2E's strict reservation was 
 - 📋 Full p95 head-of-line load proof deferred to the Stage-3 dev environment per plan (prod got the zero-risk probes only).
 - **Proof:** a stubbed 30s AI call no longer moves p95 of concurrent reads on the box.
 
-### Stage 4b — N subuser replicas behind VPC LB · ⬜ 🔑DO → **UC2 ships**
-- ⬜ VPC LB + repoint `subuser-origin.coscale.app` DNS + webhook relay upstream
-- ⬜ Per-replica bootstrap (deno + linger + BindPaths) via the provisioner
-- ⬜ Close replica blockers: force shared storage backend; action-source cache fan-out; PG-authoritative replay receipt; LB-resolve the ctx.generate hairpin
-- ⬜ Per-replica scoped/revocable credentials
-- **Proof:** kill one replica mid-traffic → zero failed customer requests beyond in-flight; replayed action returns cached success.
+### Stage 4b — N subuser replicas behind VPC LB · ✅ DEV SPLIT LANDED a48f22e5 + **LIVE on DO 2026-07-03** (operator-approved dev-first, ~$42/mo) → prod split next after soak
+**Proof wired in (tracked rail, not hand-built):** provisioner grew ordered `vpc→ssh_key→droplets(count/role/safebox_host)→load_balancer→firewall→node_registry` create steps (+~800 lines; idempotent by name/tag lookup, receipted, fail-closed on `TAKYON_DO_API_TOKEN`, prod-literal-guarded; converge-on-drift PUTs) + **automated destroy** (dry-verified against the LIVE inventory: would-delete == exactly the 7 dev resources; **prod droplets provably survive** — pinned by test, I reran the 40-test suite before merging). `environments/dev.yaml` declares the split; `deploy/takyon-dev-split/` is the tracked replica bootstrap rail.
+- ✅ **LIVE:** 2× subuser replicas (`takyon-dev-subuser-1/2`, s-1vcpu-2gb) + dev safebox droplet (VPC-only :8000) behind LB **138.197.50.136** + firewall (SSH CIDR-locked; app ports LB-only) in dev VPC 10.200.0.0/24 — receipts in `.takyon-dev-safebox/environments/dev/receipts.jsonl` (111 lines).
+- ✅ **Acceptance observed live:** LB serves dev-DB-backed app-plane envelopes through both replicas (dispatcher hit dev Supabase); **kill-one-replica → ~4.5s failover** after health-check tightening (tracked in dev.yaml, converged live via PUT), survivor continuous 200, killed replica rejoined; both nodes registered distinct identities in dev `worker_pools` (Stage-2 registry as the node registry, per plan §A.5).
+- ⬜ Remaining for FULL 4b (honest): graceful-drain zero-failure semantics (today: ~4.5s black-hole window on hard kill); per-replica scoped/revocable credentials; close the replica blockers (shared storage force, action-source cache fan-out, PG-authoritative replay receipt, ctx.generate hairpin); prod DNS/webhook-relay repoint. **Prod split = same manifest with prod names, after this dev split soaks.**
+- Honest flags: DO token lacks `tag:create` (name∪tag anchoring covers idempotency/destroy; granting the scope later activates tags with zero code change); `uv.lock` stale → droplets used the tracked pip fallback tier (chip filed).
 
-### Stage 4c — safebox headroom proven or scaled · ⬜
-- ⬜ Load-test safebox at full 4b capacity to 3× headroom
-- ⬜ If insufficient: broker replicas with per-replica key enrollment/revocation
-- **Proof:** sustained target-RPS, safebox p95 flat; or kill-one-broker → zero dropped calls.
+### Stage 4c — safebox headroom proven or scaled · ✅ MEASURED 2026-07-03 — holds 3× target, no broker replicas needed
+**Proof:** dev safebox (singleton, `TAKYON_UVICORN_WORKERS=2` — the tracked prod setting) probed from a replica over the VPC on the non-spending authority path: c=24 (4b target) p95 71ms → c=72 (3×) p95 253ms → **c=144 (6×) p95 405ms, 0 errors at every level** (~360–430 rps). Ceiling + alarm threshold (sustained p95>250ms or >60 concurrent brokered calls on 1 vCPU) recorded in receipts (`safebox_headroom`). Honest scope: exercises the auth/authority path, not 180s-held provider proxy calls (those spend real money).
 
 ### Stage 5 — compositional pricing + monthly-only · 🟡 SLICE 1 ✅ LANDED + DEPLOYED + prod-proven → **UC4 ships**
 _Deploy proof: full-tree rsync both hosts post-1638ac90, compile OK, all services active, subuser healthz 200. **Live refusal probe on the deployed operator host:** `one_time` plan write → `REFUSED: billing_interval must be 'month' … subuser plans are monthly-only`; over-cap budget → `REFUSED: included_ai_budget_microusd (9000000) exceeds the plan's monthly price cap (5000000 microUSD = 100% of price_cents=500)`. Fail-loud, figures included, nothing written._
@@ -169,8 +190,8 @@ _Independent file cluster — ran alongside Stage 2 exactly as planned._
 - ✅ **Monthly-only enforcement + fail-loud cap + legacy purge (the standalone Q13 slice) — landed, net-negative diff (+279/−298).**
   **Proof wired in:** new writes refuse `interval != 'month'` at `upsert_plan_policy` (the one path both chat/bootstrap plan writes flow through) with the frozen-legacy-row identical-re-pass escape; the silent budget clamp is now a refusal carrying the exact figures in BOTH copies' place (duplicate cap collapsed onto the one `app_entitlements` copy — core delegates); checkout always `subscription`; Stripe prices always monthly-recurring; pulse-MRR month-only; OpenMeter one_time skip + P1Y cadence deleted; dead SQLite plan branches + unreachable `_init_db` DDL + orphaned `_plan_validation_warnings` + 0-valued free-floor shim deleted. 12-test rig suite (`test_takyon_monthly_only_pg.py`, no safebox dependency) green + invariant pins hardened to absent-or-zero. Affected-suite failure set byte-identical to main baseline. Closes the live unbounded-COGS exposure (D2+D4: year/one_time budgets were uncapped by construction — those intervals no longer exist).
   _Deferred honestly: `included_action_quota` purge (30 refs — UC4's `per_unit` CostBasis replaces it structurally in the composition work below)._
-- ⬜ `PricedComponent`/`PlanComposition`/`compose_plan` (derived price/budget/gates, margin invariant)
-- ⬜ Money-shape gate at the tool choke point (covers chat + bootstrap paths)
+- ✅ `PricedComponent`/`CostBasis`/`MarginPolicy`/`compose_plan` LANDED 264d346d — prices DERIVED via usage_pricing SSOT (unpriced = fail-closed), margin invariant fail-loud, wired through `upsert_plan_from_composition` (grandfather + monthly-only preserved); 31 tests.
+- 🟡 Money-shape gate at the tool choke point — continuation lane IN BUILD (worktree `takyon-uc4`: money_shape.py + core/entitlements wiring + migration→**0061**); lands next, then the follow-up deploy.
 - ✅ **Real Shopify integration WIRING — LANDED 7620fc20 (2026-07-03; live acceptance run still ahead).** **Proof wired in:** `business_connect_shopify` tool (Composio broker, zero new runtime credential, fail-closed sans key) + `shopify_util.py` leaf + `/api/webhooks/shopify` public route (forward-only: raw body + HMAC header → safebox) + safebox authority route `/v1/shopify/app-webhook/process` (internal-token-gated; HMAC verified LOCALLY on the safebox — secret never vended; no remote leg on the verifier) + composition serialization so the stored plan recomposes. **Hardening beyond spec:** content-derived dedup id (sha256 topic+body — replay/stale-flip attacks dedupe forever since Shopify's HMAC doesn't cover headers); shop identity read from the VERIFIED body only; 1 MiB cap; minimal public responses; strict UTF-8 decode so lossy bytes fail verification cleanly. Migration `0060` = grants-only (`insert,update on app_plan_policies to takyon_safebox_authority`, 0054 precedent, delete withheld+test-asserted) — **must replay on prod (takyon migrate) at deploy before the webhook leg is live.** I re-verified in-lane: 129 tests green (48 new + 81 app-plane characterization unchanged), allowlist diff = exactly the two stripe-mirroring lines, safebox route token-gated. Honest flags from the lane: 2 Composio constants unverifiable offline (auth_configs list path, connected_accounts initiate body — fail closed, validated at live acceptance); webhookSubscriptionCreate on the store happens at the live run.
   - ⚠ **Migration numbering:** the in-flight UC4 gate lane also drafted a `0060_…` — renumber to 0061 at landing.
 - **Proof (two legs):** ① cost basis **read from the real store** → compose → `plan_key-v2` minted with derivation receipt → new signup pays derived price → existing subscriber byte-identical; ② `shop/update` plan-change **webhook** updates the cost basis → auto-recompose mints `plan_key-v3`, receipted. Plus named refusal tests for every hallucination shape. **Stop line:** per-order/fulfillment/catalog rails stay OUT (archetypes project — different money shape).
