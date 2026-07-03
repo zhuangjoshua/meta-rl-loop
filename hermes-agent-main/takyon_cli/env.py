@@ -18,13 +18,16 @@ from takyon_cli.colors import Colors, color
 def cmd_env(args: Any) -> int:
     """Dispatcher for ``takyon env <action> <name>``."""
     action = getattr(args, "env_action", None)
-    if action not in ("create", "status", "destroy", "restart"):
-        print("usage: takyon env {create|status|destroy|restart} <name> [--force]", file=sys.stderr)
+    if action not in ("create", "status", "destroy", "restart", "revoke-node"):
+        print(
+            "usage: takyon env {create|status|destroy|restart|revoke-node} <name> [<node>] [--force]",
+            file=sys.stderr,
+        )
         raise SystemExit(2)
 
     name = str(getattr(args, "env_name", "") or "").strip().lower()
     if not name:
-        print("usage: takyon env {create|status|destroy|restart} <name>", file=sys.stderr)
+        print("usage: takyon env {create|status|destroy|restart|revoke-node} <name>", file=sys.stderr)
         raise SystemExit(2)
     if name == "prod":
         print(
@@ -56,6 +59,15 @@ def cmd_env(args: Any) -> int:
         # local health verify -> re-add -> proven back in rotation. Zero requests lost on
         # planned restarts/deploys; fail-closed if the other replica cannot carry the traffic.
         result = provisioner.rolling_restart()
+    elif action == "revoke-node":
+        # Stage 4b hardening: revoke ONE replica's scoped credentials (DROP its DB role, prune
+        # its transport-token digest) so a compromised/decommissioned replica's creds die with
+        # it. Re-enroll cleanly with `takyon env create <name>` (idempotent).
+        node = str(getattr(args, "node_name", "") or "").strip()
+        if not node:
+            print("usage: takyon env revoke-node <name> <node>", file=sys.stderr)
+            raise SystemExit(2)
+        result = provisioner.revoke_node_credentials(node)
     else:
         result = provisioner.destroy(force=bool(getattr(args, "force", False)))
 

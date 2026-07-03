@@ -184,6 +184,18 @@ droplets:
     enabled: true
     name: takyon-dev-safebox
     size: s-1vcpu-1gb          # safebox_app is lighter; VPC-internal only (:8000 via the firewall)
+  # (f7) Per-replica SCOPED, REVOCABLE credentials (Stage 4b hardening bullet). create() enrolls
+  # each replica with its OWN DB login role (takyon_app_runtime__<node>, an INHERIT member of the
+  # ONE canonical app-plane role) and its OWN safebox transport token (the safebox host stores
+  # only sha256 digests in node_tokens_file; the shared token stays valid for non-split hosts).
+  # Compromising one replica therefore never yields a credential that outlives it:
+  # `takyon env revoke-node dev <node>` DROPs the role + prunes the digest — refused everywhere
+  # within one request; re-enroll with `takyon env create dev`; activate env changes with the
+  # drain rail (`takyon env restart dev`). Values below are the defaults, declared for the record.
+  runtime_dsn_alias: TAKYON_DEV_RUNTIME_DATABASE_URL   # shared alias scoped DSNs derive from
+  safebox_token_alias: TAKYON_DEV_SAFEBOX_TOKEN        # shared transport token (kept valid)
+  env_file: /opt/takyon/.takyon/.env                   # replica env the scoped creds land in
+  node_tokens_file: /opt/takyon/.takyon/safebox/node_tokens.json  # digests only, never values
 
 # (f4) VPC load balancer fronting the replicas BY ROLE TAG (takyon-env-dev-subuser): a future
 #      replica joins by tag, no LB edit. Targets each replica's Caddy on :80 (prod topology:

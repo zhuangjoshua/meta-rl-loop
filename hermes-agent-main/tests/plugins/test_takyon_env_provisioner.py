@@ -1027,7 +1027,7 @@ class FakeRemote(ep.RemoteExec):
         self.fail_restart = set(fail_restart)
         self.scripts: list[tuple[str, str]] = []
 
-    def run(self, host, script, *, key_path, timeout=120.0):
+    def run(self, host, script, *, key_path, timeout=120.0, stdin=None):
         kind = "restart" if "systemctl restart" in script else "health"
         self.scripts.append((host, script))
         self.events.append((kind, host))
@@ -1316,3 +1316,281 @@ def test_takyon_env_restart_subcommand_registered():
     assert args is not None, "takyon env restart dev did not dispatch to cmd_env"
     assert getattr(args, "env_action") == "restart"
     assert getattr(args, "env_name") == "dev"
+
+
+# ── per-replica scoped credentials (Stage 4b hardening bullet): enroll / revoke / idempotence ──
+
+
+class CredRemote(ep.RemoteExec):
+    """Answers the credential-rail scripts: the value-free state probe, the safebox-host
+    node-token read/update, and the env write (whose secret payload rides ``stdin``)."""
+
+    def __init__(self, *, state_by_host=None, node_tokens="{}", unreachable=()):
+        self.state_by_host = dict(state_by_host or {})  # host -> (dsn_scoped, token_sha)
+        self.node_tokens = node_tokens
+        self.unreachable = set(unreachable)
+        self.env_writes: list[tuple[str, str]] = []     # (host, stdin payload)
+        self.token_updates: list[str] = []              # scripts sent to the safebox host
+        self.scripts: list[tuple[str, str]] = []
+
+    def run(self, host, script, *, key_path, timeout=120.0, stdin=None):
+        self.scripts.append((host, script))
+        if host in self.unreachable:
+            return 255, "ssh: connection refused"
+        if "TAKYON_NODE_TOKENS_EOF" in script:
+            self.token_updates.append(script)
+            return 0, "NODE_TOKENS_UPDATED nodes"
+        if "DSN_SCOPED" in script:
+            scoped, sha = self.state_by_host.get(host, (False, "e3" * 32))
+            return 0, f"DSN_SCOPED={'yes' if scoped else 'no'}\nTOKEN_SHA={sha}\n"
+        if "ENV_WRITTEN" in script:
+            self.env_writes.append((host, stdin or ""))
+            return 0, "ENV_WRITTEN"
+        if "node_tokens.json" in script:
+            return 0, self.node_tokens
+        return 0, ""
+
+
+class _CredCursor:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+    def fetchall(self):
+        return []
+
+
+class _CredConn:
+    def __init__(self, dsn, state):
+        self.dsn = dsn
+        self.state = state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def close(self):
+        pass
+
+    def execute(self, sql, params=None):
+        s = str(sql)
+        self.state["log"].append((self.dsn, s, tuple(params or ())))
+        if "from pg_roles where rolname" in s:
+            role = (params or ("",))[0]
+            return _CredCursor((1,) if role in self.state["roles"] else None)
+        if s.startswith("create role "):
+            self.state["roles"].add(s.split()[2])
+        if s.startswith("drop role if exists "):
+            self.state["roles"].discard(s.split()[4])
+        return _CredCursor(None)
+
+
+def _cred_psycopg(state):
+    import types
+
+    return types.SimpleNamespace(connect=lambda dsn, **kw: _CredConn(dsn, state))
+
+
+_CRED_SHARED_DSN = "postgresql://takyon_app_runtime.devref:sharedpw@db.dev-host:5432/postgres"
+_CRED_VALUES = {
+    **_DO_VALUES,
+    "TAKYON_DEV_MIGRATION_DATABASE_URL": "postgresql://takyon_migration@dev-host/db",
+    "TAKYON_DEV_ADMIN_DATABASE_URL": "postgresql://postgres@dev-host/db",
+    "TAKYON_DEV_RUNTIME_DATABASE_URL": _CRED_SHARED_DSN,
+}
+
+
+def _cred_manifest(tmp_path, **over):
+    manifest = _do_manifest(tmp_path)
+    manifest["database"] = {
+        "enabled": True,
+        "dsn_alias": "TAKYON_DEV_MIGRATION_DATABASE_URL",
+        "admin_dsn_alias": "TAKYON_DEV_ADMIN_DATABASE_URL",
+    }
+    key = tmp_path / "takyon_dev_split"
+    key.write_text("not-a-real-key")
+    manifest["rolling_restart"] = {"private_key_path": str(key)}
+    manifest.update(over)
+    return manifest
+
+
+def _cred_provisioner(tmp_path, *, remote, safebox_values=None, roles=None, monkeypatch=None):
+    import sys as _sys
+
+    state = {"roles": set(roles or ()), "log": []}
+    monkeypatch.setitem(_sys.modules, "psycopg", _cred_psycopg(state))
+    http = FakeHttp(responses={("GET", "/droplets?"): {"droplets": _drain_fixtures()[0]}})
+    prov = ep.EnvironmentProvisioner(
+        "dev",
+        home=tmp_path,
+        safebox_mod=FakeSafebox(_CRED_VALUES if safebox_values is None else safebox_values),
+        http=http,
+        manifest=_cred_manifest(tmp_path),
+        remote=remote,
+        sleep=lambda _s: None,
+    )
+    return prov, state
+
+
+_R1 = "takyon_app_runtime__takyon_dev_subuser_1"
+_R2 = "takyon_app_runtime__takyon_dev_subuser_2"
+
+
+def test_enroll_mints_scoped_role_and_token_per_replica(tmp_path, monkeypatch):
+    """Fresh enrollment: each replica gets its OWN db role (INHERIT member of the ONE canonical
+    role, minted on the ADMIN DSN) + its OWN transport token (digest to the safebox host, value
+    only to that replica's env over stdin); the registry rows carry credential IDS, never values."""
+    import hashlib as _hashlib
+    import json as _json
+
+    remote = CredRemote()
+    prov, state = _cred_provisioner(tmp_path, remote=remote, monkeypatch=monkeypatch)
+    assert prov._create_droplets().status == ep.STATUS_EXISTS
+    receipt = prov._enroll_replica_credentials()
+    assert receipt.status == ep.STATUS_CREATED
+    assert {_R1, _R2} <= state["roles"]
+
+    admin_sql = [s for dsn, s, _p in state["log"] if "postgres@dev-host" in dsn]
+    assert any(s.startswith(f"create role {_R1} ") for s in admin_sql)
+    assert f"grant takyon_app_runtime to {_R1} with inherit true, set false" in admin_sql
+    # Role DDL never runs on the migration DSN.
+    assert not any("create role" in s or "grant takyon_app_runtime" in s
+                   for dsn, s, _p in state["log"] if "takyon_migration" in dsn)
+
+    # Each replica env got ITS scoped DSN (pooler tenant suffix preserved) + ITS token via stdin.
+    assert len(remote.env_writes) == 2
+    by_host = dict(remote.env_writes)
+    assert f"TAKYON_DEV_RUNTIME_DATABASE_URL=postgresql://{_R1}.devref:" in by_host["203.0.113.11"]
+    assert f"TAKYON_DEV_RUNTIME_DATABASE_URL=postgresql://{_R2}.devref:" in by_host["203.0.113.12"]
+    tokens = {
+        host: next(line.split("=", 1)[1] for line in payload.splitlines()
+                   if line.startswith("TAKYON_SAFEBOX_TOKEN="))
+        for host, payload in remote.env_writes
+    }
+    assert tokens["203.0.113.11"] != tokens["203.0.113.12"]
+
+    # The safebox host received exactly the token DIGESTS (values never leave the replica pair).
+    assert len(remote.token_updates) == 2
+    blob = "\n".join(remote.token_updates)
+    for host, value in tokens.items():
+        assert _hashlib.sha256(value.encode()).hexdigest() in blob
+        assert value not in blob
+
+    # Registry rows carry credential ids; receipts never carry a secret value.
+    stamps = [p for _d, s, p in state["log"] if s.startswith("update worker_pools set capabilities")]
+    assert sorted(_json.loads(p[0])["credentials"]["db_role"] for p in stamps) == [_R1, _R2]
+    receipt_blob = _json.dumps(receipt.to_dict())
+    for value in tokens.values():
+        assert value not in receipt_blob
+    assert "sharedpw" not in receipt_blob
+
+
+def test_enroll_is_idempotent_when_fully_enrolled(tmp_path, monkeypatch):
+    """A fully-enrolled replica pair is a no-op: no role DDL, no env write, no token push."""
+    sha1, sha2 = "ab" * 32, "cd" * 32
+    remote = CredRemote(
+        state_by_host={"203.0.113.11": (True, sha1), "203.0.113.12": (True, sha2)},
+        node_tokens=(
+            '{"version": 1, "nodes": {'
+            f'"takyon-dev-subuser-1": {{"token_sha256": "{sha1}"}}, '
+            f'"takyon-dev-subuser-2": {{"token_sha256": "{sha2}"}}}}}}'
+        ),
+    )
+    prov, state = _cred_provisioner(tmp_path, remote=remote, roles={_R1, _R2}, monkeypatch=monkeypatch)
+    assert prov._create_droplets().status == ep.STATUS_EXISTS
+    receipt = prov._enroll_replica_credentials()
+    assert receipt.status == ep.STATUS_EXISTS
+    assert remote.env_writes == []
+    assert remote.token_updates == []
+    assert not any("create role" in s or "alter role" in s for _d, s, _p in state["log"])
+
+
+def test_enroll_blocks_naming_admin_alias_when_mint_needed(tmp_path, monkeypatch):
+    """Role mint is privileged (same rule as topology.sql): without the admin DSN the step fails
+    CLOSED naming the exact alias — no half-enrollment, no DDL attempted."""
+    values = {k: v for k, v in _CRED_VALUES.items() if k != "TAKYON_DEV_ADMIN_DATABASE_URL"}
+    remote = CredRemote()
+    prov, state = _cred_provisioner(tmp_path, remote=remote, safebox_values=values, monkeypatch=monkeypatch)
+    assert prov._create_droplets().status == ep.STATUS_EXISTS
+    receipt = prov._enroll_replica_credentials()
+    assert receipt.status == ep.STATUS_BLOCKED
+    assert receipt.deposit == "TAKYON_DEV_ADMIN_DATABASE_URL"
+    assert remote.env_writes == []
+    assert not any("create role" in s for _d, s, _p in state["log"])
+
+
+def test_enroll_blocks_on_unbootstrapped_replica(tmp_path, monkeypatch):
+    """A replica that does not answer SSH yet (fresh droplet, bootstrap not run) BLOCKS the step
+    with the bootstrap pointer rather than half-enrolling."""
+    remote = CredRemote(unreachable={"203.0.113.11", "203.0.113.12"})
+    prov, _state = _cred_provisioner(tmp_path, remote=remote, monkeypatch=monkeypatch)
+    assert prov._create_droplets().status == ep.STATUS_EXISTS
+    receipt = prov._enroll_replica_credentials()
+    assert receipt.status == ep.STATUS_BLOCKED
+    assert "bootstrap" in receipt.detail
+    assert remote.env_writes == []
+
+
+def test_revoke_node_drops_role_and_prunes_token(tmp_path, monkeypatch):
+    """Targeted revocation: DROP the node's role (terminating live backends) on the ADMIN DSN,
+    prune its digest from the safebox host, stamp the registry row revoked."""
+    import json as _json
+
+    remote = CredRemote()
+    prov, state = _cred_provisioner(tmp_path, remote=remote, roles={_R1, _R2}, monkeypatch=monkeypatch)
+    result = prov.revoke_node_credentials("takyon-dev-subuser-2")
+    receipt = result.receipts[0]
+    assert receipt.status == ep.STATUS_DELETED
+    admin_sql = [(s, p) for dsn, s, p in state["log"] if "postgres@dev-host" in dsn]
+    assert ("select pg_terminate_backend(pid) from pg_stat_activity where usename = %s", (_R2,)) in admin_sql
+    assert any(s == f"drop owned by {_R2}" for s, _p in admin_sql)
+    assert any(s == f"drop role if exists {_R2}" for s, _p in admin_sql)
+    assert _R2 not in state["roles"] and _R1 in state["roles"]
+    assert len(remote.token_updates) == 1
+    assert '"revoke": ["takyon-dev-subuser-2"]' in remote.token_updates[0]
+    stamps = [p for _d, s, p in state["log"] if s.startswith("update worker_pools set capabilities")]
+    assert stamps and _json.loads(stamps[-1][0])["credentials"]["revoked"] is True
+
+
+def test_revoke_node_is_idempotent_when_role_absent(tmp_path, monkeypatch):
+    remote = CredRemote()
+    prov, _state = _cred_provisioner(tmp_path, remote=remote, roles=set(), monkeypatch=monkeypatch)
+    receipt = prov.revoke_node_credentials("takyon-dev-subuser-2").receipts[0]
+    assert receipt.status == ep.STATUS_DELETED
+    assert "already absent" in receipt.detail
+
+
+def test_destroy_drops_every_scoped_role(tmp_path, monkeypatch):
+    """destroy(): the dev control plane outlives the droplets, so the scoped roles must not."""
+    remote = CredRemote()
+    prov, state = _cred_provisioner(tmp_path, remote=remote, roles={_R1, _R2}, monkeypatch=monkeypatch)
+    receipt = prov._revoke_replica_credentials()
+    assert receipt.status == ep.STATUS_DELETED
+    assert sorted(receipt.data["dropped"]) == [_R1, _R2]
+    assert state["roles"] == set()
+
+
+def test_scoped_login_dsn_swaps_login_preserving_pooler_suffix():
+    scoped = ep.EnvironmentProvisioner._scoped_login_dsn(
+        "postgresql://takyon_app_runtime.ref:oldpw@h:5432/postgres?sslmode=require", _R1, "newpw"
+    )
+    assert scoped == f"postgresql://{_R1}.ref:newpw@h:5432/postgres?sslmode=require"
+    bare = ep.EnvironmentProvisioner._scoped_login_dsn(
+        "postgresql://takyon_app_runtime:oldpw@h/db", _R1, "npw"
+    )
+    assert bare == f"postgresql://{_R1}:npw@h/db"
+    with pytest.raises(ep.EnvironmentProvisionError):
+        ep.EnvironmentProvisioner._scoped_login_dsn("host=foo dbname=bar", _R1, "x")
+
+
+def test_takyon_env_revoke_node_subcommand_registered():
+    """`takyon env revoke-node <env> <node>` parses (argparse smoke, same as create/restart)."""
+    args = _parse_via_main(["env", "revoke-node", "dev", "takyon-dev-subuser-2"])
+    assert args is not None, "takyon env revoke-node did not dispatch to cmd_env"
+    assert getattr(args, "env_action") == "revoke-node"
+    assert getattr(args, "env_name") == "dev"
+    assert getattr(args, "node_name") == "takyon-dev-subuser-2"

@@ -29,8 +29,11 @@ guard. It writes the resulting pointers into ``<home>/environments/<name>/config
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import secrets as _secrets
 import time
 import urllib.error
 import urllib.parse
@@ -108,6 +111,14 @@ class ProvisionResult:
             "ok": self.ok,
             "receipts": [r.to_dict() for r in self.receipts],
         }
+
+
+class _AdminDepositMissing(Exception):
+    """Internal fail-closed signal: scoped-role DDL needs the admin DSN and it is not deposited."""
+
+    def __init__(self, alias: str) -> None:
+        super().__init__(alias)
+        self.alias = alias
 
 
 class EnvironmentProvisionError(RuntimeError):
@@ -283,6 +294,7 @@ class EnvironmentProvisioner:
         receipts.append(self._append_receipt(self._create_load_balancer()))
         receipts.append(self._append_receipt(self._create_firewall()))
         receipts.append(self._append_receipt(self._register_replica_nodes()))
+        receipts.append(self._append_receipt(self._enroll_replica_credentials()))
         receipts.append(self._append_receipt(self._write_config(receipts)))
         return ProvisionResult(name=self.name, action="create", receipts=tuple(receipts))
 
@@ -1141,7 +1153,8 @@ class EnvironmentProvisioner:
     # Stage-2 pool registry doubling as the Stage-4 replica/node registry, plan §A.5). The
     # subuser role CANNOT write worker_pools (migration 0059 revokes it — deliberately), so
     # enrollment is done here by the provisioning authority over the migration DSN. Per-replica
-    # credential enrollment (plan Stage 4b security bullet) supersedes this when it lands.
+    # credential enrollment (plan Stage 4b security bullet) is the NEXT create() step, (f7): it
+    # stamps each node's credential IDS (never values) onto these registry rows.
     def _register_replica_nodes(self) -> StepReceipt:
         cfg = self.manifest.get("droplets") or {}
         if not cfg.get("enabled", False):
@@ -1187,6 +1200,612 @@ class EnvironmentProvisioner:
             "node_registry", STATUS_CREATED, "create",
             f"enrolled {len(names)} replica node(s) in worker_pools: {', '.join(names)}",
             data={"registered": names, "lease_seconds": lease},
+        )
+
+    # ── (f7) per-replica credentials — the Stage 4b hardening bullet ───────────────────────────
+    #
+    # Today's split shipped with every replica sharing (a) one app-plane DB login and (b) one
+    # safebox transport token, so compromising one replica yielded credentials that outlive it.
+    # This step makes both PER-REPLICA, SCOPED and REVOCABLE:
+    #
+    #   * DB: each replica gets its own login role `takyon_app_runtime__<node>` — a plain INHERIT
+    #     member of the ONE canonical takyon_app_runtime role (grants/RLS stay on the canonical
+    #     role; runtime_app.assert_takyon_pg_role + takyon_rls_bound_app_user_id accept scoped
+    #     members via live pg_has_role membership, never by name alone). Revocation = DROP ROLE.
+    #   * Safebox transport: each replica gets its own token; the safebox host stores only the
+    #     token's sha256 in $TAKYON_HOME/safebox/node_tokens.json (safebox_app re-reads it on
+    #     mtime change — revocation needs no restart). The shared token stays valid so non-split
+    #     hosts keep working unchanged.
+    #
+    # Fail-closed and idempotent: a fully-enrolled replica is a no-op; missing deposits are named;
+    # an unreachable/un-bootstrapped replica blocks rather than half-enrolling. Credential VALUES
+    # ride only over SSH stdin to exactly the box that owns them — receipts, logs and the node
+    # registry carry credential IDs (role name, sha256 prefix), never values. Activation is the
+    # drain rail (`takyon env restart <env>`), so enrolling loses zero requests.
+
+    _APP_PLANE_BASE_ROLE = "takyon_app_runtime"
+
+    def _cred_aliases(self) -> tuple[str, str]:
+        """(shared runtime-DSN alias, shared safebox-token alias) the scoped per-replica
+        credentials derive from / replace on each replica."""
+        cfg = self.manifest.get("droplets") or {}
+        upper = re.sub(r"[^A-Z0-9_]+", "_", self.name.upper())
+        dsn_alias = str(cfg.get("runtime_dsn_alias") or f"TAKYON_{upper}_RUNTIME_DATABASE_URL").strip()
+        token_alias = str(cfg.get("safebox_token_alias") or f"TAKYON_{upper}_SAFEBOX_TOKEN").strip()
+        return dsn_alias, token_alias
+
+    def _replica_env_file(self) -> str:
+        return str((self.manifest.get("droplets") or {}).get("env_file") or "/opt/takyon/.takyon/.env").strip()
+
+    def _node_tokens_file(self) -> str:
+        return str(
+            (self.manifest.get("droplets") or {}).get("node_tokens_file")
+            or "/opt/takyon/.takyon/safebox/node_tokens.json"
+        ).strip()
+
+    def _split_key_path(self) -> Path:
+        """The split's own deploy key (manifest ssh_key.public_key_path minus .pub, overridable
+        via rolling_restart.private_key_path) — the same resolution the drain rail uses."""
+        cfg = self.manifest.get("rolling_restart") or {}
+        return Path(str(
+            cfg.get("private_key_path")
+            or str((self.manifest.get("ssh_key") or {}).get("public_key_path") or "").removesuffix(".pub")
+            or ""
+        )).expanduser()
+
+    def _scoped_role_name(self, node_name: str) -> str:
+        try:
+            from .runtime_app import scoped_plane_role_name
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon.runtime_app import scoped_plane_role_name
+        return scoped_plane_role_name(self._APP_PLANE_BASE_ROLE, node_name)
+
+    @staticmethod
+    def _scoped_login_dsn(shared_dsn: str, role: str, password: str) -> str:
+        """Swap the login on the SHARED app-plane DSN URL for the scoped role, preserving a
+        Supabase-pooler tenant suffix (user ``takyon_app_runtime.<ref>`` keeps ``.<ref>``)."""
+        m = re.match(
+            r"^(?P<scheme>postgres(?:ql)?://)(?:(?P<user>[^:@/]*)(?::(?P<pw>[^@/]*))?@)?(?P<rest>.+)$",
+            str(shared_dsn or "").strip(),
+        )
+        if not m:
+            raise EnvironmentProvisionError("shared runtime DSN is not a postgres:// URL")
+        base_user = urllib.parse.unquote(m.group("user") or "")
+        suffix = "." + base_user.split(".", 1)[1] if "." in base_user else ""
+        user = urllib.parse.quote(role, safe="") + suffix
+        return f"{m.group('scheme')}{user}:{urllib.parse.quote(password, safe='')}@{m.group('rest')}"
+
+    @staticmethod
+    def _assert_sql_safe_credential(role: str, password: str) -> None:
+        """Role DDL cannot be parameterized; keep both sides in provably-quotable charsets.
+        Roles are provisioner-minted ([a-z0-9_]); passwords are token_urlsafe ([A-Za-z0-9_-])."""
+        if not re.fullmatch(r"[a-z0-9_]{1,63}", role):
+            raise EnvironmentProvisionError(f"scoped role name {role!r} is not sql-safe")
+        if not re.fullmatch(r"[A-Za-z0-9_\-]+", password):
+            raise EnvironmentProvisionError("minted password contains unexpected characters")
+
+    def _resolve_safebox_host(
+        self, headers: Mapping[str, str], droplets_cfg: Mapping[str, Any]
+    ) -> "tuple[dict[str, Any] | None, str]":
+        """The singleton safebox droplet ({name, droplet_id, public_ip}) or (None, why-not)."""
+        sb = droplets_cfg.get("safebox_host") or {}
+        if not sb.get("enabled", False):
+            return None, "no safebox host declared in the manifest"
+        name = str(sb.get("name") or f"takyon-{self.name}-safebox").strip()
+        try:
+            listed = self.http.request("GET", f"{self._DO_BASE}/droplets?per_page=200", headers=dict(headers))
+        except Exception as exc:
+            return None, f"droplet list failed: {exc}"
+        for d in (listed.get("droplets") or []) if isinstance(listed, dict) else []:
+            if not isinstance(d, dict) or str(d.get("name") or "") != name:
+                continue
+            public_ip = next(
+                (str(n.get("ip_address") or "") for n in ((d.get("networks") or {}).get("v4") or [])
+                 if isinstance(n, dict) and n.get("type") == "public"),
+                "",
+            )
+            if not public_ip:
+                return None, f"safebox host {name!r} has no public IPv4"
+            return {"name": name, "droplet_id": d.get("id"), "public_ip": public_ip}, ""
+        return None, f"safebox host {name!r} not found"
+
+    def _read_replica_cred_state(
+        self, rep: Mapping[str, Any], key_path: Path, env_file: str, dsn_alias: str, role: str
+    ) -> "dict[str, Any] | None":
+        """Value-free remote read of one replica's enrollment state: whether its runtime-DSN line
+        already names the scoped role, and the sha256 of its current transport token. Only a
+        boolean and a hash ever cross the wire back."""
+        script = (
+            "set -u\n"
+            f"f={env_file!r}\n"
+            f"dsn_line=$(grep -m1 '^{dsn_alias}=' \"$f\" 2>/dev/null || true)\n"
+            f"case \"$dsn_line\" in *{role}*) echo DSN_SCOPED=yes;; *) echo DSN_SCOPED=no;; esac\n"
+            "tok=$(grep -m1 '^TAKYON_SAFEBOX_TOKEN=' \"$f\" 2>/dev/null | cut -d= -f2- | tr -d '\\n')\n"
+            "if [ -n \"$tok\" ]; then printf 'TOKEN_SHA=%s\\n' \"$(printf '%s' \"$tok\" | sha256sum | cut -d' ' -f1)\";"
+            " else echo TOKEN_SHA=; fi\n"
+        )
+        try:
+            rc, out = self.remote.run(str(rep["public_ip"]), script, key_path=str(key_path), timeout=30.0)
+        except Exception:
+            return None
+        if rc != 0 or "DSN_SCOPED=" not in out:
+            return None
+        state: dict[str, Any] = {"dsn_scoped": "DSN_SCOPED=yes" in out, "token_sha": ""}
+        for line in out.splitlines():
+            if line.startswith("TOKEN_SHA="):
+                state["token_sha"] = line[len("TOKEN_SHA="):].strip().lower()
+        return state
+
+    def _read_node_tokens(self, sb_host: Mapping[str, Any], key_path: Path) -> "dict[str, str] | None":
+        """Enrolled node -> token_sha256 map from the safebox host (hashes only; never values)."""
+        tokens_file = self._node_tokens_file()
+        script = f"cat {tokens_file!r} 2>/dev/null || echo '{{}}'"
+        try:
+            rc, out = self.remote.run(str(sb_host["public_ip"]), script, key_path=str(key_path), timeout=30.0)
+        except Exception:
+            return None
+        if rc != 0:
+            return None
+        try:
+            data = json.loads(out.strip() or "{}")
+        except Exception:
+            return {}
+        nodes = data.get("nodes") if isinstance(data, dict) else {}
+        return {
+            str(name): str((entry or {}).get("token_sha256") or "").strip().lower()
+            for name, entry in (nodes or {}).items()
+            if isinstance(entry, dict)
+        }
+
+    def _update_node_tokens(
+        self,
+        sb_host: Mapping[str, Any],
+        key_path: Path,
+        *,
+        enroll: Mapping[str, Mapping[str, Any]] | None = None,
+        revoke: tuple[str, ...] = (),
+    ) -> str:
+        """Merge/prune the safebox host's node-token digest file (atomic replace; 0600; owned by
+        the service user). The payload carries HASHES only, so it may ride the script itself.
+        Returns '' on success or a failure detail."""
+        tokens_file = self._node_tokens_file()
+        tokens_dir = os.path.dirname(tokens_file)
+        payload = json.dumps({"nodes": dict(enroll or {}), "revoke": list(revoke)}, sort_keys=True)
+        if "TAKYON_NODE_TOKENS_EOF" in payload:
+            return "refusing: payload contains the heredoc sentinel"
+        script = (
+            "set -euo pipefail\n"
+            "umask 077\n"
+            "python3 - <<'TAKYON_NODE_TOKENS_EOF'\n"
+            "import json, os\n"
+            f"path = {tokens_file!r}\n"
+            f"incoming = json.loads({payload!r})\n"
+            'data = {"version": 1, "nodes": {}}\n'
+            "try:\n"
+            "    with open(path) as fh:\n"
+            "        loaded = json.load(fh)\n"
+            '    if isinstance(loaded, dict) and isinstance(loaded.get("nodes"), dict):\n'
+            "        data = loaded\n"
+            "except Exception:\n"
+            "    pass\n"
+            'nodes = data.setdefault("nodes", {})\n'
+            'nodes.update(incoming.get("nodes") or {})\n'
+            'for name in incoming.get("revoke") or []:\n'
+            "    nodes.pop(name, None)\n"
+            "os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+            'tmp = path + ".tmp"\n'
+            'with open(tmp, "w") as fh:\n'
+            "    json.dump(data, fh, indent=1, sort_keys=True)\n"
+            "os.chmod(tmp, 0o600)\n"
+            "os.replace(tmp, path)\n"
+            'print("NODE_TOKENS_UPDATED", ",".join(sorted(nodes)) or "<empty>")\n'
+            "TAKYON_NODE_TOKENS_EOF\n"
+            f"chown takyon:takyon {tokens_dir!r} {tokens_file!r} 2>/dev/null || true\n"
+        )
+        try:
+            rc, out = self.remote.run(str(sb_host["public_ip"]), script, key_path=str(key_path), timeout=60.0)
+        except Exception as exc:
+            return f"node-token update on {sb_host.get('name')!r} failed: {exc}"
+        if rc != 0 or "NODE_TOKENS_UPDATED" not in out:
+            return f"node-token update on {sb_host.get('name')!r} failed (rc={rc}): {out[-300:]}"
+        return ""
+
+    def _write_replica_env(
+        self, rep: Mapping[str, Any], key_path: Path, env_file: str, dsn_alias: str, env_lines: str,
+        *, replace_token: bool = True,
+    ) -> str:
+        """Replace the replica's shared-credential lines with its scoped ones. The secret VALUES
+        ride stdin (never a remote command line); the file stays 0600 and service-user owned.
+        Returns '' on success or a failure detail."""
+        strip = f"{dsn_alias}|TAKYON_SAFEBOX_TOKEN" if replace_token else dsn_alias
+        script = (
+            "set -euo pipefail\n"
+            "umask 077\n"
+            f"f={env_file!r}\n"
+            'tmp="$f.repcreds.$$"\n'
+            f"grep -vE '^({strip})=' \"$f\" > \"$tmp\" 2>/dev/null || true\n"
+            'cat >> "$tmp"\n'
+            'chown takyon:takyon "$tmp" 2>/dev/null || true\n'
+            'chmod 600 "$tmp"\n'
+            'mv "$tmp" "$f"\n'
+            "echo ENV_WRITTEN\n"
+        )
+        try:
+            rc, out = self.remote.run(
+                str(rep["public_ip"]), script, key_path=str(key_path), timeout=60.0, stdin=env_lines
+            )
+        except Exception as exc:
+            return f"env write on {rep['name']} failed: {exc}"
+        if rc != 0 or "ENV_WRITTEN" not in out:
+            return f"env write on {rep['name']} failed (rc={rc}): {out[-300:]}"
+        return ""
+
+    def _admin_dsn_or_none(self) -> "tuple[str, str]":
+        """(admin DSN, alias name). Role DDL (CREATE/DROP ROLE) is privileged work the migration
+        role deliberately cannot do — same rule as topology.sql."""
+        db_cfg = self.manifest.get("database") or {}
+        alias = str(db_cfg.get("admin_dsn_alias") or "").strip()
+        dsn = self._resolve_alias(alias) if alias else ""
+        if dsn:
+            self._assert_not_prod(dsn)
+        return dsn, alias
+
+    def _mint_scoped_db_role(self, admin_conn, role: str, password: str) -> str:
+        """CREATE (or rotate) one scoped login role and grant it INHERIT membership of the ONE
+        canonical app-plane role. SET FALSE: a replica never role-switches. Returns created|rotated."""
+        self._assert_sql_safe_credential(role, password)
+        exists = admin_conn.execute("select 1 from pg_roles where rolname = %s", (role,)).fetchone()
+        attrs = "login inherit nosuperuser nobypassrls nocreatedb nocreaterole"
+        if exists:
+            admin_conn.execute(f"alter role {role} with {attrs} password '{password}'")
+        else:
+            admin_conn.execute(f"create role {role} with {attrs} password '{password}'")
+        admin_conn.execute(
+            f"grant {self._APP_PLANE_BASE_ROLE} to {role} with inherit true, set false"
+        )
+        return "rotated" if exists else "created"
+
+    def _drop_scoped_db_role(self, admin_conn, role: str) -> bool:
+        """Terminate the role's live backends and DROP it (revoking DB access instantly).
+        Returns True when the role existed."""
+        self._assert_sql_safe_credential(role, "x")
+        exists = admin_conn.execute("select 1 from pg_roles where rolname = %s", (role,)).fetchone()
+        if not exists:
+            return False
+        admin_conn.execute(
+            "select pg_terminate_backend(pid) from pg_stat_activity where usename = %s", (role,)
+        )
+        admin_conn.execute(f"drop owned by {role}")
+        admin_conn.execute(f"drop role if exists {role}")
+        return True
+
+    def _stamp_node_credentials(self, mig_conn, node_name: str, credentials: Mapping[str, Any]) -> None:
+        """Record WHICH credential ids (never values) belong to a node on its registry row."""
+        mig_conn.execute(
+            "update worker_pools set capabilities = capabilities || %s::jsonb, updated_at = now()"
+            " where pool_id = %s",
+            (json.dumps({"credentials": dict(credentials)}), node_name),
+        )
+
+    def _enroll_replica_credentials(self) -> StepReceipt:
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("replica_credentials", STATUS_SKIPPED, "create",
+                               "no droplets twin — nothing to enroll")
+        if not (self.manifest.get("database") or {}).get("enabled", False):
+            return StepReceipt("replica_credentials", STATUS_SKIPPED, "create",
+                               "no database twin — scoped per-replica logins need the env's own "
+                               "control plane")
+        registered = [d for d in (self._do_state.get("droplets") or []) if d.get("role") != "safebox"]
+        if not registered:
+            return StepReceipt("replica_credentials", STATUS_SKIPPED, "create",
+                               "no replicas provisioned this run")
+        token, blocked = self._do_token_or_blocked("droplets")
+        if blocked is not None:
+            return StepReceipt("replica_credentials", STATUS_BLOCKED, "create",
+                               blocked.detail, deposit=blocked.deposit)
+        headers = self._do_headers(token)
+        replicas, err = self._resolve_replicas(headers, cfg)
+        if err is not None:
+            return StepReceipt("replica_credentials", STATUS_ERROR, "create", err.detail)
+        sb_host, sb_why = self._resolve_safebox_host(headers, cfg)
+        key_path = self._split_key_path()
+        if not str(key_path) or str(key_path) == "." or not key_path.exists():
+            return StepReceipt(
+                "replica_credentials", STATUS_ERROR, "create",
+                f"replica ssh key not found at {key_path} — enrollment writes each replica's env "
+                "over SSH with the split's deploy key",
+            )
+        dsn_alias, _token_alias = self._cred_aliases()
+        shared_dsn = self._resolve_alias(dsn_alias)
+        if not shared_dsn:
+            return StepReceipt(
+                "replica_credentials", STATUS_BLOCKED, "create",
+                f"shared app-plane runtime DSN not deposited (alias {dsn_alias}) — the scoped "
+                "per-replica DSNs are derived from it",
+                deposit=dsn_alias,
+            )
+        self._assert_not_prod(shared_dsn)
+        db_cfg = self.manifest.get("database") or {}
+        mig_alias = str(db_cfg.get("dsn_alias") or "").strip()
+        mig_dsn = self._resolve_alias(mig_alias) if mig_alias else ""
+        if not mig_dsn:
+            return StepReceipt(
+                "replica_credentials", STATUS_BLOCKED, "create",
+                f"control-plane DSN not deposited (alias {mig_alias or 'unset'})",
+                deposit=mig_alias or None,
+            )
+        self._assert_not_prod(mig_dsn)
+        env_file = self._replica_env_file()
+        node_tokens = self._read_node_tokens(sb_host, key_path) if sb_host else None
+
+        results: list[dict[str, Any]] = []
+        pending: list[str] = []
+        minted = 0
+        admin_conn_holder: list[Any] = []
+
+        try:
+            import psycopg
+
+            def _admin_conn():
+                if admin_conn_holder:
+                    return admin_conn_holder[0]
+                admin_dsn, admin_alias = self._admin_dsn_or_none()
+                if not admin_dsn:
+                    raise _AdminDepositMissing(admin_alias or "TAKYON_DEV_ADMIN_DATABASE_URL")
+                conn = psycopg.connect(admin_dsn, autocommit=True, prepare_threshold=None)
+                admin_conn_holder.append(conn)
+                return conn
+
+            with psycopg.connect(mig_dsn, autocommit=True, prepare_threshold=None) as mig:
+                for rep in replicas:
+                    node = str(rep["name"])
+                    role = self._scoped_role_name(node)
+                    role_exists = bool(
+                        mig.execute("select 1 from pg_roles where rolname = %s", (role,)).fetchone()
+                    )
+                    state = self._read_replica_cred_state(rep, key_path, env_file, dsn_alias, role)
+                    if state is None:
+                        pending.append(node)
+                        results.append({"node": node, "db_role": role, "status": "unreachable"})
+                        continue
+                    token_enrolled = bool(
+                        sb_host
+                        and node_tokens is not None
+                        and state["token_sha"]
+                        and node_tokens.get(node) == state["token_sha"]
+                    )
+                    if role_exists and state["dsn_scoped"] and token_enrolled:
+                        results.append({
+                            "node": node, "db_role": role, "status": "exists",
+                            "safebox_token_id": state["token_sha"][:12],
+                        })
+                        continue
+
+                    # Mint path: fresh secrets for BOTH credentials (a partial enrollment is
+                    # converged by rotating, never by trusting half-written state).
+                    password = _secrets.token_urlsafe(24)
+                    node_token = _secrets.token_urlsafe(32)
+                    digest = hashlib.sha256(node_token.encode()).hexdigest()
+                    mint_kind = self._mint_scoped_db_role(_admin_conn(), role, password)
+                    token_id = ""
+                    if sb_host:
+                        detail = self._update_node_tokens(
+                            sb_host, key_path,
+                            enroll={node: {
+                                "token_sha256": digest,
+                                "env": self.name,
+                                "db_role": role,
+                                "enrolled_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            }},
+                        )
+                        if detail:
+                            return self._enroll_error(results, node, detail)
+                        token_id = digest[:12]
+                    scoped_dsn = self._scoped_login_dsn(shared_dsn, role, password)
+                    env_lines = f"{dsn_alias}={scoped_dsn}\n"
+                    if sb_host:
+                        env_lines += f"TAKYON_SAFEBOX_TOKEN={node_token}\n"
+                    detail = self._write_replica_env(
+                        rep, key_path, env_file, dsn_alias, env_lines,
+                        replace_token=bool(sb_host),
+                    )
+                    if detail:
+                        return self._enroll_error(results, node, detail)
+                    credentials: dict[str, Any] = {"db_role": role}
+                    if token_id:
+                        credentials["safebox_token_id"] = token_id
+                    credentials["enrolled_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    self._stamp_node_credentials(mig, node, credentials)
+                    minted += 1
+                    results.append({
+                        "node": node, "db_role": role, "status": mint_kind,
+                        **({"safebox_token_id": token_id} if token_id else {}),
+                    })
+        except _AdminDepositMissing as exc:
+            return StepReceipt(
+                "replica_credentials", STATUS_BLOCKED, "create",
+                f"scoped role mint needs the admin DSN (alias {exc.alias}) — CREATE ROLE is "
+                "privileged work the migration role deliberately cannot do",
+                deposit=exc.alias, data={"nodes": results},
+            )
+        except Exception as exc:
+            return StepReceipt("replica_credentials", STATUS_ERROR, "create",
+                               f"replica credential enrollment failed: {exc}", data={"nodes": results})
+        finally:
+            for conn in admin_conn_holder:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        note = "" if sb_host else f" (safebox transport tokens skipped: {sb_why})"
+        if pending:
+            return StepReceipt(
+                "replica_credentials", STATUS_BLOCKED, "create",
+                f"replica(s) not reachable for enrollment yet: {', '.join(pending)} — bootstrap "
+                "them (deploy/takyon-dev-split/bootstrap-dev-droplet.sh), then re-run "
+                f"`takyon env create {self.name}`" + note,
+                data={"nodes": results},
+            )
+        if minted:
+            return StepReceipt(
+                "replica_credentials", STATUS_CREATED, "create",
+                f"enrolled per-replica scoped credentials on {minted} replica(s); activate with "
+                f"`takyon env restart {self.name}` (drain rail — zero requests lost)" + note,
+                data={"nodes": results},
+            )
+        return StepReceipt(
+            "replica_credentials", STATUS_EXISTS, "create",
+            f"all {len(results)} replica(s) already hold their scoped credentials" + note,
+            data={"nodes": results},
+        )
+
+    def _enroll_error(self, results: list, node: str, detail: str) -> StepReceipt:
+        results.append({"node": node, "status": "error"})
+        return StepReceipt(
+            "replica_credentials", STATUS_ERROR, "create",
+            f"{detail} — re-run `takyon env create {self.name}` to converge (partial enrollments "
+            "are rotated, never trusted)",
+            data={"nodes": results},
+        )
+
+    def revoke_node_credentials(self, node_name: str) -> ProvisionResult:
+        """Targeted revocation of ONE replica's scoped credentials (`takyon env revoke-node`):
+        DROP its DB role (terminating live backends) and prune its transport-token digest from the
+        safebox host — the old DSN and token are refused everywhere within one request. The node's
+        registry row keeps its history with credentials marked revoked. Fail-closed: an
+        unprovable revocation is an error, never a shrug."""
+        receipts = [self._append_receipt(self._revoke_one_node(str(node_name or "").strip()))]
+        return ProvisionResult(name=self.name, action="revoke-node", receipts=tuple(receipts))
+
+    def _revoke_one_node(self, node: str) -> StepReceipt:
+        if not node:
+            return StepReceipt("replica_credentials", STATUS_ERROR, "revoke-node", "node name required")
+        try:
+            role = self._scoped_role_name(node)
+        except Exception as exc:
+            return StepReceipt("replica_credentials", STATUS_ERROR, "revoke-node", str(exc))
+        admin_dsn, admin_alias = self._admin_dsn_or_none()
+        if not admin_dsn:
+            return StepReceipt(
+                "replica_credentials", STATUS_BLOCKED, "revoke-node",
+                f"DROP ROLE needs the admin DSN (alias {admin_alias or 'unset'})",
+                deposit=admin_alias or None,
+            )
+        dropped = False
+        try:
+            import psycopg
+            with psycopg.connect(admin_dsn, autocommit=True, prepare_threshold=None) as admin:
+                dropped = self._drop_scoped_db_role(admin, role)
+        except Exception as exc:
+            return StepReceipt("replica_credentials", STATUS_ERROR, "revoke-node",
+                               f"db role drop failed for {role!r}: {exc}")
+
+        token_note = ""
+        cfg = self.manifest.get("droplets") or {}
+        do_token, blocked = self._do_token_or_blocked("droplets", "revoke-node")
+        if blocked is not None:
+            return StepReceipt(
+                "replica_credentials", STATUS_ERROR, "revoke-node",
+                f"db role {role!r} dropped, but the transport token could not be revoked: "
+                f"{blocked.detail}",
+                data={"node": node, "db_role_dropped": dropped},
+            )
+        headers = self._do_headers(do_token)
+        sb_host, sb_why = self._resolve_safebox_host(headers, cfg)
+        key_path = self._split_key_path()
+        if sb_host is None:
+            token_note = f"; transport token skipped: {sb_why}"
+        elif not key_path.exists():
+            return StepReceipt(
+                "replica_credentials", STATUS_ERROR, "revoke-node",
+                f"db role {role!r} dropped, but the transport token could not be revoked: ssh key "
+                f"not found at {key_path}",
+                data={"node": node, "db_role_dropped": dropped},
+            )
+        else:
+            detail = self._update_node_tokens(sb_host, key_path, revoke=(node,))
+            if detail:
+                return StepReceipt(
+                    "replica_credentials", STATUS_ERROR, "revoke-node",
+                    f"db role {role!r} dropped, but the transport token could not be revoked: {detail}",
+                    data={"node": node, "db_role_dropped": dropped},
+                )
+
+        # Best-effort registry stamp (the row may already be decommissioned/absent).
+        db_cfg = self.manifest.get("database") or {}
+        mig_dsn = self._resolve_alias(str(db_cfg.get("dsn_alias") or ""))
+        if mig_dsn:
+            try:
+                self._assert_not_prod(mig_dsn)
+                import psycopg
+                with psycopg.connect(mig_dsn, autocommit=True, prepare_threshold=None) as mig:
+                    self._stamp_node_credentials(mig, node, {
+                        "db_role": role, "revoked": True,
+                        "revoked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    })
+            except Exception:
+                pass
+
+        return StepReceipt(
+            "replica_credentials", STATUS_DELETED, "revoke-node",
+            f"revoked {node}: db role {role!r} "
+            + ("dropped (live backends terminated)" if dropped else "was already absent")
+            + ", transport token digest pruned" + token_note
+            + f"; re-enroll with `takyon env create {self.name}`",
+            data={"node": node, "db_role": role, "db_role_dropped": dropped},
+        )
+
+    def _revoke_replica_credentials(self) -> StepReceipt:
+        """destroy(): drop EVERY manifest-derived scoped role (the dev control plane outlives the
+        droplets, so the roles must not). Token digests die with the safebox droplet; prune them
+        anyway while the host still answers."""
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return StepReceipt("replica_credentials", STATUS_DISABLED, "destroy",
+                               "droplets twin disabled in manifest")
+        if not (self.manifest.get("database") or {}).get("enabled", False):
+            return StepReceipt("replica_credentials", STATUS_SKIPPED, "destroy",
+                               "no database twin — no scoped roles to drop")
+        role_tag = str(cfg.get("role") or "subuser").strip().lower()
+        prefix = str(cfg.get("name_prefix") or f"takyon-{self.name}-{role_tag}").strip()
+        count = max(1, int(cfg.get("count") or 1))
+        nodes = [f"{prefix}-{i}" for i in range(1, count + 1)]
+        admin_dsn, admin_alias = self._admin_dsn_or_none()
+        if not admin_dsn:
+            return StepReceipt(
+                "replica_credentials", STATUS_BLOCKED, "destroy",
+                f"cannot drop scoped replica roles: admin DSN not deposited (alias "
+                f"{admin_alias or 'unset'})",
+                deposit=admin_alias or None,
+            )
+        dropped: list[str] = []
+        try:
+            import psycopg
+            with psycopg.connect(admin_dsn, autocommit=True, prepare_threshold=None) as admin:
+                for node in nodes:
+                    role = self._scoped_role_name(node)
+                    if self._drop_scoped_db_role(admin, role):
+                        dropped.append(role)
+        except Exception as exc:
+            return StepReceipt("replica_credentials", STATUS_ERROR, "destroy",
+                               f"scoped role drop failed: {exc}", data={"dropped": dropped})
+
+        # Best-effort token prune while the safebox droplet still exists (it is deleted next).
+        do_token, blocked = self._do_token_or_blocked("droplets", "destroy")
+        if blocked is None:
+            sb_host, _why = self._resolve_safebox_host(self._do_headers(do_token), cfg)
+            key_path = self._split_key_path()
+            if sb_host is not None and key_path.exists():
+                self._update_node_tokens(sb_host, key_path, revoke=tuple(nodes))
+        if not dropped:
+            return StepReceipt("replica_credentials", STATUS_SKIPPED, "destroy",
+                               "no scoped replica roles to drop")
+        return StepReceipt(
+            "replica_credentials", STATUS_DELETED, "destroy",
+            f"dropped {len(dropped)} scoped replica role(s): {', '.join(dropped)}",
+            data={"dropped": dropped},
         )
 
     # Write the resolved pointers a dev RuntimeContext.from_env reads. Never writes a secret VALUE —
@@ -1280,11 +1899,7 @@ class EnvironmentProvisioner:
 
         # SSH key: the split's own deploy key (manifest ssh_key.public_key_path minus .pub),
         # overridable via rolling_restart.private_key_path. Fail closed if absent.
-        key_path = Path(str(
-            cfg.get("private_key_path")
-            or str((self.manifest.get("ssh_key") or {}).get("public_key_path") or "").removesuffix(".pub")
-            or ""
-        )).expanduser()
+        key_path = self._split_key_path()
         if not str(key_path) or str(key_path) == "." or not key_path.exists():
             return _fail(StepReceipt(
                 "rolling_restart", STATUS_ERROR, "restart",
@@ -1791,6 +2406,10 @@ class EnvironmentProvisioner:
         # is empty by the time it is removed.
         receipts.append(self._append_receipt(self._destroy_firewall()))
         receipts.append(self._append_receipt(self._destroy_load_balancer()))
+        # Scoped per-replica credentials are revoked BEFORE the droplets go away: the dev control
+        # plane outlives the droplets, so the scoped roles must be dropped, and the safebox host
+        # must still answer for the token-digest prune.
+        receipts.append(self._append_receipt(self._revoke_replica_credentials()))
         receipts.append(self._append_receipt(self._destroy_droplets()))
         receipts.append(self._append_receipt(self._decommission_replica_nodes()))
         receipts.append(self._append_receipt(self._destroy_ssh_key()))
@@ -2143,10 +2762,11 @@ class HttpTransport:
 
 class RemoteExec:
     """Runs a script on a replica as root over SSH. Injectable so the rolling-restart tests drive
-    the drain flow with a fake and zero SSH."""
+    the drain flow with a fake and zero SSH. ``stdin`` carries secret payloads (per-replica env
+    lines) over the SSH channel so a credential value never appears on a remote command line."""
 
     def run(
-        self, host: str, script: str, *, key_path: str, timeout: float = 120.0
+        self, host: str, script: str, *, key_path: str, timeout: float = 120.0, stdin: str | None = None
     ) -> tuple[int, str]:  # pragma: no cover - interface
         raise NotImplementedError
 
@@ -2155,7 +2775,9 @@ class SshRemoteExec(RemoteExec):
     """subprocess ssh with the split's deploy key. BatchMode: never prompts (fail-closed when the
     key is not authorized)."""
 
-    def run(self, host: str, script: str, *, key_path: str, timeout: float = 120.0) -> tuple[int, str]:
+    def run(
+        self, host: str, script: str, *, key_path: str, timeout: float = 120.0, stdin: str | None = None
+    ) -> tuple[int, str]:
         import subprocess
 
         proc = subprocess.run(
@@ -2171,6 +2793,7 @@ class SshRemoteExec(RemoteExec):
             capture_output=True,
             text=True,
             timeout=timeout,
+            input=stdin,
         )
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 

@@ -10774,10 +10774,16 @@ def main():
         ("create", "Stand up the environment's twins (idempotent; re-run = no-op)"),
         ("status", "Report the environment's current state without side effects"),
         ("restart", "Drain-aware rolling restart of the env's replicas (zero requests lost)"),
+        ("revoke-node", "Revoke ONE replica's scoped credentials (DB role + transport token)"),
         ("destroy", "Tear down the environment's twins (refuses live state unless --force)"),
     ):
         _sub = env_subparsers.add_parser(_action, help=_help)
         _sub.add_argument("env_name", help="Environment name (e.g. dev); refuses 'prod'")
+        if _action == "revoke-node":
+            _sub.add_argument(
+                "node_name",
+                help="Replica node name (e.g. takyon-dev-subuser-2); re-enroll via `takyon env create`",
+            )
         if _action == "destroy":
             _sub.add_argument(
                 "--force",

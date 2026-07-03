@@ -112,8 +112,26 @@ def _current_user(conn) -> str:
     return str(_first_col(row, "") or "").strip()
 
 
+_APP_RUNTIME_SCOPED_PREFIX = "takyon_app_runtime__"
+
+
 def _is_app_runtime_user(conn) -> bool:
-    return _current_user(conn) in {"takyon_app", "takyon_app_runtime"}
+    user = _current_user(conn)
+    if user in {"takyon_app", "takyon_app_runtime"}:
+        return True
+    # Per-replica SCOPED app logins (Stage 4b hardening): `takyon_app_runtime__<node>` roles that
+    # hold INHERITED membership of takyon_app_runtime. Verified against the live catalog — the
+    # name alone is never authority, and membership alone is never authority (takyon_migration
+    # holds a NON-inherit admin membership and must keep authority-plane semantics).
+    if user.startswith(_APP_RUNTIME_SCOPED_PREFIX) and len(user) > len(_APP_RUNTIME_SCOPED_PREFIX):
+        try:
+            row = conn.execute(
+                "select pg_has_role(current_user, 'takyon_app_runtime', 'usage')"
+            ).fetchone()
+        except Exception:
+            return False
+        return str(_first_col(row, "") or "").strip().lower() in {"t", "true", "1"}
+    return False
 
 
 def _normalize_status(value: str | None) -> str:

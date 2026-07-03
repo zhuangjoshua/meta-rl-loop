@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -284,6 +285,57 @@ def current_takyon_pg_roles(conn) -> tuple[str, str]:
     return _row_value(row, 0, "session_user"), _row_value(row, 1, "current_user")
 
 
+# ── per-replica scoped login roles (plan Stage 4b hardening: revocable per-replica creds) ────
+# A replica of a runtime plane may log in under its OWN role named `<canonical>__<node>` — a plain
+# INHERIT member of the canonical plane role (GRANT <canonical> TO <scoped> WITH INHERIT TRUE),
+# minted/dropped by the environment provisioner. Grants and RLS policies stay on the ONE canonical
+# role; revoking a replica = DROP ROLE, which kills exactly that replica's DB access. The dunder
+# separator is deliberate: scoped role names are sanitized to [a-z0-9_], so `__` cannot occur
+# inside a node segment and the base role is recoverable by prefix.
+SCOPED_ROLE_SEPARATOR = "__"
+_SCOPED_ROLE_NODE_MAX = 63  # postgres identifier limit (NAMEDATALEN-1)
+
+
+def scoped_plane_role_name(base_role: str, node_name: str) -> str:
+    """Canonical name of one replica's scoped login role for a plane's base role.
+
+    ``takyon-dev-subuser-1`` -> ``takyon_app_runtime__takyon_dev_subuser_1``. Raises on an empty
+    node or a name that would exceed the postgres identifier limit — never truncates silently
+    (two nodes must never collide onto one role)."""
+    base = str(base_role or "").strip()
+    node = re.sub(r"[^a-z0-9_]+", "_", str(node_name or "").strip().lower()).strip("_")
+    if not base or not node:
+        raise ValueError("scoped role needs both a base role and a node name")
+    name = f"{base}{SCOPED_ROLE_SEPARATOR}{node}"
+    if len(name) > _SCOPED_ROLE_NODE_MAX:
+        raise ValueError(f"scoped role name exceeds the postgres identifier limit: {name!r}")
+    return name
+
+
+def _is_scoped_member_of(conn, role_name: str, base_role: str) -> bool:
+    """True when ``role_name`` is a per-replica scoped login of ``base_role``: named
+    ``<base>__<suffix>`` AND holding INHERITED membership of the base role (``pg_has_role …
+    'usage'``). Both legs are load-bearing: the name alone is never authority (anyone could name a
+    role that), and membership alone is never authority (takyon_migration holds a NON-inherit
+    ADMIN membership of every runtime role and must never pass as a runtime plane)."""
+    prefix = f"{base_role}{SCOPED_ROLE_SEPARATOR}"
+    if not role_name.startswith(prefix) or len(role_name) <= len(prefix):
+        return False
+    try:
+        row = conn.execute(
+            "select pg_has_role(%s, %s, 'usage') as scoped_member", (role_name, base_role)
+        ).fetchone()
+    except Exception:
+        return False
+    return _row_value(row, 0, "scoped_member").lower() in {"t", "true", "1"}
+
+
+def _plane_role_allowed(conn, role_name: str, allowed: tuple[str, ...]) -> bool:
+    if role_name in allowed:
+        return True
+    return any(_is_scoped_member_of(conn, role_name, base) for base in allowed)
+
+
 def assert_takyon_pg_role(conn, plane: str) -> tuple[str, str]:
     """Fail closed if a connection is not on the expected DB authority plane.
 
@@ -291,13 +343,17 @@ def assert_takyon_pg_role(conn, plane: str) -> tuple[str, str]:
     failure was exactly a pooled operator-capable session demoted to current_user=takyon_app.
     Checking current_user alone would accept that bad state on the app side and miss the leak on the
     operator side.
+
+    A per-replica SCOPED login (``<canonical>__<node>``, Stage 4b) passes for its plane only when
+    it actually holds inherited membership of the canonical role — verified against the live
+    catalog via ``pg_has_role``, never by name alone.
     """
     database_plane = _normalize_database_plane(plane)
     allowed = _database_plane_roles(database_plane)
     if not allowed:
         raise DatabaseRoleMismatch(f"unknown database authority plane: {database_plane or plane}")
     session_user, current_user = current_takyon_pg_roles(conn)
-    if session_user in allowed and current_user in allowed:
+    if _plane_role_allowed(conn, session_user, allowed) and _plane_role_allowed(conn, current_user, allowed):
         return session_user, current_user
     raise DatabaseRoleMismatch(
         f"{database_plane} database role mismatch: "

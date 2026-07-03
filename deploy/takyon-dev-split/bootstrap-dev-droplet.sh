@@ -30,6 +30,13 @@
 # transport token (same posture as prod — provider keys stay behind the dev safebox). The dev
 # safebox host receives the dev store minus the DO/infra-only aliases, plus its transport token
 # and cap signing key.
+#
+# PER-REPLICA CREDENTIALS (Stage 4b hardening): this script seeds the SHARED dev DSN/token so a
+# fresh box can boot. `takyon env create <env>` then enrolls the replica with its OWN scoped DB
+# login (takyon_app_runtime__<node>) and its OWN safebox transport token, replacing the shared
+# values in the box's env file (activate with `takyon env restart <env>`). Re-running this script
+# on an enrolled replica reverts it to the shared credentials until the next `takyon env create`
+# converges it — always re-run create after a re-bootstrap.
 set -euo pipefail
 
 HOST="${1:?public ip}"

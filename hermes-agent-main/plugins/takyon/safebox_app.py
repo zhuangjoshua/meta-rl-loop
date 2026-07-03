@@ -8,6 +8,7 @@ Safebox authority module as the single backing implementation.
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -1117,9 +1118,70 @@ def _allow_tokenless() -> bool:
     return str(os.environ.get("TAKYON_SAFEBOX_ALLOW_TOKENLESS") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# ── per-replica node transport tokens (plan Stage 4b hardening) ─────────────────────────────────
+# The shared TAKYON_SAFEBOX_TOKEN stays valid (non-split hosts keep working unchanged), but each
+# replica of a split plane can be enrolled with its OWN revocable transport token. The Safebox host
+# never stores those token VALUES — only their sha256 digests, in a json file the environment
+# provisioner writes on enroll and prunes on revoke. The file is re-read when its mtime changes, so
+# a revocation takes effect on the NEXT request with no service restart. A missing/unreadable/
+# malformed file simply contributes zero accepted tokens — fail closed, never open.
+_NODE_TOKENS_PATH_ENV = "TAKYON_SAFEBOX_NODE_TOKENS_PATH"
+_NODE_TOKENS_FILENAME = "node_tokens.json"
+_node_tokens_cache: dict[str, Any] = {"path": None, "stat": None, "hashes": frozenset()}
+
+
+def _node_tokens_path() -> str:
+    explicit = str(os.environ.get(_NODE_TOKENS_PATH_ENV) or "").strip()
+    if explicit:
+        return explicit
+    try:
+        from takyon_constants import get_takyon_home
+
+        return os.path.join(str(get_takyon_home()), "safebox", _NODE_TOKENS_FILENAME)
+    except Exception:
+        return ""
+
+
+def _parse_node_token_hashes(raw: str) -> frozenset[str]:
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return frozenset()
+    nodes = data.get("nodes") if isinstance(data, dict) else None
+    hashes: set[str] = set()
+    for entry in (nodes or {}).values() if isinstance(nodes, dict) else ():
+        digest = str((entry or {}).get("token_sha256") or "").strip().lower() if isinstance(entry, dict) else ""
+        if re.fullmatch(r"[0-9a-f]{64}", digest):
+            hashes.add(digest)
+    return frozenset(hashes)
+
+
+def _node_token_hashes() -> frozenset[str]:
+    """Currently-enrolled node token digests, mtime-cached. Empty set on any failure."""
+    path = _node_tokens_path()
+    if not path:
+        return frozenset()
+    try:
+        st = os.stat(path)
+        stat_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return frozenset()
+    cache = _node_tokens_cache
+    if cache["path"] == path and cache["stat"] == stat_key:
+        return cache["hashes"]
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            hashes = _parse_node_token_hashes(fh.read())
+    except OSError:
+        return frozenset()
+    cache["path"], cache["stat"], cache["hashes"] = path, stat_key, hashes
+    return hashes
+
+
 def _require_internal_token(authorization: str | None = Header(default=None)) -> None:
     expected = str(os.environ.get(_SAFEBOX_TOKEN_ENV) or "").strip()
-    if not expected:
+    node_hashes = _node_token_hashes()
+    if not expected and not node_hashes:
         if _allow_tokenless():
             return
         # Fail closed: an unconfigured token must never mean "auth disabled" — Safebox safety must
@@ -1127,9 +1189,21 @@ def _require_internal_token(authorization: str | None = Header(default=None)) ->
         # service unit loads $TAKYON_HOME/.env) on both the Safebox host and every client plane.
         raise HTTPException(status_code=401, detail="safebox token not configured")
     presented = str(authorization or "").strip()
-    want = f"Bearer {expected}"
-    if not hmac.compare_digest(presented.encode(), want.encode()):
-        raise HTTPException(status_code=401, detail="unauthorized")
+    if expected:
+        want = f"Bearer {expected}"
+        if hmac.compare_digest(presented.encode(), want.encode()):
+            return
+    if node_hashes and presented.startswith("Bearer "):
+        digest = hashlib.sha256(presented[len("Bearer "):].strip().encode()).hexdigest()
+        # Scan EVERY enrolled digest (no early exit) with a constant-time compare per entry, so
+        # acceptance timing does not leak which node matched.
+        matched = False
+        for enrolled in node_hashes:
+            if hmac.compare_digest(digest.encode(), enrolled.encode()):
+                matched = True
+        if matched:
+            return
+    raise HTTPException(status_code=401, detail="unauthorized")
 
 
 def _client_host(request: Request) -> str:

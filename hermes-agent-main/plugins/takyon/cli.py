@@ -4904,6 +4904,7 @@ def run_takyon_command(
         cmd_env(SimpleNamespace(
             env_action=(argv[1].lower() if len(argv) >= 2 else None),
             env_name=(argv[2] if len(argv) >= 3 else ""),
+            node_name=next((a for a in argv[3:] if not a.startswith("-")), ""),
             force="--force" in argv[3:],
         ))
         return None
