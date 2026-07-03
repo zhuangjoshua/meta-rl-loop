@@ -39,6 +39,16 @@
 :80 {
 	import fourmanifold_edge_only
 
+	# DO load balancer health check: probes GET /healthz on :80 from the VPC (10.116.0.0/20,
+	# permitted by fourmanifold_edge_only above). Proxied to the runtime so it reflects real
+	# subuser health. Placed before @product so a hostless health probe resolves here, not 404.
+	@health path /healthz
+	handle @health {
+		reverse_proxy 127.0.0.1:9119 {
+			header_up Host 127.0.0.1
+		}
+	}
+
 	@product {
 		host *.coscale.app
 		not host app.fourmanifold.com skills.fourmanifold.com www.fourmanifold.com admin.fourmanifold.com dashboard.fourmanifold.com research-composer.fourmanifold.com
