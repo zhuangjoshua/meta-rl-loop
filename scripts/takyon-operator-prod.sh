@@ -85,6 +85,7 @@ ensure_dev_safebox_up() {
       TAKYON_SAFEBOX_OPERATOR_CLIENTS="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_CLIENTS)" \
       TAKYON_CAP_SIGNING_KEY="$(_dev_store_get TAKYON_CAP_SIGNING_KEY)" \
       TAKYON_OPERATOR_USAGE_GATE_DISABLED=1 \
+      TAKYON_PG_POOL_SIZE="${TAKYON_DEV_PG_POOL_SIZE:-3}" \
       "$RUNTIME_DIR/.venv/bin/uvicorn" --app-dir "$RUNTIME_DIR" \
       "plugins.takyon.safebox_app:build_safebox_app" --factory --host "$host" --port "$port" \
       >"$OPERATOR_HOME/dev-safebox.log" 2>&1 & )
@@ -205,6 +206,11 @@ load_dev_operator_env() {
   export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
   export TAKYON_STORAGE_BACKEND=local
   export TERMINAL_ENV="${TERMINAL_ENV:-local}"
+  # Dev twin runs on the Supabase SESSION pooler (15-client cap — role GUCs need session mode). The
+  # default 8-conn pool per process (safebox + runtime + worker) exhausts it and starves the job
+  # lease-heartbeat, churning long bootstraps. A small pool per process fits the single-user dev twin
+  # with headroom for the bootstrap's own connections. Override with TAKYON_DEV_PG_POOL_SIZE.
+  export TAKYON_PG_POOL_SIZE="${TAKYON_DEV_PG_POOL_SIZE:-3}"
   # Operator usage gate — mirror PROD exactly. Prod runs with TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
   # (verified live in the prod worker env), so the operator's OWN agent is never throttled when its
   # allowance is exhausted (billing.py softens `insufficient_balance` ONLY when this is set; the
