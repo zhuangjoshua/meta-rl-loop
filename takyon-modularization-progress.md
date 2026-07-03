@@ -17,7 +17,7 @@ _Last updated: 2026-07-03, by Claude. This file is updated as stages move._
 | 3+3b RuntimeContext + env provisioner | ✅ | f9fcc518 + 3b | dev Supabase bootstrapped prod-shaped; `takyon env create dev` clean |
 | UC3 runtime (dev slices + dashboard) | ✅ | b94c0435 | dev dashboard 200 off the dev control plane |
 | 4a subuser unblock | ✅ | ee6f8a4f | 3 hosts, workers=2 live |
-| **4b dev replica split + LB** | **✅ dev-first + full hardening (prod split after soak)** | **a48f22e5·28899906·3bb8c48e** | **2 replicas + LB 138.197.50.136 live on DO; graceful drain = 1505/1505 req 0-loss; per-replica scoped/revocable creds proven (revoke→FATAL+401 no restart); destroy dry-verified** |
+| **4b dev replica split + LB** | **✅ dev E2E RE-PROVEN LIVE 2026-07-03 (209/209 zero-loss drain); prod split next** | **a48f22e5·28899906·3bb8c48e** | **2 replicas + LB 138.197.50.136 live on DO; graceful drain = 1505/1505 req 0-loss; per-replica scoped/revocable creds proven (revoke→FATAL+401 no restart); destroy dry-verified** |
 | **4c safebox headroom** | **✅ measured** | (receipts) | **6× target concurrency, 0 errors — no broker replicas needed** |
 | 5 monthly-only slice | ✅ | 1638ac90± | live refusal probes on prod |
 | 5 composition engine | ✅ | 264d346d | derived pricing + margin invariant, 31 tests |
