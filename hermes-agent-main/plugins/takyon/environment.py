@@ -113,6 +113,61 @@ class ProdLeakage(RuntimeError):
     """A non-prod RuntimeContext resolved a prod literal — refusing to boot."""
 
 
+# ── dev control-plane DSN aliases (UC3 runtime slice mapping) ────────────────────────────
+
+# The Stage-3b provisioner (env_provisioner.py / environments/dev.yaml) deposits the dev twin
+# DSNs in the dev store under these aliases. In a dev instance each DB authority plane resolves
+# ONLY its dev alias — the prod alias is deliberately NOT a fallback: a dev process silently
+# reading the prod DSN is exactly the leak the environment split exists to prevent, so absence
+# fails closed upstream naming the dev alias. Non-dev instances never consult this table.
+DEV_DATABASE_PLANE_ENV: dict[str, tuple[str, ...]] = {
+    "operator": ("TAKYON_DEV_OPERATOR_DATABASE_URL",),
+    # Dev twin of the takyon_app_runtime plane (the provisioner names it "runtime").
+    "app": ("TAKYON_DEV_RUNTIME_DATABASE_URL",),
+    "safebox": ("TAKYON_DEV_SAFEBOX_DATABASE_URL",),
+    "migration": ("TAKYON_DEV_MIGRATION_DATABASE_URL",),
+}
+
+
+def env_name() -> str:
+    """This process's instance name (prod|dev|hermetic): the bound context's name, or — before
+    boot binds one — the same raw env read ``from_env`` performs (mirrors :func:`cache_scope`,
+    which deliberately avoids forcing full context construction on hot pre-boot paths)."""
+    ctx = _CURRENT.get()
+    if ctx is not None:
+        return ctx.name
+    return str(os.getenv("TAKYON_ENV") or "prod").strip().lower() or "prod"
+
+
+def database_plane_env_names(plane: str, default_names: tuple[str, ...]) -> tuple[str, ...]:
+    """UC3 slice mapping: the env aliases one DB authority plane resolves in THIS environment.
+
+    Non-dev instances keep their existing aliases byte-identically. A dev instance resolves only
+    its ``TAKYON_DEV_*`` twin; an unknown plane raises KeyError loudly rather than falling back
+    to a prod alias (callers validate the plane before resolving, so this is a belt-and-braces
+    refusal, not a reachable path)."""
+    if env_name() != "dev":
+        return default_names
+    return DEV_DATABASE_PLANE_ENV[str(plane or "").strip().lower()]
+
+
+def assert_dsn_not_prod_literal(value: str, *, plane: str, alias: str) -> None:
+    """Resolution-time arm of the prod-leakage gate (plan §3 UC3): a non-prod instance that
+    RESOLVES a DSN containing a prod literal refuses before any connection is opened. This
+    complements :func:`assert_not_prod_leakage` (which sweeps process env at boot) by also
+    covering values resolved from the ``$TAKYON_HOME/.env`` store. The DSN value itself is a
+    credential and is never echoed — only the literal hits and the alias are named."""
+    if env_name() == "prod":
+        return
+    hits = sorted({lit for lit in PROD_LITERALS if lit and lit in str(value or "")})
+    if hits:
+        raise ProdLeakage(
+            f"{env_name()} instance resolved a {plane} DSN (via {alias}) containing prod "
+            f"literal(s) {hits} — a non-prod instance must point every slice at its own twins. "
+            "Fix the environment (dev store / config), never bypass this gate."
+        )
+
+
 # ── the seven slices ─────────────────────────────────────────────────────────────────────
 
 
@@ -296,6 +351,13 @@ def assert_not_prod_leakage(ctx: RuntimeContext) -> None:
             os.getenv("TAKYON_OPERATOR_DATABASE_URL") or "",
             os.getenv("TAKYON_APP_DATABASE_URL") or "",
             os.getenv("DATABASE_URL") or "",
+            # The dev slices this context would actually resolve (UC3): a dev instance whose
+            # TAKYON_DEV_* twin points at prod must refuse at boot, not at first query.
+            *(
+                os.getenv(alias) or ""
+                for aliases in DEV_DATABASE_PLANE_ENV.values()
+                for alias in aliases
+            ),
         )
     )
     hits = sorted({lit for lit in PROD_LITERALS if lit and lit in resolved})

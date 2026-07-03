@@ -359,8 +359,15 @@ def resolve_database_url(explicit: str | None = None, *, plane: str | None = Non
         env_names = _DATABASE_PLANE_ENV.get(database_plane)
         if env_names is None:
             raise RuntimeNotConfigured(f"unknown database authority plane: {database_plane}")
+        # UC3 dev twin mapping (ONE seam for every plane's DSN read): a dev instance resolves
+        # ONLY its TAKYON_DEV_* alias — absence fails closed below naming that dev alias, never
+        # silently falling back to the prod DSN. Non-dev instances keep env_names byte-identical.
+        env_names = environment.database_plane_env_names(database_plane, env_names)
         value = _first_configured_database_url(env_names, cache_key=f"plane:{database_plane}")
         if value:
+            environment.assert_dsn_not_prod_literal(
+                value, plane=database_plane, alias=env_names[0]
+            )
             return _enforce_database_url_policy(value)
         raise RuntimeNotConfigured(
             f"no {database_plane} database URL configured; set {env_names[0]}"
@@ -368,6 +375,9 @@ def resolve_database_url(explicit: str | None = None, *, plane: str | None = Non
 
     value = _first_configured_database_url(_LEGACY_DATABASE_URL_ENV, cache_key="legacy")
     if value:
+        environment.assert_dsn_not_prod_literal(
+            value, plane="legacy", alias=_LEGACY_DATABASE_URL_ENV[0]
+        )
         return _enforce_database_url_policy(value)
     raise RuntimeNotConfigured(
         "no database URL configured; set DATABASE_URL "
