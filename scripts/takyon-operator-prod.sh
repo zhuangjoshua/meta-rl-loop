@@ -40,6 +40,89 @@ OPERATOR_USER_ID_OVERRIDE=""
 # truth shared with the dev rail, so `sai`/`josh` mean the same person in dev and prod.
 # shellcheck source=scripts/operator-users.sh
 source "$ROOT/scripts/operator-users.sh"
+
+# ── Target plane: prod (default) or the dev twin ─────────────────────────────────────────
+# EXACT MIRROR: the entire command surface below (console / worker pool / shell / ClaimScope)
+# is SHARED. Only *which plane we connect to* differs. `TAKYON_OPERATOR_TARGET=dev` (set by the
+# thin scripts/takyon-operator-dev.sh wrapper) swaps the secret source + Safebox URL + TAKYON_ENV
+# via early-return dev branches, so the prod path stays byte-identical.
+TARGET="${TAKYON_OPERATOR_TARGET:-prod}"
+DEV_STORE="${TAKYON_DEV_STORE:-$ROOT/.takyon-dev-safebox}"
+DEV_STORE_ENV="$DEV_STORE/.env"
+if [[ "$TARGET" == "dev" ]]; then
+  LOCAL_PROD_ROOT="${TAKYON_DEV_OPERATOR_HOME:-$HOME/.takyon-fourmanifold-dev-operator}"
+  OPERATOR_HOME="$LOCAL_PROD_ROOT/operator"
+  ACTIVE_LOCAL_WORKER_PREFIX_FILE="$LOCAL_PROD_ROOT/active-local-worker-prefix"
+fi
+
+# Read one KEY=value from the dev store .env (values may be quoted). No secrets echoed.
+_dev_store_get() {
+  local key="$1"
+  [[ -f "$DEV_STORE_ENV" ]] || die "dev store not found at $DEV_STORE_ENV (run 'takyon env create dev' first)"
+  sed -n "s/^${key}=//p" "$DEV_STORE_ENV" | head -1 | sed -e 's/^"//' -e 's/"$//'
+}
+
+# Bring up the dev Safebox (its own process, dev store) if its URL is not already answering.
+ensure_dev_safebox_up() {
+  local url token host port
+  url="$(_dev_store_get TAKYON_DEV_SAFEBOX_URL)"; token="$(_dev_store_get TAKYON_DEV_SAFEBOX_TOKEN)"
+  [[ -n "$url" ]] || die "TAKYON_DEV_SAFEBOX_URL missing from dev store"
+  if curl -fsS -m 4 "$url/healthz" >/dev/null 2>&1; then return 0; fi
+  host="$(printf '%s' "$url" | sed -E 's#^https?://([^:/]+).*#\1#')"
+  port="$(printf '%s' "$url" | sed -E 's#^https?://[^:]+:([0-9]+).*#\1#')"; port="${port:-8378}"
+  mkdir -p "$OPERATOR_HOME"
+  echo "Starting dev Safebox on $host:$port ..." >&2
+  # The operator-plane routes (billing reserve/settle, workspace, caps) check os.environ directly,
+  # so the operator token + client allowlist + cap-signing key must be in the Safebox PROCESS env
+  # (not only the store .env). This is what lets the dev worker's billing.reserve succeed.
+  ( cd "$RUNTIME_DIR" && env TAKYON_HOST_ROLE=safebox TAKYON_HOME="$DEV_STORE" \
+      TAKYON_SAFEBOX_TOKEN="$token" TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1 \
+      TAKYON_SAFEBOX_OPERATOR_TOKEN="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)" \
+      TAKYON_SAFEBOX_OPERATOR_CLIENTS="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_CLIENTS)" \
+      TAKYON_CAP_SIGNING_KEY="$(_dev_store_get TAKYON_CAP_SIGNING_KEY)" \
+      "$RUNTIME_DIR/.venv/bin/uvicorn" --app-dir "$RUNTIME_DIR" \
+      "plugins.takyon.safebox_app:build_safebox_app" --factory --host "$host" --port "$port" \
+      >"$OPERATOR_HOME/dev-safebox.log" 2>&1 & )
+  for _ in $(seq 1 30); do
+    curl -fsS -m 2 "$url/healthz" >/dev/null 2>&1 && { echo "dev Safebox up." >&2; return 0; }
+    sleep 1
+  done
+  die "dev Safebox did not come up; see $OPERATOR_HOME/dev-safebox.log"
+}
+
+# The dev mirror of load_operator_env: identical exports + ClaimScope pool-id + raw-secret scrub,
+# but sourced from the dev store with TAKYON_ENV=dev (resolve_database_url picks the TAKYON_DEV_*
+# twins + fails closed on any prod literal). No SSH, no tunnel — the dev Safebox runs locally.
+load_dev_operator_env() {
+  mkdir -p "$OPERATOR_HOME" "$LOCAL_PROD_ROOT/logs"
+  if [[ -f "$ROOT/.takyon/config.yaml" ]] && ! cmp -s "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
+    cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
+  fi
+  ensure_dev_safebox_up
+  export TAKYON_ENV=dev
+  export TAKYON_HOME="$OPERATOR_HOME"
+  export TAKYON_HOST_ROLE=operator
+  export TAKYON_DB_BACKEND=postgres
+  export TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1
+  export TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS=1
+  export TAKYON_DEV_OPERATOR_DATABASE_URL="$(_dev_store_get TAKYON_DEV_OPERATOR_DATABASE_URL)"
+  export TAKYON_DEV_RUNTIME_DATABASE_URL="$(_dev_store_get TAKYON_DEV_RUNTIME_DATABASE_URL)"
+  export TAKYON_DEV_SAFEBOX_DATABASE_URL="$(_dev_store_get TAKYON_DEV_SAFEBOX_DATABASE_URL)"
+  export TAKYON_DEV_MIGRATION_DATABASE_URL="$(_dev_store_get TAKYON_DEV_MIGRATION_DATABASE_URL)"
+  export TAKYON_SAFEBOX_URL="$(_dev_store_get TAKYON_DEV_SAFEBOX_URL)"
+  export TAKYON_SAFEBOX_TOKEN="$(_dev_store_get TAKYON_DEV_SAFEBOX_TOKEN)"
+  export TAKYON_SAFEBOX_OPERATOR_TOKEN="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)"
+  export TAKYON_PROVIDER_BROKER=1
+  export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$TAKYON_SAFEBOX_URL"
+  export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
+  export TAKYON_STORAGE_BACKEND=local
+  export TERMINAL_ENV="${TERMINAL_ENV:-local}"
+  export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
+  # Stage 2 (ClaimScope): identical to prod — bind this session's enqueues to the Mac's pool.
+  local local_worker_pool; local_worker_pool="$(resolve_local_worker_pool_id)"
+  [[ -n "$local_worker_pool" ]] && export TAKYON_WORKER_POOL_ID="$local_worker_pool"
+  unset_raw_runtime_authority_env
+}
 SSH_SERVER_ALIVE_INTERVAL="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_INTERVAL:-15}"
 SSH_SERVER_ALIVE_COUNT_MAX="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
 CONSOLE_TUNNEL_MONITOR_SECONDS="${TAKYON_OPERATOR_TUNNEL_MONITOR_SECONDS:-5}"
@@ -275,6 +358,12 @@ ensure_operator_runtime_deps() {
 }
 
 require_files() {
+  if [[ "$TARGET" == "dev" ]]; then
+    [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
+    ensure_takyon_cli_runtime
+    [[ -f "$DEV_STORE_ENV" ]] || die "dev store not found at $DEV_STORE_ENV (run 'takyon env create dev' first)"
+    return 0
+  fi
   [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
   ensure_takyon_cli_runtime
   [[ -f "$SSH_KEY" ]] || die "SSH key missing: $SSH_KEY"
@@ -358,6 +447,11 @@ PY"
 }
 
 load_operator_env() {
+  if [[ "$TARGET" == "dev" ]]; then
+    require_files
+    load_dev_operator_env
+    return 0
+  fi
   require_files
   ensure_operator_runtime_deps
   ensure_home
@@ -415,6 +509,10 @@ unset_raw_runtime_authority_env() {
 }
 
 require_tunnel() {
+  if [[ "$TARGET" == "dev" ]]; then
+    ensure_dev_safebox_up
+    return 0
+  fi
   if tunnel_healthy; then
     return 0
   fi
@@ -581,6 +679,7 @@ cleanup_worker_tunnel_guard() {
 }
 
 start_worker_tunnel_guard() {
+  [[ "$TARGET" == "dev" ]] && return 0  # dev Safebox is local — no tunnel to guard
   if [[ "${TAKYON_OPERATOR_TUNNELS_MANAGED:-0}" == "1" ]]; then
     WORKER_TUNNEL_GUARD_MONITOR_PID=""
     WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
@@ -632,6 +731,13 @@ ensure_deno_toolchain() {
 }
 
 cmd_preflight() {
+  if [[ "$TARGET" == "dev" ]]; then
+    # Dev preflight = load the dev env + prove the dev Safebox is up. The prod-shaped env/storage
+    # check below (R2/Cloudflare/S3) does not apply to the local dev twin.
+    load_operator_env
+    require_tunnel
+    return 0
+  fi
   load_operator_env
   require_tunnel
   cd "$ROOT"
@@ -1117,9 +1223,9 @@ spawn_console_shell_windows() {
   fi
   printf -v root_quoted '%q' "$ROOT"
   if [[ -n "$business" ]]; then
-    tail_command="$(shell_join env TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
+    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand" "$business")"
   else
-    tail_command="$(shell_join env TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand")"
+    tail_command="$(shell_join env TAKYON_OPERATOR_TARGET="$TARGET" TAKYON_SESSION_USER_ID="$operator_user_id" ./scripts/takyon-operator-prod.sh "$subcommand")"
   fi
   command_text="cd $root_quoted && $tail_command"
   local index=0
@@ -1245,8 +1351,12 @@ cmd_console() {
   }
   trap cleanup EXIT INT TERM
 
-  ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
-  ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy
+  # The dev twin's Safebox is local (started by load_operator_env → ensure_dev_safebox_up); only
+  # the prod plane reaches its private Safebox/dashboard through managed SSH tunnels.
+  if [[ "$TARGET" != "dev" ]]; then
+    ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
+    ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy
+  fi
 
   load_operator_env
   cmd_preflight
