@@ -27418,8 +27418,16 @@ def _derive_ad_spend_schedule(
     cap_cents = _ad_channel_daily_budget_cap_cents(channel)
     min_live_cents = _ad_channel_min_live_budget_cents(channel)
     if total_budget_cents < min_live_cents:
+        # Spell out the unit math: channel credits denominate live media budget at 1 credit = 1
+        # cent (grant metadata price_cents_per_credit=1), which operators and the CEO repeatedly
+        # misread as whole-dollar units (2026-07-03: three launch retries burned on a "bug" that
+        # was an underfunded bucket). Name the exact shortfall and the fix.
         raise TakyonError(
-            f"{channel} launch requires at least {min_live_cents / 100:.2f} USD of remaining reserved credits for a live campaign"
+            f"{channel} launch requires at least {min_live_cents / 100:.2f} USD of remaining reserved"
+            f" credits for a live campaign. Channel credits are media-budget CENTS (1 credit = $0.01):"
+            f" {total_budget_cents} reserved credit(s) = ${total_budget_cents / 100:.2f}, need"
+            f" {min_live_cents} (= ${min_live_cents / 100:.2f}). Allocate at least"
+            f" {min_live_cents - total_budget_cents} more {channel} credits and retry."
         )
     start_at = _parse_iso_datetime(requested_start_at) or (datetime.now(timezone.utc) + timedelta(minutes=5))
     end_at = _parse_iso_datetime(requested_end_at)
