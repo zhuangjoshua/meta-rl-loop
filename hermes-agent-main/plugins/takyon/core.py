@@ -11792,117 +11792,6 @@ def _blocked_message(text: Any) -> str:
     return f"BLOCKED: {message}"
 
 
-def _apply_instant_first_paint_landing(*, business_root: Path, build_root: Path) -> bool:
-    """Render the deterministic instant branded landing into the build root, if the bootstrap pinned
-    a brief at ``product/instant_landing.json`` AND the just-materialized landing is still the
-    byte-identical seeded scaffold. Returns True when applied.
-
-    This is what makes a sub-4-minute first paint possible: a real, designed ``landing.tsx`` +
-    themed ``tokens.css`` (different from the scaffold, no sentinel) pass the publish gate, so the
-    refresh can publish immediately instead of waiting the full design pass. Self-gated to the
-    still-seeded landing only, so it NEVER clobbers a customized design-pass landing. Best-effort:
-    any error leaves the materialized state untouched (the design pass still publishes later)."""
-    try:
-        # The brief lives INSIDE the product source (build_root) so it materializes with the source
-        # into the sandbox build; product/instant_landing.json (outside source_path) never reaches it.
-        brief_path = (build_root / "instant_landing.json").resolve()
-        logging.getLogger("takyon.instant_landing").info(
-            "instant-landing inject: brief=%s exists=%s build_root=%s",
-            brief_path, brief_path.is_file(), build_root,
-        )
-        if not brief_path.is_file():
-            return False
-        landing_path = build_root / "src" / "screens" / "landing.tsx"
-        scaffold_landing = _subuser_app_scaffold_source_dir() / "src" / "screens" / "landing.tsx"
-        if not (landing_path.is_file() and scaffold_landing.is_file()):
-            return False
-        # Only apply over the still-seeded scaffold landing; never overwrite a real design.
-        if landing_path.read_text(encoding="utf-8") != scaffold_landing.read_text(encoding="utf-8"):
-            return False
-        brief = json.loads(brief_path.read_text(encoding="utf-8") or "{}")
-        if not isinstance(brief, dict):
-            return False
-        try:
-            from . import instant_landing
-        except Exception:  # pragma: no cover - alternate load path
-            from plugins.takyon import instant_landing
-        tsx = instant_landing.render_instant_landing_tsx(
-            eyebrow=str(brief.get("eyebrow") or ""),
-            headline=str(brief.get("headline") or ""),
-            subhead=str(brief.get("subhead") or ""),
-            primary_cta=str(brief.get("primary_cta") or "Continue with Google"),
-            features=brief.get("features") if isinstance(brief.get("features"), list) else [],
-        )
-        css = instant_landing.render_instant_tokens_css(accent=str(brief.get("accent") or ""))
-        landing_path.write_text(tsx, encoding="utf-8")
-        (build_root / "src" / "tokens.css").write_text(css, encoding="utf-8")
-        # NOTE: the instant landing deliberately writes ONLY landing.tsx + tokens.css — NOT index.html.
-        # An earlier attempt to brand the <head> here (title/meta from the brief) made the inject a second
-        # writer of product/site/index.html, which raced the product build's own index.html edits and
-        # hard-failed the commit ("stale workspace base ... conflicting files changed in both places
-        # (product/site/index.html)") — index.html is a real source file, not a commentary path, so it is
-        # NOT in the stale-base auto-resolve set (_COMMENTARY_BUSINESS_PATHS). That stalled whole
-        # bootstraps. Head branding stays the slow design pass's job until it can be done WITHOUT a
-        # competing commit (e.g. in the scaffold materialize, before the build pins its base).
-        # One-shot: drop the brief from the build so it never ships in dist and never re-applies over
-        # the design pass on a later refresh.
-        try:
-            brief_path.unlink()
-        except OSError:
-            pass
-        return True
-    except Exception:
-        return False
-
-
-def _ensure_instant_first_paint_brief(
-    *, business_root: Path, build_root: Path, surface: dict[str, Any] | None
-) -> bool:
-    """Deterministic floor for the instant branded first-paint. If the bootstrap/CEO did NOT pin an
-    instant-landing brief AND the just-materialized landing is still the byte-identical seeded scaffold,
-    synthesize a minimal TRUTHFUL brief from canonical state (humanized business name + the surface
-    notes/tagline) and write it to ``build_root/instant_landing.json`` so ``_apply_instant_first_paint_landing``
-    can ship a real branded page (themed tokens.css, not the gray scaffold placeholder) on the FIRST
-    publish — independent of whether the CEO emitted ``business_write_instant_landing`` in the right order.
-
-    This is the UPSTREAM fix for the slow 2-pass thrash: step 2.0 was prompt-driven, so a CEO that
-    skipped or mis-ordered the brief left ``src/tokens.css`` byte-identical to the scaffold placeholder,
-    tripping ``_scaffold_theme_unfinished_blocker`` and forcing the slow design pass before the first
-    publish. The CEO's richer brief still wins when present (this only writes when no brief is pinned).
-    Returns True when a brief was synthesized. Best-effort; never raises."""
-    try:
-        brief_path = (build_root / "instant_landing.json").resolve()
-        if brief_path.exists():
-            # A richer brief is already pinned (CEO/bootstrap, or a prior refresh) — respect it.
-            return False
-        landing_path = build_root / "src" / "screens" / "landing.tsx"
-        scaffold_landing = _subuser_app_scaffold_source_dir() / "src" / "screens" / "landing.tsx"
-        if not (landing_path.is_file() and scaffold_landing.is_file()):
-            return False
-        # Only synthesize over the still-seeded scaffold landing; never invent a brief for a business
-        # whose landing the design pass already customized (the apply step is self-gated the same way).
-        if landing_path.read_text(encoding="utf-8") != scaffold_landing.read_text(encoding="utf-8"):
-            return False
-        slug = business_root.name
-        strings = _subuser_app_starter_strings(surface, slug=slug)
-        headline = str(strings.get("title") or _humanize_business_slug(slug)).strip()
-        subhead = str(strings.get("description") or "").strip()
-        brief = {
-            "eyebrow": "",
-            "headline": headline,
-            "subhead": subhead,
-            "primary_cta": "Continue with Google",
-            "features": [],
-            "accent": "",
-        }
-        brief_path.write_text(
-            json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return True
-    except Exception:
-        return False
-
-
 def _refresh_product_surface_path(
     business_root: Path,
     source_path: str,
@@ -12067,24 +11956,6 @@ def _refresh_product_surface_path(
         except Exception as exc:
             result.update({"status": "failed", "error": f"failed to materialize runtime kit: {exc}"})
             return result
-    # Deterministic instant-landing floor (UPSTREAM fix for the slow 2-pass thrash): if no brief was
-    # pinned, synthesize a minimal truthful one from canonical state so the FIRST publish ships a real
-    # branded page instead of the scaffold placeholder theme. Runs AFTER the materialize (so a
-    # CEO-pinned brief that materialized into the workspace is detected and respected) and BEFORE the
-    # apply below, which consumes it. This makes the fast first-paint independent of whether the CEO
-    # emitted business_write_instant_landing in the right order — on the dashboard worker path too.
-    _ensure_instant_first_paint_brief(business_root=business_root, build_root=root, surface=surface)
-    # Instant branded first-paint: apply the deterministic landing the bootstrap pinned (if any),
-    # AFTER the materialize re-seeds the scaffold and BEFORE the build, so this first publish ships a
-    # REAL branded page (passing the scaffold-visible-shell + placeholder-theme gates) instead of
-    # waiting the full design pass. Self-gated to the still-seeded scaffold landing, so it never
-    # clobbers a customized design-pass landing. Best-effort.
-    if _apply_instant_first_paint_landing(business_root=business_root, build_root=root):
-        # The inventory (with the scaffold risk-markers the publish gates read) was snapshotted at the
-        # top of this function, BEFORE the materialize + this inject — so it still describes the bare
-        # scaffold. Recompute it now that landing.tsx + tokens.css are the real branded files, or the
-        # gates would wrongly block the instant landing on a stale snapshot.
-        result["inventory"] = _product_inventory(business_root, source_rel, surface=surface)
     # A freshly-materialized readback/cache workspace is deps-free by design (node_modules is
     # never synced into canonical storage), so install MUST run there even when a caller passes
     # install=False — otherwise the build false-fails later with a misleading "vite: not found".
@@ -22426,55 +22297,6 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
     )
 
 
-def handle_business_write_instant_landing(args: dict, **_: Any) -> str:
-    """Pin the instant-landing brief to `product/instant_landing.json`. The NEXT
-    business_refresh_product_surface reads it and (when the landing is still the seeded scaffold)
-    renders a real branded landing.tsx + themed tokens.css INSIDE the build, after the re-materialize
-    — which is what lets the publish gate accept it and ship a branded first-paint in ~2-3 minutes.
-    Writing the brief (not the files) is deliberate: the refresh re-materializes the scaffold and
-    would clobber any pre-written landing, so the render must happen inside the refresh."""
-    _refuse_on_autonomous_wake("product edits")
-    business = _resolved_business_slug(args, required=True)
-    features = args.get("features") if isinstance(args.get("features"), list) else []
-    norm_features = []
-    for f in features[:4]:
-        if isinstance(f, dict) and str(f.get("title") or "").strip() and str(f.get("body") or "").strip():
-            norm_features.append({"title": str(f["title"]).strip(), "body": str(f["body"]).strip()})
-    brief = {
-        "eyebrow": str(args.get("eyebrow") or "").strip(),
-        "headline": str(args.get("headline") or "").strip(),
-        "subhead": str(args.get("subhead") or "").strip(),
-        "primary_cta": str(args.get("primary_cta") or "Continue with Google").strip(),
-        "features": norm_features,
-        "accent": str(args.get("accent") or "").strip(),
-    }
-    idem = str(args.get("idempotency_key") or "").strip() or f"instant-landing-{_slugify(business)}"
-    res = handle_business_write_file(
-        {
-            "business": args.get("business") or business,
-            "path": "product/site/instant_landing.json",
-            "content": json.dumps(brief, ensure_ascii=False, indent=2),
-            "mode": "replace",
-            "idempotency_key": f"{idem}-brief",
-            "reason": "instant branded first-paint brief",
-            "actor": args.get("actor") or "agent",
-        }
-    )
-    try:
-        ok = bool(json.loads(res).get("success", True))
-    except Exception:
-        ok = True
-    return json.dumps(
-        {
-            "success": ok,
-            "action": "business_write_instant_landing",
-            "business": business,
-            "brief_pinned": "product/instant_landing.json",
-            "next": "call business_refresh_product_surface (source_path product/site) to build + publish the instant branded landing now",
-        }
-    )
-
-
 def handle_business_patch_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
@@ -22641,7 +22463,7 @@ def _finalize_product_surface_refresh(
             "effective_publish_policy": publish_policy,
             "warnings": warnings,
         }
-    logging.getLogger("takyon.instant_landing").info(
+    logging.getLogger("takyon.product_surface").info(
         "refresh result for %s: status=%s error=%s checks=%s",
         business,
         refresh.get("status"),
@@ -34767,29 +34589,6 @@ TAKYON_TOOL_DEFINITIONS = [
             "Write a business-scoped file.",
             {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "path", "content", "idempotency_key"],
-        ),
-    },
-    {
-        "name": "business_write_instant_landing",
-        "description": "Deterministically write a real branded landing.tsx + themed tokens.css from the launch brief, so the landing can be published for an instant first-paint before the full design pass.",
-        "handler": handle_business_write_instant_landing,
-        "schema": _schema(
-            "business_write_instant_landing",
-            "Write a deterministic branded instant-landing (landing.tsx + tokens.css) from the brief.",
-            {
-                "business": _BUSINESS_PROP,
-                "source_path": {"type": "string", "description": "product surface source path (default product/site)"},
-                "eyebrow": {"type": "string", "description": "2-4 word kicker, e.g. the product category"},
-                "headline": {"type": "string", "description": "the punchy one-line tagline/headline"},
-                "subhead": {"type": "string", "description": "one truthful sentence on the core value proposition"},
-                "primary_cta": {"type": "string", "description": "primary button label (default 'Continue with Google')"},
-                "features": {"type": "array", "description": "2-4 {title, body} feature points from the brief", "items": {"type": "object", "properties": {"title": {"type": "string"}, "body": {"type": "string"}}}},
-                "accent": {"type": "string", "description": "brand accent hex like #0e7c66 (clean blue default)"},
-                "idempotency_key": _IDEMPOTENCY_PROP,
-                "reason": _REASON_PROP,
-                "actor": _ACTOR_PROP,
-            },
-            ["business", "headline", "subhead", "idempotency_key"],
         ),
     },
     {

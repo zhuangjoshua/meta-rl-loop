@@ -1175,6 +1175,17 @@ def _run_ceo_turn(
     agent._memory_nudge_interval = 0
     agent._skill_nudge_interval = 0
     agent.suppress_status_output = True
+    # Worker CEO turns (bootstrap/wake) block for many minutes on child tool calls —
+    # business_claude_agent_task builds run 5-30 minutes — so the default 5m prompt-cache TTL
+    # expires between iterations and every post-build API call re-reads the whole prefix cold.
+    # The 1h TTL (GA, plain cache_control {"ttl": "1h"} in the request body — no beta header,
+    # so it passes through the safebox proxy untouched) keeps the prefix warm across those
+    # gaps. Economics: 1h writes cost 2x vs 1.25x, but a bootstrap re-reads the prefix dozens
+    # of times, so it pays for itself within the first build gap. Env-overridable escape hatch.
+    if getattr(agent, "_use_prompt_caching", False):
+        _worker_cache_ttl = str(os.getenv("TAKYON_WORKER_CACHE_TTL", "") or "").strip() or "1h"
+        if _worker_cache_ttl in {"5m", "1h"}:
+            agent._cache_ttl = _worker_cache_ttl
     agent.activity_callback = progress.activity if progress is not None else None
     if api_retry_floor > 0:
         try:
