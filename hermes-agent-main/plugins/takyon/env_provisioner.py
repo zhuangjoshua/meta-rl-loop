@@ -1287,7 +1287,7 @@ class EnvironmentProvisioner:
     def _resolve_safebox_host(
         self, headers: Mapping[str, str], droplets_cfg: Mapping[str, Any]
     ) -> "tuple[dict[str, Any] | None, str]":
-        """The singleton safebox droplet ({name, droplet_id, public_ip}) or (None, why-not)."""
+        """The singleton safebox droplet ({name, droplet_id, public_ip, private_ip}) or (None, why-not)."""
         sb = droplets_cfg.get("safebox_host") or {}
         if not sb.get("enabled", False):
             return None, "no safebox host declared in the manifest"
@@ -1306,7 +1306,19 @@ class EnvironmentProvisioner:
             )
             if not public_ip:
                 return None, f"safebox host {name!r} has no public IPv4"
-            return {"name": name, "droplet_id": d.get("id"), "public_ip": public_ip}, ""
+            private_ip = next(
+                (str(n.get("ip_address") or "") for n in ((d.get("networks") or {}).get("v4") or [])
+                 if isinstance(n, dict) and n.get("type") == "private"),
+                "",
+            )
+            if not private_ip:
+                return None, f"safebox host {name!r} has no private IPv4"
+            return {
+                "name": name,
+                "droplet_id": d.get("id"),
+                "public_ip": public_ip,
+                "private_ip": private_ip,
+            }, ""
         return None, f"safebox host {name!r} not found"
 
     def _read_replica_cred_state(
@@ -1838,6 +1850,9 @@ class EnvironmentProvisioner:
             "provisioned_at": time.time(),
             "steps": {r.resource: r.status for r in prior},
         }
+        dev_split = self._resolved_dev_split_config()
+        if dev_split:
+            resolved["dev_split"] = dev_split
         try:
             import yaml
             self.env_dir.mkdir(parents=True, exist_ok=True)
@@ -1849,6 +1864,45 @@ class EnvironmentProvisioner:
             f"wrote resolved dev pointers to {self.config_path}",
             data={"path": str(self.config_path)},
         )
+
+    def _resolved_dev_split_config(self) -> dict[str, Any]:
+        """Best-effort non-secret metadata for remote dev use.
+
+        This is written so ordinary dev shells can discover the dev split topology without
+        depending on a local authority env file. Secrets stay on the authority host; this section
+        carries only hostnames/IPs/key-paths needed to reach the split.
+        """
+        cfg = self.manifest.get("droplets") or {}
+        if not cfg.get("enabled", False):
+            return {}
+        try:
+            token, blocked = self._do_token_or_blocked("droplets")
+            if blocked is not None or not token:
+                return {}
+            headers = self._do_headers(token)
+            safebox_host, _why = self._resolve_safebox_host(headers, cfg)
+            replicas, _err = self._resolve_replicas(headers, cfg)
+        except Exception:
+            return {}
+        out: dict[str, Any] = {}
+        if safebox_host:
+            out["safebox"] = {
+                "name": str(safebox_host.get("name") or ""),
+                "public_ip": str(safebox_host.get("public_ip") or ""),
+                "private_ip": str(safebox_host.get("private_ip") or ""),
+            }
+        key_path = self._split_key_path()
+        if str(key_path):
+            out["ssh_key_path"] = str(key_path)
+        if replicas:
+            out["replicas"] = [
+                {
+                    "name": str(rep.get("name") or ""),
+                    "public_ip": str(rep.get("public_ip") or ""),
+                }
+                for rep in replicas
+            ]
+        return out
 
     # ── ROLLING RESTART — the full-4b graceful-drain rail ──────────────────────────────────────
     #

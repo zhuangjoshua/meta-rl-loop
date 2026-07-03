@@ -62,8 +62,122 @@ _dev_store_get() {
   sed -n "s/^${key}=//p" "$DEV_STORE_ENV" | head -1 | sed -e 's/^"//' -e 's/"$//'
 }
 
+dev_env_config_path() {
+  local candidates=(
+    "$ROOT/.takyon/environments/dev/config.yaml"
+    "$DEV_STORE/environments/dev/config.yaml"
+  )
+  local path
+  for path in "${candidates[@]}"; do
+    if [[ -f "$path" ]]; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fetch_dev_topology_exports() {
+  local config_path py
+  config_path="$(dev_env_config_path 2>/dev/null || true)"
+  [[ -n "$config_path" && -f "$config_path" ]] || return 1
+  py="$TAKYON_CLI_PYTHON"
+  [[ -x "$py" ]] || py="python3"
+  "$py" - <<'PY' "$config_path"
+from __future__ import annotations
+
+import shlex
+import sys
+from pathlib import Path
+
+import yaml
+
+path = Path(sys.argv[1])
+data = yaml.safe_load(path.read_text()) or {}
+dev_split = data.get("dev_split") or {}
+safebox = dev_split.get("safebox") or {}
+ssh_key_path = str(dev_split.get("ssh_key_path") or "").strip()
+public_ip = str(safebox.get("public_ip") or "").strip()
+private_ip = str(safebox.get("private_ip") or "").strip()
+if not ssh_key_path or not public_ip or not private_ip:
+    raise SystemExit(1)
+for key, value in (
+    ("TAKYON_DEV_REMOTE_SAFEBOX_SSH_HOST", f"root@{public_ip}"),
+    ("TAKYON_DEV_REMOTE_SAFEBOX_PUBLIC_IP", public_ip),
+    ("TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP", private_ip),
+    ("TAKYON_DEV_REMOTE_SAFEBOX_SSH_KEY", ssh_key_path),
+):
+    print(f"export {key}={shlex.quote(value)}")
+PY
+}
+
+dev_remote_safebox_configured() {
+  local exports
+  exports="$(fetch_dev_topology_exports 2>/dev/null || true)"
+  [[ -n "$exports" ]]
+}
+
+load_dev_remote_topology() {
+  local exports
+  exports="$(fetch_dev_topology_exports 2>/dev/null || true)"
+  [[ -n "$exports" ]] || return 1
+  # shellcheck disable=SC1090
+  eval "$exports"
+  [[ -n "${TAKYON_DEV_REMOTE_SAFEBOX_SSH_HOST:-}" ]] || return 1
+  [[ -n "${TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP:-}" ]] || return 1
+  [[ -n "${TAKYON_DEV_REMOTE_SAFEBOX_SSH_KEY:-}" ]] || return 1
+  SSH_HOST="$TAKYON_DEV_REMOTE_SAFEBOX_SSH_HOST"
+  SSH_KEY="$TAKYON_DEV_REMOTE_SAFEBOX_SSH_KEY"
+  SAFEBOX_PRIVATE_HOST="$TAKYON_DEV_REMOTE_SAFEBOX_PRIVATE_IP"
+  SAFEBOX_PRIVATE_PORT="8000"
+  return 0
+}
+
+fetch_dev_remote_env_exports() {
+  load_dev_remote_topology || return 1
+  local -a args=(
+    -i "$SSH_KEY"
+    -o IdentitiesOnly=yes
+    -o StrictHostKeyChecking=accept-new
+  )
+  ssh "${args[@]}" "$SSH_HOST" "python3 - <<'PY'
+from __future__ import annotations
+
+import os
+import shlex
+from pathlib import Path
+
+keys = (
+    'TAKYON_DEV_OPERATOR_DATABASE_URL',
+    'TAKYON_DEV_RUNTIME_DATABASE_URL',
+    'TAKYON_DEV_SAFEBOX_DATABASE_URL',
+    'TAKYON_DEV_MIGRATION_DATABASE_URL',
+    'TAKYON_SAFEBOX_TOKEN',
+    'TAKYON_SAFEBOX_OPERATOR_TOKEN',
+)
+
+values = {}
+env_path = Path('/opt/takyon/.takyon/.env')
+if env_path.exists():
+    for raw_line in env_path.read_text(encoding='utf-8').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        values[key.strip()] = value.strip().strip('\"').strip(\"'\")
+
+for key in keys:
+    value = str(os.environ.get(key) or values.get(key) or '').strip()
+    if value:
+        print(f'export {key}={shlex.quote(value)}')
+PY"
+}
+
 # Bring up the dev Safebox (its own process, dev store) if its URL is not already answering.
 ensure_dev_safebox_up() {
+  if dev_remote_safebox_configured; then
+    return 0
+  fi
   local url token host port
   url="$(_dev_store_get TAKYON_DEV_SAFEBOX_URL)"; token="$(_dev_store_get TAKYON_DEV_SAFEBOX_TOKEN)"
   [[ -n "$url" ]] || die "TAKYON_DEV_SAFEBOX_URL missing from dev store"
@@ -100,6 +214,9 @@ ensure_dev_operator_budget_ready() {
   local operator_user_id="${1:-}"
   [[ -n "$operator_user_id" ]] || return 0
   [[ -x "$TAKYON_CLI_PYTHON" ]] || die "takyon CLI missing: expected $TAKYON_CLI_PYTHON"
+  if dev_remote_safebox_configured; then
+    return 0
+  fi
   # Dev shells/workers bind directly to an explicit operator user id (`josh`, `sai`, etc.) instead
   # of coming through the dashboard/Auth0 first-login path. Seed that existing dev user's billing
   # and custody rails up front so the first CLI bootstrap reserve cannot die on missing safebox
@@ -161,6 +278,9 @@ PY
 # appear, the TRACKED `takyon migrate` rail replays every migration idempotently as takyon_migration
 # against TAKYON_DEV_MIGRATION_DATABASE_URL (additive/nullable, so re-running is always safe).
 ensure_dev_schema_current() {
+  if dev_remote_safebox_configured; then
+    return 0
+  fi
   local repo_sig marker
   repo_sig="$(ls "$RUNTIME_DIR/plugins/takyon/db/migrations/"*.sql 2>/dev/null | wc -l | tr -d ' ')"
   [[ "${repo_sig:-0}" -gt 0 ]] || return 0
@@ -178,13 +298,41 @@ ensure_dev_schema_current() {
   fi
 }
 
-# The dev mirror of load_operator_env: identical exports + ClaimScope pool-id + raw-secret scrub,
-# but sourced from the dev store with TAKYON_ENV=dev (resolve_database_url picks the TAKYON_DEV_*
-# twins + fails closed on any prod literal). No SSH, no tunnel — the dev Safebox runs locally.
+# The dev mirror of load_operator_env. Admin/bootstrap mode still supports the local dev store, but
+# ordinary dev use prefers the remote dev safebox host described in environments/dev config so the
+# shell no longer depends on a local authority env copy.
 load_dev_operator_env() {
   mkdir -p "$OPERATOR_HOME" "$LOCAL_PROD_ROOT/logs"
   if [[ -f "$ROOT/.takyon/config.yaml" ]] && ! cmp -s "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
     cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
+  fi
+  if dev_remote_safebox_configured; then
+    load_dev_remote_topology
+    # shellcheck disable=SC1090
+    eval "$(fetch_dev_remote_env_exports)"
+    export TAKYON_ENV=dev
+    export TAKYON_HOME="$OPERATOR_HOME"
+    export TAKYON_HOST_ROLE=operator
+    export TAKYON_DB_BACKEND=postgres
+    export TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS=1
+    export TAKYON_ALLOW_REMOTE_STORAGE_SYNC_OUTSIDE_VPS=1
+    export TAKYON_SAFEBOX_URL="$LOCAL_SAFEBOX_URL"
+    export TAKYON_PROVIDER_BROKER=1
+    export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
+    export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$LOCAL_SAFEBOX_URL"
+    if [[ "$TERMINAL_ENV" == "docker" ]]; then
+      export TAKYON_CLAUDE_AGENT_BROKER_URL="$CONTAINER_SAFEBOX_URL"
+    else
+      export TAKYON_CLAUDE_AGENT_BROKER_URL="$LOCAL_SAFEBOX_URL"
+    fi
+    export TAKYON_STORAGE_BACKEND=local
+    export TAKYON_PG_POOL_SIZE="${TAKYON_DEV_PG_POOL_SIZE:-3}"
+    export TAKYON_OPERATOR_USAGE_GATE_DISABLED=1
+    export TAKYON_SESSION_USER_ID="$(resolved_operator_user_id)"
+    local remote_worker_pool; remote_worker_pool="$(resolve_local_worker_pool_id)"
+    [[ -n "$remote_worker_pool" ]] && export TAKYON_WORKER_POOL_ID="$remote_worker_pool"
+    unset_raw_runtime_authority_env
+    return 0
   fi
   ensure_dev_safebox_up
   ensure_dev_schema_current
@@ -202,10 +350,16 @@ load_dev_operator_env() {
   export TAKYON_SAFEBOX_TOKEN="$(_dev_store_get TAKYON_DEV_SAFEBOX_TOKEN)"
   export TAKYON_SAFEBOX_OPERATOR_TOKEN="$(_dev_store_get TAKYON_SAFEBOX_OPERATOR_TOKEN)"
   export TAKYON_PROVIDER_BROKER=1
+  export TERMINAL_ENV="${TERMINAL_ENV:-docker}"
+  # Mirror the prod split: the host-side operator shell talks to the local dev Safebox loopback,
+  # while Dockerized Claude product workers need the container-reachable host alias.
   export TAKYON_OPERATOR_GATEWAY_BROKER_URL="$TAKYON_SAFEBOX_URL"
-  export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
+  if [[ "$TERMINAL_ENV" == "docker" ]]; then
+    export TAKYON_CLAUDE_AGENT_BROKER_URL="$CONTAINER_SAFEBOX_URL"
+  else
+    export TAKYON_CLAUDE_AGENT_BROKER_URL="$TAKYON_SAFEBOX_URL"
+  fi
   export TAKYON_STORAGE_BACKEND=local
-  export TERMINAL_ENV="${TERMINAL_ENV:-local}"
   # Dev twin runs on the Supabase SESSION pooler (15-client cap — role GUCs need session mode). The
   # default 8-conn pool per process (safebox + runtime + worker) exhausts it and starves the job
   # lease-heartbeat, churning long bootstraps. A small pool per process fits the single-user dev twin
@@ -463,7 +617,9 @@ require_files() {
   if [[ "$TARGET" == "dev" ]]; then
     [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
     ensure_takyon_cli_runtime
-    [[ -f "$DEV_STORE_ENV" ]] || die "dev store not found at $DEV_STORE_ENV (run 'takyon env create dev' first)"
+    if ! dev_remote_safebox_configured; then
+      [[ -f "$DEV_STORE_ENV" ]] || die "dev store not found at $DEV_STORE_ENV (run 'takyon env create dev' first)"
+    fi
     return 0
   fi
   [[ -x "$TAKYON_ENTRY" ]] || die "Takyon entrypoint missing: $TAKYON_ENTRY"
@@ -551,6 +707,7 @@ PY"
 load_operator_env() {
   if [[ "$TARGET" == "dev" ]]; then
     require_files
+    ensure_operator_runtime_deps
     load_dev_operator_env
     return 0
   fi
@@ -612,6 +769,18 @@ unset_raw_runtime_authority_env() {
 
 require_tunnel() {
   if [[ "$TARGET" == "dev" ]]; then
+    if dev_remote_safebox_configured; then
+      if safebox_tunnel_healthy; then
+        return 0
+      fi
+      mkdir -p "$LOCAL_PROD_ROOT/logs"
+      local timestamp tunnel_log tunnel_pid_file
+      timestamp="$(date +%Y%m%d-%H%M%S)"
+      tunnel_log="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.log"
+      tunnel_pid_file="$LOCAL_PROD_ROOT/logs/tunnel-$timestamp.pid"
+      ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
+      return 0
+    fi
     ensure_dev_safebox_up
     return 0
   fi
@@ -752,6 +921,9 @@ monitor_console_tunnels() {
       echo "Safebox tunnel dropped; restarting..."
       start_managed_tunnel "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" "$safebox_log" "$safebox_pid_file" || true
     fi
+    if [[ "$TARGET" == "dev" ]]; then
+      continue
+    fi
     if ! dashboard_tunnel_healthy; then
       stop_pid_file_process "$dashboard_pid_file"
       echo "Operator dashboard tunnel dropped; restarting..."
@@ -781,7 +953,6 @@ cleanup_worker_tunnel_guard() {
 }
 
 start_worker_tunnel_guard() {
-  [[ "$TARGET" == "dev" ]] && return 0  # dev Safebox is local — no tunnel to guard
   if [[ "${TAKYON_OPERATOR_TUNNELS_MANAGED:-0}" == "1" ]]; then
     WORKER_TUNNEL_GUARD_MONITOR_PID=""
     WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE=""
@@ -799,6 +970,16 @@ start_worker_tunnel_guard() {
   WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE="$LOCAL_PROD_ROOT/logs/dashboard-tunnel-$timestamp.pid"
 
   trap cleanup_worker_tunnel_guard EXIT INT TERM
+
+  if [[ "$TARGET" == "dev" ]]; then
+    if ! dev_remote_safebox_configured; then
+      return 0
+    fi
+    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy
+    monitor_console_tunnels "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" >>"$tunnel_log" 2>&1 &
+    WORKER_TUNNEL_GUARD_MONITOR_PID="$!"
+    return 0
+  fi
 
   ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$WORKER_TUNNEL_GUARD_TUNNEL_PID_FILE" safebox_tunnel_healthy
   ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$WORKER_TUNNEL_GUARD_DASHBOARD_PID_FILE" dashboard_tunnel_healthy
@@ -1082,12 +1263,18 @@ stop_local_workers_background() {
 
 cmd_safebox_tunnel() {
   require_files
+  if [[ "$TARGET" == "dev" ]]; then
+    load_dev_remote_topology || die "dev remote safebox metadata missing; provision the dev split first"
+  fi
   echo "Opening Safebox tunnel: $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT via $SSH_HOST" >&2
   ssh_tunnel_exec \
     -L "127.0.0.1:${LOCAL_SAFEBOX_PORT}:${SAFEBOX_PRIVATE_HOST}:${SAFEBOX_PRIVATE_PORT}"
 }
 
 cmd_dashboard_tunnel() {
+  if [[ "$TARGET" == "dev" ]]; then
+    die "dev remote mode does not expose a dashboard tunnel yet"
+  fi
   require_files
   echo "Opening operator dashboard tunnel: $LOCAL_DASHBOARD_URL -> $REMOTE_DASHBOARD_HOST:$REMOTE_DASHBOARD_PORT via $SSH_HOST" >&2
   ssh_tunnel_exec \
@@ -1095,6 +1282,10 @@ cmd_dashboard_tunnel() {
 }
 
 cmd_tunnel() {
+  if [[ "$TARGET" == "dev" ]]; then
+    cmd_safebox_tunnel
+    return 0
+  fi
   require_files
   echo "Opening Safebox + operator dashboard tunnels:" >&2
   echo "  $LOCAL_SAFEBOX_URL -> $SAFEBOX_PRIVATE_HOST:$SAFEBOX_PRIVATE_PORT" >&2
@@ -1453,11 +1644,13 @@ cmd_console() {
   }
   trap cleanup EXIT INT TERM
 
-  # The dev twin's Safebox is local (started by load_operator_env → ensure_dev_safebox_up); only
-  # the prod plane reaches its private Safebox/dashboard through managed SSH tunnels.
+  # Prod always tunnels Safebox+dashboard. Dev remote mode tunnels Safebox only; dev local mode
+  # still runs its own local safebox process.
   if [[ "$TARGET" != "dev" ]]; then
     ensure_managed_tunnel "Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
     ensure_managed_tunnel "Operator dashboard" "$LOCAL_DASHBOARD_URL" "$LOCAL_DASHBOARD_URL/healthz" "dashboard-tunnel" "$dashboard_tunnel_log" "$dashboard_tunnel_pid_file" dashboard_tunnel_healthy
+  elif dev_remote_safebox_configured; then
+    ensure_managed_tunnel "Dev Safebox" "$LOCAL_SAFEBOX_URL" "$LOCAL_SAFEBOX_URL/healthz" "safebox-tunnel" "$tunnel_log" "$tunnel_pid_file" safebox_tunnel_healthy
   fi
 
   load_operator_env
