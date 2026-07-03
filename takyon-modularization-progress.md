@@ -48,6 +48,15 @@ Independent file clusters, each in its own worktree off origin/main, verified + 
 
 **ALL FOUR CHROME SIGN-ONS COMPLETE + verified.** Every credential captured via clipboard→secrets (never in chat), each proven live (dev DB 59 migrations / Auth0 token+GET clients / DO regions read / Shopify store reachable). Secrets staged in `scratchpad/devsecrets/` for dev-safebox seeding.
 
+## Stage 3b/UC3 — `takyon env create dev` ran CLEAN end-to-end (2026-07-03) · ✅ backend half proven live
+**PROOF WIRED IN (the real CLI, real dev twins, exit 0):** `TAKYON_HOST_ROLE=safebox TAKYON_HOME=.takyon-dev-safebox ./takyon env create dev` →
+- **database ✓** — topology applied via the NEW `admin_dsn_alias` (privileged postgres DSN; found live: Postgres refuses admin-option grants from `takyon_migration` itself — "cannot be granted back to your own grantor") + **59 migrations replayed** through the tracked rail against `four-manifold-dev`. Re-runs need NO admin credential (topology skipped + `run_migrations`' topology assertion is the guard).
+- **auth0 ✓** — REAL dev application **`Takyon Dev` created on the tenant** (client_id `PVt3eGBtqV2hq6S7KWUp8Ihg43n1xxQ0`), idempotent on re-run ("already exists"). Powered by the NEW durable mgmt credential: `TAKYON_AUTH0_MGMT_CLIENT_ID/SECRET` (M2M pair) → token **minted per run** via client_credentials (raw ~24h `TAKYON_AUTH0_MGMT_TOKEN` still accepted for one-shots). Status never mints.
+- **safebox ✓ / stripe · honest skip** — loopback `webhook_url` now SKIPS with the true local-dev rail (`stripe listen --forward-to …`, Stripe's own 400 guidance) instead of erroring every run; a public dev twin registers normally.
+- **Dev safebox stood up as a real store** — `.takyon-dev-safebox/.env` (chmod 600) holding 14 aliases: 5 dev DSNs (migration/operator/runtime/safebox-authority/admin), Auth0 tenant domain + M2M pair, DO token, Stripe TEST key (sk_test-verified before copy), shared capped provider keys. Local authority = the same safebox model prod uses (sensitive values never leave the store over /v1/env).
+- **Operator-CLI hook-up gap CLOSED:** `./takyon env …` and `./takyon migrate` previously fell through to CEO chat (registered only on `takyon-cli`); now thin-delegated in `plugins/takyon/cli.py` `run_takyon_command` — one affordance, both entrypoints — with wiring tests pinning it. 26 provisioner tests green.
+- _Known nuance (documented, pre-existing design): `load_takyon_env`'s candidate chain also reads the repo-adjacent `.env`, so shared alias names resolve from the union. Dev isolation is enforced by the `TAKYON_DEV_*` alias names + the prod-literal assertion on every resolved target, not by env-file exclusivity. The dev RUNTIME slice mapping (TAKYON_ENV=dev → DEV DSNs) is the remaining UC3 runtime half (local dev dashboard proof)._
+
 ## Sign-on moments (the only Chrome help needed) — 🔑
 
 Three, all one-time-ever:

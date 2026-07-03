@@ -52,6 +52,11 @@ database:
   # this via safebox.first_env_backed_value(...) on the operator-authority host — never os.environ.
   # FAIL-CLOSED message names this exact alias when absent.
   dsn_alias: TAKYON_DEV_MIGRATION_DATABASE_URL
+  # Alias holding the dev project's ADMIN DSN (postgres role). topology.sql is privileged work
+  # (CREATEROLE + WITH ADMIN OPTION grants) and Postgres refuses those grants from takyon_migration
+  # itself. When absent, topology is skipped and run_migrations' topology assertion is the guard —
+  # so re-runs on an already-bootstrapped dev DB need no admin credential.
+  admin_dsn_alias: TAKYON_DEV_ADMIN_DATABASE_URL
   # Roles are prod-named (topology.sql). No relaxed/legacy role flags in dev — the gate stays enforced.
   apply_topology: true
   apply_migrations: true
@@ -84,16 +89,23 @@ safebox:
       - AUTH0_SECRET
 
 # (c) Auth0 dev APPLICATION — a new application (client id/secret, callback URLs) in the SAME tenant,
-#     created via the Management API. The mgmt token is the one credential the safebox does NOT yet
-#     hold (plan §2.6): a human deposits TAKYON_AUTH0_MGMT_TOKEN once, then this is autonomous.
+#     created via the Management API. The mgmt credential is the one the safebox does NOT hold by
+#     default (plan §2.6): a human deposits it once, then this is autonomous. Two accepted shapes:
+#     the DURABLE one is an M2M app authorized for the Management API (client id+secret; the
+#     provisioner mints a fresh ~24h token per run via client_credentials), the transient one is a
+#     raw mgmt token. FAIL-CLOSED naming the exact aliases when neither is deposited.
 auth0:
   enabled: true
-  # Alias holding the Auth0 Management API token (Applications: create/read scope). FAIL-CLOSED
-  # naming this exact alias when absent.
+  # Durable deposit (preferred): M2M application credentials, minted per run.
+  mgmt_client_id_alias: TAKYON_AUTH0_MGMT_CLIENT_ID
+  mgmt_client_secret_alias: TAKYON_AUTH0_MGMT_CLIENT_SECRET
+  # Transient deposit (one-shot runs): a raw Management API token (~24h expiry).
   mgmt_token_alias: TAKYON_AUTH0_MGMT_TOKEN
-  # Alias holding the Auth0 tenant domain (e.g. dev-xxxx.us.auth0.com). Public config, still resolved
-  # from the safebox so the manifest stays value-free.
-  domain_alias: AUTH0_DOMAIN
+  # Alias holding the CANONICAL Auth0 tenant domain (e.g. dev-xxxx.us.auth0.com). Deliberately NOT
+  # the shared AUTH0_DOMAIN alias — that one holds the dashboard's custom login domain
+  # (login.fourmanifold.com), and Management API token minting requires the canonical tenant domain
+  # as its audience. Public config, still resolved from the safebox so the manifest stays value-free.
+  domain_alias: TAKYON_AUTH0_TENANT_DOMAIN
   application_name: "Takyon Dev"
   # Callback / logout URLs the dev application allows. Local-serving defaults; extend for a public twin.
   callback_urls:

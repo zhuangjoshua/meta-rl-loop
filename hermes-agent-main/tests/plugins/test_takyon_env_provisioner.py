@@ -82,7 +82,9 @@ def test_dev_manifest_parses_and_has_required_keys():
     assert data["database"]["enabled"] is True
     # dev domains must be *.dev / localtest, never the prod company base or dashboard host.
     assert data["domains"]["company_base"] == "dev.coscale.app"
-    # Auth0 mgmt token alias is the one-time-deposit credential named in the plan.
+    # Auth0 mgmt credential aliases: the durable M2M pair (preferred) + the transient raw token.
+    assert data["auth0"]["mgmt_client_id_alias"] == "TAKYON_AUTH0_MGMT_CLIENT_ID"
+    assert data["auth0"]["mgmt_client_secret_alias"] == "TAKYON_AUTH0_MGMT_CLIENT_SECRET"
     assert data["auth0"]["mgmt_token_alias"] == "TAKYON_AUTH0_MGMT_TOKEN"
 
 
@@ -160,7 +162,8 @@ def test_create_fails_closed_naming_missing_db_alias():
     assert http.calls == []  # no DB / provider work happened
 
 
-def test_create_auth0_fails_closed_naming_mgmt_token():
+def test_create_auth0_fails_closed_naming_mgmt_credential():
+    """No token AND no client pair deposited → blocked, naming BOTH accepted deposit shapes."""
     manifest = {
         "name": "dev",
         "domains": {"company_base": "dev.coscale.app"},
@@ -169,12 +172,87 @@ def test_create_auth0_fails_closed_naming_mgmt_token():
         "auth0": {"enabled": True, "mgmt_token_alias": "TAKYON_AUTH0_MGMT_TOKEN", "domain_alias": "AUTH0_DOMAIN"},
     }
     http = FakeHttp()
-    prov = _provisioner(manifest=manifest, safebox_values={}, http=http)
+    prov = _provisioner(
+        manifest=manifest, safebox_values={"AUTH0_DOMAIN": "dev-x.us.auth0.com"}, http=http
+    )
     receipt = prov._create_auth0()
     assert receipt.status == ep.STATUS_BLOCKED
-    assert receipt.deposit == "TAKYON_AUTH0_MGMT_TOKEN"
+    assert receipt.deposit == "TAKYON_AUTH0_MGMT_CLIENT_ID"
+    assert "TAKYON_AUTH0_MGMT_CLIENT_ID" in receipt.detail
     assert "TAKYON_AUTH0_MGMT_TOKEN" in receipt.detail
     assert http.calls == []
+
+
+def test_create_auth0_blocked_on_missing_domain_before_any_call():
+    http = FakeHttp()
+    prov = _provisioner(
+        manifest={
+            "name": "dev",
+            "domains": {"company_base": "dev.coscale.app"},
+            "database": {"enabled": False},
+            "safebox": {"enabled": False},
+            "auth0": {"enabled": True},
+        },
+        safebox_values={},
+        http=http,
+    )
+    receipt = prov._create_auth0()
+    assert receipt.status == ep.STATUS_BLOCKED
+    assert receipt.deposit == "AUTH0_DOMAIN"
+    assert http.calls == []
+
+
+def test_auth0_create_mints_token_from_client_credentials():
+    """The durable deposit shape: M2M client id+secret → a fresh mgmt token is minted per run via
+    client_credentials, then the app is created. A second call reuses the minted token (one mint)."""
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {"enabled": False},
+        "safebox": {"enabled": False},
+        "auth0": {"enabled": True, "application_name": "Takyon Dev", "domain_alias": "AUTH0_DOMAIN"},
+    }
+    http = FakeHttp(responses={
+        ("POST", "/oauth/token"): {"access_token": "minted-tok", "expires_in": 86400},
+        ("GET", "/clients"): [],
+        ("POST", "/clients"): {"client_id": "cid_new"},
+    })
+    prov = _provisioner(
+        manifest=manifest,
+        safebox_values={
+            "AUTH0_DOMAIN": "dev-x.us.auth0.com",
+            "TAKYON_AUTH0_MGMT_CLIENT_ID": "m2m-id",
+            "TAKYON_AUTH0_MGMT_CLIENT_SECRET": "m2m-secret",
+        },
+        http=http,
+    )
+    receipt = prov._create_auth0()
+    assert receipt.status == ep.STATUS_CREATED
+    assert receipt.data["client_id"] == "cid_new"
+    mint_calls = [(m, u) for m, u in http.calls if "/oauth/token" in u]
+    assert len(mint_calls) == 1 and mint_calls[0][0] == "POST"
+    # The mint happened BEFORE any Management API call.
+    assert http.calls[0][1].endswith("/oauth/token")
+
+    # Second step in the same run: the minted token is reused, no second mint.
+    prov._create_auth0()
+    assert len([(m, u) for m, u in http.calls if "/oauth/token" in u]) == 1
+
+
+def test_status_treats_client_pair_as_present_without_minting():
+    http = FakeHttp()
+    prov = _provisioner(
+        safebox_values={
+            "TAKYON_AUTH0_MGMT_CLIENT_ID": "m2m-id",
+            "TAKYON_AUTH0_MGMT_CLIENT_SECRET": "m2m-secret",
+        },
+        http=http,
+    )  # real dev.yaml manifest
+    result = prov.status()
+    auth0 = next(r for r in result.receipts if r.resource == "auth0")
+    assert auth0.status == ep.STATUS_EXISTS
+    assert "minted per run" in auth0.detail
+    assert http.calls == []  # status never mints
 
 
 def test_create_stripe_fails_closed_missing_key():
@@ -244,11 +322,11 @@ def test_stripe_create_is_idempotent_when_webhook_exists():
         "domains": {"company_base": "dev.coscale.app"},
         "database": {"enabled": False},
         "safebox": {"enabled": False},
-        "stripe": {"enabled": True, "webhook_url": "http://localhost:9119/api/webhooks/stripe",
+        "stripe": {"enabled": True, "webhook_url": "https://dev.coscale.app/api/webhooks/stripe",
                    "enabled_events": ["checkout.session.completed"]},
     }
     http = FakeHttp(responses={
-        ("GET", "/webhook_endpoints"): {"data": [{"id": "we_1", "url": "http://localhost:9119/api/webhooks/stripe"}]},
+        ("GET", "/webhook_endpoints"): {"data": [{"id": "we_1", "url": "https://dev.coscale.app/api/webhooks/stripe"}]},
     })
     prov = _provisioner(manifest=manifest, safebox_values={"STRIPE_SECRET_KEY": "sk_test_ABC"}, http=http)
     receipt = prov._create_stripe()
@@ -387,3 +465,146 @@ def test_takyon_env_destroy_has_force_flag():
     assert args is not None
     assert getattr(args, "env_action") == "destroy"
     assert getattr(args, "force") is True
+
+
+def test_operator_cli_routes_env_to_cmd_env_not_ceo(monkeypatch):
+    """`./takyon env status dev` (plugins.takyon.cli — the operator entrypoint) must delegate to the
+    canonical takyon_cli.env handler, never fall through to the CEO chat path."""
+    from plugins.takyon import cli as op_cli
+
+    seen: dict[str, object] = {}
+
+    def fake_cmd_env(args):
+        seen["env_action"] = getattr(args, "env_action", None)
+        seen["env_name"] = getattr(args, "env_name", None)
+        seen["force"] = getattr(args, "force", None)
+        return 0
+
+    import takyon_cli.env as env_mod
+    monkeypatch.setattr(env_mod, "cmd_env", fake_cmd_env)
+    result = op_cli.run_takyon_command(["env", "status", "dev"])
+    assert result is None
+    assert seen == {"env_action": "status", "env_name": "dev", "force": False}
+
+
+def test_operator_cli_routes_migrate_to_cmd_migrate_not_ceo(monkeypatch):
+    from plugins.takyon import cli as op_cli
+
+    seen: dict[str, object] = {}
+
+    def fake_cmd_migrate(args):
+        seen["dry_run"] = getattr(args, "dry_run", None)
+        seen["migrate_type"] = getattr(args, "migrate_type", "unset")
+        return 0
+
+    import takyon_cli.migrate as migrate_mod
+    monkeypatch.setattr(migrate_mod, "cmd_migrate", fake_cmd_migrate)
+    result = op_cli.run_takyon_command(["migrate", "--dry-run"])
+    assert result is None
+    assert seen == {"dry_run": True, "migrate_type": None}
+
+
+def test_stripe_loopback_webhook_url_skips_with_cli_guidance():
+    """Stripe refuses loopback endpoint URLs, so local dev SKIPS registration and points at the
+    Stripe CLI forwarding rail — no provider call, no recurring error."""
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {"enabled": False},
+        "safebox": {"enabled": False},
+        "stripe": {"enabled": True, "webhook_url": "http://localhost:9119/api/webhooks/stripe"},
+    }
+    http = FakeHttp()
+    prov = _provisioner(manifest=manifest, safebox_values={"STRIPE_SECRET_KEY": "sk_test_ABC"}, http=http)
+    receipt = prov._create_stripe()
+    assert receipt.status == ep.STATUS_SKIPPED
+    assert "stripe listen --forward-to" in receipt.detail
+    assert "STRIPE_WEBHOOK_SECRET" in receipt.detail
+    assert http.calls == []
+
+
+class _FakeConn:
+    def __init__(self, dsn, log):
+        self.dsn = dsn
+        self.log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *a, **k):
+        self.log.append((self.dsn, str(sql)[:60]))
+        return self
+
+
+def _fake_psycopg(log):
+    import types
+
+    def connect(dsn, **kw):
+        return _FakeConn(dsn, log)
+
+    return types.SimpleNamespace(connect=connect)
+
+
+def test_database_topology_runs_on_admin_dsn_not_migration_dsn(monkeypatch):
+    """topology.sql is privileged (CREATEROLE/admin-option) — it must run on the ADMIN DSN; the
+    migrations run on the migration DSN."""
+    import sys as _sys
+
+    log: list[tuple[str, str]] = []
+    monkeypatch.setitem(_sys.modules, "psycopg", _fake_psycopg(log))
+    from plugins.takyon.db import runner as db_runner
+    monkeypatch.setattr(db_runner, "run_migrations", lambda conn: ["0001_x.sql"])
+
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {
+            "enabled": True,
+            "dsn_alias": "TAKYON_DEV_MIGRATION_DATABASE_URL",
+            "admin_dsn_alias": "TAKYON_DEV_ADMIN_DATABASE_URL",
+        },
+        "safebox": {"enabled": False},
+    }
+    prov = _provisioner(manifest=manifest, safebox_values={
+        "TAKYON_DEV_MIGRATION_DATABASE_URL": "postgresql://takyon_migration@dev-host/db",
+        "TAKYON_DEV_ADMIN_DATABASE_URL": "postgresql://postgres@dev-host/db",
+    })
+    receipt = prov._create_database()
+    assert receipt.status == ep.STATUS_CREATED
+    topo_dsns = {dsn for dsn, sql in log if "role" in sql.lower() or "topology" in sql.lower() or "grant" in sql.lower()}
+    # the admin connection ran topology; the migration DSN never received the topology SQL
+    admin_used = [dsn for dsn, _ in log if dsn.startswith("postgresql://postgres@")]
+    assert admin_used, "admin DSN was never connected"
+    assert "topology applied (admin DSN)" in receipt.detail
+
+
+def test_database_without_admin_dsn_skips_topology_and_says_so(monkeypatch):
+    import sys as _sys
+
+    log: list[tuple[str, str]] = []
+    monkeypatch.setitem(_sys.modules, "psycopg", _fake_psycopg(log))
+    from plugins.takyon.db import runner as db_runner
+    monkeypatch.setattr(db_runner, "run_migrations", lambda conn: [])
+
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {
+            "enabled": True,
+            "dsn_alias": "TAKYON_DEV_MIGRATION_DATABASE_URL",
+            "admin_dsn_alias": "TAKYON_DEV_ADMIN_DATABASE_URL",
+        },
+        "safebox": {"enabled": False},
+    }
+    prov = _provisioner(manifest=manifest, safebox_values={
+        "TAKYON_DEV_MIGRATION_DATABASE_URL": "postgresql://takyon_migration@dev-host/db",
+    })
+    receipt = prov._create_database()
+    assert receipt.status == ep.STATUS_EXISTS
+    assert "not re-applied" in receipt.detail
+    assert "run_migrations asserts" in receipt.detail
+    # only the migration DSN was connected
+    assert {dsn for dsn, _ in log} == {"postgresql://takyon_migration@dev-host/db"}

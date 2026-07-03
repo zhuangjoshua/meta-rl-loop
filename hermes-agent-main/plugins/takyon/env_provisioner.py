@@ -191,6 +191,9 @@ class EnvironmentProvisioner:
             from . import safebox as safebox_mod  # type: ignore[no-redef]
         self.safebox = safebox_mod
         self.http = http or UrllibTransport()
+        # Per-run cache for a Management API token minted from client credentials, so one run's
+        # create+destroy mints at most once. Never persisted.
+        self._auth0_minted_token: str = ""
 
     # -- receipts I/O ------------------------------------------------------------------------
 
@@ -283,8 +286,19 @@ class EnvironmentProvisioner:
         # HARD: the dev DSN must not be a prod literal (reuses environment.PROD_LITERALS).
         self._assert_not_prod(dsn)
 
+        # topology.sql is PRIVILEGED work (CREATEROLE + admin-option grants) — it must run as the
+        # project's admin role (postgres), never as takyon_migration: Postgres refuses "ADMIN option
+        # cannot be granted back to your own grantor". So topology resolves its OWN admin DSN alias.
+        # When the admin DSN is absent, topology is skipped — safely, because run_migrations calls
+        # assert_migration_topology first and fails loudly (naming the exact SQL) if the topology is
+        # actually missing. Re-runs on a bootstrapped DB therefore need no admin credential at all.
+        admin_dsn_alias = str(cfg.get("admin_dsn_alias") or "").strip()
+        admin_dsn = self._resolve_alias(admin_dsn_alias) if admin_dsn_alias else ""
+        if admin_dsn:
+            self._assert_not_prod(admin_dsn)
+
         # === REAL DB SIDE EFFECT (gated behind the resolved, non-prod DSN) ===
-        # Consumes the DB rail verbatim: topology.sql then run_migrations as takyon_migration.
+        # Consumes the DB rail verbatim: topology.sql (admin DSN) then run_migrations (migration DSN).
         try:
             import psycopg
             from .db import runner as db_runner
@@ -292,11 +306,21 @@ class EnvironmentProvisioner:
             return StepReceipt("database", STATUS_ERROR, "create", f"db rail unavailable: {exc}")
 
         applied: list[str] = []
+        topology_note = "topology skipped (disabled in manifest)"
         try:
+            if cfg.get("apply_topology", True):
+                if admin_dsn:
+                    with psycopg.connect(admin_dsn, autocommit=True, prepare_threshold=None) as admin_conn:
+                        admin_conn.execute("select set_config('statement_timeout', '0', false)")
+                        admin_conn.execute(db_runner.topology_sql_path().read_text())
+                    topology_note = "topology applied (admin DSN)"
+                else:
+                    topology_note = (
+                        f"topology not re-applied (admin DSN alias {admin_dsn_alias or 'unset'} absent); "
+                        "run_migrations asserts the existing topology"
+                    )
             with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
                 conn.execute("select set_config('statement_timeout', '0', false)")
-                if cfg.get("apply_topology", True):
-                    conn.execute(db_runner.topology_sql_path().read_text())
                 if cfg.get("apply_migrations", True):
                     # run_migrations calls assert_migration_topology internally, then applies every
                     # db/migrations/*.sql idempotently. Re-running is a safe no-op.
@@ -308,7 +332,7 @@ class EnvironmentProvisioner:
             "database",
             STATUS_CREATED if applied else STATUS_EXISTS,
             "create",
-            f"applied topology + {len(applied)} migration(s) to dev control plane",
+            f"{topology_note}; {len(applied)} migration(s) replayed on the dev control plane",
             data={"migrations_applied": len(applied), "last_migration": applied[-1] if applied else None},
         )
 
@@ -357,22 +381,72 @@ class EnvironmentProvisioner:
             data={"present": present, "url_set": bool(url)},
         )
 
-    # (c) Auth0 dev application via the Management API (token resolved via safebox; fail-closed if absent).
+    # -- Auth0 Management API credential (token OR client-credentials mint) -------------------
+
+    def _resolve_auth0_mgmt_token(self, cfg: Mapping[str, Any], domain: str) -> tuple[str, StepReceipt | None]:
+        """Resolve a Management API bearer for the tenant, durable-first.
+
+        Two accepted deposits, in order:
+        1. ``mgmt_token_alias`` (default TAKYON_AUTH0_MGMT_TOKEN) — a raw token. Auth0 mgmt tokens
+           expire in ~24h, so this path suits one-shot runs only.
+        2. ``mgmt_client_id_alias``/``mgmt_client_secret_alias`` (default TAKYON_AUTH0_MGMT_CLIENT_ID/
+           _SECRET) — an M2M application authorized for the Management API. A fresh token is minted
+           per run via the client_credentials grant, so the deposit never goes stale.
+
+        Returns ``(token, None)`` or ``("", blocked_receipt)``. The mint goes through ``self.http``
+        so tests drive it with a fake and no network.
+        """
+        token_alias = str(cfg.get("mgmt_token_alias") or "TAKYON_AUTH0_MGMT_TOKEN").strip()
+        token = self._resolve_alias(token_alias)
+        if token:
+            return token, None
+        if self._auth0_minted_token:
+            return self._auth0_minted_token, None
+
+        id_alias = str(cfg.get("mgmt_client_id_alias") or "TAKYON_AUTH0_MGMT_CLIENT_ID").strip()
+        secret_alias = str(cfg.get("mgmt_client_secret_alias") or "TAKYON_AUTH0_MGMT_CLIENT_SECRET").strip()
+        client_id = self._resolve_alias(id_alias)
+        client_secret = self._resolve_alias(secret_alias)
+        if not client_id or not client_secret:
+            return "", StepReceipt(
+                "auth0", STATUS_BLOCKED, "create",
+                f"Auth0 Management API credential not deposited: deposit {id_alias}+{secret_alias} "
+                f"(an M2M app authorized for the Management API — durable, minted per run) or "
+                f"{token_alias} (a raw ~24h token)",
+                deposit=id_alias if not client_id else secret_alias,
+            )
+        try:
+            minted = self.http.request(
+                "POST",
+                f"https://{domain.rstrip('/')}/oauth/token",
+                headers={"Content-Type": "application/json"},
+                body={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "audience": f"https://{domain.rstrip('/')}/api/v2/",
+                },
+            )
+        except Exception as exc:
+            return "", StepReceipt(
+                "auth0", STATUS_ERROR, "create", f"auth0 mgmt token mint failed: {exc}"
+            )
+        token = str((minted or {}).get("access_token") or "").strip()
+        if not token:
+            return "", StepReceipt(
+                "auth0", STATUS_ERROR, "create",
+                "auth0 mgmt token mint returned no access_token",
+            )
+        self._auth0_minted_token = token
+        return token, None
+
+    # (c) Auth0 dev application via the Management API (credential resolved via safebox; fail-closed if absent).
     def _create_auth0(self) -> StepReceipt:
         cfg = self.manifest.get("auth0") or {}
         if not cfg.get("enabled", False):
             return StepReceipt("auth0", STATUS_DISABLED, "create", "auth0 twin disabled in manifest")
 
-        mgmt_alias = str(cfg.get("mgmt_token_alias") or "TAKYON_AUTH0_MGMT_TOKEN").strip()
         domain_alias = str(cfg.get("domain_alias") or "AUTH0_DOMAIN").strip()
-        token = self._resolve_alias(mgmt_alias)
-        if not token:
-            return StepReceipt(
-                "auth0", STATUS_BLOCKED, "create",
-                f"Auth0 Management API token not deposited (alias {mgmt_alias}); "
-                "deposit TAKYON_AUTH0_MGMT_TOKEN once to enable autonomous dev-app creation",
-                deposit=mgmt_alias,
-            )
         domain = self._resolve_alias(domain_alias)
         if not domain:
             return StepReceipt(
@@ -381,6 +455,9 @@ class EnvironmentProvisioner:
                 deposit=domain_alias,
             )
         self._assert_not_prod(domain)
+        token, blocked = self._resolve_auth0_mgmt_token(cfg, domain)
+        if blocked is not None:
+            return blocked
 
         app_name = str(cfg.get("application_name") or f"Takyon {self.name.title()}").strip()
         base = f"https://{domain.rstrip('/')}/api/v2"
@@ -508,6 +585,18 @@ class EnvironmentProvisioner:
         if not webhook_url:
             return StepReceipt("stripe", STATUS_ERROR, "create", "manifest stripe.webhook_url is required")
         self._assert_not_prod(webhook_url)
+        # Stripe refuses loopback endpoint URLs outright ("URL must be publicly accessible"; its 400
+        # points at the Stripe CLI). The REAL local-dev webhook rail is CLI forwarding, which mints
+        # its own signing secret — so a loopback webhook_url skips registration with that guidance
+        # instead of erroring every run. A public dev twin sets a public webhook_url and registers.
+        webhook_host = (urllib.parse.urlsplit(webhook_url).hostname or "").lower()
+        if webhook_host in {"localhost", "127.0.0.1", "::1"}:
+            return StepReceipt(
+                "stripe", STATUS_SKIPPED, "create",
+                f"webhook_url {webhook_url} is loopback — Stripe cannot deliver there; for local dev "
+                "run `stripe listen --forward-to " + webhook_url.split("://", 1)[-1] + "` (the CLI "
+                "prints the whsec_… to deposit as STRIPE_WEBHOOK_SECRET)",
+            )
         events = list(cfg.get("enabled_events") or [])
 
         base = "https://api.stripe.com/v1"
@@ -668,8 +757,27 @@ class EnvironmentProvisioner:
                             data={"missing": missing})
             )
 
+        a0_cfg = self.manifest.get("auth0") or {}
+        if not a0_cfg.get("enabled", False):
+            receipts.append(StepReceipt("auth0", STATUS_DISABLED, "status", "disabled in manifest"))
+        else:
+            # Either deposit shape counts as present: a raw token, or the durable M2M client pair
+            # (minted per run). Status never mints — presence of the pair is the signal.
+            token_alias = str(a0_cfg.get("mgmt_token_alias") or "TAKYON_AUTH0_MGMT_TOKEN").strip()
+            id_alias = str(a0_cfg.get("mgmt_client_id_alias") or "TAKYON_AUTH0_MGMT_CLIENT_ID").strip()
+            secret_alias = str(a0_cfg.get("mgmt_client_secret_alias") or "TAKYON_AUTH0_MGMT_CLIENT_SECRET").strip()
+            has_token = bool(self._resolve_alias(token_alias))
+            has_pair = bool(self._resolve_alias(id_alias)) and bool(self._resolve_alias(secret_alias))
+            has = has_token or has_pair
+            receipts.append(
+                StepReceipt("auth0", STATUS_EXISTS if has else STATUS_BLOCKED, "status",
+                            ("mgmt client credentials present (minted per run)" if has_pair
+                             else "mgmt token present") if has
+                            else f"mgmt credential not deposited (alias {id_alias}+{secret_alias} or {token_alias})",
+                            deposit=None if has else id_alias)
+            )
+
         for resource, alias_key, default_alias in (
-            ("auth0", "mgmt_token_alias", "TAKYON_AUTH0_MGMT_TOKEN"),
             ("cloudflare", "token_alias", "CLOUDFLARE_API_TOKEN"),
             ("droplet", "token_alias", "TAKYON_DO_API_TOKEN"),
         ):
@@ -775,15 +883,16 @@ class EnvironmentProvisioner:
         cfg = self.manifest.get("auth0") or {}
         if not cfg.get("enabled", False):
             return StepReceipt("auth0", STATUS_DISABLED, "destroy", "auth0 twin disabled in manifest")
-        mgmt_alias = str(cfg.get("mgmt_token_alias") or "TAKYON_AUTH0_MGMT_TOKEN").strip()
         domain_alias = str(cfg.get("domain_alias") or "AUTH0_DOMAIN").strip()
-        token = self._resolve_alias(mgmt_alias)
         domain = self._resolve_alias(domain_alias)
-        if not token or not domain:
+        if not domain:
             return StepReceipt("auth0", STATUS_BLOCKED, "destroy",
-                               "auth0 mgmt token/domain absent; cannot remove dev application",
-                               deposit=mgmt_alias if not token else domain_alias)
+                               "auth0 tenant domain absent; cannot remove dev application",
+                               deposit=domain_alias)
         self._assert_not_prod(domain)
+        token, blocked = self._resolve_auth0_mgmt_token(cfg, domain)
+        if blocked is not None:
+            return StepReceipt("auth0", blocked.status, "destroy", blocked.detail, deposit=blocked.deposit)
         app_name = str(cfg.get("application_name") or f"Takyon {self.name.title()}").strip()
         base = f"https://{domain.rstrip('/')}/api/v2"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}

@@ -4893,6 +4893,30 @@ def run_takyon_command(
     if command == "connect":
         return "Connector setup is handled by provider-specific skills/tools. Use `takyon secret set KEY VALUE` for credentials and keep business state in Hermes Takyon."
 
+    if command == "env":
+        # Thin delegation to the canonical Stage-3b handler (takyon_cli.env.cmd_env) so the
+        # operator entrypoint and takyon-cli expose ONE env affordance. cmd_env prints its own
+        # receipt lines and raises SystemExit(1) on blocked/errored steps (the fail-closed signal).
+        from types import SimpleNamespace
+
+        from takyon_cli.env import cmd_env
+
+        cmd_env(SimpleNamespace(
+            env_action=(argv[1].lower() if len(argv) >= 2 else None),
+            env_name=(argv[2] if len(argv) >= 3 else ""),
+            force="--force" in argv[3:],
+        ))
+        return None
+
+    if command == "migrate":
+        # Same single-affordance rule for the tracked migration rail (takyon_cli.migrate.cmd_migrate).
+        from types import SimpleNamespace
+
+        from takyon_cli.migrate import cmd_migrate
+
+        cmd_migrate(SimpleNamespace(dry_run="--dry-run" in argv[1:], migrate_type=None))
+        return None
+
     if command in {"app-server", "api"}:
         return (
             "The standalone product app API server is retired. "
