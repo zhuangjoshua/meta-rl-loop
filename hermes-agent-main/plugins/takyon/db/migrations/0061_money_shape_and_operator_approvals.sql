@@ -1,4 +1,4 @@
--- 0060_money_shape_and_operator_approvals.sql
+-- 0061_money_shape_and_operator_approvals.sql
 -- UC4 (modularization plan §2.7) — the money-shape gate + the minimal operator-approval rail.
 --
 -- Two additive, non-destructive changes, both OPERATOR/CEO-plane (plan authoring, not subuser
@@ -41,6 +41,21 @@ begin
             check (money_shape is null
                    or money_shape in ('subscription', 'credit_packs', 'cogs_passthrough'));
     end if;
+end $$;
+
+-- The operator-plane writers hold COLUMN-level UPDATE on businesses (0038/0044 revoked table-level
+-- UPDATE and granted an enumerated column list, excluding owner_user_id). Those enumerations run
+-- BEFORE this file in a fresh lexical replay, so the new column must grant itself here — otherwise
+-- the shape write is permission-denied until the NEXT full replay.
+do $$
+declare
+    wr text;
+begin
+    foreach wr in array array['takyon_runtime', 'takyon_operator_runtime'] loop
+        if exists (select 1 from pg_roles where rolname = wr) then
+            execute format('grant update (money_shape) on public.businesses to %I', wr);
+        end if;
+    end loop;
 end $$;
 
 -- 2. The minimal operator-approval rail (archetypes §1.5). Idempotent on the payload digest so a

@@ -132,15 +132,21 @@ def set_money_shape(
     "switch to credit packs" cannot flip the record silently.
 
     Setting the shape to the value it already holds is a no-op that never requires approval (declaring
-    the default explicitly is free). Returns the persisted shape.
+    the default explicitly is free). Unknown business fails loud — a shape declaration must never
+    "succeed" against a phantom row. Returns the persisted shape.
     """
     target = normalize_money_shape(money_shape, allow_empty=False)
+    exists = conn.execute(
+        "select 1 from businesses where slug = %s", (business_slug,)
+    ).fetchone()
+    if exists is None:
+        raise MoneyShapeError(f"unknown business {business_slug!r}; cannot declare a money shape")
     current = get_money_shape(conn, business_slug)
     if target == current:
         # Idempotent re-declaration of the same shape — never gated.
         with conn.transaction():
             conn.execute(
-                "update businesses set money_shape = %s where slug = %s",
+                "update businesses set money_shape = %s, updated_at = now() where slug = %s",
                 (target, business_slug),
             )
         return target
@@ -154,7 +160,7 @@ def set_money_shape(
                 {"from": current, "to": target},
             )
         conn.execute(
-            "update businesses set money_shape = %s where slug = %s",
+            "update businesses set money_shape = %s, updated_at = now() where slug = %s",
             (target, business_slug),
         )
     return target
@@ -250,19 +256,37 @@ def request_approval(
     """Create (or return, idempotent on the payload digest) a PENDING approval record. The CEO calls
     this when it needs a shape change; the operator decides it out of band (`/approve`, dashboard
     button — the archetypes §1.5 affordances). Re-requesting the SAME payload returns the existing
-    record rather than minting a duplicate. Returns the record."""
+    record rather than minting a duplicate.
+
+    Terminal-but-not-decision states RE-OPEN: a 'consumed' or 'expired' record flips back to
+    'pending' with a fresh TTL (each approval still authorizes exactly one change — a re-opened
+    record needs a fresh operator approval before it can be consumed again). Without this, the
+    unique (business, action_kind, payload_digest) key would permanently block any future identical
+    change once its one approval was spent. Live decisions are never reset: 'pending' and 'approved'
+    are returned as-is, and a 'denied' record stays denied (the operator said no; a new ask is an
+    operator conversation, not a silent re-open). Returns the record."""
     digest = payload_digest(payload)
     ttl = max(1, int(ttl_seconds))
     meta = json.dumps(dict(metadata or {}), ensure_ascii=False, sort_keys=True)
     with conn.transaction():
-        # ON CONFLICT touches only metadata (idempotent re-request); it NEVER resets the status or a
-        # prior decision, so re-requesting an already-approved/denied change does not reopen it.
         row = conn.execute(
             "insert into operator_approvals "
             "(business_slug, action_kind, payload_digest, status, actor, expires_at, metadata_json) "
             "values (%s, %s, %s, 'pending', %s, now() + make_interval(secs => %s), %s::jsonb) "
             "on conflict (business_slug, action_kind, payload_digest) do update set "
-            "  metadata_json = excluded.metadata_json "
+            "  metadata_json = excluded.metadata_json, "
+            "  status = case when operator_approvals.status in ('consumed', 'expired') "
+            "                then 'pending' else operator_approvals.status end, "
+            "  actor = case when operator_approvals.status in ('consumed', 'expired') "
+            "               then excluded.actor else operator_approvals.actor end, "
+            "  expires_at = case when operator_approvals.status in ('consumed', 'expired') "
+            "                    then excluded.expires_at else operator_approvals.expires_at end, "
+            "  requested_at = case when operator_approvals.status in ('consumed', 'expired') "
+            "                      then now() else operator_approvals.requested_at end, "
+            "  decided_at = case when operator_approvals.status in ('consumed', 'expired') "
+            "                    then null else operator_approvals.decided_at end, "
+            "  consumed_at = case when operator_approvals.status in ('consumed', 'expired') "
+            "                     then null else operator_approvals.consumed_at end "
             f"returning {_APPROVAL_COLUMNS}",
             (business_slug, action_kind, digest, actor, ttl, meta),
         ).fetchone()

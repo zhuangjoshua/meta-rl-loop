@@ -13,6 +13,8 @@ provides_tools:
   - business_upsert_business
   - business_delete_business
   - business_set_mode
+  - business_set_money_shape
+  - business_decide_operator_approval
   - business_set_work_focus
   - business_create_workspace
   - business_write_file

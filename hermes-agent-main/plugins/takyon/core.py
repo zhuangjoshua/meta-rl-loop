@@ -8436,15 +8436,21 @@ def _refuse_on_autonomous_wake(action: str) -> None:
         )
 
 
-def _money_shape_error() -> type[Exception]:
-    """The `money_shape.MoneyShapeError` base class, lazily imported so a raised money-shape violation
-    (the Roomier-hole refusal) surfaces as a clean TakyonError at the plan-write choke point. Lazy so
-    the SQLite-only path pays no import cost."""
+def _money_shape_leaf():
+    """The `money_shape` leaf module (per-business money-shape record + shape gate + the minimal
+    operator-approval affordance), lazily imported like the other Phase-5/6 leaves so import cost is
+    paid only on the paths that use it."""
     try:
         from . import money_shape as _money_shape
     except ImportError:  # pragma: no cover - alternate load path
         from plugins.takyon import money_shape as _money_shape
-    return _money_shape.MoneyShapeError
+    return _money_shape
+
+
+def _money_shape_error() -> type[Exception]:
+    """The `money_shape.MoneyShapeError` base class, lazily imported so a raised money-shape violation
+    (the Roomier-hole refusal) surfaces as a clean TakyonError at the plan-write choke point."""
+    return _money_shape_leaf().MoneyShapeError
 
 
 def _refuse_product_file_edit_on_autonomous_wake(path: Any) -> None:
@@ -14034,6 +14040,10 @@ def _enforce_business_work_focus(op: dict[str, Any], focus: str) -> None:
         "business.delete",
         "business.focus.set",
         "business.mode.set",
+        # Money-shape governance (UC4): declaring/approving the business's money shape is scope
+        # governance like mode/focus, not product or marketing work — never focus-blocked.
+        "business.money_shape.set",
+        "operator_approval.decide",
         "business.upsert",
         "control.set",
         "cron.ensure_ceo_wakeup",
@@ -18457,6 +18467,8 @@ class TakyonStore:
             "business.focus.set",
             "business.upsert",
             "business.mode.set",
+            "business.money_shape.set",
+            "operator_approval.decide",
             "conversation.message.record",
             "conversation.message.status.set",
             "conversation.thread.upsert",
@@ -19069,6 +19081,192 @@ class TakyonStore:
                 "preserved_live_state": preserve_live_state,
             }
 
+        if action == "business.money_shape.set":
+            # UC4 (plan §2.7): declaring/changing the business's money shape is the EXPLICIT
+            # operator-approval affordance the plan-write gate points at. Same shape → idempotent
+            # declare. Different shape → consume an approved `money_shape_change` approval or fail
+            # into the request path (a pending approval record, idempotent on the payload digest).
+            # The shape is never flipped silently by a plan write — this op is the only flipper.
+            leaf = _money_shape_leaf()
+            task_kind = _active_operator_task_kind()
+            try:
+                target = leaf.normalize_money_shape(op.get("money_shape"), allow_empty=False)
+            except leaf.InvalidMoneyShape as exc:
+                raise TakyonError(str(exc)) from exc
+            with self._leaf_conn(conn) as raw:
+                current = leaf.get_money_shape(raw, slug)
+            if target == current:
+                try:
+                    with self._leaf_conn(conn) as raw:
+                        leaf.set_money_shape(
+                            raw, slug, target, require_approval=False, actor=actor
+                        )
+                except leaf.MoneyShapeError as exc:
+                    raise TakyonError(str(exc)) from exc
+                self._record_event(
+                    conn,
+                    scope=f"business:{slug}",
+                    business_slug=slug,
+                    event_type=action,
+                    payload={
+                        "money_shape": target,
+                        "changed": False,
+                        "approval_status": "not_required",
+                        "task_kind": task_kind,
+                        "reason": reason,
+                        "actor": actor,
+                    },
+                )
+                return {
+                    "action": action,
+                    "business": slug,
+                    "money_shape": target,
+                    "changed": False,
+                    "approval_status": "not_required",
+                }
+            approval_payload = {"from": current, "to": target}
+            try:
+                with self._leaf_conn(conn) as raw:
+                    leaf.set_money_shape(raw, slug, target, require_approval=True, actor=actor)
+            except leaf.ApprovalRequired:
+                # No approved record for exactly this change: land/refresh the PENDING request
+                # (idempotent on the payload digest; a denied record stays denied) and report the
+                # truth — the shape did NOT change.
+                with self._leaf_conn(conn) as raw:
+                    approval = leaf.request_approval(
+                        raw,
+                        slug,
+                        leaf.SHAPE_CHANGE_ACTION_KIND,
+                        approval_payload,
+                        actor=actor,
+                        metadata={"reason": reason, "task_kind": task_kind},
+                    )
+                self._record_event(
+                    conn,
+                    scope=f"business:{slug}",
+                    business_slug=slug,
+                    event_type=action,
+                    payload={
+                        "money_shape": current,
+                        "requested_money_shape": target,
+                        "changed": False,
+                        "approval_status": approval.status,
+                        "task_kind": task_kind,
+                        "reason": reason,
+                        "actor": actor,
+                    },
+                )
+                if approval.status == "denied":
+                    next_step = (
+                        "the operator DENIED this exact change; the shape stays "
+                        f"'{current}'. A new ask is an operator conversation, not a retry."
+                    )
+                else:
+                    next_step = (
+                        "an operator must approve it (business_decide_operator_approval with "
+                        f"action_kind='{leaf.SHAPE_CHANGE_ACTION_KIND}' and this exact payload), "
+                        "then re-run business_set_money_shape to consume the approval."
+                    )
+                return {
+                    "action": action,
+                    "business": slug,
+                    "money_shape": current,
+                    "requested_money_shape": target,
+                    "changed": False,
+                    "approval_status": approval.status,
+                    "approval_action_kind": leaf.SHAPE_CHANGE_ACTION_KIND,
+                    "approval_payload": approval_payload,
+                    "next_step": next_step,
+                }
+            except leaf.MoneyShapeError as exc:
+                raise TakyonError(str(exc)) from exc
+            self._record_event(
+                conn,
+                scope=f"business:{slug}",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    "money_shape": target,
+                    "previous_money_shape": current,
+                    "changed": True,
+                    "approval_status": "consumed",
+                    "task_kind": task_kind,
+                    "reason": reason,
+                    "actor": actor,
+                },
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "money_shape": target,
+                "previous_money_shape": current,
+                "changed": True,
+                "approval_status": "consumed",
+            }
+
+        if action == "operator_approval.decide":
+            # The operator decision half of the approval affordance (archetypes §1.5 spec; built
+            # once here, future consumers reuse it). Flips exactly one PENDING record to
+            # approved/denied; refuses when there is nothing pending for the named payload.
+            leaf = _money_shape_leaf()
+            action_kind = str(op.get("action_kind") or "").strip() or leaf.SHAPE_CHANGE_ACTION_KIND
+            approve_value = op.get("approve")
+            if not isinstance(approve_value, bool):
+                raise TakyonError(
+                    "approve must be explicitly true or false — an operator decision, never a default"
+                )
+            approval_payload = op.get("payload")
+            if approval_payload in (None, "", {}):
+                # Money-shape convenience: derive the exact payload from the live record + the
+                # requested target, so "approve the switch to credit_packs" needs no digest bookkeeping.
+                target_raw = op.get("money_shape")
+                if action_kind == leaf.SHAPE_CHANGE_ACTION_KIND and target_raw not in (None, ""):
+                    try:
+                        target = leaf.normalize_money_shape(target_raw, allow_empty=False)
+                    except leaf.InvalidMoneyShape as exc:
+                        raise TakyonError(str(exc)) from exc
+                    with self._leaf_conn(conn) as raw:
+                        current = leaf.get_money_shape(raw, slug)
+                    approval_payload = {"from": current, "to": target}
+                else:
+                    raise TakyonError(
+                        "payload is required: the exact pending change being decided"
+                    )
+            if not isinstance(approval_payload, dict):
+                raise TakyonError("payload must be an object (the exact pending change being decided)")
+            try:
+                with self._leaf_conn(conn) as raw:
+                    approval = leaf.decide_approval(
+                        raw,
+                        slug,
+                        action_kind,
+                        approval_payload,
+                        approve=approve_value,
+                        actor=actor,
+                    )
+            except leaf.MoneyShapeError as exc:
+                raise TakyonError(str(exc)) from exc
+            self._record_event(
+                conn,
+                scope=f"business:{slug}",
+                business_slug=slug,
+                event_type=action,
+                payload={
+                    "action_kind": action_kind,
+                    "approval_payload": approval_payload,
+                    "approval_status": approval.status,
+                    "reason": reason,
+                    "actor": actor,
+                },
+            )
+            return {
+                "action": action,
+                "business": slug,
+                "action_kind": action_kind,
+                "approval_payload": approval_payload,
+                "approval_status": approval.status,
+            }
+
         if action == "app.plan.upsert":
             plan_key = _file_slug(str(op.get("plan_key") or "plan"), "plan")
             tier = str(op.get("tier") or plan_key or "paid")
@@ -19096,7 +19294,7 @@ class TakyonStore:
                 except ImportError:  # pragma: no cover - alternate load path
                     from plugins.takyon import plan_composition as _plan_composition
                 try:
-                    composition = _plan_composition.composition_from_spec(composition_spec)
+                    composition = _plan_composition.composition_from_dict(composition_spec)
                 except _plan_composition.CompositionError as exc:
                     raise TakyonError(f"invalid plan composition: {exc}") from exc
                 try:
@@ -22061,6 +22259,36 @@ def handle_business_set_mode(args: dict, **_: Any) -> str:
         "action": "business.mode.set",
         "business": args.get("business"),
         "mode": args.get("mode"),
+    }
+    return _commit_tool(args, operation)
+
+
+def handle_business_set_money_shape(args: dict, **_: Any) -> str:
+    # No wake ban here by design: declaring the shape it already holds is a receipted no-op,
+    # requesting a change only lands a PENDING approval record (no authority), and an actual flip
+    # consumes an approval the operator explicitly granted for exactly this change (digest-bound,
+    # TTL-bound, single-consume). The operator decision itself (business_decide_operator_approval)
+    # is what a wake can never mint.
+    operation = {
+        "action": "business.money_shape.set",
+        "business": args.get("business"),
+        "money_shape": args.get("money_shape"),
+    }
+    return _commit_tool(args, operation)
+
+
+def handle_business_decide_operator_approval(args: dict, **_: Any) -> str:
+    # An autonomous wake must never mint operator authority: the decision affordance is refused on
+    # wakes outright. On operator-present turns the decision is explicit, receipted, and bound to
+    # one exact payload digest.
+    _refuse_on_autonomous_wake("operator approvals")
+    operation = {
+        "action": "operator_approval.decide",
+        "business": args.get("business"),
+        "action_kind": args.get("action_kind"),
+        "payload": args.get("payload"),
+        "money_shape": args.get("money_shape"),
+        "approve": args.get("approve"),
     }
     return _commit_tool(args, operation)
 
@@ -34424,6 +34652,59 @@ TAKYON_TOOL_DEFINITIONS = [
             "Set business mode.",
             {"business": _BUSINESS_PROP, "mode": {"type": "string", "description": "live"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "mode", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_set_money_shape",
+        "description": (
+            "Declare or change this business's money shape — 'subscription' (recurring monthly "
+            "plans; the default), 'credit_packs', or 'cogs_passthrough'. Every plan write is "
+            "validated against the declared shape (a subscription business can never mint a "
+            "credit-pack offer, on any turn). Declaring the shape it already holds is an idempotent "
+            "no-op. CHANGING the shape requires an operator approval: without one this records a "
+            "PENDING money_shape_change approval (idempotent on the exact from->to payload) and "
+            "reports next steps; with an approved record it consumes the approval (single-use, "
+            "TTL-bound) and flips the shape, receipted."
+        ),
+        "handler": handle_business_set_money_shape,
+        "schema": _schema(
+            "business_set_money_shape",
+            "Declare/change the business money shape (changes need operator approval).",
+            {
+                "business": _BUSINESS_PROP,
+                "money_shape": {"type": "string", "enum": ["subscription", "credit_packs", "cogs_passthrough"], "description": "The target money shape."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "money_shape", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_decide_operator_approval",
+        "description": (
+            "Operator decision on a pending approval record (approve=true or deny=false). Flips "
+            "exactly one PENDING operator_approvals record — idempotent on (action_kind, exact "
+            "payload) — to approved/denied; refuses when nothing is pending for that payload. "
+            "Refused outright on autonomous wakes: a wake can never mint operator authority. For "
+            "action_kind='money_shape_change' you may pass money_shape instead of payload and the "
+            "exact from->to payload is derived from the live record."
+        ),
+        "handler": handle_business_decide_operator_approval,
+        "schema": _schema(
+            "business_decide_operator_approval",
+            "Approve or deny a pending operator approval.",
+            {
+                "business": _BUSINESS_PROP,
+                "action_kind": {"type": "string", "description": "Approval kind; defaults to money_shape_change."},
+                "payload": {"type": "object", "description": "The exact pending change being decided (e.g. {\"from\": \"subscription\", \"to\": \"credit_packs\"})."},
+                "money_shape": {"type": "string", "enum": ["subscription", "credit_packs", "cogs_passthrough"], "description": "Convenience for money_shape_change: the requested target shape; the from->to payload is derived."},
+                "approve": {"type": "boolean", "description": "true approves, false denies. Required; never defaulted."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "approve", "idempotency_key"],
         ),
     },
     {

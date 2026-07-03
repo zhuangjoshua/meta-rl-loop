@@ -801,6 +801,8 @@ def _recompose_business_for_shop(
             composition,
             tier=plan.tier,
             currency=plan.currency,
+            # Labels a money-shape refusal truthfully (the gate itself never relaxes by kind).
+            money_shape_task_kind="shopify_webhook",
             source="takyon_shopify_webhook",
             notes=(
                 f"Recomposed from {plan.plan_key}: shopify_store fee "
