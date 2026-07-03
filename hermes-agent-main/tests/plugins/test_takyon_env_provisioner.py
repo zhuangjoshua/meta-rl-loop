@@ -1507,6 +1507,9 @@ def test_enroll_is_idempotent_when_fully_enrolled(tmp_path, monkeypatch):
     assert remote.env_writes == []
     assert remote.token_updates == []
     assert not any("create role" in s or "alter role" in s for _d, s, _p in state["log"])
+    # The registry stamp IS re-asserted (the f6 upsert clobbers capabilities on every re-run).
+    stamps = [p for _d, s, p in state["log"] if s.startswith("update worker_pools set capabilities")]
+    assert len(stamps) == 2
 
 
 def test_enroll_blocks_naming_admin_alias_when_mint_needed(tmp_path, monkeypatch):
@@ -1547,8 +1550,10 @@ def test_revoke_node_drops_role_and_prunes_token(tmp_path, monkeypatch):
     assert receipt.status == ep.STATUS_DELETED
     admin_sql = [(s, p) for dsn, s, p in state["log"] if "postgres@dev-host" in dsn]
     assert ("select pg_terminate_backend(pid) from pg_stat_activity where usename = %s", (_R2,)) in admin_sql
-    assert any(s == f"drop owned by {_R2}" for s, _p in admin_sql)
+    assert any(s == f"revoke takyon_app_runtime from {_R2}" for s, _p in admin_sql)
     assert any(s == f"drop role if exists {_R2}" for s, _p in admin_sql)
+    # No DROP OWNED: the scoped role owns nothing, and the Supabase admin login cannot run it.
+    assert not any(s.startswith("drop owned by") for s, _p in admin_sql)
     assert _R2 not in state["roles"] and _R1 in state["roles"]
     assert len(remote.token_updates) == 1
     assert '"revoke": ["takyon-dev-subuser-2"]' in remote.token_updates[0]

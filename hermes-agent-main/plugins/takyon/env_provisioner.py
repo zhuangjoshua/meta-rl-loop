@@ -1466,16 +1466,20 @@ class EnvironmentProvisioner:
         return "rotated" if exists else "created"
 
     def _drop_scoped_db_role(self, admin_conn, role: str) -> bool:
-        """Terminate the role's live backends and DROP it (revoking DB access instantly).
-        Returns True when the role existed."""
+        """Revoke the role's membership, terminate its live backends, and DROP it — DB access is
+        refused instantly. No ``DROP OWNED``: the scoped role owns nothing by construction (it
+        never DDLs), and Supabase's admin login holds ADMIN on the role WITHOUT its privileges,
+        so DROP OWNED refuses there (verified live 2026-07-03). If a stray owned object ever
+        exists, DROP ROLE fails LOUDLY naming it — fail closed, never a silent shrug. Returns
+        True when the role existed."""
         self._assert_sql_safe_credential(role, "x")
         exists = admin_conn.execute("select 1 from pg_roles where rolname = %s", (role,)).fetchone()
         if not exists:
             return False
+        admin_conn.execute(f"revoke {self._APP_PLANE_BASE_ROLE} from {role}")
         admin_conn.execute(
             "select pg_terminate_backend(pid) from pg_stat_activity where usename = %s", (role,)
         )
-        admin_conn.execute(f"drop owned by {role}")
         admin_conn.execute(f"drop role if exists {role}")
         return True
 
@@ -1576,6 +1580,14 @@ class EnvironmentProvisioner:
                         and node_tokens.get(node) == state["token_sha"]
                     )
                     if role_exists and state["dsn_scoped"] and token_enrolled:
+                        # Re-stamp even on the no-op path: the (f6) node_registry upsert replaces
+                        # capabilities wholesale on every create() re-run, so the credential ids
+                        # must be re-asserted or the registry forgets which creds a node holds.
+                        self._stamp_node_credentials(mig, node, {
+                            "db_role": role,
+                            "safebox_token_id": state["token_sha"][:12],
+                            "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        })
                         results.append({
                             "node": node, "db_role": role, "status": "exists",
                             "safebox_token_id": state["token_sha"][:12],
