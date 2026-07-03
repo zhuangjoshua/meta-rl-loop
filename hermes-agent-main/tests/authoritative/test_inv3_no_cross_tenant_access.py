@@ -80,6 +80,9 @@ _RLS_MIGRATION_PATH = (
 _RLS_BYPASS_HARDENING_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0043_harden_rls_bypass_role_gate.sql"
 )
+_RLS_BYPASS_POOLER_DEFAULT_PATH = (
+    Path(core.__file__).with_name("db") / "migrations" / "0060_rls_bypass_trusted_default_on.sql"
+)
 _AUTHORITY_SPLIT_ROLES_PATH = (
     Path(core.__file__).with_name("db") / "migrations" / "0044_authority_split_login_roles.sql"
 )
@@ -313,11 +316,15 @@ def test_rls_enables_and_forces_row_level_security_on_app_tables():
 
 
 def test_rls_policies_scope_every_op_by_business_slug_and_default_bypass_off():
-    """Each policy gates on the request-bound business slug, and bypass DEFAULTS TO OFF
-    (only an explicit '1'/'true'/'on' enables it). An app route that forgets to set bypass
-    is therefore denied, not allowed (fail-closed)."""
+    """Each policy gates on the request-bound business slug, and for app/customer roles the
+    tenant boundary is fail-closed regardless of the GUC: 0043's current_user gate excludes them
+    outright, so "forgot to set bypass" was never the thing keeping an app route out. The unset
+    default for the surviving trusted-role conjunct is owned by 0060 (see the dedicated pooler
+    test below): trusted authority logins default to bypass so transaction pooling cannot flap
+    them, while an EXPLICIT '0' still demotes."""
     sql = _RLS_MIGRATION_PATH.read_text(encoding="utf-8").lower()
-    # Bypass helper defaults the unset setting to '0' (off) — fail-closed.
+    # The original 0027 helper text stays fail-closed ('0' when unset) — historical migrations are
+    # immutable; 0060 supersedes the live definition for trusted roles only.
     assert "coalesce(nullif(current_setting('takyon.rls_bypass', true), ''), '0')" in sql
     assert "in ('1', 'true', 'on')" in sql
     # Tenant scoping is keyed on the request-bound slug, present on the policies.
@@ -325,6 +332,34 @@ def test_rls_policies_scope_every_op_by_business_slug_and_default_bypass_off():
     # All four CRUD verbs are covered on the core customer-record table.
     for verb in ("for select", "for insert", "for update", "for delete"):
         assert verb in sql, verb
+
+
+def test_rls_bypass_trusted_default_survives_transaction_pooling():
+    """0060: the LIVE takyon_rls_bypass() defaults trusted logins to bypass when the GUC is
+    unset/empty, because the production DSN is a transaction-mode pooler where session-scope SETs
+    land on arbitrary pooled backends (2026-07-03 incident: nondeterministic control-plane denial).
+    The tenant boundary stays fail-closed where it matters: the current_user gate still excludes
+    app/customer roles regardless of any GUC value, and an EXPLICIT '0' (app scope / ledger gates)
+    still demotes."""
+    assert _RLS_BYPASS_POOLER_DEFAULT_PATH.exists(), _RLS_BYPASS_POOLER_DEFAULT_PATH
+    sql = _RLS_BYPASS_POOLER_DEFAULT_PATH.read_text(encoding="utf-8").lower()
+
+    assert "create or replace function takyon_rls_bypass()" in sql
+    # Trusted-role conjunct: unset/empty defaults to '1' (deterministic under pooling)…
+    assert " and coalesce(nullif(current_setting('takyon.rls_bypass', true), ''), '1')" in sql
+    assert "in ('1', 'true', 'on')" in sql
+    # …while the role gate keeps app/customer roles excluded regardless of the GUC.
+    assert "current_user in" in sql
+    trusted_block = sql.split("current_user in", 1)[1].split(")", 1)[0]
+    for allowed in (
+        "takyon_runtime",
+        "takyon_operator_runtime",
+        "takyon_safebox_authority",
+        "takyon_migration",
+    ):
+        assert f"'{allowed}'" in trusted_block
+    assert "'takyon_app'" not in trusted_block
+    assert "'takyon_app_runtime'" not in trusted_block
 
 
 def test_rls_bypass_requires_allowed_current_user_not_guc_alone():

@@ -998,9 +998,18 @@ class _PostgresPool:
             try:
                 conn.rollback()
                 conn.execute("reset role")
+                # Deliberately NO takyon.rls_bypass scrub here. The live DSN is Supabase's
+                # transaction-mode pooler (6543): a session-scope SET from this handback lands on an
+                # arbitrary pooled server backend and poisons it for every other trusted-plane
+                # client (2026-07-03 incident: intermittent empty control-plane reads / safebox
+                # unknown_business). Bypass state is owned by role defaults
+                # (db/migrations/0059_rls_bypass_role_defaults.sql) plus
+                # configure_takyon_pg_session on every acquire. The three app-scope GUCs are still
+                # zeroed as a conservative handback: '' is their fail-closed default, so the write
+                # is harmless wherever it lands, and app scoping only ever binds
+                # transaction-locally (_pg_app_scope) anyway.
                 conn.execute(
                     "select"
-                    " set_config('takyon.rls_bypass', '0', false),"
                     " set_config('takyon.rls_business_slug', '', false),"
                     " set_config('takyon.rls_app_user_id', '', false),"
                     " set_config('takyon.rls_session_hash', '', false)"
