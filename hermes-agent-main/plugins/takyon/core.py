@@ -30186,7 +30186,7 @@ def _reddit_ads_request(
     timeout: int = 60,
 ) -> dict[str, Any]:
     try:
-        return composio_distribution.reddit_proxy_request(
+        resp = composio_distribution.reddit_proxy_request(
             method=method,
             endpoint=path,
             connected_account_id=str(cfg.get("composio_connected_account_id") or "").strip() or None,
@@ -30195,6 +30195,19 @@ def _reddit_ads_request(
         )
     except Exception as exc:
         raise TakyonError(f"Reddit Ads {method.upper()} {path} failed via Composio: {exc}") from exc
+    # The Composio proxy RETURNS the upstream HTTP status inside its envelope instead of raising,
+    # so a Reddit 4xx/5xx flowed through here as a normal-looking dict and downstream parsing read
+    # an empty object — e.g. a campaign create rejection surfaced as "created with no id" and a
+    # partial_failed receipt with no cause (2026-07-03 launch incident). Fail loudly with Reddit's
+    # own error body so the receipt names the real rejection.
+    status = resp.get("status") if isinstance(resp, dict) else None
+    if isinstance(status, int) and not (200 <= status < 300):
+        try:
+            detail = json.dumps(resp.get("data"), ensure_ascii=False)[:500]
+        except Exception:
+            detail = str(resp.get("data"))[:500]
+        raise TakyonError(f"Reddit Ads {method.upper()} {path} returned HTTP {status}: {detail}")
+    return resp
 
 
 def _reddit_ads_data(payload: Any) -> Any:
