@@ -17,12 +17,12 @@ _Last updated: 2026-07-03, by Claude. This file is updated as stages move._
 | 3+3b RuntimeContext + env provisioner | ✅ | f9fcc518 + 3b | dev Supabase bootstrapped prod-shaped; `takyon env create dev` clean |
 | UC3 runtime (dev slices + dashboard) | ✅ | b94c0435 | dev dashboard 200 off the dev control plane |
 | 4a subuser unblock | ✅ | ee6f8a4f | 3 hosts, workers=2 live |
-| **4b dev replica split + LB** | **✅ dev-first (prod split after soak)** | **a48f22e5** | **2 replicas + LB 138.197.50.136 live on DO; ~4.5s failover; destroy dry-verified** |
+| **4b dev replica split + LB** | **✅ dev-first + full hardening (prod split after soak)** | **a48f22e5·28899906·3bb8c48e** | **2 replicas + LB 138.197.50.136 live on DO; graceful drain = 1505/1505 req 0-loss; per-replica scoped/revocable creds proven (revoke→FATAL+401 no restart); destroy dry-verified** |
 | **4c safebox headroom** | **✅ measured** | (receipts) | **6× target concurrency, 0 errors — no broker replicas needed** |
 | 5 monthly-only slice | ✅ | 1638ac90± | live refusal probes on prod |
 | 5 composition engine | ✅ | 264d346d | derived pricing + margin invariant, 31 tests |
-| 5 money-shape gate | ✅ | 3bb96086 | DEPLOYED all 3 hosts + 0062 migrated; gate live at the plan choke point |
-| 5 Shopify wiring | ✅ | 7620fc20 | deployed; webhook live fail-closed 503-unconfigured; acceptance run next |
+| 5 money-shape gate | ✅ **re-verified live 2026-07-03** | 3bb96086 | 0062 applied on prod DB (money_shape col + operator_approvals tbl both exist); source on both hosts; **LIVE PROBE: real biz `cyclewise` reads default subscription, subscription write allowed, credit_packs write REFUSED** — Roomier hole closed on prod |
+| 5 Shopify wiring | ✅ wired+deployed · ⬜ live acceptance | 7620fc20 | deployed; webhook live fail-closed 503-unconfigured. Live Composio-connect→plan-fee→recompose acceptance run = **still pending** (agent hit a credits wall; not yet run) |
 | 6 RuntimeRail routing half | ✅ | a87ee4ea | live smoke on prod subuser dispatcher |
 | 6 BuildStep half | ⬜ | — | sequenced after canonicalization spine |
 | Test debt (5 suites) | ✅ | e1538bfb | 146→255 passing, zero wave regressions |
