@@ -36,31 +36,10 @@ OPERATOR_USER_ID_OVERRIDE=""
 #   scripts/takyon-operator-prod.sh sai                    # = console 4 --user-id <sai> --shells 4
 #   scripts/takyon-operator-prod.sh josh 10 foo --shells 2 # name + your own console args
 #   scripts/takyon-operator-prod.sh console 4 --user sai --shells 4   # or as a --user flag
-# This case is the source of truth -- add a teammate with ONE line. Additions can also live
-# out-of-band in scripts/operator-users.conf ("<name> <uuid>" per line, '#' comments ok).
-resolve_operator_alias() {
-  local name="$1"
-  case "$name" in
-    sai)  printf '%s' 'c351355a-34f4-4885-8c60-429bf79bd7a5' ;;
-    josh) printf '%s' '150e4213-4006-4dc1-9cf3-ca7ab3b4696f' ;;
-    *)
-      local conf="$ROOT/scripts/operator-users.conf" n u
-      if [[ -f "$conf" ]]; then
-        while read -r n u _; do
-          [[ -z "$n" || "${n#\#}" != "$n" ]] && continue
-          [[ "$n" == "$name" ]] && { printf '%s' "$u"; return 0; }
-        done < "$conf"
-      fi
-      printf '%s' "$name"  # not a known profile -> pass through (raw UUIDs still work)
-      ;;
-  esac
-}
-
-# True only when the argument is a KNOWN profile name (resolves to a different value).
-is_operator_alias() {
-  local resolved; resolved="$(resolve_operator_alias "$1")"
-  [[ -n "$1" && "$resolved" != "$1" ]]
-}
+# resolve_operator_alias / is_operator_alias live in scripts/operator-users.sh — ONE source of
+# truth shared with the dev rail, so `sai`/`josh` mean the same person in dev and prod.
+# shellcheck source=scripts/operator-users.sh
+source "$ROOT/scripts/operator-users.sh"
 SSH_SERVER_ALIVE_INTERVAL="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_INTERVAL:-15}"
 SSH_SERVER_ALIVE_COUNT_MAX="${TAKYON_OPERATOR_SSH_SERVER_ALIVE_COUNT_MAX:-3}"
 CONSOLE_TUNNEL_MONITOR_SECONDS="${TAKYON_OPERATOR_TUNNEL_MONITOR_SECONDS:-5}"
