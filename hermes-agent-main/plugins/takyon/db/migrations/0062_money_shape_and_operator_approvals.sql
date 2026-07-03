@@ -1,4 +1,4 @@
--- 0061_money_shape_and_operator_approvals.sql
+-- 0062_money_shape_and_operator_approvals.sql
 -- UC4 (modularization plan §2.7) — the money-shape gate + the minimal operator-approval rail.
 --
 -- Two additive, non-destructive changes, both OPERATOR/CEO-plane (plan authoring, not subuser
