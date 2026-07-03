@@ -17,7 +17,8 @@ _Last updated: 2026-07-03, by Claude. This file is updated as stages move._
 | 3+3b RuntimeContext + env provisioner | ✅ | f9fcc518 + 3b | dev Supabase bootstrapped prod-shaped; `takyon env create dev` clean |
 | UC3 runtime (dev slices + dashboard) | ✅ | b94c0435 | dev dashboard 200 off the dev control plane |
 | 4a subuser unblock | ✅ | ee6f8a4f | 3 hosts, workers=2 live |
-| **4b dev replica split + LB** | **✅ dev E2E RE-PROVEN LIVE 2026-07-03 (209/209 zero-loss drain); prod split next** | **a48f22e5·28899906·3bb8c48e** | **2 replicas + LB 138.197.50.136 live on DO; graceful drain = 1505/1505 req 0-loss; per-replica scoped/revocable creds proven (revoke→FATAL+401 no restart); destroy dry-verified** |
+| **4b dev replica split + LB** | **✅ dev proven + PROD ADDITIVE SPLIT LIVE 2026-07-03 (not cut over)** | **a48f22e5·28899906·3bb8c48e** | dev: 209/209 zero-loss drain, per-replica revocable creds. **PROD: replica `takyon-subuser-2` (206.81.10.173, prod VPC, ZERO operator authority in /proc verified) + DO LB `24.144.65.246` fronting both boxes — LB serves app-plane 200, session gate 401, operator plane 404. Additive only (Cloudflare NOT flipped → your sign-on). Caddyfile /healthz landed (e05bff56)** |
+| **dev operator rail = exact mirror** | **✅ LANDED 77d36ef2 — CLI money rail works** | **31f13a97·77d36ef2** | `takyon-operator-dev.sh josh/console N` = prod code, target-switched. **3-layer money rail fixed + PROVEN: billing.reserve(josh, 5000c/50× over allowance) → Reservation, was InsufficientBalance** (L1 safebox token, L2 Codex account-provisioning, L3 gate-disabled in safebox+worker mirroring prod) |
 | **4c safebox headroom** | **✅ measured** | (receipts) | **6× target concurrency, 0 errors — no broker replicas needed** |
 | 5 monthly-only slice | ✅ | 1638ac90± | live refusal probes on prod |
 | 5 composition engine | ✅ | 264d346d | derived pricing + margin invariant, 31 tests |
