@@ -13112,12 +13112,16 @@ def _publish_public_asset_to_live_build_artifact(
         # workspace-artifact write above is invisible at the edge and the asset 404s — which made a
         # live Reddit/ad launch hard-fail in _stage_business_public_asset's reachability probe. Write
         # the SAME bytes to the SAME live build_id the edge currently serves, reusing the canonical
-        # key scheme (storage.public_site_object_key) and R2StorageBackend.put — do not invent a new
-        # key. Best-effort: if R2 is unconfigured we no-op, and any R2 error is recorded without
-        # failing the workspace-artifact publish above (reachability is still verified by the caller).
+        # key scheme (storage.public_site_object_key) via the authority-aware backend seam — do not
+        # invent a new key, and do NOT construct R2StorageBackend directly: runtime planes hold no
+        # R2 keys under the split-authority posture (secrets live on the safebox), so the direct
+        # constructor fails with missing R2_S3_ACCESS_KEY_ID/SECRET on every plane while
+        # r2_configured() legitimately passes (2026-07-03 reddit-launch incident). Best-effort: if
+        # R2 is unconfigured we no-op, and any R2 error is recorded without failing the
+        # workspace-artifact publish above (reachability is still verified by the caller).
         if storage.r2_configured():
             try:
-                storage.R2StorageBackend().put(
+                storage.public_r2_backend().put(
                     storage.public_site_object_key(_slugify(business), build_id, rel),
                     data,
                     digest=digest,

@@ -1094,6 +1094,18 @@ def delete_public_site_from_r2(
     }
 
 
+def public_r2_backend() -> "StorageBackend":
+    """The PUBLIC R2 product-site backend under the current authority mode.
+
+    One selection seam for out-of-module callers (public-asset staging etc.): the brokered
+    :class:`SafeboxStorageBackend` when this runtime plane defers storage secrets to the safebox,
+    the direct :class:`R2StorageBackend` when local ``R2_*`` credentials are provisioned. Callers
+    gate with :func:`r2_configured` first; under remote storage authority that check needs only
+    endpoint+bucket, so constructing :class:`R2StorageBackend` directly would demand local keys the
+    runtime planes deliberately do not hold (2026-07-03 reddit-launch incident)."""
+    return SafeboxStorageBackend("r2") if _remote_storage_authority_enabled() else R2StorageBackend()
+
+
 def write_public_site_to_r2(
     slug: str,
     build_id: str,
