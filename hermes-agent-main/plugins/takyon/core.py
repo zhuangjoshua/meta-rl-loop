@@ -26912,6 +26912,48 @@ def _shopify_active_connection(store, business: str) -> tuple[dict[str, Any], di
     return row, connection
 
 
+def _shopify_catalog_commit(
+    store,
+    *,
+    business: str,
+    shop_domain: str,
+    receipt_payloads: list,
+    idempotency_key: str,
+) -> tuple[str, str]:
+    """Project the buyable catalog from receipts (newest first) and mirror it to the business
+    workspace at `product/shopify-catalog.json` through the canonical `store.commit`
+    artifact.write (receipted, path-contained). The product-site build bakes this file into a
+    storefront section whose Buy buttons are Shopify cart permalinks — customers pay on
+    Shopify's hosted checkout, so the subuser plane gains NOTHING. Returns (relpath, error):
+    a mirror failure never fails the push (events + the store remain truth); it is surfaced."""
+    try:
+        from . import shopify_util
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import shopify_util
+    try:
+        catalog = shopify_util.catalog_from_receipts(
+            receipt_payloads, business_slug=business, shop_domain=shop_domain
+        )
+        store.commit(
+            scope=f"business:{business}",
+            operations=[
+                {
+                    "action": "artifact.write",
+                    "business": business,
+                    "path": shopify_util.SHOPIFY_CATALOG_RELPATH,
+                    "content": _json_dumps(catalog) + "\n",
+                    "mode": "replace",
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:catalog",
+            reason="mirror the buyable shopify catalog from event receipts",
+            actor="agent",
+        )
+        return shopify_util.SHOPIFY_CATALOG_RELPATH, ""
+    except Exception as exc:  # noqa: BLE001 - mirror is best-effort; receipts stay truth
+        return "", _truncate_text(str(exc), 300)
+
+
 def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
     """Commerce EXECUTOR against the business's CONNECTED Shopify store (operator ruling
     2026-07-03, "try Shopify"): create ONE product (default variant + price, optional images)
@@ -26989,20 +27031,26 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         # search — the 2026-07-04 live acceptance proved Shopify's products SEARCH index lags
         # creates by seconds, so a same-title rerun under a new key would otherwise duplicate.
         # A receipt match is verified against the store BY ID (read-your-writes) before adopting.
+        # No LIMIT: this list is the catalog-projection source, so truncation would silently
+        # drop older products from the public mirror. Volume is bounded by push cadence (one
+        # event per push/adopt/tombstone), never by customer traffic.
         with store._connect() as conn:
             receipt_rows = conn.execute(
-                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type = ? "
-                "ORDER BY created_at DESC LIMIT 100",
-                (business, "shopify.product.create"),
+                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type IN "
+                "(?, ?) ORDER BY created_at DESC",
+                (business, "shopify.product.create", "shopify.product.tombstone"),
             ).fetchall()
         receipt_payloads = [
             _json_loads(r["payload_json"] if isinstance(r, Mapping) else r[0], {})
             for r in (receipt_rows or [])
         ]
         candidate_ids = shopify_util.match_product_receipts(
-            receipt_payloads, title=title, shop_domain=shop_domain
+            [p for p in receipt_payloads if not p.get("tombstone")],
+            title=title,
+            shop_domain=shop_domain,
         )
         existing = None
+        dead_ids: list[str] = []
         for candidate_id in candidate_ids:
             try:
                 existing = shopify_util.get_product(
@@ -27017,9 +27065,50 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                 ) from exc
             if existing is not None:
                 break
+            dead_ids.append(candidate_id)
+        tombstone_payloads: list[dict[str, Any]] = []
+        if dead_ids:
+            # The probe PROVED the store deleted these — record tombstones immediately (they
+            # are true observations regardless of what the rest of this call does), so the
+            # catalog projection can never republish a dead Buy button.
+            with store._connect() as conn:
+                for dead_id in dead_ids:
+                    payload = {
+                        "tombstone": True,
+                        "shop_domain": shop_domain,
+                        "product_id": dead_id,
+                        "reason": "product-by-id probe returned null (deleted on the store)",
+                        "idempotency_key": idempotency_key,
+                    }
+                    tombstone_payloads.append(payload)
+                    store._record_event(
+                        conn,
+                        scope=f"business:{business}/app",
+                        business_slug=business,
+                        event_type="shopify.product.tombstone",
+                        payload=payload,
+                    )
         if candidate_ids:
             if existing is not None:
                 product_id = str(existing.get("id") or candidate_id)
+                variant_id, variant_price = shopify_util.first_variant(existing)
+                adopted_status = str(existing.get("status") or "").lower()
+                event_payload = {
+                    "shop_domain": shop_domain,
+                    "product_id": product_id,
+                    "handle": str(existing.get("handle") or ""),
+                    "title": str(existing.get("title") or title),
+                    "status": adopted_status,
+                    "price": variant_price or price,
+                    "variant_id": variant_id,
+                    "preview_url": str(existing.get("onlineStorePreviewUrl") or ""),
+                    "deduped": True,
+                    "dedup_source": "local_receipt",
+                    "media_warnings": [],
+                    "idempotency_key": idempotency_key,
+                    "reason": args.get("reason") or "create shopify product",
+                    "actor": args.get("actor") or "agent",
+                }
                 result = {
                     "success": True,
                     "action": "business_shopify_create_product",
@@ -27031,7 +27120,9 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                     "product_numeric_id": shopify_util._gid_numeric(product_id),
                     "handle": str(existing.get("handle") or ""),
                     "title": str(existing.get("title") or title),
-                    "status": str(existing.get("status") or "").lower(),
+                    "status": adopted_status,
+                    "variant_id": variant_id,
+                    "price": variant_price or price,
                     "online_store_preview_url": str(
                         existing.get("onlineStorePreviewUrl") or ""
                     ),
@@ -27042,15 +27133,37 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                         "exists; adopted it instead of duplicating."
                     ),
                 }
+                permalink = shopify_util.cart_permalink(shop_domain, variant_id)
+                if permalink:
+                    result["cart_permalink"] = permalink
                 numeric = result["product_numeric_id"]
                 if numeric:
                     result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+                result["catalog_path"] = shopify_util.SHOPIFY_CATALOG_RELPATH
                 with store._connect() as conn:
+                    store._record_event(
+                        conn,
+                        scope=f"business:{business}/app",
+                        business_slug=business,
+                        event_type="shopify.product.create",
+                        payload=event_payload,
+                    )
                     conn.execute(
                         "INSERT INTO idempotency_keys (key, operation_hash, result_json, "
                         "created_at) VALUES (?, ?, ?, ?)",
                         (idempotency_key, op_hash, _json_dumps(result), _now()),
                     )
+                # Mirror AFTER the durable receipt txn — a crash between them leaves receipts
+                # (truth) ahead of the mirror, and the next push's replace-write self-heals.
+                _catalog_path, catalog_error = _shopify_catalog_commit(
+                    store,
+                    business=business,
+                    shop_domain=shop_domain,
+                    receipt_payloads=[event_payload, *tombstone_payloads, *receipt_payloads],
+                    idempotency_key=idempotency_key,
+                )
+                if catalog_error:
+                    result["catalog_mirror_error"] = catalog_error
                 return tool_result(result)
             # The receipted product was deleted on the store — the store is truth; fall through
             # and create a fresh one.
@@ -27094,6 +27207,11 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
             "shop_domain": shop_domain,
             **product,
         }
+        permalink = shopify_util.cart_permalink(
+            shop_domain, str(product.get("variant_id") or "")
+        )
+        if permalink:
+            result["cart_permalink"] = permalink
         numeric = str(product.get("product_numeric_id") or "")
         if numeric:
             result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
@@ -27108,33 +27226,54 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                 "Created as DRAFT — activate it in the store admin or create as status='active' "
                 "to publish it to the online storefront."
             )
+        elif permalink:
+            result["note"] = (
+                "Live on the store. The storefront Buy button is the cart_permalink — the "
+                "customer pays on Shopify's hosted checkout; the baked catalog mirror is at "
+                f"{shopify_util.SHOPIFY_CATALOG_RELPATH}."
+            )
+        event_payload = {
+            "shop_domain": shop_domain,
+            "product_id": product.get("product_id"),
+            "handle": product.get("handle"),
+            "title": product.get("title"),
+            "status": product.get("status"),
+            "price": product.get("price"),
+            "variant_id": product.get("variant_id") or "",
+            "preview_url": product.get("online_store_preview_url") or "",
+            "deduped": bool(product.get("deduped")),
+            "media_warnings": product.get("media_warnings") or [],
+            "store_plan": plan_info.get("plan_name"),
+            "partner_development": bool(plan_info.get("partner_development")),
+            "idempotency_key": idempotency_key,
+            "reason": args.get("reason") or "create shopify product",
+            "actor": args.get("actor") or "agent",
+        }
+        result["catalog_path"] = shopify_util.SHOPIFY_CATALOG_RELPATH
         with store._connect() as conn:
             store._record_event(
                 conn,
                 scope=f"business:{business}/app",
                 business_slug=business,
                 event_type="shopify.product.create",
-                payload={
-                    "shop_domain": shop_domain,
-                    "product_id": product.get("product_id"),
-                    "handle": product.get("handle"),
-                    "title": product.get("title"),
-                    "status": product.get("status"),
-                    "price": product.get("price"),
-                    "deduped": bool(product.get("deduped")),
-                    "media_warnings": product.get("media_warnings") or [],
-                    "store_plan": plan_info.get("plan_name"),
-                    "partner_development": bool(plan_info.get("partner_development")),
-                    "idempotency_key": idempotency_key,
-                    "reason": args.get("reason") or "create shopify product",
-                    "actor": args.get("actor") or "agent",
-                },
+                payload=event_payload,
             )
             conn.execute(
                 "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (idempotency_key, op_hash, _json_dumps(result), _now()),
             )
+        # Mirror AFTER the durable receipt txn — a crash between them leaves receipts (truth)
+        # ahead of the mirror, and the next push's replace-write self-heals.
+        _catalog_path, catalog_error = _shopify_catalog_commit(
+            store,
+            business=business,
+            shop_domain=shop_domain,
+            receipt_payloads=[event_payload, *tombstone_payloads, *receipt_payloads],
+            idempotency_key=idempotency_key,
+        )
+        if catalog_error:
+            result["catalog_mirror_error"] = catalog_error
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -36943,7 +37082,10 @@ TAKYON_TOOL_DEFINITIONS = [
             "DRAFT; pass status='active' to publish to the online store. Guards: requires an "
             "ACTIVE business_connect_shopify connection; a non-live business may write only to a "
             "partner-development store; refused on autonomous wakes. $0 marginal cost; receipted "
-            "as a shopify.product.create business event."
+            "as a shopify.product.create business event. Every push also mirrors the buyable "
+            "catalog to product/shopify-catalog.json, each product carrying its cart_permalink "
+            "— the storefront Buy link: customers pay on Shopify's own hosted checkout, so the "
+            "product site bakes the catalog statically (no token, no new scope, no backend)."
         ),
         "handler": handle_business_shopify_create_product,
         "requires_api": ["composio"],
