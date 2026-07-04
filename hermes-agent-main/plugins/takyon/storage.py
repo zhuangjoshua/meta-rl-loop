@@ -321,11 +321,25 @@ def _bounded_sync_concurrency(raw: str | None) -> int:
     return max(1, min(value, 32))
 
 
-# Bounded fan-out for sync_up's per-file PUTs. A dozen concurrent small-object requests is well
+# Bounded fan-out for per-file transfer requests (sync_up PUTs, sync_down GETs, and the
+# per-object digest HEADs behind list_digests). A dozen concurrent small-object requests is well
 # within what the safebox broker and the S3-compatible stores absorb; the cap exists so a laptop
-# rail cannot open an unbounded connection burst through the broker tunnel.
+# rail cannot open an unbounded connection burst through the broker tunnel. Serialized, these
+# loops priced every workspace commit at file-count x round-trip latency — measured ~63s per
+# commit even on the VPS (readback GETs ~43s + digest HEADs ~9s for a ~140-file workspace).
 # TAKYON_STORAGE_SYNC_CONCURRENCY=1 restores the fully serial behavior.
 _SYNC_PUT_CONCURRENCY = _bounded_sync_concurrency(os.getenv("TAKYON_STORAGE_SYNC_CONCURRENCY"))
+
+
+def _map_concurrently(fn, items: list):
+    """Run ``fn`` over ``items`` on the bounded sync pool, preserving order; serial when the pool
+    is sized 1 or there is nothing to fan out. Exceptions propagate (fail-closed), matching the
+    serial loops these calls replaced."""
+    workers = min(_SYNC_PUT_CONCURRENCY, len(items))
+    if workers <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, items))
 
 
 def _sync_path_excluded(rel: str) -> bool:
@@ -815,6 +829,7 @@ class SupabaseS3StorageBackend:
     def list_digests(self, prefix: str) -> dict[str, str]:  # pragma: no cover - live only
         out: dict[str, str] = {}
         prefix = _s3_list_prefix(prefix)
+        keys: list[str] = []
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
@@ -823,24 +838,35 @@ class SupabaseS3StorageBackend:
                 if rel and _sync_path_excluded(rel):
                     out[key] = _EXCLUDED_DIGEST
                     continue
-                try:
-                    head = self._client.head_object(Bucket=self.bucket, Key=key)
-                except Exception as exc:
-                    if _storage_client_missing_object(exc):
-                        logger.warning("storage list skipped vanished object: %s", key)
-                        continue
-                    raise
-                dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
-                if not dg:
-                    # No recorded digest (e.g. written by something else): hash the bytes so the
-                    # listing is still correct rather than guessing from an ETag.
-                    try:
-                        dg = digest_bytes(self.get(key))
-                    except ObjectNotFound:
-                        logger.warning("storage list skipped vanished object during get: %s", key)
-                        continue
+                keys.append(key)
+        # Digest lives in per-object metadata, so listing costs one HEAD per key — fan those out
+        # on the bounded pool (serialized they dominated every sync/quota pass at ~key-count x RTT).
+        for key, dg in zip(keys, _map_concurrently(self._digest_for_key, keys)):
+            if dg is not None:
                 out[key] = dg
         return out
+
+    def _digest_for_key(self, key: str) -> str | None:  # pragma: no cover - live only
+        """Resolve one object's recorded digest (or hash its bytes when unrecorded); ``None`` means
+        the object vanished between the listing and the read — skipped, exactly like the old
+        serial loop."""
+        try:
+            head = self._client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            if _storage_client_missing_object(exc):
+                logger.warning("storage list skipped vanished object: %s", key)
+                return None
+            raise
+        dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
+        if dg:
+            return dg
+        # No recorded digest (e.g. written by something else): hash the bytes so the listing is
+        # still correct rather than guessing from an ETag.
+        try:
+            return digest_bytes(self.get(key))
+        except ObjectNotFound:
+            logger.warning("storage list skipped vanished object during get: %s", key)
+            return None
 
     def list_object_sizes(self, prefix: str) -> dict[str, int]:  # pragma: no cover - live only
         # `Size` rides the list_objects_v2 page itself — no per-object head/get — so quota
@@ -935,28 +961,35 @@ class R2StorageBackend:
         self._client.delete_object(Bucket=self.bucket, Key=_safe_rel(key, field="object key"))
 
     def list_digests(self, prefix: str) -> dict[str, str]:  # pragma: no cover - live only
-        out: dict[str, str] = {}
         prefix = _s3_list_prefix(prefix)
+        keys: list[str] = []
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
             for obj in page.get("Contents", []) or []:
-                key = obj["Key"]
-                try:
-                    head = self._client.head_object(Bucket=self.bucket, Key=key)
-                except Exception as exc:
-                    if _storage_client_missing_object(exc):
-                        logger.warning("r2 list skipped vanished object: %s", key)
-                        continue
-                    raise
-                dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
-                if not dg:
-                    try:
-                        dg = digest_bytes(self.get(key))
-                    except ObjectNotFound:
-                        logger.warning("r2 list skipped vanished object during get: %s", key)
-                        continue
-                out[key] = dg
-        return out
+                keys.append(obj["Key"])
+        # Same bounded fan-out as the Supabase backend: one HEAD per key, concurrent.
+        return {
+            key: dg
+            for key, dg in zip(keys, _map_concurrently(self._digest_for_key, keys))
+            if dg is not None
+        }
+
+    def _digest_for_key(self, key: str) -> str | None:  # pragma: no cover - live only
+        try:
+            head = self._client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            if _storage_client_missing_object(exc):
+                logger.warning("r2 list skipped vanished object: %s", key)
+                return None
+            raise
+        dg = (head.get("Metadata") or {}).get(self._META_DIGEST)
+        if dg:
+            return dg
+        try:
+            return digest_bytes(self.get(key))
+        except ObjectNotFound:
+            logger.warning("r2 list skipped vanished object during get: %s", key)
+            return None
 
     def list_object_sizes(self, prefix: str) -> dict[str, int]:  # pragma: no cover - live only
         out: dict[str, int] = {}
@@ -1357,18 +1390,11 @@ def sync_up(
     # Fail-closed contract is the same as the serial loop: any PUT failure raises out of sync_up
     # with a partial (idempotent, digest-keyed) upload that the next sync heals.
     if to_upload:
-        workers = min(_SYNC_PUT_CONCURRENCY, len(to_upload))
-        if workers <= 1:
-            for rel, dg in to_upload:
-                backend.put(prefix + rel, _read_file_bytes(src / rel), digest=dg)
-        else:
-            def _put_one(item: tuple[str, str]) -> None:
-                rel, dg = item
-                backend.put(prefix + rel, _read_file_bytes(src / rel), digest=dg)
+        def _put_one(item: tuple[str, str]) -> None:
+            rel, dg = item
+            backend.put(prefix + rel, _read_file_bytes(src / rel), digest=dg)
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                for _ in pool.map(_put_one, to_upload):
-                    pass
+        _map_concurrently(_put_one, to_upload)
         uploaded.extend(rel for rel, _ in to_upload)
 
     deleted: list[str] = []
@@ -1404,6 +1430,7 @@ def sync_down(
     downloaded: list[str] = []
     skipped: list[str] = []
     seen: set[str] = set()
+    to_download: list[tuple[str, str, str]] = []
     for full, dg in sorted(remote.items()):
         rel = _safe_rel(full[len(prefix):], field="object key")
         if dg == _EXCLUDED_DIGEST or _sync_path_excluded(rel):
@@ -1413,12 +1440,24 @@ def sync_down(
         if local.get(rel) == dg:
             skipped.append(rel)
             continue
+        to_download.append((full, rel, dg))
+
+    # Fetch changed files concurrently (bounded pool) — the mirror image of sync_up's parallel
+    # PUTs, and the dominant cost of the per-commit workspace readback when serial (each GET is
+    # one round trip through the storage broker). Integrity semantics unchanged: every blob is
+    # sha256-verified before it lands, writes are atomic per file to distinct paths, and any
+    # failure raises out of sync_down exactly as the serial loop did.
+    def _get_one(item: tuple[str, str, str]) -> None:
+        full, rel, dg = item
         data = backend.get(full)
         actual = digest_bytes(data)
         if actual != dg:
             raise StorageError(f"integrity check failed for {full}: expected {dg}, got {actual}")
         _atomic_write_bytes(dest / rel, data)
-        downloaded.append(rel)
+
+    if to_download:
+        _map_concurrently(_get_one, to_download)
+        downloaded.extend(rel for _, rel, _ in to_download)
 
     deleted: list[str] = []
     if delete_local:
