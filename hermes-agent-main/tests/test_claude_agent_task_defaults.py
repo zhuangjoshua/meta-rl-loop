@@ -331,6 +331,85 @@ def test_claude_agent_task_includes_public_landing_composition_contract_for_prod
     assert "58/42" not in instruction
 
 
+def test_claude_agent_task_includes_visual_craft_contract_for_product_site(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured["payload"] = payload
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>PupCoach</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "pupcoach")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda workspace_rel: workspace_rel == "product/site")
+    monkeypatch.setattr(takyon_core, "_runtime_ui_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_worker_contract_block", lambda _surface, *, plans_configured=False: "")
+    monkeypatch.setattr(takyon_core, "_subuser_app_kit_contract_block", lambda _surface: "")
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_compose_worker_guidance_block",
+        lambda skills: (list(skills), "[Hermes guidance skill: default-product-site]" if skills else ""),
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "pupcoach",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-visual-craft-contract",
+                "install": False,
+                "refresh_surface": False,
+            }
+        )
+    )
+
+    instruction = str(captured["payload"]["instruction"])
+    assert result["success"] is True
+    assert "Product visual craft contract" in instruction
+    assert "Never use emoji as UI iconography" in instruction
+    assert "lucide-react" in instruction
+    assert "framer-motion" in instruction
+    assert "prefers-reduced-motion" in instruction
+
+    # Every npm package the visual contract names MUST be pinned in the scaffold's own
+    # package.json: worker-added dependencies are force-restored away on every surface
+    # refresh, so a contract that names an unpinned dep instructs the worker into a
+    # guaranteed build failure.
+    scaffold_pkg = json.loads(
+        (Path(takyon_core.__file__).parent / "subuser_app_kit" / "scaffold" / "package.json").read_text(encoding="utf-8")
+    )
+    pinned = set(scaffold_pkg.get("dependencies") or {})
+    for named_dep in ("lucide-react", "framer-motion"):
+        assert named_dep in pinned
+
+
+def test_mobile_worker_contract_bans_emoji_iconography():
+    assert "Never use emoji as UI iconography" in takyon_core.MOBILE_APP_WORKER_CONTRACT
+    # Mobile stays on the pinned managed Expo SDK: the contract may only point at icon/motion
+    # capability already inside that dependency closure, never a new package.
+    assert "@expo/vector-icons" in takyon_core.MOBILE_APP_WORKER_CONTRACT
+
+
 def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}

@@ -206,6 +206,19 @@ PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 - On desktop, the public `/` first screen should fill most of the viewport and read page-scale, not as a small centered island with large dead gutters on both outer sides.
 - Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
 """
+# Injected for every product/site worker pass (bootstrap and iterate alike) so the visual-craft
+# floor rides regardless of which design style pack the CEO selected. The capabilities it names
+# (`lucide-react`, `framer-motion`) are pinned in the scaffold's own package.json — worker-added
+# deps are force-restored away on every refresh, so this contract must only ever name deps the
+# scaffold itself pins.
+PRODUCT_VISUAL_CRAFT_CONTRACT = """Product visual craft contract (icons, motion, assets):
+- Never use emoji as UI iconography — not feature icons, list bullets, buttons, badges, logos, stat markers, or empty states. Emoji may appear only as literal content where a human would type one (for example inside chat text a persona sends).
+- Iconography: import per-icon from `lucide-react` (pinned in this scaffold), or hand-author inline SVG for custom marks. Keep one consistent icon size and stroke weight per surface.
+- Motion: `framer-motion` is pinned in this scaffold — use it (or plain CSS transitions) for purposeful micro-interactions: entrance reveals, hover/press feedback, layout and list transitions, animated counters, skeleton loading states. Keep micro-interactions roughly 150-300ms with intentional easing; motion should clarify hierarchy and state changes, not decorate everything.
+- Respect reduced motion: gate non-essential animation behind `useReducedMotion()` from framer-motion or the `prefers-reduced-motion` media query. No scroll-jacking, no autoplaying carousels, no infinite attention-seeking loops.
+- Real graphic texture comes from CSS gradients/patterns, inline SVG illustration, the published brand assets (`brandLogoUrl()` from `src/lib/branding.ts`), and static files under `public/` — never from emoji, and never from fabricated external image URLs.
+- Real typefaces: declare `@font-face`/`@import` in worker-owned CSS (`src/tokens.css` / `src/index.css`); never edit `index.html` for fonts — it is starter-owned and force-refreshed.
+"""
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI through the shared runtime client, not browser-only authority state.
 - Use the canonical prefixed runtime API base from `./_takyon/surface-context.js`.
@@ -243,6 +256,7 @@ MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App St
 - Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
 - The Delete Account flow (profile screen) is an Apple 5.1.1(v) requirement — keep it working.
 - Stay on the pinned Expo SDK 54 dependency set; do not add packages that require custom native code (managed workflow only).
+- Never use emoji as UI iconography (tab icons, feature icons, bullets, badges): use `@expo/vector-icons` (bundled with the pinned Expo SDK) or inline SVG, and keep motion subtle and purposeful via React Native's built-in `Animated`/`LayoutAnimation` — respect the reduce-motion accessibility setting.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
@@ -34834,6 +34848,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
                     worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
+                    worker_instruction_parts.append(PRODUCT_VISUAL_CRAFT_CONTRACT)
                     runtime_ui_contract = _runtime_ui_contract_block(current_surface)
                     if runtime_ui_contract:
                         worker_instruction_parts.append(runtime_ui_contract)
