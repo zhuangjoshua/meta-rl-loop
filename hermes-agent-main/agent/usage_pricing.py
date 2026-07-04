@@ -116,6 +116,23 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # in this table (e.g. ("tavily", "search") below) — there is no synthetic flat ("agent", *) price.
     # A paid provider whose `(namespace, op)` is absent here is REFUSED (fail closed), not run
     # unpriced.
+    # ── Generic credentialed egress (per-request, NOT per-token) ─────────
+    # The egress rail (general-apps-plan delta 6) lets agent-written action code call an
+    # arbitrary approved third party through the safebox WITHOUT the credential. Metered
+    # per request through the usage rail exactly like Tavily/search: a flat platform markup
+    # for the keyless-egress primitive itself, billed by `ai_provider.egress_request_microusd`.
+    # This prices the EGRESS SERVICE, not the upstream API — connections whose host fronts a
+    # usage_pricing-metered provider (OpenAI/Anthropic/Gemini/FAL/Tavily) are refused at both
+    # connection creation and call (provider-host denylist) so a flat egress fee can never
+    # front unbounded per-call upstream inference cost. Body-size cost is added on top by
+    # `egress_request_microusd(bytes=...)`. Without this entry the egress route fails closed
+    # (503 egress_pricing_unavailable) BEFORE any reserve or upstream call.
+    ("egress", "request"): PricingEntry(
+        request_cost=Decimal("0.002"),
+        source="platform_markup",
+        source_url="egress-rail-build-spec.md",
+        pricing_version="egress-2026-07",
+    ),
     # ── DataForSEO Keywords Data → Google Ads (per-request, NOT per-token) ──
     # The SEO/GEO operator's keyword research (business_seo_query_data, modes
     # keyword-historical / keyword-ideas) meters through the SAME operator web-spend
