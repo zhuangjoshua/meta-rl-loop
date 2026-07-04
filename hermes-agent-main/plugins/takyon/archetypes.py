@@ -244,21 +244,49 @@ def default_money_shape_for(archetype) -> str:
         return _money_shape.DEFAULT_MONEY_SHAPE
 
 
+PREVIEW_ENV = "TAKYON_ARCHETYPE_PREVIEW"
+
+
+def _preview_enabled_keys() -> frozenset[str]:
+    """Registry keys enabled by the operator's PREVIEW override for THIS process only.
+
+    ``TAKYON_ARCHETYPE_PREVIEW=mobile_app`` (comma-separated keys) treats a registered-but-disabled
+    preset as selectable on the plane that sets it — the seam that lets the acceptance E2E for an
+    archetype run on the operator's own lane while every other plane (prod dashboard, VPS workers)
+    stays fail-closed. It can only widen selection to keys that already exist in the registry; it
+    is not read from any business/customer input and unknown keys are ignored."""
+    import os
+
+    raw = str(os.environ.get(PREVIEW_ENV) or "").strip()
+    if not raw:
+        return frozenset()
+    keys = set()
+    for part in raw.split(","):
+        try:
+            keys.add(normalize_archetype(part, allow_empty=False))
+        except InvalidArchetype:
+            continue
+    return frozenset(keys)
+
+
 def is_enabled(archetype) -> bool:
-    """Whether the archetype is selectable at create today (rollout flag)."""
+    """Whether the archetype is selectable at create today (rollout flag, plus the process-local
+    PREVIEW override for acceptance E2E runs)."""
     try:
-        return preset_for(archetype).enabled
+        key = normalize_archetype(archetype, allow_empty=False)
     except InvalidArchetype:
         return False
+    return BUSINESS_ARCHETYPES[key].enabled or key in _preview_enabled_keys()
 
 
 def assert_selectable(archetype: str) -> str:
     """Return the normalized archetype if it is a known, ENABLED archetype; else fail closed. A
     disabled (not-yet-shipped) archetype raises ``ArchetypeNotAvailable`` carrying the
     ``archetype_unavailable:<key>`` gate token. Called at the create/set choke point so a picker
-    can never select a pipeline that isn't proven."""
+    can never select a pipeline that isn't proven. The PREVIEW override (see
+    ``_preview_enabled_keys``) widens this only on the plane that explicitly sets it."""
     key = normalize_archetype(archetype, allow_empty=False)
-    if not BUSINESS_ARCHETYPES[key].enabled:
+    if not BUSINESS_ARCHETYPES[key].enabled and key not in _preview_enabled_keys():
         raise ArchetypeNotAvailable(
             f"archetype_unavailable:{key}: the '{key}' archetype is registered but not yet enabled "
             f"(its build/publish pipeline is not shipped and E2E-proven). Selecting it is refused. "

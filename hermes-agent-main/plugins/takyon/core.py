@@ -231,6 +231,19 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 - `tsc --noEmit` rejects unused variables/imports and type errors; remove them. Do not leave the workspace with a failing build or typecheck.
 - If you cannot land BOTH green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining build/typecheck error and the file(s) involved, so Takyon hand-patches instead of cold re-delegating. A plain "I inspected the workspace" or a diagnosis without a green build is a failure, not a success.
 """
+MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
+- This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
+- Before you finish, you MUST run `npm install` (if you changed dependencies) and `npx tsc --noEmit` in this workspace and confirm it exits green. Run it yourself with Bash — do not assume.
+- If you cannot land it green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining error and the file(s) involved.
+"""
+MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App Store rail):
+- The `_takyon/` directory is PLATFORM-OWNED and overwritten wholesale per business — never edit it. Import the runtime client and surface context only via the `@takyon/*` path alias.
+- Auth, sessions, entitlements, records, and AI generation go through the `_takyon` runtime client against the platform runtime API. Do not call providers directly and do not add your own backend.
+- NEVER add Stripe, web checkout, or any external purchase flow inside the app — Apple rejects external digital purchases (guideline 3.1.1). Subscription upsell copy may link to the product website account page; in-app purchase rails land later.
+- Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
+- The Delete Account flow (profile screen) is an Apple 5.1.1(v) requirement — keep it working.
+- Stay on the pinned Expo SDK 54 dependency set; do not add packages that require custom native code (managed workflow only).
+"""
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
 - Write files relative to the current working directory.
@@ -3113,6 +3126,121 @@ def _materialize_subuser_app_kit(
     # Idempotent: a no-op when the favicon already points at the right asset.
     _seed_brand_mark_assets(workspace_root, slug=slug)
     _inject_favicon_links(workspace_root)
+
+
+def _mobile_app_scaffold_source_dir() -> Path:
+    return Path(__file__).resolve().parent / "mobile_app_kit" / "scaffold"
+
+
+def _workspace_is_mobile_app_dir(workspace_raw: str) -> bool:
+    normalized = str(workspace_raw or "").strip().strip("/").lower()
+    return normalized == "product/app" or normalized.startswith("product/app/")
+
+
+def _materialize_mobile_app_workspace(
+    workspace_root: Path,
+    *,
+    slug: str,
+    business_name: str,
+    description: str,
+    surface: dict[str, Any] | None,
+) -> bool:
+    """The mobile analog of ``_materialize_subuser_app_kit`` — THE consumer of the archetype
+    preset's ``scaffold`` field (readmodular §4). Seed-once: copies ``mobile_app_kit/scaffold``
+    into ``product/app`` with the business tokens filled when no app.json exists yet; then ALWAYS
+    force-refreshes the platform-owned ``_takyon/`` boundary (runtime client + a per-business
+    surface-context with the ABSOLUTE runtimeApiBase and real Supabase auth config), mirroring the
+    web kit's rematerialize rule. Returns True when the scaffold was newly seeded."""
+    source = _mobile_app_scaffold_source_dir()
+    if not source.is_dir():
+        raise TakyonError("mobile_app scaffold missing from the runtime (mobile_app_kit/scaffold)")
+    canonical_slug = _slugify(slug)
+    # Free-text business fields are substituted into TSX/JSON string literals — strip every
+    # character that could escape a literal (quotes, backslashes, template/JSX delimiters,
+    # newlines). app.json gets its values via json.dumps assignment below, never str.replace.
+    def _display_safe(raw: str, fallback: str, limit: int) -> str:
+        cleaned = re.sub(r"[^\w ,.&'!?()’-]+", " ", str(raw or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()[:limit].strip()
+        return cleaned or fallback
+    display_name = _display_safe(business_name, canonical_slug, 60)
+    display_description = _display_safe(description, f"{display_name} mobile app", 160)
+    seeded = False
+    if not (workspace_root / "app.json").is_file():
+        substitutions = {
+            "__TAKYON_APP_NAME__": display_name,
+            "__TAKYON_SLUG__": canonical_slug,
+            "__TAKYON_APP_DESCRIPTION__": display_description,
+            "__TAKYON_ORG__": "coscale",
+            "__EXPO_ORG__": "coscale",
+        }
+        # app.json is the seed-completion marker (its absence gates re-seeding), so it is written
+        # LAST — a crash mid-copy re-seeds cleanly instead of wedging on a partial tree.
+        app_json_source: Path | None = None
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source)
+            if {"node_modules", ".git", "dist"} & set(rel.parts):
+                continue
+            if rel.as_posix() == "app.json":
+                app_json_source = path
+                continue
+            destination = workspace_root / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, ValueError):
+                shutil.copy2(path, destination)
+                continue
+            for token, value in substitutions.items():
+                text = text.replace(token, value)
+            destination.write_text(text, encoding="utf-8")
+        if app_json_source is None:
+            raise TakyonError("mobile_app scaffold is missing app.json")
+        # JSON-safe fill: slug/org tokens have a validated charset; the free-text name/description
+        # are ASSIGNED onto the parsed config so json.dumps owns the escaping. `eas init` assigns
+        # the real project id at build time (store_builder); the placeholder updates/projectId
+        # entries would otherwise break `expo config` on the seeded tree.
+        app_text = app_json_source.read_text(encoding="utf-8")
+        app_text = app_text.replace("__TAKYON_SLUG__", canonical_slug).replace("__TAKYON_ORG__", "coscale")
+        app_text = app_text.replace("__TAKYON_APP_NAME__", "app").replace("__TAKYON_APP_DESCRIPTION__", "app")
+        app_text = app_text.replace("__EXPO_ORG__", "coscale")
+        app_cfg = json.loads(app_text)
+        expo_cfg = app_cfg.get("expo") or {}
+        expo_cfg["name"] = display_name
+        expo_cfg["description"] = display_description
+        expo_cfg.pop("updates", None)
+        (expo_cfg.get("extra") or {}).get("eas", {}).pop("projectId", None)
+        expo_cfg["owner"] = "coscale"
+        app_cfg["expo"] = expo_cfg
+        (workspace_root / "app.json").write_text(json.dumps(app_cfg, indent=2) + "\n", encoding="utf-8")
+        seeded = True
+    # Platform-owned boundary: force-refresh every run so client/context fixes reach existing
+    # app workspaces, exactly like _rematerialize_appkit_owned_src on the web side.
+    kit_dir = workspace_root / "_takyon"
+    kit_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts")
+    auth_payload = _subuser_public_auth_payload(surface) or {}
+    context = {
+        "runtimeApiBase": f"https://{canonical_slug}.{_company_base_domain()}/api/takyon/apps/{canonical_slug}",
+        "runtimeFeatures": _surface_effective_runtime_features(surface),
+        "railState": (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {},
+        "auth": {
+            "url": str(auth_payload.get("url") or ""),
+            "publishableKey": str(auth_payload.get("publishableKey") or ""),
+            "googleProvider": str(auth_payload.get("googleProvider") or "google"),
+        },
+        "branding": {"accent": _brand_mark_accent(slug), "name": (business_name or canonical_slug).strip()},
+    }
+    (kit_dir / "surface-context.ts").write_text(
+        "// PLATFORM-OWNED — materialized per business; do not edit.\n"
+        'import type { SurfaceContext } from "./runtime-client";\n\n'
+        "export const surfaceContext: SurfaceContext = "
+        + json.dumps(context, ensure_ascii=False, indent=2)
+        + ";\n",
+        encoding="utf-8",
+    )
+    return seeded
 
 
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
@@ -7198,7 +7326,9 @@ def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
         return True
     # Product/site work is the highest-risk delegated source lane, so default it onto the
     # isolated Docker rail instead of falling back to a host subprocess when no override is set.
-    return _workspace_needs_runtime_ui_contract(workspace_rel)
+    # The mobile app workspace (product/app) is the same class of delegated customer-facing source
+    # and gets the same isolation.
+    return _workspace_needs_runtime_ui_contract(workspace_rel) or _workspace_is_mobile_app_dir(workspace_rel)
 
 
 _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
@@ -22321,15 +22451,52 @@ def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _creative_credit_reservation_outcome(store: "TakyonStore", business: str, reservation_key: str) -> dict[str, Any]:
+    """Resolve a creative-credit reservation key's prior ledger outcome (read-only).
+
+    Returns {"state": "none" | "in_flight" | "committed" | "released", "metadata": {...}} — the
+    metadata is the terminal (commit/release) entry's, which for mobile_release carries the settled
+    build_id. This is what makes publish idempotency REAL: the SQL reserve gate replays a known key
+    without holding anything, so callers must branch on the prior outcome instead of re-running."""
+    try:
+        with store._connect() as conn:
+            rows = conn.execute(
+                "select kind, metadata from business_creative_credit_entries "
+                "where business_slug = ? and reservation_key = ? order by id",
+                (business, reservation_key),
+            ).fetchall()
+    except Exception:
+        rows = []
+    state = "none"
+    metadata: dict[str, Any] = {}
+    kinds = []
+    for row in rows or []:
+        kind = str(row["kind"] if isinstance(row, Mapping) else row[0] or "").strip()
+        kinds.append(kind)
+        raw_meta = row["metadata"] if isinstance(row, Mapping) else row[1]
+        if kind in ("commit", "release") and isinstance(raw_meta, Mapping):
+            metadata = dict(raw_meta)
+    if "commit" in kinds:
+        state = "committed"
+    elif "release" in kinds:
+        state = "released"
+    elif "reserve" in kinds:
+        state = "in_flight"
+    return {"state": state, "metadata": metadata}
+
+
 def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
     """Build + ship a mobile_app release via EAS (readmodular §2.4/§2.5). Gates (fail-closed, in
-    order): refuse on autonomous wake (spendful); business must be archetype mobile_app; mobile_app
-    must be ENABLED (archetype_unavailable:mobile_app until its E2E passes — so today this refuses,
-    by design). Only then does it run the settle-at-trigger money flow (store_build.run_build):
-    reserve creative credits → invoke EAS → settle at successful trigger / release on failure. The
-    EAS invoker is fail-closed (eas_builder_unconfigured) until the jailed builder + the one-time
-    `eas credentials` login exist, so a publish today reserves nothing and returns a clear next step.
-    EXPO_TOKEN is resolved SERVER-SIDE by the invoker (never on this plane — it's denied over /v1/env)."""
+    order): refuse on autonomous wake (spendful); required idempotency_key (a retried publish must
+    never double-charge); business must be archetype mobile_app; mobile_app must be SELECTABLE
+    (archetype registry gate); the app source at product/app must exist; the greenlight
+    pre-submission compliance gate must pass (preview→internal lane, production→production lane) —
+    ALL before any credit reserve, so a refused publish charges nothing. Only then runs the
+    settle-at-trigger money flow (store_build.run_build): reserve creative credits → invoke EAS →
+    settle at successful trigger / release on failure. The invoker is the real local builder
+    (store_builder.local_eas_invoker, the live-proven recipe) when its explicit-path custody
+    resolves, else the fail-closed default (eas_builder_unconfigured). Secrets reach only the
+    builder's child process — never this plane's environ, never /v1/env."""
     _refuse_on_autonomous_wake("mobile releases")
     store = _store()
     try:
@@ -22337,6 +22504,12 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
         lane = str(args.get("lane") or "preview").strip().lower()
         if lane not in ("preview", "production"):
             raise TakyonError("lane must be 'preview' (TestFlight-internal) or 'production' (store)")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError(
+                "idempotency_key is required for a mobile release (a retried publish must re-attach, "
+                "never double-charge)"
+            )
         arch = _archetype_leaf()
         with store._connect() as conn:
             row = store._ensure_business(conn, business)
@@ -22350,12 +22523,98 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
         arch.assert_selectable(arch.MOBILE_APP)
         # A real EAS build runs for minutes — defer to the worker plane when enabled (the money flow
         # below runs inside the worker's inline re-invocation, once). Returns None ⇒ run inline here.
-        deferred = _defer_mobile_release_to_worker({**args, "business": business, "lane": lane})
+        # Preview-only enablement (TAKYON_ARCHETYPE_PREVIEW) is process-local, so a deferred re-run
+        # on a worker without the env would refuse itself — the preview lane always runs inline.
+        preview_only = not arch.BUSINESS_ARCHETYPES[arch.MOBILE_APP].enabled
+        deferred = (
+            None if preview_only else _defer_mobile_release_to_worker({**args, "business": business, "lane": lane})
+        )
         if deferred is not None:
             return deferred
+        # The app source is the publish subject — refuse before any spend if it isn't there.
+        app_source = store._business_root(business) / "product" / "app"
+        if not (app_source / "app.json").is_file():
+            raise TakyonError(
+                "mobile_app_source_missing: product/app has no app.json. Build the app first "
+                "(business_claude_agent_task with workspace 'product/app' seeds and iterates it)."
+            )
+        # Greenlight pre-submission compliance gate (readmodular §3) — BEFORE reserve: a failing
+        # scan must cost nothing. preview ships to TestFlight-internal (internal lane thresholds);
+        # production is the store lane (critical==0 AND high==0).
+        try:
+            from . import store_compliance as _greenlight
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import store_compliance as _greenlight
+        gate = _greenlight.run_preflight_gate(
+            str(app_source),
+            lane=_greenlight.LANE_PRODUCTION if lane == "production" else _greenlight.LANE_INTERNAL,
+        )
+        if not gate.get("passed"):
+            return tool_error(
+                f"greenlight_preflight_failed: {gate.get('detail') or 'compliance scan failed'}",
+                success=False,
+                compliance=gate,
+            )
         sb = _store_build_leaf()
+        # The real builder must be configured BEFORE any money moves — an unconfigured builder is a
+        # pure gate refusal (genuinely nothing reserved), never a reserve-then-release round-trip
+        # that would poison the idempotency key's ledger history.
+        try:
+            from . import store_builder as _builder
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import store_builder as _builder
+        if not _builder.is_configured():
+            return tool_error(
+                "eas_builder_unconfigured: the store-builder custody (ASC key, Expo token, team "
+                "distribution identity) is not present on this plane, so a real build cannot run. "
+                "No credits were reserved.",
+                success=False,
+            )
+        builder_creds = _builder.resolve_local_store_credentials()
+        invoke_eas = _builder.local_eas_invoker(
+            business_slug=business, lane=lane, source_dir=str(app_source), creds=builder_creds
+        )
+        # Exact provider cost per the credit rule (usage_pricing is the SSOT) — unpriced = REFUSED,
+        # before reserve (an EAS action can never spend unpriced).
+        from agent.usage_pricing import get_pricing_entry as _gpe
+
+        eas_cost_entry = _gpe("build_ios", provider="eas")
+        if eas_cost_entry is None or not getattr(eas_cost_entry, "request_cost", None):
+            raise TakyonError(
+                "eas_build_unpriced: ('eas','build_ios') has no request_cost in usage_pricing — "
+                "refusing an unpriced spend"
+            )
+        provider_cost_usd = float(eas_cost_entry.request_cost)
         credits = _creative_credit_total_cost("mobile_release")
-        rk = f"mobile-release:{business}:{lane}:{str(args.get('idempotency_key') or _now())}"
+        if credits < 1:
+            raise TakyonError(
+                f"mobile_release credit cost must be >= 1 (got {credits}); a zero-cost release "
+                "would bypass the reservation ledger"
+            )
+        rk = f"mobile-release:{business}:{lane}:{idempotency_key}"
+        # Idempotency is REAL, not just a stable key: the credit ledger replays a reserve for a
+        # known key WITHOUT holding anything, so re-running run_build on a used key would trigger a
+        # real paid build that settles as a no-op (free/unmetered). Resolve the key's prior outcome
+        # first: committed → re-attach and return the prior receipt; released/in-flight → refuse
+        # and demand a fresh key.
+        prior = _creative_credit_reservation_outcome(store, business, rk)
+        if prior.get("state") == "committed":
+            prior_meta = prior.get("metadata") or {}
+            return tool_result(
+                {
+                    "success": True,
+                    "business": business,
+                    "lane": lane,
+                    "build_id": str(prior_meta.get("build_id") or ""),
+                    "replayed": True,
+                    "note": "idempotency_key already settled — returning the prior receipt; no new build was triggered.",
+                }
+            )
+        if prior.get("state") in ("released", "in_flight"):
+            raise TakyonError(
+                f"idempotency_key already used (reservation {prior['state']}). The ledger will not "
+                "re-reserve a replayed key — retry the publish with a NEW idempotency_key."
+            )
         result = sb.run_build(
             business_slug=business,
             lane=lane,
@@ -22364,16 +22623,32 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
             reserve=lambda b, c, k: _reserve_creative_credits(
                 b, action="mobile_release", reservation_key=k, metadata={"lane": lane}
             ),
+            # Our invoker never reports actual_credits, so the full reservation settles; if a future
+            # invoker DOES report a different actual, it lands visibly in the ledger metadata rather
+            # than silently voiding the refund contract.
             settle=lambda k, actual, meta: _commit_creative_credits(
-                k, action="mobile_release", metadata=meta
+                k,
+                action="mobile_release",
+                metadata={**meta, "provider": "eas", "provider_model": "build_ios",
+                          "provider_cost_usd": provider_cost_usd,
+                          **({"actual_credits_reported": int(actual)} if actual is not None and int(actual) != int(credits) else {})},
             ),
             release=lambda k, meta: _release_creative_credits(
                 k, action="mobile_release", metadata=meta
             ),
-            invoke_eas=sb.default_eas_invoker(business_slug=business, lane=lane, expo_token=""),
+            invoke_eas=invoke_eas,
         )
         return tool_result(
-            {"success": True, "business": business, "lane": lane, "build_id": result.build_id}
+            {
+                "success": True,
+                "business": business,
+                "lane": lane,
+                "build_id": result.build_id,
+                "detail": result.detail,
+                "compliance": {"passed": True, "lane": gate.get("lane")},
+                "note": "Build triggered and credits settled (spend happens at the Expo trigger). "
+                "Poll the build for the signed artifact; store submission is a separate step.",
+            }
         )
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -30679,6 +30954,7 @@ _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
     "logo_generate": "TAKYON_CREATIVE_CREDITS_LOGO",
+    "mobile_release": "TAKYON_CREATIVE_CREDITS_MOBILE_RELEASE",
     **{c.credit_action: c.credit_cost_env for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
     "reddit_ad_launch": "TAKYON_CREATIVE_CREDITS_REDDIT_LAUNCH",
@@ -34111,10 +34387,30 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or normalized_workspace.startswith("product/")
             or normalized_workspace in {"site", "website"}
         )
-        refresh_surface = _boolish(
-            args.get("refresh_surface"),
-            default=workspace_targets_product_surface,
-        )
+        # The mobile app workspace (product/app on a mobile_app business) has its OWN build/verify
+        # lane (Expo typecheck + the credit-gated store publish) — the web surface refresh is
+        # Vite-only and can never run against an Expo tree, so it is FORCED off here (an explicit
+        # refresh_surface=true from web habit would otherwise run the Vite pipeline on the Expo
+        # tree and fail the whole delegated task after the worker succeeded).
+        mobile_app_workspace = False
+        if _workspace_is_mobile_app_dir(workspace_rel):
+            _arch_leaf = _archetype_leaf()
+            business_archetype = str((business_row or {}).get("archetype") or "web_saas")
+            try:
+                mobile_app_workspace = (
+                    _arch_leaf.normalize_archetype(business_archetype, allow_empty=True) == _arch_leaf.MOBILE_APP
+                )
+            except Exception:
+                # An out-of-registry row value (version skew) degrades to the web path rather than
+                # hard-failing the delegated task.
+                mobile_app_workspace = False
+        if mobile_app_workspace:
+            refresh_surface = False
+        else:
+            refresh_surface = _boolish(
+                args.get("refresh_surface"),
+                default=workspace_targets_product_surface,
+            )
         docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
         reuse_session_workspace = bool(
@@ -34286,13 +34582,30 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     surface=surface_for_worker,
                     plans=app.get("plans") if isinstance(app, dict) else None,
                 )
+            elif mobile_app_workspace and normalized_workspace == "product/app":
+                # The archetype preset's scaffold consumer: seed-once mobile_app_kit/scaffold into
+                # product/app + force-refresh the platform-owned _takyon/ boundary. Only the exact
+                # app root seeds — a subdirectory task must never nest a second scaffold.
+                _materialize_mobile_app_workspace(
+                    workspace_path,
+                    slug=business,
+                    business_name=str((business_row or {}).get("name") or ""),
+                    description=str((business_row or {}).get("goal") or ""),
+                    surface=surface_for_worker,
+                )
             def build_worker_instruction(current_surface: dict[str, Any] | None) -> str:
                 worker_instruction_parts = [instruction.rstrip()]
                 if guidance_block:
                     worker_instruction_parts.append(guidance_block)
                 if _workspace_needs_customer_ai_copy_contract(workspace_rel):
                     worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
-                    worker_instruction_parts.append(PRODUCT_BUILD_GATE_CONTRACT)
+                    # The web build gate demands `npm run build` — the Expo tree has no build
+                    # script; the mobile gate verifies with tsc and the store publish gate.
+                    worker_instruction_parts.append(
+                        MOBILE_APP_BUILD_GATE_CONTRACT if mobile_app_workspace else PRODUCT_BUILD_GATE_CONTRACT
+                    )
+                if mobile_app_workspace:
+                    worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
                     worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
                     runtime_ui_contract = _runtime_ui_contract_block(current_surface)
