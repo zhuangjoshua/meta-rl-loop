@@ -256,7 +256,9 @@ MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App St
 - Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
 - The Delete Account flow (profile screen) is an Apple 5.1.1(v) requirement — keep it working.
 - Stay on the pinned Expo SDK 54 dependency set; do not add packages that require custom native code (managed workflow only).
-- Never use emoji as UI iconography (tab icons, feature icons, bullets, badges): use `@expo/vector-icons` (bundled with the pinned Expo SDK) or inline SVG, and keep motion subtle and purposeful via React Native's built-in `Animated`/`LayoutAnimation` — respect the reduce-motion accessibility setting.
+- Never use emoji as UI iconography — not tab icons, feature icons, list bullets, badges, buttons, or empty states. Emoji may appear only as literal content where a human would type one.
+- Iconography: import per-family from `@expo/vector-icons` (bundled with the pinned Expo SDK, e.g. `Ionicons` or `MaterialCommunityIcons`); keep one consistent icon size and weight per surface. Do not add icon or SVG packages (`react-native-svg` is NOT in the pinned dependency set).
+- Motion: purposeful micro-interactions through React Native's built-in `Animated`/`LayoutAnimation` — entrance reveals, press feedback, list/layout changes, skeleton loading states — roughly 150-300ms with intentional easing; leave screen transitions to the router defaults, and skip non-essential animation when `AccessibilityInfo.isReduceMotionEnabled()` reports reduced motion.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.

@@ -408,6 +408,15 @@ def test_mobile_worker_contract_bans_emoji_iconography():
     # Mobile stays on the pinned managed Expo SDK: the contract may only point at icon/motion
     # capability already inside that dependency closure, never a new package.
     assert "@expo/vector-icons" in takyon_core.MOBILE_APP_WORKER_CONTRACT
+    assert "Animated" in takyon_core.MOBILE_APP_WORKER_CONTRACT
+    assert "isReduceMotionEnabled" in takyon_core.MOBILE_APP_WORKER_CONTRACT
+    # `react-native-svg` is outside the pinned closure; the contract must never point the
+    # worker at plain "inline SVG" on mobile — that import breaks the managed build.
+    mobile_pkg = json.loads(
+        (Path(takyon_core.__file__).parent / "mobile_app_kit" / "scaffold" / "package.json").read_text(encoding="utf-8")
+    )
+    assert "react-native-svg" not in (mobile_pkg.get("dependencies") or {})
+    assert "or inline SVG" not in takyon_core.MOBILE_APP_WORKER_CONTRACT
 
 
 def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path, monkeypatch):
