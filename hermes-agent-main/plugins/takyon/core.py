@@ -6963,8 +6963,11 @@ def _materialize_subuser_app_scaffold(
 
 
 # The starter-owned metadata floor + AppKit-owned rail wrappers. Unlike the worker-owned screens
-# (app-home, landing, profile, support, components, branding tokens), these files encode canonical
-# SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the product-build contract).
+# (app-home, landing, profile, support, components, and the `src/tokens.css` theme tokens), these
+# files encode canonical SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the
+# product-build contract). NOTE `src/lib/branding.ts` IS in this set (it is re-rendered from the
+# surface contract's seed tokens): an edit to any file below can never persist — see
+# _refuse_starter_owned_product_write for the operator-facing gate.
 # The scaffold seeds them once at bootstrap, but a fix to this canonical layer must reach EXISTING
 # businesses on their next rebuild — otherwise a platform metadata/rail fix only lands in brand-new
 # businesses. So these files are force-refreshed from the scaffold on every materialize, exactly
@@ -7159,6 +7162,9 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
+        "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
+        + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
+        + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
         "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers in `src/lib/hooks.ts` instead of hardcoding paid-vs-unpaid copy.",
         "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
@@ -15428,7 +15434,9 @@ class TakyonStore:
                 suffix = " ..." if len(substantive_conflicts) > 5 else ""
                 raise TakyonError(
                     f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
-                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
+                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing. "
+                    "For a worker-deferred task that means re-delegating with a NEW idempotency_key so the workspace "
+                    "re-materializes at the current head — a SAME-key re-call only replays this stored failure."
                 )
             # Commentary conflicts (and any not cleanly merged) -> drop the local render so head's
             # committed version stands after re-materialize below. A cleanly MERGED substantive file
@@ -17056,7 +17064,7 @@ class TakyonStore:
                 continue
             desc = str(p.get("hypothesis") or "").strip()
             if desc:
-                bets.append(f"- (in flight) {desc}")
+                bets.append(f"- (in flight) {desc}{_format_episode_metrics(p.get('metrics_snapshot'))}")
         if bets:
             lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
         learn_lines: list[str] = []
@@ -17105,6 +17113,11 @@ class TakyonStore:
         episode_id = uuid.uuid4().hex
         with self._connect() as conn:
             self._ensure_business(conn, slug)
+            # Guarantee at least one quantitative metric on every episode: capture measured
+            # product/channel numbers at record time alongside (never replacing) the CEO's own
+            # baseline. Best-effort — an unavailable source degrades to fewer keys, never blocks
+            # the bet from being recorded.
+            metrics_snapshot = _episode_metrics_snapshot(self, conn, slug, channel)
             event_id = self._record_event(
                 conn, scope=f"business:{slug}", business_slug=slug,
                 event_type="ceo.episode.opened",
@@ -17114,11 +17127,12 @@ class TakyonStore:
                     "channel": (channel or "").strip() or None,
                     "action_kind": (action_kind or "").strip() or None,
                     "baseline": baseline if isinstance(baseline, dict) else {},
+                    "metrics_snapshot": metrics_snapshot,
                     "opened_at": _now(),
                 },
             )
         return {"success": True, "business": slug, "episode_id": episode_id, "event_id": event_id,
-                "event_type": "ceo.episode.opened"}
+                "event_type": "ceo.episode.opened", "metrics_snapshot": metrics_snapshot}
 
     @staticmethod
     def _tokenize_tags(raw: Any) -> set[str]:
@@ -22667,18 +22681,44 @@ def _verified_business_file_mutation_response(
         return tool_error(str(exc), success=False)
 
 
+def _refuse_starter_owned_product_write(rel: str) -> None:
+    """Fail closed on durable edits that can never persist: scaffold-owned product files.
+
+    Every file in _STARTER_OWNED_REFRESH_FILES under the product/site runtime-UI surface is
+    force-rewritten from the bundled scaffold on every kit materialize — before each product
+    worker run, inside each publish build, and inside this very commit's own surface-projection
+    refresh — so a durable write here silently self-reverts within its commit, no-ops the
+    revision, and then fails its sha postcondition byte-identically on every retry (observed
+    live as an unwinnable repair loop that exhausted two full CEO turns). Refusing up front
+    converts that silent lie into a routable error naming the viable repair. Handler-level on
+    purpose: internal platform writers of these files (e.g. the Search Console index.html
+    injection) still go through the store's apply path unimpeded."""
+    normalized = str(rel or "").strip().strip("/")
+    prefix = "product/site/"
+    if not normalized.startswith(prefix):
+        return
+    if normalized[len(prefix):] in _STARTER_OWNED_REFRESH_FILES:
+        raise TakyonError(
+            f"{normalized} is scaffold-owned and force-rewritten from the bundled scaffold on every "
+            "product build/kit materialize — edits to it can never persist. Make the minimal repair in "
+            "worker-owned source instead: fix the importing screen (src/screens/*, src/components/*) or "
+            "add the helper to a NEW worker-owned module under src/lib/ with a different filename."
+        )
+
+
 def handle_business_write_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
     content = str(args.get("content") or "")
-    _, file_path = _resolved_business_output_path_for_action(
+    rel, file_path = _resolved_business_output_path_for_action(
         store,
         business,
         str(args.get("path") or ""),
         action="artifact.write",
     )
+    _refuse_starter_owned_product_write(rel)
     previous_content = (
         file_path.read_text(encoding="utf-8", errors="replace")
         if file_path.exists()
@@ -22706,12 +22746,13 @@ def handle_business_patch_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
-    _, file_path = _resolved_business_output_path_for_action(
+    rel, file_path = _resolved_business_output_path_for_action(
         store,
         business,
         str(args.get("path") or ""),
         action="artifact.patch",
     )
+    _refuse_starter_owned_product_write(rel)
     if not file_path.exists():
         raise TakyonError(f"cannot patch missing file: {args.get('path')}")
     old = str(args.get("old") or "")
@@ -26415,6 +26456,29 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         image_urls = [str(u) for u in raw_urls] if isinstance(raw_urls, list) else []
         store = _store()
         store.enforce_operator_business_access(business)
+        # Idempotency layer 1: the canonical idempotency_keys rail (the exact apply-operations
+        # pattern) — an exact replay returns the recorded result with ZERO provider calls; a
+        # reused key with different inputs refuses.
+        op_hash = _hash_operation(
+            {
+                "tool": "business_shopify_create_product",
+                "business": business,
+                "title": title,
+                "price": price,
+                "status": status,
+            }
+        )
+        with store._connect() as conn:
+            prior = conn.execute(
+                "SELECT operation_hash, result_json FROM idempotency_keys WHERE key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if prior:
+            if prior["operation_hash"] != op_hash:
+                raise TakyonError("idempotency_key already used for different operations")
+            cached = _json_loads(prior["result_json"], None)
+            if isinstance(cached, dict):
+                return tool_result({**cached, "idempotent_replay": True})
         try:
             _require_api_access(
                 {
@@ -26429,6 +26493,75 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         shop_domain = str(connection.get("shop_domain") or "")
         account_id = str(connection.get("connected_account_id") or "")
         mode = _effective_business_mode(row.get("mode"))
+        # Idempotency layer 2: our OWN receipts (immediately consistent) before any provider
+        # search — the 2026-07-04 live acceptance proved Shopify's products SEARCH index lags
+        # creates by seconds, so a same-title rerun under a new key would otherwise duplicate.
+        # A receipt match is verified against the store BY ID (read-your-writes) before adopting.
+        with store._connect() as conn:
+            receipt_rows = conn.execute(
+                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type = ? "
+                "ORDER BY created_at DESC LIMIT 100",
+                (business, "shopify.product.create"),
+            ).fetchall()
+        receipt_payloads = [
+            _json_loads(r["payload_json"] if isinstance(r, Mapping) else r[0], {})
+            for r in (receipt_rows or [])
+        ]
+        candidate_ids = shopify_util.match_product_receipts(
+            receipt_payloads, title=title, shop_domain=shop_domain
+        )
+        existing = None
+        for candidate_id in candidate_ids:
+            try:
+                existing = shopify_util.get_product(
+                    shop_domain=shop_domain,
+                    connected_account_id=account_id,
+                    product_id=candidate_id,
+                )
+            except shopify_util.ShopifyError as exc:
+                raise TakyonError(
+                    f"shopify_connection_inactive: the product-by-id probe failed ({exc}); "
+                    "re-run business_connect_shopify to refresh the connection"
+                ) from exc
+            if existing is not None:
+                break
+        if candidate_ids:
+            if existing is not None:
+                product_id = str(existing.get("id") or candidate_id)
+                result = {
+                    "success": True,
+                    "action": "business_shopify_create_product",
+                    "business": business,
+                    "shop_domain": shop_domain,
+                    "deduped": True,
+                    "dedup_source": "local_receipt",
+                    "product_id": product_id,
+                    "product_numeric_id": shopify_util._gid_numeric(product_id),
+                    "handle": str(existing.get("handle") or ""),
+                    "title": str(existing.get("title") or title),
+                    "status": str(existing.get("status") or "").lower(),
+                    "online_store_preview_url": str(
+                        existing.get("onlineStorePreviewUrl") or ""
+                    ),
+                    "tag": shopify_util.business_product_tag(business),
+                    "media_warnings": [],
+                    "note": (
+                        "A prior receipted push of this exact title to this store already "
+                        "exists; adopted it instead of duplicating."
+                    ),
+                }
+                numeric = result["product_numeric_id"]
+                if numeric:
+                    result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+                with store._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, "
+                        "created_at) VALUES (?, ?, ?, ?)",
+                        (idempotency_key, op_hash, _json_dumps(result), _now()),
+                    )
+                return tool_result(result)
+            # The receipted product was deleted on the store — the store is truth; fall through
+            # and create a fresh one.
         # The plan probe is live provider truth AND the connection-liveness check: an expired
         # token fails HERE, before any write reaches the store.
         try:
@@ -26462,6 +26595,27 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
             raise TakyonError(str(exc)) from exc
         except shopify_util.ShopifyError as exc:
             raise TakyonError(f"shopify_product_create_failed: {exc}") from exc
+        result: dict[str, Any] = {
+            "success": True,
+            "action": "business_shopify_create_product",
+            "business": business,
+            "shop_domain": shop_domain,
+            **product,
+        }
+        numeric = str(product.get("product_numeric_id") or "")
+        if numeric:
+            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+        if product.get("deduped"):
+            result["dedup_source"] = "store_search"
+            result["note"] = (
+                "An identical product (same business tag + exact title) already exists on the "
+                "store; adopted it instead of duplicating."
+            )
+        elif str(product.get("status")) == "draft":
+            result["note"] = (
+                "Created as DRAFT — activate it in the store admin or create as status='active' "
+                "to publish it to the online storefront."
+            )
         with store._connect() as conn:
             store._record_event(
                 conn,
@@ -26484,25 +26638,10 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                     "actor": args.get("actor") or "agent",
                 },
             )
-        result: dict[str, Any] = {
-            "success": True,
-            "action": "business_shopify_create_product",
-            "business": business,
-            "shop_domain": shop_domain,
-            **product,
-        }
-        numeric = str(product.get("product_numeric_id") or "")
-        if numeric:
-            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
-        if product.get("deduped"):
-            result["note"] = (
-                "An identical product (same business tag + exact title) already exists on the "
-                "store; adopted it instead of duplicating."
-            )
-        elif str(product.get("status")) == "draft":
-            result["note"] = (
-                "Created as DRAFT — activate it in the store admin or create as status='active' "
-                "to publish it to the online storefront."
+            conn.execute(
+                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (idempotency_key, op_hash, _json_dumps(result), _now()),
             )
         return tool_result(result)
     except Exception as exc:
@@ -28790,13 +28929,126 @@ def _wake_ad_refresh_enabled() -> bool:
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _format_episode_metrics(snapshot: Any) -> str:
+    """One compact ` [at record: …]` suffix for a wake-memory bet line, from the episode's
+    metrics_snapshot. Empty string when the snapshot is absent/empty — old episodes render as
+    before."""
+    if not isinstance(snapshot, dict):
+        return ""
+    bits: list[str] = []
+    for key, label in (("users", "users"), ("revenue_cents", "revenue_c"), ("usage_events", "usage")):
+        if snapshot.get(key) is not None:
+            bits.append(f"{label}={snapshot[key]}")
+    for camp in (snapshot.get("campaigns") or [])[:2]:
+        if isinstance(camp, dict):
+            frag = f"{camp.get('slug')}: spend_c={camp.get('spend_cents')}"
+            if camp.get("impressions") is not None:
+                frag += f" impr={camp['impressions']}"
+            if camp.get("clicks") is not None:
+                frag += f" clicks={camp['clicks']}"
+            bits.append(frag)
+    x_stats = snapshot.get("x")
+    if isinstance(x_stats, dict) and x_stats:
+        bits.append("x " + " ".join(f"{k}={v}" for k, v in list(x_stats.items())[:3]))
+    return f" [at record: {', '.join(bits)}]" if bits else ""
+
+
+def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channel: Any) -> dict[str, Any]:
+    """Quantitative context captured AT EPISODE RECORD TIME (RL rail R1 support).
+
+    Every episode carries at least one hard number so bets, lessons, and future settles are judged
+    against measured state instead of narrative: lifetime product counters always (users, revenue,
+    usage events), plus the episode channel's live-campaign delivery stats (spend from the policy
+    registry; impressions/clicks from the latest insights-sync receipt) for reddit/meta, and the
+    latest X sync totals for channel=x. Best-effort by design: every source is wrapped so a missing
+    table (SQLite dev store has no ad-spend policies), missing file, or provider gap degrades to
+    fewer keys — never an exception, never a blocked episode."""
+    snap: dict[str, Any] = {"captured_at": _now()}
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_users WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["users"] = int(_row_value_int(row, "n"))
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
+            (slug,),
+        ).fetchone()
+        snap["revenue_cents"] = int(_row_value_int(row, "c"))
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_usage_events WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["usage_events"] = int(_row_value_int(row, "n"))
+    except Exception:
+        pass
+    bucket = _normalize_creative_credit_bucket(channel) if channel else ""
+    if bucket in ("reddit", "meta"):
+        try:
+            backend = _business_ad_spend_backend()
+            campaigns: list[dict[str, Any]] = []
+            for policy in backend.list_policies(conn, slug, statuses=list(_PULSE_AD_LIVE_STATUSES)):
+                if str(policy.channel or "") != bucket:
+                    continue
+                entry: dict[str, Any] = {
+                    "slug": policy.slug,
+                    "status": policy.status,
+                    "spend_cents": int(policy.last_synced_spend_cents or 0),
+                    "total_budget_cents": int(policy.total_budget_cents or 0),
+                }
+                try:
+                    syncs_dir = store._resolve_business_file(
+                        slug, f"metrics/{bucket}-ads/{policy.slug}/syncs", sync=False
+                    )
+                    latest = max(
+                        (p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime
+                    )
+                    totals = (json.loads(latest.read_text(encoding="utf-8")) or {}).get("totals") or {}
+                    for key in ("impressions", "clicks", "spend_usd"):
+                        if totals.get(key) is not None:
+                            entry[key] = totals[key]
+                except Exception:
+                    pass
+                campaigns.append(entry)
+            if campaigns:
+                snap["campaigns"] = campaigns
+        except Exception:
+            pass
+    elif bucket == "x":
+        try:
+            syncs_dir = store._resolve_business_file(slug, "metrics/x/syncs", sync=False)
+            latest = max((p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime)
+            receipt = json.loads(latest.read_text(encoding="utf-8")) or {}
+            totals = receipt.get("totals") if isinstance(receipt.get("totals"), dict) else {}
+            x_stats = {
+                k: totals[k]
+                for k in ("views", "impressions", "likes", "replies", "reposts", "clicks")
+                if totals.get(k) is not None
+            }
+            if x_stats:
+                snap["x"] = x_stats
+        except Exception:
+            pass
+    return snap
+
+
+def _row_value_int(row: Any, key: str) -> int:
+    if row is None:
+        return 0
+    try:
+        return int(row[key] or 0)
+    except Exception:
+        try:
+            return int(row[0] or 0)
+        except Exception:
+            return 0
+
+
 def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
-    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE reddit campaign of this
-    business, pull fresh delivery insights via the EXISTING (gated) insights-sync tool, so the pulse
-    the CEO reads this wake is already current instead of relying on the agent to remember. Never
-    raises — a failed or skipped refresh must never break the wake. Bounded to reddit live+stale
-    campaigns (meta has no policy rows yet). Reuses the shared staleness threshold; disable with
-    TAKYON_WAKE_AD_REFRESH=0."""
+    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE ad campaign of this
+    business, pull fresh delivery insights via the EXISTING (gated) channel insights-sync tool, so
+    the pulse the CEO reads this wake is already current instead of relying on the agent to
+    remember. Never raises — a failed or skipped refresh must never break the wake. Dispatches per
+    channel (reddit + meta both register in the ad-spend policy registry as of the 2026-07-04
+    parity fix). Reuses the shared staleness threshold; disable with TAKYON_WAKE_AD_REFRESH=0."""
     summary: dict[str, Any] = {"checked": 0, "refreshed": 0, "skipped": 0, "errors": 0, "campaigns": []}
     if not _wake_ad_refresh_enabled():
         summary["disabled"] = True
@@ -28809,7 +29061,8 @@ def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
     now_dt = datetime.now(timezone.utc)
     hour_bucket = now_dt.strftime("%Y%m%dT%H")  # fresh key each wake; dedups retries within the hour
     for policy in policies or []:
-        if str(policy.channel or "") != "reddit":
+        channel = str(policy.channel or "")
+        if channel not in ("reddit", "meta"):
             summary["skipped"] += 1
             continue
         summary["checked"] += 1
@@ -28821,12 +29074,23 @@ def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
                 summary["skipped"] += 1
                 continue  # fresh enough — no refresh needed
             campaign_slug = policy.slug
-            raw = handle_business_reddit_ad_insights_sync({
+            sync_args = {
                 "business": slug,
                 "slug": campaign_slug,
                 "level": "campaign",
                 "idempotency_key": f"wake-refresh:{campaign_slug}:campaign:{hour_bucket}",
-            })
+            }
+            if channel == "meta":
+                # Lazy import: meta_ads_v2 imports core, so core must not import it at module load.
+                try:
+                    from . import meta_ads_v2
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon import meta_ads_v2
+                if policy.provider_campaign_id:
+                    sync_args["object_id"] = str(policy.provider_campaign_id)
+                raw = meta_ads_v2.handle_business_meta_ad_insights_sync(sync_args)
+            else:
+                raw = handle_business_reddit_ad_insights_sync(sync_args)
             ok = False
             try:
                 ok = bool(json.loads(raw).get("success"))
@@ -33162,6 +33426,38 @@ def _repair_stale_work_request_from_worker_job(
     return final_status, final_result
 
 
+def _terminal_worker_retry_fields(
+    tool_name: str,
+    run_id: str,
+    status: str,
+    *,
+    side_effect: bool,
+) -> dict[str, Any]:
+    """Machine + prose routing for a worker run that finished WITHOUT success.
+
+    The same-key re-call contract is attach-or-replay by design: once the run is terminal,
+    re-calling with the SAME idempotency_key replays the stored result verbatim and never
+    re-runs (observed live: a CEO looped the identical stale-base replay to budget
+    exhaustion because nothing said so). These fields make the terminal state explicit and
+    name the one real affordance — a NEW idempotency_key — with side-effect-safe wording on
+    lanes that execute external actions."""
+    if side_effect:
+        note = (
+            f"run {run_id} already finished as {status}; re-calling with the SAME idempotency_key "
+            "replays this stored result and will never re-run. A retry requires a NEW "
+            "idempotency_key and WILL re-execute the side effect (e.g. a live post), so first "
+            "confirm the action did not already happen."
+        )
+    else:
+        note = (
+            f"run {run_id} already finished as {status}; re-calling with the SAME idempotency_key "
+            "replays this stored result and will never re-run. To retry after fixing the cause, "
+            "re-call with a NEW idempotency_key — a fresh run re-materializes the workspace at the "
+            "current head revision."
+        )
+    return {"terminal": True, "retry_guidance": note}
+
+
 def _run_operator_task_on_worker(
     *,
     store: "TakyonStore",
@@ -33228,7 +33524,13 @@ def _run_operator_task_on_worker(
             error_text = str(
                 result.get("error") or f"{tool_name} {normalized_status or status} on the worker plane"
             )
-            return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+            extra = {k: v for k, v in result.items() if k != "error"}
+            extra.update(
+                _terminal_worker_retry_fields(
+                    tool_name, run_id, normalized_status or str(status), side_effect=False
+                )
+            )
+            return tool_error(error_text, **extra)
         repaired = _repair_stale_work_request_from_worker_job(
             store,
             run_id=run_id,
@@ -33249,7 +33551,13 @@ def _run_operator_task_on_worker(
                 repaired_result.get("error")
                 or f"{tool_name} {repaired_status or worker_status} on the worker plane"
             )
-            return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+            extra = {k: v for k, v in repaired_result.items() if k != "error"}
+            extra.update(
+                _terminal_worker_retry_fields(
+                    tool_name, run_id, str(repaired_status or worker_status), side_effect=False
+                )
+            )
+            return tool_error(error_text, **extra)
         now = time.monotonic()
         if not picked_up and now >= pickup_deadline:
             # The worker has not STARTED this job yet — it is queued behind an in-flight build on the
@@ -33352,7 +33660,13 @@ def _run_worker_backed_business_job_and_wait(
                     or result.get("worker_error")
                     or f"{tool_name} {normalized_status or status} on the worker plane"
                 ).strip() or f"{tool_name} {normalized_status or status} on the worker plane"
-                return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+                extra = {k: v for k, v in result.items() if k != "error"}
+                extra.update(
+                    _terminal_worker_retry_fields(
+                        tool_name, run_id, normalized_status or str(status), side_effect=True
+                    )
+                )
+                return tool_error(error_text, **extra)
             repaired = _repair_stale_work_request_from_worker_job(
                 active_store,
                 run_id=run_id,
@@ -33376,7 +33690,13 @@ def _run_worker_backed_business_job_and_wait(
                     or repaired_result.get("worker_error")
                     or f"{tool_name} {repaired_status or worker_status} on the worker plane"
                 ).strip() or f"{tool_name} {repaired_status or worker_status} on the worker plane"
-                return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+                extra = {k: v for k, v in repaired_result.items() if k != "error"}
+                extra.update(
+                    _terminal_worker_retry_fields(
+                        tool_name, run_id, str(repaired_status or worker_status), side_effect=True
+                    )
+                )
+                return tool_error(error_text, **extra)
             now = time.monotonic()
             if not picked_up and now >= pickup_deadline:
                 return tool_result(

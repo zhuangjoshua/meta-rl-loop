@@ -14,7 +14,7 @@ from plugins.takyon import core
 
 
 def _policy(**kw):
-    base = dict(channel="reddit", slug="acme", status="active", metadata={})
+    base = dict(channel="reddit", slug="acme", status="active", metadata={}, provider_campaign_id="")
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -25,6 +25,7 @@ def _iso_ago(**kw):
 
 def _wire(policies, monkeypatch, *, sync_ok=True, sync_raises=False, env=None):
     calls = []
+    meta_calls = []
 
     def fake_list(slug, *, statuses=None):
         return policies
@@ -35,23 +36,32 @@ def _wire(policies, monkeypatch, *, sync_ok=True, sync_raises=False, env=None):
             raise RuntimeError("gateway down")
         return json.dumps({"success": bool(sync_ok)})
 
+    def fake_meta_sync(args):
+        meta_calls.append(args)
+        if sync_raises:
+            raise RuntimeError("gateway down")
+        return json.dumps({"success": bool(sync_ok)})
+
+    from plugins.takyon import meta_ads_v2
+
     monkeypatch.setattr(core, "_list_ad_spend_policies", fake_list)
     monkeypatch.setattr(core, "handle_business_reddit_ad_insights_sync", fake_sync)
+    monkeypatch.setattr(meta_ads_v2, "handle_business_meta_ad_insights_sync", fake_meta_sync)
     monkeypatch.delenv("TAKYON_WAKE_AD_REFRESH", raising=False)
     for key, value in (env or {}).items():
         monkeypatch.setenv(key, value)
-    return calls
+    return calls, meta_calls
 
 
 def test_disabled_via_env_does_nothing(monkeypatch):
-    calls = _wire([_policy()], monkeypatch, env={"TAKYON_WAKE_AD_REFRESH": "0"})
+    calls, meta_calls = _wire([_policy()], monkeypatch, env={"TAKYON_WAKE_AD_REFRESH": "0"})
     out = core._refresh_stale_live_ad_campaigns("acme")
     assert out.get("disabled") is True
     assert calls == []
 
 
 def test_live_never_synced_triggers_sync(monkeypatch):
-    calls = _wire([_policy(status="active", metadata={})], monkeypatch)
+    calls, meta_calls = _wire([_policy(status="active", metadata={})], monkeypatch)
     out = core._refresh_stale_live_ad_campaigns("acme")
     assert out["refreshed"] == 1
     assert out["campaigns"] == ["acme"]
@@ -64,7 +74,7 @@ def test_live_never_synced_triggers_sync(monkeypatch):
 
 
 def test_fresh_campaign_is_skipped(monkeypatch):
-    calls = _wire([_policy(metadata={"insights_synced_at": _iso_ago(minutes=1)})], monkeypatch)
+    calls, meta_calls = _wire([_policy(metadata={"insights_synced_at": _iso_ago(minutes=1)})], monkeypatch)
     out = core._refresh_stale_live_ad_campaigns("acme")
     assert out["refreshed"] == 0
     assert out["skipped"] >= 1
@@ -72,17 +82,51 @@ def test_fresh_campaign_is_skipped(monkeypatch):
 
 
 def test_stale_campaign_is_synced(monkeypatch):
-    calls = _wire([_policy(metadata={"insights_synced_at": _iso_ago(days=2)})], monkeypatch)
+    calls, meta_calls = _wire([_policy(metadata={"insights_synced_at": _iso_ago(days=2)})], monkeypatch)
     out = core._refresh_stale_live_ad_campaigns("acme")
     assert out["refreshed"] == 1
     assert len(calls) == 1
 
 
-def test_non_reddit_policy_is_never_synced(monkeypatch):
-    calls = _wire([_policy(channel="meta", metadata={})], monkeypatch)
+def test_meta_policy_dispatches_to_meta_sync(monkeypatch):
+    """2026-07-04 parity: meta campaigns refresh through the meta insights sync (not skipped,
+    and never through the reddit handler)."""
+    calls, meta_calls = _wire(
+        [_policy(channel="meta", slug="glow", metadata={}, provider_campaign_id="120210000000")],
+        monkeypatch,
+    )
+    out = core._refresh_stale_live_ad_campaigns("acme")
+    assert out["refreshed"] == 1
+    assert out["campaigns"] == ["glow"]
+    assert calls == []  # reddit handler untouched
+    assert len(meta_calls) == 1
+    args = meta_calls[0]
+    assert args["business"] == "acme"
+    assert args["slug"] == "glow"
+    assert args["level"] == "campaign"
+    assert args["object_id"] == "120210000000"
+
+
+def test_mixed_channels_each_use_their_own_sync(monkeypatch):
+    calls, meta_calls = _wire(
+        [
+            _policy(channel="reddit", slug="r1", metadata={}),
+            _policy(channel="meta", slug="m1", metadata={}, provider_campaign_id="12099"),
+        ],
+        monkeypatch,
+    )
+    out = core._refresh_stale_live_ad_campaigns("acme")
+    assert out["refreshed"] == 2
+    assert sorted(out["campaigns"]) == ["m1", "r1"]
+    assert len(calls) == 1 and calls[0]["slug"] == "r1"
+    assert len(meta_calls) == 1 and meta_calls[0]["slug"] == "m1"
+
+
+def test_unknown_channel_is_skipped(monkeypatch):
+    calls, meta_calls = _wire([_policy(channel="x", metadata={})], monkeypatch)
     out = core._refresh_stale_live_ad_campaigns("acme")
     assert out["refreshed"] == 0
-    assert calls == []  # the reddit sync must not be called for a meta policy
+    assert calls == [] and meta_calls == []
 
 
 def test_sync_failure_counts_error_not_refreshed(monkeypatch):

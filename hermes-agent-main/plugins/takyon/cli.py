@@ -1344,6 +1344,50 @@ def _shell_create_argv(command: str, raw_args: str) -> list[str]:
 
 
 
+def _intake_convert_brief_to_goal(brief_path: str) -> str:
+    """Read a detailed external product brief and convert it, via the intake translator, into a
+    build goal expressed in Takyon's actual capabilities. Prints the full conversion (so the
+    operator SEES the doc become 'what can be built') and returns the distilled build goal.
+
+    Fails closed: a missing file, missing operator identity, or an unavailable safebox/model raises
+    SystemExit rather than creating a business with an empty or fabricated goal."""
+    import os
+    from pathlib import Path
+
+    path = Path(brief_path).expanduser()
+    if not path.is_file():
+        raise SystemExit(f"--brief: file not found: {brief_path}")
+    try:
+        brief_text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise SystemExit(f"--brief: could not read {brief_path}: {exc}")
+
+    operator_user_id = str(os.environ.get("TAKYON_SESSION_USER_ID") or "").strip()
+    if not operator_user_id:
+        raise SystemExit(
+            "--brief: no operator identity (TAKYON_SESSION_USER_ID). Run through the operator rail "
+            "(scripts/takyon-operator-prod.sh) so the intake conversion has model access."
+        )
+
+    try:
+        from .intake import IntakeError, convert_brief
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon.intake import IntakeError, convert_brief
+
+    try:
+        result = convert_brief(brief_text, operator_user_id=operator_user_id)
+    except IntakeError as exc:
+        raise SystemExit(f"--brief intake failed: {exc}")
+
+    print("\n===== INTAKE: brief converted to Takyon capabilities =====")
+    print(result.get("markdown", ""))
+    print("===== END INTAKE (building the 'Build Goal' below) =====\n")
+    goal = str(result.get("goal") or "").strip()
+    if not goal:
+        raise SystemExit("--brief intake produced no build goal")
+    return goal
+
+
 def _parse_business_start_args(
     argv: list[str],
     *,
@@ -1356,6 +1400,7 @@ def _parse_business_start_args(
     explicit_name: str | None = None
     slug_override: str | None = None
     archetype: str | None = None
+    brief_path: str | None = None
     goal_only = False
     parse_flags = True
     auto_start = auto_default
@@ -1419,6 +1464,11 @@ def _parse_business_start_args(
                     archetype = _archetypes_mod.assert_selectable(raw_archetype)
                 except _archetypes_mod.ArchetypeError as exc:
                     raise SystemExit(str(exc))
+        elif parse_flags and token == "--brief":
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            brief_path = str(tokens[index] or "").strip()
         elif parse_flags and token in {"-h", "--help", "help"}:
             raise SystemExit(usage)
         elif parse_flags and token.startswith("--"):
@@ -1429,6 +1479,14 @@ def _parse_business_start_args(
     if not clean and not slug_override:
         raise SystemExit(usage)
 
+    # --brief <path>: intake a detailed external product doc and CONVERT it to a build goal
+    # expressed in the capabilities Takyon actually has (see plugins/takyon/intake.py). Additive:
+    # absent -> unchanged behavior. The converted goal replaces any goal text; the slug still comes
+    # from the positional/--slug/--name as usual, so `create <slug> --brief <path>` is the shape.
+    converted_goal: str | None = None
+    if brief_path:
+        converted_goal = _intake_convert_brief_to_goal(brief_path)
+
     if goal_only or (
         auto_default
         and not slug_override
@@ -1436,7 +1494,7 @@ def _parse_business_start_args(
         and len(clean) == 1
         and _looks_like_create_goal_text(clean[0])
     ):
-        goal = " ".join(clean).strip()
+        goal = converted_goal or " ".join(clean).strip()
         if not goal and not slug_override and not explicit_name:
             raise SystemExit(usage)
         if slug_override:
@@ -1449,13 +1507,13 @@ def _parse_business_start_args(
     if slug_override:
         slug = _slugify(slug_override)
         raw_name = explicit_name or _display_name_from_slug(slug)
-        goal = " ".join(clean).strip()
+        goal = converted_goal or " ".join(clean).strip()
         return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
 
     slug_token = clean[0]
     raw_name = explicit_name or slug_token
     slug = _slugify(slug_token)
-    goal = " ".join(clean[1:]).strip()
+    goal = converted_goal or " ".join(clean[1:]).strip()
     return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
 
 
