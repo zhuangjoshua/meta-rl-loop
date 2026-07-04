@@ -704,3 +704,134 @@ def test_record_completed_usage_uses_the_anchored_window_too(pg_conn):
             app_user_id=user_id,
             user_monthly_limit_microusd=1_000,
         )
+
+
+# ── persistent credit grants: overflow above the monthly allowance (migration 0064 / WS2) ────
+
+
+def _grant(conn, slug, user_id, amount, source_id):
+    return app_usage.grant_app_user_credits(
+        conn,
+        slug,
+        app_user_id=user_id,
+        amount_microusd=amount,
+        source="stripe_payment",
+        source_id=source_id,
+    )
+
+
+def test_grant_mint_is_funded_only_and_idempotent(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    first = _grant(pg_conn, slug, user_id, 500, "pi_1")
+    assert first["replayed"] is False
+    replay = _grant(pg_conn, slug, user_id, 500, "pi_1")
+    assert replay["replayed"] is True and replay["grant_id"] == first["grant_id"]
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 500
+    with pytest.raises(ValueError):
+        _grant(pg_conn, slug, user_id, 0, "pi_zero")
+    with pytest.raises(ValueError):
+        app_usage.grant_app_user_credits(
+            pg_conn, slug, app_user_id=user_id, amount_microusd=100, source="", source_id="x"
+        )
+
+
+def test_reserve_overflows_into_grants_and_refunds_on_release(pg_conn):
+    # limit 1000, estimate 1200 -> the 200 above the allowance debits the grant at reserve;
+    # a release returns the full hold (no spend happened).
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    _grant(pg_conn, slug, user_id, 500, "pi_a")
+    event = app_usage.reserve_usage(
+        pg_conn,
+        slug,
+        estimated_cost_microusd=1_200,
+        reservation_key="g1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    assert event.status == "reserved"
+    assert event.metadata.get("grant_hold_microusd") == 200
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 300
+    app_usage.release_usage(pg_conn, slug, "g1")
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 500
+
+
+def test_settle_refunds_the_top_slice_of_the_grant_hold(pg_conn):
+    # The grant covers the spend ABOVE the allowance, so an estimate->actual shrink comes off
+    # the grant hold first: refund = min(hold, estimate - actual).
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    _grant(pg_conn, slug, user_id, 500, "pi_b")
+    app_usage.reserve_usage(
+        pg_conn,
+        slug,
+        estimated_cost_microusd=1_200,
+        reservation_key="g2",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    settled = app_usage.settle_usage(
+        pg_conn, slug, "g2", actual_cost_microusd=1_050
+    )
+    # hold was 200; shrink is 150 -> refund 150, grant keeps funding the 50 above the allowance.
+    assert settled.metadata.get("grant_refund_microusd") == 150
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 450
+
+
+def test_reserve_refused_when_grants_cannot_cover_the_shortfall(pg_conn):
+    # Insufficient grants -> the same AppUserBudgetExceeded refusal, and the partial debits are
+    # rolled back (no net balance change on a refusal).
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    _grant(pg_conn, slug, user_id, 100, "pi_c")
+    with pytest.raises(AppUserBudgetExceeded):
+        app_usage.reserve_usage(
+            pg_conn,
+            slug,
+            estimated_cost_microusd=2_000,
+            reservation_key="g3",
+            app_user_id=user_id,
+            user_monthly_limit_microusd=1_000,
+        )
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 100
+
+
+def test_grants_are_per_customer_never_cross_user(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    rich = _user(pg_conn, slug, email="rich@example.com")
+    poor = _user(pg_conn, slug, email="poor@example.com")
+    _paid_period(pg_conn, slug, poor, period_end_sql="now() + interval '20 days'")
+    _grant(pg_conn, slug, rich, 5_000, "pi_d")
+    with pytest.raises(AppUserBudgetExceeded):
+        app_usage.reserve_usage(
+            pg_conn,
+            slug,
+            estimated_cost_microusd=1_200,
+            reservation_key="g4",
+            app_user_id=poor,
+            user_monthly_limit_microusd=1_000,
+        )
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, rich) == 5_000
+
+
+def test_reaper_refunds_grant_holds_on_orphaned_reserves(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    _grant(pg_conn, slug, user_id, 500, "pi_e")
+    app_usage.reserve_usage(
+        pg_conn,
+        slug,
+        estimated_cost_microusd=1_200,
+        reservation_key="g5",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 300
+    _backdate_event(pg_conn, slug, "g5", interval_sql="3 hours")
+    assert app_usage.reconcile_held_usage(pg_conn, older_than_seconds=3600) >= 1
+    assert app_usage.get_app_user_grant_balance(pg_conn, slug, user_id) == 500

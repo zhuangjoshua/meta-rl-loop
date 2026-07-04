@@ -773,6 +773,49 @@ def release_usage(
     return _event_from_gate_row(row)
 
 
+def grant_app_user_credits(
+    conn,
+    business_slug: str,
+    *,
+    app_user_id: str,
+    amount_microusd: int,
+    source: str,
+    source_id: str,
+) -> dict:
+    """Mint a persistent per-customer credit grant (migration 0064, subuser-billing WS2).
+
+    FUNDED-ONLY: callers must be a settled-payment path (a signature-verified, event-deduped
+    Stripe webhook) or a bounded business-funded acquisition path — ``source``/``source_id``
+    carry that evidence and make the mint idempotent (one payment, one grant, replay-safe).
+    There is no promo/comp mint. Runs only on the safebox authority plane; runtime roles have
+    no EXECUTE on the definer function."""
+    if int(amount_microusd) <= 0:
+        raise ValueError("amount_microusd must be > 0")
+    if not str(source or "").strip() or not str(source_id or "").strip():
+        raise ValueError("source and source_id are required (funded-only mint)")
+    row = _gate_execute(
+        conn,
+        "select grant_id, remaining_microusd, replayed from safebox_grant_app_user_credits(%s, %s, %s, %s, %s)",
+        (business_slug, app_user_id, int(amount_microusd), source, source_id),
+        plane="safebox",
+    )
+    return {
+        "grant_id": str(row[0]),
+        "remaining_microusd": int(row[1]),
+        "replayed": bool(row[2]),
+    }
+
+
+def get_app_user_grant_balance(conn, business_slug: str, app_user_id: str) -> int:
+    """Persistent credit balance for one sub-user (Σ remaining across grants). Owner/authority
+    plane read — the customer-facing surface gets its own session-scoped port with the top-up
+    UI, never this raw-param read."""
+    row = conn.execute(
+        "select safebox_app_user_grant_balance(%s, %s)", (business_slug, app_user_id)
+    ).fetchone()
+    return int(row[0] if row else 0)
+
+
 def reconcile_held_usage(
     conn,
     *,
