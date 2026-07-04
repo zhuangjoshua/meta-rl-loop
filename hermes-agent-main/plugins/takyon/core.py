@@ -26456,6 +26456,29 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         image_urls = [str(u) for u in raw_urls] if isinstance(raw_urls, list) else []
         store = _store()
         store.enforce_operator_business_access(business)
+        # Idempotency layer 1: the canonical idempotency_keys rail (the exact apply-operations
+        # pattern) — an exact replay returns the recorded result with ZERO provider calls; a
+        # reused key with different inputs refuses.
+        op_hash = _hash_operation(
+            {
+                "tool": "business_shopify_create_product",
+                "business": business,
+                "title": title,
+                "price": price,
+                "status": status,
+            }
+        )
+        with store._connect() as conn:
+            prior = conn.execute(
+                "SELECT operation_hash, result_json FROM idempotency_keys WHERE key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if prior:
+            if prior["operation_hash"] != op_hash:
+                raise TakyonError("idempotency_key already used for different operations")
+            cached = _json_loads(prior["result_json"], None)
+            if isinstance(cached, dict):
+                return tool_result({**cached, "idempotent_replay": True})
         try:
             _require_api_access(
                 {
@@ -26470,6 +26493,75 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         shop_domain = str(connection.get("shop_domain") or "")
         account_id = str(connection.get("connected_account_id") or "")
         mode = _effective_business_mode(row.get("mode"))
+        # Idempotency layer 2: our OWN receipts (immediately consistent) before any provider
+        # search — the 2026-07-04 live acceptance proved Shopify's products SEARCH index lags
+        # creates by seconds, so a same-title rerun under a new key would otherwise duplicate.
+        # A receipt match is verified against the store BY ID (read-your-writes) before adopting.
+        with store._connect() as conn:
+            receipt_rows = conn.execute(
+                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type = ? "
+                "ORDER BY created_at DESC LIMIT 100",
+                (business, "shopify.product.create"),
+            ).fetchall()
+        receipt_payloads = [
+            _json_loads(r["payload_json"] if isinstance(r, Mapping) else r[0], {})
+            for r in (receipt_rows or [])
+        ]
+        candidate_ids = shopify_util.match_product_receipts(
+            receipt_payloads, title=title, shop_domain=shop_domain
+        )
+        existing = None
+        for candidate_id in candidate_ids:
+            try:
+                existing = shopify_util.get_product(
+                    shop_domain=shop_domain,
+                    connected_account_id=account_id,
+                    product_id=candidate_id,
+                )
+            except shopify_util.ShopifyError as exc:
+                raise TakyonError(
+                    f"shopify_connection_inactive: the product-by-id probe failed ({exc}); "
+                    "re-run business_connect_shopify to refresh the connection"
+                ) from exc
+            if existing is not None:
+                break
+        if candidate_ids:
+            if existing is not None:
+                product_id = str(existing.get("id") or candidate_id)
+                result = {
+                    "success": True,
+                    "action": "business_shopify_create_product",
+                    "business": business,
+                    "shop_domain": shop_domain,
+                    "deduped": True,
+                    "dedup_source": "local_receipt",
+                    "product_id": product_id,
+                    "product_numeric_id": shopify_util._gid_numeric(product_id),
+                    "handle": str(existing.get("handle") or ""),
+                    "title": str(existing.get("title") or title),
+                    "status": str(existing.get("status") or "").lower(),
+                    "online_store_preview_url": str(
+                        existing.get("onlineStorePreviewUrl") or ""
+                    ),
+                    "tag": shopify_util.business_product_tag(business),
+                    "media_warnings": [],
+                    "note": (
+                        "A prior receipted push of this exact title to this store already "
+                        "exists; adopted it instead of duplicating."
+                    ),
+                }
+                numeric = result["product_numeric_id"]
+                if numeric:
+                    result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+                with store._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, "
+                        "created_at) VALUES (?, ?, ?, ?)",
+                        (idempotency_key, op_hash, _json_dumps(result), _now()),
+                    )
+                return tool_result(result)
+            # The receipted product was deleted on the store — the store is truth; fall through
+            # and create a fresh one.
         # The plan probe is live provider truth AND the connection-liveness check: an expired
         # token fails HERE, before any write reaches the store.
         try:
@@ -26503,6 +26595,27 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
             raise TakyonError(str(exc)) from exc
         except shopify_util.ShopifyError as exc:
             raise TakyonError(f"shopify_product_create_failed: {exc}") from exc
+        result: dict[str, Any] = {
+            "success": True,
+            "action": "business_shopify_create_product",
+            "business": business,
+            "shop_domain": shop_domain,
+            **product,
+        }
+        numeric = str(product.get("product_numeric_id") or "")
+        if numeric:
+            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+        if product.get("deduped"):
+            result["dedup_source"] = "store_search"
+            result["note"] = (
+                "An identical product (same business tag + exact title) already exists on the "
+                "store; adopted it instead of duplicating."
+            )
+        elif str(product.get("status")) == "draft":
+            result["note"] = (
+                "Created as DRAFT — activate it in the store admin or create as status='active' "
+                "to publish it to the online storefront."
+            )
         with store._connect() as conn:
             store._record_event(
                 conn,
@@ -26525,25 +26638,10 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                     "actor": args.get("actor") or "agent",
                 },
             )
-        result: dict[str, Any] = {
-            "success": True,
-            "action": "business_shopify_create_product",
-            "business": business,
-            "shop_domain": shop_domain,
-            **product,
-        }
-        numeric = str(product.get("product_numeric_id") or "")
-        if numeric:
-            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
-        if product.get("deduped"):
-            result["note"] = (
-                "An identical product (same business tag + exact title) already exists on the "
-                "store; adopted it instead of duplicating."
-            )
-        elif str(product.get("status")) == "draft":
-            result["note"] = (
-                "Created as DRAFT — activate it in the store admin or create as status='active' "
-                "to publish it to the online storefront."
+            conn.execute(
+                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (idempotency_key, op_hash, _json_dumps(result), _now()),
             )
         return tool_result(result)
     except Exception as exc:
