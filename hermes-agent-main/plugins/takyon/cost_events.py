@@ -32,12 +32,27 @@ logger = logging.getLogger(__name__)
 # new kinds must not need a migration. Keep this list in sync as call sites grow.
 KIND_LLM_CALL = "llm_call"
 KIND_TOOL_CALL = "tool_call"
+KIND_PROVIDER_CALL = "provider_call"
 KIND_TURN = "turn"
 KIND_JOB = "job"
 KIND_LOG = "log"
 
 _MAX_TEXT = 2000
 _MAX_LABEL = 200
+
+# Operability: the recorder must stay silent-by-design on the hot path, but a COMPLETELY broken
+# ledger (bad grant, missing table, dead pool) should be visible in the service log. First failure
+# per process logs at WARNING; the rest stay at DEBUG.
+_failure_warned = False
+
+
+def _log_write_failure(context: str, exc: Exception) -> None:
+    global _failure_warned
+    if not _failure_warned:
+        _failure_warned = True
+        logger.warning("cost event write failed (%s) — further failures logged at DEBUG: %s", context, exc)
+    else:
+        logger.debug("cost event write failed (%s): %s", context, exc)
 
 
 def _disabled() -> bool:
@@ -155,7 +170,7 @@ def record_operator_cost_event(
             ).fetchone()
         return str(row[0]) if row else None
     except Exception as exc:  # noqa: BLE001 — observability must never break the caller
-        logger.debug("operator cost event write failed (kind=%s): %s", event_kind, exc)
+        _log_write_failure(f"operator/{event_kind}", exc)
         return None
 
 
@@ -225,7 +240,7 @@ def record_app_cost_event(
             ).fetchone()
         return str(row[0]) if row else None
     except Exception as exc:  # noqa: BLE001 — observability must never break the caller
-        logger.debug("app cost event write failed (business=%s, kind=%s): %s", business_slug, event_kind, exc)
+        _log_write_failure(f"app/{business_slug}/{event_kind}", exc)
         return None
 
 
@@ -271,7 +286,7 @@ def record_operator_event_autoconn(**fields) -> None:
         with store._connect() as conn:
             record_operator_cost_event(conn, **fields)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("cost event autoconn write failed: %s", exc)
+        _log_write_failure("autoconn", exc)
 
 
 def post_api_request_hook(**kwargs) -> None:

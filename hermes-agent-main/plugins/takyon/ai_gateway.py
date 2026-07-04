@@ -434,7 +434,9 @@ def broker_provider_call(
             cost_events.record_app_cost_event(
                 conn,
                 business_slug=business_slug,
-                event_kind=cost_events.KIND_LLM_CALL,
+                event_kind=(
+                    cost_events.KIND_LLM_CALL if provider == "anthropic" else cost_events.KIND_PROVIDER_CALL
+                ),
                 name=purpose,
                 status=status,
                 route=audit_route,
@@ -918,6 +920,29 @@ def broker_search_for_business(
         except safebox.RemoteSafeboxError as exc:
             raise _broker_remote_error(exc) from exc
         settled = True
+        # Debug ledger row for the BROKERED search path (the safebox settled the money; this is
+        # observability only, recorded through the app_cost_events port — best-effort).
+        try:
+            from . import cost_events
+
+            cost_events.record_app_cost_event(
+                conn,
+                business_slug=business_slug,
+                event_kind=cost_events.KIND_PROVIDER_CALL,
+                name=feature_name,
+                status="ok",
+                route=audit_route,
+                purpose=feature_name,
+                provider="tavily",
+                model=pricing_op,
+                cost_microusd=cost,
+                cost_status="actual",
+                app_user_id=str(getattr(app_user, "id", "") or "") or None,
+                app_user_tier=str(getattr(app_user, "tier", "") or "") or None,
+                payload={"broker": True, "operation": operation, "units": units},
+            )
+        except Exception:  # noqa: BLE001 — observability must never break the customer request
+            pass
     else:
         raw, _reservation_key, _actual_cost, settled = broker_provider_call(
             conn,

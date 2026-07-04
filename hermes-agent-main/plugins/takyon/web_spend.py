@@ -13,6 +13,7 @@ name, the `(namespace, op)` pricing key, and server-computed units/usage.
 from __future__ import annotations
 
 import logging
+import time as _time
 import uuid
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from typing import Any, Optional
@@ -74,6 +75,7 @@ class _Reservation:
         "owner_user_id",
         "billing_reserved_cents",
         "usage_reserved",
+        "reserved_at",
     )
 
     def __init__(
@@ -97,6 +99,38 @@ class _Reservation:
         self.owner_user_id = owner_user_id
         self.billing_reserved_cents = billing_reserved_cents
         self.usage_reserved = bool(usage_reserved)
+        self.reserved_at = _time.time()
+
+
+def _emit_web_spend_event(conn, handle: "_Reservation", *, status: str, cost_microusd: int, error=None) -> None:
+    """Provider-call slice of the cost/log ledger (operator_cost_events, migration 0070) for paid
+    web egress — the one operator spend path outside the agent LLM loop and the business_* tool
+    registry, so neither of those hooks sees it. Best-effort by construction."""
+    try:
+        from . import cost_events
+
+        ctx = cost_events.operator_context()
+        cost_events.record_operator_cost_event(
+            conn,
+            event_kind=cost_events.KIND_PROVIDER_CALL,
+            business_slug=handle.business_slug,
+            user_id=handle.owner_user_id or (ctx.get("user_id") or None),
+            job_id=ctx.get("run_id") or None,
+            run_id=ctx.get("run_id") or None,
+            task_kind=ctx.get("task_kind") or None,
+            name=f"{handle.pricing_key[0]}:{handle.pricing_key[1]}" if handle.pricing_key else handle.model,
+            status=status,
+            provider=handle.provider,
+            model=handle.model,
+            cost_microusd=cost_microusd,
+            cost_status="actual" if status == "ok" else None,
+            reservation_key=handle.reservation_key,
+            duration_ms=int((_time.time() - handle.reserved_at) * 1000),
+            error=(str(error)[:500] if error else None),
+            payload={"reserved_microusd": handle.reserved_microusd},
+        )
+    except Exception:  # noqa: BLE001 — observability must never break the meter
+        pass
 
 
 def _resolve_owner_user_id(raw, business: str) -> str:
@@ -265,6 +299,7 @@ class BusinessBudgetSpendMeter:
                         _microusd_to_cents_ceiling(int(cost)), int(handle.billing_reserved_cents)
                     )
                     billing.settle(raw, handle.reservation_key, actual_cents)
+            _emit_web_spend_event(conn, handle, status="ok", cost_microusd=int(cost))
 
     def release(self, handle: Optional[_Reservation], *, error) -> None:
         if handle is None:
@@ -289,6 +324,7 @@ class BusinessBudgetSpendMeter:
                 # Idempotent: a replayed/already-finalized refund is a no-op.
                 if handle.owner_user_id and handle.billing_reserved_cents:
                     billing.refund(raw, handle.reservation_key)
+            _emit_web_spend_event(conn, handle, status="error", cost_microusd=0, error=error)
 
 
 def register() -> None:
