@@ -405,14 +405,16 @@ class _UsageLedgerAdapter:
 
     def reserve(self, scope: CapabilityScope, estimate_microusd: int):
         from . import app_entitlements, app_usage
-        from .ai_gateway import _user_weekly_budget_microusd
+        from .ai_gateway import _user_monthly_budget_microusd
 
         key = str(uuid.uuid4())
         with _safebox_db_conn() as conn:
-            # A PRODUCT (sub-user) scope ALWAYS gets a concrete per-user limit so the 0037 gate is
-            # actually enforced (it only enforces when the limit is not null). On any entitlement/plan
-            # miss the plan-derived limit is 0 ⇒ reserve refuses (402), never None ⇒ "no cap". Only an
-            # OPERATOR scope (app_user_id is None) gets None (no per-user cap on operator spend).
+            # A PRODUCT (sub-user) scope ALWAYS gets a concrete per-user limit so the 0037/0063 gate
+            # is actually enforced (it only enforces when the limit is not null). On any entitlement/
+            # plan miss the plan-derived limit is 0 ⇒ reserve refuses (402), never None ⇒ "no cap".
+            # Only an OPERATOR scope (app_user_id is None) gets None (no per-user cap on operator
+            # spend). The limit is the FULL monthly allowance; the gate anchors the matching
+            # entitlement-monthly window itself (migration 0063).
             limit = None
             tier = None
             if scope.app_user_id:
@@ -425,7 +427,7 @@ class _UsageLedgerAdapter:
                         if getattr(ent, "plan_key", None)
                         else None
                     )
-                limit = _user_weekly_budget_microusd(plan)
+                limit = _user_monthly_budget_microusd(plan)
             app_usage.reserve_usage(
                 conn,
                 scope.business_slug,

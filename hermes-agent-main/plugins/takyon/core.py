@@ -23642,6 +23642,47 @@ def _app_usage_allocation_summary(store, conn, business: str, budget: dict[str, 
     }
 
 
+def _entitlement_anchored_period_start(leaf, entitlements: list[dict[str, Any]]):
+    """The customer's entitlement-anchored MONTHLY usage-window start, or None for the fallback.
+
+    Mirrors the gate's window derivation (migration 0063 / app_usage._app_user_period_start):
+    pick the funding entitlement by the SAME ranking the money gates use (active/trialing, paid
+    tier, not the openmeter mirror; owner → paid/pro → rest, newest first), then window start =
+    current_period_end - 1 month via SQL interval arithmetic so calendar-month semantics match the
+    gate exactly. Returns None (caller keeps its business-window fallback) when there is no
+    plausible active paid period."""
+    candidates = []
+    for ent in entitlements:
+        if not isinstance(ent, dict):
+            continue
+        if str(ent.get("status") or "").strip().lower() not in {"active", "trialing"}:
+            continue
+        tier = str(ent.get("tier") or "").strip().lower()
+        if tier in {"", "free", "none", "unentitled"}:
+            continue
+        if str(ent.get("source") or "").strip().lower() == "openmeter":
+            continue
+        rank = 0 if tier == "owner" else 1 if tier in {"paid", "pro"} else 100
+        candidates.append((rank, str(ent.get("updated_at") or ""), ent))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=False)
+    # rank asc, then updated_at DESC within the rank
+    best_rank = candidates[0][0]
+    within = [item for item in candidates if item[0] == best_rank]
+    within.sort(key=lambda item: item[1], reverse=True)
+    period_end = within[0][2].get("current_period_end")
+    if not period_end:
+        return None
+    row = leaf.execute(
+        "select case when %s::timestamptz > now()"
+        "             and %s::timestamptz - interval '1 month' <= now()"
+        "        then %s::timestamptz - interval '1 month' end",
+        (period_end, period_end, period_end),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
 def _coerce_jsonb_array(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, str):
         try:
@@ -23762,6 +23803,13 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                         "select takyon_app_account_entitlements(%s, %s)",
                         (business, session_hash),
                     ).fetchone()
+                    entitlements = _coerce_jsonb_array(ent_row[0] if ent_row else [])
+                    # The usage summary window mirrors the gate's entitlement-anchored MONTHLY
+                    # window (migration 0063): current_period_end - 1 month for the customer's
+                    # active paid entitlement; fallback = the business budget window above.
+                    user_period_start = _entitlement_anchored_period_start(leaf, entitlements)
+                    if user_period_start is not None:
+                        period_start = user_period_start
                     usage_row = leaf.execute(
                         "select count, estimated_cost_microusd, actual_cost_microusd "
                         "from takyon_app_account_usage_summary(%s, %s, %s)",
@@ -23771,7 +23819,6 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                         "select amount_paid_cents, count from takyon_app_account_revenue_summary(%s, %s)",
                         (business, session_hash),
                     ).fetchone()
-                entitlements = _coerce_jsonb_array(ent_row[0] if ent_row else [])
                 usage = {
                     "count": int((usage_row or [0, 0, 0])[0] or 0),
                     "estimated": int((usage_row or [0, 0, 0])[1] or 0),
