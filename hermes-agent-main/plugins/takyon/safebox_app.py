@@ -53,6 +53,7 @@ _OPERATOR_TOKEN_HEADER = "x-takyon-operator-token"
 _ANTHROPIC_AUDIENCE = "anthropic.messages"
 _TAVILY_AUDIENCE = "tavily.search"
 _GEMINI_IMAGE_AUDIENCE = "gemini.image"
+_EGRESS_AUDIENCE = "connection.egress"
 _POSTMARK_SEND_AUDIENCE = "postmark.send"
 
 # ── Operator/platform SESSION capability audience ────────────────────────────────────────────────
@@ -128,6 +129,7 @@ _ACTION_AUDIENCE_DEFAULTS = {
     _ANTHROPIC_AUDIENCE: _ANTHROPIC_AUDIENCE,
     _TAVILY_AUDIENCE: _TAVILY_AUDIENCE,
     _GEMINI_IMAGE_AUDIENCE: _GEMINI_IMAGE_AUDIENCE,
+    _EGRESS_AUDIENCE: _EGRESS_AUDIENCE,
 }
 
 # Default short TTL for minted capability tokens (seconds). The token is also single-use (nonce) and
@@ -1064,6 +1066,14 @@ class _MintTokenBody(BaseModel):
     operator_user_id: str | None = None
     audience: str | None = None
     ttl_seconds: int | None = None
+
+
+class _ConnectionDepositBody(BaseModel):
+    # Operator-plane credential deposit for an APPROVED provider connection (delta 6). The secret is
+    # AEAD-sealed server-side and never returned; only the fingerprint comes back.
+    business: str
+    connection_slug: str
+    secret: str
 
 
 class _OperatorSessionTokenBody(BaseModel):
@@ -2405,6 +2415,61 @@ def build_safebox_app() -> FastAPI:
         if not user:
             return {"authenticated": False}
         return {"authenticated": True, "user": user}
+
+    @app.post("/v1/connections/deposit")
+    def deposit_connection_secret(
+        request: Request,
+        body: _ConnectionDepositBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Deposit the plaintext credential for an operator-APPROVED provider connection. Operator-
+        plane only (the human/dashboard POSTs the secret directly): _require_internal_token +
+        _require_operator_client, so the secret never enters the CEO model context or the business
+        runtime. Verifies an APPROVED operator_approvals row exists for this connection, AEAD-seals
+        the secret with the safebox-only seal key, writes the ciphertext columns (the only role that
+        can), and flips the connection to 'active'. Idempotent: re-depositing rotates the secret."""
+        from . import egress_gateway
+
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        business = str(body.business or "").strip()
+        connection_slug = str(body.connection_slug or "").strip()
+        secret = str(body.secret or "")
+        if not business or not connection_slug or not secret:
+            raise HTTPException(status_code=400, detail="missing_deposit_fields")
+        with _safebox_db_conn() as conn:
+            row = conn.execute(
+                "select id, allowed_host, approval_id from provider_connections "
+                "where business_slug = %s and connection_slug = %s",
+                (business, connection_slug),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="connection_unknown")
+            connection_id, allowed_host, approval_id = str(row[0]), str(row[1] or ""), row[2]
+            # must-fix #7/#9/#12: re-assert the host policy at deposit (defense in depth vs a row
+            # created before a denylist entry existed).
+            denied = egress_gateway.host_denied_for_egress(allowed_host)
+            if denied:
+                raise HTTPException(status_code=403, detail={"error": denied})
+            # Require an APPROVED operator_approvals row (the human decided this connection).
+            appr = conn.execute(
+                "select status from operator_approvals where business_slug = %s "
+                "and action_kind = 'provider_connection_grant' and status = 'approved' "
+                "and (id = %s or %s is null)",
+                (business, approval_id, approval_id),
+            ).fetchone()
+            if appr is None:
+                raise HTTPException(status_code=403, detail="connection_not_approved")
+            try:
+                ct, nonce, fp = egress_gateway.seal_secret(secret)
+            except egress_gateway.EgressError as exc:
+                raise HTTPException(status_code=exc.status, detail={"error": exc.code}) from exc
+            conn.execute(
+                "update provider_connections set secret_ciphertext = %s, secret_nonce = %s, "
+                "secret_fingerprint = %s, status = 'active', updated_at = now() where id = %s",
+                (ct, nonce, fp, connection_id),
+            )
+        return {"business": business, "connection_slug": connection_slug, "status": "active", "fingerprint": fp}
 
     @app.post("/v1/user-api-keys/register")
     def register_user_key(

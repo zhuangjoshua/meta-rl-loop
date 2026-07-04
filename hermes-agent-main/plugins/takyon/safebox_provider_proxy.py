@@ -545,6 +545,109 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         _settle(ledger, reservation, price)
         return result
 
+    # ── Generic credentialed egress (delta 6) — the "any integration" rail ────────────────────────
+    @router.post("/v1/egress")
+    def proxy_egress(
+        body: Any = Body(default=None),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Keyless, metered, SSRF-guarded egress. The subuser rail forwards {business, session_token,
+        connection_slug, method, path, query, headers, body, estimate_microusd}. The credential is
+        resolved + attached ONLY inside egress_gateway on the safebox; the response is key-free.
+
+        Auth: _require_internal_token (transport reachability) + a signed connection.egress capability
+        as the SOLE spend authority (never the bare token — authority principle / G2). The scope is
+        ALWAYS session-derived (app_user_id present), so egress meters per-customer and can never
+        select an uncapped service principal (must-fix #10)."""
+        from .safebox_app import (
+            _EGRESS_AUDIENCE, _PgNonceStore, _UsageLedgerAdapter, _cap_signing_key,
+            _mint_capability_token, _require_internal_token, _safebox_db_conn, _CAP_TTL_SECONDS,
+        )
+        from . import ai_provider, app_usage, egress_gateway, safebox_broker
+        from .safebox_capability import CapabilityError
+
+        _require_internal_token(authorization)  # must-fix #6
+
+        b = _as_json_object(body)
+        business = str(b.get("business") or "").strip()
+        session_token = str(b.get("session_token") or "").strip()
+        connection_slug = str(b.get("connection_slug") or "").strip()
+        method = str(b.get("method") or "GET")
+        path = str(b.get("path") or "/")
+        query = b.get("query") if isinstance(b.get("query"), dict) else None
+        headers = b.get("headers") if isinstance(b.get("headers"), dict) else None
+        req_body = b.get("body")
+        if not business or not session_token or not connection_slug:
+            raise HTTPException(status_code=400, detail="missing_egress_identity")
+
+        signing_key = _cap_signing_key()
+        if not signing_key:
+            raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
+
+        # Estimate BEFORE reserve (fail-closed pricing). Response size is unknown at reserve; price
+        # the request body + a response headroom so a large call reserves proportionally.
+        try:
+            req_bytes = len(req_body.encode("utf-8")) if isinstance(req_body, str) else (
+                len(_json.dumps(req_body).encode("utf-8")) if req_body is not None else 0)
+            estimate = ai_provider.egress_request_microusd(
+                request_bytes=req_bytes, response_bytes=egress_gateway._MAX_RESPONSE_BYTES
+            )
+        except ai_provider.EgressPricingUnavailable as exc:
+            raise HTTPException(status_code=503, detail="egress_pricing_unavailable") from exc
+
+        # ALWAYS session-derived scope (must-fix #10): no operator_user_id path on the subuser rail.
+        now = int(_time.time())
+        token = _mint_capability_token(
+            business=business, action=_EGRESS_AUDIENCE, max_cost_microusd=estimate,
+            session_token=session_token, operator_user_id=None, audience=_EGRESS_AUDIENCE,
+            ttl_seconds=_CAP_TTL_SECONDS, now=now,
+        )
+
+        # Resolve the connection + credential inside the safebox; both key_resolver and provider_caller
+        # close over the row so it is resolved once against the SIGNED scope.business_slug.
+        state: dict[str, Any] = {}
+
+        def key_resolver(scope):
+            with _safebox_db_conn() as conn:
+                connection = egress_gateway.resolve_active_connection(
+                    conn, scope.business_slug, connection_slug
+                )
+                row = conn.execute(
+                    "select secret_ciphertext, secret_nonce, secret_fingerprint "
+                    "from provider_connections where id = %s", (connection.id,)
+                ).fetchone()
+            secret = egress_gateway._unseal_secret(row[0], row[1])
+            state["connection"] = connection
+            state["fingerprint"] = str(row[2] or "")
+            return secret
+
+        def provider_caller(scope, secret):
+            connection = state["connection"]
+            result = egress_gateway.call_egress(
+                connection, method=method, path=path, query=query, headers=headers,
+                body=req_body, secret=secret, fingerprint=state.get("fingerprint", ""),
+            )
+            # Per-request: actual == reserved estimate (the reserve already priced req+response cap).
+            return result, estimate
+
+        try:
+            return safebox_broker.handle_provider_request(
+                token=token, signing_key=signing_key, audience=_EGRESS_AUDIENCE, now=now,
+                nonce_store=_PgNonceStore(), ledger=_UsageLedgerAdapter(provider="egress"),
+                key_resolver=key_resolver, provider_caller=provider_caller,
+                estimate_microusd=estimate,
+            )
+        except egress_gateway.EgressError as exc:
+            raise HTTPException(status_code=exc.status, detail={"error": exc.code, "detail": exc.detail}) from exc
+        except CapabilityError as exc:
+            raise HTTPException(status_code=401, detail=f"capability_invalid: {exc}") from exc
+        except safebox_broker.BrokerError as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        except (app_usage.AppBudgetInactive, app_usage.AppBudgetExceeded, app_usage.AppUserBudgetExceeded) as exc:
+            raise HTTPException(status_code=402, detail={"error": type(exc).__name__, "detail": str(exc)}) from exc
+        except app_usage.AppUserNotFound as exc:
+            raise HTTPException(status_code=400, detail="unknown_app_user") from exc
+
     # NOTE: the ungated /v1/proxy/gemini/image, /v1/proxy/openai/images, and /v1/proxy/fal/{path}
     # routes were DELETED in the creative-credit safebox-gate cutover. Those provider calls now go
     # through the AUTHORITATIVE creative-credit gate on the safebox (see safebox_app.py). There is no

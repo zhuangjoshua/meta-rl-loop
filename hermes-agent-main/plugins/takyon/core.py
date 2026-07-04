@@ -503,6 +503,16 @@ PRODUCT_RUNTIME_RAILS: dict[str, dict[str, Any]] = {
             "To record a custom product event, call the globally available umami.track(\"<event-name>\", { ...data }) only if it exists; never block product behavior on analytics and never fabricate analytics numbers in the UI.",
         ],
     },
+    "egress": {
+        "owner_skill": "takyon-app-runtime",
+        "tools": ["business_request_credential"],
+        "endpoints": [("POST", "egress")],
+        "worker_contract": [
+            "To call an approved third-party API, use ctx.egress({connection, method, path, headers?, body?, query?}) — never fetch the third party directly and never put a provider key in product source; the credential is held by Takyon and attached server-side.",
+            "`connection` is a business-facing handle an operator approved via business_request_credential; the credential only ever reaches that connection's own host. The safebox meters each call (usage rail) and returns {status, headers, body} key-free.",
+            "Treat 402 as out-of-credit (surface it, do not retry as if free), 403 as a policy refusal (host not allowed / bad path / method), 404 as an unknown or not-yet-approved connection, and 5xx as upstream/egress failure; never fabricate a third-party response.",
+        ],
+    },
 }
 _RUNTIME_FEATURE_LEGACY_ALIASES: dict[str, tuple[str, ...]] = {
     "billing": ("account", "checkout"),
@@ -519,6 +529,7 @@ _RUNTIME_FEATURE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "checkout": ("auth", "account"),
     "entitlements": ("auth", "account"),
     "usage": ("auth", "account"),
+    "egress": ("auth", "account"),
 }
 _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
     "auth",
@@ -536,6 +547,7 @@ _RUNTIME_FEATURE_ORDER: tuple[str, ...] = (
     "generate",
     "search",
     "analytics",
+    "egress",
 )
 
 # Rails that are always active for every product and are never a per-business
@@ -747,6 +759,9 @@ _RAIL_ROUTES: dict[str, tuple[RailRoute, ...]] = {
     "search": (
         RailRoute("POST", ("search",), "search_post", APP_AUTH_SESSION_REQUIRED),
     ),
+    "egress": (
+        RailRoute("POST", ("egress",), "egress_post", APP_AUTH_SESSION_REQUIRED),
+    ),
 }
 
 # Runtime-client method names the source scanner keys on, per rail. The scanner regex for
@@ -767,6 +782,7 @@ _RAIL_CLIENT_METHODS: dict[str, tuple[str, ...]] = {
     "connections": ("listConnections", "actOnConnection"),
     "generate": (".generate",),
     "search": (".search",),
+    "egress": (".egress",),
 }
 
 
@@ -1654,6 +1670,10 @@ _SAFEBOX_SELF_AUTHORITY_SECRETS: frozenset[str] = frozenset(
         # Stripe billing event or bypass RLS — so they are never vended OR written, like the cap key.
         "STRIPE_BILLING_WEBHOOK_SECRET",
         "SUPABASE_SERVICE_ROLE_KEY",
+        # The egress-connection AEAD seal key (delta 6). The safebox uses it to seal/unseal
+        # business-supplied third-party credentials; vending it would let a caller decrypt every
+        # stored connection secret, so it is never vended OR written over /v1/env, like the cap key.
+        "TAKYON_CONNECTION_SEAL_KEY",
     }
 )
 
@@ -19200,6 +19220,81 @@ class TakyonStore:
                 "approval_status": "consumed",
             }
 
+        if action == "business.provider_connection.request":
+            # Egress rail (delta 6): the WHETHER gate for a business third-party credential. This
+            # NEVER carries the secret — it lands a PENDING provider_connections row (metadata only)
+            # + a `provider_connection_grant` operator approval, and returns deposit instructions.
+            # The operator approves (business_decide_operator_approval) and out-of-band POSTs the
+            # plaintext to the safebox /v1/connections/deposit route, which seals it and flips the
+            # connection active. The secret touches neither the CEO context nor the business runtime.
+            from . import egress_gateway
+            leaf = _money_shape_leaf()
+            connection_slug = str(op.get("connection_slug") or "").strip()
+            provider_kind = str(op.get("provider_kind") or "").strip()
+            allowed_host = str(op.get("allowed_host") or "").strip().lower().rstrip(".")
+            allowed_path_prefix = op.get("allowed_path_prefix")
+            allowed_methods = op.get("allowed_methods") or ["GET", "POST"]
+            placement = op.get("placement") or {"type": "header", "name": "Authorization"}
+            conn_scope = str(op.get("scope") or "business").strip().lower()
+            if not connection_slug or not provider_kind or not allowed_host:
+                raise TakyonError("connection_slug, provider_kind, and allowed_host are required")
+            # v1: per-customer credential vault does not exist yet — refuse the shape (must-fix #11).
+            if conn_scope != "business":
+                raise TakyonError("scope='per_customer' is not supported yet; use scope='business'")
+            # must-fix #7/#9/#12: refuse platform-self / metered-provider / internal hosts at creation.
+            denied = egress_gateway.host_denied_for_egress(allowed_host)
+            if denied:
+                raise TakyonError(
+                    f"host '{allowed_host}' is not permitted for egress ({denied}); "
+                    "metered providers use their own priced tools, and platform/internal hosts are refused"
+                )
+            if str((placement or {}).get("type") or "header").lower() != "header":
+                raise TakyonError("only 'header' credential placement is supported in v1")
+            approval_payload = {
+                "connection_slug": connection_slug, "provider_kind": provider_kind,
+                "allowed_host": allowed_host, "allowed_path_prefix": allowed_path_prefix,
+                "allowed_methods": list(allowed_methods), "placement": placement, "scope": conn_scope,
+            }
+            with self._leaf_conn(conn) as raw:
+                approval = leaf.request_approval(
+                    raw, slug, "provider_connection_grant", approval_payload,
+                    actor=actor, metadata={"reason": reason},
+                )
+                raw.execute(
+                    "insert into provider_connections "
+                    "(business_slug, connection_slug, provider_kind, allowed_host, allowed_path_prefix, "
+                    " allowed_methods, placement, scope, status, approval_id) "
+                    "values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,'pending',%s) "
+                    "on conflict (business_slug, connection_slug) do update set "
+                    "  provider_kind = excluded.provider_kind, allowed_host = excluded.allowed_host, "
+                    "  allowed_path_prefix = excluded.allowed_path_prefix, "
+                    "  allowed_methods = excluded.allowed_methods, placement = excluded.placement, "
+                    "  scope = excluded.scope, approval_id = excluded.approval_id, "
+                    "  status = case when provider_connections.status = 'active' "
+                    "                then 'active' else 'pending' end, "
+                    "  updated_at = now()",
+                    (slug, connection_slug, provider_kind, allowed_host, allowed_path_prefix,
+                     list(allowed_methods), json.dumps(placement), conn_scope, approval.id),
+                )
+            self._record_event(
+                conn, scope=f"business:{slug}", business_slug=slug, event_type=action,
+                payload={"connection_slug": connection_slug, "provider_kind": provider_kind,
+                         "allowed_host": allowed_host, "approval_status": approval.status,
+                         "reason": reason, "actor": actor},
+            )
+            return {
+                "action": action, "business": slug, "connection_slug": connection_slug,
+                "approval_status": approval.status,
+                "approval_action_kind": "provider_connection_grant",
+                "approval_payload": approval_payload,
+                "next_step": (
+                    "an operator must approve this connection (business_decide_operator_approval with "
+                    "action_kind='provider_connection_grant' and this exact payload), then deposit the "
+                    "credential out-of-band to the safebox /v1/connections/deposit route (the secret "
+                    "never enters this agent's context). The connection goes 'active' on deposit."
+                ),
+            }
+
         if action == "operator_approval.decide":
             # The operator decision half of the approval affordance (archetypes §1.5 spec; built
             # once here, future consumers reuse it). Flips exactly one PENDING record to
@@ -22269,6 +22364,25 @@ def handle_business_set_money_shape(args: dict, **_: Any) -> str:
         "action": "business.money_shape.set",
         "business": args.get("business"),
         "money_shape": args.get("money_shape"),
+    }
+    return _commit_tool(args, operation)
+
+
+def handle_business_request_credential(args: dict, **_: Any) -> str:
+    # Egress rail (delta 6): request an operator-approved third-party credential for this business.
+    # No wake ban needed by design (same reasoning as money_shape): this only lands a PENDING
+    # approval + a pending connection row — no secret, no authority. The operator decision +
+    # out-of-band secret deposit are what a wake can never mint.
+    operation = {
+        "action": "business.provider_connection.request",
+        "business": args.get("business"),
+        "connection_slug": args.get("connection_slug"),
+        "provider_kind": args.get("provider_kind"),
+        "allowed_host": args.get("allowed_host"),
+        "allowed_path_prefix": args.get("allowed_path_prefix"),
+        "allowed_methods": args.get("allowed_methods"),
+        "placement": args.get("placement"),
+        "scope": args.get("scope") or "business",
     }
     return _commit_tool(args, operation)
 
@@ -34811,6 +34925,41 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "money_shape", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_request_credential",
+        "description": (
+            "Request an operator-approved third-party API credential for this business so product "
+            "code can call that provider through ctx.egress WITHOUT ever holding the key. Lands a "
+            "PENDING connection + a 'provider_connection_grant' approval and returns next steps — it "
+            "NEVER accepts or sees the secret. Args: connection_slug (the handle product code "
+            "references, e.g. 'stripe-live'), provider_kind (label), allowed_host (the single host "
+            "the credential may reach, e.g. 'api.stripe.com'), optional allowed_path_prefix / "
+            "allowed_methods, placement ({type:'header',name:'Authorization'} — header only in v1), "
+            "scope ('business'). Metered providers (OpenAI/Anthropic/Gemini/FAL/Tavily) and platform/"
+            "internal hosts are refused — those use their own priced tools. After approval, the "
+            "operator deposits the plaintext out-of-band to the safebox; the connection then goes "
+            "active and ctx.egress works, metered through the usage rail."
+        ),
+        "handler": handle_business_request_credential,
+        "schema": _schema(
+            "business_request_credential",
+            "Request an operator-approved third-party credential for keyless ctx.egress.",
+            {
+                "business": _BUSINESS_PROP,
+                "connection_slug": {"type": "string", "description": "Business-facing handle product code references, e.g. 'stripe-live'."},
+                "provider_kind": {"type": "string", "description": "Free provider label, e.g. 'stripe', 'github'."},
+                "allowed_host": {"type": "string", "description": "The single host the credential may reach (no scheme), e.g. 'api.stripe.com'."},
+                "allowed_path_prefix": {"type": "string", "description": "Optional path allowlist prefix, e.g. '/v1/'."},
+                "allowed_methods": {"type": "array", "items": {"type": "string"}, "description": "Allowed HTTP methods; default ['GET','POST']."},
+                "placement": {"type": "object", "description": "Credential placement {type:'header', name:'Authorization'} — header only in v1."},
+                "scope": {"type": "string", "enum": ["business"], "description": "Credential scope; only 'business' in v1."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "connection_slug", "provider_kind", "allowed_host", "idempotency_key"],
         ),
     },
     {
