@@ -632,8 +632,16 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
                 connection, method=method, path=path, query=query, headers=headers,
                 body=req_body, secret=secret, fingerprint=state.get("fingerprint", ""),
             )
-            # Per-request: actual == reserved estimate (the reserve already priced req+response cap).
-            return result, estimate
+            # SETTLE on ACTUAL bytes, not the 1MB-headroom reserve — the reserve worst-cases the
+            # response cap (so the customer is never under-billed and a huge response can't exceed
+            # the hold), but the settle prices the REAL request+response size and the broker refunds
+            # the difference. Same reserve-worst-case / settle-actual shape as the AI rails; without
+            # this a 56-byte response would be charged as if it were 1 MiB.
+            resp_bytes = len((result.get("body") or "").encode("utf-8"))
+            actual = ai_provider.egress_request_microusd(
+                request_bytes=req_bytes, response_bytes=resp_bytes
+            )
+            return result, min(actual, estimate)
 
         try:
             return safebox_broker.handle_provider_request(
