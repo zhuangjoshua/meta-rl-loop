@@ -153,7 +153,7 @@ def convert_brief(
     operator_user_id: str,
     business: str | None = None,
     model: str = "claude-sonnet-5",
-    max_tokens: int = 2000,
+    max_tokens: int = 8000,
 ) -> dict[str, str]:
     """Translate a brief into a Takyon build plan. Returns {markdown, goal}.
 
