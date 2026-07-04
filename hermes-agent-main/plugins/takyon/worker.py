@@ -2143,6 +2143,22 @@ def product_surface_refresh_handler(job: Job) -> JobRunResult:
     )
 
 
+def store_mobile_release_handler(job: Job) -> JobRunResult:
+    """Execute a deferred ``store.build`` (business_publish_mobile_release) on the worker plane.
+
+    Reuses the deferred-operator-tool machinery exactly like claude.agent_task: the tool re-runs
+    INLINE here (TAKYON_WORKER_PROCESS suppresses re-deferral) and owns its own money flow on the
+    creative-credit rail (reserve→settle-at-trigger→release), so this wrapper carries no estimate and
+    run_one never double-settles. Fail-closed until the real EAS builder lands: the tool returns an
+    ``eas_builder_unconfigured`` result, which becomes a recorded blocked/failed run — never an
+    uncharged build."""
+    from .core import handle_business_publish_mobile_release
+
+    return _operator_tool_task_handler(
+        job, tool_name="business_publish_mobile_release", handler_fn=handle_business_publish_mobile_release
+    )
+
+
 def product_action_handler(job: Job) -> JobRunResult:
     from . import app_actions as takyon_app_actions
     from .core import _store
@@ -2223,6 +2239,7 @@ HANDLERS: dict[str, jobs.Handler] = {
     "reddit.publish_outreach": reddit_publish_outreach_handler,
     "claude.agent_task": claude_agent_task_handler,
     "product.surface_refresh": product_surface_refresh_handler,
+    "store.build": store_mobile_release_handler,
     "product_action": product_action_handler,
     "openmeter.sync": openmeter_sync_handler,
 }

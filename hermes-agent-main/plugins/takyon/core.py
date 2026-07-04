@@ -9449,7 +9449,7 @@ def _allow_missing_credentials_in_test_mode(op: dict[str, Any]) -> bool:
 # Job kinds whose EXECUTION lives on the Postgres worker plane (worker.py HANDLERS). The
 # work-request row enqueued alongside them is the canonical run object the tool-side dispatcher
 # (_run_operator_task_on_worker) waits on and re-attaches to.
-_WORKER_EXECUTED_JOB_KINDS = frozenset({"claude.agent_task", "product.surface_refresh"})
+_WORKER_EXECUTED_JOB_KINDS = frozenset({"claude.agent_task", "product.surface_refresh", "store.build"})
 
 
 def _should_mirror_job_to_worker_queue(op: Mapping[str, Any]) -> bool:
@@ -22273,6 +22273,11 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
             )
         # Fail closed until the mobile_app pipeline is E2E-proven (readmodular §5 rollout).
         arch.assert_selectable(arch.MOBILE_APP)
+        # A real EAS build runs for minutes — defer to the worker plane when enabled (the money flow
+        # below runs inside the worker's inline re-invocation, once). Returns None ⇒ run inline here.
+        deferred = _defer_mobile_release_to_worker({**args, "business": business, "lane": lane})
+        if deferred is not None:
+            return deferred
         sb = _store_build_leaf()
         credits = _creative_credit_total_cost("mobile_release")
         rk = f"mobile-release:{business}:{lane}:{str(args.get('idempotency_key') or _now())}"
@@ -33443,6 +33448,37 @@ def _defer_product_surface_refresh_to_worker(args: dict) -> str | None:
         commit_idempotency_key=f"{idempotency_key}:surface-refresh-worker-job",
         wait_seconds=float(timeout_seconds) + 180.0,
         reason=str(args.get("reason") or "product surface publication (worker plane)"),
+        actor=str(args.get("actor") or "agent"),
+    )
+
+
+def _defer_mobile_release_to_worker(args: dict) -> str | None:
+    """Route business_publish_mobile_release through the worker plane when enabled; None ⇒ inline.
+
+    A real EAS build runs for minutes, so when worker deferral is on it belongs off the CEO turn (same
+    shape as product.surface_refresh). The money (creative-credit reserve→settle-at-trigger→release)
+    lives INSIDE the tool, which the worker re-invokes verbatim — no second money path here. The worker
+    re-run sets ``TAKYON_WORKER_PROCESS`` so ``_operator_tasks_via_worker_enabled()`` is False there and
+    the deferred run executes inline instead of re-deferring itself."""
+    if not _operator_tasks_via_worker_enabled():
+        return None
+    store = _store()
+    business = _resolved_business_slug(args, required=True)
+    idempotency_key = str(args.get("idempotency_key") or "").strip()
+    if not idempotency_key:
+        raise TakyonError("idempotency_key is required to publish a mobile release on the worker plane")
+    lane = str(args.get("lane") or "preview").strip().lower()
+    # An EAS build + store submit can run long; give a generous re-attach budget with claim slack.
+    wait_seconds = 1_800.0 + 180.0
+    return _run_operator_task_on_worker(
+        store=store,
+        business=business,
+        kind="store.build",
+        tool_name="business_publish_mobile_release",
+        deferred_args={**args, "business": business, "lane": lane},
+        commit_idempotency_key=f"{idempotency_key}:mobile-release-worker-job",
+        wait_seconds=wait_seconds,
+        reason=str(args.get("reason") or "mobile release build (worker plane)"),
         actor=str(args.get("actor") or "agent"),
     )
 
