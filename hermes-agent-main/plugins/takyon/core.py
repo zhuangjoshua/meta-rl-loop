@@ -17064,7 +17064,7 @@ class TakyonStore:
                 continue
             desc = str(p.get("hypothesis") or "").strip()
             if desc:
-                bets.append(f"- (in flight) {desc}")
+                bets.append(f"- (in flight) {desc}{_format_episode_metrics(p.get('metrics_snapshot'))}")
         if bets:
             lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
         learn_lines: list[str] = []
@@ -17113,6 +17113,11 @@ class TakyonStore:
         episode_id = uuid.uuid4().hex
         with self._connect() as conn:
             self._ensure_business(conn, slug)
+            # Guarantee at least one quantitative metric on every episode: capture measured
+            # product/channel numbers at record time alongside (never replacing) the CEO's own
+            # baseline. Best-effort — an unavailable source degrades to fewer keys, never blocks
+            # the bet from being recorded.
+            metrics_snapshot = _episode_metrics_snapshot(self, conn, slug, channel)
             event_id = self._record_event(
                 conn, scope=f"business:{slug}", business_slug=slug,
                 event_type="ceo.episode.opened",
@@ -17122,11 +17127,12 @@ class TakyonStore:
                     "channel": (channel or "").strip() or None,
                     "action_kind": (action_kind or "").strip() or None,
                     "baseline": baseline if isinstance(baseline, dict) else {},
+                    "metrics_snapshot": metrics_snapshot,
                     "opened_at": _now(),
                 },
             )
         return {"success": True, "business": slug, "episode_id": episode_id, "event_id": event_id,
-                "event_type": "ceo.episode.opened"}
+                "event_type": "ceo.episode.opened", "metrics_snapshot": metrics_snapshot}
 
     @staticmethod
     def _tokenize_tags(raw: Any) -> set[str]:
@@ -28825,13 +28831,126 @@ def _wake_ad_refresh_enabled() -> bool:
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _format_episode_metrics(snapshot: Any) -> str:
+    """One compact ` [at record: …]` suffix for a wake-memory bet line, from the episode's
+    metrics_snapshot. Empty string when the snapshot is absent/empty — old episodes render as
+    before."""
+    if not isinstance(snapshot, dict):
+        return ""
+    bits: list[str] = []
+    for key, label in (("users", "users"), ("revenue_cents", "revenue_c"), ("usage_events", "usage")):
+        if snapshot.get(key) is not None:
+            bits.append(f"{label}={snapshot[key]}")
+    for camp in (snapshot.get("campaigns") or [])[:2]:
+        if isinstance(camp, dict):
+            frag = f"{camp.get('slug')}: spend_c={camp.get('spend_cents')}"
+            if camp.get("impressions") is not None:
+                frag += f" impr={camp['impressions']}"
+            if camp.get("clicks") is not None:
+                frag += f" clicks={camp['clicks']}"
+            bits.append(frag)
+    x_stats = snapshot.get("x")
+    if isinstance(x_stats, dict) and x_stats:
+        bits.append("x " + " ".join(f"{k}={v}" for k, v in list(x_stats.items())[:3]))
+    return f" [at record: {', '.join(bits)}]" if bits else ""
+
+
+def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channel: Any) -> dict[str, Any]:
+    """Quantitative context captured AT EPISODE RECORD TIME (RL rail R1 support).
+
+    Every episode carries at least one hard number so bets, lessons, and future settles are judged
+    against measured state instead of narrative: lifetime product counters always (users, revenue,
+    usage events), plus the episode channel's live-campaign delivery stats (spend from the policy
+    registry; impressions/clicks from the latest insights-sync receipt) for reddit/meta, and the
+    latest X sync totals for channel=x. Best-effort by design: every source is wrapped so a missing
+    table (SQLite dev store has no ad-spend policies), missing file, or provider gap degrades to
+    fewer keys — never an exception, never a blocked episode."""
+    snap: dict[str, Any] = {"captured_at": _now()}
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_users WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["users"] = int(_row_value_int(row, "n"))
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
+            (slug,),
+        ).fetchone()
+        snap["revenue_cents"] = int(_row_value_int(row, "c"))
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_usage_events WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["usage_events"] = int(_row_value_int(row, "n"))
+    except Exception:
+        pass
+    bucket = _normalize_creative_credit_bucket(channel) if channel else ""
+    if bucket in ("reddit", "meta"):
+        try:
+            backend = _business_ad_spend_backend()
+            campaigns: list[dict[str, Any]] = []
+            for policy in backend.list_policies(conn, slug, statuses=list(_PULSE_AD_LIVE_STATUSES)):
+                if str(policy.channel or "") != bucket:
+                    continue
+                entry: dict[str, Any] = {
+                    "slug": policy.slug,
+                    "status": policy.status,
+                    "spend_cents": int(policy.last_synced_spend_cents or 0),
+                    "total_budget_cents": int(policy.total_budget_cents or 0),
+                }
+                try:
+                    syncs_dir = store._resolve_business_file(
+                        slug, f"metrics/{bucket}-ads/{policy.slug}/syncs", sync=False
+                    )
+                    latest = max(
+                        (p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime
+                    )
+                    totals = (json.loads(latest.read_text(encoding="utf-8")) or {}).get("totals") or {}
+                    for key in ("impressions", "clicks", "spend_usd"):
+                        if totals.get(key) is not None:
+                            entry[key] = totals[key]
+                except Exception:
+                    pass
+                campaigns.append(entry)
+            if campaigns:
+                snap["campaigns"] = campaigns
+        except Exception:
+            pass
+    elif bucket == "x":
+        try:
+            syncs_dir = store._resolve_business_file(slug, "metrics/x/syncs", sync=False)
+            latest = max((p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime)
+            receipt = json.loads(latest.read_text(encoding="utf-8")) or {}
+            totals = receipt.get("totals") if isinstance(receipt.get("totals"), dict) else {}
+            x_stats = {
+                k: totals[k]
+                for k in ("views", "impressions", "likes", "replies", "reposts", "clicks")
+                if totals.get(k) is not None
+            }
+            if x_stats:
+                snap["x"] = x_stats
+        except Exception:
+            pass
+    return snap
+
+
+def _row_value_int(row: Any, key: str) -> int:
+    if row is None:
+        return 0
+    try:
+        return int(row[key] or 0)
+    except Exception:
+        try:
+            return int(row[0] or 0)
+        except Exception:
+            return 0
+
+
 def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
-    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE reddit campaign of this
-    business, pull fresh delivery insights via the EXISTING (gated) insights-sync tool, so the pulse
-    the CEO reads this wake is already current instead of relying on the agent to remember. Never
-    raises — a failed or skipped refresh must never break the wake. Bounded to reddit live+stale
-    campaigns (meta has no policy rows yet). Reuses the shared staleness threshold; disable with
-    TAKYON_WAKE_AD_REFRESH=0."""
+    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE ad campaign of this
+    business, pull fresh delivery insights via the EXISTING (gated) channel insights-sync tool, so
+    the pulse the CEO reads this wake is already current instead of relying on the agent to
+    remember. Never raises — a failed or skipped refresh must never break the wake. Dispatches per
+    channel (reddit + meta both register in the ad-spend policy registry as of the 2026-07-04
+    parity fix). Reuses the shared staleness threshold; disable with TAKYON_WAKE_AD_REFRESH=0."""
     summary: dict[str, Any] = {"checked": 0, "refreshed": 0, "skipped": 0, "errors": 0, "campaigns": []}
     if not _wake_ad_refresh_enabled():
         summary["disabled"] = True
@@ -28844,7 +28963,8 @@ def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
     now_dt = datetime.now(timezone.utc)
     hour_bucket = now_dt.strftime("%Y%m%dT%H")  # fresh key each wake; dedups retries within the hour
     for policy in policies or []:
-        if str(policy.channel or "") != "reddit":
+        channel = str(policy.channel or "")
+        if channel not in ("reddit", "meta"):
             summary["skipped"] += 1
             continue
         summary["checked"] += 1
@@ -28856,12 +28976,23 @@ def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
                 summary["skipped"] += 1
                 continue  # fresh enough — no refresh needed
             campaign_slug = policy.slug
-            raw = handle_business_reddit_ad_insights_sync({
+            sync_args = {
                 "business": slug,
                 "slug": campaign_slug,
                 "level": "campaign",
                 "idempotency_key": f"wake-refresh:{campaign_slug}:campaign:{hour_bucket}",
-            })
+            }
+            if channel == "meta":
+                # Lazy import: meta_ads_v2 imports core, so core must not import it at module load.
+                try:
+                    from . import meta_ads_v2
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon import meta_ads_v2
+                if policy.provider_campaign_id:
+                    sync_args["object_id"] = str(policy.provider_campaign_id)
+                raw = meta_ads_v2.handle_business_meta_ad_insights_sync(sync_args)
+            else:
+                raw = handle_business_reddit_ad_insights_sync(sync_args)
             ok = False
             try:
                 ok = bool(json.loads(raw).get("success"))
