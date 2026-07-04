@@ -794,8 +794,12 @@ require_tunnel() {
   if ! dashboard_tunnel_healthy; then
     missing+=("dashboard $LOCAL_DASHBOARD_URL")
   fi
+  local missing_text="local production tunnel endpoints"
+  if ((${#missing[@]} > 0)); then
+    missing_text="${missing[*]}"
+  fi
   cat >&2 <<EOF
-Required local production tunnel is not reachable: ${missing[*]}.
+Required local production tunnel is not reachable: ${missing_text}.
 
 Start it in another terminal:
   scripts/takyon-operator-prod.sh tunnel
