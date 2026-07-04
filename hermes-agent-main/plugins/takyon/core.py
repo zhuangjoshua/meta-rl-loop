@@ -23538,15 +23538,16 @@ def handle_business_delete_app_account(args: dict, **_: Any) -> str:
                 leaves = store._app_leaves()
                 identity = leaves["identity"]
                 try:
+                    # The bounded delete port is self-scoped by the session token — it derives the
+                    # target user server-side (no id surface), revokes all sessions, closes +
+                    # anonymizes. On the app-runtime plane it routes through the
+                    # takyon_app_close_account SECURITY DEFINER port (app roles hold no direct DML).
                     with store._pg_app_scope(conn, business, session_token=session_token):
                         with store._leaf_conn(conn) as leaf:
-                            # Resolve the principal from the token ONLY (server-side identity).
-                            user = identity.validate_session(leaf, business, session_token)
-                            if user is not None:
-                                app_user_id = str(getattr(user, "id", "") or "")
-                                identity.revoke_app_user_sessions(leaf, business, app_user_id)
-                                identity.set_app_user_status(leaf, business, app_user_id, "closed")
-                                deleted = True
+                            resolved_id, deleted = identity.close_app_account(
+                                leaf, business, session_token
+                            )
+                            app_user_id = str(resolved_id or "")
                 except leaves["identity"].AppIdentityError as exc:
                     raise TakyonError(str(exc)) from exc
             else:
@@ -23557,9 +23558,11 @@ def handle_business_delete_app_account(args: dict, **_: Any) -> str:
                         "UPDATE app_sessions SET revoked_at = ? WHERE business_slug = ? AND app_user_id = ? AND revoked_at IS NULL",
                         (_now(), business, app_user_id),
                     )
+                    # sqlite (dev only) has no supabase_user_id column (PG-only, 0026); anonymize
+                    # the email to free it for a fresh re-signup.
                     conn.execute(
-                        "UPDATE app_users SET status = 'closed', updated_at = ? WHERE business_slug = ? AND id = ?",
-                        (_now(), business, app_user_id),
+                        "UPDATE app_users SET status = 'closed', email = ?, updated_at = ? WHERE business_slug = ? AND id = ?",
+                        (f"deleted+{app_user_id}@deleted.invalid", _now(), business, app_user_id),
                     )
                     deleted = True
             if deleted:

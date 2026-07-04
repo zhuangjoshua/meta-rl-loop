@@ -428,6 +428,55 @@ def revoke_session(conn, business_slug: str, raw_session_token: str) -> bool:
     return row is not None
 
 
+def close_app_account(conn, business_slug: str, raw_session_token: str) -> tuple[str | None, bool]:
+    """Close the sub-user that owns this session (Apple 5.1.1(v)) — the bounded delete path.
+
+    Self-scoped by the session token, exactly like ``revoke_session``: the target user is derived
+    from the presented session, never passed in (structurally IDOR-proof). On the app-runtime plane
+    it routes through the ``takyon_app_close_account`` SECURITY DEFINER port (the app roles hold no
+    direct DML on app_users/app_sessions — 0045); on an owner/operator connection it does the same
+    work directly. Revokes ALL of the user's sessions, sets status='closed', and anonymizes email +
+    nulls supabase_user_id so a later sign-up with the same address is a fresh account. Idempotent:
+    a stale/invalid token closes nothing and returns (None, False). Returns (app_user_id, closed)."""
+    token = str(raw_session_token or "").strip()
+    if not token:
+        return (None, False)
+    token_hash = _hash_token(token)
+    if _is_app_runtime_user(conn):
+        row = conn.execute(
+            "select * from takyon_app_close_account(%s, %s)",
+            (business_slug, token_hash),
+        ).fetchone()
+        if row is None:
+            return (None, False)
+        uid = None if row[0] is None else str(row[0])
+        return (uid, bool(row[1]))
+    # Owner/operator connection (dev, rig, operator-plane admin): same effect, direct SQL.
+    with conn.transaction():
+        urow = conn.execute(
+            "select u.id from app_sessions s join app_users u "
+            "  on u.business_slug = s.business_slug and u.id = s.app_user_id "
+            "where s.business_slug = %s and s.token_hash = %s and s.revoked_at is null "
+            "  and s.expires_at > now() and u.status = 'active' limit 1",
+            (business_slug, token_hash),
+        ).fetchone()
+        if urow is None:
+            return (None, False)
+        uid = str(urow[0])
+        conn.execute(
+            "update app_sessions set revoked_at = now() "
+            "where business_slug = %s and app_user_id = %s and revoked_at is null",
+            (business_slug, uid),
+        )
+        conn.execute(
+            "update app_users set status = 'closed', "
+            "  email = 'deleted+' || %s || '@deleted.invalid', supabase_user_id = null, "
+            "  updated_at = now() where business_slug = %s and id = %s",
+            (uid, business_slug, uid),
+        )
+    return (uid, True)
+
+
 def revoke_app_user_sessions(conn, business_slug: str, app_user_id: str) -> int:
     """Revoke every live session for one sub-user. Returns the number of sessions revoked."""
     with conn.transaction():
