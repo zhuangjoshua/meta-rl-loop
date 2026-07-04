@@ -485,6 +485,7 @@ def write_workspace_revision(
         else set(backend.list_digests(cas_prefix).keys())
     )
     seen_digests: set[str] = set()
+    to_write: list[tuple[str, str]] = []
     for rel, digest in sorted(digests.items()):
         digest_text = str(digest or "").strip().lower()
         if not digest_text or digest_text in seen_digests:
@@ -492,6 +493,14 @@ def write_workspace_revision(
         seen_digests.add(digest_text)
         if workspace_cas_key(slug, digest_text) in existing_cas_key_set:
             continue
+        to_write.append((rel, digest_text))
+
+    # New CAS objects upload concurrently (bounded pool) — a fresh workspace's first revision
+    # writes the whole tree here, and serialized per-object puts priced that at file-count x RTT.
+    # Content-addressed keys are naturally race-free (same digest = same bytes), and the
+    # read-verify-put per object is unchanged.
+    def _write_cas_object(item: tuple[str, str]) -> None:
+        rel, digest_text = item
         data = _read_file_bytes(workspace_root / rel)
         actual_digest = digest_bytes(data)
         if actual_digest != digest_text:
@@ -504,6 +513,8 @@ def write_workspace_revision(
             data,
             digest=digest_text,
         )
+
+    _map_concurrently(_write_cas_object, to_write)
     manifest: dict[str, object] = {
         "slug": _safe_slug(slug),
         "revision": int(revision),
@@ -1245,15 +1256,21 @@ def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int
     The operator is the unit of the quota (one top-level Takyon user can own many businesses), so
     usage is aggregated over each owned business's ``<slug>/`` prefix. Slugs are de-duplicated and
     normalized; an unsafe slug raises rather than being silently skipped (containment)."""
-    total = 0
     seen: set[str] = set()
+    unique: list[str] = []
     for slug in slugs:
         safe = _safe_slug(str(slug))
         if safe in seen:
             continue
         seen.add(safe)
-        total += prefix_bytes(backend, object_prefix(safe))
-    return total
+        unique.append(safe)
+    # One remote listing per owned business, EVERY commit (this quota gate sits on the live commit
+    # chokepoint) — serialized this dominated commit latency for operators with many businesses
+    # (profiled: ~150 owned slugs x ~0.43s per listing ≈ 65s of every single workspace commit).
+    # Fan the per-slug listings out on the bounded sync pool; the sum is order-independent.
+    return sum(
+        _map_concurrently(lambda safe: prefix_bytes(backend, object_prefix(safe)), unique)
+    )
 
 
 def enforce_operator_storage_quota(
