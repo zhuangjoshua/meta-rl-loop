@@ -3085,6 +3085,42 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=502, detail="gsc_empty_token")
         return {"verification_token": token}
 
+    @app.post("/v1/store/asc/account-health")
+    def store_asc_account_health(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """App Store rail account-health probe (readmodular §4.1). Resolves the ASC .p8 + identifiers
+        from custody (never egressed), mints a short-TTL ES256 JWT, and probes Apple — returning ONLY
+        the health receipt (ok | agreement_blocked | auth_error | error | unreachable). The key never
+        leaves the safebox. Operator-plane only (internal token + operator client gate)."""
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        pem = str(
+            safebox.first_env_backed_value(
+                "TAKYON_APP_STORE_CONNECT_PRIVATE_KEY", "APP_STORE_CONNECT_PRIVATE_KEY"
+            )
+            or ""
+        ).strip()
+        if not pem:
+            raise HTTPException(status_code=404, detail="asc_unconfigured")
+        key_id = str(safebox.first_env_backed_value("APP_STORE_CONNECT_KEY_ID") or "").strip()
+        issuer_id = str(safebox.first_env_backed_value("APP_STORE_CONNECT_ISSUER_ID") or "").strip()
+        if not key_id or not issuer_id:
+            raise HTTPException(status_code=404, detail="asc_identifiers_unconfigured")
+        try:
+            from plugins.takyon import asc as _asc
+        except Exception as exc:  # pragma: no cover - deploy coherence
+            raise HTTPException(status_code=500, detail=f"asc_leaf_missing: {exc}") from exc
+        receipt = _asc.probe_account_health(key_id, issuer_id, pem)
+        # Return ONLY the receipt; the key/JWT never egress.
+        return {
+            "state": receipt.get("state"),
+            "status_code": receipt.get("status_code"),
+            "detail": receipt.get("detail"),
+            "checked_at": receipt.get("checked_at"),
+        }
+
     @app.post("/v1/gsc/verify")
     def gsc_verify(
         request: Request,
