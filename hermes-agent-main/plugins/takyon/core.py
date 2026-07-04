@@ -6963,8 +6963,11 @@ def _materialize_subuser_app_scaffold(
 
 
 # The starter-owned metadata floor + AppKit-owned rail wrappers. Unlike the worker-owned screens
-# (app-home, landing, profile, support, components, branding tokens), these files encode canonical
-# SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the product-build contract).
+# (app-home, landing, profile, support, components, and the `src/tokens.css` theme tokens), these
+# files encode canonical SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the
+# product-build contract). NOTE `src/lib/branding.ts` IS in this set (it is re-rendered from the
+# surface contract's seed tokens): an edit to any file below can never persist — see
+# _refuse_starter_owned_product_write for the operator-facing gate.
 # The scaffold seeds them once at bootstrap, but a fix to this canonical layer must reach EXISTING
 # businesses on their next rebuild — otherwise a platform metadata/rail fix only lands in brand-new
 # businesses. So these files are force-refreshed from the scaffold on every materialize, exactly
@@ -7159,6 +7162,9 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
+        "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
+        + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
+        + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
         "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers in `src/lib/hooks.ts` instead of hardcoding paid-vs-unpaid copy.",
         "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
@@ -15428,7 +15434,9 @@ class TakyonStore:
                 suffix = " ..." if len(substantive_conflicts) > 5 else ""
                 raise TakyonError(
                     f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
-                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
+                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing. "
+                    "For a worker-deferred task that means re-delegating with a NEW idempotency_key so the workspace "
+                    "re-materializes at the current head — a SAME-key re-call only replays this stored failure."
                 )
             # Commentary conflicts (and any not cleanly merged) -> drop the local render so head's
             # committed version stands after re-materialize below. A cleanly MERGED substantive file
@@ -22667,18 +22675,44 @@ def _verified_business_file_mutation_response(
         return tool_error(str(exc), success=False)
 
 
+def _refuse_starter_owned_product_write(rel: str) -> None:
+    """Fail closed on durable edits that can never persist: scaffold-owned product files.
+
+    Every file in _STARTER_OWNED_REFRESH_FILES under the product/site runtime-UI surface is
+    force-rewritten from the bundled scaffold on every kit materialize — before each product
+    worker run, inside each publish build, and inside this very commit's own surface-projection
+    refresh — so a durable write here silently self-reverts within its commit, no-ops the
+    revision, and then fails its sha postcondition byte-identically on every retry (observed
+    live as an unwinnable repair loop that exhausted two full CEO turns). Refusing up front
+    converts that silent lie into a routable error naming the viable repair. Handler-level on
+    purpose: internal platform writers of these files (e.g. the Search Console index.html
+    injection) still go through the store's apply path unimpeded."""
+    normalized = str(rel or "").strip().strip("/")
+    prefix = "product/site/"
+    if not normalized.startswith(prefix):
+        return
+    if normalized[len(prefix):] in _STARTER_OWNED_REFRESH_FILES:
+        raise TakyonError(
+            f"{normalized} is scaffold-owned and force-rewritten from the bundled scaffold on every "
+            "product build/kit materialize — edits to it can never persist. Make the minimal repair in "
+            "worker-owned source instead: fix the importing screen (src/screens/*, src/components/*) or "
+            "add the helper to a NEW worker-owned module under src/lib/ with a different filename."
+        )
+
+
 def handle_business_write_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
     content = str(args.get("content") or "")
-    _, file_path = _resolved_business_output_path_for_action(
+    rel, file_path = _resolved_business_output_path_for_action(
         store,
         business,
         str(args.get("path") or ""),
         action="artifact.write",
     )
+    _refuse_starter_owned_product_write(rel)
     previous_content = (
         file_path.read_text(encoding="utf-8", errors="replace")
         if file_path.exists()
@@ -22706,12 +22740,13 @@ def handle_business_patch_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
-    _, file_path = _resolved_business_output_path_for_action(
+    rel, file_path = _resolved_business_output_path_for_action(
         store,
         business,
         str(args.get("path") or ""),
         action="artifact.patch",
     )
+    _refuse_starter_owned_product_write(rel)
     if not file_path.exists():
         raise TakyonError(f"cannot patch missing file: {args.get('path')}")
     old = str(args.get("old") or "")
@@ -33162,6 +33197,38 @@ def _repair_stale_work_request_from_worker_job(
     return final_status, final_result
 
 
+def _terminal_worker_retry_fields(
+    tool_name: str,
+    run_id: str,
+    status: str,
+    *,
+    side_effect: bool,
+) -> dict[str, Any]:
+    """Machine + prose routing for a worker run that finished WITHOUT success.
+
+    The same-key re-call contract is attach-or-replay by design: once the run is terminal,
+    re-calling with the SAME idempotency_key replays the stored result verbatim and never
+    re-runs (observed live: a CEO looped the identical stale-base replay to budget
+    exhaustion because nothing said so). These fields make the terminal state explicit and
+    name the one real affordance — a NEW idempotency_key — with side-effect-safe wording on
+    lanes that execute external actions."""
+    if side_effect:
+        note = (
+            f"run {run_id} already finished as {status}; re-calling with the SAME idempotency_key "
+            "replays this stored result and will never re-run. A retry requires a NEW "
+            "idempotency_key and WILL re-execute the side effect (e.g. a live post), so first "
+            "confirm the action did not already happen."
+        )
+    else:
+        note = (
+            f"run {run_id} already finished as {status}; re-calling with the SAME idempotency_key "
+            "replays this stored result and will never re-run. To retry after fixing the cause, "
+            "re-call with a NEW idempotency_key — a fresh run re-materializes the workspace at the "
+            "current head revision."
+        )
+    return {"terminal": True, "retry_guidance": note}
+
+
 def _run_operator_task_on_worker(
     *,
     store: "TakyonStore",
@@ -33228,7 +33295,13 @@ def _run_operator_task_on_worker(
             error_text = str(
                 result.get("error") or f"{tool_name} {normalized_status or status} on the worker plane"
             )
-            return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+            extra = {k: v for k, v in result.items() if k != "error"}
+            extra.update(
+                _terminal_worker_retry_fields(
+                    tool_name, run_id, normalized_status or str(status), side_effect=False
+                )
+            )
+            return tool_error(error_text, **extra)
         repaired = _repair_stale_work_request_from_worker_job(
             store,
             run_id=run_id,
@@ -33249,7 +33322,13 @@ def _run_operator_task_on_worker(
                 repaired_result.get("error")
                 or f"{tool_name} {repaired_status or worker_status} on the worker plane"
             )
-            return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+            extra = {k: v for k, v in repaired_result.items() if k != "error"}
+            extra.update(
+                _terminal_worker_retry_fields(
+                    tool_name, run_id, str(repaired_status or worker_status), side_effect=False
+                )
+            )
+            return tool_error(error_text, **extra)
         now = time.monotonic()
         if not picked_up and now >= pickup_deadline:
             # The worker has not STARTED this job yet — it is queued behind an in-flight build on the
@@ -33352,7 +33431,13 @@ def _run_worker_backed_business_job_and_wait(
                     or result.get("worker_error")
                     or f"{tool_name} {normalized_status or status} on the worker plane"
                 ).strip() or f"{tool_name} {normalized_status or status} on the worker plane"
-                return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+                extra = {k: v for k, v in result.items() if k != "error"}
+                extra.update(
+                    _terminal_worker_retry_fields(
+                        tool_name, run_id, normalized_status or str(status), side_effect=True
+                    )
+                )
+                return tool_error(error_text, **extra)
             repaired = _repair_stale_work_request_from_worker_job(
                 active_store,
                 run_id=run_id,
@@ -33376,7 +33461,13 @@ def _run_worker_backed_business_job_and_wait(
                     or repaired_result.get("worker_error")
                     or f"{tool_name} {repaired_status or worker_status} on the worker plane"
                 ).strip() or f"{tool_name} {repaired_status or worker_status} on the worker plane"
-                return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+                extra = {k: v for k, v in repaired_result.items() if k != "error"}
+                extra.update(
+                    _terminal_worker_retry_fields(
+                        tool_name, run_id, str(repaired_status or worker_status), side_effect=True
+                    )
+                )
+                return tool_error(error_text, **extra)
             now = time.monotonic()
             if not picked_up and now >= pickup_deadline:
                 return tool_result(

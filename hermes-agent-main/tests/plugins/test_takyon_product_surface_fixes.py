@@ -66,3 +66,54 @@ def test_appkit_access_gate_uses_entitlements_not_legacy_account_flags():
     assert "user?.tier" not in subscription_block
     assert "has_active_subscription" not in hooks
     assert "subscription.status" not in hooks
+
+
+def test_scaffold_owned_product_writes_are_refused_with_routable_repair():
+    # Every file in _STARTER_OWNED_REFRESH_FILES is force-rewritten from the scaffold on every kit
+    # materialize — including inside a durable write's OWN commit (the surface-projection refresh),
+    # so a CEO edit there self-reverts and then fails its sha postcondition identically forever
+    # (observed live: two full CEO turns burned in the loop). The gate must refuse up front and
+    # name the viable repair, and it must NOT block worker-owned product source or non-product paths.
+    import pytest
+
+    for rel in takyon_core._STARTER_OWNED_REFRESH_FILES:
+        with pytest.raises(takyon_core.TakyonError, match="scaffold-owned"):
+            takyon_core._refuse_starter_owned_product_write(f"product/site/{rel}")
+    # Worker-owned screens and non-product paths stay writable.
+    takyon_core._refuse_starter_owned_product_write("product/site/src/screens/app-home.tsx")
+    takyon_core._refuse_starter_owned_product_write("product/site/src/lib/branding-extras.ts")
+    takyon_core._refuse_starter_owned_product_write("research/strategy.md")
+    # Both durable-mutation handlers actually call the gate (source-level wiring guard).
+    write_src = _CORE_SRC.split("def handle_business_write_file(", 1)[1].split("\ndef ", 1)[0]
+    patch_src = _CORE_SRC.split("def handle_business_patch_file(", 1)[1].split("\ndef ", 1)[0]
+    assert "_refuse_starter_owned_product_write(rel)" in write_src
+    assert "_refuse_starter_owned_product_write(rel)" in patch_src
+
+
+def test_worker_contract_names_the_force_rewritten_scaffold_files():
+    # The kit contract is the worker's only discovery surface for file ownership. If it does not
+    # name the force-rewritten set, workers burn build retries "fixing" a file the platform
+    # silently reverts before every build (the unwinnable formatSubscriptionState loop).
+    contract = takyon_core._subuser_app_kit_contract_block(None)
+    assert "force-rewritten" in contract
+    for rel in takyon_core._STARTER_OWNED_REFRESH_FILES:
+        assert f"`{rel}`" in contract, f"{rel} missing from the contract's scaffold-owned list"
+
+
+def test_terminal_worker_failure_names_the_new_key_affordance():
+    # Once a worker run is terminal, a same-key re-call replays the stored result verbatim (attach-
+    # or-replay is intended design). The failure payload must SAY so, or the caller loops the
+    # identical replay to budget exhaustion; the side-effect lane must additionally warn that a
+    # fresh key re-executes the action.
+    fields = takyon_core._terminal_worker_retry_fields(
+        "business_claude_agent_task", "run-1", "failed", side_effect=False
+    )
+    assert fields["terminal"] is True
+    assert "NEW idempotency_key" in fields["retry_guidance"]
+    assert "replays this stored result" in fields["retry_guidance"]
+    spendful = takyon_core._terminal_worker_retry_fields(
+        "business_x_publish_outreach", "run-2", "failed", side_effect=True
+    )
+    assert "WILL re-execute the side effect" in spendful["retry_guidance"]
+    # The stale-base raise routes to the same affordance instead of the actionless "re-hydrate".
+    assert "re-delegating with a NEW idempotency_key" in _CORE_SRC
