@@ -15,17 +15,23 @@
       "resizeMode": "contain",
       "backgroundColor": "#0b0b12"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "updates": {
       "url": "https://u.expo.dev/__EAS_PROJECT_ID__",
       "fallbackToCacheTimeout": 0
     },
-    "runtimeVersion": { "policy": "fingerprint" },
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
     "ios": {
       "bundleIdentifier": "com.__TAKYON_ORG__.__TAKYON_SLUG__",
       "buildNumber": "1",
       "supportsTablet": true,
-      "associatedDomains": ["applinks:__TAKYON_SLUG__.coscale.app"],
+      "associatedDomains": [
+        "applinks:__TAKYON_SLUG__.coscale.app"
+      ],
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "CFBundleAllowMixedLocalizations": true
@@ -37,11 +43,15 @@
         "NSPrivacyAccessedAPITypes": [
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
-            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "CA92.1"
+            ]
           },
           {
             "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
-            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+            "NSPrivacyAccessedAPITypeReasons": [
+              "C617.1"
+            ]
           }
         ]
       }
@@ -50,12 +60,20 @@
       "expo-router",
       "expo-secure-store",
       "expo-web-browser",
-      "react-native-legal",
-      ["expo-updates", { "username": "__EXPO_ORG__" }]
+      [
+        "expo-updates",
+        {
+          "username": "__EXPO_ORG__"
+        }
+      ]
     ],
-    "experiments": { "typedRoutes": true },
+    "experiments": {
+      "typedRoutes": true
+    },
     "extra": {
-      "eas": { "projectId": "__EAS_PROJECT_ID__" },
+      "eas": {
+        "projectId": "__EAS_PROJECT_ID__"
+      },
       "takyonSlug": "__TAKYON_SLUG__"
     }
   }

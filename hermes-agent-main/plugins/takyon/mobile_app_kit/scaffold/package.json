@@ -7,8 +7,7 @@
     "start": "expo start",
     "ios": "expo run:ios",
     "typecheck": "tsc --noEmit",
-    "prebuild": "expo prebuild --no-install",
-    "licenses": "react-native-legal generate"
+    "prebuild": "expo prebuild --no-install"
   },
   "dependencies": {
     "expo": "~54.0.0",
@@ -24,11 +23,11 @@
     "react-native": "0.81.4",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
-    "@supabase/supabase-js": "2.108.2"
+    "@supabase/supabase-js": "2.108.2",
+    "react-dom": "19.1.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
-    "react-native-legal": "^2.0.0",
     "typescript": "~5.9.2"
   }
 }

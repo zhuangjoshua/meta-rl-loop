@@ -20,9 +20,11 @@ second backend.
 4. **Compliance is baked in** (verified by `store_compliance.py` → greenlight preflight):
    `app.json` declares New Architecture, `ios.privacyManifests` (+ a mirrored
    `PrivacyInfo.xcprivacy` for the pre-prebuild static scan), `ITSAppUsesNonExemptEncryption=false`,
-   `associatedDomains` for universal links, and the `react-native-legal` plugin (auto OSS-licenses
-   screen). A working Delete Account flow (Apple 5.1.1(v)) ships in `src/screens/profile.tsx`,
-   wired to the `account.delete` rail.
+   `associatedDomains` for universal links, and an OSS-licenses screen that points at the product
+   web surface's `/licenses` page (an in-app native aggregator, react-native-legal, was dropped:
+   its config plugin unconditionally writes Android license metadata and crashes managed iOS-only
+   prebuild -- verified against the real EAS lane 2026-07-04). A working Delete Account flow
+   (Apple 5.1.1(v)) ships in `src/screens/profile.tsx`, wired to the `account.delete` rail.
 5. **Ugly on purpose.** `theme.ts` + placeholder copy/assets are starting points the CEO worker
    replaces before publish. A shipped app that still looks like this is a quality finding.
 
