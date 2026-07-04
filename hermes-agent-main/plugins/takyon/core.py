@@ -16562,6 +16562,12 @@ class TakyonStore:
 
         with self._connect() as conn:
             business = self._ensure_business(conn, slug)
+            # App Store account health — only for mobile_app businesses, memoized ~6h so it never
+            # hammers Apple, best-effort (None on any error/non-mobile). Surfaces agreement_blocked
+            # etc. so the CEO knows store submissions are frozen before attempting one.
+            platform_account_health = _platform_account_health(
+                str(business.get("archetype") or "web_saas"), now_dt.timestamp()
+            )
             created_at = str(business.get("created_at") or now)
             created_dt = _parse_iso_datetime(created_at) or now_dt
             previous_row = self._row_to_dict(conn.execute(
@@ -16926,6 +16932,8 @@ class TakyonStore:
                 ],
                 "recent_event_types": recent_event_types,
                 "active_ad_campaigns": active_ad_campaigns,
+                # Present only for mobile_app businesses with a resolved probe (None → omitted).
+                **({"platform_account_health": platform_account_health} if platform_account_health else {}),
                 "evidence_strength": {
                     "score": evidence_score,
                     "scale": "0 none, 1 operator hypothesis, 2 market evidence, 3 user reply, 4 usage, 5 paid revenue",
@@ -28320,6 +28328,42 @@ def _humanize_age_seconds(seconds: float) -> str:
     if minutes:
         return f"{minutes}m ago"
     return "just now"
+
+
+# App Store account-health cache: probing Apple on every pulse would hammer the ASC API, so the
+# result is memoized process-wide for ~6h (readmodular §4.1). Time is passed in (Date.now is banned
+# in some contexts; here we use monotonic-ish wall time via the caller's now_dt epoch).
+_APPSTORE_HEALTH_CACHE: dict[str, Any] = {"checked_epoch": 0, "receipt": None}
+_APPSTORE_HEALTH_TTL_SECONDS = 6 * 3600
+
+
+def _platform_account_health(archetype: str, now_epoch: float) -> dict[str, Any] | None:
+    """Best-effort Apple developer-account health for the wake pulse — ONLY for mobile_app businesses
+    (Apple-specific). Calls the safebox account-health route (the key never leaves the safebox),
+    memoized ~6h so pulse never hammers Apple. Never raises: returns None on any error / non-mobile
+    archetype / unconfigured, so the pulse is unaffected ("never break the wake"). A non-'ok' state
+    (esp. agreement_blocked) is the CEO's signal that store submissions are frozen account-wide."""
+    try:
+        if _archetype_leaf().normalize_archetype(archetype, allow_empty=True) != _archetype_leaf().MOBILE_APP:
+            return None
+    except Exception:
+        return None
+    cached = _APPSTORE_HEALTH_CACHE.get("receipt")
+    if cached is not None and (now_epoch - float(_APPSTORE_HEALTH_CACHE.get("checked_epoch") or 0)) < _APPSTORE_HEALTH_TTL_SECONDS:
+        return cached
+    try:
+        try:
+            from . import safebox as _sb
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import safebox as _sb
+        receipt = _sb.store_asc_account_health()
+    except Exception:
+        return cached  # keep the last good reading rather than flapping; None if never succeeded
+    if isinstance(receipt, dict) and receipt.get("state"):
+        _APPSTORE_HEALTH_CACHE["receipt"] = receipt
+        _APPSTORE_HEALTH_CACHE["checked_epoch"] = now_epoch
+        return receipt
+    return cached
 
 
 def _pulse_active_ad_campaigns(slug: str, now_dt: datetime) -> list[dict[str, Any]]:

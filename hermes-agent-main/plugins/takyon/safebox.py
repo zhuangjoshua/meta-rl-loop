@@ -238,6 +238,7 @@ _OPERATOR_AUTH_PATH_PREFIXES = (
     "/v1/postmark/",
     "/v1/providers/composio/",
     "/v1/providers/meta/",
+    "/v1/store/",
     "/v1/storage/",
     "/v1/user-api-keys/",
 )
@@ -3206,6 +3207,14 @@ def gsc_add_property(site_url: str) -> dict:
         {"site_url": str(site_url or "")},
         timeout=60.0,
     )
+
+
+def store_asc_account_health() -> dict:
+    """Probe the Apple developer account's health via the safebox (App Store rail, readmodular §4.1).
+    The safebox resolves the custodied ASC .p8 + identifiers, mints a JWT, and probes Apple; only the
+    receipt {state, status_code, detail, checked_at} returns — the key never egresses. state is one of
+    ok | agreement_blocked | auth_error | error | unreachable."""
+    return _remote_json("POST", "/v1/store/asc/account-health", {}, timeout=30.0)
 
 
 def openmeter_request(
