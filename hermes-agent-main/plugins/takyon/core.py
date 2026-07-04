@@ -21338,6 +21338,39 @@ def _commit_tool_data(
     store: "TakyonStore" | None = None,
     principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    def _scoped_tool_idempotency_key(
+        raw_idempotency_key: str,
+        *,
+        resolved_scope: str,
+        action: str,
+        reason: str,
+        actor: str,
+        normalized_operation: dict[str, Any],
+        include_operation_hash: bool = False,
+    ) -> str:
+        if not raw_idempotency_key:
+            return ""
+        suffix_parts = [
+            hashlib.sha256(f"{resolved_scope}:{action}".encode("utf-8")).hexdigest()[:12]
+        ]
+        if include_operation_hash:
+            suffix_parts.append(
+                _hash_operation(
+                    {
+                        "scope": resolved_scope,
+                        "operations": [normalized_operation],
+                        "reason": reason,
+                        "actor": actor,
+                    }
+                )[:12]
+            )
+        suffix = ":".join(suffix_parts)
+        candidate = f"{raw_idempotency_key}:{suffix}"
+        if len(candidate) <= 200:
+            return candidate
+        keep = max(1, 200 - len(suffix) - 1)
+        return f"{raw_idempotency_key[:keep]}:{suffix}"
+
     business = _business_slug(
         {
             "business": operation.get("business") or args.get("business"),
@@ -21351,24 +21384,50 @@ def _commit_tool_data(
     active_store = store or _store()
     resolved_scope = scope or (f"business:{business}" if business else _business_scope(args))
     raw_idempotency_key = str(args.get("idempotency_key") or "").strip()
-    scoped_idempotency_key = raw_idempotency_key
-    if raw_idempotency_key:
-        action = str(normalized_operation.get("action") or "").strip() or "operation"
-        scope_suffix = hashlib.sha256(f"{resolved_scope}:{action}".encode("utf-8")).hexdigest()[:12]
-        candidate = f"{raw_idempotency_key}:{scope_suffix}"
-        if len(candidate) <= 200:
-            scoped_idempotency_key = candidate
+    action = str(normalized_operation.get("action") or "").strip() or "operation"
+    reason = str(args.get("reason") or "")
+    actor = str(args.get("actor") or "agent")
+    scoped_idempotency_key = _scoped_tool_idempotency_key(
+        raw_idempotency_key,
+        resolved_scope=resolved_scope,
+        action=action,
+        reason=reason,
+        actor=actor,
+        normalized_operation=normalized_operation,
+    ) or raw_idempotency_key
+    try:
+        result = active_store.commit(
+            scope=resolved_scope,
+            operations=[normalized_operation],
+            idempotency_key=scoped_idempotency_key,
+            reason=reason,
+            actor=actor,
+            principal=principal,
+        )
+    except TakyonError as exc:
+        if raw_idempotency_key and "already used for different operations" in str(exc):
+            collision_retry_key = _scoped_tool_idempotency_key(
+                raw_idempotency_key,
+                resolved_scope=resolved_scope,
+                action=action,
+                reason=reason,
+                actor=actor,
+                normalized_operation=normalized_operation,
+                include_operation_hash=True,
+            )
+            if collision_retry_key and collision_retry_key != scoped_idempotency_key:
+                result = active_store.commit(
+                    scope=resolved_scope,
+                    operations=[normalized_operation],
+                    idempotency_key=collision_retry_key,
+                    reason=reason,
+                    actor=actor,
+                    principal=principal,
+                )
+            else:
+                raise
         else:
-            keep = max(1, 200 - len(scope_suffix) - 1)
-            scoped_idempotency_key = f"{raw_idempotency_key[:keep]}:{scope_suffix}"
-    result = active_store.commit(
-        scope=resolved_scope,
-        operations=[normalized_operation],
-        idempotency_key=scoped_idempotency_key,
-        reason=args.get("reason") or "",
-        actor=args.get("actor") or "agent",
-        principal=principal,
-    )
+            raise
     try:
         openmeter_sync = _maybe_openmeter_post_commit_sync(
             active_store,
