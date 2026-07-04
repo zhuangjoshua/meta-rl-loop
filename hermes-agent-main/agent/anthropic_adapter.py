@@ -81,11 +81,13 @@ _XHIGH_EFFORT_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8", "sonnet-5")
 # Models where extended thinking is deprecated/removed (4.6+ behavior: adaptive
 # is the only supported mode; 4.7 additionally forbids manual thinking entirely
 # and drops temperature/top_p/top_k).
-_ADAPTIVE_THINKING_SUBSTRINGS = ("4-6", "4.6", "4-7", "4.7", "4-8", "4.8", "sonnet-5")
+_ADAPTIVE_THINKING_SUBSTRINGS = ("4-6", "4.6", "4-7", "4.7", "4-8", "4.8", "sonnet-5", "fable-5")
 
 # Models where temperature/top_p/top_k return 400 if set to non-default values.
 # This is the Opus 4.7 contract; future 4.x+ models are expected to follow it.
-_NO_SAMPLING_PARAMS_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8", "sonnet-5")
+# fable-5 verified live 2026-07-04: sends of `temperature` 400 with "`temperature` is
+# deprecated" (surfaced as provider_error through the safebox proxy).
+_NO_SAMPLING_PARAMS_SUBSTRINGS = ("4-7", "4.7", "4-8", "4.8", "sonnet-5", "fable-5")
 _FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-6", "opus-4.6")
 
 # ── Max output token limits per Anthropic model ───────────────────────
