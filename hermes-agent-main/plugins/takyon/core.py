@@ -8463,6 +8463,17 @@ def _money_shape_error() -> type[Exception]:
     return _money_shape_leaf().MoneyShapeError
 
 
+def _archetype_leaf():
+    """The `archetypes` leaf module (per-business archetype record + preset registry — manifest key
+    #3, the app|shopify|saas toggle), lazily imported like the other Phase-5/6 leaves so import cost
+    is paid only on the paths that use it."""
+    try:
+        from . import archetypes as _archetypes
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import archetypes as _archetypes
+    return _archetypes
+
+
 def _refuse_product_file_edit_on_autonomous_wake(path: Any) -> None:
     """Block product-SOURCE writes (product/site/...) on a wake. Research/metrics/memory writes and
     distribution/creative receipts + assets (product/public-assets, product/brand, product/static-ads,
@@ -18565,8 +18576,18 @@ class TakyonStore:
                             "Seed it once at startup (control_plane.ensure_platform_owner) or set "
                             "TAKYON_PLATFORM_OWNER_SUB to a provisioned user's Auth0 sub."
                         )
+                # Archetype (manifest key #3, the app|shopify|saas toggle). Create-time only — a
+                # change goes through the gated archetypes.set_archetype path, never business.upsert
+                # (identical posture to money_shape). An explicit pick must be a known, ENABLED
+                # archetype (fail closed on a not-yet-shipped one); absent → web_saas = today.
+                _arch = _archetype_leaf()
+                requested_archetype = op.get("archetype")
+                if requested_archetype:
+                    archetype = _arch.assert_selectable(requested_archetype)
+                else:
+                    archetype = _arch.DEFAULT_ARCHETYPE
                 conn.execute(
-                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, archetype, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         slug,
                         name,
@@ -18575,6 +18596,7 @@ class TakyonStore:
                         work_focus or "all",
                         _json_dumps(budget) if budget is not None else None,
                         _json_dumps(metadata),
+                        archetype,
                         owner_user_id,
                         now,
                         now,
