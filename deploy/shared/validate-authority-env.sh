@@ -12,6 +12,11 @@ the supplied env files.
 
 Set TAKYON_REQUIRE_MIGRATION_DATABASE_URL=0 only for deploy modes that do not
 run migrations from the target host.
+
+Set TAKYON_REQUIRE_APP_DATABASE_URL=0 only for a subuser host whose app DSN
+resolves through the safebox authority at runtime (no local DSN by design —
+the takyon-subuser-2 replica posture). A local DSN remains the default
+requirement, and the operator/safebox rejects on that key are unaffected.
 EOF
 }
 
@@ -148,7 +153,9 @@ case "$plane" in
     reject_key TAKYON_SAFEBOX_DATABASE_URL "${env_files[@]}"
     ;;
   subuser)
-    require_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
+    if env_truthy "${TAKYON_REQUIRE_APP_DATABASE_URL:-1}"; then
+      require_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
+    fi
     if env_truthy "$require_migration_database_url"; then
       require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
     fi
