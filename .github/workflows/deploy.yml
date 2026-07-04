@@ -1,9 +1,10 @@
 name: Deploy Takyon
 
+# Push triggers OFF while GitHub Actions billing is dead (operator, 2026-07-04):
+# every push spawned an instant job-start failure ("recent account payments have
+# failed"), and prod deploys are LOCAL tracked scripts anyway (runners cannot SSH
+# through the firewall). Re-enable push triggers when billing is restored.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 concurrency:

@@ -139,9 +139,18 @@ Fast path for ordinary code/docs/UI changes:
 
 1. Run only the focused local checks needed for the touched surface, plus `git diff --check`.
 2. Stage only intended files, commit in the outer repo, and `git push origin main`.
-3. Immediately run `gh run list --repo tejdiv/takyon-workspace --branch main --limit 5`, then `gh run watch <run-id> --repo tejdiv/takyon-workspace --exit-status`.
-4. If the workflow passes, report the run id and any direct smoke checks. Do not also do manual VPS/Vercel deploys.
-5. If the workflow fails, inspect `gh run view <run-id> --log-failed`, patch the failing tracked rail, push again, and watch the new run. Use manual SSH/rsync only for emergency rollback or when the operator explicitly asks.
+3. **GitHub Actions is OFF (account billing failure; push triggers disabled 2026-07-04 — every
+   push-spawned run failed at job start, and those runs never deployed anything anyway since
+   GitHub runners cannot SSH through the firewall). Do NOT run `gh run list`/`gh run watch`
+   after a push, and do NOT report GHA state to the operator — it is not part of the deploy
+   path and the operator does not want to hear about it.**
+4. Deploy the touched planes with the tracked local scripts from this Mac
+   (`deploy/argon-alpha-14/deploy-runtime.sh`, `deploy/takyon-safebox/deploy-runtime.sh`,
+   `deploy/takyon-subuser/deploy-runtime.sh` for BOTH subuser boxes), migrate-before-restart
+   if migrations changed, then report on-host verification (is-active + healthz + source
+   checks).
+5. When billing is restored, re-enable the push triggers in `.github/workflows/` (they are
+   `workflow_dispatch`-only until then); this step then reverts to push → `gh run watch`.
 
 ## Dev environment deploy (the `dev` env on droplets — NOT prod, NOT the Mac-local rail)
 

@@ -14,10 +14,9 @@ name: Forward main to dev
 # This workflow only fires on pushes to `main`, and only ever pushes `dev`, so it can
 # never loop (a dev push triggers nothing) and never deploys anything to prod.
 
+# Push trigger OFF while GitHub Actions billing is dead (operator, 2026-07-04);
+# keep dev >= main by hand (git merge main) until billing is restored.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 concurrency:

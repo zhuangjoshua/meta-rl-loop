@@ -1,10 +1,8 @@
 name: Tests
 
+# Push/PR triggers OFF while GitHub Actions billing is dead (operator, 2026-07-04).
+# Re-enable when billing is restored.
 on:
-  push:
-    branches:
-      - main
-  pull_request:
   workflow_dispatch:
 
 jobs:
