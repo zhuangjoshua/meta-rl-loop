@@ -144,6 +144,20 @@ echo "→ [$NODE_NAME] venv (uv sync --locked, hash-verified — same rail as se
   .venv/bin/python -m compileall -q plugins/takyon takyon_cli tui_gateway || true
 "
 
+if [[ "$ROLE" == "operator" ]]; then
+  # The operator plane RUNS the CEO, so it needs the provider-specific extras that are NOT in
+  # .[all] (pyproject keeps anthropic/gemini as separate opt extras). Without these the worker's
+  # ceo_bootstrap fails with "the 'anthropic' package is required" / missing genai. Installed as
+  # root with root's uv (the venv was built by root; runuser-takyon cannot reach /root/.local/bin/uv).
+  echo "→ [$NODE_NAME] operator provider extras (anthropic model + google-genai creative)"
+  "${SSH[@]}" "set -euo pipefail
+    cd /opt/takyon/hermes-agent-main
+    UV=\$(command -v uv || echo /root/.local/bin/uv)
+    export UV_NO_CONFIG=1 UV_PROJECT_ENVIRONMENT=/opt/takyon/hermes-agent-main/.venv
+    \$UV pip install -e '.[anthropic]' google-genai --no-progress
+  "
+fi
+
 echo "→ [$NODE_NAME] env file (dev aliases only; scp mode 600, never echoed)"
 TMPENV="$(mktemp)"
 trap 'rm -f "$TMPENV"' EXIT
@@ -166,15 +180,34 @@ elif [[ "$ROLE" == "operator" ]]; then
 else
   # Dev safebox = the dev store minus infra-only aliases (DO token, ssh cidr, mac-local safebox
   # url), plus its own transport token + cap signing key.
-  grep -vE '^(TAKYON_DO_API_TOKEN|TAKYON_DEV_SSH_ALLOW_CIDR|TAKYON_DEV_SAFEBOX_URL|TAKYON_DEV_SAFEBOX_TOKEN|TAKYON_DEV_CAP_SIGNING_KEY)=' "$STORE" > "$TMPENV"
+  grep -vE '^(TAKYON_DO_API_TOKEN|TAKYON_DEV_SSH_ALLOW_CIDR|TAKYON_DEV_SAFEBOX_URL|TAKYON_DEV_SAFEBOX_TOKEN|TAKYON_DEV_CAP_SIGNING_KEY|TAKYON_SAFEBOX_OPERATOR_CLIENTS|TAKYON_OPERATOR_USAGE_GATE_DISABLED)=' "$STORE" > "$TMPENV"
   printf 'TAKYON_SAFEBOX_TOKEN=%s\n' "$(store_get TAKYON_DEV_SAFEBOX_TOKEN)" >> "$TMPENV"
   printf 'TAKYON_CAP_SIGNING_KEY=%s\n' "$(store_get TAKYON_DEV_CAP_SIGNING_KEY)" >> "$TMPENV"
+  # Operator money rail, mirroring prod (the remote reserve/refund/broker calls resolve IN the
+  # safebox, so these must live on the safebox host, not the operator): the dev operator droplet's
+  # VPC IP is the ONLY allowed operator client (subusers stay disallowed — the local-dev store
+  # carried a loopback value that is wrong once the operator is a separate droplet), and the
+  # operator usage gate is disabled so the dev operator agent runs $0.
+  printf 'TAKYON_SAFEBOX_OPERATOR_CLIENTS=%s\n' "${TAKYON_DEV_OPERATOR_VPC_IP:-10.200.0.2} 127.0.0.1 ::1" >> "$TMPENV"
+  printf 'TAKYON_OPERATOR_USAGE_GATE_DISABLED=1\n' >> "$TMPENV"
 fi
 scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   "$TMPENV" "root@$HOST:/opt/takyon/.takyon/.env"
 rm -f "$TMPENV"; trap - EXIT
 
 if [[ "$ROLE" == "operator" ]]; then
+  # The CEO runtime config ($TAKYON_HOME/config.yaml — model.provider/default, etc.) is NOT part of
+  # the runtime tree; the Mac rail copies it at launch, so the droplet needs it installed here or the
+  # worker's ceo_bootstrap fails with "model config missing model.provider, model.default".
+  CONFIG_SRC="${TAKYON_DEV_CONFIG_YAML:-$ROOT_DIR/.takyon/config.yaml}"
+  if [[ -f "$CONFIG_SRC" ]]; then
+    echo "→ [$NODE_NAME] operator config.yaml ($CONFIG_SRC)"
+    scp -q -i "$KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+      "$CONFIG_SRC" "root@$HOST:/opt/takyon/.takyon/config.yaml"
+    "${SSH[@]}" "chown takyon:takyon /opt/takyon/.takyon/config.yaml"
+  else
+    echo "⚠ no config.yaml at $CONFIG_SRC — the CEO will fail on missing model config; set TAKYON_DEV_CONFIG_YAML" >&2
+  fi
   echo "→ [$NODE_NAME] operator units (docker-broker + worker + dashboard) rendered + started"
   # The units' BindPaths=/run/user/<uid> must use the ACTUAL takyon uid on THIS host (a fresh dev
   # droplet rarely lands on prod's 995), so resolve it and render __TAKYON_UID__.
