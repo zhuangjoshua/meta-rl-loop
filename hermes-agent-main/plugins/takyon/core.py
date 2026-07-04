@@ -2885,10 +2885,11 @@ def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
     """Idea-branded hero copy the bootstrap writes to ``product/hero.json`` from the step-1 brief,
     so the FIRST published landing is on-message before the slower full design pass. Best-effort and
     fail-soft: any read/parse problem returns {} and the landing falls back to the generic welcome."""
-    if workspace_root is None:
+    business_root = _starter_business_root(Path(workspace_root) if workspace_root is not None else None)
+    if business_root is None:
         return {}
     try:
-        hero_path = Path(workspace_root) / "product" / "hero.json"
+        hero_path = business_root / "product" / "hero.json"
         if not hero_path.is_file():
             return {}
         data = json.loads(hero_path.read_text(encoding="utf-8") or "{}")
@@ -3261,9 +3262,153 @@ def _humanize_business_slug(slug: str) -> str:
     return " ".join(part.capitalize() for part in parts)
 
 
-def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
-    title = _humanize_business_slug(slug)
+def _starter_business_root(workspace_root: Path | None) -> Path | None:
+    if workspace_root is None:
+        return None
+    root = Path(workspace_root)
+    if root.name == "site" and root.parent.name == "product":
+        return root.parent.parent
+    return root
+
+
+def _starter_strategy_sections(workspace_root: Path | None) -> tuple[str, dict[str, str]]:
+    business_root = _starter_business_root(workspace_root)
+    if business_root is None:
+        return "", {}
+    strategy_path = business_root / "research" / "strategy.md"
+    try:
+        body = strategy_path.read_text(encoding="utf-8")
+    except OSError:
+        return "", {}
+    if not body.strip():
+        return "", {}
+
+    heading_re = re.compile(r"^(#{1,6})\s+(.*)$")
+    title = ""
+    current_section = ""
+    current_lines: list[str] = []
+    sections: dict[str, str] = {}
+
+    def _flush() -> None:
+        nonlocal current_section, current_lines
+        if current_section:
+            sections[current_section] = "\n".join(current_lines).strip()
+        current_lines = []
+
+    for raw_line in body.splitlines():
+        match = heading_re.match(raw_line)
+        if match:
+            level = len(match.group(1))
+            heading = match.group(2).strip()
+            if level == 1 and not title:
+                title = heading
+            if level <= 2:
+                _flush()
+                current_section = _normalize_heading_text(heading) if level == 2 else ""
+                continue
+        if current_section:
+            current_lines.append(raw_line)
+
+    _flush()
+    return title, sections
+
+
+def _starter_strategy_first_line(value: str) -> str:
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*•>]+\s*", "", line)
+        line = re.sub(r"[*_`]+", "", line).strip()
+        if line:
+            return line
+    return ""
+
+
+def _starter_strategy_title(value: str, *, slug: str) -> str:
+    title = _starter_strategy_first_line(value)
+    if not title:
+        return _humanize_business_slug(slug)
+    title = re.sub(r"\s*\([^)]*\)\s*$", "", title).strip()
+    title = re.split(r"\s+[—-]\s+", title, maxsplit=1)[0].strip()
+    return title or _humanize_business_slug(slug)
+
+
+def _starter_title_is_generic(title: str, *, slug: str) -> bool:
+    value = str(title or "").strip().lower()
+    if not value:
+        return True
+    if value == str(slug or "").strip().lower():
+        return True
+    return value == _humanize_business_slug(slug).strip().lower()
+
+
+def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, str]:
+    if workspace_root is None:
+        return {}
+
+    def _clean_literal(value: str) -> str:
+        text = re.sub(r"{[^}]*}", " ", value)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return re.sub(r"[*_`]+", "", text).strip()
+
+    copy: dict[str, str] = {}
+    hero = _read_bootstrap_hero_copy(workspace_root)
+    if hero.get("headline"):
+        copy["title"] = str(hero["headline"]).strip()[:160]
+    if hero.get("subhead"):
+        copy["description"] = str(hero["subhead"]).strip()[:240]
+    if copy.get("title") and copy.get("description"):
+        return copy
+
+    landing_path = Path(workspace_root) / "src" / "screens" / "landing.tsx"
+    try:
+        landing = landing_path.read_text(encoding="utf-8")
+    except OSError:
+        return copy
+
+    for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", landing, flags=re.DOTALL):
+        title = _clean_literal(match.group(1))
+        if title and "Welcome to" not in title:
+            copy.setdefault("title", title[:160])
+            break
+    for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", landing, flags=re.DOTALL):
+        description = _clean_literal(match.group(1))
+        if description and "Sign in with Google" not in description and len(description) >= 24:
+            copy.setdefault("description", description[:240])
+            break
+    return copy
+
+
+def _subuser_app_starter_strings(
+    surface: dict[str, Any] | None,
+    *,
+    slug: str,
+    workspace_root: Path | None = None,
+) -> dict[str, Any]:
+    strategy_title, strategy_sections = _starter_strategy_sections(workspace_root)
+    workspace_copy = _starter_workspace_marketing_copy(workspace_root)
+    title = _starter_strategy_title(
+        strategy_sections.get("business name") or strategy_title,
+        slug=slug,
+    )
+    if _starter_title_is_generic(title, slug=slug) and workspace_copy.get("title"):
+        title = str(workspace_copy["title"]).strip() or _humanize_business_slug(slug)
+    if _starter_title_is_generic(title, slug=slug):
+        title = _starter_strategy_title(strategy_sections.get("tagline") or "", slug=slug)
+    if _starter_title_is_generic(title, slug=slug):
+        title = _starter_strategy_title(
+            strategy_sections.get("core value proposition") or "",
+            slug=slug,
+        )
     description = str((surface or {}).get("notes") or "").strip()
+    if not description:
+        description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
+    if not description:
+        description = _starter_strategy_first_line(strategy_sections.get("core value proposition") or "")
+    if not description:
+        description = str(workspace_copy.get("description") or "").strip()
     if not description:
         description = f"Get started with {title}, manage your account, and access the product online."
     return {
@@ -3273,8 +3418,13 @@ def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -
     }
 
 
-def _starter_seed_replacements(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
-    copy = _subuser_app_starter_strings(surface, slug=slug)
+def _starter_seed_replacements(
+    surface: dict[str, Any] | None,
+    *,
+    slug: str,
+    workspace_root: Path | None = None,
+) -> dict[str, str]:
+    copy = _subuser_app_starter_strings(surface, slug=slug, workspace_root=workspace_root)
 
     # Seed values land in JSX text / HTML attribute positions: keep them markup-safe.
     def _seed_safe(value: Any) -> str:
@@ -7061,7 +7211,7 @@ def _materialize_subuser_app_scaffold(
             "frontend_stack vite_react_ts requires the bundled scaffold at "
             "plugins/takyon/subuser_app_kit/scaffold, which is missing from this runtime"
         )
-    replacements = _starter_seed_replacements(surface, slug=slug)
+    replacements = _starter_seed_replacements(surface, slug=slug, workspace_root=workspace_root)
     for path in sorted(source.rglob("*")):
         if not path.is_file():
             continue
@@ -7131,7 +7281,7 @@ def _rematerialize_starter_owned_files(
     source = _subuser_app_scaffold_source_dir()
     if not source.exists():
         return
-    replacements = _starter_seed_replacements(surface, slug=slug)
+    replacements = _starter_seed_replacements(surface, slug=slug, workspace_root=workspace_root)
     for rel in _STARTER_OWNED_REFRESH_FILES:
         src_path = source / rel
         if not src_path.is_file():
