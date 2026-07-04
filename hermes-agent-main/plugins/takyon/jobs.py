@@ -581,13 +581,51 @@ def run_one(
     if job is None:
         return None
 
+    claimed_at = time.time()
+    estimate_cents = int((job.payload or {}).get("estimate_cents", 0) or 0)
+    reservation_key = f"job:{job.id}:{job.attempts}"
+
+    def _emit_job_event(
+        status: str,
+        *,
+        actual_cents: int = 0,
+        error: str | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Job-level slice of the cost/log ledger (operator_cost_events, migration 0070).
+
+        One row per terminal transition — completed / failed / blocked — with the settled cost so
+        every task is queryable per business at job granularity. Best-effort by construction."""
+        try:
+            from . import cost_events
+
+            payload: dict[str, Any] = {"attempts": job.attempts, "worker_id": worker_id}
+            if extra:
+                payload.update(dict(extra))
+            cost_events.record_operator_cost_event(
+                conn,
+                event_kind=cost_events.KIND_JOB,
+                business_slug=job.business_slug or None,
+                job_id=str(job.id),
+                task_kind=job.kind,
+                name=job.kind,
+                status=status,
+                cost_microusd=max(0, int(actual_cents)) * 10_000,
+                cost_status="actual" if actual_cents else None,
+                reservation_key=reservation_key if estimate_cents > 0 else None,
+                duration_ms=int((time.time() - claimed_at) * 1000),
+                error=error,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 — observability must never break the job contract
+            pass
+
     handler = handlers.get(job.kind)
     if handler is None:
         block(conn, job.id, reason="no_handler", detail={"kind": job.kind})
+        _emit_job_event("blocked", error="no_handler")
         return JobOutcome(job.id, job.kind, "blocked", reason="no_handler")
 
-    estimate_cents = int((job.payload or {}).get("estimate_cents", 0) or 0)
-    reservation_key = f"job:{job.id}:{job.attempts}"
     reserved = 0
 
     if estimate_cents > 0:
@@ -613,6 +651,11 @@ def run_one(
                 job.id,
                 reason="budget_exhausted",
                 detail={"estimate_cents": estimate_cents, "error": str(exc)},
+            )
+            _emit_job_event(
+                "blocked",
+                error=f"budget_exhausted: {exc}",
+                extra={"estimate_cents": estimate_cents},
             )
             return JobOutcome(job.id, job.kind, "blocked", reason="budget_exhausted")
 
@@ -766,6 +809,7 @@ def run_one(
                     )
         finally:
             _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
+        _emit_job_event(status, error=str(exc), extra={"reserved_cents": reserved})
         return JobOutcome(
             job.id, job.kind, status, reserved_cents=reserved, reason="handler_error"
         )
@@ -798,11 +842,20 @@ def run_one(
             job.id,
             job.kind,
         )
+        _emit_job_event(
+            "completed",
+            extra={"reserved_cents": reserved, "lost_claim": True},
+        )
         return JobOutcome(
             job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=0
         )
     finally:
         _close_lifecycle_conn(lifecycle_conn, close_lifecycle)
+    _emit_job_event(
+        "completed",
+        actual_cents=actual,
+        extra={"reserved_cents": reserved},
+    )
     return JobOutcome(
         job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=actual
     )

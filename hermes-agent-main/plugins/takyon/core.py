@@ -34464,6 +34464,41 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             consume_reserved=worker_invoked,
             actual_cents=worker_actual_cents,
         )
+        # Coding-worker LLM spend slice of the cost/log ledger (operator_cost_events, 0070): the
+        # SDK subprocess reports its exact cost/usage on stdout; the settle above is the money
+        # truth, this row is the per-call debugging record. Best-effort by construction.
+        try:
+            from . import cost_events
+
+            _sdk_usage = sdk_result.get("usage") if isinstance(sdk_result.get("usage"), dict) else {}
+            cost_events.record_operator_event_autoconn(
+                event_kind=cost_events.KIND_LLM_CALL,
+                business_slug=business,
+                user_id=operator_user_id or None,
+                job_id=cost_events.operator_context().get("run_id") or None,
+                run_id=cost_events.operator_context().get("run_id") or None,
+                task_kind="business_claude_agent_task",
+                name=model,
+                status=status,
+                provider="anthropic",
+                model=model,
+                input_tokens=_sdk_usage.get("input_tokens"),
+                output_tokens=_sdk_usage.get("output_tokens"),
+                cache_read_tokens=_sdk_usage.get("cache_read_input_tokens"),
+                cache_write_tokens=_sdk_usage.get("cache_creation_input_tokens"),
+                cost_microusd=(max(0, int(worker_actual_cents)) * 10_000) if worker_actual_cents is not None else None,
+                cost_status="actual" if worker_actual_cents is not None else "unknown",
+                reservation_key=str(operator_budget.get("reservation_key") or "") or None,
+                error=str(sdk_result.get("error") or "") or None,
+                payload={
+                    "workspace": workspace_rel,
+                    "worker_attempts": worker_attempts,
+                    "blocked": bool(sdk_result.get("blocked")),
+                    "timed_out": bool(sdk_result.get("timed_out")),
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability must never break the tool
+            pass
 
         result_payload = {
             "success": bool(sdk_result.get("success")) and status == "completed",
