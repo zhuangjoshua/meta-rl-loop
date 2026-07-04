@@ -3172,6 +3172,9 @@ def _materialize_mobile_app_workspace(
             "__TAKYON_APP_DESCRIPTION__": display_description,
             "__TAKYON_ORG__": "coscale",
             "__EXPO_ORG__": "coscale",
+            # The real product host (R2 edge): universal links, the licenses page, and the runtime
+            # API all live at <slug>.<PUBLIC_COMPANY_BASE_DOMAIN> — never a hardcoded scaffold guess.
+            "__TAKYON_PRODUCT_HOST__": f"{canonical_slug}.{_company_base_domain()}",
         }
         # app.json is the seed-completion marker (its absence gates re-seeding), so it is written
         # LAST — a crash mid-copy re-seeds cleanly instead of wedging on a partial tree.
@@ -3205,6 +3208,7 @@ def _materialize_mobile_app_workspace(
         app_text = app_text.replace("__TAKYON_SLUG__", canonical_slug).replace("__TAKYON_ORG__", "coscale")
         app_text = app_text.replace("__TAKYON_APP_NAME__", "app").replace("__TAKYON_APP_DESCRIPTION__", "app")
         app_text = app_text.replace("__EXPO_ORG__", "coscale")
+        app_text = app_text.replace("__TAKYON_PRODUCT_HOST__", f"{canonical_slug}.{_company_base_domain()}")
         app_cfg = json.loads(app_text)
         expo_cfg = app_cfg.get("expo") or {}
         expo_cfg["name"] = display_name

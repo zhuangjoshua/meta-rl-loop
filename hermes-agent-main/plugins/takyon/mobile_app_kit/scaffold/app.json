@@ -30,7 +30,7 @@
       "buildNumber": "1",
       "supportsTablet": true,
       "associatedDomains": [
-        "applinks:__TAKYON_SLUG__.coscale.app"
+        "applinks:__TAKYON_PRODUCT_HOST__"
       ],
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
