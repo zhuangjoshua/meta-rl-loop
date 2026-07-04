@@ -202,6 +202,76 @@ def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, mo
     assert payload["maxTurns"] == 90
 
 
+def test_claude_agent_task_budget_bounds_and_model_are_env_overridable(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BUDGET_DEFAULT_USD", "25")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_BUDGET_MAX_USD", "60")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "claude-fable-5")
+    captured: dict[str, object] = {}
+
+    def fake_process(*, payload: dict[str, object], **kwargs):
+        captured["payload"] = payload
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+
+    monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
+    monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
+    monkeypatch.setattr(takyon_core, "_require_api_access", lambda *args, **kwargs: None)
+    monkeypatch.setattr(takyon_core, "_should_run_claude_agent_in_docker", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_workspace_needs_runtime_ui_contract", lambda _workspace_rel: False)
+    monkeypatch.setattr(takyon_core, "_resolve_runtime_executable", lambda name: "/usr/bin/node" if name == "node" else None)
+    monkeypatch.setattr(takyon_core, "_ensure_repo_node_dependencies", lambda packages: {"success": True})
+    monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_claude_agent_non_docker_worker_env",
+        lambda business, operator_user_id: {"CLAUDE_AGENT_SDK_CLIENT_APP": "takyon-business-agent"},
+    )
+
+    # Omitted budget rides the env default; explicit budget above the stock 25 cap is allowed
+    # when the env max raises it; the model env flips the worker without a per-call arg.
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-env-budget-default",
+                "install": False,
+                "refresh_surface": False,
+            }
+        )
+    )
+    payload = captured["payload"]
+    assert result["success"] is True
+    assert payload["maxBudgetUsd"] == 25.0
+    assert payload["model"] == "claude-fable-5"
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Build the first honest product surface.",
+                "idempotency_key": "workspace-env-budget-raised-cap",
+                "budget_usd": 40.0,
+                "install": False,
+                "refresh_surface": False,
+            }
+        )
+    )
+    payload = captured["payload"]
+    assert result["success"] is True
+    assert payload["maxBudgetUsd"] == 40.0
+
+
 def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}

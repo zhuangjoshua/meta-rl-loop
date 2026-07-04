@@ -8018,7 +8018,12 @@ _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_
 # minted via /v1/operator/session-token after authorize_operator_call validates business ownership, it is
 # REUSABLE and TTL-bounded, so the worker's many streaming calls reuse the one token for its TTL. The
 # ceiling mirrors the self-reported per-run worker budget (maxBudgetUsd default 2 USD).
-_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = 2_000_000
+# Env-overridable: the proxy's reserve estimate bills estimated input + max_tokens at the model's FULL
+# price, so a top-tier model lane (claude-fable-5, 5x Sonnet) needs a higher per-call ceiling to fit
+# one large-context coding-worker call under the gate. Default unchanged.
+_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = int(
+    float(os.environ.get("TAKYON_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD") or 0) or 2_000_000
+)
 
 
 def _claude_agent_broker_lockdown_enabled() -> bool:
@@ -12569,6 +12574,17 @@ def _clamp_float(value: Any, *, default: float, minimum: float, maximum: float) 
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
+
+
+def _env_positive_float(name: str, fallback: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return fallback
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
 
 
 def _truncate_text(value: str, limit: int = 20_000) -> str:
@@ -34681,11 +34697,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "javascript runtime unavailable for Claude Agent SDK tasks: "
                     f"{ensure_runtime.get('error') or 'node is missing'}"
                 )
+        # budget_usd bounds are env-overridable so a pricier model lane (e.g. claude-fable-5 at
+        # 5x Sonnet's per-token price) can be given headroom per run without editing every call
+        # site; defaults unchanged, same knob pattern as TAKYON_BUILD_DOCKER_CPUS/MEMORY.
         budget_usd = _clamp_float(
             args.get("budget_usd"),
-            default=8.0 if customer_facing_product_workspace else 2.0,
+            default=_env_positive_float(
+                "TAKYON_CLAUDE_AGENT_BUDGET_DEFAULT_USD",
+                8.0 if customer_facing_product_workspace else 2.0,
+            ),
             minimum=0.05,
-            maximum=25.0,
+            maximum=_env_positive_float("TAKYON_CLAUDE_AGENT_BUDGET_MAX_USD", 25.0),
         )
         operator_budget = _reserve_operator_task_budget(
             business=business,
