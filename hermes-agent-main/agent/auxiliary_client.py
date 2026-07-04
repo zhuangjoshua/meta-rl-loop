@@ -222,6 +222,16 @@ def _fixed_temperature_for_model(
         return OMIT_TEMPERATURE
     if _is_arcee_trinity_thinking(model):
         return 0.5
+    # Anthropic strict-sampling family (Opus 4.7+/Sonnet 5/Fable 5): any temperature send
+    # returns 400 ("`temperature` is deprecated"). Same model set the anthropic adapter
+    # strips sampling params for — one source of truth, verified live on fable-5 2026-07-04.
+    try:
+        from agent.anthropic_adapter import _forbids_sampling_params
+    except ImportError:  # pragma: no cover - alternate load path
+        _forbids_sampling_params = None
+    if _forbids_sampling_params is not None and _forbids_sampling_params(str(model or "")):
+        logger.debug("Omitting temperature for strict-sampling Anthropic model %r", model)
+        return OMIT_TEMPERATURE
     return None
 
 
