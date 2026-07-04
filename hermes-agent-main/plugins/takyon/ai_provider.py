@@ -373,6 +373,35 @@ def tavily_request_microusd(operation: str, *, units: int = 1) -> int:
     return int((result.amount_usd * _ONE_MILLION).to_integral_value(rounding=ROUND_CEILING))
 
 
+class EgressPricingUnavailable(ValueError):
+    """Raised when the generic egress per-request price has no exact known entry."""
+
+
+# Per-KiB egress data component (µUSD), added on top of the flat per-request markup so a call
+# that moves a large request/response body costs proportionally more. Kept small and explicit;
+# the real ceiling is the hard request/response body caps enforced in the egress route.
+_EGRESS_MICROUSD_PER_KIB = 4
+
+
+def egress_request_microusd(*, request_bytes: int = 0, response_bytes: int = 0) -> int:
+    """Exact per-request egress cost in microUSD, FAIL-CLOSED. A flat platform markup for the
+    keyless-egress primitive (priced under ("egress","request") in usage_pricing) plus a small
+    per-KiB component over the forwarded request + response bytes. Raises
+    ``EgressPricingUnavailable`` if the flat entry is missing, so egress can never spend budget
+    unpriced — the same fail-closed contract Tavily/model paths have. Callers reserve on this
+    value; per-request providers settle actual==reserved."""
+    result = estimate_usage_cost(
+        "request",
+        CanonicalUsage(request_count=1),
+        provider="egress",
+    )
+    if result.amount_usd is None:
+        raise EgressPricingUnavailable("no exact egress pricing is configured")
+    flat = int((result.amount_usd * _ONE_MILLION).to_integral_value(rounding=ROUND_CEILING))
+    kib = (max(0, int(request_bytes)) + max(0, int(response_bytes)) + 1023) // 1024
+    return flat + kib * _EGRESS_MICROUSD_PER_KIB
+
+
 def call_tavily(endpoint: str, payload: dict, api_key: str) -> dict:
     """Server-side Tavily call with an EXPLICIT key (mirrors ``call_anthropic``). The key is
     injected into the request body and is never returned. Returns the parsed JSON; raises ``RuntimeError`` on HTTP
