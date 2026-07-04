@@ -1,11 +1,15 @@
 """Shopify UC4 rail — connection, plan-fee cost basis, and the shop/update recompose leaf
 (modularization plan §2.7 Stage 5, "Shopify slices"; acceptance matrix §4p UC4).
 
-Scope is EXACTLY the plan's stop line: the fixed monthly per-store platform fee — the one Shopify
-money surface that belongs in monthly subscription composition. Per-order/fulfillment/catalog rails
-are the archetypes project's money shape and are deliberately NOT here.
+Money scope is EXACTLY the plan's stop line: the fixed monthly per-store platform fee — the one
+Shopify money surface that belongs in monthly subscription composition. Order-shaped MONEY rails
+(cart/checkout/fulfillment tables, the cogs_passthrough order machine) are the archetypes
+project's money shape and are deliberately NOT here. The commerce EXECUTOR ops below (product
+push, orders read — operator ruling 2026-07-03, "try Shopify") move NO money on this platform:
+customers pay on Shopify's own storefront/checkout, and this plane only writes catalog objects
+to, and reads order evidence from, the operator's connected store through the broker.
 
-Three concerns, all fail-closed:
+Four concerns, all fail-closed:
 
   * CONNECTION (`connect_shopify`) — attach/initiate the Composio Shopify connected account for a
     business through the EXISTING brokered Composio transport (`composio_distribution._request`,
@@ -54,7 +58,8 @@ import hashlib
 import hmac
 import json
 import re
-from typing import Any, Mapping
+from decimal import Decimal, InvalidOperation
+from typing import Any, Mapping, Sequence
 
 from plugins.takyon import app_entitlements, plan_composition
 
@@ -169,6 +174,12 @@ class ShopifyWebhookUnconfigured(ShopifyError):
 
 class ShopifyWebhookInvalidEvent(ShopifyError):
     """The webhook body is not a usable JSON object."""
+
+
+class ShopifyCommerceError(ShopifyError):
+    """A commerce op (product push / orders read) against the connected store failed or was
+    refused by the store (GraphQL errors / userErrors). Always fail-closed — never a partial
+    or guessed result."""
 
 
 # ── HMAC verification (pure; the SECRET is resolved safebox-side by the caller) ────────────────
@@ -549,6 +560,414 @@ def read_shop_plan_cost_basis(
         plan_info["plan_name"], partner_dev_fee_microusd=effective_partner_fee
     )
     return basis, plan_info
+
+
+# ── commerce ops (Admin GraphQL through the broker; operator ruling 2026-07-03: "try Shopify") ──
+#
+# The "try Shopify" slice: push a product to, and read orders from, the business's CONNECTED
+# store through the exact transport `read_shop_plan` proved (Composio `tools/execute/proxy` —
+# COMPOSIO_API_KEY stays in the safebox, token custody stays in Composio, nothing new on any
+# runtime plane). This is deliberately an EXECUTOR against the operator's real store, not a
+# catalog/order rail: no new tables, no cart/checkout, no fulfillment — order-shaped MONEY
+# movement still refuses everywhere (the money-shape gate is untouched); customers pay ON
+# Shopify's own storefront/checkout. $0 marginal cost (Shopify Admin API is free; the broker
+# call is flat-fee Composio), so the gates are credential + mode + receipts, not money.
+# GraphQL shapes are the stable post-2024-10 Admin API forms; like the connect-initiate body,
+# they are UNVERIFIED-OFFLINE until the first live acceptance push validates them.
+
+SHOPIFY_PRODUCT_CREATE_MUTATION = """
+mutation takyonProductCreate($product: ProductCreateInput!) {
+  productCreate(product: $product) {
+    product {
+      id
+      handle
+      title
+      status
+      onlineStorePreviewUrl
+      variants(first: 1) { nodes { id } }
+    }
+    userErrors { field message }
+  }
+}
+""".strip()
+
+SHOPIFY_VARIANTS_PRICE_MUTATION = """
+mutation takyonVariantPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id price }
+    userErrors { field message }
+  }
+}
+""".strip()
+
+SHOPIFY_PRODUCT_MEDIA_MUTATION = """
+mutation takyonProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+  productCreateMedia(productId: $productId, media: $media) {
+    media { alt }
+    mediaUserErrors { field message }
+  }
+}
+""".strip()
+
+SHOPIFY_PRODUCTS_SEARCH_QUERY = """
+query takyonProductsByQuery($query: String!) {
+  products(first: 10, query: $query) {
+    nodes { id handle title status onlineStorePreviewUrl tags }
+  }
+}
+""".strip()
+
+SHOPIFY_ORDERS_QUERY = """
+query takyonRecentOrders($first: Int!) {
+  orders(first: $first, reverse: true, sortKey: CREATED_AT) {
+    nodes {
+      id
+      name
+      createdAt
+      displayFinancialStatus
+      displayFulfillmentStatus
+      totalPriceSet { shopMoney { amount currencyCode } }
+      lineItems(first: 10) { nodes { title quantity } }
+    }
+  }
+}
+""".strip()
+
+
+def business_product_tag(business_slug: str) -> str:
+    """The namespacing tag every Takyon-pushed product carries — one shared store can hold many
+    businesses' products and stay attributable (the mega-store direction). Also the dedup key
+    half: create is idempotent on (tag, exact title)."""
+    slug = str(business_slug or "").strip().lower()
+    if not slug:
+        raise ShopifyCommerceError("business_product_tag requires a business slug")
+    return f"takyon:business:{slug}"
+
+
+def _search_escape(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _gid_numeric(gid: str) -> str:
+    tail = str(gid or "").rsplit("/", 1)[-1]
+    return tail if tail.isdigit() else ""
+
+
+def _extract_graphql_root(payload: Any, root_key: str) -> dict[str, Any] | None:
+    """Find the GraphQL root object (e.g. `productCreate`) in the Composio proxy envelope,
+    whatever the nesting (same walk as `_extract_shop_object`). A non-empty top-level GraphQL
+    `errors` list raises BEFORE any root is returned — partial results are never accepted."""
+    seen = 0
+    stack = [payload]
+    while stack and seen < 300:
+        seen += 1
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            errors = current.get("errors")
+            if (
+                isinstance(errors, list)
+                and errors
+                and all(isinstance(item, Mapping) for item in errors)
+            ):
+                messages = "; ".join(
+                    str(item.get("message") or item) for item in errors[:5]
+                )
+                raise ShopifyCommerceError(f"shopify graphql errors: {messages}")
+            root = current.get(root_key)
+            if isinstance(root, Mapping):
+                return dict(root)
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return None
+
+
+def _require_no_user_errors(
+    root: Mapping[str, Any], *, action: str, key: str = "userErrors"
+) -> None:
+    errors = root.get(key)
+    if isinstance(errors, list) and errors:
+        messages = "; ".join(
+            f"{'/'.join(str(f) for f in (item.get('field') or [])) or '-'}: {item.get('message')}"
+            for item in errors[:5]
+            if isinstance(item, Mapping)
+        )
+        raise ShopifyCommerceError(f"shopify {action} refused by the store: {messages}")
+
+
+def _shop_graphql(
+    *,
+    shop_domain: str,
+    connected_account_id: str,
+    query: str,
+    variables: Mapping[str, Any] | None,
+    root_key: str,
+) -> dict[str, Any]:
+    """One Admin GraphQL call through the Composio raw-HTTP proxy (`read_shop_plan`'s proven
+    rail; Composio signs with the connected account's credential, so no token ever reaches this
+    plane). Returns the named GraphQL root object. Fail-closed on proxy failure, GraphQL errors,
+    or a missing root — never a guessed result."""
+    domain = normalize_shop_domain(shop_domain)
+    account = str(connected_account_id or "").strip()
+    if not account:
+        raise ShopifyConnectionError("shop graphql requires a connected_account_id")
+    body: dict[str, Any] = {"query": query}
+    if variables:
+        body["variables"] = dict(variables)
+    payload = _composio_request(
+        "POST",
+        COMPOSIO_PROXY_TOOL_PATH,
+        json_body={
+            "connected_account_id": account,
+            "endpoint": f"https://{domain}/admin/api/{SHOPIFY_ADMIN_API_VERSION}/graphql.json",
+            "method": "POST",
+            "body": body,
+        },
+        timeout=60.0,
+    )
+    if isinstance(payload, Mapping) and payload.get("successful") is False:
+        raise ShopifyCommerceError(
+            f"Composio shopify proxy returned successful=false: {payload.get('error')!r}"
+        )
+    root = _extract_graphql_root(payload, root_key)
+    if root is None:
+        raise ShopifyCommerceError(
+            f"shopify graphql returned no {root_key} object; refusing to guess"
+        )
+    return root
+
+
+def _normalize_price(price: Any) -> str:
+    try:
+        amount = Decimal(str(price).strip())
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ShopifyCommerceError(f"price is not a valid decimal amount: {price!r}") from exc
+    if amount <= 0:
+        raise ShopifyCommerceError(f"price must be > 0 (got {amount})")
+    return str(amount.quantize(Decimal("0.01")))
+
+
+def find_business_product_by_title(
+    *, shop_domain: str, connected_account_id: str, business_slug: str, title: str
+) -> dict[str, Any] | None:
+    """Exact-title lookup within this business's namespacing tag — the dedup read that makes
+    `create_product` idempotent. Tag AND exact title must both match (the search query is a
+    prefilter; the exact-match confirm happens here, never a substring accept)."""
+    tag = business_product_tag(business_slug)
+    wanted = str(title or "").strip()
+    root = _shop_graphql(
+        shop_domain=shop_domain,
+        connected_account_id=connected_account_id,
+        query=SHOPIFY_PRODUCTS_SEARCH_QUERY,
+        variables={"query": f'tag:"{_search_escape(tag)}" title:"{_search_escape(wanted)}"'},
+        root_key="products",
+    )
+    nodes = root.get("nodes")
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, Mapping):
+            continue
+        tags = node.get("tags")
+        tag_ok = tag in [str(t).strip() for t in tags] if isinstance(tags, list) else False
+        if str(node.get("title") or "").strip() == wanted and tag_ok:
+            return dict(node)
+    return None
+
+
+def create_product(
+    *,
+    shop_domain: str,
+    connected_account_id: str,
+    business_slug: str,
+    title: str,
+    price: Any,
+    description_html: str = "",
+    status: str = "draft",
+    extra_tags: Sequence[str] = (),
+    image_urls: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Create ONE product (default variant + price, optional images) on the connected store.
+
+    Idempotent on (business tag, exact title): an existing match is adopted (`deduped=True`),
+    never duplicated. The default status is DRAFT — publishing to the online store is an explicit
+    `status='active'` choice. Media failures are reported as warnings, not rollbacks (the product
+    exists; the store is truth). Everything else fails closed with `ShopifyCommerceError`."""
+    wanted_title = str(title or "").strip()
+    if not wanted_title:
+        raise ShopifyCommerceError("title is required")
+    if len(wanted_title) > 255:
+        raise ShopifyCommerceError("title must be <= 255 characters")
+    normalized_status = str(status or "draft").strip().lower()
+    if normalized_status not in {"draft", "active"}:
+        raise ShopifyCommerceError(f"status must be 'draft' or 'active' (got {status!r})")
+    normalized_price = _normalize_price(price)
+    tags = [business_product_tag(business_slug)]
+    for raw_tag in extra_tags or ():
+        cleaned = str(raw_tag or "").strip()
+        if not cleaned:
+            continue
+        if "," in cleaned:
+            raise ShopifyCommerceError(
+                f"tag {cleaned!r} contains a comma (Shopify splits tags on commas)"
+            )
+        if cleaned not in tags:
+            tags.append(cleaned)
+    urls: list[str] = []
+    for raw_url in image_urls or ():
+        cleaned_url = str(raw_url or "").strip()
+        if not cleaned_url:
+            continue
+        if not cleaned_url.startswith(("https://", "http://")):
+            raise ShopifyCommerceError(f"image url must be http(s): {cleaned_url!r}")
+        urls.append(cleaned_url)
+    if len(urls) > 8:
+        raise ShopifyCommerceError(f"at most 8 image urls per product (got {len(urls)})")
+
+    existing = find_business_product_by_title(
+        shop_domain=shop_domain,
+        connected_account_id=connected_account_id,
+        business_slug=business_slug,
+        title=wanted_title,
+    )
+    if existing is not None:
+        product_id = str(existing.get("id") or "")
+        return {
+            "deduped": True,
+            "product_id": product_id,
+            "product_numeric_id": _gid_numeric(product_id),
+            "handle": str(existing.get("handle") or ""),
+            "title": str(existing.get("title") or ""),
+            "status": str(existing.get("status") or "").lower(),
+            "online_store_preview_url": str(existing.get("onlineStorePreviewUrl") or ""),
+            "tag": business_product_tag(business_slug),
+            "media_warnings": [],
+        }
+
+    create_root = _shop_graphql(
+        shop_domain=shop_domain,
+        connected_account_id=connected_account_id,
+        query=SHOPIFY_PRODUCT_CREATE_MUTATION,
+        variables={
+            "product": {
+                "title": wanted_title,
+                "descriptionHtml": str(description_html or ""),
+                "tags": tags,
+                "status": normalized_status.upper(),
+            }
+        },
+        root_key="productCreate",
+    )
+    _require_no_user_errors(create_root, action="productCreate")
+    product = create_root.get("product")
+    if not isinstance(product, Mapping) or not str(product.get("id") or "").strip():
+        raise ShopifyCommerceError("productCreate returned no product id; refusing to guess")
+    product_id = str(product["id"]).strip()
+    variant_nodes = ((product.get("variants") or {}).get("nodes")) or []
+    variant_id = (
+        str(variant_nodes[0].get("id") or "").strip()
+        if variant_nodes and isinstance(variant_nodes[0], Mapping)
+        else ""
+    )
+    if not variant_id:
+        raise ShopifyCommerceError(
+            f"productCreate returned no default variant for {product_id}; cannot set the price"
+        )
+    price_root = _shop_graphql(
+        shop_domain=shop_domain,
+        connected_account_id=connected_account_id,
+        query=SHOPIFY_VARIANTS_PRICE_MUTATION,
+        variables={
+            "productId": product_id,
+            "variants": [{"id": variant_id, "price": normalized_price}],
+        },
+        root_key="productVariantsBulkUpdate",
+    )
+    _require_no_user_errors(price_root, action="productVariantsBulkUpdate")
+
+    media_warnings: list[str] = []
+    if urls:
+        try:
+            media_root = _shop_graphql(
+                shop_domain=shop_domain,
+                connected_account_id=connected_account_id,
+                query=SHOPIFY_PRODUCT_MEDIA_MUTATION,
+                variables={
+                    "productId": product_id,
+                    "media": [
+                        {"originalSource": url, "mediaContentType": "IMAGE"} for url in urls
+                    ],
+                },
+                root_key="productCreateMedia",
+            )
+            errors = media_root.get("mediaUserErrors")
+            if isinstance(errors, list) and errors:
+                media_warnings = [
+                    str(item.get("message") or item)
+                    for item in errors[:8]
+                    if isinstance(item, Mapping)
+                ]
+        except ShopifyError as exc:
+            media_warnings = [f"media attach failed: {exc}"]
+
+    return {
+        "deduped": False,
+        "product_id": product_id,
+        "product_numeric_id": _gid_numeric(product_id),
+        "handle": str(product.get("handle") or ""),
+        "title": str(product.get("title") or wanted_title),
+        "status": normalized_status,
+        "variant_id": variant_id,
+        "price": normalized_price,
+        "online_store_preview_url": str(product.get("onlineStorePreviewUrl") or ""),
+        "tag": business_product_tag(business_slug),
+        "media_warnings": media_warnings,
+    }
+
+
+def read_orders(
+    *, shop_domain: str, connected_account_id: str, first: int = 10
+) -> dict[str, Any]:
+    """Recent orders (payment/fulfillment status, totals, line items) from the connected store —
+    the CEO's commerce evidence surface. Read-only, $0. Fail-closed parse: an unexpected payload
+    raises rather than returning a guessed/partial order list."""
+    count = max(1, min(int(first or 10), 50))
+    root = _shop_graphql(
+        shop_domain=shop_domain,
+        connected_account_id=connected_account_id,
+        query=SHOPIFY_ORDERS_QUERY,
+        variables={"first": count},
+        root_key="orders",
+    )
+    nodes = root.get("nodes")
+    if not isinstance(nodes, list):
+        raise ShopifyCommerceError("orders read returned no nodes list; refusing to guess")
+    orders: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        total = ((node.get("totalPriceSet") or {}).get("shopMoney")) or {}
+        line_nodes = ((node.get("lineItems") or {}).get("nodes")) or []
+        orders.append(
+            {
+                "id": str(node.get("id") or ""),
+                "name": str(node.get("name") or ""),
+                "created_at": str(node.get("createdAt") or ""),
+                "financial_status": str(node.get("displayFinancialStatus") or ""),
+                "fulfillment_status": str(node.get("displayFulfillmentStatus") or ""),
+                "total": {
+                    "amount": str(total.get("amount") or ""),
+                    "currency": str(total.get("currencyCode") or ""),
+                },
+                "line_items": [
+                    {
+                        "title": str(item.get("title") or ""),
+                        "quantity": int(item.get("quantity") or 0),
+                    }
+                    for item in line_nodes
+                    if isinstance(item, Mapping)
+                ],
+            }
+        )
+    return {"orders": orders, "count": len(orders)}
 
 
 # ── connection state (businesses.metadata_json; read side shared with the webhook leaf) ─────────

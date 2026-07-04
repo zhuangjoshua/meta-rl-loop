@@ -34,6 +34,8 @@ provides_tools:
   - business_create_app_checkout
   - business_record_stripe_webhook
   - business_connect_shopify
+  - business_shopify_create_product
+  - business_shopify_read_orders
   - business_record_app_usage
   - business_enqueue_job
   - business_x_publish_outreach

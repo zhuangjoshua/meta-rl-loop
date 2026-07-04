@@ -26284,6 +26284,212 @@ def handle_business_connect_shopify(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _shopify_active_connection(store, business: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The business row + its ACTIVE Shopify connection record, or a fail-closed TakyonError whose
+    text names the exact fix (`business_connect_shopify`) — the gate error IS the CEO's discovery
+    surface. Shared by the commerce executor tools; never widens what connect recorded."""
+    try:
+        from . import shopify_util
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import shopify_util
+    with store._connect() as conn:
+        row = store._ensure_business(conn, business)
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    connection = shopify_util.connection_from_metadata(metadata)
+    status = str(connection.get("status") or "").strip().lower()
+    account_id = str(connection.get("connected_account_id") or "").strip()
+    shop_domain = str(connection.get("shop_domain") or "").strip()
+    if not account_id or not shop_domain or status != "active":
+        hint = (
+            " Complete the Shopify OAuth at the connection's stored redirect_url, then re-run "
+            "business_connect_shopify to adopt the ACTIVE account."
+            if status == "initiated"
+            else ""
+        )
+        raise TakyonError(
+            "shopify_not_connected: this business has no ACTIVE Shopify connection "
+            f"(status={status or 'absent'}). Run business_connect_shopify first.{hint}"
+        )
+    return row, connection
+
+
+def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
+    """Commerce EXECUTOR against the business's CONNECTED Shopify store (operator ruling
+    2026-07-03, "try Shopify"): create ONE product (default variant + price, optional images)
+    via Admin GraphQL through the EXISTING Composio broker — key stays in the safebox, token
+    custody stays in Composio, zero new runtime credential. Moves NO money on this platform
+    (customers pay on Shopify's own checkout; the money-shape gate is untouched). Idempotent on
+    (business tag, exact title). Deterministic guards, all fail-closed BEFORE any store write:
+    autonomous-wake refusal (catalog churn is a chat/bootstrap decision), credential gate,
+    ACTIVE-connection gate, and the mode guard — a non-live business may write only to a
+    partner-development store (the live plan probe doubles as the connection-liveness check).
+    Receipted as a business event; the store itself is the durable catalog truth."""
+    try:
+        _refuse_on_autonomous_wake("Shopify catalog changes")
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        try:
+            from . import shopify_util
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import shopify_util
+        title = str(args.get("title") or "").strip()
+        if not title:
+            raise TakyonError("title is required")
+        price = str(args.get("price") or "").strip()
+        if not price:
+            raise TakyonError("price is required (store-currency amount, e.g. '19.99')")
+        status = str(args.get("status") or "draft").strip().lower()
+        if status not in {"draft", "active"}:
+            raise TakyonError(f"status must be 'draft' or 'active' (got {status!r})")
+        raw_tags = args.get("tags")
+        extra_tags = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
+        raw_urls = args.get("image_urls")
+        image_urls = [str(u) for u in raw_urls] if isinstance(raw_urls, list) else []
+        store = _store()
+        store.enforce_operator_business_access(business)
+        try:
+            _require_api_access(
+                {
+                    "action": "business_shopify_create_product",
+                    "business": business,
+                    "requires_api": ["composio"],
+                }
+            )
+        except TakyonError as exc:
+            raise TakyonError(f"shopify_composio_unconfigured: {exc}") from exc
+        row, connection = _shopify_active_connection(store, business)
+        shop_domain = str(connection.get("shop_domain") or "")
+        account_id = str(connection.get("connected_account_id") or "")
+        mode = _effective_business_mode(row.get("mode"))
+        # The plan probe is live provider truth AND the connection-liveness check: an expired
+        # token fails HERE, before any write reaches the store.
+        try:
+            plan_info = shopify_util.read_shop_plan(
+                shop_domain=shop_domain, connected_account_id=account_id
+            )
+        except shopify_util.ShopifyError as exc:
+            raise TakyonError(
+                f"shopify_connection_inactive: the store plan probe failed ({exc}); "
+                "re-run business_connect_shopify to refresh the connection"
+            ) from exc
+        if mode != "live" and not plan_info.get("partner_development"):
+            raise TakyonError(
+                "test_mode_store_write_refused: this business is not live and the connected "
+                f"store {shop_domain} is a LIVE store (plan={plan_info.get('plan_name')!r}); "
+                "switch the business live or connect a partner-development store"
+            )
+        try:
+            product = shopify_util.create_product(
+                shop_domain=shop_domain,
+                connected_account_id=account_id,
+                business_slug=business,
+                title=title,
+                price=price,
+                description_html=str(args.get("description_html") or ""),
+                status=status,
+                extra_tags=extra_tags,
+                image_urls=image_urls,
+            )
+        except shopify_util.ShopifyComposioUnconfigured as exc:
+            raise TakyonError(str(exc)) from exc
+        except shopify_util.ShopifyError as exc:
+            raise TakyonError(f"shopify_product_create_failed: {exc}") from exc
+        with store._connect() as conn:
+            store._record_event(
+                conn,
+                scope=f"business:{business}/app",
+                business_slug=business,
+                event_type="shopify.product.create",
+                payload={
+                    "shop_domain": shop_domain,
+                    "product_id": product.get("product_id"),
+                    "handle": product.get("handle"),
+                    "title": product.get("title"),
+                    "status": product.get("status"),
+                    "price": product.get("price"),
+                    "deduped": bool(product.get("deduped")),
+                    "media_warnings": product.get("media_warnings") or [],
+                    "store_plan": plan_info.get("plan_name"),
+                    "partner_development": bool(plan_info.get("partner_development")),
+                    "idempotency_key": idempotency_key,
+                    "reason": args.get("reason") or "create shopify product",
+                    "actor": args.get("actor") or "agent",
+                },
+            )
+        result: dict[str, Any] = {
+            "success": True,
+            "action": "business_shopify_create_product",
+            "business": business,
+            "shop_domain": shop_domain,
+            **product,
+        }
+        numeric = str(product.get("product_numeric_id") or "")
+        if numeric:
+            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+        if product.get("deduped"):
+            result["note"] = (
+                "An identical product (same business tag + exact title) already exists on the "
+                "store; adopted it instead of duplicating."
+            )
+        elif str(product.get("status")) == "draft":
+            result["note"] = (
+                "Created as DRAFT — activate it in the store admin or create as status='active' "
+                "to publish it to the online storefront."
+            )
+        return tool_result(result)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_shopify_read_orders(args: dict, **_: Any) -> str:
+    """Read-only commerce evidence from the CONNECTED store: recent orders with payment/
+    fulfillment status, totals, and line items, via Admin GraphQL through the Composio broker.
+    $0, no side effects, allowed on wakes — this is how the CEO observes whether Shopify selling
+    is actually working. Fail-closed on a missing/inactive connection."""
+    try:
+        business = _resolved_business_slug(args, required=True)
+        try:
+            from . import shopify_util
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import shopify_util
+        store = _store()
+        store.enforce_operator_business_access(business)
+        try:
+            _require_api_access(
+                {
+                    "action": "business_shopify_read_orders",
+                    "business": business,
+                    "requires_api": ["composio"],
+                }
+            )
+        except TakyonError as exc:
+            raise TakyonError(f"shopify_composio_unconfigured: {exc}") from exc
+        _row, connection = _shopify_active_connection(store, business)
+        try:
+            orders = shopify_util.read_orders(
+                shop_domain=str(connection.get("shop_domain") or ""),
+                connected_account_id=str(connection.get("connected_account_id") or ""),
+                first=int(args.get("first") or 10),
+            )
+        except shopify_util.ShopifyComposioUnconfigured as exc:
+            raise TakyonError(str(exc)) from exc
+        except shopify_util.ShopifyError as exc:
+            raise TakyonError(f"shopify_orders_read_failed: {exc}") from exc
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_shopify_read_orders",
+                "business": business,
+                "shop_domain": str(connection.get("shop_domain") or ""),
+                **orders,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_record_app_usage(args: dict, **_: Any) -> str:
     store = _store()
     operation = {
@@ -35628,6 +35834,62 @@ TAKYON_TOOL_DEFINITIONS = [
                 "actor": _ACTOR_PROP,
             },
             ["business", "shop_domain", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_shopify_create_product",
+        "description": (
+            "Create ONE product (title, description, default-variant price, optional images) on "
+            "this business's CONNECTED Shopify store through the existing Composio broker (key "
+            "stays in the safebox; token custody in Composio). Selling happens ON Shopify's own "
+            "storefront/checkout — this platform moves no order money (order-shaped money still "
+            "refuses via the money-shape gate). Products are tagged takyon:business:<slug> and "
+            "deduped on (tag, exact title), so re-runs adopt instead of duplicating. Defaults to "
+            "DRAFT; pass status='active' to publish to the online store. Guards: requires an "
+            "ACTIVE business_connect_shopify connection; a non-live business may write only to a "
+            "partner-development store; refused on autonomous wakes. $0 marginal cost; receipted "
+            "as a shopify.product.create business event."
+        ),
+        "handler": handle_business_shopify_create_product,
+        "requires_api": ["composio"],
+        "schema": _schema(
+            "business_shopify_create_product",
+            "Create a product on the connected Shopify store.",
+            {
+                "business": _BUSINESS_PROP,
+                "title": {"type": "string", "description": "Product title (max 255 chars; the exact-match dedup key within this business's tag)."},
+                "price": {"type": "string", "description": "Default-variant price in the store's currency, e.g. '19.99'. Must be > 0; never guessed."},
+                "description_html": {"type": "string", "description": "Optional product description (HTML allowed)."},
+                "status": {"type": "string", "enum": ["draft", "active"], "description": "draft (default, safe) or active (published to the online storefront)."},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional extra Shopify tags (no commas). takyon:business:<slug> is always added for attribution."},
+                "image_urls": {"type": "array", "items": {"type": "string"}, "description": "Optional public http(s) image URLs (max 8). Shopify fetches them async; attach failures come back as media_warnings, not rollbacks."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "title", "price", "idempotency_key"],
+        ),
+    },
+    {
+        "name": "business_shopify_read_orders",
+        "description": (
+            "Read recent orders (payment/fulfillment status, totals, line items) from this "
+            "business's CONNECTED Shopify store through the Composio broker — the commerce "
+            "evidence surface for deciding whether Shopify selling is working. Read-only, $0, "
+            "allowed on wakes. Requires an ACTIVE business_connect_shopify connection."
+        ),
+        "handler": handle_business_shopify_read_orders,
+        "requires_api": ["composio"],
+        "schema": _schema(
+            "business_shopify_read_orders",
+            "Read recent orders from the connected Shopify store.",
+            {
+                "business": _BUSINESS_PROP,
+                "first": {"type": "integer", "description": "How many recent orders to return (1-50, default 10)."},
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business"],
         ),
     },
     {
