@@ -4,7 +4,7 @@ import { AuthModal, type AuthMode } from "./auth/AuthModal";
 import { Landing } from "./landing/Landing";
 import { AppHome } from "./app/AppHome";
 import type { SettingsSection } from "./settings/Settings";
-import { useTakyonLitebulb } from "./takyon/useTakyonLitebulb";
+import { useTakyonLitebulb, type TakyonArchetypeOption } from "./takyon/useTakyonLitebulb";
 
 // Rarely-used / authed surfaces are code-split so they stay off the initial
 // critical-path bundle. Only Landing/AppHome are eager for the first paint.
@@ -35,6 +35,7 @@ export type { SettingsSection };
 export type Theme = "light" | "dark";
 
 const PENDING_IDEA_KEY = "litebulb.pending.idea";
+const PENDING_ARCHETYPE_KEY = "litebulb.pending.archetype";
 
 const nav = (hash: string) => { window.location.hash = hash; };
 
@@ -78,6 +79,23 @@ function writePendingIdea(value: string) {
   }
 }
 
+function readPendingArchetype() {
+  try {
+    return sessionStorage.getItem(PENDING_ARCHETYPE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writePendingArchetype(value: string) {
+  try {
+    if (value) sessionStorage.setItem(PENDING_ARCHETYPE_KEY, value);
+    else sessionStorage.removeItem(PENDING_ARCHETYPE_KEY);
+  } catch {
+    /* best effort */
+  }
+}
+
 const AUTHED = (path: string) =>
   path === "/app/new" || path === "/building" || path.startsWith("/app/c") || path.startsWith("/settings");
 
@@ -103,6 +121,7 @@ function Router() {
     sendPrompt,
     stopPrompt,
     createBusiness,
+    listArchetypes,
     saveChannelCreditBudgets,
     setBusinessWakeState,
     wakeBusinessNow,
@@ -129,6 +148,8 @@ function Router() {
   const [settings, setSettings] = useState<SettingsSection | null>(null);
   const [billingNudge, setBillingNudge] = useState<string>("");
   const [pendingIdea, setPendingIdea] = useState(() => readPendingIdea());
+  const [pendingArchetype, setPendingArchetype] = useState(() => readPendingArchetype());
+  const [archetypeOptions, setArchetypeOptions] = useState<TakyonArchetypeOption[]>([]);
 
   const setTheme = (value: Theme) => {
     setThemeState(value);
@@ -147,6 +168,22 @@ function Router() {
   useEffect(() => {
     writePendingIdea(pendingIdea);
   }, [pendingIdea]);
+
+  useEffect(() => {
+    writePendingArchetype(pendingArchetype);
+  }, [pendingArchetype]);
+
+  // Load the create-toggle options once the operator is signed in (registry SSOT; fail-soft).
+  useEffect(() => {
+    if (auth.status !== "in") return;
+    let cancelled = false;
+    void listArchetypes().then((opts) => {
+      if (!cancelled) setArchetypeOptions(opts);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.status, listArchetypes]);
 
   useEffect(() => {
     if (!path.startsWith("/settings")) return;
@@ -177,12 +214,13 @@ function Router() {
     if (buildState.status !== "idle") return;
     // Operator create is ungated from the plan (dogfooding): no wallet-balance precondition. The
     // per-turn runtime usage gate remains the spend chokepoint; subuser/product rails stay gated.
-    void createBusiness(pendingIdea);
+    void createBusiness(pendingIdea, pendingArchetype);
     // Clear the auto-create trigger the instant we initiate, so a RELOAD of /building (which resets
     // the in-memory buildState to "idle") cannot re-fire createBusiness and mint a SECOND company.
     // The build screen reads its idea from buildState.goal (set by createBusiness) below.
     setPendingIdea("");
-  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, resetBuildState, setPendingIdea]);
+    setPendingArchetype("");
+  }, [auth.status, buildState.goal, buildState.status, createBusiness, path, pendingIdea, pendingArchetype, resetBuildState, setPendingIdea]);
 
   useEffect(() => {
     if (path !== "/building") return;
@@ -230,11 +268,12 @@ function Router() {
 
   const gated = AUTHED(path) && auth.status === "out";
 
-  const startBuild = (idea: string) => {
+  const startBuild = (idea: string, archetype?: string) => {
     const text = idea.trim();
     if (!text) return;
     resetBuildState();
     setPendingIdea(text);
+    setPendingArchetype((archetype || "").trim().toLowerCase());
     if (auth.status !== "in") {
       setAuthModal("signup");
       return;
@@ -275,7 +314,7 @@ function Router() {
   } else if (path === "/terms" || path === "/privacy") {
     view = <Legal kind={path === "/terms" ? "terms" : "privacy"} onNav={nav} onAuth={() => setAuthModal("login")} />;
   } else if (path === "/app/new") {
-    view = <NewCompany onCreate={startBuild} onClose={() => nav("/")} />;
+    view = <NewCompany onCreate={startBuild} onClose={() => nav("/")} archetypes={archetypeOptions} />;
   } else if (path === "/building") {
     view = (
       <Building

@@ -273,6 +273,25 @@ def selectable_archetypes() -> tuple[ArchetypePreset, ...]:
     return tuple(p for p in BUSINESS_ARCHETYPES.values() if p.enabled)
 
 
+def create_toggle_options() -> list[dict]:
+    """The full create-toggle option list for the dashboard/CLI — the SINGLE source of truth for the
+    app|shopify|saas selector. Includes not-yet-enabled presets so the UI can render them as
+    "coming soon" (disabled) rather than a hardcoded roadmap. ``default`` marks the one the create
+    funnel picks when nothing is chosen. Order: default first, then the rest in registry order."""
+    def _row(p: ArchetypePreset) -> dict:
+        return {
+            "key": p.key,
+            "label": p.label,
+            "description": p.description,
+            "enabled": bool(p.enabled),
+            "default": p.key == DEFAULT_ARCHETYPE,
+        }
+
+    rows = [_row(p) for p in BUSINESS_ARCHETYPES.values()]
+    rows.sort(key=lambda r: (not r["default"], not r["enabled"]))
+    return rows
+
+
 # ── the per-business archetype record (mirrors money_shape.get/set) ───────────────────────
 
 

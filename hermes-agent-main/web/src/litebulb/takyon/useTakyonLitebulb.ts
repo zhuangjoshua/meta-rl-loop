@@ -40,6 +40,21 @@ type LiveChatSignals = {
 
 export type BuildStatus = "idle" | "creating" | "ready" | "error";
 
+// One create-toggle option (app|shopify|saas), mirrored from the backend archetype registry SSOT
+// (plugins/takyon/archetypes.py::create_toggle_options). The UI never hardcodes this roadmap.
+export type TakyonArchetypeOption = {
+  key: string;
+  label: string;
+  description: string;
+  enabled: boolean;
+  default: boolean;
+};
+
+// Fail-soft fallback so the create screen renders even if the archetypes RPC is unavailable.
+const DEFAULT_ARCHETYPE_OPTIONS: TakyonArchetypeOption[] = [
+  { key: "web_saas", label: "SaaS / website", description: "A web product on the R2 edge.", enabled: true, default: true },
+];
+
 export type BuildState = {
   status: BuildStatus;
   goal: string;
@@ -1594,9 +1609,12 @@ export function useTakyonLitebulb() {
     }
   }, [activeBusiness, beginChatTurn, completeAssistantText, discardAssistantMessage, endChatTurn, ensureAssistantMessage, ensureGateway, ensureSession, loadWorkspace, stopPrompt]);
 
-  const createBusiness = useCallback(async (goal: string) => {
+  const createBusiness = useCallback(async (goal: string, archetype?: string) => {
     const idea = trimText(goal);
     if (!idea) return "";
+    // Archetype toggle (app|shopify|saas). Only sent when explicitly picked and non-default; absent
+    // lets the backend default (web_saas) stay authoritative. The server re-asserts the registry gate.
+    const chosenArchetype = trimText(archetype || "").toLowerCase();
     setBuildState({
       status: "creating",
       goal: idea,
@@ -1649,6 +1667,7 @@ export function useTakyonLitebulb() {
             goal: idea,
             mode: "live",
             limit: 60,
+            ...(chosenArchetype && chosenArchetype !== "web_saas" ? { archetype: chosenArchetype } : {}),
           });
           break;
         } catch (error) {
@@ -1747,6 +1766,23 @@ export function useTakyonLitebulb() {
       return "";
     }
   }, [ensureGateway, ensureSession, loadCreativeCredits, loadHome, loadTraction, loadWorkspace, tractionRange]);
+
+  const listArchetypes = useCallback(async (): Promise<TakyonArchetypeOption[]> => {
+    // The create-toggle option list, derived from the backend registry SSOT (never a hardcoded UI
+    // roadmap). Fail-soft: any error yields the web_saas default so the create screen never breaks.
+    try {
+      const gateway = ensureGateway();
+      const sessionId = await ensureSession("");
+      const result = await gateway.request<{ archetypes?: TakyonArchetypeOption[] }>(
+        "takyon.dashboard.archetypes",
+        { session_id: sessionId },
+      );
+      const options = Array.isArray(result?.archetypes) ? result.archetypes : [];
+      return options.length ? options : DEFAULT_ARCHETYPE_OPTIONS;
+    } catch {
+      return DEFAULT_ARCHETYPE_OPTIONS;
+    }
+  }, [ensureGateway, ensureSession]);
 
   const openBillingPortal = useCallback(async () => {
     if (billingBusy) return;
@@ -1977,6 +2013,7 @@ export function useTakyonLitebulb() {
     sendPrompt,
     stopPrompt,
     createBusiness,
+    listArchetypes,
     saveChannelCreditBudgets,
     setBusinessWakeState,
     wakeBusinessNow,

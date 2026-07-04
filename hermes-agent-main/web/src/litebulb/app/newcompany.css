@@ -27,3 +27,12 @@
 .lb-new__pills { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: clamp(20px, 2.4vw, 34px); max-width: 40rem; }
 .lb-new__pill { height: 38px; padding: 0 16px; border: 1px solid var(--cds-color-border-default); border-radius: 999px; background: rgba(255, 255, 255, 0.6); color: var(--cds-color-text-default); font-family: inherit; font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); cursor: pointer; }
 .lb-new__pill:hover { background: #fff; border-color: var(--cds-color-border-strong); }
+
+/* Archetype toggle (app|shopify|saas) — registry-driven segmented control. */
+.lb-new__arch { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin: clamp(18px, 2vw, 28px) auto 0; }
+.lb-new__arch-opt { position: relative; display: inline-flex; flex-direction: column; align-items: center; gap: 2px; min-width: 128px; padding: 10px 16px; border: 1px solid var(--cds-color-border-default); border-radius: 12px; background: rgba(255, 255, 255, 0.6); color: var(--cds-color-text-default); font-family: inherit; font-size: var(--cds-text-sm); font-weight: var(--cds-weight-medium); cursor: pointer; transition: border-color 120ms ease, box-shadow 120ms ease; }
+.lb-new__arch-opt:hover:not(.is-disabled) { border-color: var(--cds-color-border-strong); background: #fff; }
+.lb-new__arch-opt.is-active { border-color: var(--cds-color-border-strong); box-shadow: 0 0 0 3px rgba(166, 222, 18, 0.22); background: #fff; }
+.lb-new__arch-opt.is-disabled { cursor: not-allowed; opacity: 0.55; }
+.lb-new__arch-label { line-height: 1.2; }
+.lb-new__arch-soon { font-size: var(--cds-text-xs); font-weight: var(--cds-weight-regular); letter-spacing: 0.04em; text-transform: uppercase; color: var(--cds-color-text-muted); }
