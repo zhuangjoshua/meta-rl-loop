@@ -584,13 +584,17 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         if not signing_key:
             raise HTTPException(status_code=503, detail="capability_signing_unconfigured")
 
-        # Estimate BEFORE reserve (fail-closed pricing). Response size is unknown at reserve; price
-        # the request body + a response headroom so a large call reserves proportionally.
+        # Estimate BEFORE reserve (fail-closed pricing). Reserve a MODEST response estimate (not the
+        # 1 MiB hard cap) so egress is affordable on normal plans; settle re-prices on the ACTUAL
+        # response bytes, and the hard response cap (response_too_large) bounds the true maximum. A
+        # response between the estimate and the cap settles above the reserve (money-truth, exactly
+        # as the AI rails allow) — no money is lost, the next reserve sees the higher committed.
+        _EGRESS_RESERVE_RESPONSE_BYTES = 64 * 1024
         try:
             req_bytes = len(req_body.encode("utf-8")) if isinstance(req_body, str) else (
                 len(_json.dumps(req_body).encode("utf-8")) if req_body is not None else 0)
             estimate = ai_provider.egress_request_microusd(
-                request_bytes=req_bytes, response_bytes=egress_gateway._MAX_RESPONSE_BYTES
+                request_bytes=req_bytes, response_bytes=_EGRESS_RESERVE_RESPONSE_BYTES
             )
         except ai_provider.EgressPricingUnavailable as exc:
             raise HTTPException(status_code=503, detail="egress_pricing_unavailable") from exc
@@ -641,7 +645,9 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
             actual = ai_provider.egress_request_microusd(
                 request_bytes=req_bytes, response_bytes=resp_bytes
             )
-            return result, min(actual, estimate)
+            # Settle the ACTUAL (money-truth) — may exceed the modest reserve when the response is
+            # large; the ledger allows settle > reserve and the response body cap bounds the max.
+            return result, actual
 
         try:
             return safebox_broker.handle_provider_request(

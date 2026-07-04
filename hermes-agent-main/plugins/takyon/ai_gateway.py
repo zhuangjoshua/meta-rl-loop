@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 from http.cookies import SimpleCookie
 import logging
+import time
 from types import SimpleNamespace
 import uuid
 from typing import Any, Callable
@@ -404,6 +405,59 @@ def broker_provider_call(
     the provider request and returns its raw response; ``actual_cost(raw)`` returns
     ``(actual_cost_microusd, settle_kwargs)``. Returns ``(raw, reservation_key, actual_cost, settled)``."""
     reservation_key = uuid.uuid4().hex
+
+    def _emit_gateway_cost_event(
+        status: str,
+        *,
+        cost: int | None = None,
+        settle_kwargs: dict | None = None,
+        error: str | None = None,
+        duration_ms: int | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Per-provider-call slice of the subuser cost/log ledger (app_cost_events, 0070).
+
+        Recorded AFTER the money ops on every outcome — reserve refusal, provider error, settle —
+        so budget-gate refusals and burned-then-released holds are debuggable per customer. Goes
+        through the SECURITY DEFINER port; best-effort by construction (never blocks the request)."""
+        try:
+            from . import cost_events
+
+            settle_kwargs = settle_kwargs or {}
+            meta = settle_kwargs.get("metadata") or {}
+            payload = {k: v for k, v in {
+                "realized_cost_microusd": meta.get("realized_cost_microusd"),
+                "billed_cost_microusd": meta.get("billed_cost_microusd"),
+                "estimated_cost_microusd": estimated_cost_microusd,
+                **(extra or {}),
+            }.items() if v is not None}
+            cost_events.record_app_cost_event(
+                conn,
+                business_slug=business_slug,
+                event_kind=cost_events.KIND_LLM_CALL,
+                name=purpose,
+                status=status,
+                route=audit_route,
+                purpose=purpose,
+                provider=provider,
+                model=model,
+                input_tokens=settle_kwargs.get("input_tokens"),
+                output_tokens=settle_kwargs.get("output_tokens"),
+                cache_read_tokens=meta.get("cache_read_input_tokens"),
+                cache_write_tokens=meta.get("cache_creation_input_tokens"),
+                cost_microusd=cost,
+                cost_status="actual" if status == "ok" else None,
+                reservation_key=reservation_key,
+                provider_request_id=settle_kwargs.get("provider_request_id"),
+                app_user_id=str(getattr(app_user, "id", "") or "") or None,
+                app_user_tier=str(getattr(app_user, "tier", "") or "") or None,
+                duration_ms=duration_ms,
+                error=error,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 — observability must never break the customer request
+            pass
+
     try:
         reserve_usage(
             conn,
@@ -423,12 +477,19 @@ def broker_provider_call(
             metadata=reserve_metadata or {},
         )
     except (AppBudgetInactive, AppBudgetExceeded, AppUserBudgetExceeded, AppUserNotFound) as exc:
+        _emit_gateway_cost_event("refused", error=str(exc))
         raise _gateway_reservation_error(exc) from exc
 
+    call_started = time.time()
     try:
         raw = do_call()
     except Exception as exc:
         release_usage(conn, business_slug, reservation_key, error=str(exc), session_token=session_token)
+        _emit_gateway_cost_event(
+            "error",
+            error=str(exc),
+            duration_ms=int((time.time() - call_started) * 1000),
+        )
         raise GatewayMessageError(status_code=502, detail=provider_error_detail) from exc
 
     cost, settle_kwargs = actual_cost(raw)
@@ -441,6 +502,13 @@ def broker_provider_call(
         provider=provider,
         model=model,
         **settle_kwargs,
+    )
+    _emit_gateway_cost_event(
+        "ok",
+        cost=cost,
+        settle_kwargs=settle_kwargs,
+        duration_ms=int((time.time() - call_started) * 1000),
+        extra={"settled": bool(settled)},
     )
     return raw, reservation_key, cost, settled
 
@@ -565,7 +633,41 @@ def broker_message_for_business(
             )
         except safebox.RemoteSafeboxError as exc:
             raise _broker_remote_error(exc) from exc
-        actual_cost = _anthropic_actual_cost(provider_response)[0]
+        actual_cost, _broker_settle_kwargs = _anthropic_actual_cost(provider_response)
+        # Debug ledger row for the BROKERED path too (the safebox settled the money; this is
+        # observability only, recorded through the app_cost_events port — best-effort).
+        try:
+            from . import cost_events
+
+            _broker_meta = _broker_settle_kwargs.get("metadata") or {}
+            cost_events.record_app_cost_event(
+                conn,
+                business_slug=business_slug,
+                event_kind=cost_events.KIND_LLM_CALL,
+                name=str(body.get("purpose") or "ai_generate"),
+                status="ok",
+                route=audit_route,
+                purpose=str(body.get("purpose") or "ai_generate"),
+                provider="anthropic",
+                model=model,
+                input_tokens=_broker_settle_kwargs.get("input_tokens"),
+                output_tokens=_broker_settle_kwargs.get("output_tokens"),
+                cache_read_tokens=_broker_meta.get("cache_read_input_tokens"),
+                cache_write_tokens=_broker_meta.get("cache_creation_input_tokens"),
+                cost_microusd=actual_cost,
+                cost_status="actual",
+                provider_request_id=_broker_settle_kwargs.get("provider_request_id"),
+                app_user_id=str(getattr(app_user, "id", "") or "") or None,
+                app_user_tier=str(getattr(app_user, "tier", "") or "") or None,
+                payload={
+                    "broker": True,
+                    "realized_cost_microusd": _broker_meta.get("realized_cost_microusd"),
+                    "billed_cost_microusd": _broker_meta.get("billed_cost_microusd"),
+                    "estimated_cost_microusd": estimated_cost,
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability must never break the customer request
+            pass
     else:
         provider_response, _reservation_key, actual_cost, _settled = broker_provider_call(
             conn,

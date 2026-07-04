@@ -66,6 +66,7 @@ from plugins.takyon.core import (
     handle_business_set_channel_credit_budgets,
     handle_business_list_conversation_messages,
     handle_business_read_conversation_thread,
+    handle_business_upsert_app_plan,
     handle_business_upsert_app_surface_contract,
     handle_business_upsert_app_record,
     handle_business_upsert_business,
@@ -2414,8 +2415,11 @@ def test_app_surface_contract_records_runtime_features(tmp_path, monkeypatch):
     assert "Runtime rails: auth, account, records, checkout" in surface_md
 
 
-def test_commit_tool_namespaces_raw_idempotency_keys_per_action(tmp_path, monkeypatch):
+def test_commit_tool_namespaces_raw_idempotency_keys_per_action(tmp_path, monkeypatch, pg_store_dsn):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
     result = json.loads(
         handle_business_upsert_business(
             {
@@ -2438,6 +2442,122 @@ def test_commit_tool_namespaces_raw_idempotency_keys_per_action(tmp_path, monkey
         )
     )
     assert surface["success"] is True
+
+
+def test_commit_tool_allows_same_raw_key_for_same_action_with_different_content(tmp_path, monkeypatch, pg_store_dsn):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    stripe_ids = {"product": 0, "price": 0}
+
+    def fake_stripe_request(path, params, *, method="POST"):
+        assert method == "POST"
+        if path == "products":
+            stripe_ids["product"] += 1
+            return {"id": f"prod_test_{stripe_ids['product']}"}
+        if path == "prices":
+            stripe_ids["price"] += 1
+            return {"id": f"price_test_{stripe_ids['price']}"}
+        raise AssertionError(f"unexpected Stripe request: {path}")
+
+    monkeypatch.setattr(takyon_core, "_stripe_request", fake_stripe_request)
+    result = json.loads(
+        handle_business_upsert_business(
+            {
+                "business": "latexflow",
+                "name": "Latexflow",
+                "idempotency_key": "bootstrap-step",
+            }
+        )
+    )
+    assert result["success"] is True
+
+    first_write = json.loads(
+        handle_business_write_file(
+            {
+                "business": "latexflow",
+                "path": "research/strategy.md",
+                "content": "first\n",
+                "idempotency_key": "bootstrap-step",
+            }
+        )
+    )
+    second_write = json.loads(
+        handle_business_write_file(
+            {
+                "business": "latexflow",
+                "path": "research/strategy.md",
+                "content": "second\n",
+                "idempotency_key": "bootstrap-step",
+            }
+        )
+    )
+
+    assert first_write["success"] is True
+    assert second_write["success"] is True
+    assert (tmp_path / "businesses" / "latexflow" / "research" / "strategy.md").read_text(encoding="utf-8") == "second\n"
+
+    first_surface = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "routes": [{"path": "/"}],
+                "notes": "first",
+                "idempotency_key": "surface-step",
+            }
+        )
+    )
+    second_surface = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "latexflow",
+                "source_path": "product/site",
+                "routes": [{"path": "/"}, {"path": "/pricing"}],
+                "notes": "second",
+                "idempotency_key": "surface-step",
+            }
+        )
+    )
+
+    assert first_surface["success"] is True
+    assert second_surface["success"] is True
+
+    first_plan = json.loads(
+        handle_business_upsert_app_plan(
+            {
+                "business": "latexflow",
+                "plan_key": "monthly",
+                "tier": "paid",
+                "price_cents": 1500,
+                "billing_interval": "month",
+                "notes": "first",
+                "idempotency_key": "plan-step",
+            }
+        )
+    )
+    second_plan = json.loads(
+        handle_business_upsert_app_plan(
+            {
+                "business": "latexflow",
+                "plan_key": "monthly",
+                "tier": "paid",
+                "price_cents": 1500,
+                "billing_interval": "month",
+                "notes": "second",
+                "idempotency_key": "plan-step",
+            }
+        )
+    )
+
+    assert first_plan["success"] is True
+    assert second_plan["success"] is True
+
+    app = store.read(scope="business:latexflow", query="summary", include=["app"])["app"]
+    assert app["surface_contract"]["notes"] == "second"
+    assert app["surface_contract"]["routes"] == [{"path": "/"}, {"path": "/pricing"}]
+    assert app["plans"][0]["notes"] == "second"
 
 
 def test_vite_ai_product_contract_rejects_generate_runtime_feature(tmp_path, monkeypatch):

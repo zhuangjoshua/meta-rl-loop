@@ -1216,6 +1216,59 @@ def _run_ceo_turn(
         if callable(nested):
             nested(line)
 
+    turn_started = time.time()
+
+    def _emit_turn_event(
+        status: str,
+        *,
+        error: str | None = None,
+        completed: bool | None = None,
+        response_head: str | None = None,
+    ) -> None:
+        """Turn-level slice of the cost/log ledger (operator_cost_events, migration 0070).
+
+        Fires on EVERY outcome — success, failure, timeout — because a failed turn still burned
+        real tokens and that partial spend is exactly what post-hoc debugging needs. Carries the
+        agent's reply head so a task is debuggable from the ledger alone (the full transcript
+        stays in ``events``/``business.ceo_turn``). Best-effort by construction."""
+        try:
+            from . import cost_events
+
+            payload: dict[str, Any] = {
+                "api_calls": int(getattr(agent, "session_api_calls", 0) or 0),
+            }
+            if completed is not None:
+                payload["turn_completed"] = completed
+            if response_head:
+                payload["response_head"] = response_head[:500]
+            ctx_vars = cost_events.operator_context()
+            cost_now = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
+            cost_events.record_operator_event_autoconn(
+                event_kind=cost_events.KIND_TURN,
+                business_slug=slug,
+                user_id=ctx_vars.get("user_id") or None,
+                job_id=ctx_vars.get("run_id") or None,
+                run_id=ctx_vars.get("run_id") or None,
+                session_id=str(getattr(agent, "session_id", "") or "") or None,
+                task_kind=ctx_vars.get("task_kind") or None,
+                name=ctx_vars.get("task_kind") or "ceo_turn",
+                status=status,
+                provider=str(getattr(agent, "provider", "") or "") or None,
+                model=str(getattr(agent, "model", "") or "") or None,
+                input_tokens=int(getattr(agent, "session_input_tokens", 0) or 0),
+                output_tokens=int(getattr(agent, "session_output_tokens", 0) or 0),
+                cache_read_tokens=int(getattr(agent, "session_cache_read_tokens", 0) or 0),
+                cache_write_tokens=int(getattr(agent, "session_cache_write_tokens", 0) or 0),
+                reasoning_tokens=int(getattr(agent, "session_reasoning_tokens", 0) or 0),
+                cost_microusd=int(round(cost_now * 1_000_000)),
+                cost_status=str(getattr(agent, "session_cost_status", "unknown") or "unknown"),
+                duration_ms=int((time.time() - turn_started) * 1000),
+                error=error,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 — observability must never break the turn
+            pass
+
     worker_activity_binding = (
         _bound_claude_worker_activity(_claude_worker_activity)
         if progress is not None
@@ -1259,6 +1312,10 @@ def _run_ceo_turn(
     if timed_out:
         if hasattr(agent, "interrupt"):
             agent.interrupt("CEO wake timed out (inactivity)")
+        _emit_turn_event(
+            "timeout",
+            error=f"idle past {int(limit)}s inactivity limit",
+        )
         raise TimeoutError(
             f"CEO wake for business:{slug} idle past {int(limit)}s inactivity limit"
         )
@@ -1276,9 +1333,11 @@ def _run_ceo_turn(
     # durable state (did the surface publish?) instead of the raw iteration count.
     hit_iteration_cap = str(result.get("turn_exit_reason") or "").startswith("max_iterations")
     if result.get("failed") is True or (result.get("completed") is False and not hit_iteration_cap):
-        raise RuntimeError(
-            str(result.get("error") or (result.get("final_response") or "").strip() or "CEO wake reported failure")
+        turn_error = str(
+            result.get("error") or (result.get("final_response") or "").strip() or "CEO wake reported failure"
         )
+        _emit_turn_event("error", error=turn_error, completed=False)
+        raise RuntimeError(turn_error)
 
     final_response = str(result.get("final_response") or "")
     # The chat IS the turn: record this wake/bootstrap turn's own reply as one chat
@@ -1291,6 +1350,7 @@ def _run_ceo_turn(
     # sets it True). Callers use it to tell "finished" from "ran out of budget"; the bootstrap
     # handler resolves the latter against the product's publish (done-gate) state.
     turn_completed = bool(result.get("completed"))
+    _emit_turn_event("ok", completed=turn_completed, response_head=final_response)
     return final_response, cost_usd, cost_status, turn_completed
 
 
@@ -1436,8 +1496,9 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
             # Mark the steady-state wake turn so product/destructive tool handlers fail closed
             # (_refuse_on_autonomous_wake). Bootstrap sets "ceo_bootstrap" and chat sets nothing,
             # so neither is refused. The marker is read in this turn, before any worker job is
-            # enqueued, so a wake-spawned edit is refused at source.
-            with _bound_operator_task_context(task_kind="ceo_wake"):
+            # enqueued, so a wake-spawned edit is refused at source. run_id carries the durable
+            # job id so every cost/log event inside the turn correlates to this job.
+            with _bound_operator_task_context(run_id=str(job.id), task_kind="ceo_wake"):
                 # Pre-wake ad refresh: pull fresh delivery insights for LIVE + STALE ad campaigns so
                 # the pulse the CEO reads this turn is current, instead of relying on it to remember
                 # to sync. Runs INSIDE the bound wake operator-task context so the auto-fired
@@ -1583,7 +1644,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 business_slug=slug,
                 task_kind="ceo_bootstrap",
             )
-            with _bound_operator_task_context(task_kind="ceo_bootstrap"):
+            # run_id carries the durable job id so every cost/log event inside the turn
+            # correlates to this job (operator_cost_events, migration 0070).
+            with _bound_operator_task_context(run_id=str(job.id), task_kind="ceo_bootstrap"):
                 final_response, cost_usd, cost_status, turn_completed = _run_ceo_turn(
                     slug=slug,
                     system_prompt=system_prompt,
