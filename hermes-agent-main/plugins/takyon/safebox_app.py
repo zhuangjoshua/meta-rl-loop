@@ -2448,6 +2448,9 @@ def build_safebox_app() -> FastAPI:
             # carried, so the SELECT could see the row and the UPDATE could silently touch 0 rows
             # (the documented probe gotcha). One transaction pins them to one backend.
             with conn.transaction():
+                # Pin the RLS-bypass GUC to THIS backend for the whole transaction (:6543 probe
+                # gotcha — a session-level SET is not reliably carried across pooled backends).
+                conn.execute("select set_config('takyon.rls_bypass', '1', true)")
                 row = conn.execute(
                     "select id, allowed_host, approval_id from provider_connections "
                     "where business_slug = %s and connection_slug = %s",

@@ -608,12 +608,17 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         state: dict[str, Any] = {}
 
         def key_resolver(scope):
-            # ONE statement resolves the connection AND its sealed secret (transaction-pooler-safe:
-            # a second autocommit query could land on a backend without the RLS-bypass GUC).
+            # Transaction-pooler-safe (:6543 probe gotcha): the RLS-bypass GUC that
+            # configure_takyon_pg_session set at session level is not reliably carried to the
+            # backend running a later autocommit statement, so provider_connections (RLS on) could
+            # nondeterministically return no row. Pin the read: one transaction, SET LOCAL the
+            # bypass on THIS backend, then resolve (connection + sealed secret in one statement).
             with _safebox_db_conn() as conn:
-                connection = egress_gateway.resolve_active_connection(
-                    conn, scope.business_slug, connection_slug
-                )
+                with conn.transaction():
+                    conn.execute("select set_config('takyon.rls_bypass', '1', true)")
+                    connection = egress_gateway.resolve_active_connection(
+                        conn, scope.business_slug, connection_slug
+                    )
             secret = egress_gateway._unseal_secret(
                 connection.secret_ciphertext, connection.secret_nonce
             )
