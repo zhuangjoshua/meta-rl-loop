@@ -488,7 +488,11 @@ class WorkerPool:
                 target=lambda: _run_loop(
                     thread_worker_id=f"{worker_id}-optask",
                     allow_dispatch=False,
-                    kinds_override=("claude.agent_task", "product.surface_refresh"),
+                    # Every worker-executed sub-job kind a CEO turn can fire-and-wait on. X
+                    # publishes are worker-backed too: without this lane they queue behind the
+                    # CEO's own turn on a concurrency-1 pool, so every launch-post call hits its
+                    # wait bound and the post publishes only after the turn ends (observed live).
+                    kinds_override=("claude.agent_task", "product.surface_refresh", "x.publish_outreach"),
                 ),
                 name="takyon-worker-optask",
                 daemon=True,
