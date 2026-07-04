@@ -22237,6 +22237,42 @@ def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_read_store_status(args: dict, **_: Any) -> str:
+    """CEO evidence surface for a mobile_app business's App Store standing (readmodular §2.5). Today
+    it surfaces the Apple developer-ACCOUNT health via the safebox account-health route — the key
+    never leaves the safebox, and a non-'ok' state (esp. agreement_blocked) tells the CEO store
+    submissions are frozen account-wide before it attempts one. Per-app review/version status lands
+    with the submit lane. Read-only; fail-open on the probe (state='unreachable' rather than error)."""
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        archetype = "web_saas"
+        with store._connect() as conn:
+            row = store._ensure_business(conn, business)
+            archetype = str((row or {}).get("archetype") or "web_saas")
+        account_health: dict[str, Any]
+        try:
+            try:
+                from . import safebox as _sb
+            except ImportError:  # pragma: no cover - alternate load path
+                from plugins.takyon import safebox as _sb
+            account_health = _sb.store_asc_account_health()
+        except Exception as exc:
+            # Never hard-fail a read: a probe/transport error surfaces as a state, not a tool error.
+            account_health = {"state": "unreachable", "detail": str(exc)[:200], "status_code": None}
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                "archetype": archetype,
+                "account_health": account_health,
+                "note": "Apple developer-account health; per-app review/version status lands with the submit lane.",
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 def handle_business_check_runtime_capabilities(args: dict, **_: Any) -> str:
     try:
         if _blocks_session_bound_authority_op():
@@ -34847,6 +34883,17 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Read-only web analytics for a business's published product site from the shared Umami property, filtered to the business's own subdomain. Returns truthful not-configured/unavailable states instead of faked numbers.",
         "handler": handle_business_read_app_analytics,
         "schema": _schema("business_read_app_analytics", "Read published product-site web analytics (visitors/pageviews/visits over a window) without mutating state.", {"business": _BUSINESS_PROP, "days": {"type": "integer", "description": "Trailing window in days; default 7"}}, ["business"]),
+    },
+    {
+        "name": "business_read_store_status",
+        "description": "Read a mobile_app business's App Store standing (Apple developer-account health now; per-app review/version status when the submit lane lands). Read-only, fail-open.",
+        "handler": handle_business_read_store_status,
+        "schema": _schema(
+            "business_read_store_status",
+            "Read the App Store account/app status for a mobile_app business (account health via the safebox; key never egresses).",
+            {"business": _BUSINESS_PROP},
+            ["business"],
+        ),
     },
     {
         "name": "business_check_runtime_capabilities",

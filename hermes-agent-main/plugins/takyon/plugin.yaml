@@ -6,6 +6,7 @@ kind: backend
 provides_tools:
   - business_list_businesses
   - business_read_business
+  - business_read_store_status
   - business_read_file
   - business_list_files
   - business_list_conversation_messages
