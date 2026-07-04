@@ -1,0 +1,21 @@
+# greenlight compliance config for the Takyon mobile scaffold.
+# The store_compliance gate (plugins/takyon/store_compliance.py) runs `greenlight preflight` over
+# this project and enforces: internal lane = 0 CRITICAL; production lane = 0 CRITICAL + 0 HIGH.
+# Suppressions here are diff-reviewed like code and counted in the receipt — every ignore is a claim.
+rules:
+  # The scaffold intentionally ships placeholder copy/theme (ugly-on-purpose, like the web
+  # tokens.css) that the CEO worker replaces before publish. During bootstrap these are expected;
+  # the publish gate re-scans the FINISHED product, where placeholders must be gone. Keep these at
+  # WARN (not suppressed) so they surface as must-fix findings, never silently dropped.
+  placeholder-content: { enabled: true, severity: warn }
+  # console-log is INFO by default; keep it visible.
+  console-log: { enabled: true, severity: info }
+ignore:
+  # Never scan generated/native/dependency trees — prebuild output is ephemeral (see .gitignore).
+  - node_modules
+  - ios
+  - android
+  - .expo
+  - dist
+  # The platform-owned client bridge is re-generated per business; it is not product source.
+  - _takyon

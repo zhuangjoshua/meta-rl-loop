@@ -1,0 +1,62 @@
+{
+  "expo": {
+    "name": "__TAKYON_APP_NAME__",
+    "slug": "__TAKYON_SLUG__",
+    "scheme": "__TAKYON_SLUG__",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "description": "__TAKYON_APP_DESCRIPTION__",
+    "primaryColor": "#4f46e5",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0b12"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "updates": {
+      "url": "https://u.expo.dev/__EAS_PROJECT_ID__",
+      "fallbackToCacheTimeout": 0
+    },
+    "runtimeVersion": { "policy": "fingerprint" },
+    "ios": {
+      "bundleIdentifier": "com.__TAKYON_ORG__.__TAKYON_SLUG__",
+      "buildNumber": "1",
+      "supportsTablet": true,
+      "associatedDomains": ["applinks:__TAKYON_SLUG__.coscale.app"],
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleAllowMixedLocalizations": true
+      },
+      "privacyManifests": {
+        "NSPrivacyTracking": false,
+        "NSPrivacyTrackingDomains": [],
+        "NSPrivacyCollectedDataTypes": [],
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+            "NSPrivacyAccessedAPITypeReasons": ["CA92.1"]
+          },
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+            "NSPrivacyAccessedAPITypeReasons": ["C617.1"]
+          }
+        ]
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-web-browser",
+      "react-native-legal",
+      ["expo-updates", { "username": "__EXPO_ORG__" }]
+    ],
+    "experiments": { "typedRoutes": true },
+    "extra": {
+      "eas": { "projectId": "__EAS_PROJECT_ID__" },
+      "takyonSlug": "__TAKYON_SLUG__"
+    }
+  }
+}
