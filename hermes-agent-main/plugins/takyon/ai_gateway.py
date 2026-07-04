@@ -350,33 +350,32 @@ def _model_allowed(plan, model: str) -> bool:
 # monthly-only legacy purge, plan §2.7 — nothing referenced it.)
 
 
-# Pro-rate the MONTHLY plan allowance onto the WEEKLY usage window. Operator decision (2026-06-20):
-# the per-customer AI budget resets WEEKLY (matching the /account "resets weekly" copy + migration
-# 0035's ISO-week window), so the spendable amount per weekly window is the monthly
-# included_ai_budget pro-rated to a week (× 7/30). Cumulative spend over a ~30-day month then equals
-# the monthly allowance — fixing the ~4.3× overspend a monthly allowance over a weekly window caused.
-_USAGE_WINDOW_DAYS = 7
-_PLAN_FUNDING_PERIOD_DAYS = 30
+# The per-customer allowance is the plan's FULL MONTHLY included_ai_budget_microusd, enforced over
+# an ENTITLEMENT-ANCHORED monthly window derived INSIDE the usage gate (migration 0063: the active
+# paid entitlement's current_period_end minus one month; fallback = the business budget window).
+# The 0035-era ×7/30 weekly pro-rate is retired (subuser-billing-plan WS1): window and allowance
+# move together, and because the gate owns the window, a stale caller that still passes a pro-rated
+# figure UNDERspends (safe direction) — it can never pair a monthly limit with a weekly window.
 
 
-def _user_weekly_budget_microusd(plan) -> int:
-    """THE canonical per-user AI-allowance resolver for the WEEKLY usage window (GOAL_RULES §3 gap #4:
-    "centralize per-user-limit resolution ... unify to plan-derived-or-0"). This is the per-subuser
-    gate that stops ONE subuser from draining the business and, post-invariant-9, the ONLY budget gate
+def _user_monthly_budget_microusd(plan) -> int:
+    """THE canonical per-user AI-allowance resolver (GOAL_RULES §3 gap #4: "centralize
+    per-user-limit resolution ... unify to plan-derived-or-0"). This is the per-subuser gate limit
+    that stops ONE subuser from draining the business and, post-invariant-9, the ONLY budget gate
     (there is no per-business pool cap anymore). ``app_actions._plan_derived_user_limit_microusd``
     delegates HERE so the gateway and action reserve paths share one rule.
 
     Plan-derived-or-0 with NO free-tier floor: budget comes ONLY from the active PAID subscription's
-    ``included_ai_budget_microusd`` (the ``y`` term of x+y+z) — a MONTHLY figure capped at the monthly
-    plan price. Because the usage window is the ISO WEEK, the spendable per-window amount is that
-    monthly allowance pro-rated to a week (× 7/30), so a full month totals the monthly allowance. No
-    plan ⇒ 0 (reserve refuses → 402). A free / unentitled tier ⇒ 0 (only a paid subscription funds)."""
+    ``included_ai_budget_microusd`` (the ``y`` term of x+y+z) — the FULL MONTHLY figure, capped at
+    the monthly plan price by the plan choke point. The usage gate (migration 0063) anchors the
+    matching monthly window to the customer's own entitlement period, so a full billing month
+    totals exactly this allowance. No plan ⇒ 0 (reserve refuses → 402). A free / unentitled tier ⇒
+    0 (only a paid subscription funds)."""
     if plan is None:
         return 0
     if str(getattr(plan, "tier", "") or "").strip().lower() in {"", "free", "none", "unentitled"}:
         return 0
-    monthly = max(0, int(plan.included_ai_budget_microusd))
-    return monthly * _USAGE_WINDOW_DAYS // _PLAN_FUNDING_PERIOD_DAYS
+    return max(0, int(plan.included_ai_budget_microusd))
 
 
 def broker_provider_call(
@@ -412,9 +411,9 @@ def broker_provider_call(
             estimated_cost_microusd=estimated_cost_microusd,
             reservation_key=reservation_key,
             app_user_id=app_user.id,
-            # The gate enforces this over the current (weekly) usage window; the value is the
-            # monthly plan allowance pro-rated to the week (see _user_weekly_budget_microusd).
-            user_monthly_limit_microusd=_user_weekly_budget_microusd(plan),
+            # The gate enforces this over the customer's entitlement-anchored MONTHLY window
+            # (migration 0063); the value is the full monthly plan allowance.
+            user_monthly_limit_microusd=_user_monthly_budget_microusd(plan),
             app_user_tier=app_user.tier,
             session_token=session_token,
             purpose=purpose,

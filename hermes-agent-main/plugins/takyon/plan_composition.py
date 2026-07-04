@@ -16,7 +16,7 @@ transaction; the plan-write wiring that persists a composed plan lives in `app_e
 (`upsert_plan_from_composition`), which calls `compose_plan` here and stores the derived economics
 plus the composition + receipt in the plan row's existing jsonb metadata.
 
-Money model (matches `ai_gateway._user_weekly_budget_microusd` and `usage_pricing.billed_cost`):
+Money model (matches `ai_gateway._user_monthly_budget_microusd` and `usage_pricing.billed_cost`):
 
   * A metered AI-allowance component carries an ALLOWANCE priced through `usage_pricing`
     (model + provider + monthly token counts). Pricing it yields the REALIZED monthly provider

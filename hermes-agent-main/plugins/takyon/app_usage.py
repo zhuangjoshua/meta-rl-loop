@@ -397,6 +397,36 @@ def _app_user_committed_microusd(conn, business_slug: str, app_user_id: str, per
     return int(row[0])
 
 
+def _app_user_period_start(conn, business_slug: str, app_user_id: str, fallback):
+    """The sub-user's entitlement-anchored MONTHLY window start (migration 0063 parity for the
+    Python gate path): the active paid entitlement's ``current_period_end`` minus one month —
+    plans are monthly-only by the plan choke point. The entitlement pick is verbatim the ranking
+    ``takyon_app_action_usage_limit`` (0047) and ``safebox_reserve_usage`` (0063) use, so every
+    gate agrees on which entitlement funds the customer. Falls back to ``fallback`` (the business
+    budget window — conservative: shorter window, never more spendable) when there is no active
+    paid entitlement, the period already elapsed (dunning must not mint a fresh allowance), or the
+    period is implausibly long for a monthly plan."""
+    row = conn.execute(
+        "select current_period_end,"
+        "       (current_period_end > now()"
+        "        and current_period_end - interval '1 month' <= now()) as plausible,"
+        "       current_period_end - interval '1 month' as period_start"
+        "  from app_entitlements"
+        " where business_slug = %s and app_user_id = %s"
+        "   and status in ('active', 'trialing')"
+        "   and lower(coalesce(tier, '')) not in ('', 'free', 'none', 'unentitled')"
+        "   and source <> 'openmeter'"
+        " order by case lower(tier)"
+        "            when 'owner' then 0 when 'paid' then 1 when 'pro' then 1 else 100 end asc,"
+        "          updated_at desc"
+        " limit 1",
+        (business_slug, app_user_id),
+    ).fetchone()
+    if row is None or row[0] is None or not bool(row[1]):
+        return fallback
+    return row[2]
+
+
 # ── budget catalog ───────────────────────────────────────────────────────────────
 
 
@@ -817,8 +847,14 @@ def record_completed_usage(
         if app_user_id is not None:
             _require_app_user(conn, business_slug, app_user_id)
         if app_user_id is not None and user_monthly_limit_microusd is not None:
+            # Entitlement-anchored monthly user window (0063 parity with safebox_reserve_usage).
             user_committed = _app_user_committed_microusd(
-                conn, business_slug, app_user_id, budget.current_period_start
+                conn,
+                business_slug,
+                app_user_id,
+                _app_user_period_start(
+                    conn, business_slug, app_user_id, budget.current_period_start
+                ),
             )
             if user_committed + gate_amount > user_monthly_limit_microusd:
                 raise AppUserBudgetExceeded(

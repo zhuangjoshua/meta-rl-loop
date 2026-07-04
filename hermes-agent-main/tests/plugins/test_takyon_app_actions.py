@@ -553,10 +553,9 @@ def test_reserve_usage_pg_uses_leaf_conn_and_plan_limit(monkeypatch):
 
     assert captured["conn"] is raw_conn
     assert captured["business_slug"] == "mathflow"
-    # The per-user limit is the monthly plan allowance pro-rated to the weekly usage window (×7/30,
-    # operator decision 2026-06-20). Asserted via the canonical conversion constants, not a literal.
-    from plugins.takyon import ai_gateway as _g
-    assert captured["user_monthly_limit_microusd"] == 5_000_000 * _g._USAGE_WINDOW_DAYS // _g._PLAN_FUNDING_PERIOD_DAYS
+    # The per-user limit is the plan's FULL monthly allowance (subuser-billing WS1 / migration
+    # 0063): the usage gate anchors the entitlement-monthly window itself, so no pro-rate here.
+    assert captured["user_monthly_limit_microusd"] == 5_000_000
     assert captured["app_user_tier"] == "paid"
 
 
@@ -620,8 +619,8 @@ def test_reserve_usage_pg_session_bound_limit_port(monkeypatch):
     sql = "\n".join(statement for statement, _ in raw_conn.statements)
     assert "takyon_app_action_usage_limit" in sql
     assert captured["conn"] is raw_conn
-    from plugins.takyon import ai_gateway as _g
-    assert captured["user_monthly_limit_microusd"] == 5_000_000 * _g._USAGE_WINDOW_DAYS // _g._PLAN_FUNDING_PERIOD_DAYS
+    # FULL monthly allowance (WS1 / migration 0063) — no pro-rate.
+    assert captured["user_monthly_limit_microusd"] == 5_000_000
     assert captured["app_user_tier"] == "paid"
 
 

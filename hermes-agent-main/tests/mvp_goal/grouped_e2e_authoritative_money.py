@@ -44,7 +44,7 @@ from psycopg.conninfo import make_conninfo
 from fastapi.testclient import TestClient
 
 from plugins.takyon import app_actions, app_entitlements, app_identity, app_usage
-from plugins.takyon.ai_gateway import get_provider_caller, _user_weekly_budget_microusd
+from plugins.takyon.ai_gateway import get_provider_caller, _user_monthly_budget_microusd
 from plugins.takyon.app_gateway_keys import mint_gateway_key
 from plugins.takyon.app_usage import list_usage_events, get_usage_summary, get_app_budget
 from plugins.takyon.control_plane import ensure_platform_owner, provision_user_on_first_login
@@ -188,20 +188,21 @@ def run_gateway_group():
             )
             results["no_sub_refused"] = no_sub_refused
 
-            # (2) PAID subscription whose weekly pro-rated allowance is N. One canned call costs
-            # sonnet 3/15 microusd-per-token => 3*100 + 15*20 = 600 microusd. Pick N = exactly 2
-            # calls' worth so the 1st & 2nd succeed and the 3rd is refused at the per-USER gate.
+            # (2) PAID subscription whose FULL monthly allowance is N (WS1 / migration 0063 —
+            # no weekly pro-rate; the gate anchors the entitlement-monthly window itself). One
+            # canned call costs sonnet 3/15 microusd-per-token => 3*100 + 15*20 = 600 microusd.
+            # Pick N = exactly 2 calls' worth so the 1st & 2nd succeed and the 3rd is refused.
             per_call = 600
             N = per_call * 2  # 1200 microusd
-            monthly_included = (N * 30 // 7) + 1
+            monthly_included = N
             user, st1, plan_key = seed_paid_session_user(
                 conn, slug, included_ai_budget_microusd=monthly_included
             )
 
             plan = app_entitlements.get_plan_policy(conn, slug, plan_key)
-            derived = _user_weekly_budget_microusd(plan)
+            derived = _user_monthly_budget_microusd(plan)
             log(f"[A2] plan {plan_key}: included_ai_budget_microusd={plan.included_ai_budget_microusd} "
-                f"-> _user_weekly_budget_microusd={derived} (expect == N={N})")
+                f"-> _user_monthly_budget_microusd={derived} (expect == N={N})")
             budget_equals_included = (
                 int(plan.included_ai_budget_microusd) == monthly_included and derived == N
             )

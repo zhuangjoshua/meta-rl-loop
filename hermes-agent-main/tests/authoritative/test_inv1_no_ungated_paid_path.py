@@ -58,7 +58,7 @@ from plugins.takyon.ai_gateway import (
     GatewayMessageError,
     broker_provider_call,
     _require_active_entitlement,
-    _user_weekly_budget_microusd,
+    _user_monthly_budget_microusd,
 )
 from plugins.takyon.app_usage import (
     reserve_usage,
@@ -355,8 +355,8 @@ def test_gap4_centralized_per_user_floor_is_unified_to_plan_or_zero():
     longer a live fallback in the gateway's per-user-budget resolver. RED here is
     the TARGET (the floor still exists at ai_gateway.py:248 today).
     """
-    floor_src = _source_of(_user_weekly_budget_microusd)
-    # The unified per-user resolver `_user_weekly_budget_microusd` must NOT fall back to
+    floor_src = _source_of(_user_monthly_budget_microusd)
+    # The unified per-user resolver `_user_monthly_budget_microusd` must NOT fall back to
     # the $0.50 default for `plan is None` or a 0-budget free tier — it resolves
     # plan-derived-or-0, so the floor constant is not referenced on the billable path.
     assert "_DEFAULT_USER_MONTHLY_BUDGET_MICROUSD" not in floor_src, (

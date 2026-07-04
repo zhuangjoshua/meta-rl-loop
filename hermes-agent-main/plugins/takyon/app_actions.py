@@ -1070,15 +1070,16 @@ def _require_active_entitlement(entitlement) -> None:
 def _plan_derived_user_limit_microusd(plan) -> int:
     """CENTRALIZED per-user-limit resolution (GOAL_RULES §3 gap #4: "centralize per-user-limit
     resolution ... unify to plan-derived-or-0"). Delegates to THE canonical resolver
-    ``ai_gateway._user_weekly_budget_microusd`` so the action reserve path and the gateway path
-    share ONE rule: a paid plan grants its ``included_ai_budget_microusd`` pro-rated to the weekly
-    usage window (× 7/30); a free / unentitled / absent plan grants 0. NEVER returns None (an
-    uncapped per-user limit would defeat the only gate)."""
+    ``ai_gateway._user_monthly_budget_microusd`` so the action reserve path and the gateway path
+    share ONE rule: a paid plan grants its FULL monthly ``included_ai_budget_microusd`` (the usage
+    gate anchors the matching entitlement-monthly window itself, migration 0063); a free /
+    unentitled / absent plan grants 0. NEVER returns None (an uncapped per-user limit would defeat
+    the only gate)."""
     try:
-        from .ai_gateway import _user_weekly_budget_microusd
+        from .ai_gateway import _user_monthly_budget_microusd
     except Exception:
-        from plugins.takyon.ai_gateway import _user_weekly_budget_microusd
-    return _user_weekly_budget_microusd(plan)
+        from plugins.takyon.ai_gateway import _user_monthly_budget_microusd
+    return _user_monthly_budget_microusd(plan)
 
 
 def _resolve_pg_action_usage_limit(
@@ -1118,14 +1119,10 @@ def _resolve_pg_action_usage_limit(
         resolved_id = str(row[0] or "").strip()
         if app_user_id and resolved_id and resolved_id != str(app_user_id):
             raise ActionBudgetExceeded("session_user_mismatch: action user does not match session")
-        try:
-            from . import ai_gateway
-        except Exception:
-            from plugins.takyon import ai_gateway
-
+        # FULL monthly allowance — the usage gate anchors the matching entitlement-monthly window
+        # itself (migration 0063), so no pro-rate here.
         monthly_limit = max(0, int(row[3] or 0))
-        weekly_limit = monthly_limit * ai_gateway._USAGE_WINDOW_DAYS // ai_gateway._PLAN_FUNDING_PERIOD_DAYS
-        return str(row[1] or resolved_user_tier or "") or None, weekly_limit
+        return str(row[1] or resolved_user_tier or "") or None, monthly_limit
 
     leaves = store._app_leaves()
     with store._leaf_conn(conn) as raw:

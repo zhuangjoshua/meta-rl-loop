@@ -567,3 +567,140 @@ def test_reconcile_held_usage_releases_orphaned_holds(pg_conn):
     assert ev.actual_cost_microusd == 0
     # the held estimate is freed — committed drops back to zero.
     assert app_usage.get_usage_summary(pg_conn, slug)["committed_microusd"] == 0
+
+
+# ── entitlement-anchored monthly user window (migration 0063 / subuser-billing WS1) ──────────
+
+
+def _paid_period(conn, slug, user_id, *, period_end_sql: str):
+    """Grant a paid entitlement whose current_period_end is `period_end_sql` (SQL expression)."""
+    from plugins.takyon import app_entitlements
+
+    period_end = conn.execute(f"select {period_end_sql}").fetchone()[0]
+    app_entitlements.grant_entitlement(
+        conn,
+        slug,
+        app_user_id=user_id,
+        tier="paid",
+        source="stripe",
+        stripe_subscription_id=f"sub_{uuid.uuid4().hex[:10]}",
+        current_period_end=period_end,
+    )
+
+
+def _backdate_event(conn, slug, reservation_key, *, interval_sql: str):
+    conn.execute(
+        "update app_usage_events set created_at = now() - %s::interval "
+        "where business_slug = %s and reservation_key = %s",
+        (interval_sql, slug, reservation_key),
+    )
+
+
+def test_user_gate_window_anchors_to_entitlement_period(pg_conn):
+    # WS1 (0063): the per-user aggregate anchors to the customer's OWN billing month
+    # (current_period_end - 1 month), NOT the business ISO-week window. Spend 8 days old is
+    # always OUTSIDE the ISO-week window (week start is at most 7 days back) but INSIDE a billing
+    # month that started 10 days ago — so a refusal here proves the anchored window is live.
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    app_usage.record_completed_usage(
+        pg_conn,
+        slug,
+        actual_cost_microusd=600,
+        reservation_key="w1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    _backdate_event(pg_conn, slug, "w1", interval_sql="8 days")
+    with pytest.raises(AppUserBudgetExceeded) as excinfo:
+        app_usage.reserve_usage(
+            pg_conn,
+            slug,
+            estimated_cost_microusd=600,
+            reservation_key="w2",
+            app_user_id=user_id,
+            user_monthly_limit_microusd=1_000,
+        )
+    assert excinfo.value.committed_microusd == 600
+
+
+def test_user_gate_excludes_spend_from_the_previous_billing_month(pg_conn):
+    # Spend older than the anchored month (e.g. 40 days back, before current_period_end - 1mo)
+    # does NOT count against this month's allowance — the customer's window genuinely resets on
+    # their billing anniversary.
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    app_usage.record_completed_usage(
+        pg_conn,
+        slug,
+        actual_cost_microusd=600,
+        reservation_key="old1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    _backdate_event(pg_conn, slug, "old1", interval_sql="40 days")
+    event = app_usage.reserve_usage(
+        pg_conn,
+        slug,
+        estimated_cost_microusd=600,
+        reservation_key="new1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    assert event.status == "reserved"
+
+
+def test_user_gate_falls_back_to_business_window_when_period_elapsed(pg_conn):
+    # An elapsed entitlement period (current_period_end <= now(), e.g. dunning smart-retry) must
+    # NOT mint a fresh allowance: the gate falls back to the business budget window
+    # (conservative). 8-day-old spend is outside that weekly window, so the reserve fits — but
+    # the anchored month is NOT applied (same seeding as the anchor test, different period).
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() - interval '1 day'")
+    app_usage.record_completed_usage(
+        pg_conn,
+        slug,
+        actual_cost_microusd=600,
+        reservation_key="e1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    _backdate_event(pg_conn, slug, "e1", interval_sql="8 days")
+    event = app_usage.reserve_usage(
+        pg_conn,
+        slug,
+        estimated_cost_microusd=600,
+        reservation_key="e2",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    assert event.status == "reserved"
+
+
+def test_record_completed_usage_uses_the_anchored_window_too(pg_conn):
+    # The Python one-shot path (record_completed_usage) shares the 0063 window derivation via
+    # app_usage._app_user_period_start — parity with the SQL gate.
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_id = _user(pg_conn, slug)
+    _paid_period(pg_conn, slug, user_id, period_end_sql="now() + interval '20 days'")
+    app_usage.record_completed_usage(
+        pg_conn,
+        slug,
+        actual_cost_microusd=600,
+        reservation_key="rc1",
+        app_user_id=user_id,
+        user_monthly_limit_microusd=1_000,
+    )
+    _backdate_event(pg_conn, slug, "rc1", interval_sql="8 days")
+    with pytest.raises(AppUserBudgetExceeded):
+        app_usage.record_completed_usage(
+            pg_conn,
+            slug,
+            actual_cost_microusd=600,
+            reservation_key="rc2",
+            app_user_id=user_id,
+            user_monthly_limit_microusd=1_000,
+        )
