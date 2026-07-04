@@ -3226,10 +3226,27 @@ def _materialize_mobile_app_workspace(
     kit_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts")
     auth_payload = _subuser_public_auth_payload(surface) or {}
+    # The mobile SurfaceContext.railState type is Record<string, {callable, reason}> — NOT the web
+    # shape's string status map. Convert: a positive status → callable; otherwise carry the status
+    # as the reason. runtimeFeatures already lists the enabled rails, so anything present there is
+    # callable regardless of the raw status label.
+    raw_rail_state = (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {}
+    enabled_features = set(_surface_effective_runtime_features(surface) or [])
+    _POSITIVE_RAIL_STATUS = {"enabled", "declared", "live", "ready", "on", "active", "available"}
+    rail_state = {}
+    for rail, status in (raw_rail_state.items() if isinstance(raw_rail_state, Mapping) else []):
+        status_text = str(status).strip().lower() if not isinstance(status, Mapping) else ""
+        callable_ = rail in enabled_features or status_text in _POSITIVE_RAIL_STATUS or (
+            isinstance(status, Mapping) and bool(status.get("callable"))
+        )
+        entry: dict[str, Any] = {"callable": bool(callable_)}
+        if not callable_ and status_text:
+            entry["reason"] = status_text
+        rail_state[str(rail)] = entry
     context = {
         "runtimeApiBase": f"https://{canonical_slug}.{_company_base_domain()}/api/takyon/apps/{canonical_slug}",
         "runtimeFeatures": _surface_effective_runtime_features(surface),
-        "railState": (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {},
+        "railState": rail_state,
         "auth": {
             "url": str(auth_payload.get("url") or ""),
             "publishableKey": str(auth_payload.get("publishableKey") or ""),
