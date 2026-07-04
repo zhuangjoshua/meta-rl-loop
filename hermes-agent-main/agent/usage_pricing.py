@@ -127,11 +127,19 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # front unbounded per-call upstream inference cost. Body-size cost is added on top by
     # `egress_request_microusd(bytes=...)`. Without this entry the egress route fails closed
     # (503 egress_pricing_unavailable) BEFORE any reserve or upstream call.
+    # Egress is FREE to the platform: the outbound call uses the BUSINESS's own credential, so any
+    # provider cost bills the business's own third-party account, not Takyon (unlike AI/search where
+    # Takyon holds the key and pays per token). So there is no per-call fee — it is priced at $0.
+    # The entry still EXISTS (so pricing resolves, never 503) and the reserve/settle plumbing still
+    # records a $0 attributed usage event per call (audit + rate-limit hook), but nothing is charged
+    # and egress no longer requires a paid entitlement. Abuse is bounded by the SSRF/host/body/
+    # redirect guards + a volume rate limit, not by a money gate. (If you ever want egress to carry a
+    # secure-proxy infra markup, set a small request_cost here — the whole rail turns back on.)
     ("egress", "request"): PricingEntry(
-        request_cost=Decimal("0.002"),
+        request_cost=Decimal("0"),
         source="custom_contract",
         source_url="egress-rail-build-spec.md",
-        pricing_version="egress-2026-07",
+        pricing_version="egress-2026-07-free",
     ),
     # ── DataForSEO Keywords Data → Google Ads (per-request, NOT per-token) ──
     # The SEO/GEO operator's keyword research (business_seo_query_data, modes

@@ -2234,6 +2234,33 @@ def _takyon_app_rate_limit_directory_lookup(*, business: str, session_token: str
     )
 
 
+# Egress is free to the platform, so it is NOT money-gated — abuse is bounded by the SSRF/host/body/
+# redirect guards in the safebox plus this per-customer VOLUME limit (the direct /egress path; egress
+# from a Deno action is already throttled by the action-invoke limiter). Generous default.
+_APP_EGRESS_RATE_LIMIT_ENV = "TAKYON_APP_EGRESS_RATE_LIMIT"
+_APP_EGRESS_RATE_WINDOW_SECONDS_ENV = "TAKYON_APP_EGRESS_RATE_WINDOW_SECONDS"
+_DEFAULT_APP_EGRESS_RATE_LIMIT = 120
+_DEFAULT_APP_EGRESS_RATE_WINDOW_SECONDS = 60
+
+
+def _takyon_app_rate_limit_egress(*, business: str, session_token: str) -> None:
+    if not session_token:
+        return
+    _takyon_app_check_sql_rate_limit_for_session(
+        business=business,
+        session_token=session_token,
+        limit=_takyon_positive_int_env(
+            _APP_EGRESS_RATE_LIMIT_ENV,
+            _DEFAULT_APP_EGRESS_RATE_LIMIT,
+        ),
+        window_seconds=_takyon_positive_int_env(
+            _APP_EGRESS_RATE_WINDOW_SECONDS_ENV,
+            _DEFAULT_APP_EGRESS_RATE_WINDOW_SECONDS,
+        ),
+        detail="Too many egress requests. Try again shortly.",
+    )
+
+
 def _takyon_app_rate_limit_action_invoke(*, business: str, session_token: str, action_name: str) -> None:
     if not session_token:
         return
@@ -3117,6 +3144,18 @@ def _takyon_app_egress(*, business: str, body: dict[str, Any], session_token: st
 
 
 async def _app_post_egress(request, business, parts, bound, token, body):
+    # Abuse gate (egress is free, so this is the volume control on the direct /egress path — egress
+    # from a Deno action is already throttled by the action-invoke limiter). Off-loop, same shape
+    # as the action-invoke rate check.
+    try:
+        await asyncio.to_thread(
+            _takyon_app_rate_limit_egress, business=business, session_token=token,
+        )
+    except HTTPException as exc:
+        response = _takyon_app_json(exc.status_code, {"success": False, "error": str(exc.detail)})
+        for key, value in (exc.headers or {}).items():
+            response.headers[key] = value
+        return response
     # Off the event loop: the safebox egress round-trip is a synchronous provider HTTP call.
     status, payload = await asyncio.to_thread(
         _takyon_app_egress, business=business, body=body, session_token=token,
