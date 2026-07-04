@@ -91,6 +91,9 @@ class ProviderConnection:
     placement: dict
     scope: str
     status: str
+    secret_ciphertext: bytes | None = None
+    secret_nonce: bytes | None = None
+    secret_fingerprint: str | None = None
 
 
 # ── AEAD sealing (spec §migration; seal key is safebox-only, non-egress) ─────────────────────
@@ -143,12 +146,18 @@ def _unseal_secret(ciphertext: bytes, nonce: bytes) -> str:
 # ── connection resolution (spec §safebox_route step 2) ───────────────────────────────────────
 
 def resolve_active_connection(conn, business_slug: str, connection_slug: str) -> ProviderConnection:
-    """Resolve the ACTIVE connection row by the AUTHORITATIVE (signed-scope) business_slug + slug.
-    Cross-tenant is impossible: business_slug is the signed capability scope, never a caller value.
-    Fails closed 404 on any miss. Runs on the safebox DB conn (only role that reads this table)."""
+    """Resolve the ACTIVE connection row (INCLUDING the sealed secret) by the AUTHORITATIVE
+    (signed-scope) business_slug + slug, in ONE statement. Cross-tenant is impossible: business_slug
+    is the signed capability scope, never a caller value. Fails closed 404 on any miss.
+
+    Single-statement by design: on the Supabase transaction pooler (:6543) each autocommit statement
+    can land on a different backend with the RLS-bypass GUC not carried over (the documented probe
+    gotcha), so the resolve + secret read MUST be one statement (or one transaction). Fetching the
+    ciphertext here lets the caller avoid a second query entirely."""
     row = conn.execute(
         "select id, business_slug, connection_slug, provider_kind, allowed_host, "
-        "allowed_path_prefix, allowed_methods, placement, scope, status "
+        "allowed_path_prefix, allowed_methods, placement, scope, status, "
+        "secret_ciphertext, secret_nonce, secret_fingerprint "
         "from provider_connections "
         "where business_slug = %s and connection_slug = %s and status = 'active'",
         (business_slug, connection_slug),
@@ -168,6 +177,9 @@ def resolve_active_connection(conn, business_slug: str, connection_slug: str) ->
         allowed_path_prefix=(None if row[5] is None else str(row[5])),
         allowed_methods=tuple(str(m).upper() for m in (row[6] or ())),
         placement=placement, scope=scope, status=str(row[9]),
+        secret_ciphertext=(None if row[10] is None else bytes(row[10])),
+        secret_nonce=(None if row[11] is None else bytes(row[11])),
+        secret_fingerprint=(None if row[12] is None else str(row[12])),
     )
 
 

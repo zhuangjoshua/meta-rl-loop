@@ -608,17 +608,17 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         state: dict[str, Any] = {}
 
         def key_resolver(scope):
+            # ONE statement resolves the connection AND its sealed secret (transaction-pooler-safe:
+            # a second autocommit query could land on a backend without the RLS-bypass GUC).
             with _safebox_db_conn() as conn:
                 connection = egress_gateway.resolve_active_connection(
                     conn, scope.business_slug, connection_slug
                 )
-                row = conn.execute(
-                    "select secret_ciphertext, secret_nonce, secret_fingerprint "
-                    "from provider_connections where id = %s", (connection.id,)
-                ).fetchone()
-            secret = egress_gateway._unseal_secret(row[0], row[1])
+            secret = egress_gateway._unseal_secret(
+                connection.secret_ciphertext, connection.secret_nonce
+            )
             state["connection"] = connection
-            state["fingerprint"] = str(row[2] or "")
+            state["fingerprint"] = str(connection.secret_fingerprint or "")
             return secret
 
         def provider_caller(scope, secret):

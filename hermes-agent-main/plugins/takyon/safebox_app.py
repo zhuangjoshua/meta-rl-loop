@@ -2437,38 +2437,47 @@ def build_safebox_app() -> FastAPI:
         secret = str(body.secret or "")
         if not business or not connection_slug or not secret:
             raise HTTPException(status_code=400, detail="missing_deposit_fields")
+        # Seal BEFORE opening the conn (fail fast on an unconfigured key, no partial state).
+        try:
+            ct, nonce, fp = egress_gateway.seal_secret(secret)
+        except egress_gateway.EgressError as exc:
+            raise HTTPException(status_code=exc.status, detail={"error": exc.code}) from exc
         with _safebox_db_conn() as conn:
-            row = conn.execute(
-                "select id, allowed_host, approval_id from provider_connections "
-                "where business_slug = %s and connection_slug = %s",
-                (business, connection_slug),
-            ).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="connection_unknown")
-            connection_id, allowed_host, approval_id = str(row[0]), str(row[1] or ""), row[2]
-            # must-fix #7/#9/#12: re-assert the host policy at deposit (defense in depth vs a row
-            # created before a denylist entry existed).
-            denied = egress_gateway.host_denied_for_egress(allowed_host)
-            if denied:
-                raise HTTPException(status_code=403, detail={"error": denied})
-            # Require an APPROVED operator_approvals row (the human decided this connection).
-            appr = conn.execute(
-                "select status from operator_approvals where business_slug = %s "
-                "and action_kind = 'provider_connection_grant' and status = 'approved' "
-                "and (id = %s or %s is null)",
-                (business, approval_id, approval_id),
-            ).fetchone()
-            if appr is None:
-                raise HTTPException(status_code=403, detail="connection_not_approved")
-            try:
-                ct, nonce, fp = egress_gateway.seal_secret(secret)
-            except egress_gateway.EgressError as exc:
-                raise HTTPException(status_code=exc.status, detail={"error": exc.code}) from exc
-            conn.execute(
-                "update provider_connections set secret_ciphertext = %s, secret_nonce = %s, "
-                "secret_fingerprint = %s, status = 'active', updated_at = now() where id = %s",
-                (ct, nonce, fp, connection_id),
-            )
+            # ALL statements in ONE transaction: on the Supabase transaction pooler (:6543) separate
+            # autocommit statements can land on different backends where the RLS-bypass GUC is not
+            # carried, so the SELECT could see the row and the UPDATE could silently touch 0 rows
+            # (the documented probe gotcha). One transaction pins them to one backend.
+            with conn.transaction():
+                row = conn.execute(
+                    "select id, allowed_host, approval_id from provider_connections "
+                    "where business_slug = %s and connection_slug = %s",
+                    (business, connection_slug),
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="connection_unknown")
+                connection_id, allowed_host, approval_id = str(row[0]), str(row[1] or ""), row[2]
+                # must-fix #7/#9/#12: re-assert the host policy at deposit (defense in depth vs a row
+                # created before a denylist entry existed).
+                denied = egress_gateway.host_denied_for_egress(allowed_host)
+                if denied:
+                    raise HTTPException(status_code=403, detail={"error": denied})
+                # Require an APPROVED operator_approvals row (the human decided this connection).
+                appr = conn.execute(
+                    "select status from operator_approvals where business_slug = %s "
+                    "and action_kind = 'provider_connection_grant' and status = 'approved' "
+                    "and (id = %s or %s is null)",
+                    (business, approval_id, approval_id),
+                ).fetchone()
+                if appr is None:
+                    raise HTTPException(status_code=403, detail="connection_not_approved")
+                updated = conn.execute(
+                    "update provider_connections set secret_ciphertext = %s, secret_nonce = %s, "
+                    "secret_fingerprint = %s, status = 'active', updated_at = now() where id = %s "
+                    "returning id",
+                    (ct, nonce, fp, connection_id),
+                ).fetchone()
+                if updated is None:
+                    raise HTTPException(status_code=500, detail="deposit_write_failed")
         return {"business": business, "connection_slug": connection_slug, "status": "active", "fingerprint": fp}
 
     @app.post("/v1/user-api-keys/register")
