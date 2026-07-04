@@ -8507,6 +8507,15 @@ def _archetype_leaf():
     return _archetypes
 
 
+def _store_build_leaf():
+    """The `store_build` leaf (EAS build-lane settle-at-trigger money orchestration), lazily imported."""
+    try:
+        from . import store_build as _store_build
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import store_build as _store_build
+    return _store_build
+
+
 def _refuse_product_file_edit_on_autonomous_wake(path: Any) -> None:
     """Block product-SOURCE writes (product/site/...) on a wake. Research/metrics/memory writes and
     distribution/creative receipts + assets (product/public-assets, product/brand, product/static-ads,
@@ -15568,6 +15577,10 @@ class TakyonStore:
             existing_cas_keys=existing_cas_keys,
             source_digests=candidate_files,
         )
+        if owner_user_id:
+            # The gate above read the per-slug quota cache; this revision's net-new CAS bytes
+            # are now live in the store, so record them or the next gate check undercounts.
+            storage.note_operator_storage_written(normalized, incoming_bytes)
         conn.execute(
             """
             INSERT INTO business_revisions (
@@ -22229,6 +22242,95 @@ def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
         _store().enforce_operator_business_access(slug)
         days = args.get("days") or args.get("window_days") or 7
         return tool_result(_business_analytics_summary(slug, days=int(days)))
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
+    """Build + ship a mobile_app release via EAS (readmodular §2.4/§2.5). Gates (fail-closed, in
+    order): refuse on autonomous wake (spendful); business must be archetype mobile_app; mobile_app
+    must be ENABLED (archetype_unavailable:mobile_app until its E2E passes — so today this refuses,
+    by design). Only then does it run the settle-at-trigger money flow (store_build.run_build):
+    reserve creative credits → invoke EAS → settle at successful trigger / release on failure. The
+    EAS invoker is fail-closed (eas_builder_unconfigured) until the jailed builder + the one-time
+    `eas credentials` login exist, so a publish today reserves nothing and returns a clear next step.
+    EXPO_TOKEN is resolved SERVER-SIDE by the invoker (never on this plane — it's denied over /v1/env)."""
+    _refuse_on_autonomous_wake("mobile releases")
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        lane = str(args.get("lane") or "preview").strip().lower()
+        if lane not in ("preview", "production"):
+            raise TakyonError("lane must be 'preview' (TestFlight-internal) or 'production' (store)")
+        arch = _archetype_leaf()
+        with store._connect() as conn:
+            row = store._ensure_business(conn, business)
+        archetype = str((row or {}).get("archetype") or "web_saas")
+        if arch.normalize_archetype(archetype, allow_empty=True) != arch.MOBILE_APP:
+            raise TakyonError(
+                f"business_publish_mobile_release is for mobile_app businesses; '{business}' is "
+                f"'{archetype}'."
+            )
+        # Fail closed until the mobile_app pipeline is E2E-proven (readmodular §5 rollout).
+        arch.assert_selectable(arch.MOBILE_APP)
+        sb = _store_build_leaf()
+        credits = _creative_credit_total_cost("mobile_release")
+        rk = f"mobile-release:{business}:{lane}:{str(args.get('idempotency_key') or _now())}"
+        result = sb.run_build(
+            business_slug=business,
+            lane=lane,
+            credits=credits,
+            reservation_key=rk,
+            reserve=lambda b, c, k: _reserve_creative_credits(
+                b, action="mobile_release", reservation_key=k, metadata={"lane": lane}
+            ),
+            settle=lambda k, actual, meta: _commit_creative_credits(
+                k, action="mobile_release", metadata=meta
+            ),
+            release=lambda k, meta: _release_creative_credits(
+                k, action="mobile_release", metadata=meta
+            ),
+            invoke_eas=sb.default_eas_invoker(business_slug=business, lane=lane, expo_token=""),
+        )
+        return tool_result(
+            {"success": True, "business": business, "lane": lane, "build_id": result.build_id}
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_read_store_status(args: dict, **_: Any) -> str:
+    """CEO evidence surface for a mobile_app business's App Store standing (readmodular §2.5). Today
+    it surfaces the Apple developer-ACCOUNT health via the safebox account-health route — the key
+    never leaves the safebox, and a non-'ok' state (esp. agreement_blocked) tells the CEO store
+    submissions are frozen account-wide before it attempts one. Per-app review/version status lands
+    with the submit lane. Read-only; fail-open on the probe (state='unreachable' rather than error)."""
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        archetype = "web_saas"
+        with store._connect() as conn:
+            row = store._ensure_business(conn, business)
+            archetype = str((row or {}).get("archetype") or "web_saas")
+        account_health: dict[str, Any]
+        try:
+            try:
+                from . import safebox as _sb
+            except ImportError:  # pragma: no cover - alternate load path
+                from plugins.takyon import safebox as _sb
+            account_health = _sb.store_asc_account_health()
+        except Exception as exc:
+            # Never hard-fail a read: a probe/transport error surfaces as a state, not a tool error.
+            account_health = {"state": "unreachable", "detail": str(exc)[:200], "status_code": None}
+        return tool_result(
+            {
+                "success": True,
+                "business": business,
+                "archetype": archetype,
+                "account_health": account_health,
+                "note": "Apple developer-account health; per-app review/version status lands with the submit lane.",
+            }
+        )
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -30024,6 +30126,10 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
     "logo_generate": 2,
+    # App Store rail (readmodular §2.5/§7): a mobile release (EAS build + TestFlight) is a fixed
+    # operator-priced creative-credit action; the exact EAS $ cost is recorded in the credit metadata
+    # at settle from usage_pricing ('eas','build_ios'). Reserve→settle-at-trigger→release (store_build).
+    "mobile_release": 4,
     **{c.credit_action: c.credit_cost_default for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": 1,
     "reddit_ad_launch": 1,
@@ -34843,6 +34949,32 @@ TAKYON_TOOL_DEFINITIONS = [
         "description": "Read-only web analytics for a business's published product site from the shared Umami property, filtered to the business's own subdomain. Returns truthful not-configured/unavailable states instead of faked numbers.",
         "handler": handle_business_read_app_analytics,
         "schema": _schema("business_read_app_analytics", "Read published product-site web analytics (visitors/pageviews/visits over a window) without mutating state.", {"business": _BUSINESS_PROP, "days": {"type": "integer", "description": "Trailing window in days; default 7"}}, ["business"]),
+    },
+    {
+        "name": "business_publish_mobile_release",
+        "description": "Build + ship a mobile_app release via EAS (lane: preview=TestFlight-internal | production=store). Creative-credit gated, settle-at-trigger; fail-closed until mobile_app is enabled and the EAS builder + eas-credentials login exist.",
+        "handler": handle_business_publish_mobile_release,
+        "schema": _schema(
+            "business_publish_mobile_release",
+            "Build and ship a mobile_app release through EAS (settle-at-trigger creative-credit gated).",
+            {
+                "business": _BUSINESS_PROP,
+                "lane": {"type": "string", "description": "preview (TestFlight-internal) or production (store submission). Default preview."},
+                "idempotency_key": {"type": "string", "description": "Optional idempotency key so a retried publish never double-charges."},
+            },
+            ["business"],
+        ),
+    },
+    {
+        "name": "business_read_store_status",
+        "description": "Read a mobile_app business's App Store standing (Apple developer-account health now; per-app review/version status when the submit lane lands). Read-only, fail-open.",
+        "handler": handle_business_read_store_status,
+        "schema": _schema(
+            "business_read_store_status",
+            "Read the App Store account/app status for a mobile_app business (account health via the safebox; key never egresses).",
+            {"business": _BUSINESS_PROP},
+            ["business"],
+        ),
     },
     {
         "name": "business_check_runtime_capabilities",

@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -1280,15 +1281,52 @@ def prefix_bytes(backend: StorageBackend, prefix: str) -> int:
     return sum(int(size or 0) for size in backend.list_object_sizes(prefix).values())
 
 
-# Short-TTL per-process cache for the operator's aggregate storage footprint. The quota gate sits
-# on the live commit chokepoint, so an operator with many businesses paid one listing per owned
-# slug on EVERY commit — both the dominant per-commit latency term and the main source of broker
-# saturation when several turns commit concurrently. Staleness is bounded (60s) and immaterial to
-# a 5GiB fail-closed gate whose per-commit increments are kilobytes-to-megabytes: the gate still
-# adds THIS commit's incoming bytes on top of the cached total, and a fresh listing happens at
-# most once per minute per process. Keyed by the sorted slug set so ownership changes miss.
-_OPERATOR_STORAGE_BYTES_CACHE: dict[tuple[str, ...], tuple[float, int]] = {}
-_OPERATOR_STORAGE_BYTES_TTL_SECONDS = 60.0
+# Per-slug, per-process cache of each business prefix's byte footprint. The quota gate sits on
+# the live commit chokepoint, so an operator with many businesses paid one listing per owned slug
+# on EVERY commit — both the dominant per-commit latency term and the main source of broker
+# saturation (profiled live: 165 owned slugs = 165 list-sizes round trips ≈ 30s inside a single
+# 34s commit). Caching the AGGREGATE keyed by the slug set was not enough: creating a business
+# changes the owned set, so every fresh bootstrap re-paid the full fan-out. Per-slug entries make
+# a new business cost one listing (its own, empty prefix) while the other N stay cached.
+#
+# Truthfulness contract (what keeps a 15-minute TTL safe for a fail-closed 5GiB gate):
+#   - the gate always adds THIS commit's incoming bytes on top of the cached total;
+#   - successful writers bump their slug's entry (note_operator_storage_written), so this
+#     process's own writes are never invisible to its next gate check;
+#   - deleters (delete_prefix / purge_operator_storage) drop the slug's entry, so a purge is
+#     visible immediately (a stale entry would OVERcount, which fails safe, but tests and
+#     operator-deletion reads deserve the true zero);
+#   - residual drift is only OTHER processes' concurrent writes to other businesses, bounded by
+#     the TTL and kilobytes-to-megabytes per commit vs a 5GiB cap.
+_OPERATOR_PREFIX_BYTES_CACHE: dict[str, tuple[float, int]] = {}
+_OPERATOR_STORAGE_BYTES_TTL_SECONDS = 900.0
+_OPERATOR_STORAGE_CACHE_LOCK = threading.Lock()
+
+
+def note_operator_storage_written(slug: str, byte_delta: int) -> None:
+    """Record that this process just added ``byte_delta`` object-store bytes under ``slug``.
+
+    Keeps the per-slug quota cache truthful for our own writes without a re-listing: the entry's
+    refresh clock is NOT reset, so a real listing still happens at most one TTL after the value
+    was measured. No entry yet (never listed, or invalidated) means the next gate check lists
+    fresh anyway — nothing to bump."""
+    safe = _safe_slug(str(slug))
+    delta = max(0, int(byte_delta))
+    if not delta:
+        return
+    with _OPERATOR_STORAGE_CACHE_LOCK:
+        cached = _OPERATOR_PREFIX_BYTES_CACHE.get(safe)
+        if cached is not None:
+            _OPERATOR_PREFIX_BYTES_CACHE[safe] = (cached[0], cached[1] + delta)
+
+
+def _invalidate_operator_storage_cache(slug: str) -> None:
+    try:
+        safe = _safe_slug(str(slug))
+    except Exception:
+        return  # not a business slug (cache can't hold it) — nothing to drop
+    with _OPERATOR_STORAGE_CACHE_LOCK:
+        _OPERATOR_PREFIX_BYTES_CACHE.pop(safe, None)
 
 
 def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int:
@@ -1305,20 +1343,23 @@ def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int
             continue
         seen.add(safe)
         unique.append(safe)
-    # One remote listing per owned business, EVERY commit (this quota gate sits on the live commit
-    # chokepoint) — serialized this dominated commit latency for operators with many businesses
-    # (profiled: ~150 owned slugs x ~0.43s per listing ≈ 65s of every single workspace commit).
-    # Fan the per-slug listings out on the bounded sync pool; the sum is order-independent.
-    cache_key = tuple(sorted(unique))
-    cached = _OPERATOR_STORAGE_BYTES_CACHE.get(cache_key)
     now = time.monotonic()
-    if cached is not None and now - cached[0] < _OPERATOR_STORAGE_BYTES_TTL_SECONDS:
-        return cached[1]
-    total = sum(
-        _map_concurrently(lambda safe: prefix_bytes(backend, object_prefix(safe)), unique)
-    )
-    _OPERATOR_STORAGE_BYTES_CACHE[cache_key] = (now, total)
-    return total
+    values: dict[str, int] = {}
+    with _OPERATOR_STORAGE_CACHE_LOCK:
+        for safe in unique:
+            cached = _OPERATOR_PREFIX_BYTES_CACHE.get(safe)
+            if cached is not None and now - cached[0] < _OPERATOR_STORAGE_BYTES_TTL_SECONDS:
+                values[safe] = cached[1]
+    # Only stale/unseen slugs pay a listing, fanned out on the bounded sync pool. Steady state
+    # for a bootstrap: one listing for the brand-new slug, cache hits for the other N owned.
+    stale = [safe for safe in unique if safe not in values]
+    if stale:
+        fresh = _map_concurrently(lambda safe: prefix_bytes(backend, object_prefix(safe)), stale)
+        with _OPERATOR_STORAGE_CACHE_LOCK:
+            for safe, size in zip(stale, fresh):
+                values[safe] = int(size)
+                _OPERATOR_PREFIX_BYTES_CACHE[safe] = (now, int(size))
+    return sum(values[safe] for safe in unique)
 
 
 def enforce_operator_storage_quota(
@@ -1350,6 +1391,10 @@ def delete_prefix(backend: StorageBackend, prefix: str) -> list[str]:
     keys = sorted(backend.list_digests(prefix))
     for key in keys:
         backend.delete(key)
+    # The prefix's first segment is the business slug; its cached quota footprint is now wrong.
+    slug_part = str(prefix).split("/", 1)[0].strip()
+    if slug_part:
+        _invalidate_operator_storage_cache(slug_part)
     return keys
 
 
@@ -1461,6 +1506,16 @@ def sync_up(
 
         _map_concurrently(_put_one, to_upload)
         uploaded.extend(rel for rel, _ in to_upload)
+        if operator_owned_slugs is not None:
+            # Keep the quota cache truthful for this process's own writes. Counting the full
+            # uploaded size (not net-of-replaced) can only OVERcount — safe for a fail-closed gate.
+            uploaded_bytes = 0
+            for rel, _dg in to_upload:
+                try:
+                    uploaded_bytes += (src / rel).stat().st_size
+                except OSError:
+                    continue
+            note_operator_storage_written(slug, uploaded_bytes)
 
     deleted: list[str] = []
     if delete_remote:
