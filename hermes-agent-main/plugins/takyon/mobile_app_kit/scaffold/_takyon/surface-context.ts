@@ -4,7 +4,7 @@
 import type { SurfaceContext } from "./runtime-client";
 
 export const surfaceContext: SurfaceContext = {
-  runtimeApiBase: "https://__TAKYON_SLUG__.coscale.app/api/takyon/apps/__TAKYON_SLUG__",
+  runtimeApiBase: "https://__TAKYON_PRODUCT_HOST__/api/takyon/apps/__TAKYON_SLUG__",
   runtimeFeatures: ["auth", "account", "profile", "records", "generate"],
   railState: {},
   auth: {

@@ -18,7 +18,7 @@ export default function LicensesScreen() {
         <CardContent>
           <Button
             onPress={() => {
-              Linking.openURL("https://__TAKYON_SLUG__.coscale.app/licenses").catch(() => {});
+              Linking.openURL("https://__TAKYON_PRODUCT_HOST__/licenses").catch(() => {});
             }}
           >
             View licenses

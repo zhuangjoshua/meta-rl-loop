@@ -33,10 +33,15 @@ records any ids already created.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from . import core, meta_graph
+
+
+def _dt_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 # ── Defaults / constants ──────────────────────────────────────────────────────────────────────────
@@ -356,6 +361,9 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
     credit_metadata: dict[str, Any] = {}
     credits_committed = False
     credits_released = False
+    media_reservation_key = ""
+    media_reserved = False
+    slug = ""
     try:
         store = core._store()
         business = core._resolved_business_slug(args, required=True)
@@ -503,6 +511,56 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "value": receipt,
             })
 
+        # ── Media-spend budget authority (parity with the reddit launch rail) ──
+        # Live ad delivery must be capped by reserved channel credits BEFORE any provider objects
+        # exist: reserve the remaining meta channel credits as the campaign's total budget
+        # authority, derive a bounded schedule from them, and register the campaign in the
+        # canonical ad-spend policy registry after creation. This is what makes a meta campaign
+        # visible to the wake pulse (active_ad_campaigns), eligible for the pre-wake insights
+        # refresh, enforceable by the gateway budget gate, and auto-settled/paused at its cap —
+        # none of which previously applied to meta (2026-07-04 parity fix).
+        budget_snapshot = core._creative_credit_budget_snapshot(business)
+        meta_budget = (
+            budget_snapshot.get("channels", {}).get("meta", {})
+            if isinstance(budget_snapshot.get("channels"), Mapping)
+            else {}
+        )
+        remaining_channel_credits = core._creative_credit_int(meta_budget.get("remaining_credits"))
+        media_spend_credits = core._ad_channel_live_media_spend_credits(
+            "meta", remaining_channel_credits
+        )
+        schedule = core._derive_ad_spend_schedule(
+            channel="meta",
+            reserved_credits=media_spend_credits,
+            requested_daily_budget_usd=round(daily_budget_cents / 100.0, 2),
+        )
+        daily_budget_cents = int(round(float(schedule["daily_budget_usd"]) * 100))
+        plan["daily_budget_usd"] = schedule["daily_budget_usd"]
+        plan["daily_budget_cents"] = daily_budget_cents
+        plan["total_budget_usd"] = schedule["total_budget_usd"]
+        plan["start_at"] = schedule["start_at"]
+        plan["end_at"] = schedule["end_at"]
+        base_receipt.update({
+            "daily_budget_usd": schedule["daily_budget_usd"],
+            "total_budget_usd": schedule["total_budget_usd"],
+            "start_at": schedule["start_at"],
+            "end_at": schedule["end_at"],
+        })
+        media_reservation_key = f"{idempotency_key}:meta-media-spend"
+        core._reserve_channel_spend_credits(
+            business,
+            channel="meta",
+            requested_credits=media_spend_credits,
+            reservation_key=media_reservation_key,
+            metadata={
+                "slug": slug,
+                "receipt_path": receipt_rel,
+                "plan_path": plan_rel,
+                "activation_requested": mode == "live",
+            },
+        )
+        media_reserved = True
+
         # ── 2. Fetch the generated creative bytes from the workspace store ──
         asset_abs = store._resolve_business_file(business, asset_rel)
         if not asset_abs.is_file():
@@ -621,6 +679,33 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             raise core.TakyonError(f"ads_create_ad returned no ad_id: {ad_resp!r}")
         created_ids["ad_id"] = ad_id
 
+        # ── Register the campaign in the canonical ad-spend policy registry (before activation,
+        # mirroring the reddit launch: the budget authority row must exist before delivery can
+        # spend). This row is what the wake pulse, pre-wake refresh, budget gate, and
+        # settle/auto-pause rails key on.
+        core._upsert_ad_spend_policy(
+            business,
+            channel="meta",
+            slug=slug,
+            reservation_key=media_reservation_key,
+            reserved_credits=media_spend_credits,
+            daily_budget_cents=daily_budget_cents,
+            total_budget_cents=media_spend_credits,
+            start_at=core._parse_iso_datetime(schedule["start_at"]) or _dt_now(),
+            end_at=core._parse_iso_datetime(schedule["end_at"]) or (_dt_now() + timedelta(days=1)),
+            provider_account_id=str(ad_account_id or "") or None,
+            provider_campaign_id=str(campaign_id or "") or None,
+            provider_group_id=str(adset_id or "") or None,
+            provider_ad_id=str(ad_id or "") or None,
+            provider_post_id=str(creative_id or "") or None,
+            status="created_paused",
+            metadata={
+                "receipt_path": receipt_rel,
+                "plan_path": plan_rel,
+                "activation_requested": mode == "live",
+            },
+        )
+
         # ── 5. Activate only when mode=='live' (and not test-mode, already gated) ──
         status = "created_paused"
         activated = False
@@ -631,6 +716,13 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             core.safebox.meta_graph_forward(method="POST", path=ad_id, params={"status": "ACTIVE"})
             status = "activated"
             activated = True
+            core._update_ad_spend_policy(
+                business,
+                channel="meta",
+                slug=slug,
+                status="active",
+                metadata_patch={"activated_at": core._now()},
+            )
 
         # ── Commit the reserved credits now that provider objects exist ──
         core._commit_creative_credits(
@@ -683,6 +775,31 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                     metadata=credit_metadata,
                 )
                 credits_released = True
+            except Exception:
+                pass
+        # Release the media-spend budget hold on failure (parity with reddit): a launch that did
+        # not activate must not keep the channel's credits reserved. If provider objects were
+        # created before the failure, keep the policy row truthful as partial_failed so a later
+        # repair/cleanup can find the real ids.
+        if media_reserved:
+            try:
+                core._release_channel_spend_credits(
+                    media_reservation_key,
+                    business=business,
+                    channel="meta",
+                    metadata={"slug": slug, "status": "launch_failed", "error": str(exc)[:300]},
+                )
+            except Exception:
+                pass
+        if created_ids and business and slug:
+            try:
+                core._update_ad_spend_policy(
+                    business,
+                    channel="meta",
+                    slug=slug,
+                    status="partial_failed",
+                    metadata_patch={"error": str(exc)[:300], "ids": dict(created_ids)},
+                )
             except Exception:
                 pass
         # A partial launch must leave a repair-able receipt recording any ids already created so a
@@ -957,6 +1074,75 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
             content = "\n".join(existing_lines + new_lines) + "\n"
             core._atomic_write_text(insights_abs, content)
 
+        # ── Stamp + settle the canonical ad-spend policy (parity with the reddit sync) ──
+        # Every sync stamps insights_synced_at (truthful staleness for the wake pulse /
+        # pre-wake refresh) and the running spend; when spend reaches the reserved cap or the
+        # window ends, settle the channel credits and pause the ad set (the D9 stop-at-cap
+        # belt). Best-effort by design: a stamping failure must never fail the metrics sync,
+        # and campaigns launched before the policy registry existed simply have no row.
+        settlement: dict[str, Any] | None = None
+        try:
+            policy = core._load_ad_spend_policy(business, channel="meta", slug=slug)
+        except Exception:
+            policy = None
+        if policy is not None:
+            try:
+                totals = core._meta_aggregate_insights_rows(
+                    [dict(r) for r in rows if isinstance(r, Mapping)]
+                )
+                synced_spend_cents = max(
+                    int(policy.last_synced_spend_cents or 0),
+                    int(totals.get("spend_cents") or 0),
+                )
+                terminal = synced_spend_cents >= int(policy.total_budget_cents or 0)
+                if isinstance(policy.end_at, datetime) and policy.end_at <= _dt_now():
+                    terminal = True
+                if terminal and int(policy.settled_credits or 0) < int(policy.reserved_credits or 0):
+                    settled_credits = min(int(policy.reserved_credits or 0), synced_spend_cents)
+                    balances = core._settle_channel_spend_credits(
+                        policy.reservation_key,
+                        business=business,
+                        channel="meta",
+                        actual_credits=settled_credits,
+                        metadata={"slug": slug, "status": "settled"},
+                    )
+                    core._update_ad_spend_policy(
+                        business,
+                        channel="meta",
+                        slug=slug,
+                        status="completed",
+                        last_synced_spend_cents=synced_spend_cents,
+                        settled_credits=settled_credits,
+                        metadata_patch={"settled_at": core._now(), "insights_synced_at": core._now()},
+                    )
+                    auto_pause: dict[str, Any]
+                    try:
+                        if policy.provider_group_id:
+                            core.safebox.meta_graph_forward(
+                                method="POST",
+                                path=str(policy.provider_group_id),
+                                params={"status": "PAUSED"},
+                            )
+                        auto_pause = {"success": True, "paused_adset_id": policy.provider_group_id}
+                    except Exception as pause_exc:  # noqa: BLE001 - belt, not the primary gate
+                        auto_pause = {"success": False, "error": str(pause_exc)[:200]}
+                    settlement = {
+                        "settled_credits": settled_credits,
+                        "balance_credits": balances.get("balance_credits"),
+                        "reserved_credits": balances.get("reserved_credits"),
+                        "auto_pause": auto_pause,
+                    }
+                else:
+                    core._update_ad_spend_policy(
+                        business,
+                        channel="meta",
+                        slug=slug,
+                        last_synced_spend_cents=synced_spend_cents,
+                        metadata_patch={"insights_synced_at": core._now()},
+                    )
+            except Exception:
+                pass
+
         sync = {
             **base_sync,
             "success": True,
@@ -966,7 +1152,37 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
             "insights_path": insights_rel,
             "external_side_effects": "read",
         }
+        if settlement:
+            sync["credit_settlement"] = settlement
         _write_receipt(business, sync_rel, sync)
+        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): the FULL
+        # totals + rows Meta returned (impressions/reach/clicks/spend/cpc/cpm/ctr/frequency/
+        # actions/…), verbatim and non-prescriptive. Recomputed here because the policy block
+        # above only aggregates when a spend policy exists. Best-effort — never blocks the sync.
+        try:
+            from . import cost_events
+
+            try:
+                _metrics_totals = core._meta_aggregate_insights_rows(
+                    [dict(r) for r in rows if isinstance(r, Mapping)]
+                )
+            except Exception:
+                _metrics_totals = {}
+            cost_events.record_metrics_observation(
+                provider="meta",
+                name=f"meta:{level}:{resolved_object_id or slug}",
+                metrics=_metrics_totals,
+                rows=[dict(r) for r in rows if isinstance(r, Mapping)],
+                business_slug=business,
+                identifiers={
+                    "slug": slug,
+                    "level": level,
+                    "object_id": resolved_object_id,
+                    "date_preset": date_preset,
+                },
+            )
+        except Exception:
+            pass
         return core.tool_result({
             "success": True,
             "action": "business_meta_ad_insights_sync",

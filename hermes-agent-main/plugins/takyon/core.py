@@ -231,6 +231,19 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 - `tsc --noEmit` rejects unused variables/imports and type errors; remove them. Do not leave the workspace with a failing build or typecheck.
 - If you cannot land BOTH green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining build/typecheck error and the file(s) involved, so Takyon hand-patches instead of cold re-delegating. A plain "I inspected the workspace" or a diagnosis without a green build is a failure, not a success.
 """
+MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
+- This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
+- Before you finish, you MUST run `npm install` (if you changed dependencies) and `npx tsc --noEmit` in this workspace and confirm it exits green. Run it yourself with Bash — do not assume.
+- If you cannot land it green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining error and the file(s) involved.
+"""
+MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App Store rail):
+- The `_takyon/` directory is PLATFORM-OWNED and overwritten wholesale per business — never edit it. Import the runtime client and surface context only via the `@takyon/*` path alias.
+- Auth, sessions, entitlements, records, and AI generation go through the `_takyon` runtime client against the platform runtime API. Do not call providers directly and do not add your own backend.
+- NEVER add Stripe, web checkout, or any external purchase flow inside the app — Apple rejects external digital purchases (guideline 3.1.1). Subscription upsell copy may link to the product website account page; in-app purchase rails land later.
+- Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
+- The Delete Account flow (profile screen) is an Apple 5.1.1(v) requirement — keep it working.
+- Stay on the pinned Expo SDK 54 dependency set; do not add packages that require custom native code (managed workflow only).
+"""
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
 - Write files relative to the current working directory.
@@ -2872,10 +2885,11 @@ def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
     """Idea-branded hero copy the bootstrap writes to ``product/hero.json`` from the step-1 brief,
     so the FIRST published landing is on-message before the slower full design pass. Best-effort and
     fail-soft: any read/parse problem returns {} and the landing falls back to the generic welcome."""
-    if workspace_root is None:
+    business_root = _starter_business_root(Path(workspace_root) if workspace_root is not None else None)
+    if business_root is None:
         return {}
     try:
-        hero_path = Path(workspace_root) / "product" / "hero.json"
+        hero_path = business_root / "product" / "hero.json"
         if not hero_path.is_file():
             return {}
         data = json.loads(hero_path.read_text(encoding="utf-8") or "{}")
@@ -3115,6 +3129,142 @@ def _materialize_subuser_app_kit(
     _inject_favicon_links(workspace_root)
 
 
+def _mobile_app_scaffold_source_dir() -> Path:
+    return Path(__file__).resolve().parent / "mobile_app_kit" / "scaffold"
+
+
+def _workspace_is_mobile_app_dir(workspace_raw: str) -> bool:
+    normalized = str(workspace_raw or "").strip().strip("/").lower()
+    return normalized == "product/app" or normalized.startswith("product/app/")
+
+
+def _materialize_mobile_app_workspace(
+    workspace_root: Path,
+    *,
+    slug: str,
+    business_name: str,
+    description: str,
+    surface: dict[str, Any] | None,
+) -> bool:
+    """The mobile analog of ``_materialize_subuser_app_kit`` — THE consumer of the archetype
+    preset's ``scaffold`` field (readmodular §4). Seed-once: copies ``mobile_app_kit/scaffold``
+    into ``product/app`` with the business tokens filled when no app.json exists yet; then ALWAYS
+    force-refreshes the platform-owned ``_takyon/`` boundary (runtime client + a per-business
+    surface-context with the ABSOLUTE runtimeApiBase and real Supabase auth config), mirroring the
+    web kit's rematerialize rule. Returns True when the scaffold was newly seeded."""
+    source = _mobile_app_scaffold_source_dir()
+    if not source.is_dir():
+        raise TakyonError("mobile_app scaffold missing from the runtime (mobile_app_kit/scaffold)")
+    canonical_slug = _slugify(slug)
+    # Free-text business fields are substituted into TSX/JSON string literals — strip every
+    # character that could escape a literal (quotes, backslashes, template/JSX delimiters,
+    # newlines). app.json gets its values via json.dumps assignment below, never str.replace.
+    def _display_safe(raw: str, fallback: str, limit: int) -> str:
+        cleaned = re.sub(r"[^\w ,.&'!?()’-]+", " ", str(raw or ""))
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()[:limit].strip()
+        return cleaned or fallback
+    display_name = _display_safe(business_name, canonical_slug, 60)
+    display_description = _display_safe(description, f"{display_name} mobile app", 160)
+    seeded = False
+    if not (workspace_root / "app.json").is_file():
+        substitutions = {
+            "__TAKYON_APP_NAME__": display_name,
+            "__TAKYON_SLUG__": canonical_slug,
+            "__TAKYON_APP_DESCRIPTION__": display_description,
+            "__TAKYON_ORG__": "coscale",
+            "__EXPO_ORG__": "coscale",
+            # The real product host (R2 edge): universal links, the licenses page, and the runtime
+            # API all live at <slug>.<PUBLIC_COMPANY_BASE_DOMAIN> — never a hardcoded scaffold guess.
+            "__TAKYON_PRODUCT_HOST__": f"{canonical_slug}.{_company_base_domain()}",
+        }
+        # app.json is the seed-completion marker (its absence gates re-seeding), so it is written
+        # LAST — a crash mid-copy re-seeds cleanly instead of wedging on a partial tree.
+        app_json_source: Path | None = None
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source)
+            if {"node_modules", ".git", "dist"} & set(rel.parts):
+                continue
+            if rel.as_posix() == "app.json":
+                app_json_source = path
+                continue
+            destination = workspace_root / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, ValueError):
+                shutil.copy2(path, destination)
+                continue
+            for token, value in substitutions.items():
+                text = text.replace(token, value)
+            destination.write_text(text, encoding="utf-8")
+        if app_json_source is None:
+            raise TakyonError("mobile_app scaffold is missing app.json")
+        # JSON-safe fill: slug/org tokens have a validated charset; the free-text name/description
+        # are ASSIGNED onto the parsed config so json.dumps owns the escaping. `eas init` assigns
+        # the real project id at build time (store_builder); the placeholder updates/projectId
+        # entries would otherwise break `expo config` on the seeded tree.
+        app_text = app_json_source.read_text(encoding="utf-8")
+        app_text = app_text.replace("__TAKYON_SLUG__", canonical_slug).replace("__TAKYON_ORG__", "coscale")
+        app_text = app_text.replace("__TAKYON_APP_NAME__", "app").replace("__TAKYON_APP_DESCRIPTION__", "app")
+        app_text = app_text.replace("__EXPO_ORG__", "coscale")
+        app_text = app_text.replace("__TAKYON_PRODUCT_HOST__", f"{canonical_slug}.{_company_base_domain()}")
+        app_cfg = json.loads(app_text)
+        expo_cfg = app_cfg.get("expo") or {}
+        expo_cfg["name"] = display_name
+        expo_cfg["description"] = display_description
+        expo_cfg.pop("updates", None)
+        (expo_cfg.get("extra") or {}).get("eas", {}).pop("projectId", None)
+        expo_cfg["owner"] = "coscale"
+        app_cfg["expo"] = expo_cfg
+        (workspace_root / "app.json").write_text(json.dumps(app_cfg, indent=2) + "\n", encoding="utf-8")
+        seeded = True
+    # Platform-owned boundary: force-refresh every run so client/context fixes reach existing
+    # app workspaces, exactly like _rematerialize_appkit_owned_src on the web side.
+    kit_dir = workspace_root / "_takyon"
+    kit_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts")
+    auth_payload = _subuser_public_auth_payload(surface) or {}
+    # The mobile SurfaceContext.railState type is Record<string, {callable, reason}> — NOT the web
+    # shape's string status map. Convert: a positive status → callable; otherwise carry the status
+    # as the reason. runtimeFeatures already lists the enabled rails, so anything present there is
+    # callable regardless of the raw status label.
+    raw_rail_state = (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {}
+    enabled_features = set(_surface_effective_runtime_features(surface) or [])
+    _POSITIVE_RAIL_STATUS = {"enabled", "declared", "live", "ready", "on", "active", "available"}
+    rail_state = {}
+    for rail, status in (raw_rail_state.items() if isinstance(raw_rail_state, Mapping) else []):
+        status_text = str(status).strip().lower() if not isinstance(status, Mapping) else ""
+        callable_ = rail in enabled_features or status_text in _POSITIVE_RAIL_STATUS or (
+            isinstance(status, Mapping) and bool(status.get("callable"))
+        )
+        entry: dict[str, Any] = {"callable": bool(callable_)}
+        if not callable_ and status_text:
+            entry["reason"] = status_text
+        rail_state[str(rail)] = entry
+    context = {
+        "runtimeApiBase": f"https://{canonical_slug}.{_company_base_domain()}/api/takyon/apps/{canonical_slug}",
+        "runtimeFeatures": _surface_effective_runtime_features(surface),
+        "railState": rail_state,
+        "auth": {
+            "url": str(auth_payload.get("url") or ""),
+            "publishableKey": str(auth_payload.get("publishableKey") or ""),
+            "googleProvider": str(auth_payload.get("googleProvider") or "google"),
+        },
+        "branding": {"accent": _brand_mark_accent(slug), "name": (business_name or canonical_slug).strip()},
+    }
+    (kit_dir / "surface-context.ts").write_text(
+        "// PLATFORM-OWNED — materialized per business; do not edit.\n"
+        'import type { SurfaceContext } from "./runtime-client";\n\n'
+        "export const surfaceContext: SurfaceContext = "
+        + json.dumps(context, ensure_ascii=False, indent=2)
+        + ";\n",
+        encoding="utf-8",
+    )
+    return seeded
+
+
 def _surface_requires_subuser_app_starter(surface: dict[str, Any] | None) -> bool:
     return _surface_shape_requires_app_shell(
         runtime_features=_surface_runtime_features(surface),
@@ -3129,9 +3279,153 @@ def _humanize_business_slug(slug: str) -> str:
     return " ".join(part.capitalize() for part in parts)
 
 
-def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -> dict[str, Any]:
-    title = _humanize_business_slug(slug)
+def _starter_business_root(workspace_root: Path | None) -> Path | None:
+    if workspace_root is None:
+        return None
+    root = Path(workspace_root)
+    if root.name == "site" and root.parent.name == "product":
+        return root.parent.parent
+    return root
+
+
+def _starter_strategy_sections(workspace_root: Path | None) -> tuple[str, dict[str, str]]:
+    business_root = _starter_business_root(workspace_root)
+    if business_root is None:
+        return "", {}
+    strategy_path = business_root / "research" / "strategy.md"
+    try:
+        body = strategy_path.read_text(encoding="utf-8")
+    except OSError:
+        return "", {}
+    if not body.strip():
+        return "", {}
+
+    heading_re = re.compile(r"^(#{1,6})\s+(.*)$")
+    title = ""
+    current_section = ""
+    current_lines: list[str] = []
+    sections: dict[str, str] = {}
+
+    def _flush() -> None:
+        nonlocal current_section, current_lines
+        if current_section:
+            sections[current_section] = "\n".join(current_lines).strip()
+        current_lines = []
+
+    for raw_line in body.splitlines():
+        match = heading_re.match(raw_line)
+        if match:
+            level = len(match.group(1))
+            heading = match.group(2).strip()
+            if level == 1 and not title:
+                title = heading
+            if level <= 2:
+                _flush()
+                current_section = _normalize_heading_text(heading) if level == 2 else ""
+                continue
+        if current_section:
+            current_lines.append(raw_line)
+
+    _flush()
+    return title, sections
+
+
+def _starter_strategy_first_line(value: str) -> str:
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*•>]+\s*", "", line)
+        line = re.sub(r"[*_`]+", "", line).strip()
+        if line:
+            return line
+    return ""
+
+
+def _starter_strategy_title(value: str, *, slug: str) -> str:
+    title = _starter_strategy_first_line(value)
+    if not title:
+        return _humanize_business_slug(slug)
+    title = re.sub(r"\s*\([^)]*\)\s*$", "", title).strip()
+    title = re.split(r"\s+[—-]\s+", title, maxsplit=1)[0].strip()
+    return title or _humanize_business_slug(slug)
+
+
+def _starter_title_is_generic(title: str, *, slug: str) -> bool:
+    value = str(title or "").strip().lower()
+    if not value:
+        return True
+    if value == str(slug or "").strip().lower():
+        return True
+    return value == _humanize_business_slug(slug).strip().lower()
+
+
+def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, str]:
+    if workspace_root is None:
+        return {}
+
+    def _clean_literal(value: str) -> str:
+        text = re.sub(r"{[^}]*}", " ", value)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return re.sub(r"[*_`]+", "", text).strip()
+
+    copy: dict[str, str] = {}
+    hero = _read_bootstrap_hero_copy(workspace_root)
+    if hero.get("headline"):
+        copy["title"] = str(hero["headline"]).strip()[:160]
+    if hero.get("subhead"):
+        copy["description"] = str(hero["subhead"]).strip()[:240]
+    if copy.get("title") and copy.get("description"):
+        return copy
+
+    landing_path = Path(workspace_root) / "src" / "screens" / "landing.tsx"
+    try:
+        landing = landing_path.read_text(encoding="utf-8")
+    except OSError:
+        return copy
+
+    for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", landing, flags=re.DOTALL):
+        title = _clean_literal(match.group(1))
+        if title and "Welcome to" not in title:
+            copy.setdefault("title", title[:160])
+            break
+    for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", landing, flags=re.DOTALL):
+        description = _clean_literal(match.group(1))
+        if description and "Sign in with Google" not in description and len(description) >= 24:
+            copy.setdefault("description", description[:240])
+            break
+    return copy
+
+
+def _subuser_app_starter_strings(
+    surface: dict[str, Any] | None,
+    *,
+    slug: str,
+    workspace_root: Path | None = None,
+) -> dict[str, Any]:
+    strategy_title, strategy_sections = _starter_strategy_sections(workspace_root)
+    workspace_copy = _starter_workspace_marketing_copy(workspace_root)
+    title = _starter_strategy_title(
+        strategy_sections.get("business name") or strategy_title,
+        slug=slug,
+    )
+    if _starter_title_is_generic(title, slug=slug) and workspace_copy.get("title"):
+        title = str(workspace_copy["title"]).strip() or _humanize_business_slug(slug)
+    if _starter_title_is_generic(title, slug=slug):
+        title = _starter_strategy_title(strategy_sections.get("tagline") or "", slug=slug)
+    if _starter_title_is_generic(title, slug=slug):
+        title = _starter_strategy_title(
+            strategy_sections.get("core value proposition") or "",
+            slug=slug,
+        )
     description = str((surface or {}).get("notes") or "").strip()
+    if not description:
+        description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
+    if not description:
+        description = _starter_strategy_first_line(strategy_sections.get("core value proposition") or "")
+    if not description:
+        description = str(workspace_copy.get("description") or "").strip()
     if not description:
         description = f"Get started with {title}, manage your account, and access the product online."
     return {
@@ -3141,8 +3435,13 @@ def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -
     }
 
 
-def _starter_seed_replacements(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
-    copy = _subuser_app_starter_strings(surface, slug=slug)
+def _starter_seed_replacements(
+    surface: dict[str, Any] | None,
+    *,
+    slug: str,
+    workspace_root: Path | None = None,
+) -> dict[str, str]:
+    copy = _subuser_app_starter_strings(surface, slug=slug, workspace_root=workspace_root)
 
     # Seed values land in JSX text / HTML attribute positions: keep them markup-safe.
     def _seed_safe(value: Any) -> str:
@@ -6929,7 +7228,7 @@ def _materialize_subuser_app_scaffold(
             "frontend_stack vite_react_ts requires the bundled scaffold at "
             "plugins/takyon/subuser_app_kit/scaffold, which is missing from this runtime"
         )
-    replacements = _starter_seed_replacements(surface, slug=slug)
+    replacements = _starter_seed_replacements(surface, slug=slug, workspace_root=workspace_root)
     for path in sorted(source.rglob("*")):
         if not path.is_file():
             continue
@@ -6963,8 +7262,11 @@ def _materialize_subuser_app_scaffold(
 
 
 # The starter-owned metadata floor + AppKit-owned rail wrappers. Unlike the worker-owned screens
-# (app-home, landing, profile, support, components, branding tokens), these files encode canonical
-# SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the product-build contract).
+# (app-home, landing, profile, support, components, and the `src/tokens.css` theme tokens), these
+# files encode canonical SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the
+# product-build contract). NOTE `src/lib/branding.ts` IS in this set (it is re-rendered from the
+# surface contract's seed tokens): an edit to any file below can never persist — see
+# _refuse_starter_owned_product_write for the operator-facing gate.
 # The scaffold seeds them once at bootstrap, but a fix to this canonical layer must reach EXISTING
 # businesses on their next rebuild — otherwise a platform metadata/rail fix only lands in brand-new
 # businesses. So these files are force-refreshed from the scaffold on every materialize, exactly
@@ -6996,7 +7298,7 @@ def _rematerialize_starter_owned_files(
     source = _subuser_app_scaffold_source_dir()
     if not source.exists():
         return
-    replacements = _starter_seed_replacements(surface, slug=slug)
+    replacements = _starter_seed_replacements(surface, slug=slug, workspace_root=workspace_root)
     for rel in _STARTER_OWNED_REFRESH_FILES:
         src_path = source / rel
         if not src_path.is_file():
@@ -7159,6 +7461,9 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
+        "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
+        + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
+        + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
         "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers in `src/lib/hooks.ts` instead of hardcoding paid-vs-unpaid copy.",
         "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
@@ -7192,7 +7497,9 @@ def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
         return True
     # Product/site work is the highest-risk delegated source lane, so default it onto the
     # isolated Docker rail instead of falling back to a host subprocess when no override is set.
-    return _workspace_needs_runtime_ui_contract(workspace_rel)
+    # The mobile app workspace (product/app) is the same class of delegated customer-facing source
+    # and gets the same isolation.
+    return _workspace_needs_runtime_ui_contract(workspace_rel) or _workspace_is_mobile_app_dir(workspace_rel)
 
 
 _CLAUDE_SDK_EVENT_PREFIX = "TAKYON_SDK_EVENT "
@@ -9308,6 +9615,20 @@ def _business_analytics_summary(slug: str, *, days: int = 7) -> dict[str, Any]:
         )
     except Exception as exc:  # provider error or secret-authority unavailable — degrade truthfully
         return {"configured": True, "ok": False, "hostname": hostname, "reason": str(exc)}
+    # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'), on FRESH fetches
+    # only (the TTL cache bounds frequency). Previously these numbers were memory-cached and lost.
+    try:
+        from . import cost_events
+
+        cost_events.record_metrics_observation(
+            provider="umami",
+            name=f"umami:stats:{hostname or website_id}",
+            metrics=stats if isinstance(stats, dict) else {"value": stats},
+            business_slug=slug,
+            identifiers={"website_id": website_id, "hostname": hostname, "window_days": days},
+        )
+    except Exception:
+        pass
     payload = {
         "configured": True,
         "ok": True,
@@ -15428,7 +15749,9 @@ class TakyonStore:
                 suffix = " ..." if len(substantive_conflicts) > 5 else ""
                 raise TakyonError(
                     f"stale workspace base: business:{normalized} is at r{current_head}, but this workspace was pinned to "
-                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing"
+                    f"r{base_revision}; conflicting files changed in both places ({preview}{suffix}); re-hydrate before committing. "
+                    "For a worker-deferred task that means re-delegating with a NEW idempotency_key so the workspace "
+                    "re-materializes at the current head — a SAME-key re-call only replays this stored failure."
                 )
             # Commentary conflicts (and any not cleanly merged) -> drop the local render so head's
             # committed version stands after re-materialize below. A cleanly MERGED substantive file
@@ -17056,7 +17379,7 @@ class TakyonStore:
                 continue
             desc = str(p.get("hypothesis") or "").strip()
             if desc:
-                bets.append(f"- (in flight) {desc}")
+                bets.append(f"- (in flight) {desc}{_format_episode_metrics(p.get('metrics_snapshot'))}")
         if bets:
             lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
         learn_lines: list[str] = []
@@ -17105,6 +17428,11 @@ class TakyonStore:
         episode_id = uuid.uuid4().hex
         with self._connect() as conn:
             self._ensure_business(conn, slug)
+            # Guarantee at least one quantitative metric on every episode: capture measured
+            # product/channel numbers at record time alongside (never replacing) the CEO's own
+            # baseline. Best-effort — an unavailable source degrades to fewer keys, never blocks
+            # the bet from being recorded.
+            metrics_snapshot = _episode_metrics_snapshot(self, conn, slug, channel)
             event_id = self._record_event(
                 conn, scope=f"business:{slug}", business_slug=slug,
                 event_type="ceo.episode.opened",
@@ -17114,11 +17442,12 @@ class TakyonStore:
                     "channel": (channel or "").strip() or None,
                     "action_kind": (action_kind or "").strip() or None,
                     "baseline": baseline if isinstance(baseline, dict) else {},
+                    "metrics_snapshot": metrics_snapshot,
                     "opened_at": _now(),
                 },
             )
         return {"success": True, "business": slug, "episode_id": episode_id, "event_id": event_id,
-                "event_type": "ceo.episode.opened"}
+                "event_type": "ceo.episode.opened", "metrics_snapshot": metrics_snapshot}
 
     @staticmethod
     def _tokenize_tags(raw: Any) -> set[str]:
@@ -22307,15 +22636,52 @@ def handle_business_read_app_analytics(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def _creative_credit_reservation_outcome(store: "TakyonStore", business: str, reservation_key: str) -> dict[str, Any]:
+    """Resolve a creative-credit reservation key's prior ledger outcome (read-only).
+
+    Returns {"state": "none" | "in_flight" | "committed" | "released", "metadata": {...}} — the
+    metadata is the terminal (commit/release) entry's, which for mobile_release carries the settled
+    build_id. This is what makes publish idempotency REAL: the SQL reserve gate replays a known key
+    without holding anything, so callers must branch on the prior outcome instead of re-running."""
+    try:
+        with store._connect() as conn:
+            rows = conn.execute(
+                "select kind, metadata from business_creative_credit_entries "
+                "where business_slug = ? and reservation_key = ? order by id",
+                (business, reservation_key),
+            ).fetchall()
+    except Exception:
+        rows = []
+    state = "none"
+    metadata: dict[str, Any] = {}
+    kinds = []
+    for row in rows or []:
+        kind = str(row["kind"] if isinstance(row, Mapping) else row[0] or "").strip()
+        kinds.append(kind)
+        raw_meta = row["metadata"] if isinstance(row, Mapping) else row[1]
+        if kind in ("commit", "release") and isinstance(raw_meta, Mapping):
+            metadata = dict(raw_meta)
+    if "commit" in kinds:
+        state = "committed"
+    elif "release" in kinds:
+        state = "released"
+    elif "reserve" in kinds:
+        state = "in_flight"
+    return {"state": state, "metadata": metadata}
+
+
 def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
     """Build + ship a mobile_app release via EAS (readmodular §2.4/§2.5). Gates (fail-closed, in
-    order): refuse on autonomous wake (spendful); business must be archetype mobile_app; mobile_app
-    must be ENABLED (archetype_unavailable:mobile_app until its E2E passes — so today this refuses,
-    by design). Only then does it run the settle-at-trigger money flow (store_build.run_build):
-    reserve creative credits → invoke EAS → settle at successful trigger / release on failure. The
-    EAS invoker is fail-closed (eas_builder_unconfigured) until the jailed builder + the one-time
-    `eas credentials` login exist, so a publish today reserves nothing and returns a clear next step.
-    EXPO_TOKEN is resolved SERVER-SIDE by the invoker (never on this plane — it's denied over /v1/env)."""
+    order): refuse on autonomous wake (spendful); required idempotency_key (a retried publish must
+    never double-charge); business must be archetype mobile_app; mobile_app must be SELECTABLE
+    (archetype registry gate); the app source at product/app must exist; the greenlight
+    pre-submission compliance gate must pass (preview→internal lane, production→production lane) —
+    ALL before any credit reserve, so a refused publish charges nothing. Only then runs the
+    settle-at-trigger money flow (store_build.run_build): reserve creative credits → invoke EAS →
+    settle at successful trigger / release on failure. The invoker is the real local builder
+    (store_builder.local_eas_invoker, the live-proven recipe) when its explicit-path custody
+    resolves, else the fail-closed default (eas_builder_unconfigured). Secrets reach only the
+    builder's child process — never this plane's environ, never /v1/env."""
     _refuse_on_autonomous_wake("mobile releases")
     store = _store()
     try:
@@ -22323,6 +22689,12 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
         lane = str(args.get("lane") or "preview").strip().lower()
         if lane not in ("preview", "production"):
             raise TakyonError("lane must be 'preview' (TestFlight-internal) or 'production' (store)")
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
+            raise TakyonError(
+                "idempotency_key is required for a mobile release (a retried publish must re-attach, "
+                "never double-charge)"
+            )
         arch = _archetype_leaf()
         with store._connect() as conn:
             row = store._ensure_business(conn, business)
@@ -22336,12 +22708,98 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
         arch.assert_selectable(arch.MOBILE_APP)
         # A real EAS build runs for minutes — defer to the worker plane when enabled (the money flow
         # below runs inside the worker's inline re-invocation, once). Returns None ⇒ run inline here.
-        deferred = _defer_mobile_release_to_worker({**args, "business": business, "lane": lane})
+        # Preview-only enablement (TAKYON_ARCHETYPE_PREVIEW) is process-local, so a deferred re-run
+        # on a worker without the env would refuse itself — the preview lane always runs inline.
+        preview_only = not arch.BUSINESS_ARCHETYPES[arch.MOBILE_APP].enabled
+        deferred = (
+            None if preview_only else _defer_mobile_release_to_worker({**args, "business": business, "lane": lane})
+        )
         if deferred is not None:
             return deferred
+        # The app source is the publish subject — refuse before any spend if it isn't there.
+        app_source = store._business_root(business) / "product" / "app"
+        if not (app_source / "app.json").is_file():
+            raise TakyonError(
+                "mobile_app_source_missing: product/app has no app.json. Build the app first "
+                "(business_claude_agent_task with workspace 'product/app' seeds and iterates it)."
+            )
+        # Greenlight pre-submission compliance gate (readmodular §3) — BEFORE reserve: a failing
+        # scan must cost nothing. preview ships to TestFlight-internal (internal lane thresholds);
+        # production is the store lane (critical==0 AND high==0).
+        try:
+            from . import store_compliance as _greenlight
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import store_compliance as _greenlight
+        gate = _greenlight.run_preflight_gate(
+            str(app_source),
+            lane=_greenlight.LANE_PRODUCTION if lane == "production" else _greenlight.LANE_INTERNAL,
+        )
+        if not gate.get("passed"):
+            return tool_error(
+                f"greenlight_preflight_failed: {gate.get('detail') or 'compliance scan failed'}",
+                success=False,
+                compliance=gate,
+            )
         sb = _store_build_leaf()
+        # The real builder must be configured BEFORE any money moves — an unconfigured builder is a
+        # pure gate refusal (genuinely nothing reserved), never a reserve-then-release round-trip
+        # that would poison the idempotency key's ledger history.
+        try:
+            from . import store_builder as _builder
+        except ImportError:  # pragma: no cover - alternate load path
+            from plugins.takyon import store_builder as _builder
+        if not _builder.is_configured():
+            return tool_error(
+                "eas_builder_unconfigured: the store-builder custody (ASC key, Expo token, team "
+                "distribution identity) is not present on this plane, so a real build cannot run. "
+                "No credits were reserved.",
+                success=False,
+            )
+        builder_creds = _builder.resolve_local_store_credentials()
+        invoke_eas = _builder.local_eas_invoker(
+            business_slug=business, lane=lane, source_dir=str(app_source), creds=builder_creds
+        )
+        # Exact provider cost per the credit rule (usage_pricing is the SSOT) — unpriced = REFUSED,
+        # before reserve (an EAS action can never spend unpriced).
+        from agent.usage_pricing import get_pricing_entry as _gpe
+
+        eas_cost_entry = _gpe("build_ios", provider="eas")
+        if eas_cost_entry is None or not getattr(eas_cost_entry, "request_cost", None):
+            raise TakyonError(
+                "eas_build_unpriced: ('eas','build_ios') has no request_cost in usage_pricing — "
+                "refusing an unpriced spend"
+            )
+        provider_cost_usd = float(eas_cost_entry.request_cost)
         credits = _creative_credit_total_cost("mobile_release")
-        rk = f"mobile-release:{business}:{lane}:{str(args.get('idempotency_key') or _now())}"
+        if credits < 1:
+            raise TakyonError(
+                f"mobile_release credit cost must be >= 1 (got {credits}); a zero-cost release "
+                "would bypass the reservation ledger"
+            )
+        rk = f"mobile-release:{business}:{lane}:{idempotency_key}"
+        # Idempotency is REAL, not just a stable key: the credit ledger replays a reserve for a
+        # known key WITHOUT holding anything, so re-running run_build on a used key would trigger a
+        # real paid build that settles as a no-op (free/unmetered). Resolve the key's prior outcome
+        # first: committed → re-attach and return the prior receipt; released/in-flight → refuse
+        # and demand a fresh key.
+        prior = _creative_credit_reservation_outcome(store, business, rk)
+        if prior.get("state") == "committed":
+            prior_meta = prior.get("metadata") or {}
+            return tool_result(
+                {
+                    "success": True,
+                    "business": business,
+                    "lane": lane,
+                    "build_id": str(prior_meta.get("build_id") or ""),
+                    "replayed": True,
+                    "note": "idempotency_key already settled — returning the prior receipt; no new build was triggered.",
+                }
+            )
+        if prior.get("state") in ("released", "in_flight"):
+            raise TakyonError(
+                f"idempotency_key already used (reservation {prior['state']}). The ledger will not "
+                "re-reserve a replayed key — retry the publish with a NEW idempotency_key."
+            )
         result = sb.run_build(
             business_slug=business,
             lane=lane,
@@ -22350,16 +22808,32 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
             reserve=lambda b, c, k: _reserve_creative_credits(
                 b, action="mobile_release", reservation_key=k, metadata={"lane": lane}
             ),
+            # Our invoker never reports actual_credits, so the full reservation settles; if a future
+            # invoker DOES report a different actual, it lands visibly in the ledger metadata rather
+            # than silently voiding the refund contract.
             settle=lambda k, actual, meta: _commit_creative_credits(
-                k, action="mobile_release", metadata=meta
+                k,
+                action="mobile_release",
+                metadata={**meta, "provider": "eas", "provider_model": "build_ios",
+                          "provider_cost_usd": provider_cost_usd,
+                          **({"actual_credits_reported": int(actual)} if actual is not None and int(actual) != int(credits) else {})},
             ),
             release=lambda k, meta: _release_creative_credits(
                 k, action="mobile_release", metadata=meta
             ),
-            invoke_eas=sb.default_eas_invoker(business_slug=business, lane=lane, expo_token=""),
+            invoke_eas=invoke_eas,
         )
         return tool_result(
-            {"success": True, "business": business, "lane": lane, "build_id": result.build_id}
+            {
+                "success": True,
+                "business": business,
+                "lane": lane,
+                "build_id": result.build_id,
+                "detail": result.detail,
+                "compliance": {"passed": True, "lane": gate.get("lane")},
+                "note": "Build triggered and credits settled (spend happens at the Expo trigger). "
+                "Poll the build for the signed artifact; store submission is a separate step.",
+            }
         )
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -22667,18 +23141,44 @@ def _verified_business_file_mutation_response(
         return tool_error(str(exc), success=False)
 
 
+def _refuse_starter_owned_product_write(rel: str) -> None:
+    """Fail closed on durable edits that can never persist: scaffold-owned product files.
+
+    Every file in _STARTER_OWNED_REFRESH_FILES under the product/site runtime-UI surface is
+    force-rewritten from the bundled scaffold on every kit materialize — before each product
+    worker run, inside each publish build, and inside this very commit's own surface-projection
+    refresh — so a durable write here silently self-reverts within its commit, no-ops the
+    revision, and then fails its sha postcondition byte-identically on every retry (observed
+    live as an unwinnable repair loop that exhausted two full CEO turns). Refusing up front
+    converts that silent lie into a routable error naming the viable repair. Handler-level on
+    purpose: internal platform writers of these files (e.g. the Search Console index.html
+    injection) still go through the store's apply path unimpeded."""
+    normalized = str(rel or "").strip().strip("/")
+    prefix = "product/site/"
+    if not normalized.startswith(prefix):
+        return
+    if normalized[len(prefix):] in _STARTER_OWNED_REFRESH_FILES:
+        raise TakyonError(
+            f"{normalized} is scaffold-owned and force-rewritten from the bundled scaffold on every "
+            "product build/kit materialize — edits to it can never persist. Make the minimal repair in "
+            "worker-owned source instead: fix the importing screen (src/screens/*, src/components/*) or "
+            "add the helper to a NEW worker-owned module under src/lib/ with a different filename."
+        )
+
+
 def handle_business_write_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
     content = str(args.get("content") or "")
-    _, file_path = _resolved_business_output_path_for_action(
+    rel, file_path = _resolved_business_output_path_for_action(
         store,
         business,
         str(args.get("path") or ""),
         action="artifact.write",
     )
+    _refuse_starter_owned_product_write(rel)
     previous_content = (
         file_path.read_text(encoding="utf-8", errors="replace")
         if file_path.exists()
@@ -22706,12 +23206,13 @@ def handle_business_patch_file(args: dict, **_: Any) -> str:
     _refuse_product_file_edit_on_autonomous_wake(args.get("path"))
     business = _resolved_business_slug(args, required=True)
     store = _store()
-    _, file_path = _resolved_business_output_path_for_action(
+    rel, file_path = _resolved_business_output_path_for_action(
         store,
         business,
         str(args.get("path") or ""),
         action="artifact.patch",
     )
+    _refuse_starter_owned_product_write(rel)
     if not file_path.exists():
         raise TakyonError(f"cannot patch missing file: {args.get('path')}")
     old = str(args.get("old") or "")
@@ -26415,6 +26916,29 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         image_urls = [str(u) for u in raw_urls] if isinstance(raw_urls, list) else []
         store = _store()
         store.enforce_operator_business_access(business)
+        # Idempotency layer 1: the canonical idempotency_keys rail (the exact apply-operations
+        # pattern) — an exact replay returns the recorded result with ZERO provider calls; a
+        # reused key with different inputs refuses.
+        op_hash = _hash_operation(
+            {
+                "tool": "business_shopify_create_product",
+                "business": business,
+                "title": title,
+                "price": price,
+                "status": status,
+            }
+        )
+        with store._connect() as conn:
+            prior = conn.execute(
+                "SELECT operation_hash, result_json FROM idempotency_keys WHERE key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        if prior:
+            if prior["operation_hash"] != op_hash:
+                raise TakyonError("idempotency_key already used for different operations")
+            cached = _json_loads(prior["result_json"], None)
+            if isinstance(cached, dict):
+                return tool_result({**cached, "idempotent_replay": True})
         try:
             _require_api_access(
                 {
@@ -26429,6 +26953,75 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         shop_domain = str(connection.get("shop_domain") or "")
         account_id = str(connection.get("connected_account_id") or "")
         mode = _effective_business_mode(row.get("mode"))
+        # Idempotency layer 2: our OWN receipts (immediately consistent) before any provider
+        # search — the 2026-07-04 live acceptance proved Shopify's products SEARCH index lags
+        # creates by seconds, so a same-title rerun under a new key would otherwise duplicate.
+        # A receipt match is verified against the store BY ID (read-your-writes) before adopting.
+        with store._connect() as conn:
+            receipt_rows = conn.execute(
+                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type = ? "
+                "ORDER BY created_at DESC LIMIT 100",
+                (business, "shopify.product.create"),
+            ).fetchall()
+        receipt_payloads = [
+            _json_loads(r["payload_json"] if isinstance(r, Mapping) else r[0], {})
+            for r in (receipt_rows or [])
+        ]
+        candidate_ids = shopify_util.match_product_receipts(
+            receipt_payloads, title=title, shop_domain=shop_domain
+        )
+        existing = None
+        for candidate_id in candidate_ids:
+            try:
+                existing = shopify_util.get_product(
+                    shop_domain=shop_domain,
+                    connected_account_id=account_id,
+                    product_id=candidate_id,
+                )
+            except shopify_util.ShopifyError as exc:
+                raise TakyonError(
+                    f"shopify_connection_inactive: the product-by-id probe failed ({exc}); "
+                    "re-run business_connect_shopify to refresh the connection"
+                ) from exc
+            if existing is not None:
+                break
+        if candidate_ids:
+            if existing is not None:
+                product_id = str(existing.get("id") or candidate_id)
+                result = {
+                    "success": True,
+                    "action": "business_shopify_create_product",
+                    "business": business,
+                    "shop_domain": shop_domain,
+                    "deduped": True,
+                    "dedup_source": "local_receipt",
+                    "product_id": product_id,
+                    "product_numeric_id": shopify_util._gid_numeric(product_id),
+                    "handle": str(existing.get("handle") or ""),
+                    "title": str(existing.get("title") or title),
+                    "status": str(existing.get("status") or "").lower(),
+                    "online_store_preview_url": str(
+                        existing.get("onlineStorePreviewUrl") or ""
+                    ),
+                    "tag": shopify_util.business_product_tag(business),
+                    "media_warnings": [],
+                    "note": (
+                        "A prior receipted push of this exact title to this store already "
+                        "exists; adopted it instead of duplicating."
+                    ),
+                }
+                numeric = result["product_numeric_id"]
+                if numeric:
+                    result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+                with store._connect() as conn:
+                    conn.execute(
+                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, "
+                        "created_at) VALUES (?, ?, ?, ?)",
+                        (idempotency_key, op_hash, _json_dumps(result), _now()),
+                    )
+                return tool_result(result)
+            # The receipted product was deleted on the store — the store is truth; fall through
+            # and create a fresh one.
         # The plan probe is live provider truth AND the connection-liveness check: an expired
         # token fails HERE, before any write reaches the store.
         try:
@@ -26462,6 +27055,27 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
             raise TakyonError(str(exc)) from exc
         except shopify_util.ShopifyError as exc:
             raise TakyonError(f"shopify_product_create_failed: {exc}") from exc
+        result: dict[str, Any] = {
+            "success": True,
+            "action": "business_shopify_create_product",
+            "business": business,
+            "shop_domain": shop_domain,
+            **product,
+        }
+        numeric = str(product.get("product_numeric_id") or "")
+        if numeric:
+            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
+        if product.get("deduped"):
+            result["dedup_source"] = "store_search"
+            result["note"] = (
+                "An identical product (same business tag + exact title) already exists on the "
+                "store; adopted it instead of duplicating."
+            )
+        elif str(product.get("status")) == "draft":
+            result["note"] = (
+                "Created as DRAFT — activate it in the store admin or create as status='active' "
+                "to publish it to the online storefront."
+            )
         with store._connect() as conn:
             store._record_event(
                 conn,
@@ -26484,25 +27098,10 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                     "actor": args.get("actor") or "agent",
                 },
             )
-        result: dict[str, Any] = {
-            "success": True,
-            "action": "business_shopify_create_product",
-            "business": business,
-            "shop_domain": shop_domain,
-            **product,
-        }
-        numeric = str(product.get("product_numeric_id") or "")
-        if numeric:
-            result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
-        if product.get("deduped"):
-            result["note"] = (
-                "An identical product (same business tag + exact title) already exists on the "
-                "store; adopted it instead of duplicating."
-            )
-        elif str(product.get("status")) == "draft":
-            result["note"] = (
-                "Created as DRAFT — activate it in the store admin or create as status='active' "
-                "to publish it to the online storefront."
+            conn.execute(
+                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (idempotency_key, op_hash, _json_dumps(result), _now()),
             )
         return tool_result(result)
     except Exception as exc:
@@ -27040,6 +27639,24 @@ def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record x metrics sync",
             actor=args.get("actor") or "agent",
         )
+        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): every metric
+        # section X returned for this post, verbatim. Best-effort — never blocks the sync.
+        try:
+            from . import cost_events
+
+            cost_events.record_metrics_observation(
+                provider="x",
+                name=f"x:post:{post_id}",
+                metrics={
+                    "public_metrics": snapshot["public_metrics"],
+                    "non_public_metrics": snapshot["non_public_metrics"],
+                    "organic_metrics": snapshot["organic_metrics"],
+                },
+                business_slug=business,
+                identifiers={"post_id": post_id, "post_url": snapshot["post_url"]},
+            )
+        except Exception:
+            pass
         return tool_result(
             {
                 "success": True,
@@ -28790,13 +29407,126 @@ def _wake_ad_refresh_enabled() -> bool:
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _format_episode_metrics(snapshot: Any) -> str:
+    """One compact ` [at record: …]` suffix for a wake-memory bet line, from the episode's
+    metrics_snapshot. Empty string when the snapshot is absent/empty — old episodes render as
+    before."""
+    if not isinstance(snapshot, dict):
+        return ""
+    bits: list[str] = []
+    for key, label in (("users", "users"), ("revenue_cents", "revenue_c"), ("usage_events", "usage")):
+        if snapshot.get(key) is not None:
+            bits.append(f"{label}={snapshot[key]}")
+    for camp in (snapshot.get("campaigns") or [])[:2]:
+        if isinstance(camp, dict):
+            frag = f"{camp.get('slug')}: spend_c={camp.get('spend_cents')}"
+            if camp.get("impressions") is not None:
+                frag += f" impr={camp['impressions']}"
+            if camp.get("clicks") is not None:
+                frag += f" clicks={camp['clicks']}"
+            bits.append(frag)
+    x_stats = snapshot.get("x")
+    if isinstance(x_stats, dict) and x_stats:
+        bits.append("x " + " ".join(f"{k}={v}" for k, v in list(x_stats.items())[:3]))
+    return f" [at record: {', '.join(bits)}]" if bits else ""
+
+
+def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channel: Any) -> dict[str, Any]:
+    """Quantitative context captured AT EPISODE RECORD TIME (RL rail R1 support).
+
+    Every episode carries at least one hard number so bets, lessons, and future settles are judged
+    against measured state instead of narrative: lifetime product counters always (users, revenue,
+    usage events), plus the episode channel's live-campaign delivery stats (spend from the policy
+    registry; impressions/clicks from the latest insights-sync receipt) for reddit/meta, and the
+    latest X sync totals for channel=x. Best-effort by design: every source is wrapped so a missing
+    table (SQLite dev store has no ad-spend policies), missing file, or provider gap degrades to
+    fewer keys — never an exception, never a blocked episode."""
+    snap: dict[str, Any] = {"captured_at": _now()}
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_users WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["users"] = int(_row_value_int(row, "n"))
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
+            (slug,),
+        ).fetchone()
+        snap["revenue_cents"] = int(_row_value_int(row, "c"))
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_usage_events WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["usage_events"] = int(_row_value_int(row, "n"))
+    except Exception:
+        pass
+    bucket = _normalize_creative_credit_bucket(channel) if channel else ""
+    if bucket in ("reddit", "meta"):
+        try:
+            backend = _business_ad_spend_backend()
+            campaigns: list[dict[str, Any]] = []
+            for policy in backend.list_policies(conn, slug, statuses=list(_PULSE_AD_LIVE_STATUSES)):
+                if str(policy.channel or "") != bucket:
+                    continue
+                entry: dict[str, Any] = {
+                    "slug": policy.slug,
+                    "status": policy.status,
+                    "spend_cents": int(policy.last_synced_spend_cents or 0),
+                    "total_budget_cents": int(policy.total_budget_cents or 0),
+                }
+                try:
+                    syncs_dir = store._resolve_business_file(
+                        slug, f"metrics/{bucket}-ads/{policy.slug}/syncs", sync=False
+                    )
+                    latest = max(
+                        (p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime
+                    )
+                    totals = (json.loads(latest.read_text(encoding="utf-8")) or {}).get("totals") or {}
+                    for key in ("impressions", "clicks", "spend_usd"):
+                        if totals.get(key) is not None:
+                            entry[key] = totals[key]
+                except Exception:
+                    pass
+                campaigns.append(entry)
+            if campaigns:
+                snap["campaigns"] = campaigns
+        except Exception:
+            pass
+    elif bucket == "x":
+        try:
+            syncs_dir = store._resolve_business_file(slug, "metrics/x/syncs", sync=False)
+            latest = max((p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime)
+            receipt = json.loads(latest.read_text(encoding="utf-8")) or {}
+            totals = receipt.get("totals") if isinstance(receipt.get("totals"), dict) else {}
+            x_stats = {
+                k: totals[k]
+                for k in ("views", "impressions", "likes", "replies", "reposts", "clicks")
+                if totals.get(k) is not None
+            }
+            if x_stats:
+                snap["x"] = x_stats
+        except Exception:
+            pass
+    return snap
+
+
+def _row_value_int(row: Any, key: str) -> int:
+    if row is None:
+        return 0
+    try:
+        return int(row[key] or 0)
+    except Exception:
+        try:
+            return int(row[0] or 0)
+        except Exception:
+            return 0
+
+
 def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
-    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE reddit campaign of this
-    business, pull fresh delivery insights via the EXISTING (gated) insights-sync tool, so the pulse
-    the CEO reads this wake is already current instead of relying on the agent to remember. Never
-    raises — a failed or skipped refresh must never break the wake. Bounded to reddit live+stale
-    campaigns (meta has no policy rows yet). Reuses the shared staleness threshold; disable with
-    TAKYON_WAKE_AD_REFRESH=0."""
+    """Pre-wake best-effort refresh: for each LIVE (active/paused) + STALE ad campaign of this
+    business, pull fresh delivery insights via the EXISTING (gated) channel insights-sync tool, so
+    the pulse the CEO reads this wake is already current instead of relying on the agent to
+    remember. Never raises — a failed or skipped refresh must never break the wake. Dispatches per
+    channel (reddit + meta both register in the ad-spend policy registry as of the 2026-07-04
+    parity fix). Reuses the shared staleness threshold; disable with TAKYON_WAKE_AD_REFRESH=0."""
     summary: dict[str, Any] = {"checked": 0, "refreshed": 0, "skipped": 0, "errors": 0, "campaigns": []}
     if not _wake_ad_refresh_enabled():
         summary["disabled"] = True
@@ -28809,7 +29539,8 @@ def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
     now_dt = datetime.now(timezone.utc)
     hour_bucket = now_dt.strftime("%Y%m%dT%H")  # fresh key each wake; dedups retries within the hour
     for policy in policies or []:
-        if str(policy.channel or "") != "reddit":
+        channel = str(policy.channel or "")
+        if channel not in ("reddit", "meta"):
             summary["skipped"] += 1
             continue
         summary["checked"] += 1
@@ -28821,12 +29552,23 @@ def _refresh_stale_live_ad_campaigns(slug: str) -> dict[str, Any]:
                 summary["skipped"] += 1
                 continue  # fresh enough — no refresh needed
             campaign_slug = policy.slug
-            raw = handle_business_reddit_ad_insights_sync({
+            sync_args = {
                 "business": slug,
                 "slug": campaign_slug,
                 "level": "campaign",
                 "idempotency_key": f"wake-refresh:{campaign_slug}:campaign:{hour_bucket}",
-            })
+            }
+            if channel == "meta":
+                # Lazy import: meta_ads_v2 imports core, so core must not import it at module load.
+                try:
+                    from . import meta_ads_v2
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon import meta_ads_v2
+                if policy.provider_campaign_id:
+                    sync_args["object_id"] = str(policy.provider_campaign_id)
+                raw = meta_ads_v2.handle_business_meta_ad_insights_sync(sync_args)
+            else:
+                raw = handle_business_reddit_ad_insights_sync(sync_args)
             ok = False
             try:
                 ok = bool(json.loads(raw).get("success"))
@@ -30415,6 +31157,7 @@ _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
     "logo_generate": "TAKYON_CREATIVE_CREDITS_LOGO",
+    "mobile_release": "TAKYON_CREATIVE_CREDITS_MOBILE_RELEASE",
     **{c.credit_action: c.credit_cost_env for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
     "reddit_ad_launch": "TAKYON_CREATIVE_CREDITS_REDDIT_LAUNCH",
@@ -30430,6 +31173,13 @@ _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "logo_generate": "creative.logo",
     "ugc_ad_generate": "creative.ugc",
     "static_ad_generate": "creative.static_ad",
+    # App Store rail: a mobile release is a paid creative action, so on prod (remote safebox
+    # authority) its credit spend MUST go through the audience-bound creative gate — an action with
+    # no audience falls to the generic reserve which fails closed with
+    # creative_credit_spend_requires_creative_gate. No provider route needs this audience (the EAS
+    # build resolves its keys from operator-rail custody, not a safebox-vended provider key); the
+    # audience is purely the reserve/commit/release money gate + owner verification.
+    "mobile_release": "creative.mobile_release",
     **{c.credit_action: c.credit_audience for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "creative.meta_ad_launch",
     "reddit_ad_launch": "creative.reddit_ad_launch",
@@ -32429,6 +33179,22 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
         store._sync_business_workspace_remote(business)
+        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): the FULL
+        # totals + rows the provider returned (CTR/CPM/spend/whatever comes back), verbatim and
+        # non-prescriptive. Best-effort — never blocks the sync.
+        try:
+            from . import cost_events
+
+            cost_events.record_metrics_observation(
+                provider="reddit",
+                name=f"reddit:{level}:{object_id or slug}",
+                metrics=totals,
+                rows=normalized_rows,
+                business_slug=business,
+                identifiers={"slug": slug, "level": level, "object_id": object_id, **ids},
+            )
+        except Exception:
+            pass
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_insights_sync",
@@ -33162,6 +33928,38 @@ def _repair_stale_work_request_from_worker_job(
     return final_status, final_result
 
 
+def _terminal_worker_retry_fields(
+    tool_name: str,
+    run_id: str,
+    status: str,
+    *,
+    side_effect: bool,
+) -> dict[str, Any]:
+    """Machine + prose routing for a worker run that finished WITHOUT success.
+
+    The same-key re-call contract is attach-or-replay by design: once the run is terminal,
+    re-calling with the SAME idempotency_key replays the stored result verbatim and never
+    re-runs (observed live: a CEO looped the identical stale-base replay to budget
+    exhaustion because nothing said so). These fields make the terminal state explicit and
+    name the one real affordance — a NEW idempotency_key — with side-effect-safe wording on
+    lanes that execute external actions."""
+    if side_effect:
+        note = (
+            f"run {run_id} already finished as {status}; re-calling with the SAME idempotency_key "
+            "replays this stored result and will never re-run. A retry requires a NEW "
+            "idempotency_key and WILL re-execute the side effect (e.g. a live post), so first "
+            "confirm the action did not already happen."
+        )
+    else:
+        note = (
+            f"run {run_id} already finished as {status}; re-calling with the SAME idempotency_key "
+            "replays this stored result and will never re-run. To retry after fixing the cause, "
+            "re-call with a NEW idempotency_key — a fresh run re-materializes the workspace at the "
+            "current head revision."
+        )
+    return {"terminal": True, "retry_guidance": note}
+
+
 def _run_operator_task_on_worker(
     *,
     store: "TakyonStore",
@@ -33228,7 +34026,13 @@ def _run_operator_task_on_worker(
             error_text = str(
                 result.get("error") or f"{tool_name} {normalized_status or status} on the worker plane"
             )
-            return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+            extra = {k: v for k, v in result.items() if k != "error"}
+            extra.update(
+                _terminal_worker_retry_fields(
+                    tool_name, run_id, normalized_status or str(status), side_effect=False
+                )
+            )
+            return tool_error(error_text, **extra)
         repaired = _repair_stale_work_request_from_worker_job(
             store,
             run_id=run_id,
@@ -33249,7 +34053,13 @@ def _run_operator_task_on_worker(
                 repaired_result.get("error")
                 or f"{tool_name} {repaired_status or worker_status} on the worker plane"
             )
-            return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+            extra = {k: v for k, v in repaired_result.items() if k != "error"}
+            extra.update(
+                _terminal_worker_retry_fields(
+                    tool_name, run_id, str(repaired_status or worker_status), side_effect=False
+                )
+            )
+            return tool_error(error_text, **extra)
         now = time.monotonic()
         if not picked_up and now >= pickup_deadline:
             # The worker has not STARTED this job yet — it is queued behind an in-flight build on the
@@ -33352,7 +34162,13 @@ def _run_worker_backed_business_job_and_wait(
                     or result.get("worker_error")
                     or f"{tool_name} {normalized_status or status} on the worker plane"
                 ).strip() or f"{tool_name} {normalized_status or status} on the worker plane"
-                return tool_error(error_text, **{k: v for k, v in result.items() if k != "error"})
+                extra = {k: v for k, v in result.items() if k != "error"}
+                extra.update(
+                    _terminal_worker_retry_fields(
+                        tool_name, run_id, normalized_status or str(status), side_effect=True
+                    )
+                )
+                return tool_error(error_text, **extra)
             repaired = _repair_stale_work_request_from_worker_job(
                 active_store,
                 run_id=run_id,
@@ -33376,7 +34192,13 @@ def _run_worker_backed_business_job_and_wait(
                     or repaired_result.get("worker_error")
                     or f"{tool_name} {repaired_status or worker_status} on the worker plane"
                 ).strip() or f"{tool_name} {repaired_status or worker_status} on the worker plane"
-                return tool_error(error_text, **{k: v for k, v in repaired_result.items() if k != "error"})
+                extra = {k: v for k, v in repaired_result.items() if k != "error"}
+                extra.update(
+                    _terminal_worker_retry_fields(
+                        tool_name, run_id, str(repaired_status or worker_status), side_effect=True
+                    )
+                )
+                return tool_error(error_text, **extra)
             now = time.monotonic()
             if not picked_up and now >= pickup_deadline:
                 return tool_result(
@@ -33791,10 +34613,30 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             or normalized_workspace.startswith("product/")
             or normalized_workspace in {"site", "website"}
         )
-        refresh_surface = _boolish(
-            args.get("refresh_surface"),
-            default=workspace_targets_product_surface,
-        )
+        # The mobile app workspace (product/app on a mobile_app business) has its OWN build/verify
+        # lane (Expo typecheck + the credit-gated store publish) — the web surface refresh is
+        # Vite-only and can never run against an Expo tree, so it is FORCED off here (an explicit
+        # refresh_surface=true from web habit would otherwise run the Vite pipeline on the Expo
+        # tree and fail the whole delegated task after the worker succeeded).
+        mobile_app_workspace = False
+        if _workspace_is_mobile_app_dir(workspace_rel):
+            _arch_leaf = _archetype_leaf()
+            business_archetype = str((business_row or {}).get("archetype") or "web_saas")
+            try:
+                mobile_app_workspace = (
+                    _arch_leaf.normalize_archetype(business_archetype, allow_empty=True) == _arch_leaf.MOBILE_APP
+                )
+            except Exception:
+                # An out-of-registry row value (version skew) degrades to the web path rather than
+                # hard-failing the delegated task.
+                mobile_app_workspace = False
+        if mobile_app_workspace:
+            refresh_surface = False
+        else:
+            refresh_surface = _boolish(
+                args.get("refresh_surface"),
+                default=workspace_targets_product_surface,
+            )
         docker_isolated_worker = _should_run_claude_agent_in_docker(workspace_rel)
         customer_facing_product_workspace = _workspace_needs_customer_ai_copy_contract(workspace_rel)
         reuse_session_workspace = bool(
@@ -33966,13 +34808,30 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     surface=surface_for_worker,
                     plans=app.get("plans") if isinstance(app, dict) else None,
                 )
+            elif mobile_app_workspace and normalized_workspace == "product/app":
+                # The archetype preset's scaffold consumer: seed-once mobile_app_kit/scaffold into
+                # product/app + force-refresh the platform-owned _takyon/ boundary. Only the exact
+                # app root seeds — a subdirectory task must never nest a second scaffold.
+                _materialize_mobile_app_workspace(
+                    workspace_path,
+                    slug=business,
+                    business_name=str((business_row or {}).get("name") or ""),
+                    description=str((business_row or {}).get("goal") or ""),
+                    surface=surface_for_worker,
+                )
             def build_worker_instruction(current_surface: dict[str, Any] | None) -> str:
                 worker_instruction_parts = [instruction.rstrip()]
                 if guidance_block:
                     worker_instruction_parts.append(guidance_block)
                 if _workspace_needs_customer_ai_copy_contract(workspace_rel):
                     worker_instruction_parts.append(CUSTOMER_FACING_AI_COPY_CONTRACT)
-                    worker_instruction_parts.append(PRODUCT_BUILD_GATE_CONTRACT)
+                    # The web build gate demands `npm run build` — the Expo tree has no build
+                    # script; the mobile gate verifies with tsc and the store publish gate.
+                    worker_instruction_parts.append(
+                        MOBILE_APP_BUILD_GATE_CONTRACT if mobile_app_workspace else PRODUCT_BUILD_GATE_CONTRACT
+                    )
+                if mobile_app_workspace:
+                    worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
                     worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
                     runtime_ui_contract = _runtime_ui_contract_block(current_surface)
@@ -35142,6 +36001,30 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 dimension_filters=filters,
             )
             rows = list(response.get("rows") or [])
+            # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'). GSC data
+            # previously had NO persistent sink at all; this is now its canonical record.
+            try:
+                from . import cost_events
+
+                cost_events.record_metrics_observation(
+                    provider="gsc",
+                    name=f"gsc:query:{site_url}",
+                    metrics={
+                        "clicks": response.get("clicks"),
+                        "impressions": response.get("impressions"),
+                        "ctr": response.get("ctr"),
+                        "position": response.get("position"),
+                    },
+                    rows=rows,
+                    identifiers={
+                        "site_url": site_url,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "dimensions": dimensions,
+                    },
+                )
+            except Exception:
+                pass
             return tool_result(
                 {
                     "success": True,
@@ -35177,6 +36060,22 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
+            try:
+                from . import cost_events
+
+                cost_events.record_metrics_observation(
+                    provider="dataforseo",
+                    name=f"dataforseo:{mode}",
+                    metrics={"row_count": len(rows)},
+                    rows=rows,
+                    identifiers={
+                        "keywords": raw_keywords,
+                        "location_code": location_code,
+                        "language_code": language_code,
+                    },
+                )
+            except Exception:
+                pass
             return tool_result(
                 {
                     "success": True,
@@ -35211,6 +36110,23 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
+            try:
+                from . import cost_events
+
+                cost_events.record_metrics_observation(
+                    provider="dataforseo",
+                    name=f"dataforseo:{mode}",
+                    metrics={"row_count": len(rows)},
+                    rows=rows,
+                    identifiers={
+                        "keywords": raw_keywords,
+                        "page_url": page_url,
+                        "location_code": location_code,
+                        "language_code": language_code,
+                    },
+                )
+            except Exception:
+                pass
             return tool_result(
                 {
                     "success": True,

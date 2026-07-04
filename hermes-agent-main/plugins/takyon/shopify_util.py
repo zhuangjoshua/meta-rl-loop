@@ -773,6 +773,94 @@ def find_business_product_by_title(
     return None
 
 
+SHOPIFY_PRODUCT_BY_ID_QUERY = """
+query takyonProductById($id: ID!) {
+  product(id: $id) { id handle title status onlineStorePreviewUrl }
+}
+""".strip()
+
+
+def get_product(
+    *, shop_domain: str, connected_account_id: str, product_id: str
+) -> dict[str, Any] | None:
+    """Fetch ONE product by id — the read-your-writes-consistent lookup (unlike the products
+    SEARCH, which is eventually consistent and returned empty seconds after a create in the
+    2026-07-04 live acceptance, causing a duplicate). None = the store itself answered
+    `product: null` (deleted/never existed). Any other failure raises — absence is only ever
+    the store's own answer, never an envelope-parse guess (hence the key-PRESENCE walk below
+    instead of `_extract_graphql_root`, which cannot represent an explicit null root)."""
+    wanted = str(product_id or "").strip()
+    if not wanted:
+        raise ShopifyCommerceError("get_product requires a product_id")
+    domain = normalize_shop_domain(shop_domain)
+    account = str(connected_account_id or "").strip()
+    if not account:
+        raise ShopifyConnectionError("get_product requires a connected_account_id")
+    payload = _composio_request(
+        "POST",
+        COMPOSIO_PROXY_TOOL_PATH,
+        json_body={
+            "connected_account_id": account,
+            "endpoint": f"https://{domain}/admin/api/{SHOPIFY_ADMIN_API_VERSION}/graphql.json",
+            "method": "POST",
+            "body": {
+                "query": SHOPIFY_PRODUCT_BY_ID_QUERY,
+                "variables": {"id": wanted},
+            },
+        },
+        timeout=60.0,
+    )
+    if isinstance(payload, Mapping) and payload.get("successful") is False:
+        raise ShopifyCommerceError(
+            f"Composio shopify proxy returned successful=false: {payload.get('error')!r}"
+        )
+    seen = 0
+    stack = [payload]
+    while stack and seen < 300:
+        seen += 1
+        current = stack.pop()
+        if isinstance(current, Mapping):
+            errors = current.get("errors")
+            if (
+                isinstance(errors, list)
+                and errors
+                and all(isinstance(item, Mapping) for item in errors)
+            ):
+                messages = "; ".join(str(item.get("message") or item) for item in errors[:5])
+                raise ShopifyCommerceError(f"shopify graphql errors: {messages}")
+            if "product" in current:
+                product = current.get("product")
+                return dict(product) if isinstance(product, Mapping) else None
+            stack.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    raise ShopifyCommerceError("product-by-id read returned no product field; refusing to guess")
+
+
+def match_product_receipts(
+    payloads: Sequence[Mapping[str, Any]], *, title: str, shop_domain: str
+) -> list[str]:
+    """The LOCAL dedup read: scan this business's own `shopify.product.create` event receipts
+    (canonical, immediately consistent) for prior pushes of the same (exact title, shop_domain)
+    and return their product_ids in the given order, deduped. This is what makes create
+    idempotent across reruns while the store's search index lags; the caller verifies each
+    candidate against the store via `get_product` and adopts the first that still exists."""
+    wanted_title = str(title or "").strip()
+    wanted_domain = str(shop_domain or "").strip().lower()
+    matches: list[str] = []
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        if str(payload.get("title") or "").strip() != wanted_title:
+            continue
+        if str(payload.get("shop_domain") or "").strip().lower() != wanted_domain:
+            continue
+        product_id = str(payload.get("product_id") or "").strip()
+        if product_id and product_id not in matches:
+            matches.append(product_id)
+    return matches
+
+
 def create_product(
     *,
     shop_domain: str,

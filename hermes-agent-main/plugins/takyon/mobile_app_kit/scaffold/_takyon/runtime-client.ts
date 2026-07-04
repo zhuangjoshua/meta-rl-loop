@@ -8,7 +8,7 @@
  * Two deltas vs the web client, both forced by the platform, neither a contract change:
  *   1. No cookie jar → every request carries `Authorization: Bearer <session_token>` from the
  *      injected token provider (SecureStore), replacing the web client's same-origin cookie.
- *   2. Absolute base → `runtimeApiBase` is baked absolute (https://<slug>.coscale.app/api/takyon/
+ *   2. Absolute base → `runtimeApiBase` is baked absolute (https://<product host>/api/takyon/
  *      apps/<slug>), since RN has no window.location.
  *
  * Security posture identical to web: all paid AI/search is brokered server-side (never a provider

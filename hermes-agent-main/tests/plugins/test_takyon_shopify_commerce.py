@@ -361,3 +361,84 @@ def test_no_new_subuser_surface():
     ws_src = open(ws.__file__, encoding="utf-8").read()
     assert "business_shopify_create_product" not in ws_src
     assert "business_shopify_read_orders" not in ws_src
+
+
+# ── idempotency layer 2: local receipts + product-by-id (2026-07-04 live-acceptance fix) ──────
+# Shopify's products SEARCH index is eventually consistent — the first live rerun duplicated a
+# product seconds after creating it. Dedup now reads OUR receipts first and verifies by id.
+
+
+def test_match_product_receipts_exact_title_and_domain():
+    payloads = [
+        {"title": "Other", "shop_domain": SHOP, "product_id": "gid://shopify/Product/1"},
+        {"title": "Trail Blend", "shop_domain": "elsewhere.myshopify.com", "product_id": "gid://shopify/Product/2"},
+        {"title": "Trail Blend", "shop_domain": SHOP.upper(), "product_id": "gid://shopify/Product/3"},
+        {"title": "Trail Blend", "shop_domain": SHOP, "product_id": "gid://shopify/Product/3"},
+        {"title": "Trail Blend", "shop_domain": SHOP, "product_id": "gid://shopify/Product/4"},
+        "not-a-mapping",
+    ]
+    # ordered, deduped, every matching receipt (newest first as given)
+    assert su.match_product_receipts(payloads, title="Trail Blend", shop_domain=SHOP) == [
+        "gid://shopify/Product/3",
+        "gid://shopify/Product/4",
+    ]
+    assert su.match_product_receipts(payloads, title="Nope", shop_domain=SHOP) == []
+    assert (
+        su.match_product_receipts(
+            [{"title": "Trail Blend", "shop_domain": SHOP, "product_id": ""}],
+            title="Trail Blend",
+            shop_domain=SHOP,
+        )
+        == []
+    )
+
+
+def test_get_product_present(monkeypatch):
+    payload = _proxy_data(
+        "ignored", {}
+    )
+    payload["data"]["data"] = {
+        "product": {
+            "id": "gid://shopify/Product/777",
+            "handle": "trail-blend",
+            "title": "Trail Blend",
+            "status": "ACTIVE",
+            "onlineStorePreviewUrl": "https://x",
+        }
+    }
+    transport = _FakeTransport([payload])
+    monkeypatch.setattr(su, "_composio_request", transport)
+    product = su.get_product(
+        shop_domain=SHOP, connected_account_id=ACCOUNT, product_id="gid://shopify/Product/777"
+    )
+    assert product is not None and product["id"] == "gid://shopify/Product/777"
+
+
+def test_get_product_null_means_deleted(monkeypatch):
+    payload = {"successful": True, "data": {"data": {"product": None}}}
+    transport = _FakeTransport([payload])
+    monkeypatch.setattr(su, "_composio_request", transport)
+    assert (
+        su.get_product(
+            shop_domain=SHOP, connected_account_id=ACCOUNT, product_id="gid://shopify/Product/9"
+        )
+        is None
+    )
+
+
+def test_get_product_fails_closed_on_missing_field(monkeypatch):
+    transport = _FakeTransport([{"successful": True, "data": {"data": {"shop": {}}}}])
+    monkeypatch.setattr(su, "_composio_request", transport)
+    with pytest.raises(su.ShopifyCommerceError, match="no product field"):
+        su.get_product(
+            shop_domain=SHOP, connected_account_id=ACCOUNT, product_id="gid://shopify/Product/9"
+        )
+
+
+def test_get_product_surfaces_graphql_errors(monkeypatch):
+    transport = _FakeTransport([{"successful": True, "data": {"errors": [{"message": "boom"}]}}])
+    monkeypatch.setattr(su, "_composio_request", transport)
+    with pytest.raises(su.ShopifyCommerceError, match="graphql errors"):
+        su.get_product(
+            shop_domain=SHOP, connected_account_id=ACCOUNT, product_id="gid://shopify/Product/9"
+        )

@@ -597,6 +597,75 @@ def test_starter_seeds_scaffold_on_vite_lane(tmp_path):
     assert "Fresh Co" in index_html and "__STARTER_SITE_NAME__" not in index_html
 
 
+def test_starter_uses_strategy_copy_when_surface_notes_are_empty(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    site_root = tmp_path / "product" / "site"
+    strategy = tmp_path / "research" / "strategy.md"
+    site_root.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# MetaProof — Initial Strategy
+
+## Business name
+MetaProof (metaproof0704c)
+
+## Tagline
+Turn customer conversations into your next product decision.
+
+## Core value proposition
+Transform raw interview notes into prioritized product briefs and weekly insight digests.
+""",
+        encoding="utf-8",
+    )
+
+    takyon_core._materialize_subuser_app_starter(
+        site_root, slug="metaproof0704c", surface=_app_shell_surface("vite_react_ts")
+    )
+
+    index_html = (site_root / "index.html").read_text(encoding="utf-8")
+    llms = (site_root / "public" / "llms.txt").read_text(encoding="utf-8")
+
+    assert "<title>MetaProof</title>" in index_html
+    assert 'content="Turn customer conversations into your next product decision."' in index_html
+    assert "Metaproof0704c" not in index_html
+    assert "MetaProof" in llms
+    assert "Turn customer conversations into your next product decision." in llms
+
+
+def test_starter_uses_tagline_when_strategy_title_is_generic(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    site_root = tmp_path / "product" / "site"
+    strategy = tmp_path / "research" / "strategy.md"
+    site_root.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# metaproof0704i — Landing Brief
+
+## Business name
+metaproof0704i
+
+## Tagline
+Turn every customer conversation into the next roadmap decision.
+""",
+        encoding="utf-8",
+    )
+
+    takyon_core._materialize_subuser_app_starter(
+        site_root, slug="metaproof0704i", surface=_app_shell_surface("vite_react_ts")
+    )
+
+    index_html = (site_root / "index.html").read_text(encoding="utf-8")
+
+    assert (
+        "<title>Turn every customer conversation into the next roadmap decision.</title>"
+        in index_html
+    )
+    assert 'content="Turn every customer conversation into the next roadmap decision."' in index_html
+    assert "<title>metaproof0704i</title>" not in index_html
+
+
 def test_starter_owned_metadata_refreshes_on_rebuild(tmp_path):
     from plugins.takyon import core as takyon_core
 
@@ -637,6 +706,53 @@ def test_starter_owned_metadata_refreshes_on_rebuild(tmp_path):
     assert "Fresh Co" in llms
     assert "Fresh metadata for rebuild" in llms
     assert "__STARTER_PUBLIC_ORIGIN__" not in llms
+
+
+def test_starter_refresh_uses_custom_landing_copy_when_notes_are_empty(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    strategy = tmp_path / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# fresh-co — Strategy
+
+## Tagline
+Ignore this tagline for the title fallback.
+""",
+        encoding="utf-8",
+    )
+
+    takyon_core._materialize_subuser_app_starter(
+        tmp_path, slug="fresh-co", surface=_app_shell_surface("vite_react_ts")
+    )
+
+    (tmp_path / "src" / "screens" / "landing.tsx").write_text(
+        """
+export function LandingScreen() {
+  return (
+    <main>
+      <h1>Turn customer conversations into your next product decision.</h1>
+      <p>Paste your interview notes and get a ranked product brief in minutes.</p>
+    </main>
+  );
+}
+""",
+        encoding="utf-8",
+    )
+
+    takyon_core._rematerialize_starter_owned_files(  # type: ignore[attr-defined]
+        tmp_path,
+        slug="fresh-co",
+        surface=_app_shell_surface("vite_react_ts"),
+    )
+
+    index_html = (tmp_path / "index.html").read_text(encoding="utf-8")
+
+    assert (
+        "<title>Turn customer conversations into your next product decision.</title>"
+        in index_html
+    )
+    assert "Get started with Fresh Co" not in index_html
 
 
 def test_starter_seeds_vite_when_lane_absent(tmp_path):

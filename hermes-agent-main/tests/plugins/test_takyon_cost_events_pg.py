@@ -220,6 +220,50 @@ def test_app_plane_denied_direct_access_but_port_appends(pg_conn):
     assert row == ("biz-d", 5, 7, 42)
 
 
+def test_metrics_observation_payload_shape(monkeypatch):
+    """record_metrics_observation is the NON-PRESCRIPTIVE channel-metrics recorder: whatever the
+    provider returned lands verbatim under payload['metrics']; rows cap at 50 with the true count
+    kept; empty identifier values are dropped. (Pure unit test — the SQL path is pinned above.)"""
+    captured = {}
+    monkeypatch.setattr(
+        cost_events, "record_operator_event_autoconn", lambda **fields: captured.update(fields)
+    )
+    cost_events.record_metrics_observation(
+        provider="meta",
+        name="meta:adset:123",
+        metrics={"impressions": 1000, "ctr": 0.021, "cpm": 4.2, "anything_new": "kept"},
+        rows=[{"i": i} for i in range(60)],
+        business_slug="biz-m",
+        identifiers={"slug": "camp", "object_id": "123", "empty": "", "none": None},
+    )
+    assert captured["event_kind"] == "metrics"
+    assert captured["provider"] == "meta"
+    assert captured["business_slug"] == "biz-m"
+    payload = captured["payload"]
+    assert payload["metrics"] == {"impressions": 1000, "ctr": 0.021, "cpm": 4.2, "anything_new": "kept"}
+    assert payload["rows_total"] == 60 and len(payload["rows"]) == 50
+    assert payload["identifiers"] == {"slug": "camp", "object_id": "123"}
+
+
+def test_metrics_observation_roundtrip_row(pg_conn):
+    event_id = cost_events.record_operator_cost_event(
+        pg_conn,
+        event_kind=cost_events.KIND_METRICS,
+        business_slug="biz-m",
+        provider="reddit",
+        name="reddit:campaign:c_1",
+        payload={"metrics": {"impressions": 5, "ctr": 0.5, "spend_usd": 1.25}, "rows_total": 2},
+    )
+    assert event_id
+    row = pg_conn.execute(
+        "select event_kind, provider, payload from operator_cost_events where id = %s",
+        (event_id,),
+    ).fetchone()
+    assert row[0] == "metrics" and row[1] == "reddit"
+    payload = row[2] if isinstance(row[2], dict) else json.loads(row[2])
+    assert payload["metrics"]["ctr"] == 0.5 and payload["rows_total"] == 2
+
+
 def test_operator_runtime_role_is_append_only(pg_conn):
     pg_conn.execute("set role takyon_operator_runtime")
     try:
