@@ -97,6 +97,11 @@ _CREATIVE_META_AD_LAUNCH_AUDIENCE = "creative.meta_ad_launch"
 _CREATIVE_REDDIT_AD_LAUNCH_AUDIENCE = "creative.reddit_ad_launch"
 _CREATIVE_META_AD_MEDIA_SPEND_AUDIENCE = "creative.meta_ad_media_spend"
 _CREATIVE_REDDIT_AD_MEDIA_SPEND_AUDIENCE = "creative.reddit_ad_media_spend"
+# App Store rail: a mobile release reserves/commits credits through the creative gate like any paid
+# creative action. It has NO provider route (the EAS build uses operator-rail custody, not a
+# safebox-vended key), so it appears only in the credit-action map below, never in the provider
+# audience sets.
+_CREATIVE_MOBILE_RELEASE_AUDIENCE = "creative.mobile_release"
 
 # Creative action (capability `action`, also the mint action) -> its canonical creative-credit cost
 # action key in core._CREATIVE_CREDIT_COST_DEFAULTS/_ENVS. The fixed price the client used and the
@@ -112,6 +117,7 @@ _CREATIVE_AUDIENCE_CREDIT_ACTION = {
     _CREATIVE_REDDIT_AD_LAUNCH_AUDIENCE: "reddit_ad_launch",
     _CREATIVE_META_AD_MEDIA_SPEND_AUDIENCE: "meta_ad_media_spend",
     _CREATIVE_REDDIT_AD_MEDIA_SPEND_AUDIENCE: "reddit_ad_media_spend",
+    _CREATIVE_MOBILE_RELEASE_AUDIENCE: "mobile_release",
 }
 
 # Which creative audiences each gated creative PROVIDER route accepts. A logo capability may only hit

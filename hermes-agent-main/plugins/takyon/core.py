@@ -31124,6 +31124,13 @@ _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "logo_generate": "creative.logo",
     "ugc_ad_generate": "creative.ugc",
     "static_ad_generate": "creative.static_ad",
+    # App Store rail: a mobile release is a paid creative action, so on prod (remote safebox
+    # authority) its credit spend MUST go through the audience-bound creative gate — an action with
+    # no audience falls to the generic reserve which fails closed with
+    # creative_credit_spend_requires_creative_gate. No provider route needs this audience (the EAS
+    # build resolves its keys from operator-rail custody, not a safebox-vended provider key); the
+    # audience is purely the reserve/commit/release money gate + owner verification.
+    "mobile_release": "creative.mobile_release",
     **{c.credit_action: c.credit_audience for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "creative.meta_ad_launch",
     "reddit_ad_launch": "creative.reddit_ad_launch",
