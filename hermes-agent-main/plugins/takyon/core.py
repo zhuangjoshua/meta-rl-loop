@@ -29023,7 +29023,19 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
         )
         store._sync_business_workspace_remote(business)
         logo_republish: dict[str, Any] = {"status": "skipped", "detail": "logo not published to site"}
-        if receipt.get("published_to_site"):
+        # `republish: false` lets a caller that is about to run a full site build anyway (the
+        # bootstrap's 2b pass follows the logo within minutes and its refresh_surface publish
+        # carries the favicon/header forward) skip the chained ~2-4min build+publish cycle. The
+        # logo asset + favicon are already written to the workspace and live /brand-logo.png
+        # either way; only the immediate favicon-link republish is deferred to the next publish.
+        # Default stays True so every existing caller (wake-time regeneration, standalone runs)
+        # keeps the favicon going live immediately.
+        if receipt.get("published_to_site") and not _boolish(args.get("republish"), default=True):
+            logo_republish = {
+                "status": "deferred",
+                "detail": "republish skipped by caller; the next product publish carries the favicon",
+            }
+        elif receipt.get("published_to_site"):
             try:
                 _refresh_raw = handle_business_refresh_product_surface(
                     {
@@ -35228,6 +35240,10 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business_context": {
                     "type": "object",
                     "description": "Brand context read from business state to steer the icon: {name, category|industry|vertical, tone|brand_tone|voice}. Read business_read_business / product state first; do not invent brand voice.",
+                },
+                "republish": {
+                    "type": "boolean",
+                    "description": "Default true: chain a full product republish so the favicon/header pick up the generated logo immediately. Pass false ONLY when another full product publish follows within minutes (e.g. the bootstrap app-shell build pass) — the logo asset and live /brand-logo.png still land now; that next publish carries the favicon links forward.",
                 },
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
