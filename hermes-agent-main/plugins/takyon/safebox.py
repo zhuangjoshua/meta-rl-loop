@@ -896,6 +896,59 @@ def broker_provider_call(
     return _remote_json("POST", path, body, timeout=timeout)
 
 
+def egress_call(
+    *,
+    business: str,
+    session_token: str,
+    connection_slug: str,
+    method: str,
+    path: str,
+    query: dict[str, Any] | None = None,
+    headers: dict[str, Any] | None = None,
+    body: Any = None,
+    timeout: float = _PROVIDER_BROKER_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Runtime-plane client for the credentialed-egress rail (delta 6). POSTs to the safebox
+    ``/v1/egress`` which resolves the operator-approved connection, unseals + attaches the credential
+    server-side, meters the usage ledger, and returns a KEY-FREE response. The provider credential
+    never reaches this process; identity is the product ``session_token`` (the safebox derives the
+    authoritative {business, app_user} scope). Fails closed (``SafeboxAuthorityUnavailable``) —
+    never a raw-key fallback."""
+    if not _remote_enabled():
+        raise SafeboxAuthorityUnavailable(
+            f"egress requires {_SAFEBOX_REMOTE_URL_ENV}; not set on this plane"
+        )
+    payload: dict[str, Any] = {
+        "business": str(business),
+        "session_token": str(session_token),
+        "connection_slug": str(connection_slug),
+        "method": str(method or "GET"),
+        "path": str(path or "/"),
+    }
+    if query is not None:
+        payload["query"] = dict(query)
+    if headers is not None:
+        payload["headers"] = dict(headers)
+    if body is not None:
+        payload["body"] = body
+    return _remote_json("POST", "/v1/egress", payload, timeout=timeout)
+
+
+def deposit_connection_secret(
+    *, business: str, connection_slug: str, secret: str, timeout: float = 30.0
+) -> dict[str, Any]:
+    """Operator-plane client: deposit a plaintext credential for an APPROVED provider connection.
+    Requires the operator token (operator_authority=True) — the secret is sealed server-side and
+    only the fingerprint is returned. Never call from the business/subuser runtime."""
+    return _remote_json(
+        "POST",
+        "/v1/connections/deposit",
+        {"business": str(business), "connection_slug": str(connection_slug), "secret": str(secret)},
+        timeout=timeout,
+        operator_authority=True,
+    )
+
+
 # ── Operator/platform provider proxy client ─────────────────────────────────────────────────────
 # Operator/platform/worker counterpart to ``broker_provider_call``: instead of the metered, capability
 # -gated business broker (/v1/providers/*), these helpers talk to the TRUSTED operator/platform PROXY

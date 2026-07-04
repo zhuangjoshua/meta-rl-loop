@@ -418,6 +418,18 @@ export function createSubuserRuntimeClient(context = {}) {
         body: JSON.stringify(payload),
       });
     },
+    async egress(payload = {}) {
+      // Keyless credentialed egress to an operator-approved third party (delta 6). payload:
+      // { connection, method, path, headers?, body?, query? }. The credential is held by Takyon
+      // and attached SERVER-SIDE only for the connection's own host; each call is metered through
+      // the usage rail. Returns { success, status, headers, body } — never a provider key. Treat
+      // 402 as out-of-credit, 403 as a policy refusal, 404 as unknown/not-yet-approved connection.
+      ensureRail("egress");
+      return jsonRequest(routeUrl("egress"), {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
     async invokeAction(name, payload = {}, options = {}) {
       ensureRail("actions");
       const actionName = String(name || "").trim();

@@ -3089,6 +3089,41 @@ async def _app_post_search(request, business, parts, bound, token, body):
     return _takyon_app_json(status, payload)
 
 
+def _takyon_app_egress(*, business: str, body: dict[str, Any], session_token: str) -> tuple[int, dict[str, Any]]:
+    """Product-facing credentialed egress (delta 6). The safebox owns the whole call — connection
+    resolution, credential unseal + attach, SSRF/host guard, usage metering, redaction — so this
+    handler is a thin off-loop hop to safebox.egress_call, no DB pool needed here. Maps the
+    safebox's HTTP status through unchanged (402 out-of-credit, 403 policy refusal, 404 unknown/
+    unapproved connection, 5xx upstream/egress failure)."""
+    from plugins.takyon import safebox as takyon_safebox
+
+    try:
+        result = takyon_safebox.egress_call(
+            business=business,
+            session_token=session_token,
+            connection_slug=str(body.get("connection") or body.get("connection_slug") or ""),
+            method=str(body.get("method") or "GET"),
+            path=str(body.get("path") or "/"),
+            query=body.get("query") if isinstance(body.get("query"), dict) else None,
+            headers=body.get("headers") if isinstance(body.get("headers"), dict) else None,
+            body=body.get("body"),
+        )
+        return int(HTTPStatus.OK), {"success": True, **result}
+    except takyon_safebox.SafeboxAuthorityUnavailable:
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), {"success": False, "error": "egress_not_configured"}
+    except takyon_safebox.RemoteSafeboxError as exc:
+        detail = exc.payload.get("detail") if isinstance(exc.payload, dict) else None
+        return int(exc.status_code), {"success": False, "error": detail or exc.payload or "egress_failed"}
+
+
+async def _app_post_egress(request, business, parts, bound, token, body):
+    # Off the event loop: the safebox egress round-trip is a synchronous provider HTTP call.
+    status, payload = await asyncio.to_thread(
+        _takyon_app_egress, business=business, body=body, session_token=token,
+    )
+    return _takyon_app_json(status, payload)
+
+
 async def _app_post_email_send(request, business, parts, bound, token, body):
     status, payload = await _takyon_app_tool_off_loop(handle_business_send_app_email, {
         "business": business,
@@ -3156,6 +3191,7 @@ _APP_POST_HANDLERS = {
     "usage_post": _app_post_usage,
     "generate_post": _app_post_generate,
     "search_post": _app_post_search,
+    "egress_post": _app_post_egress,
     "email_send_post": _app_post_email_send,
     "action_invoke_post": _app_post_action_invoke,
 }

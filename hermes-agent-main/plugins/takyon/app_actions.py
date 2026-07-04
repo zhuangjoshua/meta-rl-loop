@@ -76,7 +76,7 @@ _ACTION_CONTEXT_PREFIX = "/api/takyon/apps/{business}"
 # ensureRail() — a browser-side UX guard keyed on the product's declared UI features — must not
 # pre-block them for actions. media/email gate server-side on declaration, so they are deliberately
 # omitted here and follow the surface's declared runtime_features instead.
-_ACTION_RUNTIME_RAILS = ("generate", "actions", "records", "search", "connections", "profile", "directory")
+_ACTION_RUNTIME_RAILS = ("generate", "actions", "records", "search", "connections", "profile", "directory", "egress")
 _ACTION_TRIGGER_ALIASES = {
     "user": "http",
     "manual": "http",
