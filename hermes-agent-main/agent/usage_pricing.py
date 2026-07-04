@@ -129,7 +129,7 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
     # (503 egress_pricing_unavailable) BEFORE any reserve or upstream call.
     ("egress", "request"): PricingEntry(
         request_cost=Decimal("0.002"),
-        source="platform_markup",
+        source="custom_contract",
         source_url="egress-rail-build-spec.md",
         pricing_version="egress-2026-07",
     ),
