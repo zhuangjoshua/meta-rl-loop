@@ -7,7 +7,7 @@ second backend.
 ## Rules (mirror of the web kit's boundary)
 
 1. **One backend.** The app talks only to the existing subuser rails at
-   `https://<slug>.coscale.app/api/takyon/apps/<slug>` via `runtime-client.ts`, authenticated with
+   `https://<slug>.coscale.app/api/takyon/apps/<slug>` via `scaffold/_takyon/runtime-client.ts`, authenticated with
    a Bearer session token (SecureStore/Keychain) instead of a cookie. No custom `/api/takyon/apps`
    handlers, no second backend.
 2. **Kit boundary.** App code imports the client only via `@takyon/*` → `_takyon/`, which the
