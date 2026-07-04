@@ -1499,6 +1499,12 @@ def _business_artifact_url(business: str, path: str) -> str:
 # requires_env when an API is not listed here.
 _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+    # App Store rail (readmodular §6.2). The ASC private key (.p8 PEM) is a deploy/publish-authority
+    # secret — registering it here auto-adds it to provider_key_denylist() so it is NEVER vended over
+    # /v1/env; the safebox uses it server-side inside the submit/status authority routes. The .p8's
+    # non-secret identifiers (key id / issuer id / team id, all end in _ID) resolve via public config,
+    # not here.
+    "app_store_connect": ("TAKYON_APP_STORE_CONNECT_PRIVATE_KEY", "APP_STORE_CONNECT_PRIVATE_KEY"),
     "composio": ("COMPOSIO_API_KEY",),
     "database": (
         "DATABASE_URL",
@@ -1512,6 +1518,10 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
         "MIGRATION_DATABASE_URL",
     ),
     "dataforseo": ("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+    # App Store rail (readmodular §6.2/§6.3). Expo robot token that authorizes EAS builds/submits/OTA.
+    # Registered here → never vended over /v1/env; the safebox mints it per-build into the jailed
+    # builder, never onto a Takyon-host env.
+    "expo": ("TAKYON_EXPO_TOKEN", "EXPO_TOKEN"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
     "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
