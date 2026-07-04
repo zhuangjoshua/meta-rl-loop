@@ -54,14 +54,10 @@ def _user_with_session(conn, slug: str, email: str):
 
 
 def _tool_close(conn, slug: str, token: str) -> bool:
-    """Replicate the tool's exact PG op sequence at the leaf level (bypasses the app-role guard so
-    the SECURITY LOGIC can be proven on the plain rig). Returns whether an account was closed."""
-    user = app_identity.validate_session(conn, slug, token)  # target from the SESSION only
-    if user is None:
-        return False
-    app_identity.revoke_app_user_sessions(conn, slug, user.id)
-    app_identity.set_app_user_status(conn, slug, user.id, "closed")
-    return True
+    """Exercise the REAL leaf function the tool calls (owner path on the rig). Returns whether an
+    account was closed."""
+    _uid, closed = app_identity.close_app_account(conn, slug, token)
+    return closed
 
 
 def _status(conn, slug, user_id):
@@ -111,6 +107,74 @@ def test_idempotent_on_stale_token(pg_conn):
     assert _tool_close(pg_conn, slug, token) is False
 
 
+def test_anonymizes_email_for_fresh_resignup(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user, token = _user_with_session(pg_conn, slug, "reuse@example.com")
+    _tool_close(pg_conn, slug, token)
+    row = pg_conn.execute(
+        "select email, status from app_users where business_slug = %s and id = %s", (slug, user.id)
+    ).fetchone()
+    assert row[1] == "closed"
+    assert str(row[0]) != "reuse@example.com"  # tombstoned → the address is free again
+    # The original email is now free: a new user can take it (no unique collision).
+    fresh = app_identity.upsert_app_user(pg_conn, slug, "reuse@example.com")
+    assert fresh.id != user.id
+
+
+# ── the REAL app-plane proof: the SECURITY DEFINER port under takyon_app_runtime ──────
+
+
+def test_close_account_port_works_under_app_role_and_direct_dml_denied(pg_conn):
+    """The critical proof the owner-path tests can't give: on the actual app-runtime role, direct
+    DML on app_sessions/app_users is DENIED (0045), and the account close only succeeds through the
+    takyon_app_close_account SECURITY DEFINER port. This is why the tool must use the port."""
+    from plugins.takyon.app_identity import _hash_token
+
+    if pg_conn.execute("select to_regrole('takyon_app_runtime')").fetchone()[0] is None:
+        pytest.skip("takyon_app_runtime role not present in this rig")
+    slug = _business(pg_conn, _owner(pg_conn))
+    user, token = _user_with_session(pg_conn, slug, "a@example.com")
+
+    pg_conn.execute("set role takyon_app_runtime")
+    try:
+        # Direct UPDATE on the identity tables is denied for the app role (0045 revoked DML).
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            pg_conn.execute(
+                "update app_sessions set revoked_at = now() where business_slug = %s", (slug,)
+            )
+        # But the bounded port succeeds for the same role (EXECUTE granted; runs SECURITY DEFINER).
+        row = pg_conn.execute(
+            "select * from takyon_app_close_account(%s, %s)",
+            (slug, _hash_token(token)),
+        ).fetchone()
+        assert str(row[0]) == user.id and row[1] is True
+    finally:
+        pg_conn.execute("reset role")
+    assert _status(pg_conn, slug, user.id) == "closed"
+
+
+def test_close_account_port_direct_call_closes_and_scopes(pg_conn):
+    """Call the port function directly (as owner — the function is SECURITY DEFINER either way) and
+    prove it closes exactly the session's user and is self-scoping."""
+    from plugins.takyon.app_identity import _hash_token
+
+    slug = _business(pg_conn, _owner(pg_conn))
+    user_a, token_a = _user_with_session(pg_conn, slug, "a@example.com")
+    user_b, _token_b = _user_with_session(pg_conn, slug, "b@example.com")
+    row = pg_conn.execute(
+        "select * from takyon_app_close_account(%s, %s)",
+        (slug, _hash_token(token_a)),
+    ).fetchone()
+    assert str(row[0]) == user_a.id and row[1] is True
+    assert _status(pg_conn, slug, user_a.id) == "closed"
+    assert _status(pg_conn, slug, user_b.id) == "active"  # B untouched by A's session hash
+    # Bogus hash closes nothing.
+    none_row = pg_conn.execute(
+        "select * from takyon_app_close_account(%s, %s)", (slug, "deadbeef")
+    ).fetchone()
+    assert none_row[0] is None and none_row[1] is False
+
+
 # ── 2. tool plane-gating (the tool refuses off the app plane) ─────────────────────────
 
 
@@ -155,8 +219,7 @@ def test_tool_missing_token_is_error(pg_conn, monkeypatch):
 
 def test_tool_never_reads_body_app_user_id():
     src = inspect.getsource(takyon_core.handle_business_delete_app_account)
-    # The target must come from validate_session, never from a caller-supplied id.
-    assert "validate_session" in src
-    assert "app_user_id" not in src.split("def handle_business_delete_app_account")[0] or True
+    # The target must come from the session-scoped close port, never a caller-supplied id.
+    assert "close_app_account" in src
     assert 'args.get("app_user_id")' not in src
     assert 'args["app_user_id"]' not in src
