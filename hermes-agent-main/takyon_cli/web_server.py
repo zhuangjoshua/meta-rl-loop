@@ -65,6 +65,7 @@ from plugins.takyon.core import (
     handle_business_act_on_app_connection,
     handle_business_cancel_app_subscription,
     handle_business_create_app_checkout,
+    handle_business_delete_app_account,
     handle_business_delete_app_session,
     handle_business_disable_app_directory_entry,
     handle_business_delete_app_record,
@@ -3241,6 +3242,19 @@ async def _app_delete_session(request, business, parts, bound, token):
     return response
 
 
+async def _app_delete_account(request, business, parts, bound, token):
+    # Apple 5.1.1(v) account deletion. The session token IS the authorization; the target user is
+    # resolved server-side inside the tool (no body-supplied id). Clears the local session on
+    # success, mirroring _app_delete_session.
+    status, payload = await _takyon_app_tool_off_loop(handle_business_delete_app_account, {
+        "business": business,
+        "session_token": token,
+    })
+    response = _takyon_app_json(status, payload)
+    _takyon_app_clear_session_cookie(response)
+    return response
+
+
 async def _app_delete_directory_me(request, business, parts, bound, token):
     status, payload = await _takyon_app_tool_off_loop(handle_business_disable_app_directory_entry, {
         "business": business,
@@ -3273,6 +3287,7 @@ async def _app_delete_media(request, business, parts, bound, token):
 
 _APP_DELETE_HANDLERS = {
     "session_delete": _app_delete_session,
+    "account_delete": _app_delete_account,
     "directory_me_delete": _app_delete_directory_me,
     "record_delete": _app_delete_record,
     "media_delete": _app_delete_media,

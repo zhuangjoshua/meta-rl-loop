@@ -695,6 +695,9 @@ _RAIL_ROUTES: dict[str, tuple[RailRoute, ...]] = {
     "account": (
         RailRoute("GET", ("account",), "account_get", APP_AUTH_PUBLIC_OPTIONAL),
         RailRoute("POST", ("account",), "account_post", APP_AUTH_SESSION_REQUIRED),
+        # Apple 5.1.1(v) account deletion (readmodular §4.3). SESSION_REQUIRED: the target is the
+        # session's own user, resolved server-side — never a body-supplied id.
+        RailRoute("DELETE", ("account",), "account_delete", APP_AUTH_SESSION_REQUIRED),
     ),
     "profile": (
         RailRoute("GET", ("profile",), "profile_get", APP_AUTH_SESSION_REQUIRED),
@@ -23506,6 +23509,70 @@ def handle_business_delete_app_session(args: dict, **_: Any) -> str:
                     payload={"revoked": True},
                 )
         return tool_result({"success": True, "business": business, "revoked": bool(revoked)})
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
+def handle_business_delete_app_account(args: dict, **_: Any) -> str:
+    """Sub-user account deletion — the Apple 5.1.1(v) requirement + the App Store rail's ONE
+    subuser-plane addition (readmodular §4.3/§6.1). SESSION_REQUIRED: the presented session token
+    is the sole authorization and the target user is resolved SERVER-SIDE from it — a body-supplied
+    ``app_user_id`` is never trusted (no IDOR; identical posture to delete_app_session). Closes the
+    account: revoke every live session, set status='closed' (set_app_user_status revokes sessions
+    too), and anonymize the email so a re-signup with the same address is a fresh account. Runs on
+    the app-runtime plane through the SECURITY DEFINER identity port — never an operator-capable DB
+    session; no secret; the role allowlist is not widened (``account`` is already a rail). Idempotent:
+    deleting an already-closed/absent account returns deleted=True without error."""
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        session_token = str(args.get("session_token") or "").strip()
+        if not session_token:
+            raise TakyonError("session_token is required")
+        deleted = False
+        app_user_id = ""
+        with store._connect() as conn:
+            store._ensure_business(conn, business)
+            if isinstance(conn, _PGConn):
+                _require_app_database_plane_for_pg(store, conn, action="app account delete")
+                leaves = store._app_leaves()
+                identity = leaves["identity"]
+                try:
+                    with store._pg_app_scope(conn, business, session_token=session_token):
+                        with store._leaf_conn(conn) as leaf:
+                            # Resolve the principal from the token ONLY (server-side identity).
+                            user = identity.validate_session(leaf, business, session_token)
+                            if user is not None:
+                                app_user_id = str(getattr(user, "id", "") or "")
+                                identity.revoke_app_user_sessions(leaf, business, app_user_id)
+                                identity.set_app_user_status(leaf, business, app_user_id, "closed")
+                                deleted = True
+                except leaves["identity"].AppIdentityError as exc:
+                    raise TakyonError(str(exc)) from exc
+            else:
+                user = _resolve_sqlite_app_user(conn, business, session_token=session_token)
+                if user:
+                    app_user_id = str((_app_user_runtime_payload(user) or {}).get("id") or "")
+                    conn.execute(
+                        "UPDATE app_sessions SET revoked_at = ? WHERE business_slug = ? AND app_user_id = ? AND revoked_at IS NULL",
+                        (_now(), business, app_user_id),
+                    )
+                    conn.execute(
+                        "UPDATE app_users SET status = 'closed', updated_at = ? WHERE business_slug = ? AND id = ?",
+                        (_now(), business, app_user_id),
+                    )
+                    deleted = True
+            if deleted:
+                store._record_event(
+                    conn,
+                    scope=f"business:{business}/app",
+                    business_slug=business,
+                    event_type="app.account.delete",
+                    payload={"app_user_id": app_user_id, "deleted": True},
+                )
+        # Idempotent success: an invalid/expired token deletes nothing but is not an error — the
+        # client clears its local session either way (Apple's re-test signs in then deletes again).
+        return tool_result({"success": True, "business": business, "deleted": bool(deleted)})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 

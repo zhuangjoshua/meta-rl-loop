@@ -210,6 +210,13 @@ export function createSubuserRuntimeClient(context = {}) {
         }),
       });
     },
+    // Apple 5.1.1(v) account deletion. The server resolves the target user from the session — no
+    // id is sent. Callers should clear their local session after a success (the server clears the
+    // web session cookie for you).
+    async deleteAccount() {
+      ensureRail("account");
+      return jsonRequest(routeUrl("account"), { method: "DELETE" });
+    },
     async profile() {
       ensureRail("profile");
       return jsonRequest(routeUrl("profile"), { method: "GET" });
