@@ -14,6 +14,7 @@ proxy). No raw key on this plane; fails closed if the safebox/operator auth is u
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 # Capabilities the CEO can build a product from, keyed to the real rails. The rail NAMES are
@@ -152,14 +153,23 @@ def convert_brief(
     *,
     operator_user_id: str,
     business: str | None = None,
-    model: str = "claude-sonnet-5",
-    max_tokens: int = 8000,
+    model: str | None = None,
+    # 16k, not 8k: adaptive-thinking models (fable-5/sonnet-5) spend output budget on thinking
+    # blocks BEFORE the text block; a hard brief can burn all 8k on thinking and return zero text
+    # ("returned no plan"). 16k leaves room for both.
+    max_tokens: int = 16000,
 ) -> dict[str, str]:
     """Translate a brief into a Takyon build plan. Returns {markdown, goal}.
 
     One-shot keyless operator model call: mint an operator session capability, then POST the
     anthropic proxy on the safebox. Fails closed (IntakeError) if the safebox/operator auth is
-    unavailable — never fabricates a plan and never touches a raw provider key."""
+    unavailable — never fabricates a plan and never touches a raw provider key.
+
+    Model precedence mirrors the coding worker (explicit arg, then TAKYON_CLAUDE_AGENT_MODEL,
+    then the Sonnet default) so one env flip moves the whole create pipeline together."""
+    model = str(
+        model or os.environ.get("TAKYON_CLAUDE_AGENT_MODEL") or "claude-sonnet-5"
+    ).strip()
     text = str(brief_text or "").strip()
     if not text:
         raise IntakeError("empty brief")
@@ -173,7 +183,10 @@ def convert_brief(
         from plugins.takyon import safebox  # type: ignore
 
     try:
-        token = safebox.mint_operator_session_token(business or "", owner, max_cost_microusd=200_000)
+        # Per-call ceiling sized for a top-tier model: max_tokens=16000 output at Fable's $50/M is
+        # ~$0.80 plus prompt input, so the old Sonnet-sized $0.20 ceiling tripped the proxy's
+        # estimate gate (estimate_exceeds_ceiling). $2.00 still hard-bounds a single intake call.
+        token = safebox.mint_operator_session_token(business or "", owner, max_cost_microusd=2_000_000)
     except Exception as exc:  # noqa: BLE001 — any auth failure is fail-closed
         raise IntakeError(f"intake needs operator model access (safebox): {exc}") from exc
 
@@ -197,5 +210,13 @@ def convert_brief(
 
     markdown = _extract_text(result)
     if not markdown:
-        raise IntakeError("intake model returned no plan")
+        # Name WHY there is no text so a truncated-by-thinking response (stop_reason=max_tokens,
+        # only thinking blocks) is diagnosable from the CLI error alone.
+        stop_reason = str((result or {}).get("stop_reason") or "?")
+        block_types = [
+            str(b.get("type") or "?") for b in ((result or {}).get("content") or []) if isinstance(b, dict)
+        ]
+        raise IntakeError(
+            f"intake model returned no plan (stop_reason={stop_reason}, content_blocks={block_types or 'none'})"
+        )
     return {"markdown": markdown, "goal": _extract_build_goal(markdown)}

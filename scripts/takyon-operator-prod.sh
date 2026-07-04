@@ -1316,7 +1316,9 @@ cmd_shell_quiet() {
 cmd_run() {
   load_operator_env
   require_tunnel
-  cmd_preflight
+  # Preflight goes to stderr so `run --json ...` emits pure JSON on stdout — automation
+  # (batch runners, jobs polls) parses stdout directly instead of sed-stripping the table.
+  cmd_preflight 1>&2
   cd "$ROOT"
   exec "$TAKYON_ENTRY" "$@"
 }

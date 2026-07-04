@@ -206,6 +206,19 @@ PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 - On desktop, the public `/` first screen should fill most of the viewport and read page-scale, not as a small centered island with large dead gutters on both outer sides.
 - Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
 """
+# Injected for every product/site worker pass (bootstrap and iterate alike) so the visual-craft
+# floor rides regardless of which design style pack the CEO selected. The capabilities it names
+# (`lucide-react`, `framer-motion`) are pinned in the scaffold's own package.json — worker-added
+# deps are force-restored away on every refresh, so this contract must only ever name deps the
+# scaffold itself pins.
+PRODUCT_VISUAL_CRAFT_CONTRACT = """Product visual craft contract (icons, motion, assets):
+- Never use emoji as UI iconography — not feature icons, list bullets, buttons, badges, logos, stat markers, or empty states. Emoji may appear only as literal content where a human would type one (for example inside chat text a persona sends).
+- Iconography: import per-icon from `lucide-react` (pinned in this scaffold), or hand-author inline SVG for custom marks. Keep one consistent icon size and stroke weight per surface.
+- Motion: `framer-motion` is pinned in this scaffold — use it (or plain CSS transitions) for purposeful micro-interactions: entrance reveals, hover/press feedback, layout and list transitions, animated counters, skeleton loading states. Keep micro-interactions roughly 150-300ms with intentional easing; motion should clarify hierarchy and state changes, not decorate everything.
+- Respect reduced motion: gate non-essential animation behind `useReducedMotion()` from framer-motion or the `prefers-reduced-motion` media query. No scroll-jacking, no autoplaying carousels, no infinite attention-seeking loops.
+- Real graphic texture comes from CSS gradients/patterns, inline SVG illustration, the published brand assets (`brandLogoUrl()` from `src/lib/branding.ts`), and static files under `public/` — never from emoji, and never from fabricated external image URLs.
+- Real typefaces: declare `@font-face`/`@import` in worker-owned CSS (`src/tokens.css` / `src/index.css`); never edit `index.html` for fonts — it is starter-owned and force-refreshed.
+"""
 RUNTIME_UI_CONTRACT_INTRO = """Hermes runtime UI contract:
 - Build runtime-backed product UI through the shared runtime client, not browser-only authority state.
 - Use the canonical prefixed runtime API base from `./_takyon/surface-context.js`.
@@ -243,6 +256,9 @@ MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App St
 - Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
 - The Delete Account flow (profile screen) is an Apple 5.1.1(v) requirement — keep it working.
 - Stay on the pinned Expo SDK 54 dependency set; do not add packages that require custom native code (managed workflow only).
+- Never use emoji as UI iconography — not tab icons, feature icons, list bullets, badges, buttons, or empty states. Emoji may appear only as literal content where a human would type one.
+- Iconography: import per-family from `@expo/vector-icons` (bundled with the pinned Expo SDK, e.g. `Ionicons` or `MaterialCommunityIcons`); keep one consistent icon size and weight per surface. Do not add icon or SVG packages (`react-native-svg` is NOT in the pinned dependency set).
+- Motion: purposeful micro-interactions through React Native's built-in `Animated`/`LayoutAnimation` — entrance reveals, press feedback, list/layout changes, skeleton loading states — roughly 150-300ms with intentional easing; leave screen transitions to the router defaults, and skip non-essential animation when `AccessibilityInfo.isReduceMotionEnabled()` reports reduced motion.
 """
 WORKSPACE_PATH_CONTRACT = """Hermes workspace path contract:
 - The current working directory is already the requested business workspace: {workspace}.
@@ -8002,7 +8018,12 @@ _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_
 # minted via /v1/operator/session-token after authorize_operator_call validates business ownership, it is
 # REUSABLE and TTL-bounded, so the worker's many streaming calls reuse the one token for its TTL. The
 # ceiling mirrors the self-reported per-run worker budget (maxBudgetUsd default 2 USD).
-_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = 2_000_000
+# Env-overridable: the proxy's reserve estimate bills estimated input + max_tokens at the model's FULL
+# price, so a top-tier model lane (claude-fable-5, 5x Sonnet) needs a higher per-call ceiling to fit
+# one large-context coding-worker call under the gate. Default unchanged.
+_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = int(
+    float(os.environ.get("TAKYON_CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD") or 0) or 2_000_000
+)
 
 
 def _claude_agent_broker_lockdown_enabled() -> bool:
@@ -12553,6 +12574,17 @@ def _clamp_float(value: Any, *, default: float, minimum: float, maximum: float) 
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
+
+
+def _env_positive_float(name: str, fallback: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return fallback
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
 
 
 def _truncate_text(value: str, limit: int = 20_000) -> str:
@@ -34665,11 +34697,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     "javascript runtime unavailable for Claude Agent SDK tasks: "
                     f"{ensure_runtime.get('error') or 'node is missing'}"
                 )
+        # budget_usd bounds are env-overridable so a pricier model lane (e.g. claude-fable-5 at
+        # 5x Sonnet's per-token price) can be given headroom per run without editing every call
+        # site; defaults unchanged, same knob pattern as TAKYON_BUILD_DOCKER_CPUS/MEMORY.
         budget_usd = _clamp_float(
             args.get("budget_usd"),
-            default=8.0 if customer_facing_product_workspace else 2.0,
+            default=_env_positive_float(
+                "TAKYON_CLAUDE_AGENT_BUDGET_DEFAULT_USD",
+                8.0 if customer_facing_product_workspace else 2.0,
+            ),
             minimum=0.05,
-            maximum=25.0,
+            maximum=_env_positive_float("TAKYON_CLAUDE_AGENT_BUDGET_MAX_USD", 25.0),
         )
         operator_budget = _reserve_operator_task_budget(
             business=business,
@@ -34834,6 +34872,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
                     worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
+                    worker_instruction_parts.append(PRODUCT_VISUAL_CRAFT_CONTRACT)
                     runtime_ui_contract = _runtime_ui_contract_block(current_surface)
                     if runtime_ui_contract:
                         worker_instruction_parts.append(runtime_ui_contract)

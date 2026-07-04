@@ -970,7 +970,11 @@ def provider_proxy_base_url() -> str:
 # Operator session-token mint default ceiling (per-CALL cost cap the safebox proxy enforces on every
 # metered call under the minted token). 2 USD mirrors the operator-turn / coding-worker per-run budget;
 # the safebox additionally clamps the TTL, so a leaked token still expires within the hard bound.
-_OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD = 2_000_000
+# Env-overridable: the proxy estimate bills input + max_tokens at the model's FULL price, so a
+# top-tier model lane (claude-fable-5) needs a higher per-call ceiling for large CEO turns.
+_OPERATOR_SESSION_DEFAULT_MAX_COST_MICROUSD = int(
+    float(os.environ.get("TAKYON_OPERATOR_SESSION_MAX_COST_MICROUSD") or 0) or 2_000_000
+)
 
 
 def mint_operator_session_token(
