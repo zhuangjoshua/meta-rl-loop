@@ -15568,6 +15568,10 @@ class TakyonStore:
             existing_cas_keys=existing_cas_keys,
             source_digests=candidate_files,
         )
+        if owner_user_id:
+            # The gate above read the per-slug quota cache; this revision's net-new CAS bytes
+            # are now live in the store, so record them or the next gate check undercounts.
+            storage.note_operator_storage_written(normalized, incoming_bytes)
         conn.execute(
             """
             INSERT INTO business_revisions (
