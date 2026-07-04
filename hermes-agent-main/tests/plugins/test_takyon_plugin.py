@@ -8093,8 +8093,11 @@ def test_enforce_operator_business_access_fails_closed_without_principal(monkeyp
 
 def test_operator_task_worker_deferral_is_opt_in(monkeypatch):
     """Worker-plane execution of long operator tools is an explicit deployment declaration
-    (TAKYON_OPERATOR_TASKS_VIA_WORKER=1) and never triggers inside the worker process itself
-    (the surrounding job is already durable; re-deferring could starve the drain threads)."""
+    (TAKYON_OPERATOR_TASKS_VIA_WORKER=1) and never triggers IMPLICITLY inside the worker process
+    itself (the surrounding job is already durable; re-deferring could starve the drain threads).
+    The one sanctioned exception is an EXPLICIT ``wait_ms`` claude-agent call (fire-and-continue),
+    which widens the gate to any host with a Postgres worker plane — including the worker process,
+    whose dedicated operator-task drain lane claims the fired job."""
     monkeypatch.delenv("TAKYON_OPERATOR_TASKS_VIA_WORKER", raising=False)
     monkeypatch.delenv("TAKYON_WORKER_PROCESS", raising=False)
     assert takyon_core._defer_claude_agent_task_to_worker({"business": "acme"}) is None
@@ -8104,6 +8107,12 @@ def test_operator_task_worker_deferral_is_opt_in(monkeypatch):
     monkeypatch.setenv("TAKYON_WORKER_PROCESS", "1")
     assert takyon_core._defer_claude_agent_task_to_worker({"business": "acme"}) is None
     assert takyon_core._defer_product_surface_refresh_to_worker({"business": "acme"}) is None
+
+    # Explicit wait_ms widens the gate ONLY when a Postgres worker plane exists.
+    monkeypatch.setattr(takyon_core, "_db_backend", lambda: "sqlite")
+    assert (
+        takyon_core._defer_claude_agent_task_to_worker({"business": "acme", "wait_ms": 0}) is None
+    )
 
 
 class _DeferralStoreStub:

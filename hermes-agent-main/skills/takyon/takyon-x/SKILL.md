@@ -91,7 +91,7 @@ Every post or reply runs the loop, then ships **one send-ready** piece by defaul
 
 1. The hook earns the second line (or the reply's one move lands). See `hook-library.md`.
 2. Idea-led first; identity-led only when the business genuinely owns the story.
-3. **No links in the tweet body** — any link goes in a reply.
+3. **No links in the tweet body** — put the link in the reply slot; the publish tool posts that link reply automatically from the same call (never issue a separate publish for the link).
 4. **Zero AI tells, including structural Claudeisms** — no rule-of-three, no "not X, it's Y" mirror, no fortune-cookie closer, minimal "just/quietly." Run the de-Claude pass (`ai-tells.md`).
 5. One hard thing per post: a real number, tradeoff, product contrast, or direct observation. Every claim specific.
 6. Edge dial set for the business (`voice-and-edge.md`, default 3–4): spicy-but-true, punch up at practices not people. Never ragebait.
@@ -138,6 +138,8 @@ None. Copy is crafted from the references and published through the Takyon busin
 - Draft with the copy engine (hooks → build → refine → de-Claude/humanize → set edge dial), then ship one send-ready piece.
 - Prefer `business_x_publish_outreach` as the main live publish path. Use `business_publish_test_outreach` directly only when you intentionally want a local suppressed artifact without taking the normal publish path.
 - In live mode, treat `business_x_publish_outreach` as a spendful path: the actual worker-backed X publish charges the X bucket, so leave enough X channel budget before asking it to send.
+- One `business_x_publish_outreach` call publishes the ENTIRE piece — every thread segment (blank-line-separated in one `body`) and the automatic link reply — on a single credit reservation. Never issue a second call to add a link or another tweet to the same piece.
+- If the result says the publish is `detached` / "still executing" / "queued on the worker plane", re-call with the EXACT same `body` and `idempotency_key` to re-attach and collect the receipt. Do NOT redraft or mint a new `idempotency_key` — a new key publishes a DUPLICATE live post.
 - Use `business_record_conversation_message` and `business_update_conversation_message_status` so the thread state stays truthful after a draft, suppressed publication, or real publish outcome.
 
 ## Procedure
@@ -192,6 +194,7 @@ None. Copy is crafted from the references and published through the Takyon busin
 ## Rules
 
 1. Default to one send-ready post or reply, not variants, unless the operator explicitly asks for alternatives.
+1b. Default launch/announcement = ONE atomic post (a single tweet). Publish a multi-tweet thread only when the operator or calling instruction explicitly asks for a thread, or on a later wake with real traction evidence. When a thread IS requested, put all tweets in one `body` separated by blank lines and publish them in a single call — never one call per tweet.
 2. Do not claim a live X send or reply without a tool-backed receipt or result.
 3. Read the thread before answering it.
 4. Keep durable voice guidance in `distribution/voice/x.md`, not inside one-off drafts.
