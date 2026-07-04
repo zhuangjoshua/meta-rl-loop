@@ -30776,6 +30776,14 @@ def _reddit_ads_list(payload: Any) -> list[dict[str, Any]]:
         data = inner.get("data")
         if isinstance(data, list):
             return [dict(item) for item in data if isinstance(item, dict)]
+        # The reports endpoint nests its rows under "metrics" (alongside
+        # "metrics_updated_at"), not "data": {"data": {"metrics": [...]}}. Without this
+        # fallback every insights sync parsed a metrics-bearing response as zero rows while
+        # Ads Manager showed real delivery (2026-07-04 incident, caught by the operator's
+        # UI-vs-sync comparison on the first live campaign).
+        metrics = inner.get("metrics")
+        if isinstance(metrics, list):
+            return [dict(item) for item in metrics if isinstance(item, dict)]
     if isinstance(inner, list):
         return [dict(item) for item in inner if isinstance(item, dict)]
     return []

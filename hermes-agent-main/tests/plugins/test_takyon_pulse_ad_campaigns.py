@@ -108,3 +108,28 @@ def test_never_raises_when_enumeration_fails(monkeypatch):
 
     monkeypatch.setattr(core, "_list_ad_spend_policies", boom)
     assert core._pulse_active_ad_campaigns("acme", NOW) == []
+
+
+def test_reddit_ads_list_unwraps_reports_metrics_shape():
+    """The reports endpoint nests rows under data.data.metrics (not data.data.data).
+    Regression for 2026-07-04: every insights sync parsed real delivery as zero rows
+    while Ads Manager showed 1,301 impressions."""
+    reports_payload = {
+        "data": {
+            "metrics": [
+                {"date": "2026-07-03", "impressions": 1151, "clicks": 4, "spend": 3738102},
+                {"date": "2026-07-04", "impressions": 150, "clicks": 0, "spend": 0},
+            ],
+            "metrics_updated_at": "2026-07-04T09:39:40Z",
+        }
+    }
+    rows = core._reddit_ads_list(reports_payload)
+    assert len(rows) == 2
+    totals = core._reddit_aggregate_report_rows(rows)
+    assert totals["impressions"] == 1301
+    assert totals["clicks"] == 4
+    assert totals["spend_usd"] == 3.74  # 3,738,102 micros, rounded to cents
+
+    # Object-list responses (campaigns/ad_groups/ads) keep their existing shape.
+    object_payload = {"data": {"data": [{"id": "abc"}]}}
+    assert core._reddit_ads_list(object_payload) == [{"id": "abc"}]
