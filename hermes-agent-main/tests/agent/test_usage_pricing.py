@@ -224,3 +224,18 @@ def test_deepseek_v4_pro_estimate_usage_cost():
     assert result.amount_usd is not None
     # 1M input × $1.74/M + 500K output × $3.48/M = $1.74 + $1.74 = $3.48
     assert float(result.amount_usd) == 3.48
+
+
+def test_eas_build_pricing_is_priced_and_unpriced_fails_closed():
+    """App Store rail (readmodular §7): EAS build/OTA/Maestro are priced per-request so a credited
+    build records exact provider cost; an unpriced EAS op must fail closed (refused), never run
+    unpriced. Apple-only — no android entry exists."""
+    from agent.usage_pricing import has_known_pricing
+
+    for op, cost in (("build_ios", "2.00"), ("update", "0.01"), ("maestro_ios", "1.00")):
+        assert has_known_pricing(op, provider="eas") is True, op
+        entry = get_pricing_entry(op, provider="eas")
+        assert entry is not None and str(entry.request_cost) == cost, op
+    # Fail-closed: android (dropped per operator ruling) and any unknown EAS op are unpriced.
+    assert has_known_pricing("build_android", provider="eas") is False
+    assert has_known_pricing("nonsense_op", provider="eas") is False

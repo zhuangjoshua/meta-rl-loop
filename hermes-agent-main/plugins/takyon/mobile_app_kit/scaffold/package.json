@@ -1,0 +1,34 @@
+{
+  "name": "takyon-mobile-scaffold",
+  "private": true,
+  "version": "0.1.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "prebuild": "expo prebuild --no-install",
+    "licenses": "react-native-legal generate"
+  },
+  "dependencies": {
+    "expo": "~54.0.0",
+    "expo-router": "~6.0.0",
+    "expo-constants": "~18.0.0",
+    "expo-linking": "~8.0.0",
+    "expo-secure-store": "~15.0.0",
+    "expo-auth-session": "~7.0.0",
+    "expo-web-browser": "~15.0.0",
+    "expo-updates": "~29.0.0",
+    "expo-status-bar": "~3.0.0",
+    "react": "19.1.0",
+    "react-native": "0.81.4",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-screens": "~4.16.0",
+    "@supabase/supabase-js": "2.108.2"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "react-native-legal": "^2.0.0",
+    "typescript": "~5.9.2"
+  }
+}

@@ -160,6 +160,34 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source_url="https://dataforseo.com/pricing/keywords-data/google-ads",
         pricing_version="dataforseo-2026-06",
     ),
+    # ── EAS (Expo Application Services) — build / OTA / Maestro (per-request) ──
+    # The App Store rail (readmodular §2.5/§7). EAS cloud builds + hosted Maestro E2E runs are
+    # fixed operator-priced actions; they meter through the creative-credit rail, but the exact
+    # provider cost is resolved HERE so a credited build records the true EAS cost (CLAUDE.md
+    # "each credited action records exact provider cost"). Priced per request via `request_cost`
+    # (USD). Without an entry the build/submit path fails CLOSED (refuses), so an EAS action can
+    # never spend unpriced. `("eas","build_ios")` ≈ a medium iOS worker build; `("eas","update")`
+    # is an OTA publish (near-zero, but must be priced to be callable); `("eas","maestro_ios")` is
+    # a hosted E2E device-flow run. Reconcile against https://expo.dev/pricing (usage-based) when
+    # Expo changes rates. Apple-only per operator ruling — no android entries.
+    ("eas", "build_ios"): PricingEntry(
+        request_cost=Decimal("2.00"),
+        source="official_docs_snapshot",
+        source_url="https://expo.dev/pricing",
+        pricing_version="eas-2026-07",
+    ),
+    ("eas", "update"): PricingEntry(
+        request_cost=Decimal("0.01"),
+        source="official_docs_snapshot",
+        source_url="https://expo.dev/pricing",
+        pricing_version="eas-2026-07",
+    ),
+    ("eas", "maestro_ios"): PricingEntry(
+        request_cost=Decimal("1.00"),
+        source="official_docs_snapshot",
+        source_url="https://expo.dev/pricing",
+        pricing_version="eas-2026-07",
+    ),
     # ── Anthropic Fable 5 ────────────────────────────────────────────────
     # New top tier above Opus. $10/$50; cache read 0.1x input, write 1.25x.
     # Source: https://platform.claude.com/docs/en/about-claude/pricing
