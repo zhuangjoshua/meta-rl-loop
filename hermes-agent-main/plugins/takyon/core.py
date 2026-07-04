@@ -8463,6 +8463,17 @@ def _money_shape_error() -> type[Exception]:
     return _money_shape_leaf().MoneyShapeError
 
 
+def _archetype_leaf():
+    """The `archetypes` leaf module (per-business archetype record + preset registry — manifest key
+    #3, the app|shopify|saas toggle), lazily imported like the other Phase-5/6 leaves so import cost
+    is paid only on the paths that use it."""
+    try:
+        from . import archetypes as _archetypes
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import archetypes as _archetypes
+    return _archetypes
+
+
 def _refuse_product_file_edit_on_autonomous_wake(path: Any) -> None:
     """Block product-SOURCE writes (product/site/...) on a wake. Research/metrics/memory writes and
     distribution/creative receipts + assets (product/public-assets, product/brand, product/static-ads,
@@ -12464,6 +12475,11 @@ def _local_product_source_cache_path(slug: str) -> Path:
     return target
 
 
+# Best-effort remote sync targets that failed with a connection-class error in THIS process.
+# Publishing repeatedly to a firewalled/unreachable plane must not re-pay the TCP connect
+# timeout every time; a restart clears the cache so a recovered host heals naturally.
+_UNREACHABLE_CACHE_SYNC_TARGETS: set[str] = set()
+
 _PRODUCT_SOURCE_CACHE_EXCLUDES = {
     ".cache",
     ".git",
@@ -12525,6 +12541,18 @@ def _sync_remote_product_source_cache(
         return {**summary, "synced": False, "status": "blocked", "error": "ssh is unavailable"}
     if not ssh_key.exists():
         return {**summary, "synced": False, "status": "blocked", "error": f"ssh key not found: {ssh_key}"}
+    # Best-effort plane, so don't re-pay a dead host's TCP connect timeout on EVERY publish: once a
+    # target fails with a connection-class error, later publishes in this process skip it instantly
+    # (status skipped_unreachable, synced=False — an operator who set the REQUIRE flag still blocks,
+    # unchanged). Observed: the sub-user host's firewall silently drops operator-VPS ssh, so each
+    # publish burned a full connect timeout on a leg that can never succeed until a restart anyway.
+    if target in _UNREACHABLE_CACHE_SYNC_TARGETS:
+        return {
+            **summary,
+            "synced": False,
+            "status": "skipped_unreachable",
+            "error": "target marked unreachable earlier in this process; skipping best-effort cache sync",
+        }
     source = source_root.resolve()
     if not source.is_dir():
         return {**summary, "synced": False, "status": "missing_source", "error": f"product source not found: {source}"}
@@ -12535,7 +12563,7 @@ def _sync_remote_product_source_cache(
         "-o",
         "BatchMode=yes",
         "-o",
-        "ConnectTimeout=10",
+        "ConnectTimeout=4",
         "-o",
         "IdentitiesOnly=yes",
         "-o",
@@ -12562,11 +12590,14 @@ def _sync_remote_product_source_cache(
             env=_runtime_env(),
         )
         if mkdir_proc.returncode != 0:
+            error_text = (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip()
+            if "connection timed out" in error_text.lower() or "connection refused" in error_text.lower():
+                _UNREACHABLE_CACHE_SYNC_TARGETS.add(target)
             return {
                 **summary,
                 "synced": False,
                 "status": "failed",
-                "error": (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip(),
+                "error": error_text,
             }
         rsync_proc = subprocess.run(
             [
@@ -12654,6 +12685,13 @@ def _sync_subuser_product_site(slug: str, live_root: Path) -> dict[str, Any]:
             "status": "blocked",
             "error": f"sub-user VPS ssh key not found: {ssh_key}",
         }
+    if summary.get("target") in _UNREACHABLE_CACHE_SYNC_TARGETS:
+        return {
+            **summary,
+            "synced": False,
+            "status": "skipped_unreachable",
+            "error": "target marked unreachable earlier in this process; skipping best-effort site sync",
+        }
     source = live_root.resolve()
     if not source.is_dir():
         return {
@@ -12671,7 +12709,7 @@ def _sync_subuser_product_site(slug: str, live_root: Path) -> dict[str, Any]:
         "-o",
         "BatchMode=yes",
         "-o",
-        "ConnectTimeout=10",
+        "ConnectTimeout=4",
         "-o",
         "IdentitiesOnly=yes",
         "-o",
@@ -12686,11 +12724,14 @@ def _sync_subuser_product_site(slug: str, live_root: Path) -> dict[str, Any]:
             check=False,
         )
         if mkdir_proc.returncode != 0:
+            error_text = (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip()
+            if "connection timed out" in error_text.lower() or "connection refused" in error_text.lower():
+                _UNREACHABLE_CACHE_SYNC_TARGETS.add(str(summary.get("target") or ""))
             return {
                 **summary,
                 "synced": False,
                 "status": "failed",
-                "error": (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip(),
+                "error": error_text,
             }
         rsync_proc = subprocess.run(
             [
@@ -15465,14 +15506,20 @@ class TakyonStore:
             owned_slugs = self._owner_business_slugs(conn, owner_user_id)
             if normalized not in owned_slugs:
                 owned_slugs = [*owned_slugs, normalized]
+            # Keys-only listing, NOT list_digests: the CAS key itself embeds the sha256
+            # (…/cas/<sha256>), so the existing-key set is fully known from one LIST page.
+            # list_digests would additionally HEAD every object to read a digest this caller
+            # immediately discards — measured at one broker round trip per object, i.e. the
+            # single largest per-commit cost on a scaffolded workspace (140-300 objects).
             existing_cas_keys = set(
-                backend.list_digests(storage.workspace_cas_prefix(normalized)).keys()
+                backend.list_object_sizes(storage.workspace_cas_prefix(normalized)).keys()
             )
             incoming_bytes = storage.workspace_revision_incoming_bytes(
                 backend,
                 normalized,
                 workspace,
                 existing_cas_keys=existing_cas_keys,
+                source_digests=candidate_files,
             )
             storage.enforce_operator_storage_quota(backend, owned_slugs, incoming_bytes)
         else:
@@ -15486,6 +15533,7 @@ class TakyonStore:
             parent_revision=current_head,
             created_at=_now(),
             existing_cas_keys=existing_cas_keys,
+            source_digests=candidate_files,
         )
         conn.execute(
             """
@@ -18225,7 +18273,6 @@ class TakyonStore:
             raise TakyonError("operations must be a non-empty list")
         parsed = _scope_parts(scope)
         op_hash = _hash_operation({"scope": scope, "operations": operations, "reason": reason, "actor": actor})
-        touched_workspaces: dict[str, int] = {}
 
         with self._connect() as conn:
             prior = conn.execute("SELECT * FROM idempotency_keys WHERE key = ?", (idempotency_key,)).fetchone()
@@ -18246,67 +18293,111 @@ class TakyonStore:
                 for item in staged
             )
 
-            results: list[dict[str, Any]] = []
-            # No business mirror flock here: it deadlocked the worker (commit re-entered the
-            # per-fd flock through _sync_business_workspace_cache, and the two drain threads did
-            # not coalesce). Durable writes below go through _atomic_write_payload / _append_jsonl,
-            # which retry on the transient ENOENT a concurrent re-materialize can cause, so the
-            # critical section is safe without the lock. See _business_mirror_lock.
-            with conn:
-                for item in staged:
-                    result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
-                    results.append(result)
-                    action_name = str(item.get("action") or "").strip()
-                    skip_workspace_commit = (
-                        action_name == "business.upsert"
-                        and str(item.get("business_slug") or "").strip()
-                        and not bool(item.get("business_existed"))
-                        and _boolish(item.get("skip_initial_workspace_sync"), default=False)
-                    )
-                    if action_name.startswith("app.") or action_name in {
-                        "artifact.write",
-                        "artifact.patch",
-                        "memory.write",
-                        "workspace.upsert",
-                        "business.upsert",
-                    } and not skip_workspace_commit:
-                        slug = str(item.get("business_slug") or "").strip()
-                        if slug:
-                            normalized = _slugify(slug)
-                            touched_workspaces.setdefault(
-                                normalized,
-                                self._canonical_workspace_revision(normalized),
+        def _touches_workspace(item: dict[str, Any]) -> str:
+            action_name = str(item.get("action") or "").strip()
+            skip_workspace_commit = (
+                action_name == "business.upsert"
+                and str(item.get("business_slug") or "").strip()
+                and not bool(item.get("business_existed"))
+                and _boolish(item.get("skip_initial_workspace_sync"), default=False)
+            )
+            if action_name.startswith("app.") or action_name in {
+                "artifact.write",
+                "artifact.patch",
+                "memory.write",
+                "workspace.upsert",
+                "business.upsert",
+            } and not skip_workspace_commit:
+                slug = str(item.get("business_slug") or "").strip()
+                if slug:
+                    return _slugify(slug)
+            return ""
+
+        def _clear_workspace_retry_state(touched_workspaces: set[str]) -> None:
+            for slug in touched_workspaces:
+                self._workspace_revision_cache.pop(_slugify(slug), None)
+
+        def _commit_touched_workspaces(
+            conn: sqlite3.Connection,
+            touched_workspaces: set[str],
+        ) -> None:
+            for slug in sorted(touched_workspaces):
+                self._commit_business_workspace_revision(
+                    conn,
+                    slug,
+                    actor=actor,
+                    reason=reason or "Takyon durable commit",
+                    expected_base_revision=self._canonical_workspace_revision(slug),
+                )
+
+        final: dict[str, Any] | None = None
+        if not postcommit_workspace_sync:
+            last_exc: BaseException | None = None
+            for _attempt in range(_WORKSPACE_COMMIT_MAX_ATTEMPTS):
+                results: list[dict[str, Any]] = []
+                touched_workspaces: set[str] = set()
+                try:
+                    # No business mirror flock here: it deadlocked the worker (commit re-entered the
+                    # per-fd flock through _sync_business_workspace_cache, and the two drain threads did
+                    # not coalesce). Durable writes below go through _atomic_write_payload / _append_jsonl,
+                    # which retry on the transient ENOENT a concurrent re-materialize can cause, so the
+                    # critical section is safe without the lock. See _business_mirror_lock.
+                    with self._connect() as conn:
+                        with conn:
+                            for item in staged:
+                                result = self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
+                                results.append(result)
+                                slug = _touches_workspace(item)
+                                if slug:
+                                    touched_workspaces.add(slug)
+                            final = {"success": True, "scope": str(parsed["raw"]), "results": results}
+                            _commit_touched_workspaces(conn, touched_workspaces)
+                            conn.execute(
+                                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
+                                (idempotency_key, op_hash, _json_dumps(final), _now()),
                             )
-                final = {"success": True, "scope": str(parsed["raw"]), "results": results}
-                if not postcommit_workspace_sync:
-                    for slug, base_revision in sorted(touched_workspaces.items()):
-                        self._commit_business_workspace_revision(
-                            conn,
-                            slug,
-                            actor=actor,
-                            reason=reason or "Takyon durable commit",
-                            expected_base_revision=base_revision,
-                        )
-                    conn.execute(
-                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
-                        (idempotency_key, op_hash, _json_dumps(final), _now()),
-                    )
+                    return final
+                except Exception as exc:  # noqa: BLE001
+                    if not _is_recoverable_commit_conflict(exc):
+                        raise
+                    last_exc = exc
+                    _clear_workspace_retry_state(touched_workspaces)
+            if last_exc is not None:
+                raise last_exc
 
         if postcommit_workspace_sync:
+            results: list[dict[str, Any]] = []
             with self._connect() as conn:
                 with conn:
-                    for slug, base_revision in sorted(touched_workspaces.items()):
-                        self._commit_business_workspace_revision(
-                            conn,
-                            slug,
-                            actor=actor,
-                            reason=reason or "Takyon durable commit",
-                            expected_base_revision=base_revision,
+                    for item in staged:
+                        results.append(
+                            self._apply_operation(conn, parsed, item, reason=reason, actor=actor)
                         )
-                    conn.execute(
-                        "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
-                        (idempotency_key, op_hash, _json_dumps(final), _now()),
-                    )
+            touched_workspaces = {
+                slug
+                for item in staged
+                for slug in [_touches_workspace(item)]
+                if slug
+            }
+            final = {"success": True, "scope": str(parsed["raw"]), "results": results}
+            last_exc: BaseException | None = None
+            for _attempt in range(_WORKSPACE_COMMIT_MAX_ATTEMPTS):
+                try:
+                    with self._connect() as conn:
+                        with conn:
+                            _commit_touched_workspaces(conn, touched_workspaces)
+                            conn.execute(
+                                "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
+                                (idempotency_key, op_hash, _json_dumps(final), _now()),
+                            )
+                    return final
+                except Exception as exc:  # noqa: BLE001
+                    if not _is_recoverable_commit_conflict(exc):
+                        raise
+                    last_exc = exc
+                    _clear_workspace_retry_state(touched_workspaces)
+            if last_exc is not None:
+                raise last_exc
         return final
 
     def _normalize_operation(self, conn: sqlite3.Connection, parsed_scope: dict[str, str | None], op: dict[str, Any], *, principal: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -18485,8 +18576,18 @@ class TakyonStore:
                             "Seed it once at startup (control_plane.ensure_platform_owner) or set "
                             "TAKYON_PLATFORM_OWNER_SUB to a provisioned user's Auth0 sub."
                         )
+                # Archetype (manifest key #3, the app|shopify|saas toggle). Create-time only — a
+                # change goes through the gated archetypes.set_archetype path, never business.upsert
+                # (identical posture to money_shape). An explicit pick must be a known, ENABLED
+                # archetype (fail closed on a not-yet-shipped one); absent → web_saas = today.
+                _arch = _archetype_leaf()
+                requested_archetype = op.get("archetype")
+                if requested_archetype:
+                    archetype = _arch.assert_selectable(requested_archetype)
+                else:
+                    archetype = _arch.DEFAULT_ARCHETYPE
                 conn.execute(
-                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO businesses (slug, name, goal, status, mode, work_focus, budget_json, metadata_json, archetype, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         slug,
                         name,
@@ -18495,6 +18596,7 @@ class TakyonStore:
                         work_focus or "all",
                         _json_dumps(budget) if budget is not None else None,
                         _json_dumps(metadata),
+                        archetype,
                         owner_user_id,
                         now,
                         now,
@@ -26160,11 +26262,17 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
         }
         operation["worker_queue"] = True
         operation["worker_max_attempts"] = 1
+        # 120s wait, NOT 45s: a live X publish measures ~47-48s end-to-end (credit reserve +
+        # segment posts + link reply + commit), so a 45s wait timed out moments before success on
+        # EVERY call and returned the "re-call to re-attach" note — and a caller that re-drafted
+        # with a fresh idempotency_key instead of replaying published a near-duplicate post per
+        # retry (observed: four duplicate launch posts per bootstrap). The wait must comfortably
+        # exceed the tool's own p99 so the first call returns the real receipt.
         return _run_worker_backed_business_job_and_wait(
             canonical_args,
             operation,
             tool_name="business_x_publish_outreach",
-            wait_seconds=45.0,
+            wait_seconds=120.0,
             scope=operation["scope"],
         )
     except Exception as exc:
@@ -32269,6 +32377,18 @@ def _operator_tasks_via_worker_enabled() -> bool:
     return _env_truthy("TAKYON_OPERATOR_TASKS_VIA_WORKER") and not _env_truthy("TAKYON_WORKER_PROCESS")
 
 
+def _worker_plane_available() -> bool:
+    """Whether a Postgres worker plane exists that an EXPLICIT ``wait_ms`` claude-agent call may
+    target. Deliberately broader than :func:`_operator_tasks_via_worker_enabled`: it includes the
+    worker process itself, because a CEO turn running INSIDE the worker (the VPS bootstrap lane)
+    is exactly the caller that needs fire-and-continue — the enqueue is claimed by the worker's
+    dedicated operator-task drain thread, not the thread the CEO turn occupies. The blanket
+    never-defer-inside-worker guard stays for implicit (legacy) calls."""
+    if _db_backend() != "postgres":
+        return False
+    return _env_truthy("TAKYON_OPERATOR_TASKS_VIA_WORKER") or _env_truthy("TAKYON_WORKER_PROCESS")
+
+
 def _read_work_request_run(store: "TakyonStore", run_id: str) -> tuple[str, dict[str, Any]]:
     """Read the canonical run row (status + payload) for one work-request id."""
     with store._connect() as conn:
@@ -32453,11 +32573,18 @@ def _run_operator_task_on_worker(
     worker_job_id = str(op_result.get("worker_job") or "").strip()
     if not run_id or not worker_job_id:
         raise TakyonError(f"worker-plane enqueue did not return a run handle for {tool_name}")
-    deadline = time.monotonic() + max(30.0, float(wait_seconds))
-    pickup_deadline = time.monotonic() + min(
-        max(5.0, _WORKER_PICKUP_TIMEOUT_SECONDS),
-        max(5.0, float(wait_seconds)),
-    )
+    if float(wait_seconds) <= 0:
+        # Fire-and-continue: perform exactly ONE status read below (which returns the stored
+        # result when the replayed run is already terminal — the idempotent re-fire case), and
+        # otherwise return an immediately-detached, re-attachable handle without sleeping.
+        deadline = time.monotonic()
+        pickup_deadline = deadline
+    else:
+        deadline = time.monotonic() + max(30.0, float(wait_seconds))
+        pickup_deadline = time.monotonic() + min(
+            max(5.0, _WORKER_PICKUP_TIMEOUT_SECONDS),
+            max(5.0, float(wait_seconds)),
+        )
     picked_up = False
     while True:
         status, payload = _read_work_request_run(store, run_id)
@@ -32639,8 +32766,10 @@ def _run_worker_backed_business_job_and_wait(
                         "kind": str(operation.get("kind") or "").strip(),
                         "note": (
                             f"{tool_name} is queued on the worker plane and survives this session. "
-                            "Re-call the tool with the SAME arguments and idempotency_key to "
-                            f"re-attach and collect the result for run {run_id}."
+                            "Re-call the tool with EXACTLY the same arguments and the SAME "
+                            f"idempotency_key to re-attach and collect the result for run {run_id}. "
+                            "Do NOT redraft the content or mint a new idempotency_key — a new key "
+                            "starts a SECOND run with real side effects (e.g. a duplicate live post)."
                         ),
                     }
                 )
@@ -32656,8 +32785,10 @@ def _run_worker_backed_business_job_and_wait(
                         "kind": str(operation.get("kind") or "").strip(),
                         "note": (
                             f"{tool_name} is still executing on the worker plane and survives this "
-                            "session. Re-call the tool with the SAME arguments and idempotency_key to "
-                            f"re-attach and collect the result for run {run_id}."
+                            "session. Re-call the tool with EXACTLY the same arguments and the SAME "
+                            f"idempotency_key to re-attach and collect the result for run {run_id}. "
+                            "Do NOT redraft the content or mint a new idempotency_key — a new key "
+                            "starts a SECOND run with real side effects (e.g. a duplicate live post)."
                         ),
                     }
                 )
@@ -32667,8 +32798,18 @@ def _run_worker_backed_business_job_and_wait(
 
 
 def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
-    """Route business_claude_agent_task through the worker plane when enabled; None ⇒ run inline."""
-    if not _operator_tasks_via_worker_enabled():
+    """Route business_claude_agent_task through the worker plane when enabled; None ⇒ run inline.
+
+    An EXPLICIT ``wait_ms`` argument widens the gate to any host with a Postgres worker plane —
+    including the worker process itself, whose dedicated operator-task drain thread claims the
+    enqueued job while the calling CEO turn keeps running. ``wait_ms: 0`` is fire-and-continue
+    (enqueue, return detached immediately); a later call with the SAME args + idempotency_key and
+    a positive ``wait_ms`` re-attaches and collects. ``wait_ms`` is stripped from the deferred
+    payload so the fire and every re-attach hash to the SAME idempotent commit, and so the
+    worker-side execution of the job never re-defers itself."""
+    wait_ms_raw = args.get("wait_ms")
+    explicit_wait = wait_ms_raw is not None
+    if not (_operator_tasks_via_worker_enabled() or (explicit_wait and _worker_plane_available())):
         return None
     store = _store()
     business = _resolved_business_slug(args, required=True)
@@ -32707,9 +32848,17 @@ def _defer_claude_agent_task_to_worker(args: dict) -> str | None:
         minimum=15,
         maximum=900,
     )
-    deferred_args = {**args, "business": business, "workspace": workspace_rel, "refresh_surface": refresh_surface}
-    # Worst case: one bounded turn-cap continuation doubles the SDK run + surface refresh, plus claim slack.
-    wait_seconds = 2.0 * (timeout_ms / 1000.0 + float(refresh_timeout_seconds)) + 120.0
+    deferred_args = {
+        **{k: v for k, v in args.items() if k != "wait_ms"},
+        "business": business,
+        "workspace": workspace_rel,
+        "refresh_surface": refresh_surface,
+    }
+    if explicit_wait:
+        wait_seconds = max(0.0, _clamp_int(wait_ms_raw, default=0, minimum=0, maximum=3_600_000) / 1000.0)
+    else:
+        # Worst case: one bounded turn-cap continuation doubles the SDK run + surface refresh, plus claim slack.
+        wait_seconds = 2.0 * (timeout_ms / 1000.0 + float(refresh_timeout_seconds)) + 120.0
     return _run_operator_task_on_worker(
         store=store,
         business=business,
@@ -35545,6 +35694,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 1200000 for product/site work and 300000 otherwise"},
+                "wait_ms": {"type": "integer", "description": "Worker-plane wait budget in milliseconds. 0 = fire-and-continue: enqueue the build on the worker plane and return immediately with detached:true so the caller can do other work while it runs; re-call later with the SAME arguments and idempotency_key plus a positive wait_ms to re-attach and collect the result. Omit for the default blocking behavior."},
                 "refresh_surface": {"type": "boolean", "description": "Refresh product/website source after edits and write a receipt plus coarse surface snapshot; product/* workspaces default to this source refresh"},
                 "install": {"type": "boolean", "description": "Run package install before build during source check; default true"},
                 "refresh_timeout_seconds": {"type": "integer", "description": "Per source-refresh command timeout; default 600 for product/site work and 300 otherwise"},

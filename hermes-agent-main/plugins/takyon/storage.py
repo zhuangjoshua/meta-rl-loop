@@ -475,14 +475,19 @@ def write_workspace_revision(
     parent_revision: int = 0,
     created_at: str = "",
     existing_cas_keys: Iterable[str] | None = None,
+    source_digests: dict[str, str] | None = None,
 ) -> dict[str, object]:
     workspace_root = Path(root).expanduser().resolve()
-    digests = workspace_source_digests(workspace_root)
+    # ``source_digests`` lets the commit chokepoint thread ONE digest walk through the whole
+    # revision write instead of every helper re-reading + re-hashing the tree; the per-object
+    # read-verify at put time below still guards integrity. The keys-only listing fallback is
+    # deliberate: CAS keys embed the sha256, so list_digests' per-object digest HEADs add nothing.
+    digests = source_digests if source_digests is not None else workspace_source_digests(workspace_root)
     cas_prefix = workspace_cas_prefix(slug)
     existing_cas_key_set = (
         set(existing_cas_keys)
         if existing_cas_keys is not None
-        else set(backend.list_digests(cas_prefix).keys())
+        else set(backend.list_object_sizes(cas_prefix).keys())
     )
     seen_digests: set[str] = set()
     to_write: list[tuple[str, str]] = []
@@ -538,6 +543,7 @@ def workspace_revision_incoming_bytes(
     root: str | os.PathLike[str],
     *,
     existing_cas_keys: Iterable[str] | None = None,
+    source_digests: dict[str, str] | None = None,
 ) -> int:
     """Net NEW object-store bytes a :func:`write_workspace_revision` of ``root`` would add.
 
@@ -548,13 +554,13 @@ def workspace_revision_incoming_bytes(
     CAS dedup that the write itself performs (no double-counting an unchanged tree). Used by the live
     commit path to feed :func:`enforce_operator_storage_quota` BEFORE any blob is uploaded."""
     workspace_root = Path(root).expanduser().resolve()
-    digests = workspace_source_digests(workspace_root)
+    digests = source_digests if source_digests is not None else workspace_source_digests(workspace_root)
     # Existing CAS digests for THIS business (the only prefix write_workspace_revision touches).
     cas_prefix = workspace_cas_prefix(slug)
     existing_cas_key_set = (
         set(existing_cas_keys)
         if existing_cas_keys is not None
-        else set(backend.list_digests(cas_prefix).keys())
+        else set(backend.list_object_sizes(cas_prefix).keys())
     )
     incoming = 0
     counted: set[str] = set()
@@ -1192,20 +1198,43 @@ def write_public_site_to_r2(
         r2 = R2StorageBackend()
     root = Path(build_root).expanduser().resolve()
     digests = workspace_file_digests(root)
+    pointer_key = public_site_pointer_key(safe_slug)
+    normalized_build_id = str(build_id or "").strip().lower()
+    # build_id is content-addressed, so a pointer that already equals it means every object of
+    # this exact build is already present and live — re-PUTting the whole dist adds nothing.
+    # Publishes re-run for non-content reasons (logo republish chains, refresh retries), and each
+    # skipped re-mirror saves one broker round trip per file. Only a CONFIRMED pointer match
+    # skips; a failed pointer read falls through to the full mirror (fail-open to uploading).
+    try:
+        current_pointer = r2.get(pointer_key).decode("utf-8", errors="replace").strip().lower()
+    except Exception:
+        current_pointer = ""
+    if normalized_build_id and current_pointer == normalized_build_id:
+        return {
+            "slug": safe_slug,
+            "build_id": normalized_build_id,
+            "files": {},
+            "pointer_key": pointer_key,
+            "skipped": "pointer_already_current",
+        }
     uploaded: dict[str, str] = {}
-    for rel, digest in sorted(digests.items()):
+
+    def _mirror_one(item: tuple[str, str]) -> None:
+        rel, digest = item
         r2.put(
             public_site_object_key(safe_slug, build_id, rel),
             _read_file_bytes(root / rel),
             digest=digest,
         )
-        uploaded[rel] = digest
-    pointer_key = public_site_pointer_key(safe_slug)
-    pointer_body = str(build_id or "").strip().lower().encode("utf-8")
+
+    items = sorted(digests.items())
+    _map_concurrently(_mirror_one, items)
+    uploaded.update(items)
+    pointer_body = normalized_build_id.encode("utf-8")
     r2.put(pointer_key, pointer_body, digest=digest_bytes(pointer_body))
     return {
         "slug": safe_slug,
-        "build_id": str(build_id or "").strip().lower(),
+        "build_id": normalized_build_id,
         "files": uploaded,
         "pointer_key": pointer_key,
     }

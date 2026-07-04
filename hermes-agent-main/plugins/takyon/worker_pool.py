@@ -382,7 +382,7 @@ class WorkerPool:
                 # Not on the main thread (e.g. under a test harness) — skip signal install.
                 pass
 
-        def _run_loop(*, thread_worker_id: str, allow_dispatch: bool) -> int:
+        def _run_loop(*, thread_worker_id: str, allow_dispatch: bool, kinds_override: Sequence[str] | None = None) -> int:
             import psycopg
 
             def _heartbeat_conn_factory():
@@ -421,7 +421,7 @@ class WorkerPool:
                         conn,
                         worker_id=thread_worker_id,
                         handlers=self.handlers,
-                        kinds=self.kinds,
+                        kinds=kinds_override if kinds_override is not None else self.kinds,
                         owner_user_id=self.owner_user_id,
                         claim_pool_id=self.pool_id,
                         exclusive_pool=self.exclusive,
@@ -466,8 +466,39 @@ class WorkerPool:
             except Exception as exc:  # noqa: BLE001
                 _log.warning("worker[%s]: pool decommission failed: %s", worker_id, exc)
 
+        # Dedicated operator-task lane (fire-and-continue enabler): a CEO turn occupies its drain
+        # thread for the WHOLE bootstrap/wake, so a claude.agent_task / product.surface_refresh job
+        # it fires with wait_ms:0 would otherwise queue behind the turn itself on a small pool —
+        # a livelock, not overlap. One extra kinds-scoped daemon thread claims exactly those job
+        # kinds; it spends its life blocked on the brokered docker build + provider calls, so it
+        # adds no meaningful CPU. Full-service pools only (never --once/--max-jobs/kinds-scoped
+        # pools), TAKYON_WORKER_OPERATOR_TASK_LANE=0 disables.
+        operator_task_lane = (
+            self.kinds is None
+            and not once
+            and max_jobs is None
+            and str(os.getenv("TAKYON_WORKER_OPERATOR_TASK_LANE", "1")).strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+
+        def _spawn_operator_task_lane() -> threading.Thread | None:
+            if not operator_task_lane:
+                return None
+            lane = threading.Thread(
+                target=lambda: _run_loop(
+                    thread_worker_id=f"{worker_id}-optask",
+                    allow_dispatch=False,
+                    kinds_override=("claude.agent_task", "product.surface_refresh"),
+                ),
+                name="takyon-worker-optask",
+                daemon=True,
+            )
+            lane.start()
+            return lane
+
         if concurrency == 1:
             try:
+                _spawn_operator_task_lane()
                 return _run_loop(thread_worker_id=worker_id, allow_dispatch=self.dispatch)
             finally:
                 _decommission()
@@ -497,6 +528,7 @@ class WorkerPool:
             )
             for index in range(concurrency)
         ]
+        _spawn_operator_task_lane()
         for thread in threads:
             thread.start()
         for thread in threads:

@@ -1242,7 +1242,7 @@ def _resolve_dashboard_create_identity(
 
 _SHELL_CREATE_COMMANDS = {"create", "build", "init"}
 _SHELL_CREATE_FLAGS_NO_VALUE = {"--live", "--auto", "--no-auto", "--manual", "--follow", "-f", "--detach", "--background"}
-_SHELL_CREATE_FLAGS_WITH_VALUE = {"--mode", "--name", "--schedule", "--slug"}
+_SHELL_CREATE_FLAGS_WITH_VALUE = {"--mode", "--name", "--schedule", "--slug", "--archetype"}
 _SHELL_EXPLICIT_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,79}$")
 
 
@@ -1349,12 +1349,13 @@ def _parse_business_start_args(
     *,
     usage: str,
     auto_default: bool = False,
-) -> tuple[str, str, str, str | None, str | None, bool, bool, bool, bool]:
+) -> tuple[str, str, str, str | None, str | None, bool, bool, bool, bool, str | None]:
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
     explicit_name: str | None = None
     slug_override: str | None = None
+    archetype: str | None = None
     goal_only = False
     parse_flags = True
     auto_start = auto_default
@@ -1400,6 +1401,24 @@ def _parse_business_start_args(
             if index >= len(tokens):
                 raise SystemExit(usage)
             slug_override = str(tokens[index] or "").strip() or None
+        elif parse_flags and token == "--archetype":
+            # The app|shopify|saas toggle (readmodular §1.2). Validate EARLY so the shell error is
+            # immediate and names the available choices; the store op re-validates (defense in
+            # depth — archetypes.assert_selectable is the authoritative gate either way). A known
+            # but not-yet-enabled archetype fails closed with `archetype_unavailable:<key>`.
+            index += 1
+            if index >= len(tokens):
+                raise SystemExit(usage)
+            raw_archetype = str(tokens[index] or "").strip()
+            if raw_archetype:
+                try:
+                    from plugins.takyon import archetypes as _archetypes_mod
+                except ImportError:  # pragma: no cover - alternate load path
+                    from . import archetypes as _archetypes_mod  # type: ignore[no-redef]
+                try:
+                    archetype = _archetypes_mod.assert_selectable(raw_archetype)
+                except _archetypes_mod.ArchetypeError as exc:
+                    raise SystemExit(str(exc))
         elif parse_flags and token in {"-h", "--help", "help"}:
             raise SystemExit(usage)
         elif parse_flags and token.startswith("--"):
@@ -1425,19 +1444,19 @@ def _parse_business_start_args(
             raw_name = explicit_name or _display_name_from_slug(slug)
         else:
             raw_name, slug = _resolve_create_identity(explicit_name or "", goal, "")
-        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
 
     if slug_override:
         slug = _slugify(slug_override)
         raw_name = explicit_name or _display_name_from_slug(slug)
         goal = " ".join(clean).strip()
-        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
 
     slug_token = clean[0]
     raw_name = explicit_name or slug_token
     slug = _slugify(slug_token)
     goal = " ".join(clean[1:]).strip()
-    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
 
 
 def _strip_log_follow_flags(argv: list[str], *, default: bool = False) -> tuple[list[str], bool]:
@@ -4238,10 +4257,10 @@ def _handle_shell_line(
     if command in _SHELL_CREATE_COMMANDS:
         command_argv = _shell_create_argv(command, raw_args)
         if len(command_argv) < 2:
-            raise SystemExit('usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]')
-        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow, detach = _parse_business_start_args(
+            raise SystemExit('usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--archetype app|shopify|saas] [--schedule "every 6h"] <business-or-brief> [goal]')
+        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow, detach, _archetype = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--schedule "every 6h"] <business-or-brief> [goal]',
+            usage='usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--archetype app|shopify|saas] [--schedule "every 6h"] <business-or-brief> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -5221,9 +5240,9 @@ def run_takyon_command(
 
     if command in {"init", "create", "build"}:
         auto_default = command in {"create", "build"}
-        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow, detach = _parse_business_start_args(
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow, detach, archetype = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow|--detach] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow|--detach] [--archetype app|shopify|saas] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         # Fail closed on operator identity at the create chokepoint. On a plane that declares
@@ -5284,6 +5303,9 @@ def run_takyon_command(
                 "name": raw_name,
                 "goal": goal,
                 "mode": mode,
+                # The archetype toggle (app|shopify|saas). Only sent when explicitly picked —
+                # absent lets the store/DB default (web_saas) stay authoritative.
+                **({"archetype": archetype} if archetype else {}),
                 # Fresh create only needs the business row before bootstrap can start. The initial
                 # stub workspace (empty roots + seeded strategy) is non-authoritative and the
                 # bootstrap worker will commit the real first revision; skipping the create-time

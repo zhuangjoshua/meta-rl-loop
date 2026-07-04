@@ -41,7 +41,7 @@
       "requiresBusiness": false,
       "priorityBand": "p1_ceo",
       "palette": "default",
-      "usage": "/create [--live] [--no-auto] [--schedule \"every 6h\"] <name> <goal>",
+      "usage": "/create [--live] [--no-auto] [--archetype app|shopify|saas] [--schedule \"every 6h\"] <name> <goal>",
       "summary": "Use one shell command: `/create`. By default it creates the business, schedules the CEO, and starts one bootstrap turn.",
       "examples": [
         {
@@ -61,7 +61,8 @@
         {"name": "--live", "description": "accepted for compatibility; live is already the default"},
         {"name": "--no-auto", "description": "create or update only; do not run or auto-schedule the CEO"},
         {"name": "--auto", "description": "accepted for compatibility; auto-start is already the default"},
-        {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""}
+        {"name": "--schedule", "description": "set the CEO wake cadence, for example \"every 6h\""},
+        {"name": "--archetype", "description": "business type: saas (default, web product), app (App Store app), shopify (Shopify store). Choices not yet enabled fail closed with archetype_unavailable:<key>."}
       ]
     },
     {"name": "status", "description": "Show current business state", "requiresBusiness": true, "priorityBand": "p1_ceo", "palette": "default"},

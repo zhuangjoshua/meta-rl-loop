@@ -117,9 +117,13 @@ def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_block
         business_name="CRM",
     )
 
-    assert "Inspect the structured result from business_claude_agent_task." in prompt
-    assert "Trust only its exact success/blocker and surface_refresh publish status for product completion." in prompt
-    assert "If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there." in prompt
+    # The contract, not the sentence: the CEO must trust the tool's exact result, stop on a real
+    # blocker, and never proceed to X as if a blocked build had completed. The blocking (workflow)
+    # branch inspects the result in 2b; the fired (non-workflow) branch collects and judges it in
+    # step 5 — both must carry the same trust/stop language.
+    assert "trusting only its exact success/blocker and surface_refresh publish status" in prompt
+    assert "trust only its exact success/blocker and surface_refresh publish status" in prompt
+    assert "record that exact blocker in research/strategy.md and stop bootstrap there" in prompt
     assert "do not continue to X as if the product build completed." in prompt
     assert "Do not inspect the worker result." not in prompt
     assert "If something is blocked, record the blocker in research/strategy.md and continue with the next step." not in prompt
