@@ -9615,6 +9615,20 @@ def _business_analytics_summary(slug: str, *, days: int = 7) -> dict[str, Any]:
         )
     except Exception as exc:  # provider error or secret-authority unavailable — degrade truthfully
         return {"configured": True, "ok": False, "hostname": hostname, "reason": str(exc)}
+    # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'), on FRESH fetches
+    # only (the TTL cache bounds frequency). Previously these numbers were memory-cached and lost.
+    try:
+        from . import cost_events
+
+        cost_events.record_metrics_observation(
+            provider="umami",
+            name=f"umami:stats:{hostname or website_id}",
+            metrics=stats if isinstance(stats, dict) else {"value": stats},
+            business_slug=slug,
+            identifiers={"website_id": website_id, "hostname": hostname, "window_days": days},
+        )
+    except Exception:
+        pass
     payload = {
         "configured": True,
         "ok": True,
@@ -27625,6 +27639,24 @@ def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record x metrics sync",
             actor=args.get("actor") or "agent",
         )
+        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): every metric
+        # section X returned for this post, verbatim. Best-effort — never blocks the sync.
+        try:
+            from . import cost_events
+
+            cost_events.record_metrics_observation(
+                provider="x",
+                name=f"x:post:{post_id}",
+                metrics={
+                    "public_metrics": snapshot["public_metrics"],
+                    "non_public_metrics": snapshot["non_public_metrics"],
+                    "organic_metrics": snapshot["organic_metrics"],
+                },
+                business_slug=business,
+                identifiers={"post_id": post_id, "post_url": snapshot["post_url"]},
+            )
+        except Exception:
+            pass
         return tool_result(
             {
                 "success": True,
@@ -33147,6 +33179,22 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
         store._sync_business_workspace_remote(business)
+        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): the FULL
+        # totals + rows the provider returned (CTR/CPM/spend/whatever comes back), verbatim and
+        # non-prescriptive. Best-effort — never blocks the sync.
+        try:
+            from . import cost_events
+
+            cost_events.record_metrics_observation(
+                provider="reddit",
+                name=f"reddit:{level}:{object_id or slug}",
+                metrics=totals,
+                rows=normalized_rows,
+                business_slug=business,
+                identifiers={"slug": slug, "level": level, "object_id": object_id, **ids},
+            )
+        except Exception:
+            pass
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_insights_sync",
@@ -35953,6 +36001,30 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 dimension_filters=filters,
             )
             rows = list(response.get("rows") or [])
+            # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'). GSC data
+            # previously had NO persistent sink at all; this is now its canonical record.
+            try:
+                from . import cost_events
+
+                cost_events.record_metrics_observation(
+                    provider="gsc",
+                    name=f"gsc:query:{site_url}",
+                    metrics={
+                        "clicks": response.get("clicks"),
+                        "impressions": response.get("impressions"),
+                        "ctr": response.get("ctr"),
+                        "position": response.get("position"),
+                    },
+                    rows=rows,
+                    identifiers={
+                        "site_url": site_url,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "dimensions": dimensions,
+                    },
+                )
+            except Exception:
+                pass
             return tool_result(
                 {
                     "success": True,
@@ -35988,6 +36060,22 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
+            try:
+                from . import cost_events
+
+                cost_events.record_metrics_observation(
+                    provider="dataforseo",
+                    name=f"dataforseo:{mode}",
+                    metrics={"row_count": len(rows)},
+                    rows=rows,
+                    identifiers={
+                        "keywords": raw_keywords,
+                        "location_code": location_code,
+                        "language_code": language_code,
+                    },
+                )
+            except Exception:
+                pass
             return tool_result(
                 {
                     "success": True,
@@ -36022,6 +36110,23 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
+            try:
+                from . import cost_events
+
+                cost_events.record_metrics_observation(
+                    provider="dataforseo",
+                    name=f"dataforseo:{mode}",
+                    metrics={"row_count": len(rows)},
+                    rows=rows,
+                    identifiers={
+                        "keywords": raw_keywords,
+                        "page_url": page_url,
+                        "location_code": location_code,
+                        "language_code": language_code,
+                    },
+                )
+            except Exception:
+                pass
             return tool_result(
                 {
                     "success": True,

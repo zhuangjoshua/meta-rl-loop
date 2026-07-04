@@ -36,6 +36,7 @@ KIND_PROVIDER_CALL = "provider_call"
 KIND_TURN = "turn"
 KIND_JOB = "job"
 KIND_LOG = "log"
+KIND_METRICS = "metrics"
 
 _MAX_TEXT = 2000
 _MAX_LABEL = 200
@@ -368,6 +369,51 @@ def post_api_request_hook(**kwargs) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("post_api_request cost event failed: %s", exc)
+
+
+def record_metrics_observation(
+    *,
+    provider: str,
+    name: str,
+    metrics: Mapping[str, Any] | None,
+    business_slug: str | None = None,
+    rows: list | None = None,
+    identifiers: Mapping[str, Any] | None = None,
+    status: str = "ok",
+) -> None:
+    """One row per provider METRICS READBACK — ad delivery insights (impressions/clicks/CTR/CPM/
+    spend/…), post metrics, search-console/keyword data, web analytics, and any future readback.
+
+    Deliberately NON-PRESCRIPTIVE: whatever metric object the provider returned is stored verbatim
+    under payload["metrics"], so a new metric never needs schema work — it just shows up. Rows are
+    capped to the first 50 to keep each event bounded (payload["rows_total"] keeps the true count;
+    the channel's own receipt files hold the full row set). Best-effort by construction."""
+    if _disabled():
+        return
+    try:
+        ctx = operator_context()
+        payload: dict[str, Any] = {"metrics": dict(metrics or {})}
+        if rows is not None:
+            payload["rows_total"] = len(rows)
+            payload["rows"] = list(rows[:50])
+        if identifiers:
+            payload["identifiers"] = {
+                str(k): v for k, v in dict(identifiers).items() if v not in (None, "")
+            }
+        record_operator_event_autoconn(
+            event_kind=KIND_METRICS,
+            business_slug=business_slug or (ctx.get("business_slug") or None),
+            user_id=ctx.get("user_id") or None,
+            job_id=ctx.get("run_id") or None,
+            run_id=ctx.get("run_id") or None,
+            task_kind=ctx.get("task_kind") or None,
+            name=name,
+            status=status,
+            provider=provider,
+            payload=payload,
+        )
+    except Exception as exc:  # noqa: BLE001 — observability must never break the readback
+        _log_write_failure(f"metrics/{provider}", exc)
 
 
 def _tool_call_business_slug(args: Mapping[str, Any] | None, ctx: Mapping[str, str]) -> str | None:

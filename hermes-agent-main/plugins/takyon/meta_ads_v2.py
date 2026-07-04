@@ -1155,6 +1155,34 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         if settlement:
             sync["credit_settlement"] = settlement
         _write_receipt(business, sync_rel, sync)
+        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): the FULL
+        # totals + rows Meta returned (impressions/reach/clicks/spend/cpc/cpm/ctr/frequency/
+        # actions/…), verbatim and non-prescriptive. Recomputed here because the policy block
+        # above only aggregates when a spend policy exists. Best-effort — never blocks the sync.
+        try:
+            from . import cost_events
+
+            try:
+                _metrics_totals = core._meta_aggregate_insights_rows(
+                    [dict(r) for r in rows if isinstance(r, Mapping)]
+                )
+            except Exception:
+                _metrics_totals = {}
+            cost_events.record_metrics_observation(
+                provider="meta",
+                name=f"meta:{level}:{resolved_object_id or slug}",
+                metrics=_metrics_totals,
+                rows=[dict(r) for r in rows if isinstance(r, Mapping)],
+                business_slug=business,
+                identifiers={
+                    "slug": slug,
+                    "level": level,
+                    "object_id": resolved_object_id,
+                    "date_preset": date_preset,
+                },
+            )
+        except Exception:
+            pass
         return core.tool_result({
             "success": True,
             "action": "business_meta_ad_insights_sync",
