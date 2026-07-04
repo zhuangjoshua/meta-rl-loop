@@ -442,3 +442,95 @@ def test_get_product_surfaces_graphql_errors(monkeypatch):
         su.get_product(
             shop_domain=SHOP, connected_account_id=ACCOUNT, product_id="gid://shopify/Product/9"
         )
+
+
+# ── buyable catalog: permalinks + the receipts→catalog projection (storefront slice) ──────────
+
+
+def test_cart_permalink_shape():
+    assert (
+        su.cart_permalink(SHOP, "gid://shopify/ProductVariant/888")
+        == f"https://{SHOP}/cart/888:1"
+    )
+    assert su.cart_permalink(SHOP, "gid://shopify/ProductVariant/888", 3).endswith("/cart/888:3")
+    assert su.cart_permalink(SHOP, "not-a-gid") == ""
+    assert su.cart_permalink(SHOP, "") == ""
+
+
+def test_first_variant_extraction():
+    product = {"variants": {"nodes": [{"id": "gid://shopify/ProductVariant/9", "price": "5.00"}]}}
+    assert su.first_variant(product) == ("gid://shopify/ProductVariant/9", "5.00")
+    assert su.first_variant({"variants": {"nodes": []}}) == ("", "")
+    assert su.first_variant(None) == ("", "")
+
+
+def test_catalog_from_receipts_projection():
+    payloads = [
+        {  # newest wins for product 1 (active, has variant → buyable)
+            "shop_domain": SHOP, "product_id": "gid://shopify/Product/1",
+            "title": "A", "price": "9.99", "status": "active",
+            "variant_id": "gid://shopify/ProductVariant/11", "handle": "a",
+            "preview_url": "https://p/a",
+        },
+        {  # older duplicate of product 1 — ignored
+            "shop_domain": SHOP, "product_id": "gid://shopify/Product/1",
+            "title": "A old", "price": "1.00", "status": "draft",
+            "variant_id": "", "handle": "a",
+        },
+        {  # draft product → not buyable
+            "shop_domain": SHOP, "product_id": "gid://shopify/Product/2",
+            "title": "B", "price": "4.00", "status": "draft",
+            "variant_id": "gid://shopify/ProductVariant/22", "handle": "b",
+        },
+        {  # active but no variant → not buyable (no permalink is ever guessed)
+            "shop_domain": SHOP, "product_id": "gid://shopify/Product/3",
+            "title": "C", "price": "2.00", "status": "active", "variant_id": "", "handle": "c",
+        },
+        {  # different store → excluded
+            "shop_domain": "other.myshopify.com", "product_id": "gid://shopify/Product/4",
+            "title": "D", "price": "2.00", "status": "active",
+            "variant_id": "gid://shopify/ProductVariant/44", "handle": "d",
+        },
+        {"no_product_id": True},
+        "not-a-mapping",
+    ]
+    catalog = su.catalog_from_receipts(payloads, business_slug="Roasted-Peak", shop_domain=SHOP)
+    assert catalog["business"] == "roasted-peak" and catalog["shop_domain"] == SHOP
+    by_id = {p["product_id"]: p for p in catalog["products"]}
+    # The mirror is a PUBLIC artifact: drafts and variant-less products are EXCLUDED entirely
+    # (unreleased titles/prices must not leak), so only the buyable product ships.
+    assert set(by_id) == {"gid://shopify/Product/1"}
+    p1 = by_id["gid://shopify/Product/1"]
+    assert p1["title"] == "A" and p1["buyable"] is True
+    assert p1["cart_permalink"] == f"https://{SHOP}/cart/11:1"
+
+
+def test_catalog_tombstone_newest_wins():
+    payloads = [
+        {"tombstone": True, "shop_domain": SHOP, "product_id": "gid://shopify/Product/1"},
+        {  # older create receipt for the SAME product — must NOT resurrect it
+            "shop_domain": SHOP, "product_id": "gid://shopify/Product/1",
+            "title": "A", "price": "9.99", "status": "active",
+            "variant_id": "gid://shopify/ProductVariant/11", "handle": "a",
+        },
+        {  # a re-push NEWER than a tombstone resurrects (newest wins in the given order)
+            "shop_domain": SHOP, "product_id": "gid://shopify/Product/2",
+            "title": "B", "price": "5.00", "status": "active",
+            "variant_id": "gid://shopify/ProductVariant/22", "handle": "b",
+        },
+        {"tombstone": True, "shop_domain": SHOP, "product_id": "gid://shopify/Product/2"},
+    ]
+    catalog = su.catalog_from_receipts(payloads, business_slug=BIZ, shop_domain=SHOP)
+    ids = {p["product_id"] for p in catalog["products"]}
+    assert ids == {"gid://shopify/Product/2"}  # 1 tombstoned; 2 re-pushed after its tombstone
+
+
+def test_create_result_carries_variant_for_permalink(monkeypatch):
+    transport = _FakeTransport([_empty_search(), _created_product(), _price_ok()])
+    monkeypatch.setattr(su, "_composio_request", transport)
+    result = su.create_product(
+        shop_domain=SHOP, connected_account_id=ACCOUNT, business_slug=BIZ,
+        title="Trail Blend", price="19.99", status="active",
+    )
+    assert result["variant_id"] == "gid://shopify/ProductVariant/888"
+    assert su.cart_permalink(SHOP, result["variant_id"]) == f"https://{SHOP}/cart/888:1"

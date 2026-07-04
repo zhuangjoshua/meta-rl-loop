@@ -612,7 +612,15 @@ mutation takyonProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
 SHOPIFY_PRODUCTS_SEARCH_QUERY = """
 query takyonProductsByQuery($query: String!) {
   products(first: 10, query: $query) {
-    nodes { id handle title status onlineStorePreviewUrl tags }
+    nodes {
+      id
+      handle
+      title
+      status
+      onlineStorePreviewUrl
+      tags
+      variants(first: 1) { nodes { id price } }
+    }
   }
 }
 """.strip()
@@ -775,9 +783,101 @@ def find_business_product_by_title(
 
 SHOPIFY_PRODUCT_BY_ID_QUERY = """
 query takyonProductById($id: ID!) {
-  product(id: $id) { id handle title status onlineStorePreviewUrl }
+  product(id: $id) {
+    id
+    handle
+    title
+    status
+    onlineStorePreviewUrl
+    variants(first: 1) { nodes { id price } }
+  }
 }
 """.strip()
+
+# Where the buyable-catalog mirror lives in the business workspace. The file is a PURE
+# PROJECTION of `shopify.product.create` event receipts (canonical truth stays in events);
+# the product-site build bakes it into a storefront section whose Buy buttons are Shopify
+# CART PERMALINKS — the customer's browser goes straight to Shopify's hosted checkout, so
+# no token, no extra OAuth scope, and NOTHING new on the subuser plane.
+SHOPIFY_CATALOG_RELPATH = "product/shopify-catalog.json"
+
+
+def first_variant(product: Mapping[str, Any] | None) -> tuple[str, str]:
+    """(variant_id, price) of a product mapping's first variant, or ('','')."""
+    if not isinstance(product, Mapping):
+        return "", ""
+    nodes = ((product.get("variants") or {}).get("nodes")) or []
+    if nodes and isinstance(nodes[0], Mapping):
+        return str(nodes[0].get("id") or "").strip(), str(nodes[0].get("price") or "").strip()
+    return "", ""
+
+
+def cart_permalink(shop_domain: str, variant_id: str, quantity: int = 1) -> str:
+    """The Shopify cart permalink for one variant — `https://<store>/cart/<variant_num>:<qty>`
+    drops the buyer straight into the store's hosted checkout. Empty when the variant id has
+    no numeric tail (never a guessed URL)."""
+    numeric = _gid_numeric(variant_id)
+    if not numeric:
+        return ""
+    domain = normalize_shop_domain(shop_domain)
+    qty = max(1, int(quantity or 1))
+    return f"https://{domain}/cart/{numeric}:{qty}"
+
+
+def catalog_from_receipts(
+    payloads: Sequence[Mapping[str, Any]], *, business_slug: str, shop_domain: str
+) -> dict[str, Any]:
+    """Project the buyable catalog from this business's Shopify receipts (given NEWEST first —
+    the events-query order). The NEWEST record per product_id decides its fate:
+      * a `tombstone` record (recorded when the by-id probe proved the store deleted it) →
+        the product is excluded — a dead Buy button is never republished;
+      * a create receipt with ACTIVE status and a resolvable variant → included, `buyable`;
+      * a DRAFT (or variant-less) create receipt → excluded entirely — the mirror is a PUBLIC
+        artifact baked into the product site, and unreleased titles/prices must not leak.
+    Deterministic and side-effect free — the mirror file is always exactly this projection."""
+    domain = normalize_shop_domain(shop_domain)
+    seen: set[str] = set()
+    products: list[dict[str, Any]] = []
+    for payload in payloads:
+        if not isinstance(payload, Mapping):
+            continue
+        product_id = str(payload.get("product_id") or "").strip()
+        if not product_id or product_id in seen:
+            continue
+        if str(payload.get("shop_domain") or "").strip().lower() != domain:
+            continue
+        seen.add(product_id)  # newest record for this product decides; older ones are ignored
+        if payload.get("tombstone"):
+            continue
+        status = str(payload.get("status") or "").strip().lower()
+        variant_id = str(payload.get("variant_id") or "").strip()
+        permalink = cart_permalink(domain, variant_id) if variant_id else ""
+        if status != "active" or not permalink:
+            continue
+        products.append(
+            {
+                "product_id": product_id,
+                "product_numeric_id": _gid_numeric(product_id),
+                "handle": str(payload.get("handle") or ""),
+                "title": str(payload.get("title") or ""),
+                "price": str(payload.get("price") or ""),
+                "status": status,
+                "variant_id": variant_id,
+                "variant_numeric_id": _gid_numeric(variant_id),
+                "cart_permalink": permalink,
+                "preview_url": str(payload.get("preview_url") or ""),
+                "buyable": True,
+            }
+        )
+    return {
+        "business": str(business_slug or "").strip().lower(),
+        "shop_domain": domain,
+        "products": products,
+        "buy_button": (
+            "Render each product with a link/button to its cart_permalink — the customer "
+            "completes payment on Shopify's own hosted checkout."
+        ),
+    }
 
 
 def get_product(
@@ -918,6 +1018,7 @@ def create_product(
     )
     if existing is not None:
         product_id = str(existing.get("id") or "")
+        found_variant_id, found_price = first_variant(existing)
         return {
             "deduped": True,
             "product_id": product_id,
@@ -925,6 +1026,8 @@ def create_product(
             "handle": str(existing.get("handle") or ""),
             "title": str(existing.get("title") or ""),
             "status": str(existing.get("status") or "").lower(),
+            "variant_id": found_variant_id,
+            "price": found_price or _normalize_price(price),
             "online_store_preview_url": str(existing.get("onlineStorePreviewUrl") or ""),
             "tag": business_product_tag(business_slug),
             "media_warnings": [],
