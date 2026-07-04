@@ -382,7 +382,7 @@ class WorkerPool:
                 # Not on the main thread (e.g. under a test harness) — skip signal install.
                 pass
 
-        def _run_loop(*, thread_worker_id: str, allow_dispatch: bool, kinds_override: Sequence[str] | None = None) -> int:
+        def _run_loop(*, thread_worker_id: str, allow_dispatch: bool, kinds_override: Sequence[str] | None = None, min_queue_age_override: float | None = None) -> int:
             import psycopg
 
             def _heartbeat_conn_factory():
@@ -422,6 +422,7 @@ class WorkerPool:
                         worker_id=thread_worker_id,
                         handlers=self.handlers,
                         kinds=kinds_override if kinds_override is not None else self.kinds,
+                        min_queue_age_seconds=min_queue_age_override,
                         owner_user_id=self.owner_user_id,
                         claim_pool_id=self.pool_id,
                         exclusive_pool=self.exclusive,
@@ -493,6 +494,10 @@ class WorkerPool:
                     # CEO's own turn on a concurrency-1 pool, so every launch-post call hits its
                     # wait bound and the post publishes only after the turn ends (observed live).
                     kinds_override=("claude.agent_task", "product.surface_refresh", "x.publish_outreach"),
+                    # Sub-jobs are fired BY a turn already running here; the Mac-first queue-age
+                    # delay only stalls that turn's own wait (measured: every launch post aged
+                    # 180s before the lane could claim it). Claim immediately.
+                    min_queue_age_override=0.0,
                 ),
                 name="takyon-worker-optask",
                 daemon=True,
