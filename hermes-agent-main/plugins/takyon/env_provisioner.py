@@ -2432,7 +2432,13 @@ class EnvironmentProvisioner:
                 "no --rev given and no code_revision pinned in the manifest",
                 deposit=f"environments/{self.name}.yaml: code_revision"))
             return ProvisionResult(self.name, "deploy", tuple(receipts))
-        sha = _git("rev-parse", target_ref)
+        # Prefer the PUSHED ref: a bare branch name (e.g. 'dev') means origin/dev — the canonical
+        # remote revision — not a possibly-stale LOCAL branch on this machine. Best-effort fetch first.
+        if "/" not in target_ref and target_ref != "HEAD":
+            _git("fetch", "origin", target_ref)
+            sha = _git("rev-parse", f"origin/{target_ref}") or _git("rev-parse", target_ref)
+        else:
+            sha = _git("rev-parse", target_ref)
         if sha is None:
             receipts.append(StepReceipt(
                 "code_revision", STATUS_BLOCKED, "deploy",
@@ -2466,19 +2472,102 @@ class EnvironmentProvisioner:
             self.config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         except Exception:
             pass
-        # Host activation leg — only when a dev operator host is DECLARED (S4). No fake activation:
-        # an undeclared host is a fail-closed 'staged; host pending' receipt, not a pretend success.
-        op_cfg = self.manifest.get("operator_host") or {}
-        if not op_cfg.get("enabled", False):
+        # Host activation leg — revision-aware, CODE-ONLY. It rsyncs the STAGED runtime tree and
+        # restarts services; it NEVER touches a host's .env / Doppler config (re-running the full
+        # bootstrap would clobber the safebox's managed-secret setup). Host topology (public IPs +
+        # the dev ssh key) comes from the env config's dev_split block.
+        import subprocess
+
+        tree_root = staged / "tree"
+        try:
+            tree_root.mkdir(exist_ok=True)
+            subprocess.run(["tar", "-xf", str(tar_path), "-C", str(tree_root)],
+                           check=True, capture_output=True, timeout=180)
+        except Exception as exc:
+            receipts.append(StepReceipt("hosts", STATUS_ERROR, "deploy",
+                                        f"failed to extract staged rev: {exc}"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        src_tree = tree_root / "hermes-agent-main"
+        if not (src_tree / "plugins").is_dir():
+            receipts.append(StepReceipt("hosts", STATUS_ERROR, "deploy",
+                                        "staged rev has no hermes-agent-main/ runtime tree"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+
+        ds: dict[str, Any] = {}
+        try:
+            import yaml
+            if self.config_path.exists():
+                ds = (yaml.safe_load(self.config_path.read_text()) or {}).get("dev_split") or {}
+        except Exception:
+            ds = {}
+        key_path = str(ds.get("ssh_key_path") or "").strip()
+        if not key_path:
             receipts.append(StepReceipt(
-                "operator_host", STATUS_SKIPPED, "deploy",
-                "no dev operator host declared (manifest.operator_host) — staged rev is ready; "
-                "declare + wire the host (S4) to activate this revision"))
-        else:
+                "hosts", STATUS_BLOCKED, "deploy",
+                "no dev_split in env config (host topology unknown) — provision the dev split first",
+                deposit="dev_split.ssh_key_path"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        ssh_base = ["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new"]
+
+        def _push_code(ip: str) -> "tuple[bool, str]":
+            # No --delete: protects host-only artifacts (.venv, takyon_cli/web_dist, node_modules);
+            # files removed in the rev linger harmlessly (nothing imports them post-change).
+            rsync = ["rsync", "-rt", "--no-perms", "--no-owner", "--no-group", "--checksum",
+                     "--exclude=.git", "--exclude=.venv", "--exclude=venv", "--exclude=node_modules",
+                     "--exclude=__pycache__", "--exclude=*.pyc", "--exclude=._*", "--exclude=.DS_Store",
+                     "--exclude=.env", "--exclude=secrets", "--exclude=logs", "--exclude=tmp",
+                     "-e", "ssh " + " ".join(ssh_base),
+                     f"{src_tree}/", f"root@{ip}:/opt/takyon/hermes-agent-main/"]
+            r = subprocess.run(rsync, capture_output=True, text=True, timeout=900,
+                               env={**os.environ, "COPYFILE_DISABLE": "1"})
+            return (r.returncode == 0), ("synced" if r.returncode == 0
+                                         else f"rsync failed: {(r.stderr or '').strip()[:160]}")
+
+        def _restart(ip: str, services: "list[str]") -> "tuple[bool, str]":
+            remote = (
+                "find /opt/takyon/hermes-agent-main -name '._*' -delete 2>/dev/null; "
+                "runuser -u takyon -- /opt/takyon/hermes-agent-main/.venv/bin/python -m compileall -q "
+                "/opt/takyon/hermes-agent-main/plugins/takyon >/dev/null 2>&1; systemctl daemon-reload; "
+                + "; ".join(f"systemctl restart {s}" for s in services) + "; sleep 2; "
+                + "systemctl is-active " + " ".join(services)
+            )
+            r = subprocess.run(["ssh", *ssh_base, f"root@{ip}", remote],
+                               capture_output=True, text=True, timeout=180)
+            return (r.returncode == 0), (r.stdout or r.stderr or "").strip().replace("\n", " ")[:160]
+
+        # safebox + operator: not behind an LB — a plain restart is fine (code-only, .env untouched).
+        for role, block, services in (
+            ("safebox", ds.get("safebox") or {}, ["takyon-safebox.service"]),
+            ("operator", ds.get("operator") or {},
+             ["takyon-docker-broker.service", "takyon-worker.service", "takyon-dashboard.service"]),
+        ):
+            ip = str((block or {}).get("public_ip") or "").strip()
+            if not ip:
+                receipts.append(StepReceipt(role, STATUS_SKIPPED, "deploy", f"no {role} host in dev_split"))
+                continue
+            ok, why = _push_code(ip)
+            if not ok:
+                receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
+                continue
+            ok, why = _restart(ip, services)
             receipts.append(StepReceipt(
-                "operator_host", STATUS_BLOCKED, "deploy",
-                "dev operator host declared but activation transport not yet wired (S4)",
-                deposit="S4: dev operator host rsync+restart"))
+                role, STATUS_CREATED if ok else STATUS_ERROR, "deploy",
+                f"{ip}: rev {short} {'active (' + why + ')' if ok else 'restart FAILED — ' + why}"))
+
+        # subuser replicas: DRAIN-AWARE. Sync code to every replica first (staged, still serving old
+        # code), then activate with the zero-loss rolling restart so the LB never black-holes.
+        replicas = [r for r in (ds.get("replicas") or []) if str((r or {}).get("public_ip") or "").strip()]
+        synced = []
+        for rep in replicas:
+            ip = str(rep.get("public_ip")).strip()
+            ok, why = _push_code(ip)
+            receipts.append(StepReceipt(
+                "subuser", STATUS_EXISTS if ok else STATUS_ERROR, "deploy",
+                f"{rep.get('name') or ip}: code {'staged' if ok else 'sync FAILED — ' + why}"))
+            if ok:
+                synced.append(rep)
+        if synced:
+            receipts.extend(self.rolling_restart().receipts)
         return ProvisionResult(self.name, "deploy", tuple(receipts))
 
     def promote(self, confirm: bool = False) -> ProvisionResult:

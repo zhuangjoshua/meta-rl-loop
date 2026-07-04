@@ -143,6 +143,15 @@ Fast path for ordinary code/docs/UI changes:
 4. If the workflow passes, report the run id and any direct smoke checks. Do not also do manual VPS/Vercel deploys.
 5. If the workflow fails, inspect `gh run view <run-id> --log-failed`, patch the failing tracked rail, push again, and watch the new run. Use manual SSH/rsync only for emergency rollback or when the operator explicitly asks.
 
+## Dev environment deploy (the `dev` env on droplets — NOT prod, NOT the Mac-local rail)
+
+The prod-shaped `dev` environment (its own Supabase + dev safebox/operator/subuser droplets in the `takyon-dev-vpc`, key `~/.ssh/takyon_dev_split`) is deployed by **one tracked command, not a push** — GitHub can't SSH to the dev hosts any more than the prod ones.
+
+- **Land dev-first changes on the `dev` branch** (prod→dev auto-forward keeps `dev ⊇ main`), then deploy with **`takyon env deploy dev [--rev <sha>]`** (`EnvironmentProvisioner.deploy`). It is **revision-aware**: it `git archive`s the pinned rev (`environments/dev.yaml: code_revision: dev` → resolves the PUSHED `origin/dev`, never a stale local branch or the dirty working tree) and fans that exact tree out to every dev host read from the env config's `dev_split` block — **safebox + operator** (rsync + restart in place) and the **subuser replicas** (rsync then the zero-loss drain rail). It is **CODE-ONLY** (excludes `.env`/`secrets`): it must NOT re-run `bootstrap-dev-droplet.sh`, which would overwrite the dev safebox's Doppler managed-secret config.
+- If the rev added `db/migrations/*`, run **`takyon migrate`** on the dev **operator** host first (dev migration DSN), same rule as prod.
+- Promote to prod only via **`takyon env promote dev --confirm`** (ff `main` to the dev-green SHA + trigger the prod rail) — never hand-merge `dev`→`main`, and never run it while prod is ahead/in-flight unless you intend to ship.
+- Dev secret authority mirrors prod: the dev safebox resolves managed provider/Stripe keys from **Doppler** (`takyon` project, `dev` config, host-local service token) via `TAKYON_MANAGED_SECRET_KEYS`/`_COMMAND`; they are NOT in plaintext `.env`. Never re-seed them into a `.env`. `deploy/shared/migrate-safebox-env-key-to-doppler.sh` migrates one key at a time (override `TAKYON_SAFEBOX_ENV_FILES`/`_CONTROL_ENV_FILE` to `/opt/takyon/.takyon/.env` + `TAKYON_RESTART_SAFEBOX=0` for dev — its health check is hardcoded to the prod IP).
+
 ## Local Dev Rail
 
 When the operator wants a persistent local Takyon dev environment, use one stable local-only root outside the repo, not a repo-owned `TAKYON_HOME` clone and not ad hoc workspace scratch by default. The canonical local dev root is `~/.takyon-fourmanifold-local-dev/` unless the operator explicitly chooses a different outside-repo path.
