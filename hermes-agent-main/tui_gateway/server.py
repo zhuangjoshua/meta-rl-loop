@@ -11737,6 +11737,33 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5052, str(e))
 
 
+@method("takyon.dashboard.archetypes")
+def _(rid, params: dict) -> dict:
+    """The create-toggle option list (app|shopify|saas), derived from the archetype registry SSOT.
+    Read-only; includes not-yet-enabled presets flagged ``enabled: false`` so the UI renders them as
+    'coming soon' rather than a hardcoded roadmap. Fail-soft: on any registry import error, return the
+    web_saas default so the create screen never breaks."""
+    session = _takyon_session(params)
+    if session is None:
+        return _err(rid, 4001, "session not found")
+    try:
+        _archetypes_mod = importlib.import_module("plugins.takyon.archetypes")
+        options = _archetypes_mod.create_toggle_options()
+        default_key = _archetypes_mod.DEFAULT_ARCHETYPE
+    except Exception:  # noqa: BLE001 - never break the create screen on a registry hiccup
+        options = [
+            {
+                "key": "web_saas",
+                "label": "SaaS / website",
+                "description": "A web product on the R2 edge.",
+                "enabled": True,
+                "default": True,
+            }
+        ]
+        default_key = "web_saas"
+    return _ok(rid, {"archetypes": options, "default": default_key})
+
+
 @method("takyon.dashboard.create")
 def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
@@ -11751,6 +11778,19 @@ def _(rid, params: dict) -> dict:
         requested_goal = str(params.get("goal") or "").strip()
         requested_mode = str(params.get("mode") or "live").strip().lower()
         bootstrap_enabled = _coerce_bool(params.get("bootstrap"), default=True)
+        # Archetype toggle (app|shopify|saas). Validate up front against the registry so a
+        # not-yet-enabled pick returns a clean RPC error instead of a subprocess SystemExit; absent
+        # lets the DB default (web_saas) stay authoritative. The CLI `--archetype` flag re-asserts the
+        # same gate (assert_selectable) at the single create chokepoint — this is a UX pre-check, not a
+        # second gate.
+        requested_archetype = str(params.get("archetype") or "").strip()
+        normalized_archetype = ""
+        if requested_archetype:
+            try:
+                _archetypes_mod = importlib.import_module("plugins.takyon.archetypes")
+                normalized_archetype = _archetypes_mod.assert_selectable(requested_archetype)
+            except Exception as arch_exc:  # noqa: BLE001 - surface a clean 4xx, never a 500
+                return _err(rid, 4041, f"archetype not available: {arch_exc}")
         if requested_mode == "test":
             return _err(rid, 4004, "test mode is disabled; all businesses run live")
         if requested_mode != "live":
@@ -11805,6 +11845,8 @@ def _(rid, params: dict) -> dict:
         # the CLI worker path but the dashboard thrashed into a slow 2-pass build.
         if not bootstrap_enabled:
             command_argv.append("--no-auto")
+        if normalized_archetype:
+            command_argv.extend(["--archetype", normalized_archetype])
         if resolved_name:
             command_argv.extend(["--name", resolved_name])
         command_argv.append(slug)

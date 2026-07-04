@@ -92,7 +92,7 @@ gemini = ["google-genai==1.21.0"]
 # Brand-logo post-processing (white-background -> real alpha). Only needed when
 # a logo is actually rendered; lazy-installed via tools/lazy_deps.py
 # (image.logo_postprocess). Keep these pins in sync with tools/lazy_deps.py.
-logo-postprocess = ["Pillow>=10.4,<12", "numpy==2.4.3"]
+logo-postprocess = ["Pillow>=10.4,<12", "numpy>=2.4.3,<3"]
 # Edge TTS — default TTS provider but still optional (users can pick
 # ElevenLabs / OpenAI / MiniMax instead).
 edge-tts = ["edge-tts==7.2.7"]

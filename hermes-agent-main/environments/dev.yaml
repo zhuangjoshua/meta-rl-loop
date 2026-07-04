@@ -31,7 +31,13 @@ description: >-
 #     dev -> prod path) and triggers the tracked prod deploy. prod never receives an unpinned rev.
 # prod -> dev is the reverse and AUTOMATIC (.github/workflows/forward-main-to-dev.yml); dev is
 # always a superset of prod.
-code_revision: dev
+# Pinned to the REMOTE ref, not the local `dev` branch: this workspace hosts concurrent
+# sessions, so a machine-local `dev` can be stale or a diverged duplicate-SHA history (observed
+# 2026-07-03: local dev held 12 patch-equivalent-but-different-SHA commits while checked out
+# dirty in another session — promote would have pushed the wrong history to prod). The tested
+# revision is by definition the PUSHED dev tip (CI + dev hosts deploy from it via git archive);
+# run `git fetch` before promote/deploy so the tracking ref is current.
+code_revision: origin/dev
 
 # ── domains ─────────────────────────────────────────────────────────────────────────────
 # Dev domains are *.dev / localtest — never the prod company base or dashboard host.

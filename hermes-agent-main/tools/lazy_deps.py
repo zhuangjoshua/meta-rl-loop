@@ -123,7 +123,12 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # a real alpha channel. Loaded only after a logo is rendered, in
     # plugins/takyon/creative_gateway.py::_key_white_background_to_alpha. Keep
     # these pins in sync with the `logo-postprocess` extra in pyproject.toml.
-    "image.logo_postprocess": ("Pillow>=10.4,<12", "numpy==2.4.3"),
+    # numpy is RANGED, not exact: an exact pin turns any coexisting numpy (a
+    # transitive of some other backend) into a runtime pip downgrade in the
+    # middle of a paid logo render — observed live blocking a bootstrap's logo
+    # (venv had 2.4.6, pin demanded ==2.4.3, install failed → credit released,
+    # logo blocked). Any modern numpy 2.x works for the alpha-keying math.
+    "image.logo_postprocess": ("Pillow>=10.4,<12", "numpy>=2.4.3,<3"),
 
     # ─── Memory providers ──────────────────────────────────────────────────
     "memory.honcho": ("honcho-ai==2.0.1",),
