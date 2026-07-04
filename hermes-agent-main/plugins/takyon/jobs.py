@@ -304,6 +304,7 @@ def claim_one(
     owner_user_id: str | None = None,
     claim_pool_id: str | None = None,
     exclusive_pool: bool = False,
+    min_queue_age_seconds: float | None = None,
 ) -> Job | None:
     """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
     ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
@@ -325,7 +326,12 @@ def claim_one(
         f"  and {_LANE_SQL.format(a='r')} = {_LANE_SQL.format(a='j')}"
         ") "
     )
-    min_queue_age_seconds = max(0.0, float(os.getenv("TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS") or 0.0))
+    # None => the process-wide env policy (Mac-first pickup delay for root jobs). An explicit
+    # value lets the operator-task lane claim turn-fired sub-jobs immediately: those jobs are
+    # created BY a turn already running on this worker, so aging them only stalls the turn.
+    if min_queue_age_seconds is None:
+        min_queue_age_seconds = max(0.0, float(os.getenv("TAKYON_WORKER_MIN_QUEUE_AGE_SECONDS") or 0.0))
+    min_queue_age_seconds = max(0.0, float(min_queue_age_seconds))
     owner_filter = str(owner_user_id or "").strip()
     pool_filter = str(claim_pool_id or "").strip()
     if exclusive_pool and not pool_filter:
@@ -550,6 +556,7 @@ def run_one(
     exclusive_pool: bool = False,
     heartbeat_interval_seconds: float = 15.0,
     heartbeat_conn_factory: Callable[[], Any] | None = None,
+    min_queue_age_seconds: float | None = None,
 ) -> JobOutcome | None:
     """Claim one job and run it under the full contract; returns its outcome, or None if the queue is
     empty. The pipeline, each step its own transaction on the autocommit conn:
@@ -569,6 +576,7 @@ def run_one(
         owner_user_id=owner_user_id,
         claim_pool_id=claim_pool_id,
         exclusive_pool=exclusive_pool,
+        min_queue_age_seconds=min_queue_age_seconds,
     )
     if job is None:
         return None
