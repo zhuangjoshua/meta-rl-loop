@@ -597,6 +597,48 @@ def test_starter_seeds_scaffold_on_vite_lane(tmp_path):
     assert "Fresh Co" in index_html and "__STARTER_SITE_NAME__" not in index_html
 
 
+def test_starter_owned_metadata_refreshes_on_rebuild(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    surface = _app_shell_surface("vite_react_ts")
+    surface["notes"] = "Original metadata"
+    takyon_core._materialize_subuser_app_starter(tmp_path, slug="fresh-co", surface=surface)
+
+    (tmp_path / "index.html").write_text(
+        """<!doctype html>
+<html>
+  <head>
+    <!-- SCAFFOLD-PLACEHOLDER: stale -->
+    <title>Wrong Title</title>
+    <meta name="description" content="Wrong description" />
+  </head>
+  <body></body>
+</html>
+""",
+        encoding="utf-8",
+    )
+
+    refreshed_surface = _app_shell_surface("vite_react_ts")
+    refreshed_surface["notes"] = "Fresh metadata for rebuild"
+    takyon_core._rematerialize_starter_owned_files(  # type: ignore[attr-defined]
+        tmp_path,
+        slug="fresh-co",
+        surface=refreshed_surface,
+    )
+
+    index_html = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert "SCAFFOLD-PLACEHOLDER" not in index_html
+    assert "<title>Fresh Co</title>" in index_html
+    assert 'content="Fresh metadata for rebuild"' in index_html
+    assert "__STARTER_SITE_NAME__" not in index_html
+    assert "Wrong Title" not in index_html
+
+    llms = (tmp_path / "public" / "llms.txt").read_text(encoding="utf-8")
+    assert "Fresh Co" in llms
+    assert "Fresh metadata for rebuild" in llms
+    assert "__STARTER_PUBLIC_ORIGIN__" not in llms
+
+
 def test_starter_seeds_vite_when_lane_absent(tmp_path):
     from plugins.takyon import core as takyon_core
 

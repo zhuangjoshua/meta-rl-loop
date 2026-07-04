@@ -377,10 +377,10 @@ class EgressPricingUnavailable(ValueError):
     """Raised when the generic egress per-request price has no exact known entry."""
 
 
-# Per-KiB egress data component (µUSD), added on top of the flat per-request markup so a call
-# that moves a large request/response body costs proportionally more. Kept small and explicit;
-# the real ceiling is the hard request/response body caps enforced in the egress route.
-_EGRESS_MICROUSD_PER_KIB = 4
+# Per-KiB egress data component (µUSD). Egress is free to the platform (the business's own
+# credential bears any provider cost), so this is 0 — the flat request_cost in usage_pricing is
+# also 0. Set both non-zero only if you want egress to carry a secure-proxy infra markup.
+_EGRESS_MICROUSD_PER_KIB = 0
 
 
 def egress_request_microusd(*, request_bytes: int = 0, response_bytes: int = 0) -> int:

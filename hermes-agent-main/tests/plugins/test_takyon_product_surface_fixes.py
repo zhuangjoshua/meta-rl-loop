@@ -9,15 +9,24 @@ _SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "subuser_app_kit" / "s
 
 
 def test_appkit_owned_src_rematerialized_on_rebuild():
-    # The AppKit-owned rail wrappers (lib/hooks.ts, lib/takyon.ts, screens/app-layout.tsx, ...) are
-    # seeded into a business once at bootstrap. They must ALSO be force-refreshed from the scaffold
-    # on every rebuild, or a canonical rail fix (e.g. wiring the subscribe CTA to checkout) only
-    # ever reaches newly-bootstrapped businesses and never the existing ones. Guard the mechanism.
-    assert "def _rematerialize_appkit_owned_src(" in _CORE_SRC
+    # The scaffold-owned metadata floor + AppKit rail wrappers are seeded into a business once at
+    # bootstrap. They must ALSO be force-refreshed from the scaffold on every rebuild, or a
+    # canonical metadata/rail fix only ever reaches newly-bootstrapped businesses and never the
+    # existing ones. Guard the mechanism.
+    assert "def _rematerialize_starter_owned_files(" in _CORE_SRC
     # ...and that it is actually invoked from the kit materializer (runs on every refresh build).
-    assert "_rematerialize_appkit_owned_src(workspace_root" in _CORE_SRC
-    for rail in ("src/main.tsx", "src/lib/hooks.ts", "src/lib/takyon.ts", "src/screens/app-layout.tsx"):
-        assert rail in _CORE_SRC, f"{rail} missing from _APPKIT_OWNED_SRC_FILES"
+    assert "_rematerialize_starter_owned_files(workspace_root" in _CORE_SRC
+    for rail in (
+        "index.html",
+        "public/llms.txt",
+        "public/robots.txt",
+        "public/sitemap.xml",
+        "src/main.tsx",
+        "src/lib/hooks.ts",
+        "src/lib/takyon.ts",
+        "src/screens/app-layout.tsx",
+    ):
+        assert rail in _CORE_SRC, f"{rail} missing from _STARTER_OWNED_REFRESH_FILES"
 
 
 def test_worker_contract_forbids_free_tier():

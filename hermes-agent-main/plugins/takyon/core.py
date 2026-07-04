@@ -3100,10 +3100,10 @@ def _materialize_subuser_app_kit(
         encoding="utf-8",
     )
     _materialize_subuser_app_starter(workspace_root, slug=slug, surface=materialized_surface)
-    # After the (seed-once) starter, force-refresh the AppKit-owned rail wrappers so canonical
-    # auth/checkout/entitlement plumbing fixes reach existing businesses on rebuild, not just new
-    # ones. Worker-owned screens are untouched.
-    _rematerialize_appkit_owned_src(workspace_root, slug=slug, surface=materialized_surface)
+    # After the (seed-once) starter, force-refresh the scaffold-owned metadata + AppKit rails so
+    # canonical SEO/auth/checkout/entitlement fixes reach existing businesses on rebuild, not just
+    # new ones. Worker-owned screens are untouched.
+    _rematerialize_starter_owned_files(workspace_root, slug=slug, surface=materialized_surface)
     # Tab favicon = the business logo on EVERY rebuild, not just first materialize. The scaffold-only
     # path (_materialize_subuser_app_scaffold) seeds + repoints the favicon, but it short-circuits for
     # any already-built business (the seed-once starter returns early once product source exists). So
@@ -3138,6 +3138,28 @@ def _subuser_app_starter_strings(surface: dict[str, Any] | None, *, slug: str) -
         "title": title,
         "description": description,
         "og_alt": f"{title} preview",
+    }
+
+
+def _starter_seed_replacements(surface: dict[str, Any] | None, *, slug: str) -> dict[str, str]:
+    copy = _subuser_app_starter_strings(surface, slug=slug)
+
+    # Seed values land in JSX text / HTML attribute positions: keep them markup-safe.
+    def _seed_safe(value: Any) -> str:
+        return re.sub(r'["<>{}]', "", str(value or "")).strip()
+
+    return {
+        "__STARTER_SITE_NAME__": _seed_safe(copy.get("title")) or _humanize_business_slug(slug),
+        "__STARTER_SITE_DESCRIPTION__": _seed_safe(copy.get("description")),
+        # Public origin for technical-SEO artifacts (sitemap.xml, llms.txt, canonical, OG) seeded
+        # into the build. Resolved from the slug + the current company base domain so a fresh
+        # business ships a valid sitemap/canonical on coscale.app (never the legacy domain).
+        "__STARTER_PUBLIC_ORIGIN__": f"https://{slug}.{_company_base_domain()}/",
+        # GSC ownership: the platform service-account's stable verification META tag, baked into
+        # index.html so EVERY build carries it from the first publish and the bootstrap verify
+        # always finds it on the live edge (no build-pointer/R2 race). Fail-soft "" when the SA is
+        # unavailable at seed time, in which case the GSC tool's own injection is the fallback.
+        "__STARTER_GSC_VERIFICATION__": _resolve_gsc_verification_meta_tag(),
     }
 
 
@@ -6907,24 +6929,7 @@ def _materialize_subuser_app_scaffold(
             "frontend_stack vite_react_ts requires the bundled scaffold at "
             "plugins/takyon/subuser_app_kit/scaffold, which is missing from this runtime"
         )
-    copy = _subuser_app_starter_strings(surface, slug=slug)
-    # Seed values land in JSX text / HTML attribute positions: keep them markup-safe.
-    def _seed_safe(value: Any) -> str:
-        return re.sub(r'["<>{}]', "", str(value or "")).strip()
-
-    replacements = {
-        "__STARTER_SITE_NAME__": _seed_safe(copy.get("title")) or _humanize_business_slug(slug),
-        "__STARTER_SITE_DESCRIPTION__": _seed_safe(copy.get("description")),
-        # Public origin for technical-SEO artifacts (sitemap.xml, llms.txt, canonical, OG) seeded
-        # into the build. Resolved from the slug + the current company base domain so a fresh
-        # business ships a valid sitemap/canonical on coscale.app (never the legacy domain).
-        "__STARTER_PUBLIC_ORIGIN__": f"https://{slug}.{_company_base_domain()}/",
-        # GSC ownership: the platform service-account's stable verification META tag, baked into
-        # index.html so EVERY build carries it from the first publish and the bootstrap verify
-        # always finds it on the live edge (no build-pointer/R2 race). Fail-soft "" when the SA is
-        # unavailable at seed time, in which case the GSC tool's own injection is the fallback.
-        "__STARTER_GSC_VERIFICATION__": _resolve_gsc_verification_meta_tag(),
-    }
+    replacements = _starter_seed_replacements(surface, slug=slug)
     for path in sorted(source.rglob("*")):
         if not path.is_file():
             continue
@@ -6957,15 +6962,19 @@ def _materialize_subuser_app_scaffold(
     _seed_warm_node_modules(workspace_root, for_docker_consumer=True)
 
 
-# The AppKit-owned rail wrappers + shared app shell. Unlike the worker-owned screens (app-home,
-# landing, profile, support, components, branding tokens), these encode canonical auth / session /
-# checkout / entitlement plumbing the worker must NOT edit (see the product-build contract). The
-# scaffold seeds them once at bootstrap, but a fix to this canonical plumbing must reach EXISTING
-# businesses on their next rebuild — otherwise a platform rail fix (e.g. wiring subscribe checkout)
-# only ever lands in brand-new businesses. So these specific files are force-refreshed from the
-# scaffold on every materialize, exactly like the `_takyon/` kit. They are additive/backward-
-# compatible by policy (new exports, never breaking the API the worker screens import).
-_APPKIT_OWNED_SRC_FILES = (
+# The starter-owned metadata floor + AppKit-owned rail wrappers. Unlike the worker-owned screens
+# (app-home, landing, profile, support, components, branding tokens), these files encode canonical
+# SEO/auth/checkout/entitlement plumbing the worker must NOT edit (see the product-build contract).
+# The scaffold seeds them once at bootstrap, but a fix to this canonical layer must reach EXISTING
+# businesses on their next rebuild — otherwise a platform metadata/rail fix only lands in brand-new
+# businesses. So these files are force-refreshed from the scaffold on every materialize, exactly
+# like the `_takyon/` kit. They are additive/backward-compatible by policy.
+_STARTER_OWNED_REFRESH_FILES = (
+    "index.html",
+    "public/robots.txt",
+    "public/sitemap.xml",
+    "public/llms.txt",
+    "src/main.tsx",
     "src/lib/takyon.ts",
     "src/lib/hooks.ts",
     "src/lib/product-auth.tsx",
@@ -6974,28 +6983,21 @@ _APPKIT_OWNED_SRC_FILES = (
 )
 
 
-def _rematerialize_appkit_owned_src(
+def _rematerialize_starter_owned_files(
     workspace_root: Path,
     *,
     slug: str,
     surface: dict[str, Any] | None,
 ) -> None:
-    """Force-refresh the AppKit-owned rail wrappers from the scaffold, overwriting the business's
-    seeded-once copies. Worker-owned screens/components are left untouched. This is what lets a
-    canonical rail fix propagate to an already-bootstrapped business on rebuild."""
+    """Force-refresh the scaffold-owned metadata + AppKit rails from the scaffold.
+
+    Worker-owned screens/components are left untouched. This is what lets a canonical metadata or
+    rail fix propagate to an already-bootstrapped business on rebuild."""
     source = _subuser_app_scaffold_source_dir()
     if not source.exists():
         return
-    copy = _subuser_app_starter_strings(surface, slug=slug)
-
-    def _seed_safe(value: Any) -> str:
-        return re.sub(r'["<>{}]', "", str(value or "")).strip()
-
-    replacements = {
-        "__STARTER_SITE_NAME__": _seed_safe(copy.get("title")) or _humanize_business_slug(slug),
-        "__STARTER_SITE_DESCRIPTION__": _seed_safe(copy.get("description")),
-    }
-    for rel in _APPKIT_OWNED_SRC_FILES:
+    replacements = _starter_seed_replacements(surface, slug=slug)
+    for rel in _STARTER_OWNED_REFRESH_FILES:
         src_path = source / rel
         if not src_path.is_file():
             continue

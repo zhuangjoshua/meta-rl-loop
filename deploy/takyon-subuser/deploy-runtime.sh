@@ -25,6 +25,9 @@ TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SYNC_PRODUCT_SITES="${TAKYON_SYNC_PRODUCT_SITES:-1}"
 TAKYON_SYNC_PRODUCT_SOURCE_CACHE="${TAKYON_SYNC_PRODUCT_SOURCE_CACHE:-1}"
 TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"
+# 0 only for a replica whose app DSN resolves through the safebox authority (no local DSN by
+# design — takyon-subuser-2); see deploy/shared/validate-authority-env.sh.
+TAKYON_REQUIRE_APP_DATABASE_URL="${TAKYON_REQUIRE_APP_DATABASE_URL:-1}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
@@ -68,7 +71,7 @@ if [[ ( "$TAKYON_SYNC_PRODUCT_SITES" == "1" || "$TAKYON_SYNC_PRODUCT_SOURCE_CACH
 fi
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
-  "TAKYON_REQUIRE_MIGRATION_DATABASE_URL='$TAKYON_RUN_DB_MIGRATIONS' bash -s -- subuser /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  "TAKYON_REQUIRE_MIGRATION_DATABASE_URL='$TAKYON_RUN_DB_MIGRATIONS' TAKYON_REQUIRE_APP_DATABASE_URL='$TAKYON_REQUIRE_APP_DATABASE_URL' bash -s -- subuser /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
   < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
