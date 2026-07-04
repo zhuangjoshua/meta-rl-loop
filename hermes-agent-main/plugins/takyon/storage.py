@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1279,6 +1280,17 @@ def prefix_bytes(backend: StorageBackend, prefix: str) -> int:
     return sum(int(size or 0) for size in backend.list_object_sizes(prefix).values())
 
 
+# Short-TTL per-process cache for the operator's aggregate storage footprint. The quota gate sits
+# on the live commit chokepoint, so an operator with many businesses paid one listing per owned
+# slug on EVERY commit — both the dominant per-commit latency term and the main source of broker
+# saturation when several turns commit concurrently. Staleness is bounded (60s) and immaterial to
+# a 5GiB fail-closed gate whose per-commit increments are kilobytes-to-megabytes: the gate still
+# adds THIS commit's incoming bytes on top of the cached total, and a fresh listing happens at
+# most once per minute per process. Keyed by the sorted slug set so ownership changes miss.
+_OPERATOR_STORAGE_BYTES_CACHE: dict[tuple[str, ...], tuple[float, int]] = {}
+_OPERATOR_STORAGE_BYTES_TTL_SECONDS = 60.0
+
+
 def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int:
     """Sum the operator's combined object-store usage across every business they own.
 
@@ -1297,9 +1309,16 @@ def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int
     # chokepoint) — serialized this dominated commit latency for operators with many businesses
     # (profiled: ~150 owned slugs x ~0.43s per listing ≈ 65s of every single workspace commit).
     # Fan the per-slug listings out on the bounded sync pool; the sum is order-independent.
-    return sum(
+    cache_key = tuple(sorted(unique))
+    cached = _OPERATOR_STORAGE_BYTES_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < _OPERATOR_STORAGE_BYTES_TTL_SECONDS:
+        return cached[1]
+    total = sum(
         _map_concurrently(lambda safe: prefix_bytes(backend, object_prefix(safe)), unique)
     )
+    _OPERATOR_STORAGE_BYTES_CACHE[cache_key] = (now, total)
+    return total
 
 
 def enforce_operator_storage_quota(
