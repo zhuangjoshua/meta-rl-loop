@@ -3,73 +3,61 @@
 --
 -- Mechanism of the bug (verified live 2026-07-04): the app-plane connection pool pins the
 -- session GUC takyon.rls_bypass = '0' (defense-in-depth for DIRECT table access by app roles).
--- But GUCs are session-wide: inside a SECURITY DEFINER function current_user becomes the
--- trusted owner (takyon_migration), yet current_setting('takyon.rls_bypass') still reads the
--- caller's '0', so takyon_rls_bypass() = trusted-role AND guc-on = FALSE — and every
--- FORCE-RLS table read inside the definer (app_entitlements, app_usage_events) is filtered by
+-- But GUCs are session-wide and survive into SECURITY DEFINER functions: inside a definer port
+-- current_user becomes the trusted owner (takyon_migration) while current_setting still reads
+-- the caller's '0', so takyon_rls_bypass() = trusted-role AND guc-on went FALSE — and every
+-- FORCE-RLS table read inside the port (app_entitlements, app_usage_events) was filtered by
 -- scope GUCs the pool never set. Observed effects on the session-token paths:
 --   * takyon_app_session_plan returned {entitlement: null} for a provably active paid
---     entitlement → broker_message_for_business 402s subscription_required → the direct
---     /generate rail refuses PAYING customers;
+--     entitlement → broker_message_for_business 402'd subscription_required → the direct
+--     /generate rail refused PAYING customers;
 --   * the committed-spend aggregates inside the usage gate read through the same filter, so
---     the session-path gate arithmetic was untrustworthy (fail direction varies by policy).
+--     session-path gate arithmetic was untrustworthy.
 --
--- Fix: these ports are SELF-SCOPING — they derive the app user from a validated session hash
--- (or take an explicit business+reservation key) and pin EVERY internal query by that scope,
--- so row security inside them is redundant. Give each a FUNCTION-SCOPED
--- `SET takyon.rls_bypass = '1'`: PostgreSQL applies it for the function's duration and
--- restores the caller's value on exit, so the app-plane session keeps its '0' for any direct
--- table access. This does NOT loosen the subuser boundary: app roles still have no direct
--- table privileges (0037/0038/0041 revokes), the ports still validate the session/scope
--- arguments themselves, and an attacker without a valid session hash gets exactly what they
--- got before — nothing.
+-- The upstream flaw is in takyon_rls_bypass() itself (last shaped by 0060): it conflates two
+-- different trust questions —
+--   (1) "should a trusted LOGIN's direct statements bypass row security?"  → governed by the
+--       session GUC, and the '0' pin must keep working there; and
+--   (2) "should trusted DEFINER CODE bypass row security?" → yes, always: a SECURITY DEFINER
+--       port owned by a trusted role IS the sanctioned access path; it validates and pins its
+--       own scope (session hash / business + key) on every internal query. Row security
+--       inside it is redundant, and letting the caller's session GUC veto it is exactly the
+--       bug above.
+-- The definer context is precisely `current_user IS DISTINCT FROM session_user` (the login
+-- stays the app role while the definer switches current_user to the trusted owner), so the fix
+-- is ONE function redefinition, no per-port changes and no parameter-permission grants (prod's
+-- takyon_migration may not ALTER ... SET this parameter — learned the hard way).
 --
--- MAINTENANCE INVARIANT (read before touching any function below): CREATE OR REPLACE resets a
--- function's SET clauses to whatever the new definition declares. Any FUTURE migration that
--- replaces one of these functions MUST carry `set takyon.rls_bypass = '1'` in its own
--- definition (next to `set search_path`) — a later replay of this file will NOT rescue a
--- function replaced by a later-numbered migration, because migrations replay in name order.
+-- Security review (subusers are hostile):
+--   * App roles gain nothing: they are not in the trusted list, they have NO direct table
+--     privileges on the money/identity tables (outright permission denied, verified), and the
+--     ports still validate the session/scope arguments — a bogus session hash still resolves
+--     to nothing (verified).
+--   * A trusted login's DIRECT statements with the GUC pinned to '0' behave exactly as before
+--     (current_user = session_user → the GUC still governs).
+--   * Definer ports owned by trusted roles were AUTHORED under owner-bypass assumptions (0047
+--     revoked direct SELECT precisely because the ports are the sanctioned reader); this
+--     restores that contract.
 
--- ── safebox usage gate (0037, rewritten 0063/0064) ────────────────────────────────────────
-alter function safebox_reserve_usage(text, bigint, text, uuid, bigint, text, text, text, text, text, jsonb)
-    set "takyon.rls_bypass" = '1';
-alter function safebox_settle_usage(text, text, bigint, integer, integer, text, text, text, jsonb)
-    set "takyon.rls_bypass" = '1';
-alter function safebox_release_usage(text, text, text, jsonb)
-    set "takyon.rls_bypass" = '1';
-alter function safebox_reconcile_held_usage(bigint)
-    set "takyon.rls_bypass" = '1';
-
--- ── persistent credit grants (0064) ──────────────────────────────────────────────────────
-alter function safebox_grant_app_user_credits(text, uuid, bigint, text, text)
-    set "takyon.rls_bypass" = '1';
-alter function safebox_app_user_grant_balance(text, uuid)
-    set "takyon.rls_bypass" = '1';
-alter function safebox_refund_grant_holds(jsonb, bigint)
-    set "takyon.rls_bypass" = '1';
-
--- ── session-scoped app-plane ports (0047/0048/0051) ──────────────────────────────────────
-alter function takyon_app_session_plan(text, text)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_account_entitlements(text, text)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_account_usage_summary(text, text, timestamptz)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_account_revenue_summary(text, text)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_action_usage_limit(text, text)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_reserve_usage(text, text, uuid, bigint, text, bigint, text, text, text, text, text, jsonb)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_settle_usage(text, text, text, bigint, integer, integer, text, text, text, jsonb)
-    set "takyon.rls_bypass" = '1';
-alter function takyon_app_release_usage(text, text, text, text, jsonb)
-    set "takyon.rls_bypass" = '1';
-
-do $$
-begin
-    -- 0051's session-bound media-usage summary, if present on this database.
-    if exists (select 1 from pg_proc where proname = 'takyon_app_media_usage') then
-        execute 'alter function takyon_app_media_usage(text, text) set "takyon.rls_bypass" = ''1''';
-    end if;
-end $$;
+create or replace function takyon_rls_bypass()
+returns boolean
+language sql
+stable
+as $$
+    select
+        current_user in (
+            'postgres',
+            'takyon_runtime',
+            'takyon_operator_runtime',
+            'takyon_safebox_authority',
+            'takyon_migration'
+        )
+        and (
+            coalesce(nullif(current_setting('takyon.rls_bypass', true), ''), '1') in ('1', 'true', 'on')
+            -- SECURITY DEFINER context: the login (session_user) is an untrusted plane role
+            -- while current_user is the trusted function owner. Trusted definer code is the
+            -- sanctioned access path and self-scopes every query; the caller's session GUC
+            -- must not veto it (that veto is the 402-paying-customers bug this fixes).
+            or current_user is distinct from session_user
+        );
+$$;
