@@ -176,6 +176,7 @@ def _business_bootstrap_instruction(
     active_mode: str,
     *,
     business_name: str = "",
+    animations: bool = False,
 ) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
     workflow_requested = _bootstrap_goal_requests_product_workflow(goal_text)
@@ -238,6 +239,13 @@ def _business_bootstrap_instruction(
         '- guidance_skills: pass exactly TWO — "claude-design" (the base design method) PLUS the single style pack that best fits this business, chosen from the brief by product type: "claude-design-stripe" (fintech / payments / B2B / commerce), "claude-design-openai" (AI / productivity / prosumer / serious tools), "claude-design-doodle" (playful / casual / pet / kid-adjacent), or "claude-design-superhuman" (executive / speed / focus / power-user). If the fit is unclear, use "claude-design-openai". Pass ONLY "claude-design" plus the one you chose — do NOT pass the other style packs — so the site worker carries one coherent direction instead of all six.',
         "- Scope this pass to the landing route `/` plus the brand theme: customize `src/screens/landing.tsx` so it is a truthful, branded landing page, AND theme `src/tokens.css` with the chosen direction's real palette/typography tokens — the publish gate refuses to publish while `src/tokens.css` is still byte-identical to the scaffold placeholder theme, so the themed tokens are REQUIRED for this first publish, not optional polish. Do NOT edit `src/screens/app-layout.tsx`, `src/screens/app-home.tsx`, or `src/screens/profile.tsx` in this pass — those are customized in 2b.",
         "- Keep the shared Vite route skeleton and the seeded `/app`, `/app/profile`, and support routes intact; do not delete or stub any seeded screen. They stay as the seeded app kit until 2b refines them.",
+        *(
+            [
+                "- Landing hero animation (operator opted in via --animation): in `src/screens/landing.tsx` wrap the hero section (headline, subheading, primary CTA, and the hero visual/graphic) in a subtle framer-motion entrance — opacity 0->1 and y 16->0 over ~250ms, lightly staggered across those elements — gated behind `useReducedMotion()` from framer-motion so reduced-motion visitors get NO animation. framer-motion is already pinned in the scaffold; import it, do not add a dependency. Hero only: do not animate the whole page, no scroll-jacking, no autoplaying loops. This is a small addition on top of the landing scope above — keep it within this pass's budget and do not let it delay the publish.",
+            ]
+            if animations
+            else []
+        ),
         "- refresh_surface: true",
         "- max_turns: 24 — the landing pass edits ONLY `src/screens/landing.tsx` + `src/tokens.css`, so it needs far fewer turns than the full 2b app-shell pass. A tight budget keeps the customer's first paint fast; the runtime auto-escalates the cap and retries once on a genuine turn-cap hit, so a tight landing cap is self-healing, not a quality risk.",
         "- effort: low — the landing is ONE well-specified, design-pack-guided screen; low effort is sufficient and materially faster per turn. (Pass NOTHING here for 2b so the heavier app-shell pass keeps the default effort.)",
@@ -363,6 +371,7 @@ def _ceo_bootstrap_turn_config(
     active_mode: str,
     *,
     business_name: str = "",
+    animations: bool = False,
 ) -> dict[str, Any]:
     return {
         "user_prompt": _business_bootstrap_instruction(
@@ -370,6 +379,7 @@ def _ceo_bootstrap_turn_config(
             goal,
             active_mode,
             business_name=business_name,
+            animations=animations,
         ),
         "ephemeral_system_prompt": _ceo_prompt_for_bootstrap(),
         # Same CEO toolset as the interactive/cron turns: ``takyon-authority`` carries the spendful

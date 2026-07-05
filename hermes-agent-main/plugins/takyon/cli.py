@@ -1393,7 +1393,7 @@ def _parse_business_start_args(
     *,
     usage: str,
     auto_default: bool = False,
-) -> tuple[str, str, str, str | None, str | None, bool, bool, bool, bool, str | None]:
+) -> tuple[str, str, str, str | None, str | None, bool, bool, bool, bool, str | None, bool]:
     tokens = list(argv[1:])
     mode: str | None = None
     schedule: str | None = None
@@ -1407,6 +1407,10 @@ def _parse_business_start_args(
     no_auto = False
     follow = False
     detach = False
+    # Opt-in landing-hero animations. Off by default so ordinary creates keep the fast, lean 2a
+    # landing pass unchanged; when set, the bootstrap 2a step gets ONE extra directive to add a
+    # framer-motion hero entrance (reduced-motion gated). Does not alter the no-flag prose at all.
+    animations = False
     clean: list[str] = []
     index = 0
     while index < len(tokens):
@@ -1431,6 +1435,8 @@ def _parse_business_start_args(
         elif parse_flags and token in {"--detach", "--background"}:
             detach = True
             follow = False
+        elif parse_flags and token in {"--animation", "--animations"}:
+            animations = True
         elif parse_flags and token == "--schedule":
             index += 1
             if index >= len(tokens):
@@ -1502,19 +1508,19 @@ def _parse_business_start_args(
             raw_name = explicit_name or _display_name_from_slug(slug)
         else:
             raw_name, slug = _resolve_create_identity(explicit_name or "", goal, "")
-        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype, animations
 
     if slug_override:
         slug = _slugify(slug_override)
         raw_name = explicit_name or _display_name_from_slug(slug)
         goal = converted_goal or " ".join(clean).strip()
-        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
+        return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype, animations
 
     slug_token = clean[0]
     raw_name = explicit_name or slug_token
     slug = _slugify(slug_token)
     goal = converted_goal or " ".join(clean[1:]).strip()
-    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype
+    return slug, raw_name, goal, mode, schedule, auto_start, no_auto, follow, detach, archetype, animations
 
 
 def _strip_log_follow_flags(argv: list[str], *, default: bool = False) -> tuple[list[str], bool]:
@@ -4316,9 +4322,9 @@ def _handle_shell_line(
         command_argv = _shell_create_argv(command, raw_args)
         if len(command_argv) < 2:
             raise SystemExit('usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--archetype app|shopify|saas] [--schedule "every 6h"] <business-or-brief> [goal]')
-        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow, detach, _archetype = _parse_business_start_args(
+        requested_slug, _raw_name, _goal, _mode, _schedule, _auto_start, _no_auto, _follow, detach, _archetype, _animations = _parse_business_start_args(
             command_argv,
-            usage='usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--archetype app|shopify|saas] [--schedule "every 6h"] <business-or-brief> [goal]',
+            usage='usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--archetype app|shopify|saas] [--animation] [--schedule "every 6h"] <business-or-brief> [goal]',
             auto_default=True,
         )
         result = run_takyon_command(
@@ -5298,9 +5304,9 @@ def run_takyon_command(
 
     if command in {"init", "create", "build"}:
         auto_default = command in {"create", "build"}
-        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow, detach, archetype = _parse_business_start_args(
+        slug, raw_name, goal, mode, schedule_arg, auto_start, no_auto, follow, detach, archetype, animations = _parse_business_start_args(
             argv,
-            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow|--detach] [--archetype app|shopify|saas] [--schedule "every 6h"] <business> [goal text]',
+            usage=f'usage: takyon {command} [--live] [--no-auto] [--follow|--detach] [--archetype app|shopify|saas] [--animation] [--schedule "every 6h"] <business> [goal text]',
             auto_default=auto_default,
         )
         # Fail closed on operator identity at the create chokepoint. On a plane that declares
@@ -5364,6 +5370,11 @@ def run_takyon_command(
                 # The archetype toggle (app|shopify|saas). Only sent when explicitly picked —
                 # absent lets the store/DB default (web_saas) stay authoritative.
                 **({"archetype": archetype} if archetype else {}),
+                # Opt-in landing-hero animations (--animation). Persisted on the fresh business row's
+                # metadata so the deferred ceo_bootstrap worker can read it and add ONE hero-motion
+                # directive to the 2a landing pass. Only sent when the flag is set — a normal create
+                # writes no such key and the bootstrap prose is unchanged.
+                **({"metadata": {"landing_animations": True}} if animations else {}),
                 # Fresh create only needs the business row before bootstrap can start. The initial
                 # stub workspace (empty roots + seeded strategy) is non-authoritative and the
                 # bootstrap worker will commit the real first revision; skipping the create-time

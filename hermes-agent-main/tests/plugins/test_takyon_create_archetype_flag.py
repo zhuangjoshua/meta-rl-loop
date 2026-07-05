@@ -22,7 +22,7 @@ def _parse(argv):
 
 
 def test_absent_flag_yields_none_archetype():
-    slug, name, goal, mode, sched, auto, no_auto, follow, detach, archetype = _parse(
+    slug, name, goal, mode, sched, auto, no_auto, follow, detach, archetype, animations = _parse(
         ["create", "acme", "build a thing"]
     )
     assert slug == "acme"
@@ -30,12 +30,12 @@ def test_absent_flag_yields_none_archetype():
 
 
 def test_explicit_saas_parses_and_normalizes():
-    *_head, archetype = _parse(["create", "--archetype", "saas", "acme", "goal text"])
+    *_head, archetype, _animations = _parse(["create", "--archetype", "saas", "acme", "goal text"])
     assert archetype == arch.WEB_SAAS
 
 
 def test_alias_normalization_via_flag():
-    *_head, archetype = _parse(["create", "--archetype", "web_saas", "acme", "goal"])
+    *_head, archetype, _animations = _parse(["create", "--archetype", "web_saas", "acme", "goal"])
     assert archetype == arch.WEB_SAAS
 
 
@@ -62,12 +62,33 @@ def test_shell_create_argv_routes_archetype_as_value_flag():
     # --archetype and its value must be consumed as flag+value, not folded into the brief.
     assert argv[:3] == ["create", "--archetype", "saas"]
     parsed = _parse(argv)
-    assert parsed[-1] == arch.WEB_SAAS
+    assert parsed[-2] == arch.WEB_SAAS  # archetype is second-to-last (animations is the last element)
 
 
 def test_shell_create_argv_archetype_with_slug_flag():
     argv = cli._shell_create_argv("create", '--archetype saas --slug acme the whole brief')
     assert "--archetype" in argv and "--slug" in argv
-    slug, *_mid, archetype = _parse(argv)
+    slug, *_mid, archetype, _animations = _parse(argv)
     assert slug == "acme"
     assert archetype == arch.WEB_SAAS
+
+
+def test_animation_flag_sets_last_element():
+    # --animation is opt-in and rides as the last tuple element; absent → False.
+    *_head, animations = _parse(["create", "--animation", "acme", "goal text"])
+    assert animations is True
+    *_head2, animations_off = _parse(["create", "acme", "goal text"])
+    assert animations_off is False
+    # alias
+    *_head3, animations_alias = _parse(["create", "--animations", "acme", "goal"])
+    assert animations_alias is True
+
+
+def test_animation_flag_adds_landing_hero_directive_only_when_set():
+    from plugins.takyon.turn_runtime import _business_bootstrap_instruction
+
+    on = _business_bootstrap_instruction("acme", "build a thing", "live", animations=True)
+    off = _business_bootstrap_instruction("acme", "build a thing", "live")
+    assert "Landing hero animation" in on
+    assert "framer-motion" in on
+    assert "Landing hero animation" not in off  # no-flag prose is unchanged
