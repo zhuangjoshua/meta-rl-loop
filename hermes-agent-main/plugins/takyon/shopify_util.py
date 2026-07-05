@@ -961,6 +961,41 @@ def match_product_receipts(
     return matches
 
 
+def publish_product_to_online_store(
+    *, shop_domain: str, connected_account_id: str, product_id: str
+) -> str:
+    """Publish one product to the Online Store sales channel via the REST product `published`
+    field — Admin-created products are NOT auto-published, and an unpublished product's cart
+    permalink 410s (proven live 2026-07-04). REST `published` rides the SAME write_products
+    scope (GraphQL publishablePublish would need write_publications = a new scope + operator
+    re-consent). Returns '' on success or a WARNING string — the caller never rolls back a
+    created product over a publish failure."""
+    numeric = _gid_numeric(product_id)
+    if not numeric:
+        return f"online-store publish skipped: no numeric id in {product_id!r}"
+    domain = normalize_shop_domain(shop_domain)
+    try:
+        payload = _composio_request(
+            "POST",
+            COMPOSIO_PROXY_TOOL_PATH,
+            json_body={
+                "connected_account_id": str(connected_account_id or "").strip(),
+                "endpoint": (
+                    f"https://{domain}/admin/api/{SHOPIFY_ADMIN_API_VERSION}/products/"
+                    f"{numeric}.json"
+                ),
+                "method": "PUT",
+                "body": {"product": {"id": int(numeric), "published": True}},
+            },
+            timeout=60.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - warning, never a rollback
+        return f"online-store publish failed: {exc}"
+    if isinstance(payload, Mapping) and payload.get("successful") is False:
+        return f"online-store publish returned successful=false: {payload.get('error')!r}"
+    return ""
+
+
 def create_product(
     *,
     shop_domain: str,
@@ -1074,6 +1109,16 @@ def create_product(
     )
     _require_no_user_errors(price_root, action="productVariantsBulkUpdate")
 
+    publish_warnings: list[str] = []
+    if normalized_status == "active":
+        warning = publish_product_to_online_store(
+            shop_domain=shop_domain,
+            connected_account_id=connected_account_id,
+            product_id=product_id,
+        )
+        if warning:
+            publish_warnings.append(warning)
+
     media_warnings: list[str] = []
     if urls:
         try:
@@ -1111,6 +1156,7 @@ def create_product(
         "online_store_preview_url": str(product.get("onlineStorePreviewUrl") or ""),
         "tag": business_product_tag(business_slug),
         "media_warnings": media_warnings,
+        "publish_warnings": publish_warnings,
     }
 
 
