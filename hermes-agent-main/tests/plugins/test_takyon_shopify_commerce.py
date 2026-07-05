@@ -128,8 +128,12 @@ def test_create_product_refuses_bad_inputs(monkeypatch):
 # ── create: happy path, dedup, refusals ────────────────────────────────────────────
 
 
+def _publish_ok():
+    return {"successful": True, "data": {"product": {"id": 777, "published_at": "2026-07-04T00:00:00Z"}}}
+
+
 def test_create_product_happy_path(monkeypatch):
-    transport = _FakeTransport([_empty_search(), _created_product(), _price_ok(), _media_ok()])
+    transport = _FakeTransport([_empty_search(), _created_product(), _price_ok(), _publish_ok(), _media_ok()])
     monkeypatch.setattr(su, "_composio_request", transport)
     result = su.create_product(
         shop_domain=SHOP,
@@ -149,7 +153,11 @@ def test_create_product_happy_path(monkeypatch):
     assert result["price"] == "19.99"
     assert result["tag"] == TAG
     assert result["media_warnings"] == []
-    assert len(transport.calls) == 4
+    assert result["publish_warnings"] == []
+    assert len(transport.calls) == 5
+    publish_call = transport.calls[3]["json_body"]
+    assert publish_call["method"] == "PUT" and "/products/777.json" in publish_call["endpoint"]
+    assert publish_call["body"] == {"product": {"id": 777, "published": True}}
     # every call rides the proven proxy path against the store's Admin GraphQL endpoint
     for call in transport.calls:
         assert call["path"] == su.COMPOSIO_PROXY_TOOL_PATH
@@ -261,6 +269,8 @@ def test_media_failure_is_warning_not_rollback(monkeypatch):
     )
     assert result["deduped"] is False
     assert result["media_warnings"] == ["bad image"]
+    assert result["publish_warnings"] == []  # DRAFT is never published to the online store
+    assert len(transport.calls) == 4  # search, create, price, media — no publish call
 
 
 def test_composio_proxy_failure_fails_closed(monkeypatch):
@@ -526,7 +536,7 @@ def test_catalog_tombstone_newest_wins():
 
 
 def test_create_result_carries_variant_for_permalink(monkeypatch):
-    transport = _FakeTransport([_empty_search(), _created_product(), _price_ok()])
+    transport = _FakeTransport([_empty_search(), _created_product(), _price_ok(), _publish_ok()])
     monkeypatch.setattr(su, "_composio_request", transport)
     result = su.create_product(
         shop_domain=SHOP, connected_account_id=ACCOUNT, business_slug=BIZ,
