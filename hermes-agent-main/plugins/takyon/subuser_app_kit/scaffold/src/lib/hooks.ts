@@ -187,6 +187,24 @@ export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated
  *  so every business gets a working subscribe without the generated UI wiring it by hand. When a
  *  signed-in, not-yet-entitled viewer carries intent=subscribe, start checkout via the shared rail
  *  and redirect to the returned URL; on no-URL/failure, clear the intent so it can be retried. */
+const RESUME_SUBSCRIBE_KEY = "takyon.resumeSubscribe";
+
+function readResumeSubscribe(): boolean {
+  try {
+    return window.sessionStorage.getItem(RESUME_SUBSCRIBE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function setResumeSubscribe(on: boolean): void {
+  try {
+    if (on) window.sessionStorage.setItem(RESUME_SUBSCRIBE_KEY, "1");
+    else window.sessionStorage.removeItem(RESUME_SUBSCRIBE_KEY);
+  } catch {
+    /* sessionStorage unavailable (private mode / SSR) — degrade to same-load only */
+  }
+}
+
 export function useSubscribeIntent(
   access: Pick<ViewerAccessResult, "authenticated" | "entitled" | "loading">,
   intent: string | null,
@@ -195,33 +213,53 @@ export function useSubscribeIntent(
   useEffect(() => {
     if (typeof window === "undefined") return;
     // `intent` MUST be passed from the router (useSearchParams) and be in the deps, so a
-    // client-side <Link> click to /app?intent=subscribe re-runs this effect. Reading
-    // window.location.search alone would only fire on a full reload (when `access` changes),
-    // which is exactly the bug that made the click do nothing. Reset the once-guard when the
-    // intent clears so a later click re-arms it.
-    if (intent !== "subscribe") {
+    // client-side <Link> click to /app?intent=subscribe re-runs this effect.
+    // The subscribe intent must ALSO survive the sign-in round-trip: Google OAuth redirects to a
+    // FIXED redirect path (config.redirectPath) that drops the ?intent=subscribe query, so a
+    // signed-out Subscribe click used to lead to the sign-in gate and then silently do nothing
+    // (intent lost). We persist the intent in sessionStorage and resume on return.
+    const wantsSubscribe = intent === "subscribe" || readResumeSubscribe();
+    if (!wantsSubscribe) {
       startedRef.current = false;
       return;
     }
-    if (access.loading || !access.authenticated || access.entitled) return;
+    if (access.loading) return;
+    if (access.entitled) {
+      // Already subscribed — nothing to buy; clear any stale resume flag.
+      setResumeSubscribe(false);
+      return;
+    }
+    if (!access.authenticated) {
+      // Stash the intent across the sign-in OAuth redirect; the app's sign-in gate is already
+      // shown. On return (authenticated) this effect re-runs and resumes checkout below.
+      setResumeSubscribe(true);
+      return;
+    }
     if (startedRef.current) return;
     startedRef.current = true;
     let cancelled = false;
     void (async () => {
+      let failed = false;
       try {
         const planKey = defaultSubscribePlanKey();
         const response = await client.checkout(planKey ? { plan_key: planKey } : {});
         const url = String((response && (response.url || response.checkout_url)) || "").trim();
         if (!cancelled && url) {
+          setResumeSubscribe(false);
           window.location.assign(url);
           return;
         }
+        failed = true; // authorized but no checkout URL came back
       } catch {
-        // fall through to clear the intent so the CTA can be retried without looping
+        failed = true;
       }
       if (cancelled) return;
+      // Do NOT swallow failures silently (the old bare `catch {}` made a failed Subscribe look
+      // dead). Clear the resume flag and surface ?checkout=error so the app shows a retry banner.
+      setResumeSubscribe(false);
       const next = new URLSearchParams(window.location.search);
       next.delete("intent");
+      if (failed) next.set("checkout", "error");
       const query = next.toString();
       window.history.replaceState(
         null,

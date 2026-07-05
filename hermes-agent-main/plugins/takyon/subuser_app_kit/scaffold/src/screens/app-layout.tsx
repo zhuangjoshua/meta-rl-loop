@@ -89,6 +89,15 @@ export function AppLayout() {
         </div>
       ) : null}
       <main className="mx-auto w-full max-w-6xl px-6 py-8">
+        {searchParams.get("checkout") === "error" ? (
+          <div
+            role="alert"
+            className="mb-6 rounded border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+          >
+            We couldn&apos;t start checkout. Please try the subscribe button again in a moment — if it
+            keeps failing, contact support.
+          </div>
+        ) : null}
         <Outlet />
       </main>
     </div>
