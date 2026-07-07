@@ -1563,6 +1563,7 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
         "MIGRATION_DATABASE_URL",
     ),
     "dataforseo": ("DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"),
+    "deepseek": ("DEEPSEEK_API_KEY",),
     # App Store rail (readmodular §6.2/§6.3). Expo robot token that authorizes EAS builds/submits/OTA.
     # Registered here → never vended over /v1/env; the safebox mints it per-build into the jailed
     # builder, never onto a Takyon-host env.
@@ -8244,6 +8245,11 @@ def _run_claude_agent_task_in_docker(
     env_keys = [
         "CLAUDE_AGENT_SDK_CLIENT_APP",
         _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV,
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "NO_PROXY",
@@ -19210,7 +19216,7 @@ class TakyonStore:
                             "ai_generate": True,
                             "web_search": True,
                         },
-                        "model_allowlist": ["claude-sonnet-4-6"],
+                        "model_allowlist": ["claude-sonnet-4-6", "gpt-5.4-mini"],
                         "takyon_seed": {
                             "kind": "monthly_access_shell",
                             "price_status": "unset",

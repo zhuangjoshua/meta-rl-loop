@@ -1425,6 +1425,27 @@ class AIAgent:
         # JSON body errors from OpenAI/Anthropic SDKs
         body = getattr(error, "body", None)
         if isinstance(body, dict):
+            # Safebox provider-proxy envelope: an upstream provider rejection is
+            # forwarded as {"error": "provider_error", "upstream_status": N,
+            # "body": "<raw upstream JSON>"} — on the streaming path it rides an
+            # SSE error event inside HTTP 200, so the transport status_code is
+            # misleading.  Surface the REAL upstream status and error message
+            # instead of "HTTP 200: {'upstream_status': 400, ...}".
+            try:
+                from agent.error_classifier import unwrap_provider_proxy_error
+                _proxy_env = unwrap_provider_proxy_error(body)
+            except Exception:
+                _proxy_env = None
+            if _proxy_env is not None:
+                _upstream_msg = str(_proxy_env.get("message") or "").strip()
+                if not _upstream_msg:
+                    _upstream_msg = (
+                        "provider_error (upstream error body not forwarded by the proxy)"
+                    )
+                return (
+                    f"HTTP {_proxy_env['upstream_status']} (upstream, via provider "
+                    f"proxy): {_upstream_msg[:300]}"
+                )
             msg = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
             if msg:
                 status_code = getattr(error, "status_code", None)

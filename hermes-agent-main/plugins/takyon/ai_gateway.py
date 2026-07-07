@@ -40,6 +40,7 @@ from agent.usage_pricing import usage_markup_bps
 
 from .ai_provider import (
     AnthropicPricingUnavailable,
+    OpenAIPricingUnavailable,
     TavilyPricingUnavailable,
     anthropic_key,
     anthropic_payload,
@@ -47,6 +48,14 @@ from .ai_provider import (
     anthropic_text,
     billed_microusd_cost,
     call_anthropic,
+    call_openai,
+    openai_billed_microusd_cost,
+    openai_content,
+    openai_key,
+    openai_payload,
+    openai_rates_microusd_per_token,
+    openai_text,
+    openai_usage,
     call_tavily,
     tavily_key,
     tavily_request_microusd,
@@ -193,6 +202,46 @@ def get_provider_caller() -> ProviderCaller | None:
         return call_anthropic(payload, key)
 
     return _call
+
+
+def get_openai_caller() -> ProviderCaller | None:
+    key = openai_key()
+    if not key:
+        return None
+
+    def _call(payload: dict) -> dict:
+        return call_openai(payload, key)
+
+    return _call
+
+
+def _is_openai_model(model: object) -> bool:
+    value = str(model or "").strip().lower()
+    if "/" in value:
+        value = value.split("/", 1)[1]
+    return value.startswith("gpt-") or value.startswith("o")
+
+
+def _message_provider(body: dict | None) -> str:
+    body = body or {}
+    for key in ("provider", "llm_provider", "model_provider"):
+        value = str(body.get(key) or "").strip().lower()
+        if value in {"anthropic", "openai"}:
+            return value
+    model = str(body.get("model") or "").strip()
+    if model:
+        return "openai" if _is_openai_model(model) else "anthropic"
+    if str(os.getenv("TAKYON_APP_OPENAI_MODEL") or "").strip():
+        return "openai"
+    if str(os.getenv("TAKYON_APP_ANTHROPIC_MODEL") or "").strip():
+        return "anthropic"
+    return "anthropic"
+
+
+def _resolve_message_caller(provider: str) -> ProviderCaller | None:
+    if provider == "openai":
+        return get_openai_caller()
+    return get_provider_caller()
 
 
 # A search caller is a server-side closure that already holds the shared Tavily key. The endpoint
@@ -435,7 +484,9 @@ def broker_provider_call(
                 conn,
                 business_slug=business_slug,
                 event_kind=(
-                    cost_events.KIND_LLM_CALL if provider == "anthropic" else cost_events.KIND_PROVIDER_CALL
+                    cost_events.KIND_LLM_CALL
+                    if provider in {"anthropic", "openai"}
+                    else cost_events.KIND_PROVIDER_CALL
                 ),
                 name=purpose,
                 status=status,
@@ -532,6 +583,7 @@ def broker_message_for_business(
     sees the provider key and never gets to bypass the budget rails.
     """
     body = body or {}
+    provider = _message_provider(body)
     # Cut over to the safebox BROKER on runtime planes (flag on + remote authority): the provider key
     # is resolved, the call made, and the spend metered INSIDE the safebox, so this process never fetches
     # a raw key. A test/host that injects an explicit `caller` keeps the local metered path; on the
@@ -539,7 +591,7 @@ def broker_message_for_business(
     # resolves the key locally — it IS the authority.
     use_broker = caller is _CALLER_UNSET and safebox.provider_broker_enabled()
     if caller is _CALLER_UNSET and not use_broker:
-        caller = get_provider_caller()
+        caller = _resolve_message_caller(provider)
 
     if not raw_session_token:
         raise GatewayMessageError(status_code=401, detail="missing_app_session")
@@ -558,19 +610,27 @@ def broker_message_for_business(
         raise GatewayMessageError(status_code=503, detail="provider_unconfigured")
 
     try:
-        payload, model, estimated_input_tokens = anthropic_payload(body)
+        if provider == "openai":
+            payload, model, estimated_input_tokens = openai_payload(body)
+        else:
+            payload, model, estimated_input_tokens = anthropic_payload(body)
     except Exception as exc:
         raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
 
-    estimated_output_tokens = int(payload.get("max_tokens") or 0)
     try:
-        # The usage rail reserves the BILLED estimate (provider cost + usage markup); the realized
-        # provider estimate is recorded alongside it for money-truth.
-        estimated_realized_cost, estimated_cost = billed_microusd_cost(
-            model, estimated_input_tokens, estimated_output_tokens
-        )
-        rate_source = anthropic_rates_microusd_per_token(model)[2]
-    except AnthropicPricingUnavailable as exc:
+        if provider == "openai":
+            estimated_output_tokens = int(payload.get("max_completion_tokens") or 0)
+            estimated_realized_cost, estimated_cost = openai_billed_microusd_cost(
+                model, estimated_input_tokens, estimated_output_tokens
+            )
+            rate_source = openai_rates_microusd_per_token(model)[2]
+        else:
+            estimated_output_tokens = int(payload.get("max_tokens") or 0)
+            estimated_realized_cost, estimated_cost = billed_microusd_cost(
+                model, estimated_input_tokens, estimated_output_tokens
+            )
+            rate_source = anthropic_rates_microusd_per_token(model)[2]
+    except (AnthropicPricingUnavailable, OpenAIPricingUnavailable) as exc:
         raise GatewayMessageError(status_code=400, detail=str(exc)) from exc
 
     entitlement, plan = _resolve_plan_for_user(
@@ -591,51 +651,89 @@ def broker_message_for_business(
             status_code=403,
             detail={"error": "model_not_in_plan", "model": model},
         )
-    def _anthropic_actual_cost(raw):
-        # Anthropic reports cached prompt tokens in separate buckets and EXCLUDES them from
-        # input_tokens. Bill them at their real cache rates instead of dropping them (which would
-        # undercharge true provider cost on every cached call). The usage rail settles the BILLED
-        # amount (realized provider cost + usage markup); realized is recorded in metadata for
-        # money-truth so a settled row carries both numbers.
-        usage = raw.get("usage") or {}
-        in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
-        out_tok = int(usage.get("output_tokens") or 0)
-        cr = int(usage.get("cache_read_input_tokens") or 0)
-        cw = int(usage.get("cache_creation_input_tokens") or 0)
-        realized_cost, billed = billed_microusd_cost(
-            model, in_tok, out_tok, cache_read_tokens=cr, cache_write_tokens=cw
+
+    if provider == "openai":
+        action = "openai.messages"
+
+        def _provider_actual_cost(raw):
+            usage = openai_usage(
+                raw,
+                model=model,
+                estimated_input_tokens=estimated_input_tokens,
+            )
+            return int(usage["billed_cost_microusd"]), {
+                "input_tokens": int(usage["input_tokens"]),
+                "output_tokens": int(usage["output_tokens"]),
+                "provider_request_id": str(usage["provider_request_id"]),
+                "metadata": {
+                    "cache_read_input_tokens": int(usage["cache_read_tokens"]),
+                    "cache_creation_input_tokens": int(usage["cache_write_tokens"]),
+                    "realized_cost_microusd": int(usage["realized_cost_microusd"]),
+                    "billed_cost_microusd": int(usage["billed_cost_microusd"]),
+                },
+            }
+
+        render_text = openai_text
+        render_content = openai_content
+        usage_input = lambda raw: int(  # noqa: E731
+            openai_usage(raw, model=model, estimated_input_tokens=estimated_input_tokens)["input_tokens"]
         )
-        return billed, {
-            "input_tokens": in_tok,
-            "output_tokens": out_tok,
-            "provider_request_id": str(raw.get("id") or ""),
-            "metadata": {
-                "cache_read_input_tokens": cr,
-                "cache_creation_input_tokens": cw,
-                "realized_cost_microusd": realized_cost,
-                "billed_cost_microusd": billed,
-            },
-        }
+        usage_output = lambda raw: int(  # noqa: E731
+            openai_usage(raw, model=model, estimated_input_tokens=estimated_input_tokens)["output_tokens"]
+        )
+    else:
+        action = "anthropic.messages"
+
+        def _provider_actual_cost(raw):
+            # Anthropic reports cached prompt tokens in separate buckets and EXCLUDES them from
+            # input_tokens. Bill them at their real cache rates instead of dropping them (which would
+            # undercharge true provider cost on every cached call). The usage rail settles the BILLED
+            # amount (realized provider cost + usage markup); realized is recorded in metadata for
+            # money-truth so a settled row carries both numbers.
+            usage = raw.get("usage") or {}
+            in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
+            out_tok = int(usage.get("output_tokens") or 0)
+            cr = int(usage.get("cache_read_input_tokens") or 0)
+            cw = int(usage.get("cache_creation_input_tokens") or 0)
+            realized_cost, billed = billed_microusd_cost(
+                model, in_tok, out_tok, cache_read_tokens=cr, cache_write_tokens=cw
+            )
+            return billed, {
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "provider_request_id": str(raw.get("id") or ""),
+                "metadata": {
+                    "cache_read_input_tokens": cr,
+                    "cache_creation_input_tokens": cw,
+                    "realized_cost_microusd": realized_cost,
+                    "billed_cost_microusd": billed,
+                },
+            }
+
+        render_text = anthropic_text
+        render_content = lambda raw: raw.get("content") or []  # noqa: E731
+        usage_input = lambda raw: int((raw.get("usage") or {}).get("input_tokens") or estimated_input_tokens)  # noqa: E731
+        usage_output = lambda raw: int((raw.get("usage") or {}).get("output_tokens") or 0)  # noqa: E731
 
     if use_broker:
-        # The safebox reserves on the validated {business, app_user}, resolves the key, calls Anthropic,
+        # The safebox reserves on the validated {business, app_user}, resolves the key, calls the
         # and SETTLES the billed cost ITSELF — exactly ONE money gate. We must NOT reserve/settle here
-        # (that would double-charge). Send the RAW request body: the safebox re-runs anthropic_payload to
+        # (that would double-charge). Send the RAW request body: the safebox re-runs payload validation to
         # build + price the call (idempotent with our pre-flight). `actual_cost` below is display-only;
         # the authoritative settle already happened on the safebox.
         try:
             provider_response = safebox.broker_provider_call(
-                "anthropic",
+                provider,
                 "messages",
                 body,
                 estimate_microusd=estimated_cost,
                 business=business_slug,
-                action="anthropic.messages",
+                action=action,
                 session_token=raw_session_token,
             )
         except safebox.RemoteSafeboxError as exc:
             raise _broker_remote_error(exc) from exc
-        actual_cost, _broker_settle_kwargs = _anthropic_actual_cost(provider_response)
+        actual_cost, _broker_settle_kwargs = _provider_actual_cost(provider_response)
         # Debug ledger row for the BROKERED path too (the safebox settled the money; this is
         # observability only, recorded through the app_cost_events port — best-effort).
         try:
@@ -650,7 +748,7 @@ def broker_message_for_business(
                 status="ok",
                 route=audit_route,
                 purpose=str(body.get("purpose") or "ai_generate"),
-                provider="anthropic",
+                provider=provider,
                 model=model,
                 input_tokens=_broker_settle_kwargs.get("input_tokens"),
                 output_tokens=_broker_settle_kwargs.get("output_tokens"),
@@ -677,7 +775,7 @@ def broker_message_for_business(
             app_user=app_user,
             plan=plan,
             session_token=raw_session_token,
-            provider="anthropic",
+            provider=provider,
             model=model,
             estimated_cost_microusd=estimated_cost,
             purpose=str(body.get("purpose") or "ai_generate"),
@@ -689,17 +787,16 @@ def broker_message_for_business(
                 "estimated_billed_cost_microusd": estimated_cost,
             },
             do_call=lambda: caller(payload),
-            actual_cost=_anthropic_actual_cost,
+            actual_cost=_provider_actual_cost,
         )
 
-    usage = provider_response.get("usage") or {}
-    input_tokens = int(usage.get("input_tokens") or estimated_input_tokens)
-    output_tokens = int(usage.get("output_tokens") or 0)
+    input_tokens = usage_input(provider_response)
+    output_tokens = usage_output(provider_response)
 
     return {
         "success": True,
-        "text": anthropic_text(provider_response),
-        "content": provider_response.get("content") or [],
+        "text": render_text(provider_response),
+        "content": render_content(provider_response),
         "model": model,
         "usage": {
             "input_tokens": input_tokens,
@@ -999,13 +1096,16 @@ def build_ai_gateway_router() -> APIRouter:
         settle. Returns only the generated text/content/model/usage — never the provider key."""
         body = body or {}
         raw_session_token = _session_token(body, app_session_token, cookie_header)
+        provider_caller: ProviderCaller | None | object = (
+            caller if _message_provider(body) == "anthropic" else _CALLER_UNSET
+        )
         try:
             return broker_message_for_business(
                 conn,
                 business_slug=principal.business_slug,
                 raw_session_token=raw_session_token,
                 body=body,
-                caller=caller,
+                caller=provider_caller,
                 audit_route="internal_ai_gateway",
             )
         except GatewayMessageError as exc:

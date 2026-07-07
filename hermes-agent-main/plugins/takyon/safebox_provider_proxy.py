@@ -63,6 +63,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 # Upstream provider hosts. Kept here (not in the business runtime) because only the safebox forwards.
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+_DEEPSEEK_MESSAGES_URL = "https://api.deepseek.com/anthropic/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"  # match ai_provider.ANTHROPIC_VERSION / call_anthropic
 
 # Generous upstream timeout: provider calls (Anthropic / image gen) routinely exceed the 10s env-read
@@ -84,6 +85,15 @@ def _anthropic_key() -> str:
     return str(ai_provider.anthropic_key() or "").strip()
 
 
+def _deepseek_key() -> str:
+    from . import safebox
+
+    try:
+        return str(safebox.first_env_backed_value("DEEPSEEK_API_KEY") or "").strip()
+    except Exception:
+        return ""
+
+
 def _tavily_key() -> str:
     from . import ai_provider
 
@@ -96,6 +106,13 @@ def _sanitize_upstream_error(status_code: int, body: str) -> HTTPException:
         status_code=status_code,
         detail={"error": "provider_error", "upstream_status": int(status_code), "body": body[:500]},
     )
+
+
+def _is_deepseek_model(model: object) -> bool:
+    value = str(model or "").strip().lower()
+    if "/" in value:
+        value = value.split("/", 1)[1]
+    return value.startswith("deepseek")
 
 
 def _presented_credential(authorization: str | None, x_api_key: str | None) -> str:
@@ -383,10 +400,16 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         ledger, reservation = _reserve_or_refuse(auth, estimate)
 
         # 2. Resolve the key LOCALLY (release the hold and 503 if unconfigured — never proceed keyless).
-        key = _anthropic_key()
+        model = str((payload or {}).get("model") or "")
+        deepseek = _is_deepseek_model(model)
+        target_url = _DEEPSEEK_MESSAGES_URL if deepseek else _ANTHROPIC_MESSAGES_URL
+        key = _deepseek_key() if deepseek else _anthropic_key()
         if not key:
             _release(ledger, reservation)
-            raise HTTPException(status_code=503, detail="anthropic_unconfigured")
+            raise HTTPException(
+                status_code=503,
+                detail="deepseek_unconfigured" if deepseek else "anthropic_unconfigured",
+            )
 
         headers = {
             "x-api-key": key,
@@ -420,7 +443,7 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
                 client = httpx.Client(timeout=httpx.Timeout(_UPSTREAM_TIMEOUT_S, read=None))
                 try:
                     with client.stream(
-                        "POST", _ANTHROPIC_MESSAGES_URL, headers=headers, json=payload
+                        "POST", target_url, headers=headers, json=payload
                     ) as upstream:
                         if upstream.status_code >= 400:
                             # Upstream rejected: no provider spend realized -> RELEASE the hold and emit a
@@ -457,7 +480,7 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         # Non-streaming: call -> settle actual from the response usage. Release on transport failure.
         try:
             with httpx.Client(timeout=_UPSTREAM_TIMEOUT_S) as client:
-                resp = client.post(_ANTHROPIC_MESSAGES_URL, headers=headers, json=payload)
+                resp = client.post(target_url, headers=headers, json=payload)
         except httpx.HTTPError as exc:
             _release(ledger, reservation)
             raise HTTPException(status_code=502, detail="provider_unreachable") from exc

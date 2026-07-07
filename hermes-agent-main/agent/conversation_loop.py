@@ -2748,13 +2748,30 @@ def run_conversation(
                         )
                     else:
                         agent._persist_session(messages, conversation_history)
+                    # Carry the real (possibly proxy-unwrapped) provider message
+                    # into the raised error text — str(api_error) alone can be an
+                    # opaque envelope like "{'upstream_status': 400, 'error':
+                    # 'provider_error'}" when the failure came through the
+                    # safebox provider proxy.
+                    _err_text = str(api_error)
+                    _classified_msg = str(classified.message or "").strip()
+                    if _classified_msg and _classified_msg not in _err_text:
+                        _err_text = f"{_err_text} — {_classified_msg}"
                     return {
                         "final_response": None,
                         "messages": messages,
                         "api_calls": api_call_count,
                         "completed": False,
                         "failed": True,
-                        "error": str(api_error),
+                        "error": _err_text,
+                        # Deterministic upstream invalid-request class (400/401/
+                        # 403/404): a re-run with identical inputs fails
+                        # identically, so durable job runners must NOT requeue
+                        # this turn for another full retry burn.
+                        "error_non_retryable": bool(
+                            not classified.retryable
+                            and classified.status_code in {400, 401, 403, 404}
+                        ),
                     }
 
                 if retry_count >= max_retries:

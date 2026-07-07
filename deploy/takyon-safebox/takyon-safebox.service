@@ -27,6 +27,12 @@ Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=safebox
+# Must match the operator/subuser planes' PUBLIC_COMPANY_BASE_DOMAIN: the checkout redirect gate
+# (_require_app_checkout_redirect_url) only allows <slug>.<this base>, so a stale value breaks every
+# product checkout with stripe_redirect_not_allowed (2026-07-05 incident: secrets/.env still said
+# fourmanifold.com after the coscale cutover). NOTE: EnvironmentFile= overrides Environment=, so a
+# secrets/.env line for this var wins — keep that file in sync; this pin covers the file dropping it.
+Environment=PUBLIC_COMPANY_BASE_DOMAIN=coscale.app
 # Operator/infrastructure-only routes require this exact client allowlist in addition to the shared
 # transport token and TAKYON_SAFEBOX_OPERATOR_TOKEN. Do not widen to 10.116.0.0/20; the sub-user host is
 # 10.116.0.3 and must not mint operator capabilities or touch private workspace/provider infrastructure.

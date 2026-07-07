@@ -12,11 +12,57 @@ that the main retry loop in run_agent.py consults for every API failure.
 from __future__ import annotations
 
 import enum
+import json as _json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def unwrap_provider_proxy_error(body: Any) -> Optional[Dict[str, Any]]:
+    """Detect and unwrap the Takyon safebox provider-proxy error envelope.
+
+    The safebox proxy (``plugins/takyon/safebox_provider_proxy.py``) forwards an
+    upstream provider rejection as ``{"error": "provider_error",
+    "upstream_status": <int>, "body": "<raw upstream JSON>"}`` — nested under
+    ``detail`` on the non-streaming (FastAPI ``HTTPException``) path, and riding
+    an SSE ``error`` event inside an HTTP **200** response on the streaming path
+    (the stream headers were already sent), so the transport status code says
+    nothing about the real failure.  The deterministic signal is
+    ``upstream_status`` and the real reason lives in the inner ``body`` string.
+
+    Returns ``{"upstream_status": int, "body": dict|None, "message": str}``
+    when the envelope is present, else ``None``.
+    """
+    env = body if isinstance(body, dict) else None
+    if env is None:
+        return None
+    if isinstance(env.get("detail"), dict):
+        env = env["detail"]
+    upstream_status = env.get("upstream_status")
+    if env.get("error") != "provider_error" or not isinstance(upstream_status, int):
+        return None
+    if isinstance(upstream_status, bool) or not (100 <= upstream_status < 600):
+        return None
+    inner_body: Optional[Dict[str, Any]] = None
+    message = ""
+    raw = env.get("body")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = _json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            inner_body = parsed
+            err_obj = parsed.get("error", {})
+            if isinstance(err_obj, dict):
+                message = str(err_obj.get("message") or "").strip()[:500]
+            if not message:
+                message = str(parsed.get("message") or "").strip()[:500]
+        if not message:
+            message = raw.strip()[:500]
+    return {"upstream_status": int(upstream_status), "body": inner_body, "message": message}
 
 
 # ── Error taxonomy ──────────────────────────────────────────────────────
@@ -381,6 +427,24 @@ def classify_api_error(
     if status_code is None and error_type == "RateLimitError":
         status_code = 429
     body = _extract_error_body(error)
+
+    # ── Safebox provider-proxy envelope unwrap ──────────────────────────
+    # On the streaming path the proxy's upstream rejection rides an SSE
+    # ``error`` event inside an HTTP 200 response, so ``status_code`` here is
+    # 200 and every classifier branch below misses — the error used to fall
+    # through to ``unknown`` (retryable) and burn the full retry budget on a
+    # deterministic upstream 400 (observed: workspace-usage-limit 400 retried
+    # 6x, requeued, retried 6x again).  Adopt ``upstream_status`` as the
+    # effective status code and classify against the inner upstream error
+    # body so the real reason (and retryability) comes from the provider's
+    # actual rejection.
+    _proxy_env = unwrap_provider_proxy_error(body)
+    if _proxy_env is not None:
+        if status_code is None or status_code == 200:
+            status_code = int(_proxy_env["upstream_status"])
+        if isinstance(_proxy_env.get("body"), dict):
+            body = _proxy_env["body"]
+
     error_code = _extract_error_code(body)
 
     # Build a comprehensive error message string for pattern matching.

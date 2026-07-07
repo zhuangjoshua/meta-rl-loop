@@ -90,6 +90,28 @@ def test_broker_provider_call_operator_token_shape(monkeypatch):
     assert "session_token" not in body and "business" not in body
 
 
+def test_broker_provider_call_openai_route(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    seen = {}
+
+    def _fake_remote_json(method, path, payload=None, *, timeout=10.0):
+        seen.update(path=path, payload=payload, timeout=timeout)
+        return {"ok": True}
+
+    monkeypatch.setattr(safebox, "_remote_json", _fake_remote_json)
+    safebox.broker_provider_call(
+        "openai",
+        "messages",
+        {"messages": [{"role": "user", "content": "hi"}]},
+        estimate_microusd=375,
+        business="climblog",
+        action="openai.messages",
+        session_token="sess_abc",
+    )
+    assert seen["path"] == "/v1/providers/openai/messages"
+    assert seen["payload"]["action"] == "openai.messages"
+
+
 def test_broker_provider_call_unknown_route_raises(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
     with pytest.raises(ValueError, match="no safebox broker route"):

@@ -83,6 +83,7 @@ def test_new_routes_are_registered_alongside_env_routes():
     # New action-shaped routes are mounted...
     assert "/v1/token/mint" in paths
     assert "/v1/providers/anthropic/messages" in paths
+    assert "/v1/providers/openai/messages" in paths
     assert "/v1/providers/tavily/search" in paths
     assert "/v1/providers/gemini/image" in paths
     assert "/v1/providers/postmark/send" in paths

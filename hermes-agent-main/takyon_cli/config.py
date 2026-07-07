@@ -5068,7 +5068,10 @@ def get_env_value(key: str) -> Optional[str]:
     if takyon_safebox.is_sensitive_env_key(name):
         try:
             value = takyon_safebox.read_env_backed_value(name)
-        except takyon_safebox.SafeboxAuthorityUnavailable:
+        except (
+            takyon_safebox.SafeboxAuthorityUnavailable,
+            takyon_safebox.RemoteSafeboxError,
+        ):
             # Local CLI/dashboard processes should still be able to inspect
             # env-backed config even when no remote Safebox is configured.
             if name in os.environ:

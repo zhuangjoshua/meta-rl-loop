@@ -30,11 +30,16 @@ from agent.usage_pricing import (
 
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
+OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 _ONE_MILLION = Decimal("1000000")
 
 
 class AnthropicPricingUnavailable(ValueError):
     """Raised when the requested Anthropic model has no exact known pricing."""
+
+
+class OpenAIPricingUnavailable(ValueError):
+    """Raised when the requested OpenAI model has no exact known pricing."""
 
 
 def _env(name: str, default: str = "") -> str:
@@ -101,8 +106,25 @@ def anthropic_model(body: dict) -> str:
     ).strip()
 
 
+def _canonical_model_name(model: object) -> str:
+    name = str(model or "").strip()
+    if "/" in name:
+        _provider, _sep, tail = name.partition("/")
+        if tail:
+            name = tail
+    return name
+
+
+def _is_deepseek_model(model: object) -> bool:
+    return _canonical_model_name(model).lower().startswith("deepseek")
+
+
+def _pricing_provider(model: str) -> str:
+    return "deepseek" if _is_deepseek_model(model) else "anthropic"
+
+
 def _anthropic_pricing_source_label(model: str) -> str:
-    entry = get_pricing_entry(model, provider="anthropic")
+    entry = get_pricing_entry(model, provider=_pricing_provider(model))
     if entry is None:
         raise AnthropicPricingUnavailable(
             f"no exact Anthropic pricing is configured for model {model!r}"
@@ -116,7 +138,7 @@ def _anthropic_pricing_source_label(model: str) -> str:
 def anthropic_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, str]:
     input_override = _env("TAKYON_APP_ANTHROPIC_INPUT_MICROUSD_PER_TOKEN")
     output_override = _env("TAKYON_APP_ANTHROPIC_OUTPUT_MICROUSD_PER_TOKEN")
-    entry = get_pricing_entry(model, provider="anthropic")
+    entry = get_pricing_entry(model, provider=_pricing_provider(model))
     canonical_unavailable = (
         entry is None
         or entry.input_cost_per_million is None
@@ -187,7 +209,7 @@ def microusd_cost(
             cache_read_tokens=max(0, cache_read_tokens),
             cache_write_tokens=max(0, cache_write_tokens),
         ),
-        provider="anthropic",
+        provider=_pricing_provider(model),
     )
     if result.amount_usd is None:
         raise AnthropicPricingUnavailable(
@@ -301,6 +323,221 @@ def call_anthropic(payload: dict, api_key: str) -> dict:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Anthropic API returned {exc.code}: {body[:500]}") from exc
+
+
+def openai_key() -> str:
+    """The app-rail OpenAI key, resolved server-side.
+
+    Prefer the app-specific rail key when present so operator/CEO usage can keep its own
+    ``OPENAI_API_KEY`` while the subuser AI leaf meters against ``TAKYON_APP_OPENAI_API_KEY``.
+    """
+    return _safebox_env_value("TAKYON_APP_OPENAI_API_KEY", "OPENAI_API_KEY")
+
+
+def openai_model(body: dict) -> str:
+    return _canonical_model_name(
+        body.get("model")
+        or _env("TAKYON_APP_OPENAI_MODEL")
+        or _env("OPENAI_MODEL")
+        or "gpt-5.4-mini"
+    )
+
+
+def openai_payload(body: dict) -> tuple[dict, str, int]:
+    model = openai_model(body)
+    max_tokens = _bounded_int(
+        body.get("max_completion_tokens")
+        or body.get("max_tokens")
+        or body.get("maxTokens"),
+        default=1024,
+        minimum=1,
+        maximum=_bounded_int(
+            _env("TAKYON_APP_OPENAI_MAX_TOKENS", "4096"),
+            default=4096,
+            minimum=1,
+            maximum=200_000,
+        ),
+    )
+    system = str(body.get("system") or "").strip()
+    raw_messages = body.get("messages")
+    messages: list[dict[str, object]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    if isinstance(raw_messages, list):
+        for item in raw_messages:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "user").strip()
+            if role not in {"system", "user", "assistant"}:
+                role = "user"
+            content = item.get("content")
+            if isinstance(content, str):
+                messages.append({"role": role, "content": content})
+            elif isinstance(content, list):
+                text_items = [
+                    {"type": "text", "text": str(part.get("text") or "")}
+                    for part in content
+                    if isinstance(part, dict) and str(part.get("text") or "").strip()
+                ]
+                if text_items:
+                    messages.append({"role": role, "content": text_items})
+    if len(messages) == (1 if system else 0):
+        prompt = str(body.get("prompt") or body.get("input") or "").strip()
+        if not prompt:
+            raise ValueError("prompt or messages is required")
+        messages.append({"role": "user", "content": prompt})
+
+    payload: dict[str, object] = {
+        "model": model,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+    }
+    if body.get("temperature") is not None:
+        payload["temperature"] = max(0.0, min(2.0, float(body.get("temperature") or 0)))
+    return payload, model, estimate_input_tokens(messages[1:] if system else messages, system)
+
+
+def _openai_pricing_source_label(model: str) -> str:
+    entry = get_pricing_entry(model, provider="openai")
+    if entry is None:
+        raise OpenAIPricingUnavailable(
+            f"no exact OpenAI pricing is configured for model {model!r}"
+        )
+    parts = [entry.source]
+    if entry.pricing_version:
+        parts.append(entry.pricing_version)
+    return ":".join(part for part in parts if part)
+
+
+def openai_rates_microusd_per_token(model: str) -> tuple[Decimal, Decimal, str]:
+    entry = get_pricing_entry(model, provider="openai")
+    if (
+        entry is None
+        or entry.input_cost_per_million is None
+        or entry.output_cost_per_million is None
+    ):
+        raise OpenAIPricingUnavailable(
+            f"no exact OpenAI pricing is configured for model {model!r}"
+        )
+    return (
+        entry.input_cost_per_million / _ONE_MILLION,
+        entry.output_cost_per_million / _ONE_MILLION,
+        _openai_pricing_source_label(model),
+    )
+
+
+def openai_billed_microusd_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> tuple[int, int]:
+    result = estimate_usage_cost(
+        model,
+        CanonicalUsage(
+            input_tokens=max(0, input_tokens),
+            output_tokens=max(0, output_tokens),
+            cache_read_tokens=max(0, cache_read_tokens),
+            cache_write_tokens=max(0, cache_write_tokens),
+        ),
+        provider="openai",
+    )
+    if result.amount_usd is None:
+        raise OpenAIPricingUnavailable(
+            f"no exact OpenAI pricing is configured for model {model!r}"
+        )
+    realized = int(
+        (result.amount_usd * _ONE_MILLION).to_integral_value(rounding=ROUND_CEILING)
+    )
+    return realized, billed_cost(realized)
+
+
+def _openai_usage(
+    response: dict,
+    *,
+    estimated_input_tokens: int,
+) -> tuple[int, int, int, int]:
+    usage = response.get("usage") or {}
+    prompt_total = int(usage.get("prompt_tokens") or estimated_input_tokens)
+    output_tokens = int(usage.get("completion_tokens") or 0)
+    details = usage.get("prompt_tokens_details") or {}
+    cache_read_tokens = int(details.get("cached_tokens") or 0)
+    cache_write_tokens = int(details.get("cache_write_tokens") or 0)
+    input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
+    return input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+
+
+def call_openai(payload: dict, api_key: str) -> dict:
+    request = urllib.request.Request(
+        OPENAI_CHAT_COMPLETIONS_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+    timeout = _bounded_int(
+        _env("TAKYON_APP_OPENAI_TIMEOUT_SECONDS", "60"),
+        default=60,
+        minimum=5,
+        maximum=300,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI API returned {exc.code}: {body[:500]}") from exc
+
+
+def openai_text(response: dict) -> str:
+    message = ((response.get("choices") or [{}])[0] or {}).get("message") or {}
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def openai_content(response: dict) -> list[dict[str, str]]:
+    text = openai_text(response)
+    return [{"type": "text", "text": text}] if text else []
+
+
+def openai_usage(
+    response: dict,
+    *,
+    model: str,
+    estimated_input_tokens: int,
+) -> dict[str, int | str]:
+    input_tokens, output_tokens, cache_read_tokens, cache_write_tokens = _openai_usage(
+        response,
+        estimated_input_tokens=estimated_input_tokens,
+    )
+    realized, billed = openai_billed_microusd_cost(
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "realized_cost_microusd": realized,
+        "billed_cost_microusd": billed,
+        "provider_request_id": str(response.get("id") or ""),
+    }
 
 
 # ── Tavily web search / extract — product-runtime metered tool provider ──────

@@ -207,9 +207,9 @@ def test_deepseek_v4_pro_pricing_entry_exists():
     assert entry is not None
     assert entry.input_cost_per_million is not None
     assert entry.output_cost_per_million is not None
-    assert float(entry.input_cost_per_million) == 1.74
-    assert float(entry.output_cost_per_million) == 3.48
-    assert float(entry.cache_read_cost_per_million) == 0.0145
+    assert float(entry.input_cost_per_million) == 0.435
+    assert float(entry.output_cost_per_million) == 0.87
+    assert float(entry.cache_read_cost_per_million) == 0.003625
 
 
 def test_deepseek_v4_pro_estimate_usage_cost():
@@ -222,8 +222,26 @@ def test_deepseek_v4_pro_estimate_usage_cost():
 
     assert result.status == "estimated"
     assert result.amount_usd is not None
-    # 1M input × $1.74/M + 500K output × $3.48/M = $1.74 + $1.74 = $3.48
-    assert float(result.amount_usd) == 3.48
+    # 1M input × $0.435/M + 500K output × $0.87/M = $0.435 + $0.435 = $0.87
+    assert float(result.amount_usd) == 0.87
+
+
+def test_openai_gpt_5_5_pricing_entry_exists():
+    entry = get_pricing_entry("gpt-5.5", provider="openai")
+
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 5.0
+    assert float(entry.output_cost_per_million) == 30.0
+    assert float(entry.cache_read_cost_per_million) == 0.5
+
+
+def test_openai_gpt_5_4_mini_pricing_entry_exists():
+    entry = get_pricing_entry("gpt-5.4-mini", provider="openai")
+
+    assert entry is not None
+    assert float(entry.input_cost_per_million) == 0.75
+    assert float(entry.output_cost_per_million) == 4.5
+    assert float(entry.cache_read_cost_per_million) == 0.075
 
 
 def test_eas_build_pricing_is_priced_and_unpriced_fails_closed():

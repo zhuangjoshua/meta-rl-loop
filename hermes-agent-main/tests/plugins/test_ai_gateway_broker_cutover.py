@@ -21,7 +21,7 @@ class _FakeUser:
 class _Plan:
     metadata = {
         "features": {"ai_generate": True, "web_search": True},
-        "model_allowlist": ["claude-x"],
+        "model_allowlist": ["claude-x", "gpt-5.4-mini"],
     }
     tier = "pro"
     included_ai_budget_microusd = 5_000_000
@@ -102,6 +102,74 @@ def test_message_broker_403_maps_to_subscription_required(broker_on, monkeypatch
         )
     assert ei.value.status_code == 402
     assert ei.value.detail == {"error": "subscription_required"}
+
+
+def test_message_broker_openai_posts_and_normalizes_cached_prompt_tokens(broker_on, monkeypatch):
+    seen = {}
+
+    monkeypatch.setenv("TAKYON_APP_OPENAI_MODEL", "gpt-5.4-mini")
+    monkeypatch.setattr(
+        ai_gateway,
+        "openai_payload",
+        lambda body: (
+            {"model": "gpt-5.4-mini", "messages": body.get("messages", []), "max_completion_tokens": 64},
+            "gpt-5.4-mini",
+            90,
+        ),
+    )
+    monkeypatch.setattr(ai_gateway, "openai_billed_microusd_cost", lambda *a, **k: (300, 375))
+    monkeypatch.setattr(
+        ai_gateway,
+        "openai_rates_microusd_per_token",
+        lambda m: (Decimal(0), Decimal(0), "src"),
+    )
+    monkeypatch.setattr(
+        ai_gateway,
+        "openai_usage",
+        lambda raw, **_: {
+            "input_tokens": 80,
+            "output_tokens": 20,
+            "cache_read_tokens": 40,
+            "cache_write_tokens": 0,
+            "realized_cost_microusd": 300,
+            "billed_cost_microusd": 375,
+            "provider_request_id": "chatcmpl_1",
+        },
+    )
+    monkeypatch.setattr(ai_gateway, "openai_text", lambda raw: "hello-openai")
+    monkeypatch.setattr(
+        ai_gateway,
+        "openai_content",
+        lambda raw: [{"type": "text", "text": "hello-openai"}],
+    )
+
+    def _fake_broker(provider, op, payload, **kw):
+        seen.update(provider=provider, op=op, payload=payload, kw=kw)
+        return {
+            "id": "chatcmpl_1",
+            "choices": [{"message": {"content": "hello-openai"}}],
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 20,
+                "prompt_tokens_details": {"cached_tokens": 40},
+            },
+        }
+
+    monkeypatch.setattr(ai_gateway.safebox, "broker_provider_call", _fake_broker)
+    out = ai_gateway.broker_message_for_business(
+        object(),
+        business_slug="climblog",
+        raw_session_token="sess",
+        body={"provider": "openai", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert seen["provider"] == "openai" and seen["op"] == "messages"
+    assert seen["kw"]["action"] == "openai.messages"
+    assert seen["kw"]["estimate_microusd"] == 375
+    assert out["text"] == "hello-openai"
+    assert out["content"] == [{"type": "text", "text": "hello-openai"}]
+    assert out["usage"]["input_tokens"] == 80
+    assert out["usage"]["output_tokens"] == 20
+    assert out["usage"]["actual_cost_microusd"] == 375
 
 
 def test_search_broker_path_posts_tavily_and_does_not_meter_locally(broker_on, monkeypatch):

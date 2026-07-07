@@ -335,6 +335,30 @@ def test_anthropic_non_stream_accepts_claude_sonnet_5_catalog_pricing(client, mo
     _assert_no_key(resp)
 
 
+def test_deepseek_model_uses_deepseek_endpoint_and_key(client, monkeypatch):
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 5000)
+    monkeypatch.setattr(
+        safebox_provider_proxy, "_anthropic_actual_microusd_from_response", lambda p, r: 900
+    )
+    monkeypatch.setattr(safebox_provider_proxy, "_deepseek_key", lambda: _REAL_KEY)
+    monkeypatch.setattr(
+        safebox_provider_proxy,
+        "_anthropic_key",
+        lambda: pytest.fail("anthropic key must not be used for deepseek models"),
+    )
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_deepseek", "usage": {"output_tokens": 7}})
+    resp = client.post(
+        "/v1/messages",
+        headers=_cap_headers(_session_cap()),
+        json={"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    sent = _FakeClient.sent[-1]
+    assert sent["url"] == safebox_provider_proxy._DEEPSEEK_MESSAGES_URL
+    assert sent["headers"]["x-api-key"] == _REAL_KEY
+
+
 def test_anthropic_upstream_error_releases_hold_and_is_sanitized(client, monkeypatch):
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 5000)
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)

@@ -829,6 +829,7 @@ def storage_list_object_sizes(provider: str, prefix: str) -> dict[str, int]:
 _PROVIDER_BROKER_FLAG_ENV = "TAKYON_PROVIDER_BROKER"
 _PROVIDER_BROKER_PATHS = {
     ("anthropic", "messages"): "/v1/providers/anthropic/messages",
+    ("openai", "messages"): "/v1/providers/openai/messages",
     ("tavily", "search"): "/v1/providers/tavily/search",
     ("gemini", "image"): "/v1/providers/gemini/image",
     ("postmark", "send"): "/v1/providers/postmark/send",

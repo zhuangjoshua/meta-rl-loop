@@ -51,6 +51,7 @@ _OPERATOR_TOKEN_HEADER = "x-takyon-operator-token"
 # mirror the canonical resolvers (ai_provider.anthropic_key / tavily_key,
 # creative_gateway._GEMINI_KEY_ALIASES) so "what key does this action use" lives in ONE place.
 _ANTHROPIC_AUDIENCE = "anthropic.messages"
+_OPENAI_AUDIENCE = "openai.messages"
 _TAVILY_AUDIENCE = "tavily.search"
 _GEMINI_IMAGE_AUDIENCE = "gemini.image"
 _EGRESS_AUDIENCE = "connection.egress"
@@ -133,6 +134,7 @@ _CREATIVE_FAL_AUDIENCES = frozenset({_CREATIVE_UGC_AUDIENCE})
 # pass an explicit `audience` to mint for a future/custom action.
 _ACTION_AUDIENCE_DEFAULTS = {
     _ANTHROPIC_AUDIENCE: _ANTHROPIC_AUDIENCE,
+    _OPENAI_AUDIENCE: _OPENAI_AUDIENCE,
     _TAVILY_AUDIENCE: _TAVILY_AUDIENCE,
     _GEMINI_IMAGE_AUDIENCE: _GEMINI_IMAGE_AUDIENCE,
     _EGRESS_AUDIENCE: _EGRESS_AUDIENCE,
@@ -1570,6 +1572,29 @@ def _anthropic_provider_caller(payload: dict[str, Any]):
     return _call
 
 
+def _openai_key_resolver(_scope: CapabilityScope) -> str:
+    from . import ai_provider
+
+    return ai_provider.openai_key()
+
+
+def _openai_provider_caller(payload: dict[str, Any]):
+    from . import ai_provider
+
+    built_payload, model, estimated_input_tokens = ai_provider.openai_payload(payload or {})
+
+    def _call(_scope: CapabilityScope, key: str):
+        raw = ai_provider.call_openai(built_payload, key)
+        usage = ai_provider.openai_usage(
+            raw,
+            model=model,
+            estimated_input_tokens=estimated_input_tokens,
+        )
+        return raw, int(usage["billed_cost_microusd"])
+
+    return _call
+
+
 def _tavily_key_resolver(_scope: CapabilityScope) -> str:
     """Resolve the SHARED Tavily key LOCALLY on the safebox (never returned to a caller)."""
     from . import ai_provider
@@ -1662,6 +1687,26 @@ def _anthropic_estimate(payload: dict[str, Any]):
             )
         except ai_provider.AnthropicPricingUnavailable as exc:
             raise BrokerLedgerError("anthropic_pricing_unavailable") from exc
+        return int(billed)
+
+    return _estimate
+
+
+def _openai_estimate(payload: dict[str, Any]):
+    from . import ai_provider
+
+    built_payload, model, estimated_input_tokens = ai_provider.openai_payload(payload or {})
+    max_tokens = int((built_payload or {}).get("max_completion_tokens") or 0)
+
+    def _estimate(_scope: CapabilityScope) -> int:
+        try:
+            _realized, billed = ai_provider.openai_billed_microusd_cost(
+                model,
+                int(estimated_input_tokens),
+                int(max_tokens),
+            )
+        except ai_provider.OpenAIPricingUnavailable as exc:
+            raise BrokerLedgerError("openai_pricing_unavailable") from exc
         return int(billed)
 
     return _estimate
@@ -4203,6 +4248,21 @@ def build_safebox_app() -> FastAPI:
             key_resolver=_anthropic_key_resolver,
             caller_builder=_anthropic_provider_caller,
             estimate_builder=_anthropic_estimate,
+        )
+
+    @app.post("/v1/providers/openai/messages")
+    def provider_openai_messages(
+        body: _ProviderCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        return _broker_provider_route(
+            body,
+            audience=_OPENAI_AUDIENCE,
+            provider="openai",
+            key_resolver=_openai_key_resolver,
+            caller_builder=_openai_provider_caller,
+            estimate_builder=_openai_estimate,
         )
 
     @app.post("/v1/providers/tavily/search")

@@ -47,6 +47,11 @@ function buildClaudeSessionEnv({
   anthropicToken,
   disableExperimentalBetas,
   anthropicBaseUrl,
+  anthropicModel,
+  anthropicDefaultOpusModel,
+  anthropicDefaultSonnetModel,
+  anthropicDefaultHaikuModel,
+  claudeCodeSubagentModel,
   inDockerWorker,
   cwd,
 }) {
@@ -57,7 +62,12 @@ function buildClaudeSessionEnv({
     ANTHROPIC_TOKEN: anthropicToken,
     CLAUDE_AGENT_SDK_CLIENT_APP: "takyon-business-agent",
     CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: disableExperimentalBetas,
-    ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {})
+    ...(anthropicBaseUrl ? { ANTHROPIC_BASE_URL: anthropicBaseUrl } : {}),
+    ...(anthropicModel ? { ANTHROPIC_MODEL: anthropicModel } : {}),
+    ...(anthropicDefaultOpusModel ? { ANTHROPIC_DEFAULT_OPUS_MODEL: anthropicDefaultOpusModel } : {}),
+    ...(anthropicDefaultSonnetModel ? { ANTHROPIC_DEFAULT_SONNET_MODEL: anthropicDefaultSonnetModel } : {}),
+    ...(anthropicDefaultHaikuModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: anthropicDefaultHaikuModel } : {}),
+    ...(claudeCodeSubagentModel ? { CLAUDE_CODE_SUBAGENT_MODEL: claudeCodeSubagentModel } : {})
   };
   for (const key of ["LANG", "LC_ALL", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER"]) {
     const value = String(process.env[key] || "").trim();
@@ -396,6 +406,11 @@ async function main() {
   // container. In that mode ANTHROPIC_API_KEY (the capability token) is the auth and the base URL is
   // present; outside lockdown a raw key/token is still required.
   const anthropicBaseUrl = String(process.env.ANTHROPIC_BASE_URL || "").trim();
+  const anthropicModel = String(process.env.ANTHROPIC_MODEL || "").trim();
+  const anthropicDefaultOpusModel = String(process.env.ANTHROPIC_DEFAULT_OPUS_MODEL || "").trim();
+  const anthropicDefaultSonnetModel = String(process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || "").trim();
+  const anthropicDefaultHaikuModel = String(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL || "").trim();
+  const claudeCodeSubagentModel = String(process.env.CLAUDE_CODE_SUBAGENT_MODEL || "").trim();
   const disableExperimentalBetas = String(
     process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS || "1"
   ).trim() || "1";
@@ -434,6 +449,11 @@ async function main() {
               anthropicToken,
               disableExperimentalBetas,
               anthropicBaseUrl,
+              anthropicModel,
+              anthropicDefaultOpusModel,
+              anthropicDefaultSonnetModel,
+              anthropicDefaultHaikuModel,
+              claudeCodeSubagentModel,
               inDockerWorker,
               cwd,
             }),

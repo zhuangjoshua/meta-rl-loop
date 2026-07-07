@@ -67,6 +67,15 @@ class BusinessOwnerMissing(JobError):
     not be reserved against anyone — an integrity violation, surfaced rather than charged to no one."""
 
 
+class NonRetryableJobError(JobError):
+    """Raise from a job handler when the failure is DETERMINISTIC — e.g. an upstream provider
+    rejected the request with an invalid-request-class 4xx (400/401/403/404), where a re-run with
+    identical inputs fails identically. ``run_one`` then finalizes the job through the EXISTING
+    terminal path (``fail(..., retryable=False)`` → status 'failed') on the first claim instead of
+    requeueing it for another identical burn (observed: a workspace-usage-limit 400 burned
+    2 claims x 6 API retries before failing generic 'handler_error')."""
+
+
 _TERMINAL = ("completed", "blocked", "failed", "cancelled")
 
 # Lanes: the per-business concurrency gate in claim_one is PER LANE, not per business-total. CEO
@@ -108,7 +117,8 @@ _RENEW_AFTER_LEASE_SQL = (
 # The columns of a jobs row, in one place so every SELECT projects the same Job.
 _COLS = (
     "id, business_slug, kind, status, idempotency_key, payload, result, error, "
-    "reserved_billing_entry_id, attempts, max_attempts, locked_by, locked_at, created_at, updated_at"
+    "reserved_billing_entry_id, attempts, max_attempts, locked_by, locked_at, created_at, updated_at, "
+    "reserved_pool_id"
 )
 
 

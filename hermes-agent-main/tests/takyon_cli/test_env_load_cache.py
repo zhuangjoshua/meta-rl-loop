@@ -191,6 +191,25 @@ def test_get_env_value_prefers_remote_safebox_for_openai_api_key(monkeypatch):
     assert get_env_value("OPENAI_API_KEY") == "remote-openai-key"
 
 
+def test_get_env_value_falls_back_to_local_env_when_remote_safebox_refuses(monkeypatch):
+    from plugins.takyon import safebox
+    from takyon_cli.config import get_env_value
+
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://safebox.internal")
+    monkeypatch.setenv("OPENAI_API_KEY", "local-openai-key")
+
+    def _raise(_key):
+        raise safebox.RemoteSafeboxError(
+            "blocked",
+            status_code=403,
+            payload={"detail": "env_key_blocked"},
+        )
+
+    monkeypatch.setattr(safebox, "read_env_backed_value", _raise)
+
+    assert get_env_value("OPENAI_API_KEY") == "local-openai-key"
+
+
 def test_load_env_handles_missing_file():
     """A nonexistent .env returns {} and caches the empty result."""
     from takyon_cli.config import invalidate_env_cache, load_env
