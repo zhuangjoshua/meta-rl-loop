@@ -1598,11 +1598,33 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     active_mode = "live"
     goal = str((job.payload or {}).get("goal") or (business or {}).get("goal") or "").strip()
     business_name = str((business or {}).get("name") or "").strip()
+    # Opt-in landing-hero animations (--animation at create). Persisted on the business metadata;
+    # read it robustly whether the summary exposes a parsed `metadata` dict or a raw metadata_json
+    # string, and honor a job-payload override. Absent → False → bootstrap prose is unchanged.
+    def _business_metadata(rec: dict) -> dict:
+        meta = rec.get("metadata")
+        if isinstance(meta, dict):
+            return meta
+        raw = rec.get("metadata_json")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                import json as _json
+                parsed = _json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    animations = bool(
+        (job.payload or {}).get("landing_animations")
+        or _business_metadata(business or {}).get("landing_animations")
+    )
     bootstrap_turn = _ceo_bootstrap_turn_config(
         slug,
         goal,
         active_mode,
         business_name=business_name,
+        animations=animations,
     )
     user_prompt = str(bootstrap_turn.get("user_prompt") or "")
     system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")

@@ -74,6 +74,24 @@ def test_snapshot_attaches_channel_campaign_stats(tmp_path, monkeypatch):
     assert camp["clicks"] == 4
 
 
+def test_snapshot_reads_x_totals_from_metrics_summary(tmp_path):
+    # X totals live in metrics/x/summary.json (raw X API metric names), not in the per-post
+    # sync receipts — regression pin for the read path + name mapping.
+    summary_path = tmp_path / "acme" / "metrics/x/summary.json"
+    summary_path.parent.mkdir(parents=True)
+    summary_path.write_text(json.dumps({
+        "posts_synced": 2,
+        "totals": {
+            "public_metrics": {"impression_count": 5400, "like_count": 33, "reply_count": 7,
+                               "retweet_count": 9, "quote_count": 2},
+            "non_public_metrics": {"url_link_clicks": 21},
+            "organic_metrics": {"url_link_clicks": 19},
+        },
+    }))
+    snap = core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", "x")
+    assert snap["x"] == {"impressions": 5400, "likes": 33, "replies": 7, "reposts": 11, "clicks": 21}
+
+
 def test_snapshot_never_raises_when_everything_is_missing(tmp_path, monkeypatch):
     def boom():
         raise RuntimeError("no backend")
@@ -98,3 +116,23 @@ def test_format_episode_metrics_renders_compact_suffix():
     assert "users=7" in text and "spend_c=374" in text and "impr=1301" in text
     assert core._format_episode_metrics(None) == ""
     assert core._format_episode_metrics({}) == ""
+
+
+def test_snapshot_attaches_meta_campaign_stats(tmp_path, monkeypatch):
+    """Meta episodes attach delivery numbers through the same rail as reddit (2026-07-04 parity:
+    the meta sync receipt now carries `totals` exactly like reddit's)."""
+    backend = SimpleNamespace(
+        list_policies=lambda conn, slug, statuses=None: [
+            _policy(channel="meta", slug="m-camp", last_synced_spend_cents=33)
+        ]
+    )
+    monkeypatch.setattr(core, "_business_ad_spend_backend", lambda: backend)
+    syncs = tmp_path / "acme" / "metrics/meta-ads/m-camp/syncs"
+    syncs.mkdir(parents=True)
+    (syncs / "s.json").write_text(json.dumps({"totals": {"impressions": 43, "clicks": 3, "spend_usd": 0.33}}))
+
+    snap = core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", "meta")
+    camp = snap["campaigns"][0]
+    assert camp["spend_cents"] == 33
+    assert camp["impressions"] == 43
+    assert camp["clicks"] == 3

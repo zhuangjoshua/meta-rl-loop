@@ -1081,15 +1081,19 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         # belt). Best-effort by design: a stamping failure must never fail the metrics sync,
         # and campaigns launched before the policy registry existed simply have no row.
         settlement: dict[str, Any] | None = None
+        # Aggregate totals over the RETURNED rows regardless of policy state: the sync receipt
+        # carries them (parity with the reddit receipt shape) so downstream readers — episode
+        # metrics snapshots, evaluate, operators — get impressions/clicks/spend without re-reading
+        # insights.jsonl.
+        totals = core._meta_aggregate_insights_rows(
+            [dict(r) for r in rows if isinstance(r, Mapping)]
+        )
         try:
             policy = core._load_ad_spend_policy(business, channel="meta", slug=slug)
         except Exception:
             policy = None
         if policy is not None:
             try:
-                totals = core._meta_aggregate_insights_rows(
-                    [dict(r) for r in rows if isinstance(r, Mapping)]
-                )
                 synced_spend_cents = max(
                     int(policy.last_synced_spend_cents or 0),
                     int(totals.get("spend_cents") or 0),
@@ -1149,6 +1153,7 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
             "status": "synced",
             "rows_returned": len(rows),
             "rows_appended": appended,
+            "totals": totals,
             "insights_path": insights_rel,
             "external_side_effects": "read",
         }
