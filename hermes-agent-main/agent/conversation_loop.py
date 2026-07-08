@@ -2185,13 +2185,16 @@ def run_conversation(
 
                 retry_count += 1
                 elapsed_time = time.time() - api_start_time
-                agent._touch_activity(
-                    f"API error recovery (attempt {retry_count}/{max_retries})"
-                )
-                
                 error_type = type(api_error).__name__
                 error_msg = str(api_error).lower()
                 _error_summary = agent._summarize_api_error(api_error)
+                # Show the operator WHAT failed, not just that a retry is happening — a bare
+                # "API error recovery (attempt 1/6)" line hid a hard 400 (wrong model pin,
+                # burned provider limit) behind six blind retries (femitary-2, 2026-07-08).
+                agent._touch_activity(
+                    f"API error recovery (attempt {retry_count}/{max_retries}): "
+                    f"{str(_error_summary or error_type)[:140]}"
+                )
                 logger.warning(
                     "API call failed (attempt %s/%s) error_type=%s %s summary=%s",
                     retry_count,
