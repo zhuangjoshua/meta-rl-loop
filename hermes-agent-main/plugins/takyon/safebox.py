@@ -267,6 +267,20 @@ def _remote_headers(*, with_json: bool = False, operator_authority: bool = False
     return headers
 
 
+# Idempotent READ paths may retry on a TRANSPORT failure (tunnel restart, uvicorn worker
+# recycle, dropped keepalive) — re-reading is always safe. Everything else stays single-shot:
+# provider calls and writes must never double-fire on an ambiguous connection error.
+# (Observed: a single tunnel blip on /v1/storage/get failed shelfscan0708's whole bootstrap
+# attempt, 2026-07-08 — "Remote end closed connection without response".)
+_REMOTE_IDEMPOTENT_READ_PATHS = (
+    "/v1/storage/get",
+    "/v1/storage/list-digests",
+    "/v1/storage/list-sizes",
+    "/healthz",
+)
+_REMOTE_READ_RETRY_DELAYS_S = (0.5, 1.5)
+
+
 def _remote_json(
     method: str,
     path: str,
@@ -285,33 +299,43 @@ def _remote_json(
     )
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(f"{base}{path}", data=body, method=method.upper(), headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw.strip() else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        detail = raw.strip() or exc.reason
+    retryable = any(path.startswith(prefix) for prefix in _REMOTE_IDEMPOTENT_READ_PATHS)
+    transport_attempts = (1 + len(_REMOTE_READ_RETRY_DELAYS_S)) if retryable else 1
+    for attempt in range(transport_attempts):
+        req = urllib.request.Request(
+            f"{base}{path}", data=body, method=method.upper(), headers=headers
+        )
         try:
-            parsed = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError:
-            parsed = {"detail": detail}
-        raise RemoteSafeboxError(
-            f"Safebox remote {method.upper()} {path} failed: {parsed}",
-            status_code=exc.code,
-            payload=parsed if isinstance(parsed, dict) else {"detail": detail},
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        # Transport failure (timeout / connection refused / DNS), NOT an HTTP status — HTTPError is a
-        # URLError subclass and is handled above, so this only catches unreachable-safebox cases. Fail
-        # closed as a 504 so a brokered provider call surfaces a clean upstream error and never falls
-        # back to a raw key.
-        raise RemoteSafeboxError(
-            f"Safebox remote {method.upper()} {path} unreachable: {exc}",
-            status_code=504,
-            payload={"detail": "safebox_unreachable"},
-        ) from exc
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            # An HTTP status is a real answer from the safebox — never retried.
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw.strip() or exc.reason
+            try:
+                parsed = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                parsed = {"detail": detail}
+            raise RemoteSafeboxError(
+                f"Safebox remote {method.upper()} {path} failed: {parsed}",
+                status_code=exc.code,
+                payload=parsed if isinstance(parsed, dict) else {"detail": detail},
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # Transport failure (timeout / connection refused / DNS / connection closed), NOT an
+            # HTTP status — HTTPError is a URLError subclass and is handled above. Idempotent reads
+            # retry with backoff; everything else fails closed immediately as a 504 so a brokered
+            # provider call surfaces a clean upstream error and never falls back to a raw key.
+            if attempt + 1 < transport_attempts:
+                time.sleep(_REMOTE_READ_RETRY_DELAYS_S[attempt])
+                continue
+            raise RemoteSafeboxError(
+                f"Safebox remote {method.upper()} {path} unreachable: {exc}",
+                status_code=504,
+                payload={"detail": "safebox_unreachable"},
+            ) from exc
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def _managed_secret_command() -> str:
