@@ -893,6 +893,7 @@ class _RuntimeProgress:
         self._stream_buffer = ""
         self._stream_open = False
         self._stream_last_emit = 0.0
+        self._reasoning_buf = ""
         self._last_activity_monotonic = time.monotonic()
 
     def _touch_activity(self) -> None:
@@ -1040,6 +1041,12 @@ class _RuntimeProgress:
         self._last_nested_activity = text
         self.emit(f"worker -> {text}")
 
+    def _flush_reasoning(self) -> None:
+        note = _normalize_worker_progress_text(self._reasoning_buf)
+        self._reasoning_buf = ""
+        if note:
+            self.emit(f"reasoning -> {note}")
+
     def tool_progress(
         self,
         event_type: str,
@@ -1052,17 +1059,28 @@ class _RuntimeProgress:
             return
         self._touch_activity()
         if event_type == "tool.started":
+            self._flush_reasoning()
             self._last_tool_generating = ""
             suffix = f" · {preview}" if preview else ""
             self.emit(f"tool started -> {name}{suffix}")
         elif event_type == "tool.completed":
+            self._flush_reasoning()
             duration = kwargs.get("duration")
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
         elif event_type in {"reasoning.available", "_thinking"}:
-            note = _normalize_worker_progress_text(preview if _normalize_worker_progress_text(preview) else name)
-            if note:
-                self.emit(f"reasoning -> {note}")
+            # Streaming reasoning arrives as PER-TOKEN BPE deltas. Recording one runtime
+            # event per delta floods the events plane and every renderer that replays it
+            # (follow tail, dashboard) with one word — or half a word — per line (274
+            # fragment lines on paylane0708's bootstrap). Coalesce raw deltas (spacing
+            # intact) and record ONE event per sentence or ~200 chars; flush before
+            # tool-start/complete so ordering is preserved. Mirrors cli._ShellProgress.
+            raw = str(preview if preview is not None else (name or ""))
+            if raw:
+                self._reasoning_buf += raw
+                stripped = self._reasoning_buf.rstrip()
+                if len(stripped) >= 200 or stripped.endswith((".", "!", "?", ":", ";")):
+                    self._flush_reasoning()
 
     def tool_completed(
         self,

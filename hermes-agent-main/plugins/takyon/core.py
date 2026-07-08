@@ -3369,6 +3369,29 @@ def _starter_strategy_title(value: str, *, slug: str) -> str:
     return title or _humanize_business_slug(slug)
 
 
+def _sanitize_starter_title(title: str, *, slug: str, max_len: int = 90) -> str:
+    """Final hygiene for the machine-derived public <title>: never slug-embedded, never
+    paragraph-length. Salvages a usable clause rather than regressing to the bare slug."""
+    text = str(title or "").strip()
+    slug_l = str(slug or "").strip().lower()
+    if slug_l:
+        # Drop a LEADING slug mention ("<slug> helps ..." -> "Helps ..."); if the slug still
+        # appears mid-string, cut the title at the clause boundary before it.
+        pattern = re.compile(rf"^\W*{re.escape(slug_l)}\b[\s:,-]*", re.IGNORECASE)
+        text = pattern.sub("", text).strip()
+        mid = re.search(rf"(?<![a-z0-9]){re.escape(slug_l)}(?![a-z0-9])", text, re.IGNORECASE)
+        if mid:
+            text = text[: mid.start()].rstrip(" ,;:-").strip()
+    if len(text) > max_len:
+        # One clause: cut at the first sentence/clause boundary past nothing, else word-cut.
+        cut = re.split(r"(?<=[.!?])\s|,\s(?=so\b|and\b|which\b)", text, maxsplit=1)[0].strip()
+        text = cut if len(cut) <= max_len else cut[:max_len].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    text = text.strip().rstrip(",;:-").strip()
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text or _humanize_business_slug(slug)
+
+
 def _starter_title_is_generic(title: str, *, slug: str) -> bool:
     value = str(title or "").strip().lower()
     if not value:
@@ -3448,6 +3471,12 @@ def _subuser_app_starter_strings(
             strategy_sections.get("core value proposition") or "",
             slug=slug,
         )
+    # The LAST candidate above was never re-checked, so a slug-embedded value prop shipped as
+    # the public <title> verbatim ("paylane0708 helps freelancers ...", 200+ chars, 2026-07-08).
+    # Salvage instead of falling back to the bare slug: drop a LEADING slug mention (the CEO's
+    # docs routinely open with "<slug> helps ..."), recapitalize, and bound to one title-length
+    # sentence clause. Only if nothing salvageable remains does the humanized slug fallback apply.
+    title = _sanitize_starter_title(title, slug=slug)
     description = str((surface or {}).get("notes") or "").strip()
     if not description:
         description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
