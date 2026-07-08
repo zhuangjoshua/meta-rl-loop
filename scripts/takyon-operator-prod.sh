@@ -700,12 +700,29 @@ for part in data:
     if name in keys:
         env[name] = value.decode('utf-8', errors='replace')
 
+# The CEO model lane (named custom provider -> api.openai.com) authenticates with the RAW
+# OpenAI key from the operator runtime env file — the dashboard unit deliberately unsets it
+# in its process env, so read it from the file. Without this a collaborator machine that has
+# never hand-deposited a local key resolves the 'no-key-required' placeholder and every CEO
+# call 401s at OpenAI (turputaru on Sai's machine, 2026-07-08). Anyone running this script
+# already holds root SSH to the operator VPS, so this export adds no new exposure.
+if not env.get('OPENAI_API_KEY'):
+    try:
+        for line in open('/opt/takyon/.takyon/.env', encoding='utf-8'):
+            line = line.strip()
+            if line.startswith('OPENAI_API_KEY=') and not line.startswith('#'):
+                env['OPENAI_API_KEY'] = line.split('=', 1)[1].strip().strip(chr(34)).strip(chr(39))
+                break
+    except OSError:
+        pass
+
 missing = [
     key
     for key in (
         'TAKYON_OPERATOR_DATABASE_URL',
         'TAKYON_SAFEBOX_TOKEN',
         'TAKYON_SAFEBOX_OPERATOR_TOKEN',
+        'OPENAI_API_KEY',
     )
     if not env.get(key)
 ]
@@ -1074,7 +1091,10 @@ FORBIDDEN_ENV = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
-    "OPENAI_API_KEY",
+    # OPENAI_API_KEY is deliberately NOT forbidden: the ruled CEO lane (provider split,
+    # 2026-07-07) is the named custom provider calling api.openai.com DIRECTLY with the raw
+    # key, and fetch_operator_env_exports provisions it into every operator console. All
+    # OTHER paid-provider keys stay safebox-only.
     "OPENAI_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
