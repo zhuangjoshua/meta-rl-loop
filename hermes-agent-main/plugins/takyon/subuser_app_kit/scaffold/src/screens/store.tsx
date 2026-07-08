@@ -1,12 +1,15 @@
 import { Link } from "react-router-dom";
-import { Badge } from "../components/ui/badge";
-import { Card, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { businessDisplayName } from "../lib/branding";
 import { hasStorefront, productCatalog, storePriceLabel } from "../lib/takyon";
 
-// Same look as the landing hero's primary CTA link, so the Buy button matches the theme without
-// re-deriving button internals. It is an <a>, not a <button>, because it navigates to Shopify's
-// hosted checkout — the customer never touches our runtime (no new subuser-plane surface).
+// Self-contained on purpose: this is a starter-owned rail that gets refreshed into EXISTING
+// businesses whose custom builds may have dropped scaffold UI components. It imports only other
+// starter-owned modules (branding + the takyon lib) and react-router, and styles with plain
+// Tailwind utility classes so it always builds — a custom theme that removed Tailwind degrades to
+// unstyled-but-functional (the Buy link still works). No ../components/ui/* dependency.
+
+// Matches the landing hero's primary CTA styling. An <a>, not a <button>, because it navigates to
+// Shopify's hosted checkout — the customer never touches our runtime (no new subuser-plane surface).
 const buyButtonClass =
   "inline-flex h-11 w-full items-center justify-center rounded bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90";
 
@@ -33,29 +36,27 @@ export function StoreSection({ heading = "Shop" }: { heading?: string }) {
         {productCatalog.map((product) => {
           const priceLabel = storePriceLabel(product.price);
           return (
-            <Card
+            <div
               key={product.productId || product.handle || product.title}
-              className="flex flex-col"
+              className="flex flex-col gap-4 rounded-lg border border-border bg-card p-5 text-card-foreground shadow-sm"
             >
-              <CardHeader className="flex-1 gap-2">
-                <CardTitle className="text-base">{product.title}</CardTitle>
+              <div className="flex flex-1 flex-col gap-2">
+                <h3 className="text-base font-semibold text-foreground">{product.title}</h3>
                 {priceLabel ? (
-                  <Badge variant="outline" className="w-fit">
+                  <span className="w-fit rounded-sm border border-border px-2 py-0.5 text-xs font-semibold text-foreground">
                     {priceLabel}
-                  </Badge>
+                  </span>
                 ) : null}
-              </CardHeader>
-              <CardFooter>
-                <a
-                  href={product.cartPermalink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={buyButtonClass}
-                >
-                  Buy now
-                </a>
-              </CardFooter>
-            </Card>
+              </div>
+              <a
+                href={product.cartPermalink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buyButtonClass}
+              >
+                Buy now
+              </a>
+            </div>
           );
         })}
       </div>
