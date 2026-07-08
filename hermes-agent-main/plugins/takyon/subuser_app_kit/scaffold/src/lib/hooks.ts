@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { client, defaultSubscribePlanKey, type TakyonActionError } from "./takyon";
+import { client, defaultSubscribePlanKey, productPlans, type TakyonActionError } from "./takyon";
 
 export interface SessionUser {
   [key: string]: unknown;
@@ -300,6 +300,40 @@ function hasCheckoutReturnSignal(params: URLSearchParams): boolean {
   return params.get("checkout") === "success" || Boolean(String(params.get("session_id") ?? "").trim());
 }
 
+/** Fire the Meta Pixel `Purchase` event once per checkout return. The platform injects the shared
+ *  pixel (`fbq`) into every published site at publish time; this reports the conversion VALUE so
+ *  Meta can attribute revenue/ROAS back to the ad click. Guarded on every side: only on an explicit
+ *  `checkout=success` return (never `checkout=cancel`, never a bare session_id), no-op when the
+ *  pixel is not installed or no priced plan is published, and deduped per browser session (belt on
+ *  top of the URL-param strip). The value is the published plan's list price — an attribution
+ *  estimate, not billing truth (Stripe owns that). `content_name` carries the site hostname
+ *  because the pixel is shared platform-wide. Analytics must never break the app: every step is
+ *  wrapped and failure is silent. */
+function fireMetaPurchasePixel(params: URLSearchParams): void {
+  if (typeof window === "undefined") return;
+  if (params.get("checkout") !== "success") return;
+  const fbq = (window as { fbq?: (...args: unknown[]) => void }).fbq;
+  if (typeof fbq !== "function") return;
+  const plan = productPlans[0];
+  const cents = Number(plan?.priceCents ?? plan?.price_cents ?? Number.NaN);
+  if (!Number.isFinite(cents) || cents <= 0) return;
+  try {
+    if (window.sessionStorage?.getItem("tk_meta_purchase_fired")) return;
+    window.sessionStorage?.setItem("tk_meta_purchase_fired", "1");
+  } catch {
+    // Storage blocked (private mode): fall through — the URL-param strip still dedupes reloads.
+  }
+  try {
+    fbq("track", "Purchase", {
+      value: Math.round(cents) / 100,
+      currency: String(plan?.currency ?? "usd").toUpperCase(),
+      content_name: String(window.location.hostname || ""),
+    });
+  } catch {
+    // Never let analytics break the return-from-checkout flow.
+  }
+}
+
 /** Strip the one-shot checkout return params from the URL (both the real query and any hash query) so
  *  a later reload does not re-trigger the refresh poll. Uses history.replaceState directly so it works
  *  even when the params live in the hash, which react-router's setSearchParams would not touch. */
@@ -350,6 +384,7 @@ export function useCheckoutReturnRefresh(
     const params = checkoutReturnParams();
     if (!hasCheckoutReturnSignal(params)) return;
     handledReturnRef.current = true;
+    fireMetaPurchasePixel(params);
     stripCheckoutReturnParams();
 
     let cancelled = false;

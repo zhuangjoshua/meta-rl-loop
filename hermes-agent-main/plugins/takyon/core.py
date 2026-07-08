@@ -5581,33 +5581,6 @@ def _subuser_app_starter_access_page_js() -> str:
                 setCheckoutState(nextCheckout === "success" ? "success" : "");
               }, []);
 
-              // Meta Pixel Purchase signal. Stripe hosted checkout only redirects to
-              // ?checkout=success after a successful payment, so this is the standard place to fire
-              // the value-carrying Purchase event that lets Meta attribute revenue/ROAS back to the
-              // ad. No-ops when the pixel is not installed (window.fbq absent). Deduped once per
-              // browser session so a refresh on ?checkout=success cannot double-count.
-              useEffect(() => {
-                if (typeof window === "undefined" || checkoutState !== "success") return;
-                if (typeof window.fbq !== "function") return;
-                var plan = currentPlan();
-                var valueCents = plan && Number(plan.priceCents) > 0 ? Number(plan.priceCents) : 0;
-                if (!(valueCents > 0)) return;
-                try {
-                  if (window.sessionStorage && window.sessionStorage.getItem("tk_meta_purchase_fired")) return;
-                  if (window.sessionStorage) window.sessionStorage.setItem("tk_meta_purchase_fired", "1");
-                } catch (storageError) {}
-                try {
-                  window.fbq("track", "Purchase", {
-                    value: Math.round(valueCents) / 100,
-                    currency: String((plan && plan.currency) || "usd").toUpperCase(),
-                    // Tag with the business's own hostname: the pixel is SHARED across all
-                    // product sites, so this makes each Purchase identifiable per business in
-                    // Events Manager (detects cross-business attribution on the shared pixel).
-                    content_name: String(window.location.hostname || ""),
-                  });
-                } catch (pixelError) {}
-              }, [checkoutState]);
-
               if (!appState) {
                 return (
                   <section className="starter-card starter-section-card">

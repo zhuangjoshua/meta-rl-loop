@@ -82,20 +82,39 @@ def test_first_action_metric_prefers_canonical_order():
     assert core._meta_first_action_metric([], core._META_PURCHASE_ACTION_TYPES) is None
 
 
-# ── write side: client-side Purchase pixel event ────────────────────────────
+# ── write side: client-side Purchase pixel event (LIVE scaffold, not the dead starter) ──
 
 
-def test_starter_app_shell_fires_value_carrying_purchase_on_checkout_success():
-    js = core._subuser_app_starter_access_page_js()
+def _scaffold_hooks_source() -> str:
+    from pathlib import Path
+
+    return (
+        Path(core.__file__).parent / "subuser_app_kit" / "scaffold" / "src" / "lib" / "hooks.ts"
+    ).read_text(encoding="utf-8")
+
+
+def test_live_scaffold_fires_value_carrying_purchase_on_checkout_success():
+    ts = _scaffold_hooks_source()
     # Fires the standard Purchase event with a value + currency (not just PageView).
-    assert 'fbq("track", "Purchase"' in js
-    assert "value: Math.round(valueCents) / 100" in js
-    assert "currency:" in js
-    # Only when the pixel is actually installed, and only on the success state.
-    assert "typeof window.fbq !== \"function\"" in js
-    assert 'checkoutState !== "success"' in js
+    assert 'fbq("track", "Purchase"' in ts
+    assert "value: Math.round(cents) / 100" in ts
+    assert "currency:" in ts
+    # Only when the pixel is actually installed, and ONLY on an explicit success return —
+    # a checkout=cancel (or bare session_id) return must never mint a Purchase.
+    assert 'if (params.get("checkout") !== "success") return;' in ts
+    assert "typeof fbq !== \"function\"" in ts
     # Deduped once per session so a refresh cannot double-count.
-    assert "tk_meta_purchase_fired" in js
+    assert "tk_meta_purchase_fired" in ts
     # Tagged with the business's own hostname so cross-business purchases on the SHARED
     # pixel stay identifiable per business in Events Manager.
-    assert "content_name: String(window.location.hostname" in js
+    assert "content_name: String(window.location.hostname" in ts
+    # Wired into the one return-from-checkout hook that actually runs.
+    assert "fireMetaPurchasePixel(params);" in ts
+
+
+def test_dead_legacy_starter_carries_no_pixel_code():
+    # The _subuser_app_starter_*_js family has zero callers (legacy Next starter); Purchase
+    # tracking must live ONLY in the real vite scaffold so nobody mistakes the dead file
+    # for the live implementation again.
+    js = core._subuser_app_starter_access_page_js()
+    assert "fbq" not in js
