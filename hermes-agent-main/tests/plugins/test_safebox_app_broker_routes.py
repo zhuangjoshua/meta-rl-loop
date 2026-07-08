@@ -95,6 +95,80 @@ def test_new_routes_are_registered_alongside_env_routes():
     assert "/v1/env/{key}" in paths
 
 
+def test_analytics_umami_forward_route_registered():
+    app = safebox_app.build_safebox_app()
+    paths = {route.path for route in app.routes}
+    assert "/v1/analytics/umami/forward" in paths
+
+
+def test_analytics_umami_forward_requires_operator_route_token(client):
+    # Account-scoped analytics key => operator-gated broker, like GSC/Composio. The shared transport
+    # token alone is not enough.
+    resp = client.post(
+        "/v1/analytics/umami/forward",
+        headers=_auth(operator=False),
+        json={"path": "websites/WID/stats", "params": {"hostname": "demo.coscale.app"}},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "operator_unauthorized"
+
+
+def test_analytics_umami_forward_rejects_non_stats_path(client, monkeypatch):
+    from plugins.takyon import umami_util
+
+    monkeypatch.setattr(umami_util, "umami_request", lambda *a, **k: pytest.fail("must not reach upstream"))
+    for bad in ("websites", "websites/WID", "websites/WID/reset", "teams", "../secrets"):
+        resp = client.post(
+            "/v1/analytics/umami/forward",
+            headers=_auth(),
+            json={"path": bad, "params": {}},
+        )
+        assert resp.status_code == 400, f"{bad!r} -> {resp.text}"
+        assert resp.json()["detail"] == "umami_path_not_allowed"
+
+
+def test_analytics_umami_forward_returns_key_free_stats(client, monkeypatch):
+    from plugins.takyon import umami_util
+
+    captured: dict[str, object] = {}
+
+    def fake_request(path, params, api_endpoint, *, timeout=20):
+        captured.update({"path": path, "params": params, "api_endpoint": api_endpoint})
+        return {"pageviews": 58, "visitors": 4, "visits": 10, "bounces": 4, "totaltime": 4496}
+
+    monkeypatch.setattr(umami_util, "umami_request", fake_request)
+    resp = client.post(
+        "/v1/analytics/umami/forward",
+        headers=_auth(),
+        json={
+            "path": "websites/WID/stats",
+            "params": {"hostname": "aipeekaboo.coscale.app", "startAt": 1, "endAt": 2},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["visitors"] == 4
+    assert captured["path"] == "websites/WID/stats"
+    assert captured["params"]["hostname"] == "aipeekaboo.coscale.app"
+    # The safebox uses its OWN configured endpoint (caller never supplies the upstream URL).
+    assert str(captured["api_endpoint"]).startswith("https://api.umami.is")
+
+
+def test_analytics_umami_forward_maps_missing_key_to_404(client, monkeypatch):
+    from plugins.takyon import umami_util
+
+    def fake_request(*a, **k):
+        raise umami_util.UmamiError("Umami analytics read requires UMAMI_API_KEY")
+
+    monkeypatch.setattr(umami_util, "umami_request", fake_request)
+    resp = client.post(
+        "/v1/analytics/umami/forward",
+        headers=_auth(),
+        json={"path": "websites/WID/stats", "params": {}},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "umami_unconfigured"
+
+
 def test_operator_session_token_roundtrips_to_validated_scope(client, monkeypatch):
     # Operator mint: boundary 1 only — the operator must own the business. The owner resolves to
     # user_A (fake conn), and we mint for that operator through the dedicated operator session route.

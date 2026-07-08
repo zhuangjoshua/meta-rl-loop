@@ -739,6 +739,18 @@ class _ComposioForwardBody(BaseModel):
     timeout: float = 60.0
 
 
+class _UmamiForwardBody(BaseModel):
+    path: str = ""
+    params: dict[str, Any] | None = None
+    timeout: float = 20.0
+
+
+# The exact READ-ONLY per-website stats routes umami_util calls. Anything else (bare website list,
+# writes/deletes, website-management) is refused so a runtime plane can only READ one site's stats,
+# never enumerate or mutate the shared Umami account.
+_UMAMI_FORWARD_PATH_RE = re.compile(r"^websites/[A-Za-z0-9_-]+/(?:stats|pageviews)$")
+
+
 class _GscTokenBody(BaseModel):
     site_url: str
 
@@ -3128,6 +3140,41 @@ def build_safebox_app() -> FastAPI:
             )
         except _cd.ComposioDistributionError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/analytics/umami/forward")
+    def analytics_umami_forward(
+        request: Request,
+        body: _UmamiForwardBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        # UMAMI_API_KEY is account-scoped (it reads every business's analytics and can manage the
+        # shared Umami account), so it is denied /v1/env egress and resolved only here. Runtime planes
+        # broker their READ-ONLY stats reads through this route: on the safebox host
+        # umami_util.umami_request resolves the key LOCALLY, calls Umami with the safebox's OWN
+        # configured endpoint, and returns the key-free upstream JSON. Operator-plane only (internal
+        # token + operator client gate), like the GSC/Composio brokers. The path is allowlisted to the
+        # read-only stats routes and the caller never supplies the upstream URL — a compromised runtime
+        # can neither mutate the account nor redirect the key.
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        path = str(body.path or "").strip().lstrip("/")
+        if not _UMAMI_FORWARD_PATH_RE.match(path):
+            raise HTTPException(status_code=400, detail="umami_path_not_allowed")
+        from . import core as _core, umami_util as _uu
+
+        try:
+            cfg = _core._analytics_umami_config() or {}
+        except Exception:
+            cfg = {}
+        api_endpoint = str(cfg.get("api_endpoint") or "https://api.umami.is/v1").strip()
+        timeout = min(60.0, max(5.0, float(body.timeout or 20.0)))
+        try:
+            return _uu.umami_request(path, dict(body.params or {}), api_endpoint, timeout=timeout)
+        except _uu.UmamiError as exc:
+            msg = str(exc)
+            if "requires UMAMI_API_KEY" in msg:
+                raise HTTPException(status_code=404, detail="umami_unconfigured") from exc
+            raise HTTPException(status_code=502, detail=msg[:300]) from exc
 
     def _gsc_credentials():
         sa_json = str(safebox.first_env_backed_value("TAKYON_GSC_SERVICE_ACCOUNT_KEY") or "").strip()
