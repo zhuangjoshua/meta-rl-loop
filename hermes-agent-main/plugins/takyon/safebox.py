@@ -229,6 +229,7 @@ _OPERATOR_AUTH_EXACT_PATHS = frozenset(
     }
 )
 _OPERATOR_AUTH_PATH_PREFIXES = (
+    "/v1/analytics/",
     "/v1/auth0/",
     "/v1/creative/",
     "/v1/creative-credits/",
@@ -3179,6 +3180,31 @@ def composio_forward(
     return _remote_json(
         "POST",
         "/v1/providers/composio/forward",
+        payload,
+        timeout=max(15.0, float(timeout) + 10.0),
+    )
+
+
+def umami_forward(
+    *,
+    path: str,
+    params: dict[str, Any] | None = None,
+    timeout: float = 20.0,
+) -> dict:
+    """Broker one READ-ONLY Umami stats call through the safebox.
+
+    UMAMI_API_KEY is account-scoped (it reads every business's analytics and can manage the shared
+    Umami account), so it is denied /v1/env egress and never leaves the safebox. This forwards the
+    read to the safebox ``/v1/analytics/umami/forward`` route, which resolves the key LOCALLY, calls
+    Umami Cloud, and returns the key-free upstream JSON. Used by ``umami_util.umami_request`` on
+    runtime (remote-authority) planes. The caller never supplies the upstream URL — the safebox uses
+    its OWN configured api_endpoint — which closes the key-exfil vector."""
+    payload: dict[str, Any] = {"path": str(path or ""), "timeout": float(timeout)}
+    if params is not None:
+        payload["params"] = dict(params)
+    return _remote_json(
+        "POST",
+        "/v1/analytics/umami/forward",
         payload,
         timeout=max(15.0, float(timeout) + 10.0),
     )

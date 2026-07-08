@@ -29,10 +29,17 @@ class UmamiError(Exception):
 
 
 def umami_configured() -> bool:
-    """True when a Umami API key is present (stats reads are possible).
+    """True when a Umami stats read is possible.
 
-    Never raises — a missing/unavailable secret authority reads as "not
-    configured" rather than propagating, so callers can probe safely."""
+    On a remote-authority plane (operator/sub-user) the account-scoped key is held by the safebox and
+    resolved by the broker route, not here, so report configured and let the actual read fail-soft if
+    the safebox lacks the key. On the safebox host / standalone, check the locally-resolvable key.
+    Never raises — a missing/unavailable secret authority reads as "not configured"."""
+    try:
+        if safebox._use_remote_authority():
+            return True
+    except Exception:
+        pass
     try:
         return bool(str(safebox.read_env_backed_value("UMAMI_API_KEY") or "").strip())
     except Exception:
@@ -57,7 +64,20 @@ def umami_request(
 ) -> dict[str, Any]:
     """GET ``{api_endpoint}/{path}`` with the shared Umami API key, dropping
     None-valued params. Returns the parsed JSON object. Raises ``UmamiError`` if
-    the key/endpoint is missing (never faked) or the call returns non-2xx."""
+    the key/endpoint is missing (never faked) or the call returns non-2xx.
+
+    On a remote-authority plane (operator/sub-user) the read is brokered through the safebox
+    (``/v1/analytics/umami/forward``) so the account-scoped key never leaves the safebox; on the
+    safebox host / standalone the key is resolved locally and Umami is called directly."""
+    try:
+        remote = safebox._use_remote_authority()
+    except Exception:
+        remote = False
+    if remote:
+        try:
+            return safebox.umami_forward(path=path, params=params, timeout=timeout)
+        except Exception as exc:  # broker/transport failure — surface as a Umami read error, never fake
+            raise UmamiError(f"Umami broker GET {path} failed: {exc}") from exc
     key = str(safebox.read_env_backed_value("UMAMI_API_KEY") or "").strip()
     if not key:
         raise UmamiError("Umami analytics read requires UMAMI_API_KEY")

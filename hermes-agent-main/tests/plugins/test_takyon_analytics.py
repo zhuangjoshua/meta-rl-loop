@@ -189,6 +189,81 @@ def test_umami_configured_is_safe_without_authority():
     assert umami_util.umami_configured() is False
 
 
+def test_umami_configured_true_on_remote_authority(monkeypatch):
+    # A runtime plane (operator/sub-user) reports configured — the account-scoped key lives on the
+    # safebox and the broker resolves it; the read itself fail-softs if the safebox lacks it.
+    monkeypatch.setattr(umami_util.safebox, "_use_remote_authority", lambda: True)
+    assert umami_util.umami_configured() is True
+
+
+def test_umami_request_brokers_on_remote_authority(monkeypatch):
+    # On a remote-authority plane the read goes through the safebox broker; the key is NEVER resolved
+    # locally and Umami is NEVER called directly from the runtime.
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(umami_util.safebox, "_use_remote_authority", lambda: True)
+
+    def fake_forward(*, path, params=None, timeout=20.0):
+        captured.update({"path": path, "params": params, "timeout": timeout})
+        return {"visitors": 4, "visits": 10}
+
+    monkeypatch.setattr(umami_util.safebox, "umami_forward", fake_forward)
+    monkeypatch.setattr(
+        umami_util.safebox,
+        "read_env_backed_value",
+        lambda *a, **k: pytest.fail("remote plane must broker, not resolve the key locally"),
+    )
+    monkeypatch.setattr(
+        umami_util.urllib.request,
+        "urlopen",
+        lambda *a, **k: pytest.fail("remote plane must broker, not call Umami directly"),
+    )
+    out = umami_util.umami_request("websites/WID/stats", {"hostname": "x.example"}, "https://api.umami.is/v1")
+    assert out == {"visitors": 4, "visits": 10}
+    assert captured["path"] == "websites/WID/stats" and captured["params"] == {"hostname": "x.example"}
+
+
+def test_umami_request_broker_failure_raises_umami_error(monkeypatch):
+    monkeypatch.setattr(umami_util.safebox, "_use_remote_authority", lambda: True)
+
+    def boom(**_kwargs):
+        raise RuntimeError("safebox 502")
+
+    monkeypatch.setattr(umami_util.safebox, "umami_forward", boom)
+    with pytest.raises(umami_util.UmamiError):
+        umami_util.umami_request("websites/WID/stats", {}, "https://api.umami.is/v1")
+
+
+def test_umami_request_uses_local_key_when_not_remote(monkeypatch):
+    # On the safebox host / standalone the key is resolved locally and Umami is called directly — the
+    # broker is not used (this is the path the broker ROUTE itself runs on the safebox host).
+    monkeypatch.setattr(umami_util.safebox, "_use_remote_authority", lambda: False)
+    monkeypatch.setattr(
+        umami_util.safebox, "umami_forward", lambda **k: pytest.fail("local path must not broker")
+    )
+    monkeypatch.setattr(umami_util.safebox, "read_env_backed_value", lambda key: "local-key")
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"visitors": 7}'
+
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout=0):
+        captured["headers"] = {k.lower(): v for k, v in request.header_items()}
+        return DummyResponse()
+
+    monkeypatch.setattr(umami_util.urllib.request, "urlopen", fake_urlopen)
+    out = umami_util.umami_request("websites/WID/stats", {"hostname": "x"}, "https://api.umami.is/v1")
+    assert out == {"visitors": 7}
+    assert captured["headers"]["x-umami-api-key"] == "local-key"
+
+
 def test_umami_request_sends_browser_user_agent(monkeypatch):
     captured: dict[str, object] = {}
 
