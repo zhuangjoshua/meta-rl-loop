@@ -3563,6 +3563,7 @@ class _ShellProgress:
         self.fd: int | None = os.dup(1) if self.enabled else None
         self._last_activity = ""
         self._last_tool_generating = ""
+        self._reasoning_buf = ""
         self._stream_open = False
         self.streamed_chars = 0
         self.raw_hermes = bool(raw_hermes)
@@ -3708,24 +3709,40 @@ class _ShellProgress:
             return
         if not text or text == self._last_activity:
             return
+        self._flush_reasoning()
         self._last_activity = text
         self.emit(f"agent -> {text}")
+
+    def _flush_reasoning(self) -> None:
+        note = _normalize_progress_text(self._reasoning_buf, limit=220)
+        self._reasoning_buf = ""
+        if note:
+            self.emit(f"reasoning -> {note}")
 
     def tool_progress(self, event_type: str, name: str | None = None, preview: str | None = None, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
         if not name:
             return
         if event_type == "tool.started":
+            self._flush_reasoning()
             self._last_tool_generating = ""
             suffix = f" · {preview}" if preview else ""
             self.emit(f"tool started -> {name}{suffix}")
         elif event_type == "tool.completed":
+            self._flush_reasoning()
             duration = kwargs.get("duration")
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
         elif event_type in {"reasoning.available", "_thinking"}:
-            note = _reasoning_progress_text(name, preview)
-            if note:
-                self.emit(f"reasoning -> {note}")
+            # Streaming reasoning arrives as PER-TOKEN deltas (BPE pieces: " up", "sert",
+            # " the" ...). Emitting one line per delta floods the console with one word —
+            # or half a word — per line. Coalesce raw deltas (spacing intact) and emit a
+            # line only at a sentence boundary or once a display line is full.
+            raw = str(preview if preview is not None else (name or ""))
+            if raw:
+                self._reasoning_buf += raw
+                stripped = self._reasoning_buf.rstrip()
+                if len(stripped) >= 200 or stripped.endswith((".", "!", "?", ":", ";")):
+                    self._flush_reasoning()
 
     def tool_started(self, tool_id: str, name: str, args: dict[str, Any]) -> None:
         self.raw_event("tool_call", {"id": tool_id, "name": name, "args": args})
