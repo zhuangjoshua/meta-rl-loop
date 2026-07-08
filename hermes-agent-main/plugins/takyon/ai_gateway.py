@@ -351,8 +351,21 @@ def _resolve_plan_for_user(
     session_token: str | None = None,
 ):
     token = str(session_token or "").strip()
-    if token and app_identity._is_app_runtime_user(conn):
-        return _resolve_plan_for_session(conn, business_slug, token)
+    if token:
+        # The SECURITY DEFINER session-plan function is the canonical resolver on every app
+        # plane and is ROLE-AGNOSTIC — do not gate it behind _is_app_runtime_user: that probe
+        # swallows infra errors into "" (app_identity._current_user), and a transient flap
+        # (aborted pooled transaction / wrong-pool handoff right after a service restart)
+        # silently flipped a PAID user onto the RLS-filtered direct-read branch below, which
+        # returned no rows -> a clean but FALSE subscription_required 402 (qaproof0708b,
+        # 2026-07-08: active entitlement, valid session, refused once, fine on retry). Data
+        # absence is an EMPTY payload from the function (handled by the caller as unentitled);
+        # only function unavailability (local/SQLite stores, missing migration) falls through
+        # to the direct reads.
+        try:
+            return _resolve_plan_for_session(conn, business_slug, token)
+        except Exception:  # noqa: BLE001 — fall through only when the function path is unavailable
+            pass
     entitlement = app_entitlements.get_active_entitlement(conn, business_slug, user.id)
     if entitlement is not None and entitlement.plan_key:
         plan = app_entitlements.get_plan_policy(conn, business_slug, entitlement.plan_key)
