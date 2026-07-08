@@ -325,6 +325,118 @@ def _anthropic_actual_microusd_from_response(payload: dict[str, Any], response_j
     return int(billed)
 
 
+_OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+# Worst-case output reserve when the payload does not cap max_output_tokens. Deliberately modest:
+# the settle refunds the diff, and an oversized reserve would trip session-capability ceilings.
+_OPENAI_RESPONSES_DEFAULT_MAX_OUTPUT_TOKENS = 8192
+
+
+def _openai_key_local() -> str:
+    from . import ai_provider
+
+    return str(ai_provider.openai_key() or "").strip()
+
+
+def _openai_responses_estimate_microusd(payload: dict[str, Any]) -> int:
+    """SERVER-side reserve estimate for an OpenAI Responses call. Input tokens are approximated from
+    the serialized payload (chars/4 — the Responses `input` array carries the whole prompt); output is
+    the requested `max_output_tokens` cap (or a modest default). Fail-closed: an unpriced model raises
+    so the reserve never runs on an unpriceable call."""
+    from . import ai_provider
+
+    model = str((payload or {}).get("model") or "").strip()
+    est_in = max(1, len(_json.dumps(payload or {})) // 4)
+    max_out = int((payload or {}).get("max_output_tokens") or _OPENAI_RESPONSES_DEFAULT_MAX_OUTPUT_TOKENS)
+    _realized, billed = ai_provider.openai_billed_microusd_cost(model, est_in, max_out)
+    return int(billed)
+
+
+def _openai_responses_usage_tokens(usage: dict[str, Any]) -> tuple[int, int, int]:
+    """(uncached_input, output, cache_read) from a Responses API ``usage`` block. ``input_tokens`` is
+    the TOTAL prompt; ``input_tokens_details.cached_tokens`` is the cache-priced subset."""
+    total_in = int((usage or {}).get("input_tokens") or 0)
+    out_tok = int((usage or {}).get("output_tokens") or 0)
+    details = (usage or {}).get("input_tokens_details") or {}
+    cached = int((details or {}).get("cached_tokens") or 0)
+    return max(0, total_in - cached), out_tok, cached
+
+
+class _OpenAIResponsesStreamUsage:
+    """Accumulates realized usage from a Responses API SSE stream: the terminal
+    ``response.completed`` event carries ``response.usage``. Same settle contract as the Anthropic
+    parser — no usage observed -> settle the reserve estimate (never under-settle to zero)."""
+
+    def __init__(self, model: str):
+        self.model = str(model or "")
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.saw_usage = False
+        self._line_buffer = ""
+
+    def feed(self, chunk: bytes) -> None:
+        try:
+            text = chunk.decode("utf-8", errors="ignore")
+        except Exception:
+            return
+        self._line_buffer += text
+        lines = self._line_buffer.split("\n")
+        self._line_buffer = lines.pop()
+        for raw in lines:
+            line = raw.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            # Only the terminal response.* events carry usage; skip content deltas cheaply.
+            if "response.completed" not in payload and "response.incomplete" not in payload:
+                continue
+            try:
+                obj = _json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            response = obj.get("response")
+            usage = (response or {}).get("usage") if isinstance(response, dict) else None
+            if isinstance(usage, dict):
+                uncached, out_tok, cached = _openai_responses_usage_tokens(usage)
+                self.input_tokens = uncached
+                self.output_tokens = out_tok
+                self.cache_read_tokens = cached
+                self.saw_usage = True
+
+    def billed_microusd(self, *, fallback_microusd: int) -> int:
+        if not self.saw_usage:
+            return int(fallback_microusd)
+        from . import ai_provider
+
+        try:
+            _realized, billed = ai_provider.openai_billed_microusd_cost(
+                self.model,
+                int(self.input_tokens),
+                int(self.output_tokens),
+                cache_read_tokens=int(self.cache_read_tokens),
+            )
+        except Exception:
+            return int(fallback_microusd)
+        return int(billed)
+
+
+def _openai_responses_actual_microusd(payload: dict[str, Any], response_json: dict[str, Any]) -> int:
+    """Realized billed cost for a NON-stream Responses call, from its ``usage`` block."""
+    from . import ai_provider
+
+    model = str((payload or {}).get("model") or "")
+    usage = (response_json or {}).get("usage") or {}
+    uncached, out_tok, cached = _openai_responses_usage_tokens(usage)
+    _realized, billed = ai_provider.openai_billed_microusd_cost(
+        model, uncached, out_tok, cache_read_tokens=cached
+    )
+    return int(billed)
+
+
 def _tavily_price_microusd(operation: str, payload: dict[str, Any]) -> int:
     """The EXACT per-request Tavily price (estimate == actual for a per-request provider). Fail-closed:
     an unpriced operation raises so the reserve never runs on an unpriceable call."""
@@ -383,7 +495,7 @@ def _release(ledger, reservation) -> None:
 def register_provider_proxy_routes(app: FastAPI) -> None:
     """Register the operator/platform provider-proxy routes DIRECTLY on the safebox app (flat APIRoute
     entries, matching every other route in ``build_safebox_app()``)."""
-    from .safebox_app import _ANTHROPIC_AUDIENCE, _TAVILY_AUDIENCE
+    from .safebox_app import _ANTHROPIC_AUDIENCE, _OPENAI_AUDIENCE, _TAVILY_AUDIENCE
 
     router = app
 
@@ -524,6 +636,122 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         # ALSO mounted at the stock Anthropic SDK path so a caller can set ANTHROPIC_BASE_URL to the
         # safebox root and have the SDK work unmodified.
         return _anthropic_messages(body, authorization, x_api_key)
+
+    # ── OpenAI Responses (streaming-capable, money-gated passthrough) ─────────────────────────────
+    # The CEO lane (named custom provider, api_mode codex_responses) brokers here under operator
+    # lockdown so NO raw OpenAI key ever exists on an operator machine — the exact same contract as
+    # the Anthropic/DeepSeek lane above: reserve -> inject key server-side -> stream/call -> settle.
+    def _openai_responses_passthrough(payload: dict[str, Any], auth: _ProxyAuth):
+        try:
+            estimate = _openai_responses_estimate_microusd(payload)
+        except Exception as exc:  # noqa: BLE001 — OpenAIPricingUnavailable etc. -> fail-closed 503
+            raise HTTPException(status_code=503, detail="openai_pricing_unavailable") from exc
+        ledger, reservation = _reserve_or_refuse(auth, estimate)
+
+        key = _openai_key_local()
+        if not key:
+            _release(ledger, reservation)
+            raise HTTPException(status_code=503, detail="openai_unconfigured")
+
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "content-type": "application/json",
+            # Uncompressed upstream so SSE bytes pass through verbatim (see anthropic passthrough).
+            "accept-encoding": "identity",
+        }
+        wants_stream = bool(payload.get("stream") is True)
+        model = str((payload or {}).get("model") or "")
+
+        if wants_stream:
+            usage = _OpenAIResponsesStreamUsage(model)
+
+            def _sse_bytes() -> Iterator[bytes]:
+                settled = {"done": False}
+
+                def _finish_settle() -> None:
+                    if settled["done"]:
+                        return
+                    settled["done"] = True
+                    actual = usage.billed_microusd(fallback_microusd=estimate)
+                    _settle(ledger, reservation, actual)
+
+                client = httpx.Client(timeout=httpx.Timeout(_UPSTREAM_TIMEOUT_S, read=None))
+                try:
+                    with client.stream(
+                        "POST", _OPENAI_RESPONSES_URL, headers=headers, json=payload
+                    ) as upstream:
+                        if upstream.status_code >= 400:
+                            _ = upstream.read()
+                            _release(ledger, reservation)
+                            settled["done"] = True
+                            yield (
+                                f"event: error\ndata: "
+                                f'{{"upstream_status": {int(upstream.status_code)}, '
+                                f'"error": "provider_error"}}\n\n'
+                            ).encode("utf-8")
+                            return
+                        for chunk in upstream.iter_bytes():
+                            if chunk:
+                                usage.feed(chunk)
+                                yield chunk
+                    _finish_settle()
+                except Exception:  # noqa: BLE001 — mid-stream failure releases the hold
+                    if not settled["done"]:
+                        settled["done"] = True
+                        _release(ledger, reservation)
+                    raise
+                finally:
+                    client.close()
+                    if not settled["done"]:
+                        _finish_settle()
+
+            return StreamingResponse(_sse_bytes(), media_type="text/event-stream")
+
+        try:
+            with httpx.Client(timeout=_UPSTREAM_TIMEOUT_S) as client:
+                resp = client.post(_OPENAI_RESPONSES_URL, headers=headers, json=payload)
+        except httpx.HTTPError as exc:
+            _release(ledger, reservation)
+            raise HTTPException(status_code=502, detail="provider_unreachable") from exc
+        text = resp.text
+        if resp.status_code >= 400:
+            _release(ledger, reservation)
+            raise _sanitize_upstream_error(resp.status_code, text)
+        try:
+            data = _json.loads(text) if text.strip() else {}
+        except (ValueError, TypeError):
+            data = {}
+        try:
+            actual = _openai_responses_actual_microusd(payload, data if isinstance(data, dict) else {})
+        except Exception:  # noqa: BLE001 — settle the reserved estimate if pricing the response fails
+            actual = estimate
+        _settle(ledger, reservation, actual)
+        return JSONResponse(content=data, status_code=resp.status_code)
+
+    def _openai_responses(body: Any, authorization: str | None, x_api_key: str | None):
+        auth = _authorize_operator_proxy(
+            authorization, x_api_key, capability_audiences=frozenset({_OPENAI_AUDIENCE})
+        )
+        payload = _as_json_object(body)
+        return _openai_responses_passthrough(payload, auth)
+
+    @router.post("/v1/proxy/openai/responses")
+    def proxy_openai_responses(
+        body: Any = Body(default=None),
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    ):
+        return _openai_responses(body, authorization, x_api_key)
+
+    @router.post("/v1/responses")
+    def proxy_openai_responses_sdk(
+        body: Any = Body(default=None),
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="x-api-key"),
+    ):
+        # ALSO mounted at the stock OpenAI SDK path so a caller can point base_url at
+        # <safebox>/v1 and the unmodified SDK/gateway appends /responses.
+        return _openai_responses(body, authorization, x_api_key)
 
     # ── Tavily search / extract (money-gated passthrough) ─────────────────────────────────────────
     @router.post("/v1/proxy/tavily/{operation}")
