@@ -96,3 +96,6 @@ def test_starter_app_shell_fires_value_carrying_purchase_on_checkout_success():
     assert 'checkoutState !== "success"' in js
     # Deduped once per session so a refresh cannot double-count.
     assert "tk_meta_purchase_fired" in js
+    # Tagged with the business's own hostname so cross-business purchases on the SHARED
+    # pixel stay identifiable per business in Events Manager.
+    assert "content_name: String(window.location.hostname" in js

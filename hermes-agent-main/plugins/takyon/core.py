@@ -5600,6 +5600,10 @@ def _subuser_app_starter_access_page_js() -> str:
                   window.fbq("track", "Purchase", {
                     value: Math.round(valueCents) / 100,
                     currency: String((plan && plan.currency) || "usd").toUpperCase(),
+                    // Tag with the business's own hostname: the pixel is SHARED across all
+                    // product sites, so this makes each Purchase identifiable per business in
+                    // Events Manager (detects cross-business attribution on the shared pixel).
+                    content_name: String(window.location.hostname || ""),
                   });
                 } catch (pixelError) {}
               }, [checkoutState]);
