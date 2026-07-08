@@ -1466,11 +1466,15 @@ def handle_business_meta_pixel_verify(args: dict, **_: Any) -> str:
 
 # ── 6. PIXEL ENSURE ───────────────────────────────────────────────────────────────────────────────
 def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
-    """Lazily ensure the per-business custom conversion exists on the ONE shared pixel.
+    """Lazily ensure the business is pixel-ready on BOTH sides of the wire.
 
-    The shared pixel/dataset itself is created once manually (Events Manager — not an MCP strength).
-    Per-business attribution is a URL-rule custom conversion created via
-    ``meta_graph.ensure_custom_conversion``. Writes ``metrics/meta-pixel/<slug>/ensure.json``.
+    Meta side: the per-business custom conversion on the ONE shared pixel (URL-rule isolation)
+    via ``meta_graph.ensure_custom_conversion``. Site side: flip the surface contract's
+    ``metadata.meta_pixel.enabled`` so every future publish bakes the snippet, inject the snippet
+    into the currently-served live dist, and republish it to the edge
+    (``core._republish_live_dist_to_r2``) so verification and traffic do not wait for a rebuild.
+    Site-side blockers (pixel unconfigured, site not yet published) are recorded truthfully on the
+    receipt instead of failing the Meta-side ensure. Writes ``metrics/meta-pixel/<slug>/ensure.json``.
     """
     try:
         store = core._store()
@@ -1538,6 +1542,36 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             or ""
         ).strip()
         ok = bool(custom_conversion_id)
+
+        # ── Site-side install (the half this tool historically skipped). Fail-soft by design:
+        # the Meta-side custom conversion above is the primary op; a site-side blocker is
+        # recorded truthfully on the receipt instead of failing the tool, and pixel verify's
+        # snippet proof stays the arbiter of whether the site actually serves fbq.
+        site: dict[str, Any] = {}
+        try:
+            site["surface"] = core._surface_enable_meta_pixel(business)
+        except Exception as exc:  # noqa: BLE001 - surface flip must not sink the ensure
+            site["surface"] = {"enabled": False, "blocker": str(exc)[:200]}
+        pixel_cfg = core._meta_pixel_config()
+        pixel_id = str(pixel_cfg.get("pixel_id") or "").strip() if isinstance(pixel_cfg, Mapping) else ""
+        if not pixel_id:
+            site["blocker"] = "meta_pixel_unconfigured: set analytics.meta_pixel.pixel_id"
+        else:
+            try:
+                live_root = core._product_live_current_root(business)
+                injected = core._inject_meta_pixel_snippet(
+                    live_root,
+                    pixel_id=pixel_id,
+                    script_src=str(pixel_cfg.get("script_src") or "").strip(),
+                )
+                site["live_injected"] = bool(injected)
+                if injected:
+                    site["republish"] = core._republish_live_dist_to_r2(business, live_root)
+                else:
+                    site["blocker"] = "live site index.html not found; publish the product first"
+            except Exception as exc:  # noqa: BLE001 - retrofit must not sink the ensure
+                site["blocker"] = str(exc)[:200]
+
         ensure = {
             **base,
             "success": True,
@@ -1545,6 +1579,7 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             "ok": ok,
             "custom_conversion_id": custom_conversion_id or None,
             "provider_response": result,
+            "site": site,
             "external_side_effects": "ensured",
         }
         _write_receipt(business, ensure_rel, ensure)
@@ -1555,6 +1590,7 @@ def handle_business_meta_pixel_ensure(args: dict, **_: Any) -> str:
             "slug": slug,
             "ok": ok,
             "custom_conversion_id": custom_conversion_id or None,
+            "site": site,
             "receipt": ensure_rel,
             "value": ensure,
         })
@@ -1700,13 +1736,17 @@ TAKYON_META_ADS_V2_DEFINITIONS = [
     {
         "name": "business_meta_pixel_ensure",
         "description": (
-            "Lazily ensure the per-business URL-rule custom conversion exists on the ONE shared pixel via "
-            "meta_graph.ensure_custom_conversion. The shared pixel/dataset is created once manually."
+            "Lazily make the business pixel-ready on BOTH sides: the per-business URL-rule custom "
+            "conversion on the ONE shared pixel (meta_graph.ensure_custom_conversion), PLUS the site "
+            "install — flip the surface contract's meta_pixel flag so future publishes bake the "
+            "snippet, inject the snippet into the currently-served live site, and republish it to "
+            "the edge. Site-side blockers (pixel unconfigured, site unpublished) are recorded on "
+            "the receipt without failing the Meta-side ensure."
         ),
         "handler": handle_business_meta_pixel_ensure,
         "schema": core._schema(
             "business_meta_pixel_ensure",
-            "Ensure the per-business custom conversion on the shared pixel.",
+            "Install the shared pixel on the business site and ensure its custom conversion.",
             {
                 "business": core._BUSINESS_PROP,
                 "idempotency_key": core._IDEMPOTENCY_PROP,

@@ -399,8 +399,41 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
             }
         )
 
+    # Pixel site-install fakes (surface flag flip + live-dist inject + edge republish),
+    # mirroring core's _surface_enable_meta_pixel / _meta_pixel_config /
+    # _product_live_current_root / _inject_meta_pixel_snippet / _republish_live_dist_to_r2.
+    pixel_site: dict = {"surface_flips": [], "injections": [], "republishes": []}
+
+    def _surface_enable_meta_pixel(business):
+        pixel_site["surface_flips"].append(business)
+        return {"enabled": True, "changed": True}
+
+    def _meta_pixel_config():
+        if "config" in pixel_site:
+            return dict(pixel_site["config"])
+        return {"enabled": True, "pixel_id": "PIX-TEST-1", "script_src": ""}
+
+    def _product_live_current_root(business):
+        root = Path(tmp_path) / "live" / business / "current"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _inject_meta_pixel_snippet(site_root, *, pixel_id, script_src=""):
+        pixel_site["injections"].append({"root": str(site_root), "pixel_id": pixel_id})
+        return (Path(site_root) / "index.html").is_file()
+
+    def _republish_live_dist_to_r2(business, live_root):
+        pixel_site["republishes"].append({"business": business, "live_root": str(live_root)})
+        return {"status": "published", "live_build_id": "build-test-1", "blocker": ""}
+
     # Public surface.
     mod._store = _store
+    mod._pixel_site_rec = pixel_site
+    mod._surface_enable_meta_pixel = _surface_enable_meta_pixel
+    mod._meta_pixel_config = _meta_pixel_config
+    mod._product_live_current_root = _product_live_current_root
+    mod._inject_meta_pixel_snippet = _inject_meta_pixel_snippet
+    mod._republish_live_dist_to_r2 = _republish_live_dist_to_r2
     mod.tool_result = tool_result
     mod.tool_error = tool_error
     mod.safebox = safebox
@@ -1153,6 +1186,85 @@ def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
     insights_path = harness.business_file_path("clipbook", "metrics/meta-ads/demo-meta/insights.jsonl")
     lines = [json.loads(line) for line in insights_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert lines[0]["action_values"] == [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "80.00"}]
+
+
+def test_pixel_ensure_live_installs_site_side_and_meta_side(harness):
+    harness.set_business_mode("clipbook", "live")
+    # A published live site exists (index.html present in the served dist).
+    live_index = harness.core._product_live_current_root("clipbook") / "index.html"
+    live_index.write_text("<html><head></head><body></body></html>", encoding="utf-8")
+
+    result = _result(
+        harness.module.handle_business_meta_pixel_ensure(
+            {"business": "clipbook", "idempotency_key": "clipbook-pixel-v1", "ad_account_id": "123456"}
+        )
+    )
+
+    assert result["success"] is True
+    assert result["ok"] is True
+    # Meta side: the per-business custom conversion was ensured.
+    assert harness.graph.custom_conversions
+    # Site side: surface flag flipped, snippet injected into the live dist, edge republished.
+    site = result["site"]
+    assert site["surface"] == {"enabled": True, "changed": True}
+    assert site["live_injected"] is True
+    assert site["republish"]["live_build_id"] == "build-test-1"
+    rec = harness.core._pixel_site_rec
+    assert rec["surface_flips"] == ["clipbook"]
+    assert rec["injections"][0]["pixel_id"] == "PIX-TEST-1"
+    assert rec["republishes"][0]["business"] == "clipbook"
+    # The receipt mirrors the site block so operators can see what actually happened.
+    receipt = harness.read_business_file("clipbook", result["receipt"])
+    assert receipt["site"]["live_injected"] is True
+
+
+def test_pixel_ensure_unconfigured_pixel_is_site_blocker_not_failure(harness):
+    harness.set_business_mode("clipbook", "live")
+    harness.core._pixel_site_rec["config"] = {}  # analytics.meta_pixel unset
+
+    result = _result(
+        harness.module.handle_business_meta_pixel_ensure(
+            {"business": "clipbook", "idempotency_key": "clipbook-pixel-v2", "ad_account_id": "123456"}
+        )
+    )
+
+    # Meta-side ensure still succeeds; the missing pixel id is a truthful site blocker.
+    assert result["success"] is True
+    assert result["ok"] is True
+    assert "meta_pixel_unconfigured" in result["site"]["blocker"]
+    assert not harness.core._pixel_site_rec["injections"]
+
+
+def test_pixel_ensure_unpublished_site_records_blocker(harness):
+    harness.set_business_mode("clipbook", "live")
+    # No live index.html -> injection cannot land; ensure reports it instead of pretending.
+
+    result = _result(
+        harness.module.handle_business_meta_pixel_ensure(
+            {"business": "clipbook", "idempotency_key": "clipbook-pixel-v3", "ad_account_id": "123456"}
+        )
+    )
+
+    assert result["success"] is True
+    site = result["site"]
+    assert site["live_injected"] is False
+    assert "publish the product first" in site["blocker"]
+    assert not harness.core._pixel_site_rec["republishes"]
+
+
+def test_pixel_ensure_test_mode_suppresses_site_install(harness):
+    harness.set_business_mode("clipbook", "test")
+
+    result = _result(
+        harness.module.handle_business_meta_pixel_ensure(
+            {"business": "clipbook", "idempotency_key": "clipbook-pixel-v4", "ad_account_id": "123456"}
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "test_receipt"
+    rec = harness.core._pixel_site_rec
+    assert not rec["surface_flips"] and not rec["injections"] and not rec["republishes"]
 
 
 def test_insights_sync_rejects_cross_business_object_id(harness):

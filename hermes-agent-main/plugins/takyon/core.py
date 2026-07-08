@@ -31154,6 +31154,42 @@ def _meta_pixel_config() -> dict[str, Any]:
     return {}
 
 
+def _surface_enable_meta_pixel(business: str) -> dict[str, Any]:
+    """Flip ``metadata.meta_pixel.enabled`` on the business's app surface contract so every FUTURE
+    publish bakes the shared pixel snippet (the ``_surface_meta_pixel_enabled`` gate in
+    ``_publish_product_surface_path``). Targeted metadata merge on the existing row — the same
+    narrow-update pattern as the ``live_build_id`` stamp — so the pixel install does not need the
+    full ``app.surface.upsert`` operation shape. Returns ``{"enabled", "changed"}`` or a
+    ``blocker`` when the business has no surface contract yet (publish the product first)."""
+    store = _store()
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT metadata_json FROM app_surface_contracts WHERE business_slug = ?",
+            (business,),
+        ).fetchone()
+        if row is None:
+            return {"enabled": False, "blocker": "no app surface contract; publish the product first"}
+        try:
+            raw = row["metadata_json"]
+        except (TypeError, KeyError, IndexError):
+            raw = getattr(row, "metadata_json", None)
+        try:
+            metadata = json.loads(raw or "{}")
+        except Exception:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        meta_pixel = metadata.get("meta_pixel") if isinstance(metadata.get("meta_pixel"), dict) else {}
+        if bool(meta_pixel.get("enabled")):
+            return {"enabled": True, "changed": False}
+        metadata["meta_pixel"] = {**meta_pixel, "enabled": True}
+        conn.execute(
+            "UPDATE app_surface_contracts SET metadata_json = ?, updated_at = ? WHERE business_slug = ?",
+            (_json_dumps(metadata), _now(), business),
+        )
+        return {"enabled": True, "changed": True}
+
+
 def _meta_pixel_snippet(pixel_id: str, *, script_src: str = "") -> str:
     pid = str(pixel_id or "").strip()
     if not pid:
