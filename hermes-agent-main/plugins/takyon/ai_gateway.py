@@ -405,16 +405,38 @@ def _platform_default_models() -> set[str]:
     return defaults
 
 
+# Comma-separated extra models the platform sanctions for EVERY business, on top of the
+# per-provider defaults. This is the retroactive-model rail: adding a model here (one env
+# line on the serving planes) makes it usable by ALL existing businesses immediately — no
+# plan-row migration, no reseeding. The pricing table stays the fail-closed cost gate: an
+# unpriced model still refuses at the estimate step regardless of this list.
+_SANCTIONED_MODELS_ENV = "TAKYON_APP_SANCTIONED_MODELS"
+
+
+def _platform_sanctioned_models() -> set[str]:
+    """Platform-sanctioned, always-usable app models: the per-provider defaults plus the
+    ``TAKYON_APP_SANCTIONED_MODELS`` env list (comma-separated). Plan ``model_allowlist``
+    entries ADD to this (business-specific extras); they can never subtract from it."""
+    sanctioned = _platform_default_models()
+    raw = str(os.environ.get(_SANCTIONED_MODELS_ENV) or "")
+    for item in raw.split(","):
+        value = item.strip()
+        if value:
+            sanctioned.add(value)
+    return sanctioned
+
+
 def _model_allowed(plan, model: str) -> bool:
-    # The platform's own configured default model is always usable. Plan
-    # ``model_allowlist`` gates CLIENT model choice (explicitly requested
-    # models); it must not strand existing businesses when the operator moves
-    # the platform default. 2026-07-08 provider split: 219 plans seeded with
-    # ["claude-sonnet-4-6"] while the app default moved to gpt-5.4-mini, so
-    # every ctx.generate call (no explicit model) 403'd model_not_in_plan
-    # (observed: aipeekaboo run-visibility). Cost safety is unaffected — the
-    # pricing gate and the reserve/settle money gate still meter every call.
-    if model in _platform_default_models():
+    # Platform-sanctioned models (per-provider defaults + TAKYON_APP_SANCTIONED_MODELS)
+    # are always usable. Plan ``model_allowlist`` gates CLIENT model choice (explicitly
+    # requested models); it must not strand existing businesses when the operator moves
+    # the platform default or introduces a new model. 2026-07-08 provider split: 219
+    # plans seeded with ["claude-sonnet-4-6"] while the app default moved to
+    # gpt-5.4-mini, so every ctx.generate call (no explicit model) 403'd
+    # model_not_in_plan (observed: aipeekaboo run-visibility). Cost safety is
+    # unaffected — the pricing gate and the reserve/settle money gate still meter
+    # every call, and an unpriced model refuses at the estimate step.
+    if model in _platform_sanctioned_models():
         return True
     if plan is None or not isinstance(getattr(plan, "metadata", None), dict):
         return False

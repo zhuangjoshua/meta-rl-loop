@@ -65,3 +65,28 @@ def test_broken_default_resolver_does_not_block_the_other_lane():
         defaults = _platform_default_models()
     # anthropic default still resolves
     assert any(m.startswith("claude-") for m in defaults)
+
+
+def test_sanctioned_models_env_backdates_new_models_to_existing_plans(monkeypatch):
+    """The retroactive-model rail: adding a model to TAKYON_APP_SANCTIONED_MODELS makes
+    it usable by every existing business immediately — stale plan allowlists (seeded
+    before the model existed) cannot strand it. This is the general mechanism for
+    'add a model in the future, backdate it to previous companies'."""
+    monkeypatch.setenv("TAKYON_APP_OPENAI_MODEL", "gpt-5.4-mini")
+    monkeypatch.setenv(
+        "TAKYON_APP_SANCTIONED_MODELS", "gpt-6-hypothetical, deepseek-v5-future"
+    )
+    stale_plan = _plan(["claude-sonnet-4-6"])  # seeded long before these models existed
+    assert _model_allowed(stale_plan, "gpt-6-hypothetical") is True
+    assert _model_allowed(stale_plan, "deepseek-v5-future") is True
+    # Unsanctioned, non-allowlisted models are still refused.
+    assert _model_allowed(stale_plan, "gpt-7-unsanctioned") is False
+
+
+def test_sanctioned_models_env_absent_changes_nothing(monkeypatch):
+    monkeypatch.setenv("TAKYON_APP_OPENAI_MODEL", "gpt-5.4-mini")
+    monkeypatch.delenv("TAKYON_APP_SANCTIONED_MODELS", raising=False)
+    plan = _plan(["claude-sonnet-4-6"])
+    assert _model_allowed(plan, "gpt-5.4-mini") is True  # default
+    assert _model_allowed(plan, "claude-sonnet-4-6") is True  # allowlisted
+    assert _model_allowed(plan, "gpt-6-hypothetical") is False  # neither
