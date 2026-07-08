@@ -2923,6 +2923,49 @@ def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
     return out
 
 
+def _read_shopify_catalog_products(workspace_root: "Path | None") -> list[dict[str, Any]]:
+    """The business's buyable Shopify catalog (``product/shopify-catalog.json``), materialized into
+    the surface context at publish time so EVERY shopify_commerce product site renders a store
+    section with Buy buttons — the SAME publish-time-injection wiring as ``plans``/``hero``. The
+    mirror file is written by ``business_shopify_create_product`` (buyable catalog projection),
+    which already excludes drafts/variant-less products, so every entry here is public + buyable.
+    Fail-soft: any missing file / parse problem returns [] and the site shows no store section — a
+    non-Shopify business has no catalog file, so it is unaffected by construction."""
+    business_root = _starter_business_root(Path(workspace_root) if workspace_root is not None else None)
+    if business_root is None:
+        return []
+    try:
+        # product/shopify-catalog.json == shopify_util.SHOPIFY_CATALOG_RELPATH.
+        catalog_path = business_root / "product" / "shopify-catalog.json"
+        if not catalog_path.is_file():
+            return []
+        data = json.loads(catalog_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return []
+    products = data.get("products") if isinstance(data, dict) else None
+    if not isinstance(products, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for product in products:
+        if not isinstance(product, Mapping):
+            continue
+        title = str(product.get("title") or "").strip()
+        permalink = str(product.get("cart_permalink") or "").strip()
+        if not title or not permalink:
+            continue  # only released, buyable products reach the public bake
+        out.append(
+            {
+                "product_id": str(product.get("product_id") or ""),
+                "title": title[:200],
+                "price": str(product.get("price") or ""),
+                "handle": str(product.get("handle") or ""),
+                "cart_permalink": permalink,
+                "preview_url": str(product.get("preview_url") or ""),
+            }
+        )
+    return out
+
+
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
@@ -2948,6 +2991,10 @@ def _subuser_surface_context_payload(
         "railState": shape.get("rail_state") or {},
         "auth": _subuser_public_auth_payload(surface),
         "plans": _starter_plan_shape_payload(plans),
+        # Buyable Shopify storefront, baked at publish for every business that has pushed products
+        # (empty for non-Shopify businesses). The scaffold reads this as ``productCatalog`` and
+        # renders a Store section whose Buy buttons deep-link each product's cart_permalink.
+        "shopifyCatalog": _read_shopify_catalog_products(workspace_root),
         "routes": routes,
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
