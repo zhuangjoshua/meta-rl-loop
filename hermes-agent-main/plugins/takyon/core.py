@@ -205,6 +205,7 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 - On desktop, the public `/` first screen should fill most of the viewport and read page-scale, not as a small centered island with large dead gutters on both outer sides.
 - Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
+- Name the product like a real product. The HTML `<title>`, landing headline, visible branding, and SEO/OG tags must carry a human product name and/or plain-language value proposition. NEVER derive them from the business slug or workspace id — an internal slug (e.g. `qaproof0708b`) must not appear in the title, hero, nav brand, or meta tags. If no product name exists yet, coin a short brandable one consistent with the business's research/ and product/ state and use it consistently everywhere.
 """
 # Injected for every product/site worker pass (bootstrap and iterate alike) so the visual-craft
 # floor rides regardless of which design style pack the CEO selected. The capabilities it names
