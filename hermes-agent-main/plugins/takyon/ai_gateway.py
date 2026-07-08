@@ -384,7 +384,38 @@ def _feature_allowed(plan, feature_name: str) -> bool:
     return False
 
 
+def _platform_default_models() -> set[str]:
+    """The platform's currently-configured default app models (one per provider).
+
+    Resolved the same way the payload builders resolve an unspecified model:
+    ``TAKYON_APP_OPENAI_MODEL``/``TAKYON_APP_ANTHROPIC_MODEL`` env (or the
+    hardcoded fallbacks). These are the models the platform ITSELF routes to
+    when a product action calls ``ctx.generate`` without naming a model.
+    """
+    from .ai_provider import anthropic_model, openai_model
+
+    defaults: set[str] = set()
+    for resolve in (openai_model, anthropic_model):
+        try:
+            value = str(resolve({}) or "").strip()
+        except Exception:  # noqa: BLE001 — a broken resolver must not block the other lane
+            value = ""
+        if value:
+            defaults.add(value)
+    return defaults
+
+
 def _model_allowed(plan, model: str) -> bool:
+    # The platform's own configured default model is always usable. Plan
+    # ``model_allowlist`` gates CLIENT model choice (explicitly requested
+    # models); it must not strand existing businesses when the operator moves
+    # the platform default. 2026-07-08 provider split: 219 plans seeded with
+    # ["claude-sonnet-4-6"] while the app default moved to gpt-5.4-mini, so
+    # every ctx.generate call (no explicit model) 403'd model_not_in_plan
+    # (observed: aipeekaboo run-visibility). Cost safety is unaffected — the
+    # pricing gate and the reserve/settle money gate still meter every call.
+    if model in _platform_default_models():
+        return True
     if plan is None or not isinstance(getattr(plan, "metadata", None), dict):
         return False
     metadata = plan.metadata
