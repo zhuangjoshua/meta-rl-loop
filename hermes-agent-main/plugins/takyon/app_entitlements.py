@@ -46,6 +46,17 @@ _UNENTITLING_TIERS = {"", "free", "none", app_identity.UNENTITLED_TIER}
 _MONTH_SPELLINGS = {"", "month", "monthly", "mo", "per_month"}
 _GATEWAY_ALLOWLIST_METADATA_KEYS = ("features", "model_allowlist", "models")
 
+# Gateway-required baseline feature grants every paid plan carries unless the operator
+# EXPLICITLY opts out (an explicit `"ai_generate": false` is preserved — a deliberate no-AI
+# tier). The AI gateway's default feature for a product ctx.generate call is 'ai_generate'
+# (ai_gateway._feature_allowed, strict), but plan seeding is CEO-free-form: the 07-04 batch
+# wrote product-domain names only ({deck_generate, prompt_scoring, investor_search, ...}),
+# stranding PAYING users with 403 feature_not_in_plan on every AI action (fable-batch audit
+# 2026-07-08: magicslides /actions/generate-deck, peekaboo-intake, angelmatch-2). The
+# baseline is merged at the ONE plan-write funnel so no seeding shape can strand it again;
+# migration 0072 backfills rows seeded before this existed.
+_BASELINE_GATEWAY_FEATURES = ("ai_generate",)
+
 # UC4 composition receipt lives under this jsonb metadata key on the plan row (additive; no
 # migration). A plan written from a PlanComposition stores its full derivation here so the
 # composed economics are auditable and the composition is re-derivable.
@@ -204,6 +215,27 @@ def _preserve_gateway_allowlist_metadata(meta: dict, existing: PlanPolicy | None
         if key not in merged and key in existing.metadata:
             merged[key] = existing.metadata[key]
     return merged
+
+
+def _ensure_baseline_gateway_features(meta: dict) -> dict:
+    """Merge `_BASELINE_GATEWAY_FEATURES` into plan metadata features (see the constant's note).
+
+    Handles every shape a seeded features value takes: absent -> baseline dict; dict -> setdefault
+    each baseline key (an explicit false is preserved — deliberate opt-out); list/tuple/set ->
+    append missing baseline names. Non-features metadata is untouched."""
+    features = meta.get("features")
+    if isinstance(features, dict):
+        merged = dict(features)
+        for name in _BASELINE_GATEWAY_FEATURES:
+            merged.setdefault(name, True)
+        return {**meta, "features": merged}
+    if isinstance(features, (list, tuple, set)):
+        values = [str(item) for item in features]
+        return {
+            **meta,
+            "features": values + [n for n in _BASELINE_GATEWAY_FEATURES if n not in values],
+        }
+    return {**meta, "features": {name: True for name in _BASELINE_GATEWAY_FEATURES}}
 
 
 def _plan_from_row(row) -> PlanPolicy:
@@ -383,7 +415,9 @@ def upsert_plan_policy(
                     f"subscribers onto new pricing is a separate billing migration (OpenMeter-owned; "
                     f"not available yet)."
                 )
-    meta = _preserve_gateway_allowlist_metadata(dict(metadata or {}), existing)
+    meta = _ensure_baseline_gateway_features(
+        _preserve_gateway_allowlist_metadata(dict(metadata or {}), existing)
+    )
     warnings = plan_validation_warnings(key, tier_value, quota, meta)
     if warnings:
         prior = meta.get("takyon_plan_validation")

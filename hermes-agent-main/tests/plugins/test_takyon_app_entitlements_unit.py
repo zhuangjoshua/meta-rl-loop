@@ -53,3 +53,32 @@ def test_plan_metadata_update_allows_explicit_gateway_allowlist_change():
 
     assert merged["features"] == {}
     assert merged["model_allowlist"] == ["claude-other"]
+
+
+def test_baseline_gateway_features_injected_when_features_absent():
+    merged = app_entitlements._ensure_baseline_gateway_features({"custom": "x"})
+    assert merged["features"] == {"ai_generate": True}
+    assert merged["custom"] == "x"
+
+
+def test_baseline_gateway_features_merged_into_product_domain_dict():
+    # The 07-04 strand shape: CEO-seeded product-domain names only (magicslides).
+    merged = app_entitlements._ensure_baseline_gateway_features(
+        {"features": {"deck_chat": True, "deck_generate": True, "speaker_notes": True}}
+    )
+    assert merged["features"]["ai_generate"] is True
+    assert merged["features"]["deck_generate"] is True
+
+
+def test_baseline_gateway_features_respects_explicit_opt_out():
+    merged = app_entitlements._ensure_baseline_gateway_features(
+        {"features": {"ai_generate": False, "exports": True}}
+    )
+    assert merged["features"]["ai_generate"] is False
+
+
+def test_baseline_gateway_features_appended_to_legacy_list():
+    merged = app_entitlements._ensure_baseline_gateway_features(
+        {"features": ["prompt_scoring", "mention_tracking"]}
+    )
+    assert merged["features"] == ["prompt_scoring", "mention_tracking", "ai_generate"]
