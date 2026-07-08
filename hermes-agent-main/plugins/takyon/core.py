@@ -7387,6 +7387,10 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/lib/product-auth.tsx",
     "src/lib/branding.ts",
     "src/screens/app-layout.tsx",
+    # Starter-owned buyable Shopify storefront rail. Must refresh alongside src/main.tsx (which
+    # imports it) so existing businesses gain a working /store route on their next publish, and so
+    # the rail stays worker-uneditable (like the other AppKit rails here).
+    "src/screens/store.tsx",
 )
 
 
