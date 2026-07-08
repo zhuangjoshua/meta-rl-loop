@@ -2495,7 +2495,18 @@ class AIAgent:
         with self._openai_client_lock():
             old_client = getattr(self, "client", None)
             try:
-                new_client = self._create_openai_client(self._client_kwargs, reason=reason, shared=True)
+                rebuild_kwargs = dict(self._client_kwargs)
+                factory = getattr(self, "_request_http_client_factory", None)
+                if factory is not None:
+                    # Custom-transport agents (operator gateway): rebuilding
+                    # from stored kwargs would re-wrap the OLD — possibly
+                    # closed — transport instance, yielding a client that is
+                    # detected closed again on the very next call. Mint a
+                    # fresh transport and store it so the rebuilt primary is
+                    # actually usable.
+                    rebuild_kwargs["http_client"] = factory()
+                    self._client_kwargs = rebuild_kwargs
+                new_client = self._create_openai_client(rebuild_kwargs, reason=reason, shared=True)
             except Exception as exc:
                 logger.warning(
                     "Failed to rebuild shared OpenAI client (%s) %s error=%s",
@@ -2569,6 +2580,17 @@ class AIAgent:
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
+        factory = getattr(self, "_request_http_client_factory", None)
+        if factory is not None:
+            # Gateway/custom-transport agents: mint a fresh transport per
+            # request client so closing it on ``request_complete`` can never
+            # close the primary client's shared transport (#10933 class).
+            request_kwargs["http_client"] = factory()
+        else:
+            # Never let a per-request client wrap (and close on completion)
+            # an ``http_client`` instance shared with the primary client —
+            # ``create_openai_client`` will mint a fresh keepalive transport.
+            request_kwargs.pop("http_client", None)
         # Per-request OpenAI-wire clients (used by both the non-streaming
         # chat-completions path and the streaming chat-completions path
         # in `_interruptible_api_call`) should not run the SDK's built-in

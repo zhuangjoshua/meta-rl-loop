@@ -256,6 +256,17 @@ def _replace_openai_gateway_client(agent: Any, context: OperatorGatewayContext) 
     if timeout is not None:
         client_kwargs["timeout"] = timeout
     agent._client_kwargs = client_kwargs
+    # Per-request wire clients (``interruptible_api_call``) are closed after
+    # every request, and the OpenAI SDK ``close()`` also closes whatever
+    # ``http_client`` it wraps — including the shared gateway transport stored
+    # in ``_client_kwargs`` above. Publish a factory so the agent mints a
+    # FRESH gateway transport per request client / primary rebuild instead of
+    # wrapping (and then closing) the primary client's transport. Without
+    # this, the first ``request_complete`` close kills the shared transport
+    # and every later call dies with APIConnectionError (#10933 class).
+    agent._request_http_client_factory = (
+        lambda: build_operator_gateway_http_client(context)
+    )
     agent.client = agent._create_openai_client(
         client_kwargs,
         reason="operator_gateway",
