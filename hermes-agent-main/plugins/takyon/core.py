@@ -3375,7 +3375,18 @@ def _starter_title_is_generic(title: str, *, slug: str) -> bool:
         return True
     if value == str(slug or "").strip().lower():
         return True
-    return value == _humanize_business_slug(slug).strip().lower()
+    if value == _humanize_business_slug(slug).strip().lower():
+        return True
+    # A title that still CONTAINS the internal slug as a token is slug-derived junk, not a
+    # product name — CEO strategy docs are routinely headed "<slug> Strategy (Brief)", and the
+    # old exact-match check let those through as the public <title>/og:title on fresh builds
+    # (observed live: "qaproof0708b Strategy", "acceptinvoice0708 strategy"). Rejecting it here
+    # makes the chain fall through to the worker-authored hero headline / landing <h1> — the
+    # same source that produced the good value-prop titles on droppop/magicslides.
+    slug_token = re.escape(str(slug or "").strip().lower())
+    if slug_token and re.search(rf"(?<![a-z0-9]){slug_token}(?![a-z0-9])", value):
+        return True
+    return False
 
 
 def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, str]:
