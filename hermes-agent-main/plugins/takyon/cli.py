@@ -600,12 +600,22 @@ def _format_cli_value(value: Any) -> str:
             status = str(follow.get("status") or bootstrap_job.get("status") or "queued")
             took = str(follow.get("duration_display") or "").strip()
             took_suffix = f" in {took}" if took else ""
+            # Durable-state truth for a failed/blocked job record: if the site is actually
+            # published, the one-line verdict must say so (job-record status alone reads as a
+            # total failure and misled the operator on test-2).
+            published_build = str(follow.get("site_published_build") or "").strip()
+            published_suffix = (
+                f" — BUT the product site IS built and published (live build {published_build[:12]});"
+                " only later bootstrap steps may be missing"
+                if published_build and status in {"failed", "blocked"}
+                else ""
+            )
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
             job_id = str(bootstrap_job.get("job_id") or "").strip()
             if job_id:
-                return f"Create {status} for business:{slug}{took_suffix}. Bootstrap job: {job_id}."
-            return f"Create {status} for business:{slug}{took_suffix}."
+                return f"Create {status} for business:{slug}{took_suffix}{published_suffix}. Bootstrap job: {job_id}."
+            return f"Create {status} for business:{slug}{took_suffix}{published_suffix}."
 
     if "summary" in value and "deltas_from_previous_pulse" in value and "windows" in value:
         business = value.get("business") or "<unknown>"
@@ -2677,6 +2687,31 @@ def _follow_worker_job(
                 + (f" (worker phases: {phase_bits})" if phase_bits else ""),
                 flush=True,
             )
+    # A terminal 'failed'/'blocked' JOB record is not the whole truth: the business's durable
+    # outcome can still be good (a retry or recovery run published the site while the job record
+    # kept the first failure — observed on test-2 2026-07-08: job failed on a watchdog kill, yet
+    # the site was built, published, and R2-mirrored 16 minutes later). Verdicts the operator
+    # reads must reflect DURABLE STATE, so check the canonical live-build pointer and say so.
+    live_build_id = ""
+    if (last_status or "") in {"failed", "blocked"}:
+        try:
+            with store._connect() as conn:
+                row = conn.execute(
+                    "SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?",
+                    (slug,),
+                ).fetchone()
+            if row:
+                live_build_id = str((store._row_to_dict(row) or {}).get("live_build_id") or "").strip()
+        except Exception:  # noqa: BLE001 - verdict enrichment is display-only
+            live_build_id = ""
+        if live_build_id:
+            print(
+                f"[{label}] NOTE: the job record says {last_status}, but the product site IS "
+                f"built and published (live build {live_build_id[:12]}). A later run completed "
+                "the site work; only this job's remaining steps may be missing. The business is "
+                "usable — re-run a wake (or the CEO will on its schedule) to finish the tail.",
+                flush=True,
+            )
     return {
         "action": f"{label}.follow",
         "job_id": str(job_id),
@@ -2685,6 +2720,7 @@ def _follow_worker_job(
         "error": (record.error if record else None),
         "detached": detached,
         **({"duration_display": duration_display} if duration_display else {}),
+        **({"site_published_build": live_build_id} if live_build_id else {}),
     }
 
 

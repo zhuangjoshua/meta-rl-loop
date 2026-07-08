@@ -7862,6 +7862,13 @@ def _run_claude_agent_task_process(
                     workspace_rel=workspace_rel,
                     event=mapping_event,
                 )
+                # EVERY worker event is real wake activity — reasoning/output deltas included.
+                # The phase mapper below deliberately returns "" for most events, and ticking the
+                # inactivity keepalive only on mapped phase lines STARVED the wake watchdog during
+                # reasoning-heavy stretches: it killed LIVE builds at exactly start+600s while
+                # events flowed 13-145/min (test-2, 2026-07-08, failed 2/2 then a recovery run
+                # published anyway). Tick on the raw event first; then emit the mapped line if any.
+                _notify_claude_worker_activity("claude-worker event")
                 # Surface the worker's current step/activity as live job/task progress so the long
                 # Claude-worker phase is no longer blank in the tui_gateway. Concise human lines only;
                 # raw per-tool ticks are filtered out by the mapper.
@@ -7873,6 +7880,7 @@ def _run_claude_agent_task_process(
             if not clean:
                 continue
             stderr_lines.append(clean)
+            _notify_claude_worker_activity(clean)
             _record_claude_agent_runtime_event(
                 business=business,
                 workspace_rel=workspace_rel,
