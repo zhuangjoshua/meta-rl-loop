@@ -129,7 +129,7 @@ def _runtime_event_rows_for_business(
             ) recent
             ORDER BY created_at ASC, id ASC
             """,
-            (slug, max(1, min(int(limit or 300), 500))),
+            (slug, max(1, min(int(limit or 300), 2000))),
         ).fetchall()
     return [store._row_to_dict(row) for row in rows]
 
@@ -598,12 +598,14 @@ def _format_cli_value(value: Any) -> str:
                 slug = str(business_ref or "<unknown>")
             follow = value.get("follow") if isinstance(value.get("follow"), dict) else {}
             status = str(follow.get("status") or bootstrap_job.get("status") or "queued")
+            took = str(follow.get("duration_display") or "").strip()
+            took_suffix = f" in {took}" if took else ""
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
             job_id = str(bootstrap_job.get("job_id") or "").strip()
             if job_id:
-                return f"Create {status} for business:{slug}. Bootstrap job: {job_id}."
-            return f"Create {status} for business:{slug}."
+                return f"Create {status} for business:{slug}{took_suffix}. Bootstrap job: {job_id}."
+            return f"Create {status} for business:{slug}{took_suffix}."
 
     if "summary" in value and "deltas_from_previous_pulse" in value and "windows" in value:
         business = value.get("business") or "<unknown>"
@@ -2388,6 +2390,67 @@ class _RuntimeEventTail:
         print(f"{_color('->', _THEME['secondary'])} {note}", file=self._out, flush=True)
 
 
+def _coerce_event_datetime(value: Any) -> Any:
+    """Best-effort datetime from a job/event timestamp (PG datetime or SQLite ISO text)."""
+    import datetime as _dt
+
+    if isinstance(value, _dt.datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _format_duration_seconds(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _bootstrap_phase_durations(store: TakyonStore, slug: str) -> list[tuple[str, float]]:
+    """Per-workspace worker-phase durations (seconds) from the recorded runtime events.
+
+    Groups the Claude-worker progress events (``command = 'Claude worker -> <workspace>'``)
+    by workspace and takes first->last event time per group. Display-only: derived entirely
+    from already-recorded events, so it works cross-machine and after reattach."""
+    phases: dict[str, list[Any]] = {}
+    try:
+        rows = _runtime_event_rows_for_business(store, slug, limit=2000)
+    except Exception:  # noqa: BLE001 - duration report is display-only
+        return []
+    for event in rows:
+        payload = event.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:  # noqa: BLE001
+                continue
+        if not isinstance(payload, dict):
+            continue
+        command = str(payload.get("command") or "")
+        if not command.startswith("Claude worker -> "):
+            continue
+        stamp = _coerce_event_datetime(event.get("created_at"))
+        if stamp is None:
+            continue
+        phases.setdefault(command.removeprefix("Claude worker -> ").strip() or "worker", []).append(stamp)
+    out: list[tuple[str, float]] = []
+    for workspace, stamps in phases.items():
+        if len(stamps) >= 2:
+            out.append((workspace, (max(stamps) - min(stamps)).total_seconds()))
+    out.sort(key=lambda item: -item[1])
+    return out
+
+
 def _follow_worker_job(
     store: TakyonStore,
     slug: str,
@@ -2596,6 +2659,24 @@ def _follow_worker_job(
     except KeyboardInterrupt:
         detached = True
         print(f"\n[{label}] detached (the worker job keeps running).", flush=True)
+    # Wall-clock duration from the DURABLE job row (queued -> terminal), not the local follow
+    # timer — correct across detach/reattach and cross-machine claims. Phase breakdown comes
+    # from the recorded worker events. Display + report only; never mutates the job.
+    duration_display = ""
+    if record is not None and (last_status or "") in terminal:
+        started_at = _coerce_event_datetime(getattr(record, "created_at", None))
+        ended_at = _coerce_event_datetime(getattr(record, "updated_at", None))
+        if started_at is not None and ended_at is not None:
+            duration_display = _format_duration_seconds((ended_at - started_at).total_seconds())
+            phase_bits = ", ".join(
+                f"{workspace} {_format_duration_seconds(seconds)}"
+                for workspace, seconds in _bootstrap_phase_durations(store, slug)[:4]
+            )
+            print(
+                f"[{label}] {last_status} in {duration_display}"
+                + (f" (worker phases: {phase_bits})" if phase_bits else ""),
+                flush=True,
+            )
     return {
         "action": f"{label}.follow",
         "job_id": str(job_id),
@@ -2603,6 +2684,7 @@ def _follow_worker_job(
         "result": (record.result if record else None),
         "error": (record.error if record else None),
         "detached": detached,
+        **({"duration_display": duration_display} if duration_display else {}),
     }
 
 
