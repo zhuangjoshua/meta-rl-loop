@@ -1011,7 +1011,7 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
                 "value": sync,
             })
 
-        fields = "impressions,reach,clicks,spend,cpc,cpm,ctr,frequency,actions,date_start,date_stop"
+        fields = "impressions,reach,clicks,spend,cpc,cpm,ctr,frequency,actions,action_values,date_start,date_stop"
         receipt = _load_launch_receipt(store, business, slug)
         resolved_object_id = object_id
         if resolved_object_id:
@@ -1061,6 +1061,7 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
                 "ctr": row.get("ctr"),
                 "frequency": row.get("frequency"),
                 "actions": row.get("actions"),
+                "action_values": row.get("action_values"),
                 "synced_at": core._now(),
             }
             dedup_key = f"{record['level']}|{record['object_id']}|{record['date_start']}"

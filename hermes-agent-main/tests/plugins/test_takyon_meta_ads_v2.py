@@ -272,9 +272,29 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
         except (TypeError, ValueError):
             return 0
 
+    _purchase_action_types = ("omni_purchase", "offsite_conversion.fb_pixel_purchase", "purchase")
+
+    def _first_action_metric(entries, action_types):
+        if not isinstance(entries, list):
+            return None
+        by_type = {}
+        for entry in entries:
+            if isinstance(entry, dict):
+                at = str(entry.get("action_type") or "").strip().lower()
+                if at and at not in by_type:
+                    by_type[at] = entry.get("value")
+        for wanted in action_types:
+            if wanted in by_type:
+                try:
+                    return float(str(by_type[wanted]).strip())
+                except (TypeError, ValueError):
+                    return None
+        return None
+
     def _meta_aggregate_insights_rows(rows):
         # Faithful mirror of core._meta_aggregate_insights_rows: derive ctr/cpc/cpm
-        # from summed clicks/impressions/spend (the row's literal ctr/cpc are ignored).
+        # from summed clicks/impressions/spend (the row's literal ctr/cpc are ignored)
+        # and Meta-attributed purchase value/count/roas from action_values/actions.
         totals = {
             "rows": len(rows),
             "spend_usd": 0.0,
@@ -284,6 +304,10 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
             "cpc": None,
             "cpm": None,
             "ctr": None,
+            "purchase_count": 0,
+            "purchase_value_cents": 0,
+            "purchase_value_usd": 0.0,
+            "roas": None,
         }
         spend = 0.0
         for row in rows:
@@ -294,12 +318,22 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
             totals["impressions"] += _meta_int_metric(row.get("impressions"))
             totals["reach"] += _meta_int_metric(row.get("reach"))
             totals["clicks"] += _meta_int_metric(row.get("clicks"))
+            pv = _first_action_metric(row.get("action_values"), _purchase_action_types)
+            if pv is not None:
+                totals["purchase_value_cents"] += int(round(pv * 100))
+            pc = _first_action_metric(row.get("actions"), _purchase_action_types)
+            if pc is not None:
+                totals["purchase_count"] += int(round(pc))
         totals["spend_usd"] = round(spend, 2)
+        totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
         if totals["clicks"] > 0:
             totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
         if totals["impressions"] > 0:
             totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
             totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
+        spend_cents = int(round(spend * 100))
+        if spend_cents > 0:
+            totals["roas"] = round(totals["purchase_value_cents"] / spend_cents, 4)
         return totals
 
     class _FakeCreativeCreditBackend:
@@ -588,12 +622,17 @@ def harness(tmp_path, monkeypatch):
     fake_graph = _build_fake_meta_graph(graph_rec)
     fake_mcp = _build_fake_meta_mcp(mcp_rec)
 
-    # Ensure a parent ``plugins.takyon`` package exists so relative imports resolve.
+    # Inject FRESH parent package objects unconditionally so relative imports resolve to the
+    # fakes below. ``from . import core`` prefers ``getattr(package, "core")`` over the
+    # sys.modules entry — if another test file in the same process imported the REAL
+    # ``plugins.takyon`` (e.g. test_takyon_episode_metrics), the real package object carries a
+    # real ``core`` attribute and the module under test would silently bind the real core
+    # (real store → Postgres) instead of the fakes. monkeypatch restores the real packages
+    # at teardown.
     for pkg_name in ("plugins", "plugins.takyon"):
-        if pkg_name not in sys.modules:
-            pkg = types.ModuleType(pkg_name)
-            pkg.__path__ = []  # mark as a (namespace-ish) package
-            monkeypatch.setitem(sys.modules, pkg_name, pkg)
+        pkg = types.ModuleType(pkg_name)
+        pkg.__path__ = []  # mark as a (namespace-ish) package
+        monkeypatch.setitem(sys.modules, pkg_name, pkg)
 
     monkeypatch.setitem(sys.modules, "plugins.takyon.core", fake_core)
     monkeypatch.setitem(sys.modules, "plugins.takyon.meta_graph", fake_graph)
@@ -1071,6 +1110,49 @@ def test_insights_sync_defaults_to_receipt_owned_object(harness):
     insights_path = harness.business_file_path("clipbook", "metrics/meta-ads/demo-meta/insights.jsonl")
     lines = [json.loads(line) for line in insights_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert lines[0]["object_id"] == "ad-1"
+
+
+def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+    harness.graph.graph_forward_get_response = {
+        "data": [
+            {
+                "ad_id": "ad-1",
+                "date_start": "2026-06-24",
+                "date_stop": "2026-06-24",
+                "impressions": "1200",
+                "clicks": "40",
+                "spend": "20.00",
+                "actions": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "3"}],
+                "action_values": [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "80.00"}],
+            }
+        ]
+    }
+
+    result = _result(
+        harness.module.handle_business_meta_ad_insights_sync(
+            {
+                "business": "clipbook",
+                "slug": "demo-meta",
+                "level": "ad",
+                "idempotency_key": "clipbook-meta-revenue-v1",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    # The read request asks Meta for the revenue field, not just spend/counts.
+    assert "action_values" in harness.graph.graph_calls[-1]["params"]["fields"]
+    # ROAS surfaces on the receipt totals: 80 revenue / 20 spend = 4.0.
+    totals = result["value"]["totals"]
+    assert totals["purchase_value_usd"] == 80.0
+    assert totals["purchase_count"] == 3
+    assert totals["roas"] == 4.0
+    # action_values is persisted for downstream re-reads.
+    insights_path = harness.business_file_path("clipbook", "metrics/meta-ads/demo-meta/insights.jsonl")
+    lines = [json.loads(line) for line in insights_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert lines[0]["action_values"] == [{"action_type": "offsite_conversion.fb_pixel_purchase", "value": "80.00"}]
 
 
 def test_insights_sync_rejects_cross_business_object_id(harness):

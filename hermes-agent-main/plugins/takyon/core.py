@@ -5581,6 +5581,29 @@ def _subuser_app_starter_access_page_js() -> str:
                 setCheckoutState(nextCheckout === "success" ? "success" : "");
               }, []);
 
+              // Meta Pixel Purchase signal. Stripe hosted checkout only redirects to
+              // ?checkout=success after a successful payment, so this is the standard place to fire
+              // the value-carrying Purchase event that lets Meta attribute revenue/ROAS back to the
+              // ad. No-ops when the pixel is not installed (window.fbq absent). Deduped once per
+              // browser session so a refresh on ?checkout=success cannot double-count.
+              useEffect(() => {
+                if (typeof window === "undefined" || checkoutState !== "success") return;
+                if (typeof window.fbq !== "function") return;
+                var plan = currentPlan();
+                var valueCents = plan && Number(plan.priceCents) > 0 ? Number(plan.priceCents) : 0;
+                if (!(valueCents > 0)) return;
+                try {
+                  if (window.sessionStorage && window.sessionStorage.getItem("tk_meta_purchase_fired")) return;
+                  if (window.sessionStorage) window.sessionStorage.setItem("tk_meta_purchase_fired", "1");
+                } catch (storageError) {}
+                try {
+                  window.fbq("track", "Purchase", {
+                    value: Math.round(valueCents) / 100,
+                    currency: String((plan && plan.currency) || "usd").toUpperCase(),
+                  });
+                } catch (pixelError) {}
+              }, [checkoutState]);
+
               if (!appState) {
                 return (
                   <section className="starter-card starter-section-card">
@@ -31429,6 +31452,38 @@ def _meta_int_metric(value: Any) -> int:
         return 0
 
 
+# Meta reports the SAME purchase under several synonym action_types (e.g. `omni_purchase`,
+# `offsite_conversion.fb_pixel_purchase`, `purchase`), each carrying the identical value. To read
+# Meta-attributed revenue without double/triple counting, pick ONE canonical type per row in this
+# preference order and ignore the synonyms.
+_META_PURCHASE_ACTION_TYPES = (
+    "omni_purchase",
+    "offsite_conversion.fb_pixel_purchase",
+    "purchase",
+)
+
+
+def _meta_first_action_metric(entries: Any, action_types: tuple[str, ...]) -> float | None:
+    """Return the value of the first present action_type (in preference order) from a Meta
+    `actions`/`action_values` list, as a float, or None if none match. Deduped so a purchase listed
+    under multiple synonym action_types is counted once."""
+    if not isinstance(entries, list):
+        return None
+    by_type: dict[str, Any] = {}
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            at = str(entry.get("action_type") or "").strip().lower()
+            if at and at not in by_type:
+                by_type[at] = entry.get("value")
+    for wanted in action_types:
+        if wanted in by_type:
+            try:
+                return float(str(by_type[wanted]).strip())
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     totals = {
         "rows": len(rows),
@@ -31440,6 +31495,10 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "cpc": None,
         "cpm": None,
         "ctr": None,
+        "purchase_count": 0,
+        "purchase_value_cents": 0,
+        "purchase_value_usd": 0.0,
+        "roas": None,
         "currency": None,
         "date_start": None,
         "date_stop": None,
@@ -31458,13 +31517,26 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals["impressions"] += _meta_int_metric(row.get("impressions"))
         totals["reach"] += _meta_int_metric(row.get("reach"))
         totals["clicks"] += _meta_int_metric(row.get("clicks"))
+        # Meta-attributed purchase VALUE (revenue) and count for this object, deduped across the
+        # synonym action_types so one purchase is not counted several times. Fed by the client-side
+        # `Purchase` pixel event; zero until that event fires.
+        purchase_value = _meta_first_action_metric(row.get("action_values"), _META_PURCHASE_ACTION_TYPES)
+        if purchase_value is not None:
+            totals["purchase_value_cents"] += int((Decimal(str(purchase_value)) * 100).quantize(Decimal("1")))
+        purchase_count = _meta_first_action_metric(row.get("actions"), _META_PURCHASE_ACTION_TYPES)
+        if purchase_count is not None:
+            totals["purchase_count"] += int(round(purchase_count))
 
     totals["spend_usd"] = round(totals["spend_cents"] / 100.0, 2)
+    totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
     if totals["clicks"] > 0:
         totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
     if totals["impressions"] > 0:
         totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
         totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
+    # ROAS = Meta-attributed revenue / ad spend. Only meaningful once spend is non-zero.
+    if totals["spend_cents"] > 0:
+        totals["roas"] = round(totals["purchase_value_cents"] / totals["spend_cents"], 4)
     return totals
 
 
