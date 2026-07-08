@@ -1572,6 +1572,44 @@ def _anthropic_provider_caller(payload: dict[str, Any]):
     return _call
 
 
+def _deepseek_key_resolver(_scope: CapabilityScope) -> str:
+    """Resolve the SHARED DeepSeek key LOCALLY on the safebox (never returned to a caller)."""
+    from . import safebox
+
+    try:
+        return str(safebox.first_env_backed_value("DEEPSEEK_API_KEY") or "").strip()
+    except Exception:  # noqa: BLE001 — resolver returns empty; the broker fails closed on it
+        return ""
+
+
+def _deepseek_provider_caller(payload: dict[str, Any]):
+    """Anthropic-wire caller pointed at DeepSeek's anthropic-compatible Messages endpoint.
+
+    Mirrors ``_anthropic_provider_caller`` (same payload parse, same billed-cost settle from the
+    canonical pricing table — deepseek models price via their own entries) with the URL + key swap
+    the operator proxy lane already does (``safebox_provider_proxy``). Direct call, no Cloudflare
+    AIG hop — AIG is provider-configured for Anthropic only."""
+    from . import ai_provider
+
+    built_payload, model, estimated_input_tokens = ai_provider.anthropic_payload(payload or {})
+
+    def _call(scope: CapabilityScope, key: str):
+        raw = ai_provider.call_anthropic(
+            built_payload, key, url=ai_provider.DEEPSEEK_ANTHROPIC_MESSAGES_URL
+        )
+        usage = raw.get("usage") or {}
+        in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
+        out_tok = int(usage.get("output_tokens") or 0)
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        _realized, billed = ai_provider.billed_microusd_cost(
+            model, in_tok, out_tok, cache_read_tokens=cache_read, cache_write_tokens=cache_write
+        )
+        return raw, int(billed)
+
+    return _call
+
+
 def _openai_key_resolver(_scope: CapabilityScope) -> str:
     from . import ai_provider
 
@@ -4241,6 +4279,21 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        # DeepSeek models ride the SAME anthropic wire (audience/action unchanged: the client
+        # brokers them as anthropic.messages) but need the key + upstream URL swap the operator
+        # proxy lane already does — without this, a deepseek-* model was sent to the REAL
+        # Anthropic API with the Anthropic key and failed provider_error on every call.
+        from . import ai_provider as _ai
+
+        if _ai._is_deepseek_model(_ai.anthropic_model(body.payload or {})):
+            return _broker_provider_route(
+                body,
+                audience=_ANTHROPIC_AUDIENCE,
+                provider="deepseek",
+                key_resolver=_deepseek_key_resolver,
+                caller_builder=_deepseek_provider_caller,
+                estimate_builder=_anthropic_estimate,
+            )
         return _broker_provider_route(
             body,
             audience=_ANTHROPIC_AUDIENCE,
