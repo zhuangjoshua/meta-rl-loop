@@ -202,6 +202,21 @@ def _business_bootstrap_instruction(
         "This is an operational create/build request. Execute immediately.",
         "Do not respond with instructions, checklists, or 'want me to start?'.",
         "",
+        *(
+            [
+                "MANDATORY FOR THIS BUSINESS: it is a mobile_app (iOS) business. Its PRIMARY deliverable "
+                "is a real, store-signed iOS app, not the website. You MUST run every step through step 5 "
+                "(the iOS app build + first store-signed build) and you MUST NOT declare the bootstrap "
+                "complete after only the landing/website. Publishing the landing is an early milestone, "
+                "NOT the finish line. The only acceptable end states are: (a) step 5 produced a real "
+                "build_id, or (b) step 5 hit a concrete, recorded blocker (compliance gate, credits, "
+                "eas_builder_unconfigured) after a genuine attempt. Concluding without reaching step 5 is a "
+                "failed bootstrap.",
+                "",
+            ]
+            if mobile_app
+            else []
+        ),
         f"Canonical business name: {business_name or slug}",
         f"Business goal: {goal_text}",
         f"Mode: {effective_mode}",
@@ -393,6 +408,16 @@ def _business_bootstrap_instruction(
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
         "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
+        *(
+            [
+                "This is a mobile_app business: the final response is only valid if you actually reached step 5. "
+                "It MUST state the iOS build outcome — the build_id of the store-signed build, or the exact "
+                "step-5 blocker. A final response that stops at the website (no step-5 build_id and no step-5 "
+                "blocker) is a FAILED bootstrap, not a completion — keep going and do step 5 instead of closing.",
+            ]
+            if mobile_app
+            else []
+        ),
         "If `Explicit product workflow requested: yes`, the final response must include the action name and the workflow-verification result or the exact blocker. Never say the real workflow is \"coming soon\" after marking bootstrap complete; note that live action execution is the post-bootstrap signed-in subscriber verification step.",
         "If `Explicit product workflow requested: no` and only the landing + access shell were required, close by naming the next business move in warm, customer-facing language: the live site is a real starting point, and the next step is to build out the post-sign-in product experience. If `Explicit product workflow requested: yes`, close on the verified live workflow instead. Do NOT name any internal skill or tool; describe the work, not the runtime.",
     ]
