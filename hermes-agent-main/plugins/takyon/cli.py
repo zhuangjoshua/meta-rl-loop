@@ -5242,9 +5242,17 @@ def run_takyon_command(
             if len(argv) < 3:
                 raise SystemExit("usage: takyon rl policy <business>")
             return store.rl_policy(_slugify(argv[2]))
+        if sub == "distill":
+            # Deterministic metrics→lessons pass (same code path the wake runs). --dry-run
+            # evaluates matured episodes and reports what WOULD distill without writing —
+            # the operator backtest affordance for the fixed significance thresholds.
+            if len(argv) < 3 or str(argv[2]).startswith("--"):
+                raise SystemExit("usage: takyon rl distill <business> [--dry-run]")
+            return store.distill_episode_lessons(
+                _slugify(argv[2]), dry_run=("--dry-run" in [str(a) for a in argv[3:]]))
         if sub in {"status", ""}:
             return store.rl_status(_slugify(argv[2]) if len(argv) >= 3 else None)
-        raise SystemExit("usage: takyon rl status|lessons|why|policy ...")
+        raise SystemExit("usage: takyon rl status|lessons|why|policy|distill ...")
 
     if command == "test":
         if len(argv) < 2:

@@ -24,6 +24,8 @@ class _FakeConn:
             _FakeRow(n=users),
             _FakeRow(c=revenue_cents),
             _FakeRow(n=usage_events),
+            _FakeRow(n=3),                       # checkout_intents
+            _FakeRow(inbound=5, unresolved=2),   # conversation_messages
         ]
         self._i = 0
         self._raise_on = raise_on
@@ -72,6 +74,21 @@ def test_snapshot_attaches_channel_campaign_stats(tmp_path, monkeypatch):
     assert camp["spend_cents"] == 374
     assert camp["impressions"] == 1301
     assert camp["clicks"] == 4
+
+
+def test_snapshot_lists_full_campaign_lifecycle_statuses(tmp_path, monkeypatch):
+    # Measurement needs a lifecycle-stable status set: a campaign COMPLETING between an
+    # episode's before and after snapshots must not vanish from the after side (that would
+    # mint phantom negative delivery deltas in the distiller).
+    seen: dict = {}
+    backend = SimpleNamespace(
+        list_policies=lambda conn, slug, statuses=None: seen.update(statuses=list(statuses or [])) or []
+    )
+    monkeypatch.setattr(core, "_business_ad_spend_backend", lambda: backend)
+    core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", "reddit")
+    assert "completed" in seen["statuses"]
+    for status in ("reserved", "created_paused", "active", "paused"):
+        assert status in seen["statuses"]
 
 
 def test_snapshot_reads_x_totals_from_metrics_summary(tmp_path):
@@ -136,3 +153,50 @@ def test_snapshot_attaches_meta_campaign_stats(tmp_path, monkeypatch):
     assert camp["spend_cents"] == 33
     assert camp["impressions"] == 43
     assert camp["clicks"] == 3
+
+
+def test_snapshot_counts_checkouts_and_conversations(tmp_path):
+    snap = core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", None)
+    assert snap["checkout_intents"] == 3
+    assert snap["inbound_messages"] == 5
+    assert snap["unresolved_inbound"] == 2
+
+
+def test_snapshot_attaches_x_summary_totals(tmp_path):
+    x_dir = tmp_path / "acme" / "metrics/x"
+    x_dir.mkdir(parents=True)
+    (x_dir / "summary.json").write_text(json.dumps({
+        "totals": {
+            "public_metrics": {"impression_count": 900, "like_count": 12, "reply_count": 4,
+                                "retweet_count": 2, "quote_count": 1},
+            "organic_metrics": {"url_link_clicks": 7},
+        },
+        "posts": [{"post_id": "1"}],
+    }))
+    snap = core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", "x")
+    assert snap["x"]["impressions"] == 900
+    assert snap["x"]["likes"] == 12
+    assert snap["x"]["reposts"] == 3  # retweets + quotes
+    assert snap["x"]["clicks"] == 7
+
+
+def test_snapshot_attaches_web_analytics_for_product_channels(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        core,
+        "_business_analytics_summary",
+        lambda slug: {"ok": True, "window_days": 7,
+                      "stats": {"pageviews": {"value": 210}, "visitors": {"value": 64}}},
+    )
+    snap = core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", "product")
+    assert snap["web"]["pageviews"] == 210
+    assert snap["web"]["visitors"] == 64
+    assert snap["web"]["window_days"] == 7
+
+
+def test_snapshot_skips_web_analytics_when_unconfigured(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        core, "_business_analytics_summary",
+        lambda slug: {"configured": False, "reason": "analytics off"},
+    )
+    snap = core._episode_metrics_snapshot(_fake_store(tmp_path), _FakeConn(), "acme", "site")
+    assert "web" not in snap

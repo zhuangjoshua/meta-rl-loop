@@ -1472,7 +1472,6 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     slug = job.business_slug
     owner_user_id = _business_owner_user_id(slug)
     store = TakyonStore(operator_user_id=owner_user_id)
-    user_prompt = store._ceo_cron_prompt(slug)
     toolsets = store._ceo_cron_toolsets()
     system_prompt = _load_ceo_prompt()
     progress = _RuntimeProgress(slug=slug, kind="ceo_wake", command=f"/wake {slug}")
@@ -1537,6 +1536,31 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                         )
                 except Exception:
                     pass
+                # Pre-wake deterministic distillation: evaluate matured episodes' measured
+                # metric deltas and keep the significant ones as [measured] lessons (RL rail
+                # R8, fixed slice — code, not model judgment). Runs AFTER the insights refresh
+                # so the "after" snapshot reads fresh delivery numbers, and BEFORE the prompt
+                # build so this wake's appended learnings already include them. Best-effort —
+                # a failed distill must never break the wake.
+                try:
+                    _distilled = store.distill_episode_lessons(slug)
+                    if int(_distilled.get("distilled") or 0):
+                        _record_runtime_event(
+                            slug,
+                            kind="ceo_wake",
+                            status="running",
+                            detail=(
+                                f"Pre-wake distilled {_distilled['distilled']} measured lesson(s) "
+                                "from matured episodes."
+                            ),
+                            command=f"/wake {slug}",
+                        )
+                except Exception:
+                    pass
+                # Build the wake prompt AFTER the pre-wake refresh + distillation (it was
+                # previously built before them, so the injected memory and appended learnings
+                # could not see this wake's own refresh/distill work — a stale-prompt bug).
+                user_prompt = store._ceo_cron_prompt(slug)
                 final_response, cost_usd, cost_status, _turn_completed = _run_ceo_turn(
                     slug=slug,
                     system_prompt=system_prompt,

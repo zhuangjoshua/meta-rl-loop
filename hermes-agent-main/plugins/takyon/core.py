@@ -17398,7 +17398,10 @@ class TakyonStore:
         """RL rail R5: build the CEO's injected wake state (identity + where-I-left-off +
         recent bets) from events. Returned text is prepended to the wake user turn by
         _ceo_cron_prompt, so a planted state-of-mind byte provably enters the cold wake
-        context (floor-1 byte-carrying channel). Never raises — degrades to empty."""
+        context (floor-1 byte-carrying channel). Learnings are NOT rendered here — they ride
+        the separate compressed block that _ceo_cron_prompt APPENDS to the END of the wake
+        prompt (_assemble_wake_learnings), so there is exactly one render path for lessons.
+        Never raises — degrades to empty."""
         slug = _slugify(slug)
         try:
             with self._connect() as conn:
@@ -17406,7 +17409,6 @@ class TakyonStore:
                 som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
                 settled = self._recent_event_payloads(conn, slug, "ceo.episode.settled", episode_limit)
                 opened = self._recent_event_payloads(conn, slug, "ceo.episode.opened", episode_limit)
-                intra_learn, inter_learn = self._retrieve_learnings(conn, slug)
         except Exception:
             return ""
         lines: list[str] = []
@@ -17434,17 +17436,6 @@ class TakyonStore:
                 bets.append(f"- (in flight) {desc}{_format_episode_metrics(p.get('metrics_snapshot'))}")
         if bets:
             lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
-        learn_lines: list[str] = []
-        for p in intra_learn:
-            claim = str((p or {}).get("claim") or "").strip()
-            if claim:
-                learn_lines.append(f"- (this business) {claim}")
-        for p in inter_learn:
-            claim = str((p or {}).get("claim") or "").strip()
-            if claim:
-                learn_lines.append(f"- (from similar businesses) {claim}")
-        if learn_lines:
-            lines.append("Learnings:\n" + "\n".join(learn_lines))
         if not lines:
             return ""
         return (
@@ -17546,15 +17537,32 @@ class TakyonStore:
                 out[lid] = decision
         return out
 
-    def _retrieve_learnings(self, conn: Any, slug: str, *, intra_limit: int = 10,
-                            inter_k: int = 5) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """RL rail R7 retrieval: ALL of this business's own learnings (intra, bounded) + top-k
-        cross-business learnings (inter) ranked by tag overlap. Human-REJECTED lessons are excluded
-        — the operator's reject in the CLI actually removes a lesson from what the CEO sees. Never
-        crosses operators. Cheap tag-overlap scoring now (embeddings deferred)."""
-        rejected = {lid for lid, d in self._rl_review_status(conn).items() if d == "reject"}
-        intra_rows = self._rl_fetch_events(conn, ["ceo.learning"], slug=slug, limit=intra_limit * 4)
-        intra = [r["payload"] for r in intra_rows
+    def _retrieve_learnings(self, conn: Any, slug: str, *, intra_limit: int = 40,
+                            inter_k: int = 8) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """RL rail R7 retrieval: this business's own learnings (intra, bounded, newest first) +
+        top-k cross-business learnings (inter) ranked by tag overlap. Human-REJECTED lessons are
+        excluded — the operator's reject in the CLI actually removes a lesson from what the CEO
+        sees. Never crosses operators. Returned payload dicts are annotated with ``_lesson_id`` /
+        ``_effective_status`` ('proven' when human-approved) so the wake renderer can rank
+        provenance without a second fetch. A borrowed lesson whose declared tags share NOTHING
+        with this business's tags is dropped (when both sides declared tags) instead of filling a
+        slot as topical noise. Cheap tag-overlap scoring now (embeddings deferred)."""
+        reviews = self._rl_review_status(conn)
+        rejected = {lid for lid, d in reviews.items() if d == "reject"}
+
+        def annotate(row: dict[str, Any]) -> dict[str, Any]:
+            payload = dict(row.get("payload") or {})
+            payload["_lesson_id"] = str(row.get("id") or "")
+            payload["_effective_status"] = (
+                "proven" if reviews.get(str(row.get("id") or "")) == "approve"
+                else str(payload.get("status") or "candidate")
+            )
+            payload.setdefault("created_at", str(row.get("created_at") or ""))
+            return payload
+
+        intra_rows = self._rl_fetch_events(
+            conn, ["ceo.learning"], slug=slug, limit=max(80, intra_limit * 4))
+        intra = [annotate(r) for r in intra_rows
                  if isinstance(r.get("payload"), dict) and r.get("id") not in rejected][:intra_limit]
         op = str(self._operator_user_id or "").strip()
         biz_tags = self._business_tags(conn, slug)
@@ -17568,31 +17576,58 @@ class TakyonStore:
             learning_op = str(p.get("operator") or "").strip()
             if op and learning_op and learning_op != op:
                 continue  # never surface another operator's learnings
-            scored.append((len(biz_tags & self._tokenize_tags(p.get("tags"))), p))
+            lesson_tags = self._tokenize_tags(p.get("tags"))
+            overlap = len(biz_tags & lesson_tags)
+            if overlap == 0 and biz_tags and lesson_tags:
+                continue  # both sides declared tags and none match: topically irrelevant
+            scored.append((overlap, annotate(row)))
         scored.sort(key=lambda x: x[0], reverse=True)
         inter = [p for _score, p in scored[:inter_k]]
         return intra, inter
 
-    def record_learning(self, slug: str, claim: str, *, tags: Any = None,
-                        scope: str = "business") -> dict[str, Any]:
-        """RL rail R7 write: record a learning. scope='business' -> intra (this business only);
-        scope='shared' -> inter (operator-scoped, surfaced to similar businesses by tag overlap)."""
-        slug = _slugify(slug)
+    def _learning_payload(self, slug: str, claim: str, *, tags: Any = None,
+                          evidence: Any = None, source: str = "") -> dict[str, Any]:
+        """Canonical ceo.learning(.shared) payload shape — the ONE place it is built, used by
+        both the CEO-facing record_learning tool path and the deterministic episode distiller.
+        ``evidence`` links the lesson to what proved it (episode ids, receipt paths, before/
+        after metric dicts); ``source`` records who authored it ('' = the CEO model via the
+        tool, 'auto:metrics' = the deterministic distiller)."""
         claim = str(claim or "").strip()
         if not claim:
             raise TakyonError("learning claim required")
-        scope_kind = str(scope or "business").strip().lower()
-        if scope_kind not in {"business", "shared"}:
-            raise TakyonError("learning scope must be 'business' or 'shared'")
-        tag_set = sorted(self._tokenize_tags(tags))
-        payload = {
+        payload: dict[str, Any] = {
             "claim": claim,
-            "tags": tag_set,
+            "tags": sorted(self._tokenize_tags(tags)),
             "operator": str(self._operator_user_id or "").strip(),
             "authored_by": slug,
             "status": "candidate",
             "created_at": _now(),
         }
+        evidence_list: list[Any] = []
+        if isinstance(evidence, (list, tuple)):
+            evidence_list = [e for e in evidence if isinstance(e, dict) or str(e or "").strip()]
+        elif isinstance(evidence, dict):
+            evidence_list = [evidence]
+        elif evidence is not None and str(evidence).strip():
+            evidence_list = [str(evidence).strip()]
+        if evidence_list:
+            payload["evidence"] = evidence_list
+        if str(source or "").strip():
+            payload["source"] = str(source).strip()
+        return payload
+
+    def record_learning(self, slug: str, claim: str, *, tags: Any = None,
+                        scope: str = "business", evidence: Any = None,
+                        source: str = "") -> dict[str, Any]:
+        """RL rail R7 write: record a learning. scope='business' -> intra (this business only);
+        scope='shared' -> inter (operator-scoped, surfaced to similar businesses by tag overlap).
+        Optional ``evidence`` (episode ids, receipt paths, measured numbers) gives the lesson
+        provenance the retrieval renderer can weigh ([measured] marker)."""
+        slug = _slugify(slug)
+        scope_kind = str(scope or "business").strip().lower()
+        if scope_kind not in {"business", "shared"}:
+            raise TakyonError("learning scope must be 'business' or 'shared'")
+        payload = self._learning_payload(slug, claim, tags=tags, evidence=evidence, source=source)
         with self._connect() as conn:
             self._ensure_business(conn, slug)
             if scope_kind == "shared":
@@ -17607,6 +17642,354 @@ class TakyonStore:
                 )
         return {"success": True, "business": slug, "event_id": event_id, "scope": scope_kind,
                 "event_type": "ceo.learning.shared" if scope_kind == "shared" else "ceo.learning"}
+
+    # --- RL rail R8 (deterministic slice): distill measured episodes into lessons ------------
+    # The metrics→lesson conversion is CODE, not model judgment (operator-mandated): every
+    # episode carries a quantitative metrics_snapshot at open time (R1); once the episode's
+    # window matures, the distiller measures before→now deltas and KEEPS the episode as a
+    # lesson iff a fixed significance threshold is crossed. ceo.episode.settled stays reserved
+    # for the future money-attribution settle job — observation is not settlement.
+
+    # Fixed significance thresholds on before→after metric deltas (absolute value). Spend is
+    # significant on its own so "spent real money, nothing moved" distills as a negative lesson.
+    _RL_SIGNIFICANT_DELTAS: dict[str, int] = {
+        "users": 3,
+        "revenue_cents": 100,     # >= $1.00 of revenue movement
+        "usage_events": 20,
+        "impressions": 1000,
+        "clicks": 25,
+        "views": 1000,
+        "likes": 20,
+        "replies": 5,
+        "reposts": 10,
+        "spend_cents": 500,       # >= $5.00 of ad spend is significant even with zero return
+    }
+
+    @staticmethod
+    def _rl_distill_window_hours() -> tuple[float, float]:
+        """(min_age_hours, max_age_hours) an episode must reach / not exceed to be distilled.
+        Min (default 12h): the bet needs time for its numbers to move before it is judged.
+        Max (default 14d): past this, a before→now delta attributes weeks of unrelated drift
+        to one old bet, so the episode is marked observed/stale instead of minting a
+        misattributed lesson."""
+        def _env_hours(name: str, default: float) -> float:
+            try:
+                value = float(os.environ.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+            return value if value >= 0 else default
+        min_h = _env_hours("TAKYON_RL_DISTILL_MIN_AGE_HOURS", 12.0)
+        max_h = _env_hours("TAKYON_RL_DISTILL_MAX_AGE_HOURS", 336.0)
+        return min_h, max(max_h, min_h)
+
+    @staticmethod
+    def _flatten_metrics_snapshot(snap: Any) -> dict[str, float]:
+        """Flatten an _episode_metrics_snapshot payload into {metric: number}. Product counters
+        stay top-level; campaign entries (reddit/meta) sum across campaigns into impressions /
+        clicks / spend_cents; X totals merge under their own metric names (an episode has one
+        channel, so the names never collide in practice). Non-numeric keys (captured_at, slugs,
+        statuses) are dropped. Tolerant of partial or legacy snapshots — returns {} for one
+        that carries no numbers."""
+        out: dict[str, float] = {}
+        if not isinstance(snap, Mapping):
+            return out
+
+        def _num(value: Any) -> float | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            return None
+
+        for key in ("users", "revenue_cents", "usage_events"):
+            val = _num(snap.get(key))
+            if val is not None:
+                out[key] = val
+        campaigns = snap.get("campaigns")
+        if isinstance(campaigns, (list, tuple)):
+            for entry in campaigns:
+                if not isinstance(entry, Mapping):
+                    continue
+                for key in ("impressions", "clicks"):
+                    val = _num(entry.get(key))
+                    if val is not None:
+                        out[key] = out.get(key, 0.0) + val
+                spend_cents = _num(entry.get("spend_cents"))
+                if spend_cents is not None:
+                    out["spend_cents"] = out.get("spend_cents", 0.0) + spend_cents
+                else:
+                    # insights-sync receipts carry spend as USD; fold in only when the policy
+                    # row's cents figure is absent so spend is never double counted.
+                    spend_usd = _num(entry.get("spend_usd"))
+                    if spend_usd is not None:
+                        out["spend_cents"] = out.get("spend_cents", 0.0) + spend_usd * 100.0
+        x_stats = snap.get("x")
+        if isinstance(x_stats, Mapping):
+            for key in ("views", "impressions", "likes", "replies", "reposts", "clicks"):
+                val = _num(x_stats.get(key))
+                if val is not None:
+                    out[key] = out.get(key, 0.0) + val
+        return out
+
+    @classmethod
+    def _significant_metric_moves(cls, deltas: Mapping[str, Any]) -> dict[str, float]:
+        """The subset of before→after deltas crossing the fixed thresholds (absolute value, so
+        a measured drop is as significant as a gain)."""
+        out: dict[str, float] = {}
+        for key, threshold in cls._RL_SIGNIFICANT_DELTAS.items():
+            try:
+                delta = float(deltas.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(delta) >= float(threshold):
+                out[key] = delta
+        return out
+
+    @staticmethod
+    def _format_metric_delta(key: str, delta: float) -> str:
+        sign = "+" if delta >= 0 else "-"
+        magnitude = abs(delta)
+        if key.endswith("_cents"):
+            label = "revenue" if key == "revenue_cents" else key[:-6].replace("_", " ")
+            return f"{sign}${magnitude / 100:.2f} {label}"
+        return f"{sign}{int(round(magnitude))} {key.replace('_', ' ')}"
+
+    @classmethod
+    def _compose_measured_claim(cls, hypothesis: str, significant: Mapping[str, float],
+                                *, window_hours: float, channel: str | None) -> str:
+        """Deterministic, compact lesson text from an episode's measured outcome. No LLM, no
+        adjectives — the numbers are the claim. 'Measured:' prefix + the [measured] render
+        marker are what let the CEO weigh evidence-backed lessons over narrative ones."""
+        hyp = " ".join(str(hypothesis or "").split())
+        if len(hyp) > 100:
+            hyp = hyp[:97] + "..."
+        window = f"{window_hours:.0f}h" if window_hours < 72 else f"{window_hours / 24:.0f}d"
+        chan = f" on {channel}" if channel else ""
+        moved = {k: v for k, v in significant.items() if k != "spend_cents"}
+        spend = significant.get("spend_cents")
+        if moved:
+            parts = ", ".join(cls._format_metric_delta(k, v) for k, v in sorted(moved.items()))
+            spend_note = f" (spend ${abs(float(spend)) / 100:.2f})" if spend is not None else ""
+            return f"Measured: '{hyp}'{chan} -> {parts} in {window}{spend_note}"
+        return (f"Measured: '{hyp}'{chan} -> no significant movement despite "
+                f"${abs(float(spend or 0.0)) / 100:.2f} ad spend in {window}")
+
+    def distill_episode_lessons(self, slug: str, *, dry_run: bool = False,
+                                now: datetime | None = None) -> dict[str, Any]:
+        """Deterministic metrics→lessons pass (RL rail R8, fixed slice). For every not-yet-
+        observed ceo.episode.opened whose window has matured: before = the episode's open-time
+        metrics_snapshot, after = the same snapshot taken NOW, keep the episode as a lesson IFF
+        the delta crosses a fixed significance threshold. Exactly one append-only
+        ``ceo.episode.observed`` marker is written per evaluated episode (the idempotency
+        ledger: an episode is never judged twice, so a later unrelated metric drift can never be
+        re-attributed to an old bet), and each kept episode writes one ``ceo.learning`` with
+        source='auto:metrics' + evidence carrying the exact before/after/delta numbers. All
+        writes for one pass share one transaction. Per-episode failures are counted, never
+        raised. ``dry_run`` evaluates and reports without writing anything (backtest mode)."""
+        slug = _slugify(slug)
+        now_dt = now or datetime.now(timezone.utc)
+        min_age_h, max_age_h = self._rl_distill_window_hours()
+        summary: dict[str, Any] = {
+            "success": True, "business": slug, "dry_run": bool(dry_run),
+            "checked": 0, "pending": 0, "distilled": 0, "insignificant": 0,
+            "stale": 0, "no_baseline": 0, "errors": 0, "lessons": [],
+        }
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            observed_ids: set[str] = set()
+            for row in self._rl_fetch_events(conn, ["ceo.episode.observed"], slug=slug, limit=2000):
+                payload = row.get("payload") or {}
+                episode_id = str((payload or {}).get("episode_id") or "")
+                if episode_id:
+                    observed_ids.add(episode_id)
+
+            def _mark(marker: dict[str, Any]) -> None:
+                if dry_run:
+                    return
+                self._record_event(conn, scope=f"business:{slug}", business_slug=slug,
+                                   event_type="ceo.episode.observed", payload=marker)
+                observed_ids.add(str(marker.get("episode_id") or ""))
+
+            opened_rows = self._rl_fetch_events(conn, ["ceo.episode.opened"], slug=slug, limit=200)
+            for row in reversed(opened_rows):  # oldest first: deterministic evaluation order
+                payload = row.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
+                episode_id = str(payload.get("episode_id") or "")
+                if not episode_id or episode_id in observed_ids:
+                    continue
+                summary["checked"] += 1
+                try:
+                    opened_dt = (_parse_iso_datetime(payload.get("opened_at"))
+                                 or _parse_iso_datetime(row.get("created_at")))
+                    if opened_dt is None:
+                        raise TakyonError(f"episode {episode_id} has no parseable opened_at")
+                    age_hours = max(0.0, (now_dt - opened_dt).total_seconds() / 3600.0)
+                    if age_hours < min_age_h:
+                        summary["pending"] += 1
+                        continue  # not matured yet; a later wake evaluates it exactly once
+                    channel = str(payload.get("channel") or "").strip() or None
+                    marker: dict[str, Any] = {
+                        "episode_id": episode_id,
+                        "hypothesis": payload.get("hypothesis"),
+                        "channel": channel,
+                        "window_hours": round(age_hours, 2),
+                        "observed_at": _now(),
+                    }
+                    if age_hours > max_age_h:
+                        summary["stale"] += 1
+                        marker["skipped"] = "stale"
+                        _mark(marker)
+                        continue
+                    before = self._flatten_metrics_snapshot(payload.get("metrics_snapshot"))
+                    if not before:
+                        summary["no_baseline"] += 1
+                        marker["skipped"] = "no-baseline"
+                        _mark(marker)
+                        continue
+                    after = self._flatten_metrics_snapshot(
+                        _episode_metrics_snapshot(self, conn, slug, channel))
+                    deltas = {key: after.get(key, 0.0) - before.get(key, 0.0)
+                              for key in (set(before) | set(after))}
+                    significant = self._significant_metric_moves(deltas)
+                    marker.update({
+                        "significant": bool(significant),
+                        "before": before,
+                        "after": after,
+                        "deltas": {k: round(v, 2) for k, v in sorted(deltas.items())},
+                    })
+                    if not significant:
+                        summary["insignificant"] += 1
+                        _mark(marker)
+                        continue
+                    claim = self._compose_measured_claim(
+                        str(payload.get("hypothesis") or ""), significant,
+                        window_hours=age_hours, channel=channel)
+                    evidence_entry = {
+                        "episode_id": episode_id,
+                        "window_hours": round(age_hours, 2),
+                        "before": before,
+                        "after": after,
+                        "deltas": {k: round(v, 2) for k, v in sorted(significant.items())},
+                    }
+                    lesson: dict[str, Any] = {
+                        "episode_id": episode_id, "claim": claim,
+                        "deltas": evidence_entry["deltas"],
+                    }
+                    if not dry_run:
+                        tags = [t for t in (channel, str(payload.get("action_kind") or "").strip()) if t]
+                        lesson_payload = self._learning_payload(
+                            slug, claim, tags=tags, evidence=[evidence_entry], source="auto:metrics")
+                        lesson_event_id = self._record_event(
+                            conn, scope=f"business:{slug}", business_slug=slug,
+                            event_type="ceo.learning", payload=lesson_payload)
+                        marker["lesson_event_id"] = lesson_event_id
+                        lesson["lesson_event_id"] = lesson_event_id
+                        _mark(marker)
+                    summary["lessons"].append(lesson)
+                    summary["distilled"] += 1
+                except Exception:
+                    summary["errors"] += 1
+                    continue
+        return summary
+
+    # --- RL learnings render: the compressed block APPENDED to the END of the wake prompt ----
+
+    @staticmethod
+    def _rl_lessons_char_budget() -> int:
+        """Hard character budget for the rendered learnings block (env-overridable). This is
+        what lets a long-lived business hold MANY lessons in the store without unbounded wake
+        prompt growth — the block compresses to fit, it never grows past the budget."""
+        try:
+            value = int(os.environ.get("TAKYON_RL_LESSONS_CHAR_BUDGET") or 4000)
+        except (TypeError, ValueError):
+            return 4000
+        return max(400, value)
+
+    @staticmethod
+    def _learning_render_entries(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Dedupe + rank lessons for rendering. Near-duplicates (same claim modulo digits and
+        punctuation) collapse into one entry with an (xN) repeat count, keeping the highest-
+        provenance then newest representative. Rank tiers: human-approved 'proven' (2) >
+        evidence-backed / auto-measured (1) > plain narrative candidate (0); newest first
+        within a tier — so an operator-approved or measured lesson can no longer be crowded
+        out of the prompt by newer unreviewed narrative."""
+        def tier(p: Mapping[str, Any]) -> int:
+            if str(p.get("_effective_status") or "") == "proven":
+                return 2
+            if p.get("evidence") or str(p.get("source") or "").startswith("auto:"):
+                return 1
+            return 0
+
+        def dedupe_key(claim: str) -> str:
+            text = re.sub(r"[0-9]+(?:\.[0-9]+)?", "#", claim.lower())
+            text = re.sub(r"[^a-z#]+", " ", text)
+            return " ".join(text.split())
+
+        merged: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for p in payloads:
+            claim = str((p or {}).get("claim") or "").strip()
+            if not claim:
+                continue
+            key = dedupe_key(claim)
+            candidate = {"claim": claim, "tier": tier(p),
+                         "created_at": str(p.get("created_at") or ""), "count": 1}
+            entry = merged.get(key)
+            if entry is None:
+                merged[key] = candidate
+                order.append(key)
+            else:
+                entry["count"] += 1
+                if (candidate["tier"], candidate["created_at"]) > (entry["tier"], entry["created_at"]):
+                    entry.update({k: candidate[k] for k in ("claim", "tier", "created_at")})
+        entries = [merged[k] for k in order]
+        entries.sort(key=lambda e: (e["tier"], e["created_at"]), reverse=True)
+        return entries
+
+    @staticmethod
+    def _render_learning_line(entry: Mapping[str, Any]) -> str:
+        marker = {2: "[proven] ", 1: "[measured] "}.get(int(entry.get("tier") or 0), "")
+        claim = str(entry.get("claim") or "")
+        if len(claim) > 240:
+            claim = claim[:237] + "..."
+        repeat = f" (x{int(entry.get('count') or 1)})" if int(entry.get("count") or 1) > 1 else ""
+        return f"- {marker}{claim}{repeat}"
+
+    def _assemble_wake_learnings(self, slug: str) -> str:
+        """The compressed Learnings block APPENDED to the END of every wake prompt by
+        _ceo_cron_prompt (the recency-weighted position in the context window). Own lessons
+        first, then borrowed cross-business lessons; each group deduped and packed highest-
+        provenance-then-newest into the hard character budget. Never raises — degrades to
+        empty."""
+        slug = _slugify(slug)
+        try:
+            with self._connect() as conn:
+                intra, inter = self._retrieve_learnings(conn, slug)
+        except Exception:
+            return ""
+        budget = self._rl_lessons_char_budget()
+        used = 0
+        blocks: list[str] = []
+        for header, payloads in (("Learnings from this business:", intra),
+                                 ("Learnings from similar businesses:", inter)):
+            lines: list[str] = []
+            for entry in self._learning_render_entries(payloads):
+                line = self._render_learning_line(entry)
+                if used + len(line) + 1 > budget:
+                    break
+                lines.append(line)
+                used += len(line) + 1
+            if lines:
+                blocks.append(header + "\n" + "\n".join(lines))
+        if not blocks:
+            return ""
+        return (
+            "== Learnings (your accumulated playbook; [proven] = operator-approved, "
+            "[measured] = auto-distilled from tracked metric deltas) ==\n"
+            + "\n".join(blocks)
+            + "\n== end learnings =="
+        )
 
     def set_identity(self, slug: str, identity: str) -> dict[str, Any]:
         """RL rail R5: set the CEO's stable identity, injected at the top of every wake."""
@@ -17640,7 +18023,7 @@ class TakyonStore:
         out: list[dict[str, Any]] = []
         with self._connect() as conn:
             reviews = self._rl_review_status(conn, slug=None)
-            for row in self._rl_fetch_events(conn, types, slug=slug, limit=500):
+            for row in self._rl_fetch_events(conn, types, slug=slug, limit=max(500, int(limit))):
                 p = row.get("payload") or {}
                 if not isinstance(p, dict):
                     continue
@@ -17659,6 +18042,7 @@ class TakyonStore:
                     "claim": p.get("claim"),
                     "tags": p.get("tags") or [],
                     "evidence": p.get("evidence") or [],
+                    "source": p.get("source") or "ceo",
                     "status": effective,
                     "human_reviewed": decided is not None,
                     "created_at": row.get("created_at"),
@@ -17696,8 +18080,9 @@ class TakyonStore:
 
     def rl_why(self, episode_id: str) -> dict[str, Any]:
         """Reconstruct the reasoning behind a bet: the bet itself, the context that was injectable
-        just before it (identity + latest state-of-mind), and its settled outcome. All from events;
-        absent pieces are reported as null, never invented."""
+        just before it (identity + latest state-of-mind), its deterministic metric observation
+        (the distiller's before/after/deltas marker, when the episode has been evaluated), and its
+        settled outcome. All from events; absent pieces are reported as null, never invented."""
         episode_id = str(episode_id or "").strip()
         if not episode_id:
             raise TakyonError("episode_id required")
@@ -17711,6 +18096,8 @@ class TakyonStore:
             opened_at = str(op_p.get("opened_at") or opened.get("created_at") or "")
             settled = next((r for r in self._rl_fetch_events(conn, ["ceo.episode.settled"], slug=slug, limit=2000)
                             if str((r.get("payload") or {}).get("episode_id") or "") == episode_id), None)
+            observed = next((r for r in self._rl_fetch_events(conn, ["ceo.episode.observed"], slug=slug, limit=2000)
+                             if str((r.get("payload") or {}).get("episode_id") or "") == episode_id), None)
             # context that existed BEFORE the bet (truthful: latest with created_at <= opened_at)
             def latest_before(event_type: str) -> dict[str, Any] | None:
                 for r in self._rl_fetch_events(conn, [event_type], slug=slug, limit=500):
@@ -17730,41 +18117,51 @@ class TakyonStore:
                 "identity": (identity or {}).get("identity"),
                 "state_of_mind": (som or {}).get("note"),
             },
+            "observation": (observed.get("payload") if observed else None),
+            "observed": observed is not None,
             "outcome": (settled.get("payload") if settled else None),
             "settled": settled is not None,
         }
 
     def rl_status(self, slug: str | None = None) -> dict[str, Any]:
-        """Per-business RL summary from events: counts of episodes (open/settled), lessons by
-        effective status, last activity. Zeros when there is nothing — never padded."""
+        """Per-business RL summary from events: counts of episodes (open/observed/settled),
+        lessons by effective status + authorship, last activity. Zeros when there is nothing —
+        never padded. 'observed' = deterministically evaluated by the metrics distiller;
+        'settled' stays reserved for the future money-attribution settle job."""
         slug = _slugify(slug) if slug else None
         with self._connect() as conn:
             opened = self._rl_fetch_events(conn, ["ceo.episode.opened"], slug=slug, limit=5000)
+            observed = self._rl_fetch_events(conn, ["ceo.episode.observed"], slug=slug, limit=5000)
             settled = self._rl_fetch_events(conn, ["ceo.episode.settled"], slug=slug, limit=5000)
             som = self._rl_fetch_events(conn, ["ceo.state_of_mind"], slug=slug, limit=1)
         lessons = self.rl_lessons(slug, limit=10000)["lessons"]
         by_status: dict[str, int] = {}
         for ln in lessons:
             by_status[ln["status"]] = by_status.get(ln["status"], 0) + 1
+        auto_lessons = sum(1 for ln in lessons if str(ln.get("source") or "").startswith("auto:"))
         rewards = [p.get("reward") for r in settled if isinstance((p := r.get("payload")), dict) and p.get("reward") is not None]
         return {
             "success": True,
             "business": slug or "(all)",
             "episodes_opened": len(opened),
+            "episodes_observed": len(observed),
             "episodes_settled": len(settled),
             "lessons_total": len(lessons),
             "lessons_by_status": by_status,
+            "lessons_auto_distilled": auto_lessons,
             "rewarded_episodes": len(rewards),
             "last_state_of_mind_at": (som[0].get("created_at") if som else None),
             "last_episode_at": (opened[0].get("created_at") if opened else None),
         }
 
     def rl_policy(self, slug: str) -> dict[str, Any]:
-        """The CEO's current injected policy for a business = exactly what _assemble_wake_memory
-        produces (identity + state-of-mind + recent bets + non-rejected learnings). Returns the
-        real injected text plus its structured pieces — this IS the policy, not a description."""
+        """The CEO's current injected policy for a business = exactly what the wake carries:
+        the memory block PREPENDED to the wake user turn (identity + state-of-mind + recent
+        bets) plus the compressed learnings block APPENDED to its end. Returns the real
+        injected text plus its structured pieces — this IS the policy, not a description."""
         slug = _slugify(slug)
-        injected = self._assemble_wake_memory(slug)
+        memory = self._assemble_wake_memory(slug)
+        learnings = self._assemble_wake_learnings(slug)
         with self._connect() as conn:
             identity = self._latest_event_payload(conn, slug, "ceo.identity")
             som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
@@ -17772,7 +18169,9 @@ class TakyonStore:
         return {
             "success": True,
             "business": slug,
-            "injected_text": injected,
+            "injected_text": memory + ("\n\n" if memory and learnings else "") + learnings,
+            "injected_memory": memory,
+            "injected_learnings": learnings,
             "identity": (identity or {}).get("identity"),
             "state_of_mind": (som or {}).get("note"),
             "active_intra_learnings": [p.get("claim") for p in intra if isinstance(p, dict)],
@@ -21475,6 +21874,7 @@ class TakyonStore:
                 "otherwise just keep metrics/summary.md current with this wake's pulse. "
             )
         memory_block = self._assemble_wake_memory(slug)
+        learnings_block = self._assemble_wake_learnings(slug)
         return (
             memory_block
             + f"CEO wakeup for business:{slug}.\n"
@@ -21506,14 +21906,18 @@ class TakyonStore:
             "metric, event, conversation, ledger, job, or wake data during a wake. "
             "Record the 1-2 moves you choose as bets with business_record_episode, and before you sleep write where "
             "you are leaving off with business_open_state_of_mind so your next wake remembers this one. "
-            "When an outcome teaches you something durable, capture it with business_record_learning (scope 'business' "
-            "for this company's own playbook; scope 'shared' if it should help similar businesses). "
+            "When an outcome teaches you something durable that the numbers cannot express on their own, capture it "
+            "with business_record_learning (scope 'business' for this company's own playbook; scope 'shared' if it "
+            "should help similar businesses; include evidence refs when you have them). Measured outcomes are "
+            "distilled into [measured] lessons automatically from your recorded episodes' metric deltas — do not "
+            "re-record what the numbers already say. "
             f"{daily_summary_line}"
             "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
             "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
             "or outreach/marketing email delivery. "
             "When the 1-2 tasks are done and this wake's snapshot (and any daily summary) is written, end the turn and sleep "
             "until the next scheduled wake; do not start additional work beyond the capped tasks."
+            + (f"\n\n{learnings_block}" if learnings_block else "")
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
@@ -22663,6 +23067,7 @@ def handle_business_record_learning(args: dict, **_: Any) -> str:
             str(args.get("claim") or ""),
             tags=args.get("tags"),
             scope=str(args.get("scope") or "business"),
+            evidence=args.get("evidence"),
         ))
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -29472,7 +29877,7 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
     against measured state instead of narrative: lifetime product counters always (users, revenue,
     usage events), plus the episode channel's live-campaign delivery stats (spend from the policy
     registry; impressions/clicks from the latest insights-sync receipt) for reddit/meta, and the
-    latest X sync totals for channel=x. Best-effort by design: every source is wrapped so a missing
+    aggregated X metrics summary totals for channel=x. Best-effort by design: every source is wrapped so a missing
     table (SQLite dev store has no ad-spend policies), missing file, or provider gap degrades to
     fewer keys — never an exception, never a blocked episode."""
     snap: dict[str, Any] = {"captured_at": _now()}
@@ -29481,8 +29886,13 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
             "SELECT COUNT(*) AS n FROM app_users WHERE business_slug = ?", (slug,)
         ).fetchone()
         snap["users"] = int(_row_value_int(row, "n"))
+        # NET revenue, mirroring the canonical reader (app_payments.get_revenue_summary /
+        # core pulse): reversal rows (refunds/chargebacks) are stored with a POSITIVE
+        # amount_paid_cents but revenue_type='reversal' — they must subtract, or a refund
+        # inside an episode's window would measure as a false positive revenue delta.
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
+            "SELECT COALESCE(SUM(CASE WHEN revenue_type = 'reversal' THEN -amount_paid_cents "
+            "ELSE amount_paid_cents END), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
             (slug,),
         ).fetchone()
         snap["revenue_cents"] = int(_row_value_int(row, "c"))
@@ -29492,12 +29902,42 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
         snap["usage_events"] = int(_row_value_int(row, "n"))
     except Exception:
         pass
+    # Checkout + conversation counters: the judgeable numbers for pricing/checkout bets and for
+    # outreach/support/conversation bets. Same always-on, never-raising posture as the product
+    # counters above (each in its own guard so one missing table costs only its own keys).
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_checkout_intents WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["checkout_intents"] = int(_row_value_int(row, "n"))
+    except Exception:
+        pass
+    try:
+        row = conn.execute(
+            """
+            SELECT SUM(CASE WHEN direction = 'inbound' THEN 1 ELSE 0 END) AS inbound,
+                   SUM(CASE WHEN direction = 'inbound' AND status = 'needs_response' THEN 1 ELSE 0 END) AS unresolved
+            FROM conversation_messages WHERE business_slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+        snap["inbound_messages"] = int(_row_value_int(row, "inbound"))
+        snap["unresolved_inbound"] = int(_row_value_int(row, "unresolved"))
+    except Exception:
+        pass
     bucket = _normalize_creative_credit_bucket(channel) if channel else ""
     if bucket in ("reddit", "meta"):
         try:
             backend = _business_ad_spend_backend()
             campaigns: list[dict[str, Any]] = []
-            for policy in backend.list_policies(conn, slug, statuses=list(_PULSE_AD_LIVE_STATUSES)):
+            # Measurement needs a status set that is STABLE across a campaign's lifecycle:
+            # if the "after" snapshot listed only live statuses, a campaign completing (or
+            # settling at its cap) between an episode's open and its observation would vanish
+            # from the after side and mint phantom NEGATIVE delivery deltas. So include the
+            # full lifecycle (reserved/created_paused contribute zeros; completed keeps its
+            # final reconciled numbers), unlike the pulse which deliberately shows live-only.
+            _snapshot_statuses = list(_PULSE_AD_CAMPAIGN_STATUSES) + ["completed"]
+            for policy in backend.list_policies(conn, slug, statuses=_snapshot_statuses):
                 if str(policy.channel or "") != bucket:
                     continue
                 entry: dict[str, Any] = {
@@ -29526,17 +29966,50 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
             pass
     elif bucket == "x":
         try:
-            syncs_dir = store._resolve_business_file(slug, "metrics/x/syncs", sync=False)
-            latest = max((p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime)
-            receipt = json.loads(latest.read_text(encoding="utf-8")) or {}
-            totals = receipt.get("totals") if isinstance(receipt.get("totals"), dict) else {}
-            x_stats = {
-                k: totals[k]
-                for k in ("views", "impressions", "likes", "replies", "reposts", "clicks")
-                if totals.get(k) is not None
-            }
+            # Business-level X totals live in metrics/x/summary.json (_x_write_summary), NOT in
+            # the per-post sync receipts (those carry only per-post public/organic metric maps
+            # and no "totals" key — reading them here silently yielded nothing). The summary's
+            # totals keep the raw X API metric names, so map them to the snapshot vocabulary.
+            summary_abs = store._resolve_business_file(slug, _x_metrics_summary_rel(), sync=False)
+            summary = json.loads(summary_abs.read_text(encoding="utf-8")) or {}
+            totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+            public = totals.get("public_metrics") if isinstance(totals.get("public_metrics"), dict) else {}
+            x_stats: dict[str, int] = {}
+            for src, dst in (("impression_count", "impressions"), ("like_count", "likes"),
+                             ("reply_count", "replies")):
+                if public.get(src) is not None:
+                    x_stats[dst] = int(public.get(src) or 0)
+            if public.get("retweet_count") is not None or public.get("quote_count") is not None:
+                x_stats["reposts"] = int(public.get("retweet_count") or 0) + int(public.get("quote_count") or 0)
+            for section in ("non_public_metrics", "organic_metrics"):
+                sec = totals.get(section) if isinstance(totals.get(section), dict) else {}
+                if sec.get("url_link_clicks") is not None:
+                    x_stats["clicks"] = int(sec.get("url_link_clicks") or 0)
+                    break
             if x_stats:
                 snap["x"] = x_stats
+        except Exception:
+            pass
+    if str(channel or "").strip().lower() in (
+        "product", "site", "website", "app", "seo", "content", "landing", "launch",
+    ):
+        # Site/product/content bets are judged on traffic: best-effort web-analytics snapshot
+        # (the helper caches per window and returns {"configured": False} when analytics is off,
+        # so this degrades to nothing rather than a provider hit per episode).
+        try:
+            analytics = _business_analytics_summary(slug)
+            if analytics.get("ok"):
+                stats = analytics.get("stats") if isinstance(analytics.get("stats"), dict) else {}
+                web: dict[str, Any] = {}
+                for key in ("pageviews", "visitors", "uniques", "visits"):
+                    value = stats.get(key)
+                    if isinstance(value, dict):
+                        value = value.get("value")
+                    if value is not None:
+                        web[key] = int(value)
+                if web:
+                    web["window_days"] = analytics.get("window_days")
+                    snap["web"] = web
         except Exception:
             pass
     return snap
@@ -36166,7 +36639,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_record_learning",
         "description": "Record a durable learning. scope 'business' = this business's own playbook (always surfaced for it); scope 'shared' = a cross-business prior surfaced to similar businesses by tag overlap (RL rail R7).",
         "handler": handle_business_record_learning,
-        "schema": _schema("business_record_learning", "Record a learning for this business or the shared cross-business pool.", {"business": _BUSINESS_PROP, "claim": {"type": "string", "description": "The lesson, 1-2 sentences."}, "tags": {"type": "array", "items": {"type": "string"}, "description": "Situation tags for retrieval, e.g. ['b2c','reddit','pre-launch']."}, "scope": {"type": "string", "enum": ["business", "shared"], "description": "'business' (intra, default) or 'shared' (inter/cross-business)."}}, ["business", "claim"]),
+        "schema": _schema("business_record_learning", "Record a learning for this business or the shared cross-business pool.", {"business": _BUSINESS_PROP, "claim": {"type": "string", "description": "The lesson, 1-2 sentences."}, "tags": {"type": "array", "items": {"type": "string"}, "description": "Situation tags for retrieval, e.g. ['b2c','reddit','pre-launch']."}, "scope": {"type": "string", "enum": ["business", "shared"], "description": "'business' (intra, default) or 'shared' (inter/cross-business)."}, "evidence": {"type": "array", "items": {"type": "string"}, "description": "Optional proof refs: episode ids, receipt/file paths, or measured numbers that back this claim."}}, ["business", "claim"]),
     },
     {
         "name": "business_set_identity",
