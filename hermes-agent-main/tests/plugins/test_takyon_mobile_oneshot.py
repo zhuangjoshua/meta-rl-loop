@@ -198,3 +198,15 @@ def test_operator_creative_gate_flag_parsing(monkeypatch, raw, expected):
         monkeypatch.delenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", raising=False)
     assert core._operator_creative_gate_disabled() is expected
     assert safebox_app._operator_creative_gate_disabled() is expected
+
+
+# ── regression pin: the mobile_release audience must ride the safebox creative gate ───────
+# (c87547a0 was clobbered once by a stale-base core.py push; a missing entry silently
+# downgrades the reserve to the local branch, which refuses on remote planes.)
+
+
+def test_mobile_release_audience_registered_on_both_halves():
+    from plugins.takyon import core, safebox_app
+
+    assert core._creative_credit_action_audience("mobile_release") == "creative.mobile_release"
+    assert safebox_app._CREATIVE_AUDIENCE_CREDIT_ACTION.get("creative.mobile_release") == "mobile_release"

@@ -29316,10 +29316,12 @@ def _reserve_creative_credits(
                     reserved_credits=_creative_credit_int(channel.get("reserved_credits")),
                 )
         if not use_safebox_gate:
-            if gate_disabled and requested > available_credits:
-                # God-mode local top-up: grant exactly the shortfall (idempotent on the reservation
-                # key, bypass-tagged in the ledger) so the reserve below succeeds without ever
-                # loosening the ledger's non-negative invariant.
+            if gate_disabled and requested > available_credits and not safebox._use_remote_authority():
+                # God-mode local top-up — LOCAL-AUTHORITY planes only (dev/rig): grant exactly the
+                # shortfall (idempotent on the reservation key, bypass-tagged) so the reserve below
+                # succeeds. A remote-enabled plane must never mint — its shortfall bypass is the
+                # SAFEBOX route's authority-side grant (and with the audience registered, the
+                # remote path is the one that runs there anyway).
                 credits_backend._local_grant_credits(
                     conn,
                     business,
@@ -29713,7 +29715,9 @@ def _reserve_channel_spend_credits(
                 reserved_credits=_creative_credit_int(channel_budget.get("reserved_credits")),
             )
         if not use_safebox_gate:
-            if gate_disabled and requested > available_credits:
+            if gate_disabled and requested > available_credits and not safebox._use_remote_authority():
+                # Local-authority planes only (dev/rig): a remote-enabled plane must never mint —
+                # its shortfall bypass is the SAFEBOX route's authority-side grant.
                 credits_backend._local_grant_credits(
                     conn,
                     business,
@@ -31863,6 +31867,11 @@ _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "reddit_ad_launch": "creative.reddit_ad_launch",
     "meta_ad_media_spend": "creative.meta_ad_media_spend",
     "reddit_ad_media_spend": "creative.reddit_ad_media_spend",
+    # mobile_release rides the safebox creative gate on prod (c87547a0, E2E-found; restored
+    # 2026-07-09 after a stale-base core.py push clobbered it — safebox_app's reverse map kept
+    # its half, so a missing entry here silently downgraded the reserve to the LOCAL branch,
+    # which correctly refuses on remote planes). Pinned by test_takyon_mobile_oneshot.py.
+    "mobile_release": "creative.mobile_release",
 }
 
 
