@@ -629,25 +629,17 @@ require_files() {
 
 ensure_home() {
   mkdir -p "$OPERATOR_HOME" "$LOCAL_PROD_ROOT/logs"
-  if [[ -f "$ROOT/.takyon/config.yaml" ]]; then
-    if ! cmp -s "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
-      cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
-    fi
-  elif ssh_base "test -f /opt/takyon/.takyon/config.yaml"; then
-    # No workspace config (fresh/stale clone): the VPS runtime config is CANONICAL — adopt it
-    # on EVERY launch, not only when the operator home has none. A stale operator-home config
-    # otherwise survives git pull forever and silently runs dead model lanes (observed
-    # 2026-07-08: a collaborator's machine kept old anthropic/claude-opus-4-8 pins and every
-    # CEO call 400'd while the current rails are gpt-5.5 + deepseek).
-    ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml.vps.tmp" || rm -f "$OPERATOR_HOME/config.yaml.vps.tmp"
-    if [[ -s "$OPERATOR_HOME/config.yaml.vps.tmp" ]]; then
-      if ! cmp -s "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
-        mv "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml"
-        echo "→ Adopted current runtime config from the VPS (model pins refreshed)"
-      else
-        rm -f "$OPERATOR_HOME/config.yaml.vps.tmp"
-      fi
-    fi
+  # The production VPS config is canonical. A workspace-local config must never override the
+  # production CEO/worker model split on the Mac-primary compute rail.
+  ssh_base "test -f /opt/takyon/.takyon/config.yaml" || die "operator VPS config is missing"
+  ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml.vps.tmp" \
+    || die "failed to fetch canonical operator VPS config"
+  [[ -s "$OPERATOR_HOME/config.yaml.vps.tmp" ]] || die "operator VPS config is empty"
+  if ! cmp -s "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
+    mv "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml"
+    echo "→ Adopted canonical runtime config from the VPS"
+  else
+    rm -f "$OPERATOR_HOME/config.yaml.vps.tmp"
   fi
   if ssh_base "test -f /opt/takyon/.takyon/dashboard_session_token"; then
     ssh_base "cat /opt/takyon/.takyon/dashboard_session_token" >"$OPERATOR_HOME/dashboard_session_token"
@@ -680,6 +672,14 @@ keys = {
     'R2_BUCKET',
     'TERMINAL_DOCKER_IMAGE',
     'TAKYON_CLAUDE_AGENT_DOCKER_IMAGE',
+    'TAKYON_STRICT_MODEL_ROLES',
+    'TAKYON_MODEL',
+    'TAKYON_CLAUDE_AGENT_MODEL',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'CLAUDE_CODE_SUBAGENT_MODEL',
 }
 
 pid = subprocess.check_output(
@@ -711,6 +711,24 @@ missing = [
 ]
 if missing:
     raise SystemExit('missing required operator env: ' + ', '.join(missing))
+
+expected_models = {
+    'TAKYON_STRICT_MODEL_ROLES': '1',
+    'TAKYON_MODEL': 'gpt-5.5',
+    'TAKYON_CLAUDE_AGENT_MODEL': 'deepseek-v4-pro',
+    'ANTHROPIC_MODEL': 'deepseek-v4-pro',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL': 'deepseek-v4-pro',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL': 'deepseek-v4-pro',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'deepseek-v4-pro',
+    'CLAUDE_CODE_SUBAGENT_MODEL': 'deepseek-v4-pro',
+}
+wrong = [
+    f'{key}={env.get(key) or "<missing>"}'
+    for key, expected in expected_models.items()
+    if env.get(key) != expected
+]
+if wrong:
+    raise SystemExit('operator model pins do not match production contract: ' + ', '.join(wrong))
 
 for key in sorted(env):
     print(f'export {key}={shlex.quote(env[key])}')

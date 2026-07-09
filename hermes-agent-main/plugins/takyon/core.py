@@ -83,7 +83,6 @@ TAKYON_AUTHORITY_TOOLSET = "takyon-authority"
 OPERATOR_UPDATE_CATEGORIES = ("RESEARCH", "PRODUCT", "LAUNCH", "GROWTH", "OPS")
 OPERATOR_UPDATE_STATUSES = ("queued", "running", "blocked", "completed")
 DEFAULT_TAKYON_DIRNAME = "takyon"
-DEFAULT_CLAUDE_AGENT_MODEL = "claude-sonnet-5"
 MAX_READ_CHARS = 64_000
 MAX_WRITE_CHARS = 1_000_000
 CURRENT_BUSINESS_SCHEMA_VERSION = 1
@@ -8161,6 +8160,21 @@ _CLAUDE_AGENT_BROKER_MAX_COST_MICROUSD = int(
 )
 
 
+def _claude_agent_model_aliases(model: object) -> dict[str, str]:
+    """Pin the SDK main model and every internal model alias to one exact model."""
+    value = str(model or "").strip()
+    if not value:
+        raise TakyonError("coding worker model pin is empty")
+    return {
+        "TAKYON_CLAUDE_AGENT_MODEL": value,
+        "ANTHROPIC_MODEL": value,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": value,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": value,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": value,
+        "CLAUDE_CODE_SUBAGENT_MODEL": value,
+    }
+
+
 def _claude_agent_broker_lockdown_enabled() -> bool:
     """Whether the coding worker runs key-free against the safebox proxy (the only supported path).
 
@@ -8322,8 +8336,10 @@ def _run_claude_agent_task_in_docker(
         or os.getenv("TERMINAL_DOCKER_IMAGE")
         or "nikolaik/python-nodejs:python3.11-nodejs20"
     ).strip()
+    worker_model = _resolve_claude_agent_model(payload.get("model"))
     payload = {
         **payload,
+        "model": worker_model,
         "cwd": "/workspace",
         "root": "/workspace",
     }
@@ -8336,6 +8352,7 @@ def _run_claude_agent_task_in_docker(
         # safebox Messages proxy; beta fields such as context_management can
         # be rejected upstream before the agent starts.
         _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV: "1",
+        **_claude_agent_model_aliases(worker_model),
     })
 
     # Coding-worker broker lockdown — the ONLY provider-auth path (the legacy raw-key fallback is
@@ -8379,6 +8396,7 @@ def _run_claude_agent_task_in_docker(
     env_keys = [
         "CLAUDE_AGENT_SDK_CLIENT_APP",
         _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV,
+        "TAKYON_CLAUDE_AGENT_MODEL",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -9703,10 +9721,47 @@ def _model_from_config(*keys: str) -> str:
                 value = str(model_data.get(key) or "").strip()
                 if value:
                     return value
+            if keys:
+                return ""
             return str(model_data.get("default") or model_data.get("model") or "").strip()
     except Exception:
         return ""
     return ""
+
+
+def _resolve_claude_agent_model(requested_model: object = None) -> str:
+    """Resolve one coding-worker model and keep it fixed for the run.
+
+    ``TAKYON_CLAUDE_AGENT_MODEL`` is an operator deployment pin. A tool call may not override it.
+    Without that env pin, an explicit request or ``model.claude_agent_default`` is required. There
+    is deliberately no built-in model default: missing configuration fails closed instead of
+    silently switching providers.
+    """
+    requested = str(requested_model or "").strip()
+    pinned = str(os.getenv("TAKYON_CLAUDE_AGENT_MODEL") or "").strip()
+    configured = _model_from_config("claude_agent_default", "deep_work_default")
+    strict_roles = str(os.getenv("TAKYON_STRICT_MODEL_ROLES") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if strict_roles and pinned != "deepseek-v4-pro":
+        raise TakyonError(
+            "strict coding-worker role requires TAKYON_CLAUDE_AGENT_MODEL='deepseek-v4-pro'"
+        )
+    if pinned:
+        if requested and requested != pinned:
+            raise TakyonError(
+                "coding worker model override refused: "
+                f"requested {requested!r}, pinned {pinned!r} by TAKYON_CLAUDE_AGENT_MODEL"
+            )
+        return pinned
+    if requested:
+        return requested
+    if configured:
+        return configured
+    raise TakyonError(
+        "coding worker model is not configured: set TAKYON_CLAUDE_AGENT_MODEL or "
+        "model.claude_agent_default; no fallback model is available"
+    )
 
 
 def _analytics_umami_config() -> dict[str, Any]:
@@ -35544,23 +35599,10 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         ).strip().lower()
         if effort not in {"low", "medium", "high"}:
             effort = "medium" if customer_facing_product_workspace else "high"
-        # The configured coding-worker model (model.claude_agent_default) is the SINGLE source of
-        # truth for BOTH lanes. The customer-facing branch used to hardcode "claude-sonnet-5" and
-        # IGNORE that config, which was a silent trap after the provider split: on any host where
-        # TAKYON_CLAUDE_AGENT_MODEL was not exported (a fresh collaborator clone — the env-fetch
-        # never propagated it), a product/site build fell to claude-sonnet-5, and the safebox proxy
-        # routes claude-* to the platform Anthropic account (credit-dead) -> "Credit balance is too
-        # low", while deepseek-* routes to the live DeepSeek endpoint (climuru on Sai's machine,
-        # 2026-07-08). Honor the config pin first; keep claude-sonnet-5 only as the customer-facing
-        # fallback when no pin is configured. VPS is unchanged (its env var still wins below).
-        default_model = _model_from_config("claude_agent_default", "deep_work_default") or (
-            "claude-sonnet-5" if customer_facing_product_workspace else DEFAULT_CLAUDE_AGENT_MODEL
-        )
-        model = str(
-            args.get("model")
-            or os.getenv("TAKYON_CLAUDE_AGENT_MODEL")
-            or default_model
-        ).strip()
+        # One model for the whole coding-worker run. The deployment env is an authoritative pin;
+        # per-call overrides that disagree are refused, and missing configuration has no implicit
+        # Claude/provider fallback.
+        model = _resolve_claude_agent_model(args.get("model"))
         guidance_skills: list[str] = []
         guidance_selection_reason = ""
         resolved_guidance_skills: list[str] = []
@@ -35791,12 +35833,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         # ANTHROPIC_BASE_URL = safebox proxy ROOT + a minted operator.session token (real
                         # owner), NO raw provider key. Fails closed if the safebox is unreachable / refuses
                         # the mint (there is no raw-key fallback to inject here anymore).
+                        worker_env = _claude_agent_non_docker_worker_env(business, operator_user_id)
+                        worker_env.update(_claude_agent_model_aliases(model))
                         proc = _run_claude_agent_task_process(
                             run_cmd=[node, str(script)],
                             payload=attempt_payload,
                             cwd=str(_repo_root()),
                             timeout_ms=timeout_ms,
-                            env=_claude_agent_non_docker_worker_env(business, operator_user_id),
+                            env=worker_env,
                             business=business,
                             workspace_rel=workspace_rel,
                         )
@@ -38214,7 +38258,6 @@ TAKYON_TOOL_DEFINITIONS = [
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
                 "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus ONE shared style pack (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-doodle, claude-design-brutalist), and claude-refresh-audit on UI-refresh passes. When omitted on a customer-facing product workspace, the runtime auto-injects claude-design plus a generic style pack; pass an explicit empty list to opt out."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
-                "model": {"type": "string", "description": "Optional Claude model override. Product/site work defaults to claude-sonnet-5; other work follows the configured Claude agent default."},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},
                 "timeout_ms": {"type": "integer", "description": "Wall-clock timeout, default 1200000 for product/site work and 300000 otherwise"},

@@ -33,8 +33,8 @@ deploy/argon-alpha-14/repair-product-runtime.sh
 ```
 
 The operator plane's tracked runtime contract includes Docker because
-`business_claude_agent_task` defaults `product/site` work onto the isolated
-Docker rail. `deploy-runtime.sh` now bootstraps/verifies Docker and fails fast
+`business_claude_agent_task` runs `product/site` work on the isolated Docker
+rail with the deployment-pinned DeepSeek model. `deploy-runtime.sh` now bootstraps/verifies Docker and fails fast
 if the operator host cannot run the tracked Claude Agent SDK container image.
 The tracked contract now also includes a pinned system-wide `deno` install plus
 `systemd-run`, because scheduled product actions execute on this plane through

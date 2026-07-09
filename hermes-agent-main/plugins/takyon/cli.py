@@ -4313,14 +4313,14 @@ def _write_model_config(store: TakyonStore, provider: str, model: str) -> dict[s
 def _format_model_config(store: TakyonStore) -> str:
     data = _read_model_config(store)
     model = data.get("model") or "(not set)"
-    claude_agent_model = data.get("claude_agent_model") or "(inherits default)"
+    claude_agent_model = data.get("claude_agent_model") or "(not set)"
     response_style = data.get("response_style") or "(not set)"
     show_agent_activity = data.get("show_agent_activity") or "(not set)"
     provider = data.get("provider") or "(not set)"
     return (
         f"Model provider: {provider}\n"
         f"Conversational model: {model}\n"
-        f"Claude Agent SDK model: {claude_agent_model}\n"
+        f"Coding worker model: {claude_agent_model}\n"
         f"Response style: {response_style}\n"
         f"Agent activity: {show_agent_activity}\n"
         f"Config: {data.get('path')}"

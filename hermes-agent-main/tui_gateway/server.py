@@ -1199,7 +1199,24 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
     if not model_input:
         raise ValueError("model value required")
 
+    strict_roles = str(os.environ.get("TAKYON_STRICT_MODEL_ROLES") or "").strip().lower()
     agent = session.get("agent")
+    if strict_roles in {"1", "true", "yes", "on"}:
+        pinned_model = str(os.environ.get("TAKYON_MODEL") or "").strip()
+        if not pinned_model:
+            raise ValueError("strict CEO model pin is missing")
+        context = getattr(agent, "_takyon_operator_gateway_context", None) if agent else None
+        context_model = str(getattr(context, "model", "") or "").strip()
+        if context_model and context_model != pinned_model:
+            raise ValueError(
+                f"CEO model pin mismatch: process {pinned_model!r}, session {context_model!r}"
+            )
+        if model_input != pinned_model:
+            raise ValueError(
+                f"CEO model switch refused: requested {model_input!r}, pinned {pinned_model!r}"
+            )
+        return {"value": pinned_model, "warning": ""}
+
     if agent:
         current_provider = getattr(agent, "provider", "") or ""
         current_model = getattr(agent, "model", "") or ""
@@ -5408,6 +5425,7 @@ def _(rid, params: dict) -> dict:
                 enable_operator_gateway(
                     bg_agent,
                     runtime,
+                    pinned_model=getattr(context, "model", ""),
                     operator_user_id=getattr(context, "operator_user_id", ""),
                     business_slug=getattr(context, "business_slug", ""),
                     workspace_root=getattr(context, "workspace_root", ""),

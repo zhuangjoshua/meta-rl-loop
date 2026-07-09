@@ -6,9 +6,16 @@ import subprocess
 import types
 from pathlib import Path
 
+import pytest
+
 from plugins.takyon import core as takyon_core
 from plugins.takyon import storage as takyon_storage
 from plugins.takyon.core import handle_business_claude_agent_task
+
+
+@pytest.fixture(autouse=True)
+def _pin_test_coding_worker_model(monkeypatch):
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")
 
 
 class _FakeConn:
@@ -101,7 +108,7 @@ class _FakeStore:
         return {"success": True}
 
 
-def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path, monkeypatch):
+def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_site_work(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
 
@@ -150,7 +157,42 @@ def test_claude_agent_task_uses_broader_defaults_for_product_site_work(tmp_path,
     assert payload["timeoutMs"] == 1200000
     assert payload["maxBudgetUsd"] == 8.0
     assert payload["effort"] == "medium"
-    assert payload["model"] == "claude-sonnet-5"
+    assert payload["model"] == "deepseek-v4-pro"
+
+
+def test_claude_agent_model_pin_refuses_per_call_override(monkeypatch):
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")
+
+    with pytest.raises(takyon_core.TakyonError, match="model override refused"):
+        takyon_core._resolve_claude_agent_model("claude-sonnet-5")
+
+
+def test_claude_agent_model_has_no_implicit_fallback(monkeypatch):
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_MODEL", raising=False)
+    monkeypatch.setattr(takyon_core, "_model_from_config", lambda *keys: "")
+
+    with pytest.raises(takyon_core.TakyonError, match="no fallback model is available"):
+        takyon_core._resolve_claude_agent_model()
+
+
+def test_claude_agent_model_does_not_inherit_ceo_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.delenv("TAKYON_CLAUDE_AGENT_MODEL", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  provider: custom\n  default: gpt-5.5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(takyon_core.TakyonError, match="no fallback model is available"):
+        takyon_core._resolve_claude_agent_model()
+
+
+def test_strict_worker_role_requires_deepseek_pin(monkeypatch):
+    monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+    monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "claude-sonnet-5")
+
+    with pytest.raises(takyon_core.TakyonError, match="requires TAKYON_CLAUDE_AGENT_MODEL"):
+        takyon_core._resolve_claude_agent_model()
 
 
 def test_claude_agent_task_clamps_explicit_product_site_turn_budget(tmp_path, monkeypatch):
@@ -1223,6 +1265,15 @@ def test_run_claude_agent_task_in_docker_lockdown_drops_raw_key_and_confines_net
     assert "ANTHROPIC_BASE_URL=https://safebox.internal" in joined
     assert "ANTHROPIC_API_KEY=cap-token-xyz" in joined
     assert "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1" in joined
+    for key in (
+        "TAKYON_CLAUDE_AGENT_MODEL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert f"{key}=deepseek-v4-pro" in joined
     # Network confined to the safebox-only network (no default-bridge egress).
     assert "--network" in run_cmd
     assert run_cmd[run_cmd.index("--network") + 1] == "takyon-safebox-only"
@@ -1736,6 +1787,56 @@ def test_claude_agent_task_script_passes_safe_host_path_to_child_env():
     assert 'PATH: String(process.env.PATH || SANDBOX_PATH).trim() || SANDBOX_PATH,' in text
     assert 'HOME: String(process.env.HOME || "/tmp").trim() || "/tmp",' in text
     assert 'for (const key of ["LANG", "LC_ALL", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER"]) {' in text
+
+
+def test_claude_agent_task_script_has_no_model_fallback(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    proc = subprocess.run(
+        [node, str(script)],
+        input=json.dumps({"cwd": str(tmp_path), "root": str(tmp_path)}),
+        text=True,
+        capture_output=True,
+        env={"PATH": str(Path(node).parent), "HOME": str(tmp_path), "ANTHROPIC_API_KEY": "cap_test"},
+        timeout=10,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    assert "no fallback model is available" in json.loads(proc.stdout)["error"]
+
+
+def test_claude_agent_task_script_rejects_mismatched_internal_model_alias(tmp_path):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is unavailable")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
+    proc = subprocess.run(
+        [node, str(script)],
+        input=json.dumps(
+            {
+                "cwd": str(tmp_path),
+                "root": str(tmp_path),
+                "model": "deepseek-v4-pro",
+            }
+        ),
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": str(Path(node).parent),
+            "HOME": str(tmp_path),
+            "ANTHROPIC_API_KEY": "cap_test",
+            "TAKYON_CLAUDE_AGENT_MODEL": "deepseek-v4-pro",
+            "ANTHROPIC_MODEL": "claude-sonnet-5",
+        },
+        timeout=10,
+        check=False,
+    )
+
+    assert proc.returncode == 1
+    assert "conflicts with pinned model" in json.loads(proc.stdout)["error"]
 
 
 def test_docker_claude_worker_binary_mounts_uses_repo_binary_when_present(tmp_path, monkeypatch):

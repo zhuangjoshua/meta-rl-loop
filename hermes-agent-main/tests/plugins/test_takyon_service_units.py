@@ -37,6 +37,27 @@ def test_safebox_unit_keeps_capability_signing_authority():
     assert "TAKYON_CAP_SIGNING_KEY" not in names
 
 
+def test_operator_units_pin_ceo_to_openai_and_worker_to_deepseek():
+    required = {
+        "Environment=TAKYON_STRICT_MODEL_ROLES=1",
+        "Environment=TAKYON_MODEL=gpt-5.5",
+        "Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro",
+        "Environment=ANTHROPIC_MODEL=deepseek-v4-pro",
+        "Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro",
+        "Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro",
+        "Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro",
+        "Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro",
+    }
+    for unit_path in (
+        "deploy/argon-alpha-14/takyon-dashboard.service",
+        "deploy/argon-alpha-14/takyon-worker.service",
+        "deploy/takyon-dev-split/takyon-dashboard-dev.service.tmpl",
+        "deploy/takyon-dev-split/takyon-worker-dev.service.tmpl",
+    ):
+        lines = set((ROOT / unit_path).read_text().splitlines())
+        assert required <= lines, unit_path
+
+
 def test_runtime_units_strip_wrong_plane_and_migration_database_urls():
     expectations = {
         "deploy/argon-alpha-14/takyon-dashboard.service": {
@@ -172,6 +193,38 @@ def test_operator_prod_script_handles_empty_local_worker_pool_under_nounset():
     assert 'if [[ "${#pids[@]}" -eq 0 ]]; then' in collect
     assert "return 0" in collect
     assert "printf '%s\\n' \"${pids[@]}\"" in collect
+
+
+def test_operator_prod_script_adopts_vps_model_pins_for_mac_compute():
+    src = (ROOT / "scripts/takyon-operator-prod.sh").read_text()
+    ensure_home = src.split("ensure_home() {", 1)[1].split("fetch_operator_env_exports() {", 1)[0]
+    fetch = src.split("fetch_operator_env_exports() {", 1)[1].split("load_operator_env() {", 1)[0]
+
+    assert 'if [[ -f "$ROOT/.takyon/config.yaml" ]]' not in ensure_home
+    assert 'cat /opt/takyon/.takyon/config.yaml' in ensure_home
+    assert "'TAKYON_STRICT_MODEL_ROLES': '1'" in fetch
+    assert "'TAKYON_MODEL': 'gpt-5.5'" in fetch
+    assert "'TAKYON_CLAUDE_AGENT_MODEL': 'deepseek-v4-pro'" in fetch
+    assert "'CLAUDE_CODE_SUBAGENT_MODEL': 'deepseek-v4-pro'" in fetch
+
+
+def test_operator_vps_launcher_propagates_and_validates_exact_model_pins():
+    src = (ROOT / "deploy/argon-alpha-14/takyon-op").read_text()
+
+    for key in (
+        "TAKYON_STRICT_MODEL_ROLES",
+        "TAKYON_MODEL",
+        "TAKYON_CLAUDE_AGENT_MODEL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert f"service_env_value {key}" in src
+        assert f"export {key}=" in src
+    assert '[[ "$ceo_model" == "gpt-5.5" ]]' in src
+    assert '[[ "$model_value" == "deepseek-v4-pro" ]]' in src
 
 
 def test_app_control_blocker_matches_operator_runtime_text_timestamp():

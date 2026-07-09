@@ -321,6 +321,35 @@ PY
   systemctl stop takyon-activation-broker.service >/dev/null 2>&1 || true
   systemctl disable takyon-activation-broker.service >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/takyon-activation-broker.service
+  for unit_file in '$TAKYON_REMOTE_SERVICE_FILE' '$TAKYON_REMOTE_WORKER_SERVICE_FILE'; do
+    grep -Fx -- 'Environment=TAKYON_STRICT_MODEL_ROLES=1' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=TAKYON_MODEL=gpt-5.5' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=ANTHROPIC_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
+    grep -Fx -- 'Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' "\$unit_file" >/dev/null
+  done
+  '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
+from pathlib import Path
+import yaml
+
+data = yaml.safe_load(Path('/opt/takyon/.takyon/config.yaml').read_text()) or {}
+model = data.get('model') or {}
+expected = {
+    'provider': 'custom',
+    'base_url': 'https://api.openai.com/v1',
+    'api_mode': 'codex_responses',
+    'default': 'gpt-5.5',
+    'claude_agent_default': 'deepseek-v4-pro',
+}
+wrong = {key: model.get(key) for key, value in expected.items() if model.get(key) != value}
+if wrong:
+    raise SystemExit(f'operator model config violates strict role contract: {wrong}')
+if data.get('fallback_model') or data.get('fallback_providers'):
+    raise SystemExit('operator model fallback config must be absent')
+PY
   systemctl daemon-reload
   systemctl enable takyon-docker-broker.service >/dev/null
   systemctl restart takyon-docker-broker.service
@@ -331,7 +360,20 @@ PY
     systemctl enable takyon-worker.service >/dev/null
     systemctl restart takyon-worker.service
     systemctl is-active --quiet takyon-worker.service
-  fi"
+  fi
+  for unit in takyon-dashboard.service takyon-worker.service; do
+    pid=\$(systemctl show -p MainPID --value "\$unit")
+    [ "\$pid" != 0 ]
+    process_env=\$(tr '\\000' '\\n' < "/proc/\$pid/environ")
+    grep -Fx -- 'TAKYON_STRICT_MODEL_ROLES=1' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'TAKYON_MODEL=gpt-5.5' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'ANTHROPIC_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+    grep -Fx -- 'CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+  done"
 
 if [[ "$TAKYON_APPLY_CADDY" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \

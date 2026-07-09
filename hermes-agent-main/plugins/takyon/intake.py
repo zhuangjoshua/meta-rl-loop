@@ -14,7 +14,6 @@ proxy). No raw key on this plane; fails closed if the safebox/operator auth is u
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 # Capabilities the CEO can build a product from, keyed to the real rails. The rail NAMES are
@@ -165,11 +164,16 @@ def convert_brief(
     anthropic proxy on the safebox. Fails closed (IntakeError) if the safebox/operator auth is
     unavailable — never fabricates a plan and never touches a raw provider key.
 
-    Model precedence mirrors the coding worker (explicit arg, then TAKYON_CLAUDE_AGENT_MODEL,
-    then the Sonnet default) so one env flip moves the whole create pipeline together."""
-    model = str(
-        model or os.environ.get("TAKYON_CLAUDE_AGENT_MODEL") or "claude-sonnet-5"
-    ).strip()
+    Uses the exact coding-worker model pin. A conflicting per-call override or missing pin fails
+    closed; intake never substitutes a different model/provider."""
+    try:
+        from . import core
+    except ImportError:  # pragma: no cover
+        from plugins.takyon import core  # type: ignore
+    try:
+        model = core._resolve_claude_agent_model(model)
+    except core.TakyonError as exc:
+        raise IntakeError(str(exc)) from exc
     text = str(brief_text or "").strip()
     if not text:
         raise IntakeError("empty brief")

@@ -4461,11 +4461,6 @@ def build_safebox_app() -> FastAPI:
         # Anthropic API with the Anthropic key and failed provider_error on every call.
         from . import ai_provider as _ai
 
-        # Dead-lane rescue (TAKYON_ANTHROPIC_MODEL_REWRITE): same operator-declared rewrite as the
-        # operator proxy lane — claude-* from stale clients rides the working DeepSeek lane while
-        # the platform Anthropic account is credit/limit-dead. See apply_anthropic_model_rewrite.
-        body.payload, _rewritten_from = _ai.apply_anthropic_model_rewrite(body.payload)
-
         if _ai._is_deepseek_model(_ai.anthropic_model(body.payload or {})):
             return _broker_provider_route(
                 body,

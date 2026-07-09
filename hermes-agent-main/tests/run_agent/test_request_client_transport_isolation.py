@@ -205,6 +205,7 @@ def test_gateway_swap_publishes_request_transport_factory():
         requested_provider="custom",
         api_mode="codex_responses",
         upstream_base_url="https://api.openai.com/v1",
+        model="gpt-5.5",
     )
     with patch.object(og, "build_operator_gateway_http_client") as build:
         build.side_effect = lambda ctx: _FakeTransport()

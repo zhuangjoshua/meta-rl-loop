@@ -123,34 +123,6 @@ def _is_deepseek_model(model: object) -> bool:
     return _canonical_model_name(model).lower().startswith("deepseek")
 
 
-ANTHROPIC_MODEL_REWRITE_ENV = "TAKYON_ANTHROPIC_MODEL_REWRITE"
-
-
-def apply_anthropic_model_rewrite(payload: dict | None) -> tuple[dict, str]:
-    """Operator-declared dead-lane rescue for the anthropic wire (safebox-host env).
-
-    When ``TAKYON_ANTHROPIC_MODEL_REWRITE`` is set (e.g. ``deepseek-v4-pro``), any request whose
-    model would route to the REAL Anthropic upstream is rewritten onto that replacement BEFORE
-    pricing/routing, so stale collaborator machines that still ask for ``claude-*`` (their code or
-    config predates the provider split) get the working DeepSeek lane instead of a guaranteed
-    upstream failure — the platform Anthropic account is credit/limit-dead until reset, so every
-    ``claude-*`` call through the broker fails ("Credit balance is too low" / 400). Models that
-    already route off-Anthropic (``deepseek-*``) are never touched. Unset the env var when the
-    Anthropic account revives; callers surface the rewrite via ``x-takyon-model-rewritten-from``.
-
-    Returns ``(payload, rewritten_from)`` — ``rewritten_from`` is ``""`` when no rewrite applied.
-    """
-    target = _env(ANTHROPIC_MODEL_REWRITE_ENV).strip()
-    body = dict(payload or {})
-    if not target:
-        return body, ""
-    requested = str(body.get("model") or "").strip()
-    if not requested or _is_deepseek_model(requested) or requested == target:
-        return body, ""
-    body["model"] = target
-    return body, requested
-
-
 def _pricing_provider(model: str) -> str:
     return "deepseek" if _is_deepseek_model(model) else "anthropic"
 

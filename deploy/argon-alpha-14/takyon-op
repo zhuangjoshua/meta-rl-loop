@@ -64,6 +64,21 @@ safe_token="$(service_env_value TAKYON_SAFEBOX_TOKEN)"
 [[ -n "$safe_url" ]] || die "TAKYON_SAFEBOX_URL missing from $TAKYON_SERVICE env"
 [[ -n "$safe_token" ]] || die "TAKYON_SAFEBOX_TOKEN missing from $TAKYON_SERVICE env"
 
+strict_model_roles="$(service_env_value TAKYON_STRICT_MODEL_ROLES)"
+ceo_model="$(service_env_value TAKYON_MODEL)"
+worker_model="$(service_env_value TAKYON_CLAUDE_AGENT_MODEL)"
+anthropic_model="$(service_env_value ANTHROPIC_MODEL)"
+opus_model="$(service_env_value ANTHROPIC_DEFAULT_OPUS_MODEL)"
+sonnet_model="$(service_env_value ANTHROPIC_DEFAULT_SONNET_MODEL)"
+haiku_model="$(service_env_value ANTHROPIC_DEFAULT_HAIKU_MODEL)"
+subagent_model="$(service_env_value CLAUDE_CODE_SUBAGENT_MODEL)"
+[[ "$strict_model_roles" == "1" ]] || die "strict model roles are not enabled in $TAKYON_SERVICE"
+[[ "$ceo_model" == "gpt-5.5" ]] || die "CEO model pin is not gpt-5.5 in $TAKYON_SERVICE"
+for model_value in "$worker_model" "$anthropic_model" "$opus_model" "$sonnet_model" "$haiku_model" "$subagent_model"; do
+  [[ "$model_value" == "deepseek-v4-pro" ]] \
+    || die "coding-worker model aliases are not all deepseek-v4-pro in $TAKYON_SERVICE"
+done
+
 logs=1
 args=("$@")
 if [[ "${args[0]:-}" == "--no-logs" ]]; then
@@ -93,6 +108,14 @@ export HOME=/opt/takyon
 export TAKYON_HOST_ROLE=operator
 export TAKYON_SAFEBOX_URL="$safe_url"
 export TAKYON_SAFEBOX_TOKEN="$safe_token"
+export TAKYON_STRICT_MODEL_ROLES="$strict_model_roles"
+export TAKYON_MODEL="$ceo_model"
+export TAKYON_CLAUDE_AGENT_MODEL="$worker_model"
+export ANTHROPIC_MODEL="$anthropic_model"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$opus_model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$sonnet_model"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$haiku_model"
+export CLAUDE_CODE_SUBAGENT_MODEL="$subagent_model"
 export TAKYON_SESSION_USER_ID="${TAKYON_SESSION_USER_ID:-$DEFAULT_OPERATOR_USER_ID}"
 
 exec runuser -u takyon -- "$RUNTIME_DIR/takyon" "${args[@]}"

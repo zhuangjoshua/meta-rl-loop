@@ -420,12 +420,40 @@ async function main() {
     );
   }
 
+  const requestedModel = String(input.model || "").trim();
+  const pinnedModel = String(process.env.TAKYON_CLAUDE_AGENT_MODEL || "").trim();
+  if (requestedModel && pinnedModel && requestedModel !== pinnedModel) {
+    throw new Error(
+      `coding worker model override refused: requested ${JSON.stringify(requestedModel)}, ` +
+      `pinned ${JSON.stringify(pinnedModel)} by TAKYON_CLAUDE_AGENT_MODEL`
+    );
+  }
+  const model = requestedModel || pinnedModel;
+  if (!model) {
+    throw new Error(
+      "coding worker model is not configured; no fallback model is available"
+    );
+  }
+  for (const [name, value] of Object.entries({
+    ANTHROPIC_MODEL: anthropicModel,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: anthropicDefaultOpusModel,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: anthropicDefaultSonnetModel,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: anthropicDefaultHaikuModel,
+    CLAUDE_CODE_SUBAGENT_MODEL: claudeCodeSubagentModel,
+  })) {
+    if (value && value !== model) {
+      throw new Error(
+        `coding worker model alias ${name}=${JSON.stringify(value)} conflicts with pinned model ` +
+        JSON.stringify(model)
+      );
+    }
+  }
+
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const abortController = new AbortController();
   const timeoutMs = Number.parseInt(String(input.timeoutMs || ""), 10) || 300000;
   const maxTurns = Number.parseInt(String(input.maxTurns || ""), 10) || 12;
   const maxBudgetUsd = Number.parseFloat(String(input.maxBudgetUsd || "")) || 2;
-  const model = String(input.model || process.env.TAKYON_CLAUDE_AGENT_MODEL || "claude-sonnet-5").trim();
   const effort = String(input.effort || process.env.TAKYON_CLAUDE_AGENT_EFFORT || "high").trim().toLowerCase();
   const allowBash = Boolean(input.allowBash);
   const pathToClaudeCodeExecutable = String(process.env.TAKYON_CLAUDE_CODE_EXECUTABLE || "").trim();
@@ -449,11 +477,11 @@ async function main() {
               anthropicToken,
               disableExperimentalBetas,
               anthropicBaseUrl,
-              anthropicModel,
-              anthropicDefaultOpusModel,
-              anthropicDefaultSonnetModel,
-              anthropicDefaultHaikuModel,
-              claudeCodeSubagentModel,
+              anthropicModel: model,
+              anthropicDefaultOpusModel: model,
+              anthropicDefaultSonnetModel: model,
+              anthropicDefaultHaikuModel: model,
+              claudeCodeSubagentModel: model,
               inDockerWorker,
               cwd,
             }),

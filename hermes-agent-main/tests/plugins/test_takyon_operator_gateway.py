@@ -84,6 +84,7 @@ def _anthropic_context(business="latexflow", operator_user_id="owner-1"):
         requested_provider="anthropic",
         api_mode="anthropic_messages",
         upstream_base_url="https://api.anthropic.com",
+        model="claude-opus-4-8",
         operator_user_id=operator_user_id,
         business_slug=business,
     )
@@ -228,11 +229,77 @@ def test_non_anthropic_modes_do_not_use_the_broker_runtime(monkeypatch):
         requested_provider="openai",
         api_mode="chat_completions",
         upstream_base_url="https://api.openai.com/v1",
+        model="gpt-4o",
         operator_user_id="owner-1",
         business_slug="latexflow",
     )
     runtime = _resolve_runtime_for_request(context, {"model": "gpt-4o"})
     assert runtime["api_key"] == "local-key"
+
+
+def test_operator_gateway_refuses_model_switch_before_provider_resolution(monkeypatch):
+    context = OperatorGatewayContext(
+        provider="openai",
+        requested_provider="openai",
+        api_mode="codex_responses",
+        upstream_base_url="https://api.openai.com/v1",
+        model="gpt-5.5",
+    )
+
+    with pytest.raises(RuntimeError, match="model switch refused"):
+        _resolve_runtime_for_request(context, {"model": "deepseek-v4-pro"})
+
+
+def test_strict_ceo_role_requires_pinned_openai_responses_runtime(monkeypatch):
+    monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+    monkeypatch.setenv("TAKYON_MODEL", "gpt-5.5")
+
+    og._require_strict_ceo_role(
+        {
+            "api_mode": "codex_responses",
+            "base_url": "https://api.openai.com/v1",
+        },
+        "gpt-5.5",
+    )
+    with pytest.raises(RuntimeError, match="requires OpenAI Responses"):
+        og._require_strict_ceo_role(
+            {
+                "api_mode": "anthropic_messages",
+                "base_url": "https://api.anthropic.com",
+            },
+            "gpt-5.5",
+        )
+
+
+def test_enable_operator_gateway_deletes_generic_fallback_state(monkeypatch):
+    class Agent:
+        model = "gpt-5.5"
+        _fallback_chain = [{"provider": "anthropic", "model": "claude-sonnet-5"}]
+        _fallback_model = _fallback_chain[0]
+        _fallback_index = 0
+        _credential_pool = object()
+
+    monkeypatch.setattr(
+        og,
+        "_operator_gateway_dispatch_for",
+        lambda _mode: {"base_url": "https://operator-gateway.local/v1", "replace_fn": lambda agent, context: None},
+    )
+    agent = Agent()
+
+    og.enable_operator_gateway(
+        agent,
+        {
+            "provider": "custom",
+            "requested_provider": "custom",
+            "api_mode": "codex_responses",
+            "base_url": "https://api.openai.com/v1",
+        },
+    )
+
+    assert agent._fallback_chain == []
+    assert agent._fallback_model is None
+    assert agent._credential_pool is None
+    assert agent._takyon_strict_model_pin == "gpt-5.5"
 
 
 def test_runtime_plane_resolves_anthropic_keyfree_without_probing_v1_env(monkeypatch):

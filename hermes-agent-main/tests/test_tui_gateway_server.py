@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from gateway.session_context import get_session_env
 from plugins.takyon import storage
 from tui_gateway import server
@@ -3646,6 +3648,34 @@ def test_config_set_model_allowed_when_idle(monkeypatch):
         assert seen["called"]
     finally:
         server._sessions.pop("sid", None)
+
+
+def test_strict_takyon_gateway_refuses_model_switch_before_mutating_agent(monkeypatch):
+    monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+    monkeypatch.setenv("TAKYON_MODEL", "gpt-5.5")
+    switched = []
+    agent = types.SimpleNamespace(
+        _takyon_operator_gateway=True,
+        _takyon_operator_gateway_context=types.SimpleNamespace(model="gpt-5.5"),
+        model="gpt-5.5",
+        switch_model=lambda **kwargs: switched.append(kwargs),
+    )
+
+    with pytest.raises(ValueError, match="CEO model switch refused"):
+        server._apply_model_switch("sid", _session(agent=agent), "claude-sonnet-5")
+
+    assert agent.model == "gpt-5.5"
+    assert switched == []
+
+
+def test_strict_takyon_gateway_refuses_model_switch_without_an_agent(monkeypatch):
+    monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+    monkeypatch.setenv("TAKYON_MODEL", "gpt-5.5")
+    session = _session()
+    session["agent"] = None
+
+    with pytest.raises(ValueError, match="CEO model switch refused"):
+        server._apply_model_switch("sid", session, "claude-sonnet-5")
 
 
 def test_mirror_slash_side_effects_rejects_mutating_commands_while_running(monkeypatch):

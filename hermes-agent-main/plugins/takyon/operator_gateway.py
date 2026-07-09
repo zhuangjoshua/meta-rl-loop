@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -75,6 +76,7 @@ class OperatorGatewayContext:
     requested_provider: str
     api_mode: str
     upstream_base_url: str
+    model: str = ""
     operator_user_id: str = ""
     business_slug: str = ""
     workspace_root: str = ""
@@ -86,6 +88,21 @@ def operator_gateway_supported(runtime: dict[str, Any]) -> bool:
 
 def operator_gateway_placeholder_api_key() -> str:
     return _PLACEHOLDER_API_KEY
+
+
+def _require_strict_ceo_role(runtime: dict[str, Any], model: str) -> None:
+    strict = str(os.getenv("TAKYON_STRICT_MODEL_ROLES") or "").strip().lower()
+    if strict not in {"1", "true", "yes", "on"}:
+        return
+    pinned = str(os.getenv("TAKYON_MODEL") or "").strip()
+    mode = str(runtime.get("api_mode") or "").strip().lower()
+    host = (urlparse(str(runtime.get("base_url") or "")).hostname or "").lower()
+    if pinned != "gpt-5.5" or model != pinned:
+        raise RuntimeError("strict CEO role requires TAKYON_MODEL='gpt-5.5'")
+    if mode != "codex_responses" or host != "api.openai.com":
+        raise RuntimeError(
+            "strict CEO role requires OpenAI Responses at https://api.openai.com/v1"
+        )
 
 
 def _operator_gateway_dispatch() -> dict[str, dict[str, Any]]:
@@ -121,6 +138,7 @@ def operator_gateway_client_base_url(api_mode: str) -> str:
 def build_operator_gateway_context(
     runtime: dict[str, Any],
     *,
+    model: str,
     operator_user_id: str | None = None,
     business_slug: str | None = None,
     workspace_root: str | None = None,
@@ -134,6 +152,7 @@ def build_operator_gateway_context(
         requested_provider=requested or provider,
         api_mode=api_mode,
         upstream_base_url=base_url.rstrip("/"),
+        model=str(model or "").strip(),
         operator_user_id=str(operator_user_id or "").strip(),
         business_slug=str(business_slug or "").strip(),
         workspace_root=str(workspace_root or "").strip(),
@@ -153,6 +172,7 @@ def enable_operator_gateway(
     agent: Any,
     runtime: dict[str, Any],
     *,
+    pinned_model: str | None = None,
     operator_user_id: str | None = None,
     business_slug: str | None = None,
     workspace_root: str | None = None,
@@ -163,16 +183,30 @@ def enable_operator_gateway(
             f"api_mode={runtime.get('api_mode')!r}"
         )
 
+    model = str(pinned_model or getattr(agent, "model", "") or "").strip()
+    if not model:
+        raise RuntimeError("operator gateway requires an explicit model pin")
+    if str(getattr(agent, "model", "") or "").strip() != model:
+        raise RuntimeError(
+            "operator gateway model changed after pin: "
+            f"expected {model!r}, got {getattr(agent, 'model', '')!r}"
+        )
+    _require_strict_ceo_role(runtime, model)
     context = build_operator_gateway_context(
         runtime,
+        model=model,
         operator_user_id=operator_user_id,
         business_slug=business_slug,
         workspace_root=workspace_root,
     )
     agent._takyon_operator_gateway = True
     agent._takyon_operator_gateway_context = context
-    # Disable direct credential rotation / pool failover paths: the outer
-    # agent should not try to re-resolve raw provider credentials.
+    agent._takyon_strict_model_pin = model
+    # Takyon CEO turns never switch provider/model. Clear every fallback-chain state even if a
+    # generic Hermes caller tried to populate it, and disable credential-pool failover.
+    agent._fallback_chain = []
+    agent._fallback_model = None
+    agent._fallback_index = 0
     agent._credential_pool = None
 
     _operator_gateway_dispatch_for(context.api_mode)["replace_fn"](agent, context)
@@ -192,6 +226,7 @@ def rebuild_operator_gateway_transport(agent: Any) -> None:
     enable_operator_gateway(
         agent,
         runtime,
+        pinned_model=context.model,
         operator_user_id=context.operator_user_id,
         business_slug=context.business_slug,
         workspace_root=context.workspace_root,
@@ -214,8 +249,13 @@ def build_operator_gateway_agent(
             "operator gateway does not yet support "
             f"api_mode={runtime.get('api_mode')!r}"
         )
+    _require_strict_ceo_role(runtime, str(model or "").strip())
 
     agent_kwargs = dict(agent_kwargs or {})
+    configured_fallback = agent_kwargs.pop("fallback_model", None)
+    if configured_fallback:
+        raise RuntimeError("Takyon CEO model fallback is disabled")
+    agent_kwargs["fallback_model"] = None
     gateway_base = operator_gateway_client_base_url(runtime.get("api_mode") or "")
     agent = AIAgent(
         model=model,
@@ -501,6 +541,17 @@ def _resolve_runtime_for_request(
     context: OperatorGatewayContext,
     body: dict[str, Any],
 ) -> dict[str, Any]:
+    pinned_model = str(context.model or "").strip()
+    requested_model = str(body.get("model") or "").strip()
+    if not pinned_model:
+        raise RuntimeError("operator gateway context has no model pin")
+    if not requested_model:
+        raise RuntimeError("operator gateway request omitted its pinned model")
+    if requested_model != pinned_model:
+        raise RuntimeError(
+            "operator gateway model switch refused: "
+            f"requested {requested_model!r}, pinned {pinned_model!r}"
+        )
     # Anthropic AND OpenAI CEO turns route THROUGH the safebox proxy (key-free, operator.session)
     # under broker lockdown — the raw provider key is never resolved on this plane. chat_completions
     # remains local-resolve (no safebox proxy route yet).

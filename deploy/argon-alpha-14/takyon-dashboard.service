@@ -43,6 +43,16 @@ UnsetEnvironment=TAKYON_CAP_SIGNING_KEY
 Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
+# Production model roles are explicit process pins. The CEO stays on OpenAI; every coding-worker
+# model name, including Claude SDK internal subagents, stays on the same DeepSeek model.
+Environment=TAKYON_STRICT_MODEL_ROLES=1
+Environment=TAKYON_MODEL=gpt-5.5
+Environment=TAKYON_CLAUDE_AGENT_MODEL=deepseek-v4-pro
+Environment=ANTHROPIC_MODEL=deepseek-v4-pro
+Environment=ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro
+Environment=ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro
+Environment=ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro
+Environment=CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro
 Environment=TAKYON_FORCE_RESTORE_BUNDLED_SKILLS=1
 # Long operator tool runs (claude.agent_task, product.surface_refresh) execute on the durable
 # worker plane (takyon-worker.service) instead of inline in this process: the tool enqueues, waits

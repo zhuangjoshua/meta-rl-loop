@@ -503,14 +503,6 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
     def _anthropic_passthrough(payload: dict[str, Any], auth: _ProxyAuth):
         """Reserve -> resolve key -> (stream|call) -> settle. The key is injected ONLY into the outbound
         request headers; it never appears in the response."""
-        # 0. Dead-lane rescue (TAKYON_ANTHROPIC_MODEL_REWRITE, safebox-host env): while the platform
-        #    Anthropic account cannot serve, rewrite claude-* requests from stale collaborator
-        #    machines onto the working DeepSeek lane BEFORE pricing/routing, instead of forwarding
-        #    them to a guaranteed "Credit balance is too low" / 400. See apply_anthropic_model_rewrite.
-        from . import ai_provider as _ai_rewrite
-
-        payload, rewritten_from = _ai_rewrite.apply_anthropic_model_rewrite(payload)
-        rewrite_headers = {"x-takyon-model-rewritten-from": rewritten_from} if rewritten_from else None
         # 1. RESERVE the operator budget on the worst-case estimate BEFORE any key resolution / upstream
         #    call. Out of budget / unpriced model -> refused here (402 / 503).
         try:
@@ -595,7 +587,7 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
                     if not settled["done"]:
                         _finish_settle()
 
-            return StreamingResponse(_sse_bytes(), media_type="text/event-stream", headers=rewrite_headers)
+            return StreamingResponse(_sse_bytes(), media_type="text/event-stream")
 
         # Non-streaming: call -> settle actual from the response usage. Release on transport failure.
         try:
@@ -618,7 +610,7 @@ def register_provider_proxy_routes(app: FastAPI) -> None:
         except Exception:  # noqa: BLE001 — settle the reserved estimate if pricing the response fails
             actual = estimate
         _settle(ledger, reservation, actual)
-        return JSONResponse(content=data, status_code=resp.status_code, headers=rewrite_headers)
+        return JSONResponse(content=data, status_code=resp.status_code)
 
     def _anthropic_messages(body: Any, authorization: str | None, x_api_key: str | None):
         auth = _authorize_operator_proxy(
