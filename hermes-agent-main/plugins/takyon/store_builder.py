@@ -603,27 +603,42 @@ def local_eas_invoker(
 
 def poll_build(build_id: str, creds: StoreBuilderCreds, *, cwd: str | None = None) -> dict[str, Any]:
     """$0 status read for a triggered build (never touches the reservation). Returns
-    {status, artifact_url, error}."""
-    import os
+    {status, artifact_url, error}.
 
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
-        "HOME": os.environ.get("HOME", str(Path.home())),
-        "EXPO_TOKEN": creds.expo_token,
-        "EXPO_NO_TELEMETRY": "1",
+    Uses the EAS GraphQL API directly: `eas build:view` requires a LINKED project directory
+    (extra.eas.projectId), which the ephemeral build dir had but the canonical workspace does not —
+    the API lookup by build id needs only the account token, so this works from any cwd on any host
+    (E2E-found: build:view from $HOME always failed). `cwd` is kept for signature compatibility."""
+    import httpx
+
+    query = {
+        "query": (
+            "query($id: ID!){ builds { byId(buildId: $id) { id status "
+            "artifacts { buildUrl applicationArchiveUrl } error { message } } } }"
+        ),
+        "variables": {"id": str(build_id or "").strip()},
     }
-    proc = subprocess.run(
-        ["npx", "--yes", f"eas-cli@{EAS_CLI_VERSION}", "build:view", build_id, "--json"],
-        cwd=cwd or str(Path.home()), env=env, capture_output=True, text=True, timeout=120,
-    )
-    if proc.returncode != 0:
-        return {"status": "unknown", "artifact_url": "", "error": (proc.stderr or "")[-300:]}
     try:
-        row = json.loads(proc.stdout)
-    except ValueError:
-        return {"status": "unknown", "artifact_url": "", "error": "unparseable build:view output"}
+        resp = httpx.post(
+            "https://api.expo.dev/graphql",
+            json=query,
+            headers={"Authorization": f"Bearer {creds.expo_token}"},
+            timeout=30.0,
+        )
+        body = resp.json() if resp.content else {}
+    except Exception as exc:
+        return {"status": "unknown", "artifact_url": "", "error": str(exc)[:300]}
+    build = (((body.get("data") or {}).get("builds") or {}).get("byId") or {})
+    if not isinstance(build, dict) or not build:
+        errors = body.get("errors") or []
+        detail = json.dumps(errors)[:300] if errors else f"build {build_id} not found"
+        return {"status": "unknown", "artifact_url": "", "error": detail}
+    artifacts = build.get("artifacts") or {}
     return {
-        "status": str(row.get("status") or ""),
-        "artifact_url": str((row.get("artifacts") or {}).get("buildUrl") or ""),
-        "error": str((row.get("error") or {}).get("message") or ""),
+        # GraphQL statuses are UPPERCASE (FINISHED/ERRORED/IN_PROGRESS…); receipts use lowercase.
+        "status": str(build.get("status") or "").lower(),
+        "artifact_url": str(
+            artifacts.get("applicationArchiveUrl") or artifacts.get("buildUrl") or ""
+        ),
+        "error": str(((build.get("error") or {}).get("message")) or ""),
     }
