@@ -146,9 +146,17 @@ def _reasoning_progress_callback(progress: Any) -> Callable[[str], None] | None:
         return None
 
     def _callback(text: str) -> None:
-        note = _normalize_progress_text(text, limit=220)
-        if note:
-            progress.tool_progress("reasoning.available", "_thinking", note, None)
+        # Pass the RAW delta through. Reasoning streams as BPE pieces (" up", "sert", " the")
+        # and BOTH downstream coalescers (cli._ShellProgress / worker progress) buffer raw
+        # deltas "spacing intact" and normalize at flush time. Normalizing PER DELTA here
+        # stripped every piece's leading space before the buffer ever saw it, so flushed
+        # lines printed with the words jammed together ("Ineedtoexecuteourstrategy...").
+        raw = str(text or "")
+        if not raw:
+            return
+        if raw.strip() in {"(empty)", "_thinking"}:
+            return
+        progress.tool_progress("reasoning.available", "_thinking", raw, None)
 
     return _callback
 
