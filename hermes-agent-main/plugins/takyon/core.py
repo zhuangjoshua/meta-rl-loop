@@ -18068,6 +18068,82 @@ class TakyonStore:
                     continue
         return summary
 
+    def assemble_roas_run_history(self, slug: str, *,
+                                  channels: tuple[str, ...] = ("meta",)) -> dict[str, Any]:
+        """Production half of the per-skill ROAS feedback loop: for every NEW insights-sync
+        receipt on a channel's campaigns, append ONE truthful run entry — the process (from
+        the campaign's launch plan: creative kind, headline, copy, CTA, budget) + delivery +
+        pixel-attributed purchases/revenue + ROAS (from the sync receipt totals) — to the
+        per-business file ``metrics/roas/<channel>.md``. That file is the run history the
+        channel skill reads before its next run ("do more of what worked"); SKILL.md stays
+        static and shared, the history is per-business state. Idempotent per sync receipt:
+        each entry embeds ``sync <campaign>/<file>`` and existing tokens are skipped, so a
+        sync is recorded exactly once. Best-effort everywhere — a missing/corrupt plan
+        degrades to a plan-less process line, and a per-campaign failure is counted, never
+        raised (the pre-wake hook must not break the wake)."""
+        slug = _slugify(slug)
+        summary: dict[str, Any] = {"success": True, "business": slug,
+                                   "appended": 0, "skipped": 0, "errors": 0, "entries": []}
+        policies: list[tuple[str, Any]] = []
+        try:
+            backend = _business_ad_spend_backend()
+            statuses = list(_PULSE_AD_CAMPAIGN_STATUSES) + ["completed"]
+            with self._connect() as conn:
+                for policy in backend.list_policies(conn, slug, statuses=statuses):
+                    channel = str(policy.channel or "")
+                    if channel in channels:
+                        policies.append((channel, policy))
+        except Exception:
+            summary["errors"] += 1
+            return summary
+        for channel, policy in policies:
+            try:
+                syncs_dir = self._resolve_business_file(
+                    slug, f"metrics/{channel}-ads/{policy.slug}/syncs", sync=False)
+                if not syncs_dir.is_dir():
+                    continue
+                history_path = self._resolve_business_file(
+                    slug, f"metrics/roas/{channel}.md", sync=False)
+                existing = history_path.read_text(encoding="utf-8") if history_path.exists() else ""
+                plan: dict[str, Any] = {}
+                try:
+                    plan_path = self._resolve_business_file(
+                        slug, f"distribution/{channel}-ads/{policy.slug}/plan.json", sync=False)
+                    if plan_path.exists():
+                        loaded = json.loads(plan_path.read_text(encoding="utf-8"))
+                        plan = loaded if isinstance(loaded, dict) else {}
+                except Exception:
+                    plan = {}
+                for sync_file in sorted(syncs_dir.glob("*.json")):
+                    token = f"sync {policy.slug}/{sync_file.name}"
+                    if token in existing:
+                        summary["skipped"] += 1
+                        continue
+                    try:
+                        totals = (json.loads(sync_file.read_text(encoding="utf-8")) or {}).get("totals") or {}
+                    except Exception:
+                        summary["errors"] += 1
+                        continue
+                    if not isinstance(totals, dict) or not totals:
+                        summary["skipped"] += 1
+                        continue
+                    entry = _compose_roas_history_entry(channel, policy.slug, token, plan, totals)
+                    header = "" if existing else (
+                        f"# {channel} run history (per-business skill feedback)\n\n"
+                        "One entry per insights sync. ROAS = pixel-attributed purchase value / ad "
+                        "spend (the sync receipt's own figure). Read this before launching the "
+                        "next campaign and favor what measurably worked.\n\n"
+                    )
+                    history_path.parent.mkdir(parents=True, exist_ok=True)
+                    with history_path.open("a", encoding="utf-8") as fh:
+                        fh.write(header + entry)
+                    existing += header + entry
+                    summary["appended"] += 1
+                    summary["entries"].append(token)
+            except Exception:
+                summary["errors"] += 1
+        return summary
+
     # --- RL learnings render: the compressed block APPENDED to the END of the wake prompt ----
 
     @staticmethod
@@ -30162,6 +30238,48 @@ def _wake_ad_refresh_enabled() -> bool:
     (auto-firing insights syncs) per-deployment without a redeploy."""
     raw = os.environ.get("TAKYON_WAKE_AD_REFRESH")
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _compose_roas_history_entry(channel: str, campaign: str, token: str,
+                                plan: Mapping[str, Any], totals: Mapping[str, Any]) -> str:
+    """One deterministic run-history line for metrics/roas/<channel>.md — the PROCESS (what
+    the launch plan says was actually made and run) and the MEASURED result (what the sync
+    receipt says came back). No narrative invention: every field is copied from a receipt,
+    and absent fields are omitted or marked n/a rather than guessed."""
+    process_bits: list[str] = []
+    kind = str(plan.get("asset_kind") or "").strip()
+    if kind:
+        process_bits.append(f"{kind} ad")
+    headline = str(plan.get("headline") or "").strip()
+    if headline:
+        process_bits.append(f'headline "{headline}"')
+    message = " ".join(str(plan.get("message") or "").split())
+    if message:
+        if len(message) > 90:
+            message = message[:87] + "..."
+        process_bits.append(f'copy "{message}"')
+    cta = str(plan.get("call_to_action_type") or "").strip()
+    if cta:
+        process_bits.append(f"CTA {cta}")
+    if plan.get("daily_budget_usd") is not None:
+        process_bits.append(f"${plan['daily_budget_usd']}/day")
+    process = ("launched " + ", ".join(process_bits)) if process_bits else (
+        f"ran {channel} campaign (no launch plan recorded)")
+
+    metric_bits: list[str] = []
+    for key, label in (("impressions", "impressions"), ("clicks", "clicks"),
+                       ("purchase_count", "purchases")):
+        if totals.get(key) is not None:
+            metric_bits.append(f"{totals[key]} {label}")
+    if totals.get("purchase_value_usd") is not None:
+        metric_bits.append(f"attributed revenue ${float(totals['purchase_value_usd']):.2f}")
+    spend = totals.get("spend_usd")
+    spend_txt = f"spend ${float(spend):.2f}" if spend is not None else "spend n/a"
+    roas = totals.get("roas")
+    roas_txt = (f"ROAS {float(roas):.2f}" if roas is not None
+                else "ROAS n/a (no attributed revenue synced)")
+    return (f"- campaign {campaign} | {token} | process: {process} | "
+            f"metrics: {', '.join(metric_bits) or 'none synced'} | {spend_txt} | {roas_txt}\n")
 
 
 def _format_episode_metrics(snapshot: Any) -> str:

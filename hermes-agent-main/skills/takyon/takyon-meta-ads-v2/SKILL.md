@@ -223,7 +223,12 @@ attribution without a truthful join.
 ## Procedure
 
 1. **Read business state** — `business_read_business`. Note the business `mode`. Read existing
-   `distribution/meta-ads` and `metrics/meta-ads` state so a retry is recognized.
+   `distribution/meta-ads` and `metrics/meta-ads` state so a retry is recognized. Then read the
+   ROAS run history at `metrics/roas/meta.md` (if present): one entry per past campaign sync
+   recording the creative that ran (kind, headline, copy, CTA, budget) and what it measurably
+   returned (purchases, attributed revenue, ROAS). Favor the creative approaches that scored the
+   highest ROAS and do not repeat ones that measurably failed — the history is receipts, not
+   narrative; an absent or empty file just means no measured runs yet.
 2. **Confirm the creative source** — verify the real asset exists at `product/ugc-ads/<slug>/ad.mp4`
    (video) or `product/static-ads/<slug>/<creative_id>.png` (image). If not, route upstream to the
    creative skill in the same flow; never fabricate placeholder media.
