@@ -17663,6 +17663,10 @@ class TakyonStore:
         "replies": 5,
         "reposts": 10,
         "spend_cents": 500,       # >= $5.00 of ad spend is significant even with zero return
+        # Meta-pixel attributed revenue (insights action_values -> sync receipt totals ->
+        # campaign snapshot): channel-attributed, so a single purchase is meaningful signal.
+        "attributed_revenue_cents": 100,  # >= $1.00 of pixel-attributed purchase value
+        "purchases": 1,
     }
 
     @staticmethod
@@ -17686,10 +17690,11 @@ class TakyonStore:
     def _flatten_metrics_snapshot(snap: Any) -> dict[str, float]:
         """Flatten an _episode_metrics_snapshot payload into {metric: number}. Product counters
         stay top-level; campaign entries (reddit/meta) sum across campaigns into impressions /
-        clicks / spend_cents; X totals merge under their own metric names (an episode has one
-        channel, so the names never collide in practice). Non-numeric keys (captured_at, slugs,
-        statuses) are dropped. Tolerant of partial or legacy snapshots — returns {} for one
-        that carries no numbers."""
+        clicks / spend_cents plus pixel-attributed attributed_revenue_cents / purchases when
+        the receipt carries them; X totals merge under their own metric names (an episode has
+        one channel, so the names never collide in practice). Non-numeric keys (captured_at,
+        slugs, statuses) are dropped. Tolerant of partial or legacy snapshots — returns {} for
+        one that carries no numbers."""
         out: dict[str, float] = {}
         if not isinstance(snap, Mapping):
             return out
@@ -17723,6 +17728,15 @@ class TakyonStore:
                     spend_usd = _num(entry.get("spend_usd"))
                     if spend_usd is not None:
                         out["spend_cents"] = out.get("spend_cents", 0.0) + spend_usd * 100.0
+                # Meta-pixel attributed purchase value/count (receipt totals via action_values):
+                # the channel-attributed revenue signal, distinct from business-wide revenue_cents.
+                purchase_value_usd = _num(entry.get("purchase_value_usd"))
+                if purchase_value_usd is not None:
+                    out["attributed_revenue_cents"] = (
+                        out.get("attributed_revenue_cents", 0.0) + purchase_value_usd * 100.0)
+                purchase_count = _num(entry.get("purchase_count"))
+                if purchase_count is not None:
+                    out["purchases"] = out.get("purchases", 0.0) + purchase_count
         x_stats = snap.get("x")
         if isinstance(x_stats, Mapping):
             for key in ("views", "impressions", "likes", "replies", "reposts", "clicks"):
@@ -29954,7 +29968,11 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
                         (p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime
                     )
                     totals = (json.loads(latest.read_text(encoding="utf-8")) or {}).get("totals") or {}
-                    for key in ("impressions", "clicks", "spend_usd"):
+                    # purchase_value_usd / purchase_count are the Meta-pixel attributed
+                    # revenue the insights sync aggregates onto the receipt (action_values);
+                    # absent on channels without purchase attribution (e.g. reddit today).
+                    for key in ("impressions", "clicks", "spend_usd",
+                                "purchase_value_usd", "purchase_count"):
                         if totals.get(key) is not None:
                             entry[key] = totals[key]
                 except Exception:
