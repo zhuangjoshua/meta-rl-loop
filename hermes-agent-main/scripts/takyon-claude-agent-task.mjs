@@ -140,10 +140,25 @@ function humanizeLabel(value) {
 
 const thinkingBlockState = new Map();
 
-function reasoningProgressEvent(note, { entryKey = "claude-reasoning", traceStatus = "running" } = {}) {
+// Thinking blocks the stream lane already emitted (compact form). The final assistant message
+// repeats the FULL thinking text of blocks that partial-message streaming already printed
+// piecewise — without this memory the fallback lane re-emits the whole block as one more line.
+const emittedThinkingSummaries = new Set();
+
+function _rememberEmittedThinking(text) {
+  const summary = compactText(text, 220);
+  if (!summary) return;
+  if (emittedThinkingSummaries.size >= 200) emittedThinkingSummaries.clear();
+  emittedThinkingSummaries.add(summary);
+}
+
+function reasoningProgressEvent(note, { entryKey = "claude-reasoning", traceStatus = "running", traceSummary = "" } = {}) {
   const summary = compactText(note, 220);
   if (!summary) return null;
   const line = `reasoning -> ${summary}`;
+  // The trace entry updates IN PLACE by entry_key, so it can carry the cumulative block summary;
+  // the terminal line cannot (each event prints as a new line), so it carries only `note`.
+  const fullSummary = compactText(traceSummary, 220) || summary;
   return {
     kind: "claude_agent_sdk",
     status: "output",
@@ -153,9 +168,9 @@ function reasoningProgressEvent(note, { entryKey = "claude-reasoning", traceStat
       kind: "reasoning",
       entry_key: entryKey,
       label: "Reasoning",
-      detail: summary,
+      detail: fullSummary,
       status: traceStatus,
-      summary,
+      summary: fullSummary,
     },
   };
 }
@@ -188,13 +203,19 @@ function _flushThinkingState(index, { traceStatus = "running" } = {}) {
   const key = Number(index);
   const state = thinkingBlockState.get(key);
   if (!state) return null;
-  const summary = compactText(state.buffer, 220);
-  if (!summary || summary === state.lastEmitted) return null;
-  state.lastEmitted = summary;
+  // Terminal line = ONLY the text added since the last flush. Emitting the whole accumulated
+  // buffer each flush printed a stack of near-identical growing lines in the shell ("agent
+  // return is like russian nesting dolls", ching 2026-07-09). The cumulative summary still
+  // reaches the trace lane via traceSummary, which updates in place by entry_key.
+  const delta = state.buffer.slice(state.lastEmitLength);
+  const deltaSummary = compactText(delta, 220);
+  if (!deltaSummary) return null;
+  state.lastEmitted = compactText(state.buffer, 220);
   state.lastEmitLength = state.buffer.length;
-  return reasoningProgressEvent(summary, {
+  return reasoningProgressEvent(deltaSummary, {
     entryKey: `claude-reasoning:${key}`,
     traceStatus,
+    traceSummary: state.buffer,
   });
 }
 
@@ -225,7 +246,9 @@ function thinkingProgressEventFromStream(message) {
     return shouldEmit ? _flushThinkingState(event.index) : null;
   }
   if (event.type === "content_block_stop") {
+    const state = thinkingBlockState.get(Number(event.index));
     const progress = _flushThinkingState(event.index, { traceStatus: "completed" });
+    if (state && state.buffer) _rememberEmittedThinking(state.buffer);
     thinkingBlockState.delete(Number(event.index));
     return progress;
   }
@@ -239,9 +262,15 @@ function progressEventFromSdkMessage(message) {
   if (thinkingProgress) return thinkingProgress;
   const assistantThinking = assistantThinkingText(record);
   if (assistantThinking) {
+    // Skip blocks the partial-message stream already emitted piecewise — the final assistant
+    // message carries the full thinking text again and would re-print it as one more line.
+    const summary = compactText(assistantThinking, 220);
+    if (emittedThinkingSummaries.has(summary)) return null;
+    _rememberEmittedThinking(assistantThinking);
     return reasoningProgressEvent(assistantThinking, {
       entryKey: `claude-reasoning:${String(record.uuid || "assistant").trim() || "assistant"}`,
       traceStatus: "completed",
+      traceSummary: assistantThinking,
     });
   }
   if (record.type === "system" && record.subtype === "task_started") {
