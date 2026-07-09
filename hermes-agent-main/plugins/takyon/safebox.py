@@ -3272,6 +3272,23 @@ def store_asc_account_health() -> dict:
     return _remote_json("POST", "/v1/store/asc/account-health", {}, timeout=30.0)
 
 
+def store_eas_build_credentials(business_slug: str, *, capabilities: list | None = None) -> dict:
+    """Mint the per-build store-signing bundle via the safebox (host-independent builder lane).
+
+    The safebox does the ASC provisioning SERVER-SIDE — ensures the business's deterministic bundle
+    id, syncs capabilities, and (re)mints the App Store provisioning profile bound to the custodied
+    team distribution cert — so the ASC .p8 never egresses. The response carries only the ephemeral
+    signing material the eas-cli child process needs: expo_token, dist p12 (base64) + password,
+    profile (base64), team/owner identifiers. Operator-plane only; generous timeout because the ASC
+    provisioning is several sequential Apple API calls."""
+    return _remote_json(
+        "POST",
+        "/v1/store/eas/build-credentials",
+        {"business": str(business_slug or ""), "capabilities": list(capabilities or [])},
+        timeout=180.0,
+    )
+
+
 def openmeter_request(
     method: str,
     path: str,

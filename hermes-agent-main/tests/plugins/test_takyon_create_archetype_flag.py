@@ -39,11 +39,15 @@ def test_alias_normalization_via_flag():
     assert archetype == arch.WEB_SAAS
 
 
+def test_enabled_mobile_app_parses_through_the_flag():
+    *_head, archetype, _animations = _parse(["create", "--archetype", "app", "acme", "goal"])
+    assert archetype == arch.MOBILE_APP
+
+
 def test_disabled_archetype_fails_closed_with_gate_token():
-    for choice in ("app", "shopify"):
-        with pytest.raises(SystemExit) as exc:
-            _parse(["create", "--archetype", choice, "acme", "goal"])
-        assert "archetype_unavailable:" in str(exc.value)
+    with pytest.raises(SystemExit) as exc:
+        _parse(["create", "--archetype", "shopify", "acme", "goal"])
+    assert "archetype_unavailable:" in str(exc.value)
 
 
 def test_unknown_archetype_fails_with_choices():

@@ -88,8 +88,8 @@ _TAKYON_SKILL_PREFIX = "takyon-"
 
 
 
-def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
-    cap = _bootstrap_turn_cap_for_goal(goal)
+def _clamp_bootstrap_max_turns(goal: str, value: Any, archetype: str = "") -> int:
+    cap = _bootstrap_turn_cap_for_goal(goal, archetype=archetype)
     try:
         raw = int(value or cap)
     except (TypeError, ValueError):
@@ -5553,7 +5553,7 @@ def run_takyon_command(
                 goal=goal,
                 mode=active_mode,
                 schedule=schedule if should_schedule else None,
-                max_turns=_clamp_bootstrap_max_turns(goal, max_turns),
+                max_turns=_clamp_bootstrap_max_turns(goal, max_turns, archetype=str(archetype or "")),
             )
             should_follow = (follow or follow_logs) and not detach
             bootstrap_job_id = str(bootstrap_job.get("job_id") or "").strip()

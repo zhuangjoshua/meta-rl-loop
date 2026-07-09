@@ -1661,12 +1661,23 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         (job.payload or {}).get("landing_animations")
         or _business_metadata(business or {}).get("landing_animations")
     )
+    # Archetype-aware bootstrap: prefer the summary's business row, fall back to a direct row read
+    # (the archetype column is canonical on businesses). Absent/error → "" → web prose unchanged.
+    archetype = str((business or {}).get("archetype") or "").strip().lower()
+    if not archetype:
+        try:
+            with store._connect() as conn:
+                row = store._ensure_business(conn, slug)
+            archetype = str((row or {}).get("archetype") or "").strip().lower()
+        except Exception:
+            archetype = ""
     bootstrap_turn = _ceo_bootstrap_turn_config(
         slug,
         goal,
         active_mode,
         business_name=business_name,
         animations=animations,
+        archetype=archetype,
     )
     user_prompt = str(bootstrap_turn.get("user_prompt") or "")
     system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")

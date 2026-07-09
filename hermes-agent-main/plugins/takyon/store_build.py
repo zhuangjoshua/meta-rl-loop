@@ -39,6 +39,9 @@ class BuildResult:
     lane: str
     actual_credits: Optional[int] = None
     detail: str = ""
+    # expo.dev build page (status + full build logs) — carried into the settle metadata and the
+    # tool receipt so the repair loop can fetch failure logs without reconstructing the URL.
+    logs_url: str = ""
 
 
 def run_build(
@@ -75,7 +78,11 @@ def run_build(
     settle(
         reservation_key,
         result.actual_credits if result.actual_credits is not None else credits,
-        {"build_id": result.build_id, "lane": lane},
+        {
+            "build_id": result.build_id,
+            "lane": lane,
+            **({"logs_url": result.logs_url} if getattr(result, "logs_url", "") else {}),
+        },
     )
     return result
 

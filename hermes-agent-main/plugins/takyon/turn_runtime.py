@@ -100,10 +100,20 @@ def _bootstrap_goal_requests_product_workflow(goal: str) -> bool:
     return " with " in text.lower() and bool(_BOOTSTRAP_FEATURE_NOUN_RE.search(text))
 
 
-def _bootstrap_turn_cap_for_goal(goal: str) -> int:
-    if _bootstrap_goal_requests_product_workflow(goal):
-        return _WORKFLOW_BOOTSTRAP_MAX_TURNS
-    return _DEFAULT_BOOTSTRAP_MAX_TURNS
+# Extra bootstrap turns a mobile_app business needs on top of the web cap: the iOS app-source
+# build pass + the store-signed publish + one triage round of the repair loop.
+_MOBILE_BOOTSTRAP_EXTRA_TURNS = 14
+
+
+def _bootstrap_turn_cap_for_goal(goal: str, archetype: str = "") -> int:
+    cap = (
+        _WORKFLOW_BOOTSTRAP_MAX_TURNS
+        if _bootstrap_goal_requests_product_workflow(goal)
+        else _DEFAULT_BOOTSTRAP_MAX_TURNS
+    )
+    if str(archetype or "").strip().lower() == "mobile_app":
+        cap += _MOBILE_BOOTSTRAP_EXTRA_TURNS
+    return cap
 
 
 def _bootstrap_public_site_url(slug: str) -> str:
@@ -177,10 +187,15 @@ def _business_bootstrap_instruction(
     *,
     business_name: str = "",
     animations: bool = False,
+    archetype: str = "",
 ) -> str:
     goal_text = goal or "Use current business state and evidence to define the business goal."
     workflow_requested = _bootstrap_goal_requests_product_workflow(goal_text)
     effective_mode = "live" if str(active_mode or "").strip().lower() != "live" else "live"
+    # Archetype-aware bootstrap: web steps run unchanged (byte-identical prose for web_saas); a
+    # mobile_app business gains step 5 — the iOS app build + first store-signed TestFlight-lane
+    # release, routed through the takyon-mobile-app skill.
+    mobile_app = str(archetype or "").strip().lower() == "mobile_app"
     lines = [
         f"Bootstrap business:{slug} now.",
         "",
@@ -198,7 +213,13 @@ def _business_bootstrap_instruction(
         "- Do NOT call business_read_business, business_read_file, or business_list_files before acting.",
         "- Do NOT call todo or update task lists at any point.",
         "- Do NOT call skills_list.",
-        "- Load a skill only at the step that uses it, with one skill_view right before use: takyon-brand-logo at 2b, takyon-market-research at step 3, takyon-x at step 4. Do not preload skills up front, do not load takyon-distribution during bootstrap, and do not load any other skill.",
+        (
+            "- Load a skill only at the step that uses it, with one skill_view right before use: "
+            "takyon-brand-logo at 2b, takyon-market-research at step 3, takyon-x at step 4"
+            + (", takyon-mobile-app at step 5" if mobile_app else "")
+            + ". Do not preload skills up front, do not load takyon-distribution during bootstrap, "
+            "and do not load any other skill."
+        ),
         "- After completing each step, move to the next immediately.",
         "- Use exactly the business name above. Do not invent a second company, umbrella brand, or product name.",
         "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (researching the market, designing the product, putting the site online, drafting the launch post) — never the runtime plumbing.",
@@ -346,6 +367,19 @@ def _business_bootstrap_instruction(
         "Use research findings to make the post truthful and compelling. The post links the already-live landing page; do not claim in-app features or polish that may still be building.",
         "Before any live X publish or paid creative/ad action, call business_read_channel_credit_budgets. If the required bucket cannot cover the action cost, record that exact blocker in research/strategy.md and stop before enqueueing or launching the spendful step.",
         "For broader distribution-thread execution, load takyon-distribution.",
+        *(
+            [
+                "",
+                "### 5. iOS app build + first store-signed build (this business is archetype mobile_app)",
+                "This business's deliverable includes a REAL iOS app, not only the web surface. Load takyon-mobile-app (skill_view) right before this step and follow its Procedure.",
+                "Build the app source first: call business_claude_agent_task with workspace product/app. The platform seeds the pinned Expo scaffold into that workspace automatically and injects the mobile worker contract + build gates by code — instruct the worker to turn the seeded scaffold into this business's real app (screens, flows, copy, theme) from research/strategy.md and the offer, and to finish only on its injected green gates (npm ci + tsc + expo config).",
+                "Then cut the first store-signed build: call business_publish_mobile_release with lane preview and a FRESH idempotency_key. The result's build_id + logs_url are the receipt; record them in metrics/ and reflect the milestone in the curated operator update.",
+                "If the publish result is a blocker (compliance gate, credits, eas_builder_unconfigured), record the exact gate token in research/strategy.md and stop this step honestly. If the build triggers but later reports errored (check with business_read_store_status passing the build_id), run the takyon-mobile-app skill's Build-Failure Triage loop — maximum 3 total build attempts, each with a fresh idempotency_key.",
+                "Customer-visible milestone: include an 'iOS app build' milestone (category PRODUCT) in the business_post_operator_update plan; describe it as building and packaging their mobile app — never name EAS, TestFlight internals, or tool names in customer-visible sentences.",
+            ]
+            if mobile_app
+            else []
+        ),
         "",
         "## Constraints",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
@@ -372,6 +406,7 @@ def _ceo_bootstrap_turn_config(
     *,
     business_name: str = "",
     animations: bool = False,
+    archetype: str = "",
 ) -> dict[str, Any]:
     return {
         "user_prompt": _business_bootstrap_instruction(
@@ -380,6 +415,7 @@ def _ceo_bootstrap_turn_config(
             active_mode,
             business_name=business_name,
             animations=animations,
+            archetype=archetype,
         ),
         "ephemeral_system_prompt": _ceo_prompt_for_bootstrap(),
         # Same CEO toolset as the interactive/cron turns: ``takyon-authority`` carries the spendful
@@ -402,7 +438,7 @@ def _ceo_bootstrap_turn_config(
         "load_soul_identity": False,
         "skip_memory": True,
         "skip_context_files": True,
-        "max_turns": _bootstrap_turn_cap_for_goal(goal),
+        "max_turns": _bootstrap_turn_cap_for_goal(goal, archetype=archetype),
     }
 
 

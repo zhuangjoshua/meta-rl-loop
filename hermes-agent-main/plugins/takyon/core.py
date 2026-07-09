@@ -247,7 +247,11 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 """
 MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 - This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
-- Before you finish, you MUST run `npm install` (if you changed dependencies) and `npx tsc --noEmit` in this workspace and confirm it exits green. Run it yourself with Bash — do not assume.
+- Before you finish, you MUST run and confirm green, yourself, with Bash — do not assume:
+  1. `npm ci --ignore-scripts --no-audit --no-fund` if you changed package.json/package-lock.json — `npm install` only WARNS on peer-dependency conflicts that make the real EAS builder FAIL (ERESOLVE), so `npm ci` strictness is the gate, not install.
+  2. `npx tsc --noEmit` — zero type errors.
+  3. `npx expo config --type public` — the app config must evaluate cleanly (a crashing config plugin kills the paid store build).
+- These same checks run again as the store build's free preflight; a tree that fails them here would burn a paid build there.
 - If you cannot land it green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining error and the file(s) involved.
 """
 MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App Store rail):
@@ -1569,6 +1573,10 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     # Registered here → never vended over /v1/env; the safebox mints it per-build into the jailed
     # builder, never onto a Takyon-host env.
     "expo": ("TAKYON_EXPO_TOKEN", "EXPO_TOKEN"),
+    # Team distribution-signing custody (host-independent builder lane): the p12 + password live in
+    # safebox Doppler and egress ONLY inside the /v1/store/eas/build-credentials signing bundle —
+    # never over /v1/env (this registration puts them on the provider-key denylist).
+    "app_store_dist": ("APP_STORE_DIST_P12_B64", "APP_STORE_DIST_P12_PASSWORD"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
     "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -2923,6 +2931,53 @@ def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
     return out
 
 
+def _read_shopify_catalog_products(workspace_root: "Path | None") -> list[dict[str, Any]]:
+    """The business's buyable Shopify catalog (``product/shopify-catalog.json``), materialized into
+    the surface context at publish time so EVERY shopify_commerce product site renders a store
+    section with Buy buttons — the SAME publish-time-injection wiring as ``plans``/``hero``. The
+    mirror file is written by ``business_shopify_create_product`` (buyable catalog projection),
+    which already excludes drafts/variant-less products, so every entry here is public + buyable.
+    Fail-soft: any missing file / parse problem returns [] and the site shows no store section — a
+    non-Shopify business has no catalog file, so it is unaffected by construction.
+
+    (Restored 2026-07-08: originally landed in 6755be74; a concurrent stale-base core.py push
+    (8a0eeb2a) clobbered it while its tests/scaffold half survived — the storefront-rail suite
+    pins it against regressing again.)"""
+    business_root = _starter_business_root(Path(workspace_root) if workspace_root is not None else None)
+    if business_root is None:
+        return []
+    try:
+        # product/shopify-catalog.json == shopify_util.SHOPIFY_CATALOG_RELPATH.
+        catalog_path = business_root / "product" / "shopify-catalog.json"
+        if not catalog_path.is_file():
+            return []
+        data = json.loads(catalog_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return []
+    products = data.get("products") if isinstance(data, dict) else None
+    if not isinstance(products, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for product in products:
+        if not isinstance(product, Mapping):
+            continue
+        title = str(product.get("title") or "").strip()
+        permalink = str(product.get("cart_permalink") or "").strip()
+        if not title or not permalink:
+            continue  # only released, buyable products reach the public bake
+        out.append(
+            {
+                "product_id": str(product.get("product_id") or ""),
+                "title": title[:200],
+                "price": str(product.get("price") or ""),
+                "handle": str(product.get("handle") or ""),
+                "cart_permalink": permalink,
+                "preview_url": str(product.get("preview_url") or ""),
+            }
+        )
+    return out
+
+
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
@@ -2948,6 +3003,10 @@ def _subuser_surface_context_payload(
         "railState": shape.get("rail_state") or {},
         "auth": _subuser_public_auth_payload(surface),
         "plans": _starter_plan_shape_payload(plans),
+        # Buyable Shopify storefront, baked at publish for every business that has pushed products
+        # (empty for non-Shopify businesses). The scaffold reads this as ``productCatalog`` and
+        # renders the Store section whose Buy buttons deep-link each product's cart_permalink.
+        "shopifyCatalog": _read_shopify_catalog_products(workspace_root),
         "routes": routes,
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
@@ -23153,7 +23212,10 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
     (store_builder.local_eas_invoker, the live-proven recipe) when its explicit-path custody
     resolves, else the fail-closed default (eas_builder_unconfigured). Secrets reach only the
     builder's child process — never this plane's environ, never /v1/env."""
-    _refuse_on_autonomous_wake("mobile releases")
+    # Operator ruling 2026-07-08: no wake refusal here. The operator plane is god-mode — bootstrap
+    # and scheduled wakes may both publish builds (the spend is bounded by the credit rail and the
+    # ≤3-attempt repair loop in the takyon-mobile-app skill). App Store SUBMISSION (the outward,
+    # account-blast-radius step) is a separate lane that keeps its operator_approvals receipt.
     store = _store()
     try:
         business = _resolved_business_slug(args, required=True)
@@ -23219,14 +23281,26 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
             from . import store_builder as _builder
         except ImportError:  # pragma: no cover - alternate load path
             from plugins.takyon import store_builder as _builder
-        if not _builder.is_configured():
+        builder_lane = _builder.builder_mode()
+        if not builder_lane:
             return tool_error(
-                "eas_builder_unconfigured: the store-builder custody (ASC key, Expo token, team "
-                "distribution identity) is not present on this plane, so a real build cannot run. "
-                "No credits were reserved.",
+                "eas_builder_unconfigured: no store-builder lane on this plane — neither local "
+                "custody (TAKYON_STORE_BUILDER_SECRETS_DIR) nor the host-independent safebox lane "
+                "(node/npm/npx/git on PATH + a configured remote safebox). No credits were reserved.",
                 success=False,
             )
-        builder_creds = _builder.resolve_local_store_credentials()
+        if builder_lane == "local":
+            builder_creds = _builder.resolve_local_store_credentials()
+        else:
+            # Host-independent lane: the safebox does the ASC provisioning server-side and returns
+            # the ephemeral signing bundle (fail-closed StoreBuilderUnconfigured before any reserve).
+            try:
+                app_cfg_for_caps = json.loads((app_source / "app.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise TakyonError(f"mobile_app_source_invalid: app.json unreadable ({exc})") from exc
+            builder_creds = _builder.resolve_safebox_store_credentials(
+                business, capabilities=_builder.capabilities_from_app_config(app_cfg_for_caps)
+            )
         invoke_eas = _builder.local_eas_invoker(
             business_slug=business, lane=lane, source_dir=str(app_source), creds=builder_creds
         )
@@ -23300,10 +23374,14 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
                 "business": business,
                 "lane": lane,
                 "build_id": result.build_id,
+                "logs_url": getattr(result, "logs_url", ""),
+                "builder_lane": builder_lane,
                 "detail": result.detail,
                 "compliance": {"passed": True, "lane": gate.get("lane")},
                 "note": "Build triggered and credits settled (spend happens at the Expo trigger). "
-                "Poll the build for the signed artifact; store submission is a separate step.",
+                "Check status with business_read_store_status {build_id}; a FAILED build's fix "
+                "loop is the takyon-mobile-app skill's build-failure triage (max 3 attempts, "
+                "fresh idempotency_key each). Store submission is a separate step.",
             }
         )
     except Exception as exc:
@@ -23333,12 +23411,34 @@ def handle_business_read_store_status(args: dict, **_: Any) -> str:
         except Exception as exc:
             # Never hard-fail a read: a probe/transport error surfaces as a state, not a tool error.
             account_health = {"state": "unreachable", "detail": str(exc)[:200], "status_code": None}
+        # Optional per-build status read ($0, never touches the reservation): the repair loop's
+        # evidence surface. status: finished | errored | in-progress/new/…; errored builds carry
+        # the provider error message, and the expo.dev logs page is in the publish receipt.
+        build_status: dict[str, Any] | None = None
+        requested_build_id = str(args.get("build_id") or "").strip()
+        if requested_build_id:
+            try:
+                try:
+                    from . import store_builder as _builder
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon import store_builder as _builder
+                poll_lane = _builder.builder_mode()
+                if poll_lane == "local":
+                    poll_creds = _builder.resolve_local_store_credentials()
+                elif poll_lane == "safebox":
+                    poll_creds = _builder.resolve_safebox_store_credentials(business)
+                else:
+                    raise TakyonError("eas_builder_unconfigured: no builder lane on this plane")
+                build_status = _builder.poll_build(requested_build_id, poll_creds)
+            except Exception as exc:
+                build_status = {"status": "unknown", "artifact_url": "", "error": str(exc)[:200]}
         return tool_result(
             {
                 "success": True,
                 "business": business,
                 "archetype": archetype,
                 "account_health": account_health,
+                **({"build": {"build_id": requested_build_id, **(build_status or {})}} if requested_build_id else {}),
                 "note": "Apple developer-account health; per-app review/version status lands with the submit lane.",
             }
         )
@@ -28320,6 +28420,19 @@ def _assert_ad_set_budget_authorized(
         raise TakyonError(str(exc))
 
 
+def _operator_creative_gate_disabled() -> bool:
+    """Operator god-mode creative-credit bypass (client half; the authoritative half lives in
+    ``safebox_app._operator_creative_gate_disabled`` on the safebox host). When set, the operator
+    plane's client-side credit refusals (balance pre-check, channel-budget check, local-ledger
+    insufficient) stop refusing: local shortfalls are auto-granted as ledgered bypass-tagged
+    top-ups, and remote refusal is handled by the safebox authority under the same flag. Metering
+    is unchanged — every action still reserves and settles with real cost metadata. Subusers are
+    untouched: this helper only runs inside operator-plane ``business_*`` tools."""
+    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _creative_credit_unit_cost(action: str) -> int:
     env_name = _CREATIVE_CREDIT_COST_ENVS.get(action, "")
     raw = os.getenv(env_name or "")
@@ -29162,12 +29275,17 @@ def _reserve_creative_credits(
             owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
         credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
-        if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
+        available_credits = _creative_credit_int(getattr(balances, "balance_credits", 0))
+        # Operator god-mode (TAKYON_OPERATOR_CREATIVE_GATE_DISABLED): skip the client-side refusals;
+        # the safebox authority applies the same bypass (shortfall auto-granted + ledgered) remotely,
+        # and the local branch below tops up the ledger before reserving. Metering is unchanged.
+        gate_disabled = _operator_creative_gate_disabled()
+        if requested > available_credits and not gate_disabled:
             raise credits_backend.InsufficientCreativeCredits(
                 requested_credits=requested,
-                available_credits=_creative_credit_int(getattr(balances, "balance_credits", 0)),
+                available_credits=available_credits,
             )
-        if resolved_bucket:
+        if resolved_bucket and not gate_disabled:
             snapshot = _creative_credit_budget_snapshot_from_conn(
                 store,
                 conn,
@@ -29186,6 +29304,21 @@ def _reserve_creative_credits(
                     reserved_credits=_creative_credit_int(channel.get("reserved_credits")),
                 )
         if not use_safebox_gate:
+            if gate_disabled and requested > available_credits:
+                # God-mode local top-up: grant exactly the shortfall (idempotent on the reservation
+                # key, bypass-tagged in the ledger) so the reserve below succeeds without ever
+                # loosening the ledger's non-negative invariant.
+                credits_backend._local_grant_credits(
+                    conn,
+                    business,
+                    max(1, requested - available_credits),
+                    f"operator-creative-gate-bypass:{reservation_key}",
+                    metadata={
+                        "reason": "operator_creative_gate_disabled",
+                        "action": action,
+                        "shortfall_credits": max(1, requested - available_credits),
+                    },
+                )
             reservation = credits_backend.reserve_credits(
                 conn,
                 business,
@@ -29542,10 +29675,13 @@ def _reserve_channel_spend_credits(
             owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
         credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
-        if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
+        available_credits = _creative_credit_int(getattr(balances, "balance_credits", 0))
+        # Operator god-mode: same bypass as _reserve_creative_credits (see there for the contract).
+        gate_disabled = _operator_creative_gate_disabled()
+        if requested > available_credits and not gate_disabled:
             raise credits_backend.InsufficientCreativeCredits(
                 requested_credits=requested,
-                available_credits=_creative_credit_int(getattr(balances, "balance_credits", 0)),
+                available_credits=available_credits,
             )
         snapshot = _creative_credit_budget_snapshot_from_conn(
             store,
@@ -29555,7 +29691,7 @@ def _reserve_channel_spend_credits(
         )
         channel_budget = snapshot["channels"].get(bucket, {})
         remaining_credits = _creative_credit_int(channel_budget.get("remaining_credits"))
-        if requested > remaining_credits:
+        if requested > remaining_credits and not gate_disabled:
             raise CreativeCreditBudgetExceeded(
                 bucket=bucket,
                 requested_credits=requested,
@@ -29565,6 +29701,18 @@ def _reserve_channel_spend_credits(
                 reserved_credits=_creative_credit_int(channel_budget.get("reserved_credits")),
             )
         if not use_safebox_gate:
+            if gate_disabled and requested > available_credits:
+                credits_backend._local_grant_credits(
+                    conn,
+                    business,
+                    max(1, requested - available_credits),
+                    f"operator-creative-gate-bypass:{reservation_key}",
+                    metadata={
+                        "reason": "operator_creative_gate_disabled",
+                        "action": action,
+                        "shortfall_credits": max(1, requested - available_credits),
+                    },
+                )
             reservation = credits_backend.reserve_credits(
                 conn,
                 business,
@@ -36688,12 +36836,15 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_store_status",
-        "description": "Read a mobile_app business's App Store standing (Apple developer-account health now; per-app review/version status when the submit lane lands). Read-only, fail-open.",
+        "description": "Read a mobile_app business's App Store standing: Apple developer-account health, plus a specific EAS build's status/artifact/error when build_id is passed ($0 poll — the build-failure triage evidence read). Read-only, fail-open.",
         "handler": handle_business_read_store_status,
         "schema": _schema(
             "business_read_store_status",
-            "Read the App Store account/app status for a mobile_app business (account health via the safebox; key never egresses).",
-            {"business": _BUSINESS_PROP},
+            "Read the App Store account/app status for a mobile_app business (account health via the safebox; key never egresses). Pass build_id to also poll that EAS build's status, signed-artifact URL, and error message.",
+            {
+                "business": _BUSINESS_PROP,
+                "build_id": {"type": "string", "description": "Optional EAS build id (from business_publish_mobile_release) to poll: returns status (finished/errored/in-progress), the signed-artifact URL when finished, and the provider error when errored."},
+            },
             ["business"],
         ),
     },

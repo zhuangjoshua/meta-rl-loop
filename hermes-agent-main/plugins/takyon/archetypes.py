@@ -147,9 +147,14 @@ BUSINESS_ARCHETYPES: dict[str, ArchetypePreset] = {
         label="Mobile app (App Store)",
         description=(
             "An iOS app built with Expo/EAS over the same subuser rails, published to the Apple "
-            "App Store (readmodular.md). NOT yet enabled — pipeline lands across M0–M2."
+            "App Store (readmodular.md). Bootstrap seeds product/app and "
+            "business_publish_mobile_release triggers the store-signed EAS build."
         ),
-        enabled=False,  # readmodular §5: flip to True when the M-milestone E2E passes
+        # Operator ruling 2026-07-08 (god-mode enablement): the store-signed build lane is
+        # live-proven (pocketgarden) and the builder is host-independent via the safebox
+        # build-credentials route, so the create toggle is ON. App Store SUBMISSION remains a
+        # separate, still-gated lane (approval_gates below).
+        enabled=True,
         default_money_shape=_money_shape.SUBSCRIPTION,  # IAP is the same shape, a different provider (M3)
         scaffold="mobile_app_kit/scaffold",
         build_kind="expo_build",

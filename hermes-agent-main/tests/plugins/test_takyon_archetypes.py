@@ -26,12 +26,13 @@ def test_registry_keys_match_declared_set():
 
 
 def test_web_saas_is_the_enabled_identity_case():
-    # Only web_saas is selectable today; the store/shopify pipelines are registered but gated
-    # (readmodular §5 rollout). This is the zero-behavior-change guarantee.
+    # web_saas + mobile_app are selectable (mobile enabled 2026-07-08, operator god-mode ruling —
+    # the store-signed build lane is live-proven and host-independent); shopify_commerce stays
+    # gated until its S1 slice is E2E-proven.
     assert arch.is_enabled(arch.WEB_SAAS) is True
-    assert arch.is_enabled(arch.MOBILE_APP) is False
+    assert arch.is_enabled(arch.MOBILE_APP) is True
     assert arch.is_enabled(arch.SHOPIFY_COMMERCE) is False
-    assert tuple(p.key for p in arch.selectable_archetypes()) == (arch.WEB_SAAS,)
+    assert tuple(p.key for p in arch.selectable_archetypes()) == (arch.WEB_SAAS, arch.MOBILE_APP)
     # web_saas presets today's behavior byte-for-byte.
     web = arch.BUSINESS_ARCHETYPES[arch.WEB_SAAS]
     assert web.build_kind == "node_build"
@@ -61,11 +62,11 @@ def test_normalize_unknown_and_required_raise():
 
 def test_assert_selectable_fails_closed_on_disabled():
     assert arch.assert_selectable("saas") == arch.WEB_SAAS
-    for disabled in ("app", "shopify"):
-        with pytest.raises(arch.ArchetypeNotAvailable) as exc:
-            arch.assert_selectable(disabled)
-        # The gate token is the CEO's discovery surface.
-        assert "archetype_unavailable:" in str(exc.value)
+    assert arch.assert_selectable("app") == arch.MOBILE_APP
+    with pytest.raises(arch.ArchetypeNotAvailable) as exc:
+        arch.assert_selectable("shopify")
+    # The gate token is the CEO's discovery surface.
+    assert "archetype_unavailable:" in str(exc.value)
 
 
 def test_default_money_shape_for_matches_preset():
