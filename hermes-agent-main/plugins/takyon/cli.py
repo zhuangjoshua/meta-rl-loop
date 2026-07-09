@@ -88,8 +88,8 @@ _TAKYON_SKILL_PREFIX = "takyon-"
 
 
 
-def _clamp_bootstrap_max_turns(goal: str, value: Any, archetype: str = "") -> int:
-    cap = _bootstrap_turn_cap_for_goal(goal, archetype=archetype)
+def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
+    cap = _bootstrap_turn_cap_for_goal(goal)
     try:
         raw = int(value or cap)
     except (TypeError, ValueError):
@@ -610,6 +610,16 @@ def _format_cli_value(value: Any) -> str:
                 if published_build and status in {"failed", "blocked"}
                 else ""
             )
+            # The follow-tail capped out while the job kept running its background tail, but the
+            # product site is already published. Do NOT report "Create running" (reads as "still
+            # bootstrapping" — operator complaint): the business is LIVE, the tail is background.
+            if follow.get("site_live_on_detach") and status not in {"failed", "blocked"}:
+                live_suffix = f" (live build {published_build[:12]})" if published_build else ""
+                return (
+                    f"business:{slug} is LIVE{live_suffix}{took_suffix} — bootstrap effectively done; "
+                    "remaining setup finishes in the background. Use /use "
+                    f"{slug} to work it, or `takyon logs -f` to watch the tail."
+                )
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
             job_id = str(bootstrap_job.get("job_id") or "").strip()
@@ -2597,6 +2607,7 @@ def _follow_worker_job(
     last_status = ""
     record = None
     detached = False
+    detached_live_build = ""  # set when the follow-tail caps out but the site is already published
     try:
         # Prime with already-recorded turns so --follow shows only narration produced from now on.
         try:
@@ -2654,11 +2665,38 @@ def _follow_worker_job(
                 )
                 queued_warned = True
             if elapsed > max_seconds:
-                print(
-                    f"[{label}] detaching after {int(max_seconds)}s; job still {status}. "
-                    "Re-attach with `takyon logs -f`.",
-                    flush=True,
-                )
+                # The follow-tail hit its cap, but a bootstrap keeps a long background TAIL
+                # (research, wake scheduling, launch post) running LONG after the one thing the
+                # operator waits for — the live product site — is already published. Leaving
+                # "[bootstrap] ... job still running" as the last line reads as "stuck / still
+                # bootstrapping" even though the business is usable (operator complaint, ching).
+                # Check the DURABLE live-build pointer: once the site is live, drop the bootstrap
+                # framing entirely and say the business is LIVE — the tail is just background.
+                detach_live_build = ""
+                try:
+                    with store._connect() as conn:
+                        row = conn.execute(
+                            "SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?",
+                            (slug,),
+                        ).fetchone()
+                    if row:
+                        detach_live_build = str((store._row_to_dict(row) or {}).get("live_build_id") or "").strip()
+                except Exception:  # noqa: BLE001 - display-only enrichment
+                    detach_live_build = ""
+                if detach_live_build:
+                    detached_live_build = detach_live_build
+                    print(
+                        f"\n✓ business:{slug} is LIVE (build {detach_live_build[:12]}). The "
+                        "bootstrap is effectively done — its remaining background steps continue on "
+                        "the worker; you don't need to wait. (`takyon logs -f` to watch them.)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[{label}] detaching after {int(max_seconds)}s; job still {status}. "
+                        "Re-attach with `takyon logs -f`.",
+                        flush=True,
+                    )
                 break
             time.sleep(poll_seconds)
         # Final sweep for trailing narration / log lines written just before the terminal status.
@@ -2720,7 +2758,8 @@ def _follow_worker_job(
         "error": (record.error if record else None),
         "detached": detached,
         **({"duration_display": duration_display} if duration_display else {}),
-        **({"site_published_build": live_build_id} if live_build_id else {}),
+        **({"site_published_build": live_build_id or detached_live_build} if (live_build_id or detached_live_build) else {}),
+        **({"site_live_on_detach": True} if detached_live_build else {}),
     }
 
 
@@ -5242,17 +5281,9 @@ def run_takyon_command(
             if len(argv) < 3:
                 raise SystemExit("usage: takyon rl policy <business>")
             return store.rl_policy(_slugify(argv[2]))
-        if sub == "distill":
-            # Deterministic metrics→lessons pass (same code path the wake runs). --dry-run
-            # evaluates matured episodes and reports what WOULD distill without writing —
-            # the operator backtest affordance for the fixed significance thresholds.
-            if len(argv) < 3 or str(argv[2]).startswith("--"):
-                raise SystemExit("usage: takyon rl distill <business> [--dry-run]")
-            return store.distill_episode_lessons(
-                _slugify(argv[2]), dry_run=("--dry-run" in [str(a) for a in argv[3:]]))
         if sub in {"status", ""}:
             return store.rl_status(_slugify(argv[2]) if len(argv) >= 3 else None)
-        raise SystemExit("usage: takyon rl status|lessons|why|policy|distill ...")
+        raise SystemExit("usage: takyon rl status|lessons|why|policy ...")
 
     if command == "test":
         if len(argv) < 2:
@@ -5553,7 +5584,7 @@ def run_takyon_command(
                 goal=goal,
                 mode=active_mode,
                 schedule=schedule if should_schedule else None,
-                max_turns=_clamp_bootstrap_max_turns(goal, max_turns, archetype=str(archetype or "")),
+                max_turns=_clamp_bootstrap_max_turns(goal, max_turns),
             )
             should_follow = (follow or follow_logs) and not detach
             bootstrap_job_id = str(bootstrap_job.get("job_id") or "").strip()
