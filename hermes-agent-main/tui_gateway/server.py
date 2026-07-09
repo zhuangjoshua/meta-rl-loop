@@ -3033,9 +3033,23 @@ _TAKYON_BUDGET_GUARD_PREFIX = (
 )
 _TAKYON_SCOPED_OPERATOR_SUFFIX = (
     "\n\nFirst read this business state with Takyon business tools. Honor the business work_focus field "
+    "if it is marketing-only or product-only. Keep all durable writes business-scoped. "
+    "Requests to create, build, or make a product, app, site, feature, or workflow apply to this "
+    "business and must use its product workflow. Never create or switch to another business from "
+    "a scoped request. The current scope is authoritative; do not infer a business name from request "
+    "wording or list businesses to choose a different target."
+)
+_TAKYON_LEGACY_SCOPED_OPERATOR_SUFFIX = (
+    "\n\nFirst read this business state with Takyon business tools. Honor the business work_focus field "
     "if it is marketing-only or product-only. Keep all durable writes business-scoped."
 )
 _TAKYON_GLOBAL_OPERATOR_SUFFIX = (
+    "\n\nUse global reads for businesses, credentials, policy, skills, and budgets. "
+    "Natural-language requests cannot create businesses. Business creation requires an explicit /create "
+    "command or the dashboard create form; otherwise select an existing business before changing business, "
+    "product, or customer state."
+)
+_TAKYON_LEGACY_GLOBAL_OPERATOR_SUFFIX = (
     "\n\nUse global reads for businesses, credentials, policy, skills, and budgets. "
     "For any business/product/customer state change, create or select the business and use concrete business_* tools."
 )
@@ -3058,18 +3072,16 @@ def _sanitize_user_history_display_text(text: str) -> str:
                 continue
 
     marker = "\n\nOperator request:\n"
-    if value.startswith("Scope: business:") and marker in value and value.endswith(
-        _TAKYON_SCOPED_OPERATOR_SUFFIX
-    ):
-        head, request = value.split(marker, 1)
-        if "\nCEO role: scoped business operator." in head:
-            return request[: -len(_TAKYON_SCOPED_OPERATOR_SUFFIX)]
-    if value.startswith("Scope: global") and marker in value and value.endswith(
-        _TAKYON_GLOBAL_OPERATOR_SUFFIX
-    ):
-        head, request = value.split(marker, 1)
-        if "\nCEO role: account/root-scope operator." in head:
-            return request[: -len(_TAKYON_GLOBAL_OPERATOR_SUFFIX)]
+    for suffix in (_TAKYON_SCOPED_OPERATOR_SUFFIX, _TAKYON_LEGACY_SCOPED_OPERATOR_SUFFIX):
+        if value.startswith("Scope: business:") and marker in value and value.endswith(suffix):
+            head, request = value.split(marker, 1)
+            if "\nCEO role: scoped business operator." in head:
+                return request[: -len(suffix)]
+    for suffix in (_TAKYON_GLOBAL_OPERATOR_SUFFIX, _TAKYON_LEGACY_GLOBAL_OPERATOR_SUFFIX):
+        if value.startswith("Scope: global") and marker in value and value.endswith(suffix):
+            head, request = value.split(marker, 1)
+            if "\nCEO role: account/root-scope operator." in head:
+                return request[: -len(suffix)]
     return value
 
 
@@ -7064,34 +7076,6 @@ def _takyon_business_slugs(businesses: Any) -> set[str]:
     }
 
 
-_TAKYON_CREATE_BUSINESS_PATTERNS = (
-    re.compile(r"\b(?:create|build|make|start|launch|bootstrap|set\s+up)\b.{0,80}\b(?:business|micro\s*saas|saas|startup|company)\b", re.I | re.S),
-    re.compile(r"\b(?:new|another)\b.{0,40}\b(?:business|micro\s*saas|saas|startup|company)\b", re.I | re.S),
-)
-_TAKYON_EXISTING_BUSINESS_TARGET_PATTERNS = (
-    re.compile(r"\bfor\s+(?:this|the)\s+(?:business|company|startup|saas|micro\s*saas|app|product)\b", re.I),
-    re.compile(r"\bthis\s+(?:business|company|startup|saas|micro\s*saas|app|product)\b", re.I),
-)
-
-
-def _takyon_prompt_may_create_business(text: str) -> bool:
-    compact = " ".join(str(text or "").strip().split())
-    if not compact:
-        return False
-    if any(pattern.search(compact) for pattern in _TAKYON_EXISTING_BUSINESS_TARGET_PATTERNS):
-        return False
-    return any(pattern.search(compact) for pattern in _TAKYON_CREATE_BUSINESS_PATTERNS)
-
-
-def _takyon_prompt_mentions_budget(text: str) -> bool:
-    compact = " ".join(str(text or "").strip().split()).lower()
-    if not compact:
-        return False
-    if re.search(r"\b(?:budget|cap|spend limit|spend cap|runway|limit)\b", compact):
-        return True
-    return bool(re.search(r"(?:\$|usd\s*)\d+(?:[,.]\d+)?|\d+(?:[,.]\d+)?\s*(?:usd|dollars?)\b", compact))
-
-
 def _build_takyon_prompt_text(
     session: dict,
     text: str,
@@ -7101,26 +7085,7 @@ def _build_takyon_prompt_text(
     from plugins.takyon.cli import _operator_context_message
 
     current_business = str(session.get("takyon_current_business") or "") or None
-    prompt_text = _operator_context_message(text, current_business)
-    if _takyon_prompt_may_create_business(text):
-        try:
-            data = _takyon_store(session).read(scope="global", query="list_businesses", limit=200)
-            session["takyon_businesses_before_prompt"] = sorted(_takyon_business_slugs(data.get("businesses")))
-            session["takyon_pending_business_create"] = True
-            session["takyon_pending_business_create_at"] = time.time()
-        except Exception:
-            session["takyon_businesses_before_prompt"] = list(session.get("takyon_known_businesses") or [])
-            session["takyon_pending_business_create"] = True
-            session["takyon_pending_business_create_at"] = time.time()
-        if not _takyon_prompt_mentions_budget(text):
-            prompt_text = (
-                "Budget guard: the operator appears to be asking for a new business but did not state a budget. "
-                "Before live spending, paid provider calls, customer-facing AI usage, or app usage-budget commitments, "
-                "ask one concise budget question or set an explicit budget only if the operator/configured creation path provides one. "
-                "If the product has AI-backed customer usage, that usage budget is funded by the active paid subscription's included AI budget (set plan pricing with business_upsert_app_plan); there is no separate operator usage-cap tool.\n\n"
-                + prompt_text
-            )
-    return prompt_text
+    return _operator_context_message(text, current_business)
 
 
 def _takyon_maybe_auto_enter_created_business(
@@ -11769,6 +11734,13 @@ def _(rid, params: dict) -> dict:
     session = _takyon_session(params)
     if session is None:
         return _err(rid, 4001, "session not found")
+    current_business = str(session.get("takyon_current_business") or "").strip()
+    if current_business:
+        return _err(
+            rid,
+            4004,
+            f"cannot create a business from business:{current_business}; return to global scope and use the create form",
+        )
     started_stream = False
     try:
         takyon_cli = importlib.import_module("plugins.takyon.cli")

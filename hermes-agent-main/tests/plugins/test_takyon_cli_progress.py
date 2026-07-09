@@ -6,6 +6,8 @@ import os
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 from plugins.takyon import cli, core as takyon_core, turn_runtime, worker
 
 
@@ -1458,6 +1460,72 @@ def test_global_plain_text_is_rejected_without_running_agent(monkeypatch):
 
     assert output == "Plain text is disabled in global scope. Use /commands, /create, or /use <business>."
     assert business is None
+
+
+def test_global_natural_language_create_is_not_dispatched_as_command(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        cli,
+        "run_takyon_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("natural language must not reach the create command")
+        ),
+    )
+
+    output, business = cli._handle_shell_line(
+        "create a product now",
+        current_business=None,
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "Plain text is disabled in global scope. Use /commands, /create, or /use <business>."
+    assert business is None
+
+
+def test_scoped_product_creation_language_routes_to_current_business_agent(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+    captured: dict[str, str] = {}
+
+    def fake_run_agent(message, **_kwargs):  # noqa: ANN001
+        captured["message"] = message
+        return "working on ching"
+
+    monkeypatch.setattr(cli, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        cli,
+        "run_takyon_command",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped product language must not reach the create command")
+        ),
+    )
+
+    output, business = cli._handle_shell_line(
+        "create the product now",
+        current_business="ching",
+        store=_FakeStore(),
+        model="",
+        max_turns=1,
+    )
+
+    assert output == "working on ching"
+    assert business == "ching"
+    assert captured["message"].startswith("Scope: business:ching")
+    assert "apply to this business and must use its product workflow" in captured["message"]
+
+
+def test_explicit_create_command_is_rejected_inside_business_scope(monkeypatch):
+    monkeypatch.setattr(cli, "_local_shell_help_answer", lambda *_args, **_kwargs: "")
+
+    with pytest.raises(SystemExit, match="cannot create a business from business:ching"):
+        cli._handle_shell_line(
+            "/create other-business",
+            current_business="ching",
+            store=_FakeStore(),
+            model="",
+            max_turns=1,
+        )
 
 
 def test_startup_graphic_disables_plain_text_in_global_scope():

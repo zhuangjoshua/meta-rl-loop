@@ -2420,6 +2420,12 @@ def test_commit_tool_namespaces_raw_idempotency_keys_per_action(tmp_path, monkey
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     store = TakyonStore(tmp_path, database_url=pg_store_dsn)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "setup-latexflow",
+    )
     result = json.loads(
         handle_business_upsert_business(
             {
@@ -2449,6 +2455,12 @@ def test_commit_tool_allows_same_raw_key_for_same_action_with_different_content(
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     store = TakyonStore(tmp_path, database_url=pg_store_dsn)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "setup-latexflow",
+    )
     stripe_ids = {"product": 0, "price": 0}
 
     def fake_stripe_request(path, params, *, method="POST"):
@@ -5029,16 +5041,23 @@ def test_sync_business_workspace_remote_skips_supabase_push_on_local_mac(tmp_pat
 
 def test_tool_handlers_return_json(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    create = json.loads(
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:latexflow",
+        [{"action": "business.upsert", "business": "latexflow", "name": "Latexflow"}],
+        "handler-init",
+    )
+    update = json.loads(
         handle_business_upsert_business(
             {
                 "business": "latexflow",
-                "name": "Latexflow",
-                "idempotency_key": "handler-init",
+                "name": "Latexflow Updated",
+                "idempotency_key": "handler-update",
             }
         )
     )
-    assert create["success"] is True
+    assert update["success"] is True
 
     read = json.loads(handle_business_list_businesses({}))
     assert read["success"] is True
@@ -5057,36 +5076,66 @@ def test_tool_handlers_return_json(tmp_path, monkeypatch):
     assert preview["results"][0]["dry_run"] is True
 
 
-def test_business_upsert_respects_configured_reserved_public_subdomains(tmp_path, monkeypatch):
+def test_business_upsert_tool_cannot_create_business(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
-    (tmp_path / "config.yaml").write_text(
-        "dashboard:\n  reserved_public_subdomains:\n    - sai\n",
-        encoding="utf-8",
-    )
 
     blocked = json.loads(
         handle_business_upsert_business(
             {
-                "business": "sai",
-                "name": "SAI",
-                "idempotency_key": "handler-reserved-sai",
+                "business": "accidental",
+                "name": "Accidental",
+                "idempotency_key": "handler-create-accidental",
             }
         )
     )
     assert blocked["success"] is False
-    assert "reserved for Four Manifold infrastructure" in blocked["error"]
+    assert "business:accidental does not exist" in blocked["error"]
+    assert TakyonStore(tmp_path).read(scope="global", query="list_businesses")["businesses"] == []
 
-    allowed = json.loads(
-        handle_business_upsert_business(
-            {
-                "business": "sai-lab",
-                "name": "SAI",
-                "idempotency_key": "handler-allowed-sai-name",
-            }
-        )
+
+def test_business_upsert_tool_cannot_cross_scoped_business(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+    _commit(
+        store,
+        "business:ching",
+        [{"action": "business.upsert", "business": "ching", "name": "Ching"}],
+        "init-ching",
     )
-    assert allowed["success"] is True
-    assert allowed["slug"] == "sai-lab"
+    _commit(
+        store,
+        "business:other",
+        [{"action": "business.upsert", "business": "other", "name": "Other"}],
+        "init-other",
+    )
+
+    tokens = set_session_vars(business_slug="ching")
+    try:
+        allowed = json.loads(
+            handle_business_upsert_business(
+                {
+                    "business": "ching",
+                    "name": "Ching Updated",
+                    "idempotency_key": "update-ching",
+                }
+            )
+        )
+        assert allowed["success"] is True
+
+        blocked = json.loads(
+            handle_business_upsert_business(
+                {
+                    "business": "other",
+                    "name": "Other Changed",
+                    "idempotency_key": "cross-scope-update",
+                }
+            )
+        )
+        assert blocked["success"] is False
+        assert "bound to the current session" in blocked["error"]
+    finally:
+        clear_session_vars(tokens)
 
 
 def test_business_session_binding_scopes_file_writes(tmp_path, monkeypatch):

@@ -359,6 +359,88 @@ def test_deepseek_model_uses_deepseek_endpoint_and_key(client, monkeypatch):
     assert sent["headers"]["x-api-key"] == _REAL_KEY
 
 
+def test_dead_lane_rewrite_routes_claude_to_deepseek(client, monkeypatch):
+    # TAKYON_ANTHROPIC_MODEL_REWRITE set (Anthropic account credit/limit-dead): a stale client
+    # asking for claude-* is rewritten onto the DeepSeek lane BEFORE pricing/routing — deepseek
+    # endpoint + deepseek key, never the (dead) Anthropic upstream — and the response carries
+    # x-takyon-model-rewritten-from so the swap is visible.
+    monkeypatch.setenv("TAKYON_ANTHROPIC_MODEL_REWRITE", "deepseek-v4-pro")
+    estimates = []
+    monkeypatch.setattr(
+        safebox_provider_proxy,
+        "_anthropic_estimate_microusd",
+        lambda p: estimates.append(p.get("model")) or 5000,
+    )
+    monkeypatch.setattr(
+        safebox_provider_proxy, "_anthropic_actual_microusd_from_response", lambda p, r: 900
+    )
+    monkeypatch.setattr(safebox_provider_proxy, "_deepseek_key", lambda: _REAL_KEY)
+    monkeypatch.setattr(
+        safebox_provider_proxy,
+        "_anthropic_key",
+        lambda: pytest.fail("dead Anthropic lane must not be used when the rewrite is on"),
+    )
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_rewritten", "usage": {"output_tokens": 7}})
+    resp = client.post(
+        "/v1/messages",
+        headers=_cap_headers(_session_cap()),
+        json={"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    sent = _FakeClient.sent[-1]
+    assert sent["url"] == safebox_provider_proxy._DEEPSEEK_MESSAGES_URL
+    assert sent["headers"]["x-api-key"] == _REAL_KEY
+    assert sent["json"]["model"] == "deepseek-v4-pro"  # upstream sees the rewritten model
+    assert estimates == ["deepseek-v4-pro"]  # priced/reserved on the model actually served
+    assert resp.headers["x-takyon-model-rewritten-from"] == "claude-sonnet-5"
+    _assert_no_key(resp)
+
+
+def test_dead_lane_rewrite_leaves_deepseek_requests_untouched(client, monkeypatch):
+    # The rewrite only redirects models that would hit the REAL Anthropic upstream; a request that
+    # is already deepseek-* passes through unmodified (no rewrite header).
+    monkeypatch.setenv("TAKYON_ANTHROPIC_MODEL_REWRITE", "deepseek-v4-pro")
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 5000)
+    monkeypatch.setattr(
+        safebox_provider_proxy, "_anthropic_actual_microusd_from_response", lambda p, r: 900
+    )
+    monkeypatch.setattr(safebox_provider_proxy, "_deepseek_key", lambda: _REAL_KEY)
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_ds", "usage": {"output_tokens": 7}})
+    resp = client.post(
+        "/v1/messages",
+        headers=_cap_headers(_session_cap()),
+        json={"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    assert _FakeClient.sent[-1]["json"]["model"] == "deepseek-v4-pro"
+    assert "x-takyon-model-rewritten-from" not in resp.headers
+
+
+def test_no_rewrite_env_keeps_claude_on_anthropic_upstream(client, monkeypatch):
+    # Env unset (normal state once the Anthropic account revives): claude-* routes to the real
+    # Anthropic upstream exactly as before — the rewrite is a no-op.
+    monkeypatch.delenv("TAKYON_ANTHROPIC_MODEL_REWRITE", raising=False)
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 5000)
+    monkeypatch.setattr(
+        safebox_provider_proxy, "_anthropic_actual_microusd_from_response", lambda p, r: 900
+    )
+    monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
+    _patch_httpx(monkeypatch)
+    _FakeClient.response = _FakeResponse(200, {"id": "msg_claude", "usage": {"output_tokens": 7}})
+    resp = client.post(
+        "/v1/messages",
+        headers=_cap_headers(_session_cap()),
+        json={"model": "claude-sonnet-4-6", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+    sent = _FakeClient.sent[-1]
+    assert sent["url"] == safebox_provider_proxy._ANTHROPIC_MESSAGES_URL
+    assert sent["json"]["model"] == "claude-sonnet-4-6"
+    assert "x-takyon-model-rewritten-from" not in resp.headers
+
+
 def test_anthropic_upstream_error_releases_hold_and_is_sanitized(client, monkeypatch):
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_estimate_microusd", lambda p: 5000)
     monkeypatch.setattr(safebox_provider_proxy, "_anthropic_key", lambda: _REAL_KEY)
