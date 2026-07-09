@@ -272,12 +272,16 @@ def test_strict_ceo_role_requires_pinned_openai_responses_runtime(monkeypatch):
 
 
 def test_enable_operator_gateway_deletes_generic_fallback_state(monkeypatch):
+    class Compressor:
+        pass
+
     class Agent:
         model = "gpt-5.5"
         _fallback_chain = [{"provider": "anthropic", "model": "claude-sonnet-5"}]
         _fallback_model = _fallback_chain[0]
         _fallback_index = 0
         _credential_pool = object()
+        context_compressor = Compressor()
 
     monkeypatch.setattr(
         og,
@@ -300,6 +304,7 @@ def test_enable_operator_gateway_deletes_generic_fallback_state(monkeypatch):
     assert agent._fallback_model is None
     assert agent._credential_pool is None
     assert agent._takyon_strict_model_pin == "gpt-5.5"
+    assert agent.context_compressor._takyon_operator_gateway_context.model == "gpt-5.5"
 
 
 def test_runtime_plane_resolves_anthropic_keyfree_without_probing_v1_env(monkeypatch):

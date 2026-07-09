@@ -1066,6 +1066,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 "max_tokens": int(summary_budget * 1.3),
                 # timeout resolved from auxiliary.compression.timeout config by call_llm
             }
+            gateway_context = getattr(
+                self, "_takyon_operator_gateway_context", None
+            )
+            if gateway_context is not None:
+                call_kwargs["main_runtime"]["operator_gateway_context"] = gateway_context
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
             response = call_llm(**call_kwargs)

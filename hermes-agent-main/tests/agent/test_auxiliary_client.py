@@ -28,6 +28,7 @@ from agent.auxiliary_client import (
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
+    _client_cache_key,
 )
 
 
@@ -38,6 +39,7 @@ def _clean_env(monkeypatch):
         "OPENROUTER_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY",
         "OPENAI_MODEL", "LLM_MODEL", "NOUS_INFERENCE_BASE_URL",
         "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+        "TAKYON_STRICT_MODEL_ROLES", "TAKYON_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -1150,6 +1152,127 @@ class TestCallLlmPaymentFallback:
             )
         # Fallback client should have been used
         assert fallback_client.chat.completions.create.called
+
+
+class TestStrictModelRoles:
+    @staticmethod
+    def _runtime():
+        return {
+            "provider": "custom",
+            "model": "gpt-5.5",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "operator-gateway-placeholder",
+            "api_mode": "codex_responses",
+        }
+
+    def test_sync_payment_error_never_uses_fallback(self, monkeypatch):
+        monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+        monkeypatch.setenv("TAKYON_MODEL", "gpt-5.5")
+        primary = MagicMock()
+        payment_error = Exception("Payment Required: insufficient credits")
+        payment_error.status_code = 402
+        primary.chat.completions.create.side_effect = payment_error
+
+        with patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(primary, "gpt-5.5"),
+        ), patch(
+            "agent.auxiliary_client._try_payment_fallback"
+        ) as auto_fallback, patch(
+            "agent.auxiliary_client._try_configured_fallback_chain"
+        ) as configured_fallback, patch(
+            "agent.auxiliary_client._try_main_agent_model_fallback"
+        ) as main_fallback:
+            with pytest.raises(Exception, match="Payment Required"):
+                call_llm(
+                    task="compression",
+                    main_runtime=self._runtime(),
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+
+        assert primary.chat.completions.create.call_args.kwargs["model"] == "gpt-5.5"
+        auto_fallback.assert_not_called()
+        configured_fallback.assert_not_called()
+        main_fallback.assert_not_called()
+
+    def test_operator_gateway_auxiliary_cache_is_scoped_to_operator_context(self):
+        def runtime(owner):
+            return {
+                **self._runtime(),
+                "base_url": "https://operator-gateway.local/v1",
+                "operator_gateway_context": SimpleNamespace(
+                    operator_user_id=owner,
+                    business_slug="acme",
+                    workspace_root="/tmp/acme",
+                    model="gpt-5.5",
+                    requested_provider="custom",
+                    upstream_base_url="https://api.openai.com/v1",
+                ),
+            }
+
+        key_one = _client_cache_key(
+            "custom",
+            async_mode=False,
+            base_url="https://operator-gateway.local/v1",
+            api_key="operator-gateway-placeholder",
+            api_mode="codex_responses",
+            main_runtime=runtime("owner-1"),
+        )
+        key_two = _client_cache_key(
+            "custom",
+            async_mode=False,
+            base_url="https://operator-gateway.local/v1",
+            api_key="operator-gateway-placeholder",
+            api_mode="codex_responses",
+            main_runtime=runtime("owner-2"),
+        )
+
+        assert key_one != key_two
+
+    def test_model_override_is_refused_before_client_resolution(self, monkeypatch):
+        monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+        monkeypatch.setenv("TAKYON_MODEL", "gpt-5.5")
+
+        with patch("agent.auxiliary_client._get_cached_client") as get_client:
+            with pytest.raises(RuntimeError, match="model override refused"):
+                call_llm(
+                    task="compression",
+                    model="claude-sonnet-5",
+                    main_runtime=self._runtime(),
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+
+        get_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_rate_limit_never_uses_fallback(self, monkeypatch):
+        monkeypatch.setenv("TAKYON_STRICT_MODEL_ROLES", "1")
+        monkeypatch.setenv("TAKYON_MODEL", "gpt-5.5")
+        primary = MagicMock()
+        rate_error = Exception("Rate limit exceeded")
+        rate_error.status_code = 429
+        primary.chat.completions.create = AsyncMock(side_effect=rate_error)
+
+        with patch(
+            "agent.auxiliary_client._get_cached_client",
+            return_value=(primary, "gpt-5.5"),
+        ), patch(
+            "agent.auxiliary_client._try_payment_fallback"
+        ) as auto_fallback, patch(
+            "agent.auxiliary_client._try_configured_fallback_chain"
+        ) as configured_fallback, patch(
+            "agent.auxiliary_client._try_main_agent_model_fallback"
+        ) as main_fallback:
+            with pytest.raises(Exception, match="Rate limit exceeded"):
+                await async_call_llm(
+                    task="compression",
+                    main_runtime=self._runtime(),
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+
+        auto_fallback.assert_not_called()
+        configured_fallback.assert_not_called()
+        main_fallback.assert_not_called()
 
 
 class TestAuxiliaryFallbackLayering:

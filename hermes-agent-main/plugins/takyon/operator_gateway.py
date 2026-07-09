@@ -202,6 +202,9 @@ def enable_operator_gateway(
     agent._takyon_operator_gateway = True
     agent._takyon_operator_gateway_context = context
     agent._takyon_strict_model_pin = model
+    compressor = getattr(agent, "context_compressor", None)
+    if compressor is not None:
+        compressor._takyon_operator_gateway_context = context
     # Takyon CEO turns never switch provider/model. Clear every fallback-chain state even if a
     # generic Hermes caller tried to populate it, and disable credential-pool failover.
     agent._fallback_chain = []

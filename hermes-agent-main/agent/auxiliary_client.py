@@ -2112,6 +2112,9 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
             continue
         if isinstance(value, str) and value.strip():
             normalized[field] = value.strip()
+    gateway_context = main_runtime.get("operator_gateway_context")
+    if gateway_context is not None:
+        normalized["operator_gateway_context"] = gateway_context
     provider = normalized.get("provider")
     if isinstance(provider, str):
         normalized["provider"] = provider.lower()
@@ -3293,11 +3296,30 @@ def resolve_provider_client(
                     "but base_url is empty"
                 )
                 return None, None
+            extra = {}
+            gateway_context = _normalize_main_runtime(main_runtime).get(
+                "operator_gateway_context"
+            )
+            if base_url_hostname(custom_base) == "operator-gateway.local":
+                if gateway_context is None:
+                    raise RuntimeError(
+                        "operator gateway auxiliary call is missing its session context"
+                    )
+                if async_mode:
+                    raise RuntimeError(
+                        "async operator gateway auxiliary calls are not supported"
+                    )
+                from plugins.takyon.operator_gateway import (
+                    build_operator_gateway_http_client,
+                )
+
+                extra["http_client"] = build_operator_gateway_http_client(
+                    gateway_context
+                )
             final_model = _normalize_resolved_model(
                 model or (main_runtime.get("model") if main_runtime else None) or "gpt-4o-mini",
                 provider,
             )
-            extra = {}
             _clean_base, _dq = _extract_url_query_params(custom_base)
             if _dq:
                 extra["default_query"] = _dq
@@ -3987,7 +4009,8 @@ def auxiliary_max_tokens_param(value: int) -> dict:
 # Every auxiliary LLM consumer should use these instead of manually
 # constructing clients and calling .chat.completions.create().
 
-# Client cache: (provider, async_mode, base_url, api_key, api_mode, runtime_key) -> (client, default_model, loop)
+# Client cache: (provider, async_mode, base_url, api_key, api_mode, runtime_key,
+# gateway_context_key) -> (client, default_model, loop)
 # NOTE: loop identity is NOT part of the key.  On async cache hits we check
 # whether the cached loop is the *current* loop; if not, the stale entry is
 # replaced in-place.  This bounds cache growth to one entry per unique
@@ -4010,8 +4033,27 @@ def _client_cache_key(
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
     runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    gateway_context = runtime.get("operator_gateway_context")
+    gateway_context_key = (
+        str(getattr(gateway_context, "operator_user_id", "") or ""),
+        str(getattr(gateway_context, "business_slug", "") or ""),
+        str(getattr(gateway_context, "workspace_root", "") or ""),
+        str(getattr(gateway_context, "model", "") or ""),
+        str(getattr(gateway_context, "requested_provider", "") or ""),
+        str(getattr(gateway_context, "upstream_base_url", "") or ""),
+    ) if gateway_context is not None else ()
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
-    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, pool_hint)
+    return (
+        provider,
+        async_mode,
+        base_url or "",
+        api_key or "",
+        api_mode or "",
+        runtime_key,
+        gateway_context_key,
+        is_vision,
+        pool_hint,
+    )
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
@@ -4580,6 +4622,57 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
     return response
 
 
+def _strict_model_roles_enabled() -> bool:
+    return str(os.environ.get("TAKYON_STRICT_MODEL_ROLES") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _strict_auxiliary_resolution(
+    *,
+    provider: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+    api_key: Optional[str],
+    main_runtime: Optional[Dict[str, Any]],
+) -> Tuple[str, str, Optional[str], Optional[str], Optional[str]]:
+    """Pin every production CEO auxiliary call to the exact main OpenAI runtime."""
+    expected_model = str(os.environ.get("TAKYON_MODEL") or "").strip()
+    if expected_model != "gpt-5.5":
+        raise RuntimeError("strict CEO auxiliary role requires TAKYON_MODEL='gpt-5.5'")
+
+    runtime = _normalize_main_runtime(main_runtime)
+    runtime_provider = str(runtime.get("provider") or _read_main_provider() or "").strip().lower()
+    runtime_model = str(runtime.get("model") or _read_main_model() or "").strip()
+    if runtime_provider != "custom" or runtime_model != expected_model:
+        raise RuntimeError(
+            "strict CEO auxiliary role requires custom/OpenAI with model 'gpt-5.5'"
+        )
+    if provider and str(provider).strip().lower() != runtime_provider:
+        raise RuntimeError("CEO auxiliary provider override refused")
+    if model and str(model).strip() != expected_model:
+        raise RuntimeError(
+            f"CEO auxiliary model override refused: requested {model!r}, pinned {expected_model!r}"
+        )
+
+    runtime_base = str(runtime.get("base_url") or base_url or "").strip() or None
+    if base_url and runtime.get("base_url") and str(base_url).strip().rstrip("/") != str(
+        runtime["base_url"]
+    ).strip().rstrip("/"):
+        raise RuntimeError("CEO auxiliary base URL override refused")
+    runtime_key = runtime.get("api_key") or api_key
+    if api_key and runtime.get("api_key") and api_key != runtime.get("api_key"):
+        raise RuntimeError("CEO auxiliary credential override refused")
+    runtime_mode = str(runtime.get("api_mode") or "").strip().lower() or None
+    if runtime_mode and runtime_mode != "codex_responses":
+        raise RuntimeError("strict CEO auxiliary role requires OpenAI Responses")
+    if runtime_base:
+        host = (urlparse(runtime_base).hostname or "").lower()
+        if host not in {"api.openai.com", "operator-gateway.local"}:
+            raise RuntimeError("strict CEO auxiliary role requires the OpenAI operator gateway")
+    return runtime_provider, expected_model, runtime_base, runtime_key, runtime_mode
+
+
 def call_llm(
     task: str = None,
     *,
@@ -4619,12 +4712,24 @@ def call_llm(
     Raises:
         RuntimeError: If no provider is configured.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
+    strict_roles = _strict_model_roles_enabled()
+    if strict_roles:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = (
+            _strict_auxiliary_resolution(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                main_runtime=main_runtime,
+            )
+        )
+    else:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+            task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
-    if task == "vision":
+    if task == "vision" and not strict_roles:
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
             model=resolved_model or model,
@@ -4673,7 +4778,7 @@ def call_llm(
             # Pass model=None so each provider uses its own default —
             # resolved_model may be an OpenRouter-format slug that doesn't
             # work on other providers.
-            if not resolved_base_url:
+            if not resolved_base_url and not strict_roles:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
                 client, final_model = _get_cached_client("auto", main_runtime=main_runtime)
@@ -4681,6 +4786,11 @@ def call_llm(
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
                 f"Run: takyon setup")
+        if strict_roles and final_model != resolved_model:
+            raise RuntimeError(
+                f"CEO auxiliary model changed during resolution: expected {resolved_model!r}, "
+                f"got {final_model!r}"
+            )
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
@@ -4850,6 +4960,17 @@ def call_llm(
                     effective_extra_body=effective_extra_body,
                 )
 
+        if strict_roles:
+            if _is_connection_error(first_err):
+                try:
+                    _evict_cached_client_instance(client)
+                except Exception:
+                    logger.debug(
+                        "Auxiliary: strict-role cache eviction after connection error failed",
+                        exc_info=True,
+                    )
+            raise first_err
+
         # ── Payment / credit exhaustion fallback ──────────────────────
         # When the resolved provider returns 402 or a credit-related error,
         # try alternative providers instead of giving up.  This handles the
@@ -5010,6 +5131,7 @@ async def async_call_llm(
     model: str = None,
     base_url: str = None,
     api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
     messages: list,
     temperature: float = None,
     max_tokens: int = None,
@@ -5021,12 +5143,24 @@ async def async_call_llm(
 
     Same as call_llm() but async. See call_llm() for full documentation.
     """
-    resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
-        task, provider, model, base_url, api_key)
+    strict_roles = _strict_model_roles_enabled()
+    if strict_roles:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = (
+            _strict_auxiliary_resolution(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
+                main_runtime=main_runtime,
+            )
+        )
+    else:
+        resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
+            task, provider, model, base_url, api_key)
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
 
-    if task == "vision":
+    if task == "vision" and not strict_roles:
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
             model=resolved_model or model,
@@ -5058,6 +5192,7 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -5067,7 +5202,7 @@ async def async_call_llm(
                     f"was found. Set the {_explicit.upper()}_API_KEY environment "
                     f"variable, or switch to a different provider with `takyon model`."
                 )
-            if not resolved_base_url:
+            if not resolved_base_url and not strict_roles:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
                 client, final_model = _get_cached_client("auto", async_mode=True)
@@ -5075,6 +5210,11 @@ async def async_call_llm(
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
                 f"Run: takyon setup")
+        if strict_roles and final_model != resolved_model:
+            raise RuntimeError(
+                f"CEO auxiliary model changed during resolution: expected {resolved_model!r}, "
+                f"got {final_model!r}"
+            )
 
     effective_timeout = timeout if timeout is not None else _get_task_timeout(task)
 
@@ -5227,6 +5367,17 @@ async def async_call_llm(
                     effective_timeout=effective_timeout,
                     effective_extra_body=effective_extra_body,
                 )
+
+        if strict_roles:
+            if _is_connection_error(first_err):
+                try:
+                    _evict_cached_client_instance(client)
+                except Exception:
+                    logger.debug(
+                        "Auxiliary (async): strict-role cache eviction after connection error failed",
+                        exc_info=True,
+                    )
+            raise first_err
 
         # ── Payment / connection / rate-limit fallback (mirrors sync call_llm) ──
         should_fallback = (
