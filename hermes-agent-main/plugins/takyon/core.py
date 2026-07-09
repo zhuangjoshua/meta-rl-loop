@@ -31728,6 +31728,42 @@ def _meta_pixel_config() -> dict[str, Any]:
     return {}
 
 
+def _surface_enable_meta_pixel(business: str) -> dict[str, Any]:
+    """Flip ``metadata.meta_pixel.enabled`` on the business's app surface contract so every FUTURE
+    publish bakes the shared pixel snippet (the ``_surface_meta_pixel_enabled`` gate in
+    ``_publish_product_surface_path``). Targeted metadata merge on the existing row — the same
+    narrow-update pattern as the ``live_build_id`` stamp — so the pixel install does not need the
+    full ``app.surface.upsert`` operation shape. Returns ``{"enabled", "changed"}`` or a
+    ``blocker`` when the business has no surface contract yet (publish the product first)."""
+    store = _store()
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT metadata_json FROM app_surface_contracts WHERE business_slug = ?",
+            (business,),
+        ).fetchone()
+        if row is None:
+            return {"enabled": False, "blocker": "no app surface contract; publish the product first"}
+        try:
+            raw = row["metadata_json"]
+        except (TypeError, KeyError, IndexError):
+            raw = getattr(row, "metadata_json", None)
+        try:
+            metadata = json.loads(raw or "{}")
+        except Exception:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        meta_pixel = metadata.get("meta_pixel") if isinstance(metadata.get("meta_pixel"), dict) else {}
+        if bool(meta_pixel.get("enabled")):
+            return {"enabled": True, "changed": False}
+        metadata["meta_pixel"] = {**meta_pixel, "enabled": True}
+        conn.execute(
+            "UPDATE app_surface_contracts SET metadata_json = ?, updated_at = ? WHERE business_slug = ?",
+            (_json_dumps(metadata), _now(), business),
+        )
+        return {"enabled": True, "changed": True}
+
+
 def _meta_pixel_snippet(pixel_id: str, *, script_src: str = "") -> str:
     pid = str(pixel_id or "").strip()
     if not pid:
@@ -32001,6 +32037,38 @@ def _meta_int_metric(value: Any) -> int:
         return 0
 
 
+# Meta reports the SAME purchase under several synonym action_types (e.g. `omni_purchase`,
+# `offsite_conversion.fb_pixel_purchase`, `purchase`), each carrying the identical value. To read
+# Meta-attributed revenue without double/triple counting, pick ONE canonical type per row in this
+# preference order and ignore the synonyms.
+_META_PURCHASE_ACTION_TYPES = (
+    "omni_purchase",
+    "offsite_conversion.fb_pixel_purchase",
+    "purchase",
+)
+
+
+def _meta_first_action_metric(entries: Any, action_types: tuple[str, ...]) -> float | None:
+    """Return the value of the first present action_type (in preference order) from a Meta
+    `actions`/`action_values` list, as a float, or None if none match. Deduped so a purchase listed
+    under multiple synonym action_types is counted once."""
+    if not isinstance(entries, list):
+        return None
+    by_type: dict[str, Any] = {}
+    for entry in entries:
+        if isinstance(entry, Mapping):
+            at = str(entry.get("action_type") or "").strip().lower()
+            if at and at not in by_type:
+                by_type[at] = entry.get("value")
+    for wanted in action_types:
+        if wanted in by_type:
+            try:
+                return float(str(by_type[wanted]).strip())
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     totals = {
         "rows": len(rows),
@@ -32012,6 +32080,10 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "cpc": None,
         "cpm": None,
         "ctr": None,
+        "purchase_count": 0,
+        "purchase_value_cents": 0,
+        "purchase_value_usd": 0.0,
+        "roas": None,
         "currency": None,
         "date_start": None,
         "date_stop": None,
@@ -32030,13 +32102,26 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals["impressions"] += _meta_int_metric(row.get("impressions"))
         totals["reach"] += _meta_int_metric(row.get("reach"))
         totals["clicks"] += _meta_int_metric(row.get("clicks"))
+        # Meta-attributed purchase VALUE (revenue) and count for this object, deduped across the
+        # synonym action_types so one purchase is not counted several times. Fed by the client-side
+        # `Purchase` pixel event; zero until that event fires.
+        purchase_value = _meta_first_action_metric(row.get("action_values"), _META_PURCHASE_ACTION_TYPES)
+        if purchase_value is not None:
+            totals["purchase_value_cents"] += int((Decimal(str(purchase_value)) * 100).quantize(Decimal("1")))
+        purchase_count = _meta_first_action_metric(row.get("actions"), _META_PURCHASE_ACTION_TYPES)
+        if purchase_count is not None:
+            totals["purchase_count"] += int(round(purchase_count))
 
     totals["spend_usd"] = round(totals["spend_cents"] / 100.0, 2)
+    totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
     if totals["clicks"] > 0:
         totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
     if totals["impressions"] > 0:
         totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
         totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
+    # ROAS = Meta-attributed revenue / ad spend. Only meaningful once spend is non-zero.
+    if totals["spend_cents"] > 0:
+        totals["roas"] = round(totals["purchase_value_cents"] / totals["spend_cents"], 4)
     return totals
 
 
