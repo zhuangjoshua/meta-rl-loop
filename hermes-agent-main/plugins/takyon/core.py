@@ -3522,6 +3522,18 @@ def _subuser_app_starter_strings(
         description = _starter_strategy_first_line(strategy_sections.get("core value proposition") or "")
     if not description:
         description = str(workspace_copy.get("description") or "").strip()
+    # A minimal strategy (just the slug + one-line goal, no business-name/tagline/value-prop
+    # section) with an unextractable hero headline leaves the title as the bare humanized slug
+    # even when a real value prop DID resolve into the description (observed: sdkfix0708b shipped
+    # <title>Sdkfix0708b</title> while the meta description was a real tagline). Never ship the
+    # bare slug as the title when real copy exists: derive the title from the first sentence of
+    # that description. Runs before the generic "Get started with ..." description fallback so we
+    # only borrow genuine value-prop copy, never the boilerplate.
+    if _starter_title_is_generic(title, slug=slug) and description:
+        first_sentence = re.split(r"(?<=[.!?])\s", description, maxsplit=1)[0].strip()
+        salvaged = _sanitize_starter_title(first_sentence or description, slug=slug)
+        if not _starter_title_is_generic(salvaged, slug=slug):
+            title = salvaged
     if not description:
         description = f"Get started with {title}, manage your account, and access the product online."
     return {
