@@ -61,6 +61,10 @@ from .business_credits import (
 
 _EXACT_SENSITIVE_ENV_KEYS = frozenset(
     {
+        # The team distribution p12 (base64) is raw signing material; "_B64" is not a sensitive
+        # suffix, so it is pinned here explicitly — without this the managed-secret manifest
+        # silently drops it and the safebox build-credentials route fails closed unconfigured.
+        "APP_STORE_DIST_P12_B64",
         "AUTH0_CLIENT_SECRET",
         "AUTH0_SECRET",
         "DATABASE_URL",
