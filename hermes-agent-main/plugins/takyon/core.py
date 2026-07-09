@@ -2923,49 +2923,6 @@ def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
     return out
 
 
-def _read_shopify_catalog_products(workspace_root: "Path | None") -> list[dict[str, Any]]:
-    """The business's buyable Shopify catalog (``product/shopify-catalog.json``), materialized into
-    the surface context at publish time so EVERY shopify_commerce product site renders a store
-    section with Buy buttons — the SAME publish-time-injection wiring as ``plans``/``hero``. The
-    mirror file is written by ``business_shopify_create_product`` (buyable catalog projection),
-    which already excludes drafts/variant-less products, so every entry here is public + buyable.
-    Fail-soft: any missing file / parse problem returns [] and the site shows no store section — a
-    non-Shopify business has no catalog file, so it is unaffected by construction."""
-    business_root = _starter_business_root(Path(workspace_root) if workspace_root is not None else None)
-    if business_root is None:
-        return []
-    try:
-        # product/shopify-catalog.json == shopify_util.SHOPIFY_CATALOG_RELPATH.
-        catalog_path = business_root / "product" / "shopify-catalog.json"
-        if not catalog_path.is_file():
-            return []
-        data = json.loads(catalog_path.read_text(encoding="utf-8") or "{}")
-    except (OSError, ValueError):
-        return []
-    products = data.get("products") if isinstance(data, dict) else None
-    if not isinstance(products, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for product in products:
-        if not isinstance(product, Mapping):
-            continue
-        title = str(product.get("title") or "").strip()
-        permalink = str(product.get("cart_permalink") or "").strip()
-        if not title or not permalink:
-            continue  # only released, buyable products reach the public bake
-        out.append(
-            {
-                "product_id": str(product.get("product_id") or ""),
-                "title": title[:200],
-                "price": str(product.get("price") or ""),
-                "handle": str(product.get("handle") or ""),
-                "cart_permalink": permalink,
-                "preview_url": str(product.get("preview_url") or ""),
-            }
-        )
-    return out
-
-
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
@@ -2991,10 +2948,6 @@ def _subuser_surface_context_payload(
         "railState": shape.get("rail_state") or {},
         "auth": _subuser_public_auth_payload(surface),
         "plans": _starter_plan_shape_payload(plans),
-        # Buyable Shopify storefront, baked at publish for every business that has pushed products
-        # (empty for non-Shopify businesses). The scaffold reads this as ``productCatalog`` and
-        # renders a Store section whose Buy buttons deep-link each product's cart_permalink.
-        "shopifyCatalog": _read_shopify_catalog_products(workspace_root),
         "routes": routes,
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
@@ -3238,9 +3191,6 @@ def _materialize_mobile_app_workspace(
             "__TAKYON_APP_DESCRIPTION__": display_description,
             "__TAKYON_ORG__": "coscale",
             "__EXPO_ORG__": "coscale",
-            # The real product host (R2 edge): universal links, the licenses page, and the runtime
-            # API all live at <slug>.<PUBLIC_COMPANY_BASE_DOMAIN> — never a hardcoded scaffold guess.
-            "__TAKYON_PRODUCT_HOST__": f"{canonical_slug}.{_company_base_domain()}",
         }
         # app.json is the seed-completion marker (its absence gates re-seeding), so it is written
         # LAST — a crash mid-copy re-seeds cleanly instead of wedging on a partial tree.
@@ -3274,7 +3224,6 @@ def _materialize_mobile_app_workspace(
         app_text = app_text.replace("__TAKYON_SLUG__", canonical_slug).replace("__TAKYON_ORG__", "coscale")
         app_text = app_text.replace("__TAKYON_APP_NAME__", "app").replace("__TAKYON_APP_DESCRIPTION__", "app")
         app_text = app_text.replace("__EXPO_ORG__", "coscale")
-        app_text = app_text.replace("__TAKYON_PRODUCT_HOST__", f"{canonical_slug}.{_company_base_domain()}")
         app_cfg = json.loads(app_text)
         expo_cfg = app_cfg.get("expo") or {}
         expo_cfg["name"] = display_name
@@ -3291,27 +3240,10 @@ def _materialize_mobile_app_workspace(
     kit_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts")
     auth_payload = _subuser_public_auth_payload(surface) or {}
-    # The mobile SurfaceContext.railState type is Record<string, {callable, reason}> — NOT the web
-    # shape's string status map. Convert: a positive status → callable; otherwise carry the status
-    # as the reason. runtimeFeatures already lists the enabled rails, so anything present there is
-    # callable regardless of the raw status label.
-    raw_rail_state = (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {}
-    enabled_features = set(_surface_effective_runtime_features(surface) or [])
-    _POSITIVE_RAIL_STATUS = {"enabled", "declared", "live", "ready", "on", "active", "available"}
-    rail_state = {}
-    for rail, status in (raw_rail_state.items() if isinstance(raw_rail_state, Mapping) else []):
-        status_text = str(status).strip().lower() if not isinstance(status, Mapping) else ""
-        callable_ = rail in enabled_features or status_text in _POSITIVE_RAIL_STATUS or (
-            isinstance(status, Mapping) and bool(status.get("callable"))
-        )
-        entry: dict[str, Any] = {"callable": bool(callable_)}
-        if not callable_ and status_text:
-            entry["reason"] = status_text
-        rail_state[str(rail)] = entry
     context = {
         "runtimeApiBase": f"https://{canonical_slug}.{_company_base_domain()}/api/takyon/apps/{canonical_slug}",
         "runtimeFeatures": _surface_effective_runtime_features(surface),
-        "railState": rail_state,
+        "railState": (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {},
         "auth": {
             "url": str(auth_payload.get("url") or ""),
             "publishableKey": str(auth_payload.get("publishableKey") or ""),
@@ -7387,10 +7319,6 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/lib/product-auth.tsx",
     "src/lib/branding.ts",
     "src/screens/app-layout.tsx",
-    # Starter-owned buyable Shopify storefront rail. Must refresh alongside src/main.tsx (which
-    # imports it) so existing businesses gain a working /store route on their next publish, and so
-    # the rail stays worker-uneditable (like the other AppKit rails here).
-    "src/screens/store.tsx",
 )
 
 
@@ -9742,20 +9670,6 @@ def _business_analytics_summary(slug: str, *, days: int = 7) -> dict[str, Any]:
         )
     except Exception as exc:  # provider error or secret-authority unavailable — degrade truthfully
         return {"configured": True, "ok": False, "hostname": hostname, "reason": str(exc)}
-    # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'), on FRESH fetches
-    # only (the TTL cache bounds frequency). Previously these numbers were memory-cached and lost.
-    try:
-        from . import cost_events
-
-        cost_events.record_metrics_observation(
-            provider="umami",
-            name=f"umami:stats:{hostname or website_id}",
-            metrics=stats if isinstance(stats, dict) else {"value": stats},
-            business_slug=slug,
-            identifiers={"website_id": website_id, "hostname": hostname, "window_days": days},
-        )
-    except Exception:
-        pass
     payload = {
         "configured": True,
         "ok": True,
@@ -27018,48 +26932,6 @@ def _shopify_active_connection(store, business: str) -> tuple[dict[str, Any], di
     return row, connection
 
 
-def _shopify_catalog_commit(
-    store,
-    *,
-    business: str,
-    shop_domain: str,
-    receipt_payloads: list,
-    idempotency_key: str,
-) -> tuple[str, str]:
-    """Project the buyable catalog from receipts (newest first) and mirror it to the business
-    workspace at `product/shopify-catalog.json` through the canonical `store.commit`
-    artifact.write (receipted, path-contained). The product-site build bakes this file into a
-    storefront section whose Buy buttons are Shopify cart permalinks — customers pay on
-    Shopify's hosted checkout, so the subuser plane gains NOTHING. Returns (relpath, error):
-    a mirror failure never fails the push (events + the store remain truth); it is surfaced."""
-    try:
-        from . import shopify_util
-    except ImportError:  # pragma: no cover - alternate load path
-        from plugins.takyon import shopify_util
-    try:
-        catalog = shopify_util.catalog_from_receipts(
-            receipt_payloads, business_slug=business, shop_domain=shop_domain
-        )
-        store.commit(
-            scope=f"business:{business}",
-            operations=[
-                {
-                    "action": "artifact.write",
-                    "business": business,
-                    "path": shopify_util.SHOPIFY_CATALOG_RELPATH,
-                    "content": _json_dumps(catalog) + "\n",
-                    "mode": "replace",
-                }
-            ],
-            idempotency_key=f"{idempotency_key}:catalog",
-            reason="mirror the buyable shopify catalog from event receipts",
-            actor="agent",
-        )
-        return shopify_util.SHOPIFY_CATALOG_RELPATH, ""
-    except Exception as exc:  # noqa: BLE001 - mirror is best-effort; receipts stay truth
-        return "", _truncate_text(str(exc), 300)
-
-
 def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
     """Commerce EXECUTOR against the business's CONNECTED Shopify store (operator ruling
     2026-07-03, "try Shopify"): create ONE product (default variant + price, optional images)
@@ -27137,26 +27009,20 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         # search — the 2026-07-04 live acceptance proved Shopify's products SEARCH index lags
         # creates by seconds, so a same-title rerun under a new key would otherwise duplicate.
         # A receipt match is verified against the store BY ID (read-your-writes) before adopting.
-        # No LIMIT: this list is the catalog-projection source, so truncation would silently
-        # drop older products from the public mirror. Volume is bounded by push cadence (one
-        # event per push/adopt/tombstone), never by customer traffic.
         with store._connect() as conn:
             receipt_rows = conn.execute(
-                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type IN "
-                "(?, ?) ORDER BY created_at DESC",
-                (business, "shopify.product.create", "shopify.product.tombstone"),
+                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type = ? "
+                "ORDER BY created_at DESC LIMIT 100",
+                (business, "shopify.product.create"),
             ).fetchall()
         receipt_payloads = [
             _json_loads(r["payload_json"] if isinstance(r, Mapping) else r[0], {})
             for r in (receipt_rows or [])
         ]
         candidate_ids = shopify_util.match_product_receipts(
-            [p for p in receipt_payloads if not p.get("tombstone")],
-            title=title,
-            shop_domain=shop_domain,
+            receipt_payloads, title=title, shop_domain=shop_domain
         )
         existing = None
-        dead_ids: list[str] = []
         for candidate_id in candidate_ids:
             try:
                 existing = shopify_util.get_product(
@@ -27171,50 +27037,9 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                 ) from exc
             if existing is not None:
                 break
-            dead_ids.append(candidate_id)
-        tombstone_payloads: list[dict[str, Any]] = []
-        if dead_ids:
-            # The probe PROVED the store deleted these — record tombstones immediately (they
-            # are true observations regardless of what the rest of this call does), so the
-            # catalog projection can never republish a dead Buy button.
-            with store._connect() as conn:
-                for dead_id in dead_ids:
-                    payload = {
-                        "tombstone": True,
-                        "shop_domain": shop_domain,
-                        "product_id": dead_id,
-                        "reason": "product-by-id probe returned null (deleted on the store)",
-                        "idempotency_key": idempotency_key,
-                    }
-                    tombstone_payloads.append(payload)
-                    store._record_event(
-                        conn,
-                        scope=f"business:{business}/app",
-                        business_slug=business,
-                        event_type="shopify.product.tombstone",
-                        payload=payload,
-                    )
         if candidate_ids:
             if existing is not None:
                 product_id = str(existing.get("id") or candidate_id)
-                variant_id, variant_price = shopify_util.first_variant(existing)
-                adopted_status = str(existing.get("status") or "").lower()
-                event_payload = {
-                    "shop_domain": shop_domain,
-                    "product_id": product_id,
-                    "handle": str(existing.get("handle") or ""),
-                    "title": str(existing.get("title") or title),
-                    "status": adopted_status,
-                    "price": variant_price or price,
-                    "variant_id": variant_id,
-                    "preview_url": str(existing.get("onlineStorePreviewUrl") or ""),
-                    "deduped": True,
-                    "dedup_source": "local_receipt",
-                    "media_warnings": [],
-                    "idempotency_key": idempotency_key,
-                    "reason": args.get("reason") or "create shopify product",
-                    "actor": args.get("actor") or "agent",
-                }
                 result = {
                     "success": True,
                     "action": "business_shopify_create_product",
@@ -27226,9 +27051,7 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                     "product_numeric_id": shopify_util._gid_numeric(product_id),
                     "handle": str(existing.get("handle") or ""),
                     "title": str(existing.get("title") or title),
-                    "status": adopted_status,
-                    "variant_id": variant_id,
-                    "price": variant_price or price,
+                    "status": str(existing.get("status") or "").lower(),
                     "online_store_preview_url": str(
                         existing.get("onlineStorePreviewUrl") or ""
                     ),
@@ -27239,37 +27062,15 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                         "exists; adopted it instead of duplicating."
                     ),
                 }
-                permalink = shopify_util.cart_permalink(shop_domain, variant_id)
-                if permalink:
-                    result["cart_permalink"] = permalink
                 numeric = result["product_numeric_id"]
                 if numeric:
                     result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
-                result["catalog_path"] = shopify_util.SHOPIFY_CATALOG_RELPATH
                 with store._connect() as conn:
-                    store._record_event(
-                        conn,
-                        scope=f"business:{business}/app",
-                        business_slug=business,
-                        event_type="shopify.product.create",
-                        payload=event_payload,
-                    )
                     conn.execute(
                         "INSERT INTO idempotency_keys (key, operation_hash, result_json, "
                         "created_at) VALUES (?, ?, ?, ?)",
                         (idempotency_key, op_hash, _json_dumps(result), _now()),
                     )
-                # Mirror AFTER the durable receipt txn — a crash between them leaves receipts
-                # (truth) ahead of the mirror, and the next push's replace-write self-heals.
-                _catalog_path, catalog_error = _shopify_catalog_commit(
-                    store,
-                    business=business,
-                    shop_domain=shop_domain,
-                    receipt_payloads=[event_payload, *tombstone_payloads, *receipt_payloads],
-                    idempotency_key=idempotency_key,
-                )
-                if catalog_error:
-                    result["catalog_mirror_error"] = catalog_error
                 return tool_result(result)
             # The receipted product was deleted on the store — the store is truth; fall through
             # and create a fresh one.
@@ -27313,11 +27114,6 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
             "shop_domain": shop_domain,
             **product,
         }
-        permalink = shopify_util.cart_permalink(
-            shop_domain, str(product.get("variant_id") or "")
-        )
-        if permalink:
-            result["cart_permalink"] = permalink
         numeric = str(product.get("product_numeric_id") or "")
         if numeric:
             result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
@@ -27332,54 +27128,33 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                 "Created as DRAFT — activate it in the store admin or create as status='active' "
                 "to publish it to the online storefront."
             )
-        elif permalink:
-            result["note"] = (
-                "Live on the store. The storefront Buy button is the cart_permalink — the "
-                "customer pays on Shopify's hosted checkout; the baked catalog mirror is at "
-                f"{shopify_util.SHOPIFY_CATALOG_RELPATH}."
-            )
-        event_payload = {
-            "shop_domain": shop_domain,
-            "product_id": product.get("product_id"),
-            "handle": product.get("handle"),
-            "title": product.get("title"),
-            "status": product.get("status"),
-            "price": product.get("price"),
-            "variant_id": product.get("variant_id") or "",
-            "preview_url": product.get("online_store_preview_url") or "",
-            "deduped": bool(product.get("deduped")),
-            "media_warnings": product.get("media_warnings") or [],
-            "store_plan": plan_info.get("plan_name"),
-            "partner_development": bool(plan_info.get("partner_development")),
-            "idempotency_key": idempotency_key,
-            "reason": args.get("reason") or "create shopify product",
-            "actor": args.get("actor") or "agent",
-        }
-        result["catalog_path"] = shopify_util.SHOPIFY_CATALOG_RELPATH
         with store._connect() as conn:
             store._record_event(
                 conn,
                 scope=f"business:{business}/app",
                 business_slug=business,
                 event_type="shopify.product.create",
-                payload=event_payload,
+                payload={
+                    "shop_domain": shop_domain,
+                    "product_id": product.get("product_id"),
+                    "handle": product.get("handle"),
+                    "title": product.get("title"),
+                    "status": product.get("status"),
+                    "price": product.get("price"),
+                    "deduped": bool(product.get("deduped")),
+                    "media_warnings": product.get("media_warnings") or [],
+                    "store_plan": plan_info.get("plan_name"),
+                    "partner_development": bool(plan_info.get("partner_development")),
+                    "idempotency_key": idempotency_key,
+                    "reason": args.get("reason") or "create shopify product",
+                    "actor": args.get("actor") or "agent",
+                },
             )
             conn.execute(
                 "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (idempotency_key, op_hash, _json_dumps(result), _now()),
             )
-        # Mirror AFTER the durable receipt txn — a crash between them leaves receipts (truth)
-        # ahead of the mirror, and the next push's replace-write self-heals.
-        _catalog_path, catalog_error = _shopify_catalog_commit(
-            store,
-            business=business,
-            shop_domain=shop_domain,
-            receipt_payloads=[event_payload, *tombstone_payloads, *receipt_payloads],
-            idempotency_key=idempotency_key,
-        )
-        if catalog_error:
-            result["catalog_mirror_error"] = catalog_error
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -27916,24 +27691,6 @@ def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record x metrics sync",
             actor=args.get("actor") or "agent",
         )
-        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): every metric
-        # section X returned for this post, verbatim. Best-effort — never blocks the sync.
-        try:
-            from . import cost_events
-
-            cost_events.record_metrics_observation(
-                provider="x",
-                name=f"x:post:{post_id}",
-                metrics={
-                    "public_metrics": snapshot["public_metrics"],
-                    "non_public_metrics": snapshot["non_public_metrics"],
-                    "organic_metrics": snapshot["organic_metrics"],
-                },
-                business_slug=business,
-                identifiers={"post_id": post_id, "post_url": snapshot["post_url"]},
-            )
-        except Exception:
-            pass
         return tool_result(
             {
                 "success": True,
@@ -31254,42 +31011,6 @@ def _meta_pixel_config() -> dict[str, Any]:
     return {}
 
 
-def _surface_enable_meta_pixel(business: str) -> dict[str, Any]:
-    """Flip ``metadata.meta_pixel.enabled`` on the business's app surface contract so every FUTURE
-    publish bakes the shared pixel snippet (the ``_surface_meta_pixel_enabled`` gate in
-    ``_publish_product_surface_path``). Targeted metadata merge on the existing row — the same
-    narrow-update pattern as the ``live_build_id`` stamp — so the pixel install does not need the
-    full ``app.surface.upsert`` operation shape. Returns ``{"enabled", "changed"}`` or a
-    ``blocker`` when the business has no surface contract yet (publish the product first)."""
-    store = _store()
-    with store._connect() as conn:
-        row = conn.execute(
-            "SELECT metadata_json FROM app_surface_contracts WHERE business_slug = ?",
-            (business,),
-        ).fetchone()
-        if row is None:
-            return {"enabled": False, "blocker": "no app surface contract; publish the product first"}
-        try:
-            raw = row["metadata_json"]
-        except (TypeError, KeyError, IndexError):
-            raw = getattr(row, "metadata_json", None)
-        try:
-            metadata = json.loads(raw or "{}")
-        except Exception:
-            metadata = {}
-        if not isinstance(metadata, dict):
-            metadata = {}
-        meta_pixel = metadata.get("meta_pixel") if isinstance(metadata.get("meta_pixel"), dict) else {}
-        if bool(meta_pixel.get("enabled")):
-            return {"enabled": True, "changed": False}
-        metadata["meta_pixel"] = {**meta_pixel, "enabled": True}
-        conn.execute(
-            "UPDATE app_surface_contracts SET metadata_json = ?, updated_at = ? WHERE business_slug = ?",
-            (_json_dumps(metadata), _now(), business),
-        )
-        return {"enabled": True, "changed": True}
-
-
 def _meta_pixel_snippet(pixel_id: str, *, script_src: str = "") -> str:
     pid = str(pixel_id or "").strip()
     if not pid:
@@ -31486,13 +31207,6 @@ _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "logo_generate": "creative.logo",
     "ugc_ad_generate": "creative.ugc",
     "static_ad_generate": "creative.static_ad",
-    # App Store rail: a mobile release is a paid creative action, so on prod (remote safebox
-    # authority) its credit spend MUST go through the audience-bound creative gate — an action with
-    # no audience falls to the generic reserve which fails closed with
-    # creative_credit_spend_requires_creative_gate. No provider route needs this audience (the EAS
-    # build resolves its keys from operator-rail custody, not a safebox-vended provider key); the
-    # audience is purely the reserve/commit/release money gate + owner verification.
-    "mobile_release": "creative.mobile_release",
     **{c.credit_action: c.credit_audience for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "creative.meta_ad_launch",
     "reddit_ad_launch": "creative.reddit_ad_launch",
@@ -31565,38 +31279,6 @@ def _meta_int_metric(value: Any) -> int:
         return 0
 
 
-# Meta reports the SAME purchase under several synonym action_types (e.g. `omni_purchase`,
-# `offsite_conversion.fb_pixel_purchase`, `purchase`), each carrying the identical value. To read
-# Meta-attributed revenue without double/triple counting, pick ONE canonical type per row in this
-# preference order and ignore the synonyms.
-_META_PURCHASE_ACTION_TYPES = (
-    "omni_purchase",
-    "offsite_conversion.fb_pixel_purchase",
-    "purchase",
-)
-
-
-def _meta_first_action_metric(entries: Any, action_types: tuple[str, ...]) -> float | None:
-    """Return the value of the first present action_type (in preference order) from a Meta
-    `actions`/`action_values` list, as a float, or None if none match. Deduped so a purchase listed
-    under multiple synonym action_types is counted once."""
-    if not isinstance(entries, list):
-        return None
-    by_type: dict[str, Any] = {}
-    for entry in entries:
-        if isinstance(entry, Mapping):
-            at = str(entry.get("action_type") or "").strip().lower()
-            if at and at not in by_type:
-                by_type[at] = entry.get("value")
-    for wanted in action_types:
-        if wanted in by_type:
-            try:
-                return float(str(by_type[wanted]).strip())
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
 def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     totals = {
         "rows": len(rows),
@@ -31608,10 +31290,6 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "cpc": None,
         "cpm": None,
         "ctr": None,
-        "purchase_count": 0,
-        "purchase_value_cents": 0,
-        "purchase_value_usd": 0.0,
-        "roas": None,
         "currency": None,
         "date_start": None,
         "date_stop": None,
@@ -31630,26 +31308,13 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         totals["impressions"] += _meta_int_metric(row.get("impressions"))
         totals["reach"] += _meta_int_metric(row.get("reach"))
         totals["clicks"] += _meta_int_metric(row.get("clicks"))
-        # Meta-attributed purchase VALUE (revenue) and count for this object, deduped across the
-        # synonym action_types so one purchase is not counted several times. Fed by the client-side
-        # `Purchase` pixel event; zero until that event fires.
-        purchase_value = _meta_first_action_metric(row.get("action_values"), _META_PURCHASE_ACTION_TYPES)
-        if purchase_value is not None:
-            totals["purchase_value_cents"] += int((Decimal(str(purchase_value)) * 100).quantize(Decimal("1")))
-        purchase_count = _meta_first_action_metric(row.get("actions"), _META_PURCHASE_ACTION_TYPES)
-        if purchase_count is not None:
-            totals["purchase_count"] += int(round(purchase_count))
 
     totals["spend_usd"] = round(totals["spend_cents"] / 100.0, 2)
-    totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
     if totals["clicks"] > 0:
         totals["cpc"] = round(totals["spend_usd"] / totals["clicks"], 4)
     if totals["impressions"] > 0:
         totals["ctr"] = round((totals["clicks"] / totals["impressions"]) * 100.0, 4)
         totals["cpm"] = round((totals["spend_usd"] * 1000.0) / totals["impressions"], 4)
-    # ROAS = Meta-attributed revenue / ad spend. Only meaningful once spend is non-zero.
-    if totals["spend_cents"] > 0:
-        totals["roas"] = round(totals["purchase_value_cents"] / totals["spend_cents"], 4)
     return totals
 
 
@@ -33541,22 +33206,6 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
         store._sync_business_workspace_remote(business)
-        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): the FULL
-        # totals + rows the provider returned (CTR/CPM/spend/whatever comes back), verbatim and
-        # non-prescriptive. Best-effort — never blocks the sync.
-        try:
-            from . import cost_events
-
-            cost_events.record_metrics_observation(
-                provider="reddit",
-                name=f"reddit:{level}:{object_id or slug}",
-                metrics=totals,
-                rows=normalized_rows,
-                business_slug=business,
-                identifiers={"slug": slug, "level": level, "object_id": object_id, **ids},
-            )
-        except Exception:
-            pass
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_insights_sync",
@@ -35065,10 +34714,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         ).strip().lower()
         if effort not in {"low", "medium", "high"}:
             effort = "medium" if customer_facing_product_workspace else "high"
-        default_model = (
-            "claude-sonnet-5"
-            if customer_facing_product_workspace
-            else (_model_from_config("claude_agent_default", "deep_work_default") or DEFAULT_CLAUDE_AGENT_MODEL)
+        # The configured coding-worker model (model.claude_agent_default) is the SINGLE source of
+        # truth for BOTH lanes. The customer-facing branch used to hardcode "claude-sonnet-5" and
+        # IGNORE that config, which was a silent trap after the provider split: on any host where
+        # TAKYON_CLAUDE_AGENT_MODEL was not exported (a fresh collaborator clone — the env-fetch
+        # never propagated it), a product/site build fell to claude-sonnet-5, and the safebox proxy
+        # routes claude-* to the platform Anthropic account (credit-dead) -> "Credit balance is too
+        # low", while deepseek-* routes to the live DeepSeek endpoint (climuru on Sai's machine,
+        # 2026-07-08). Honor the config pin first; keep claude-sonnet-5 only as the customer-facing
+        # fallback when no pin is configured. VPS is unchanged (its env var still wins below).
+        default_model = _model_from_config("claude_agent_default", "deep_work_default") or (
+            "claude-sonnet-5" if customer_facing_product_workspace else DEFAULT_CLAUDE_AGENT_MODEL
         )
         model = str(
             args.get("model")
@@ -36370,30 +36026,6 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 dimension_filters=filters,
             )
             rows = list(response.get("rows") or [])
-            # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'). GSC data
-            # previously had NO persistent sink at all; this is now its canonical record.
-            try:
-                from . import cost_events
-
-                cost_events.record_metrics_observation(
-                    provider="gsc",
-                    name=f"gsc:query:{site_url}",
-                    metrics={
-                        "clicks": response.get("clicks"),
-                        "impressions": response.get("impressions"),
-                        "ctr": response.get("ctr"),
-                        "position": response.get("position"),
-                    },
-                    rows=rows,
-                    identifiers={
-                        "site_url": site_url,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "dimensions": dimensions,
-                    },
-                )
-            except Exception:
-                pass
             return tool_result(
                 {
                     "success": True,
@@ -36429,22 +36061,6 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
-            try:
-                from . import cost_events
-
-                cost_events.record_metrics_observation(
-                    provider="dataforseo",
-                    name=f"dataforseo:{mode}",
-                    metrics={"row_count": len(rows)},
-                    rows=rows,
-                    identifiers={
-                        "keywords": raw_keywords,
-                        "location_code": location_code,
-                        "language_code": language_code,
-                    },
-                )
-            except Exception:
-                pass
             return tool_result(
                 {
                     "success": True,
@@ -36479,23 +36095,6 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
-            try:
-                from . import cost_events
-
-                cost_events.record_metrics_observation(
-                    provider="dataforseo",
-                    name=f"dataforseo:{mode}",
-                    metrics={"row_count": len(rows)},
-                    rows=rows,
-                    identifiers={
-                        "keywords": raw_keywords,
-                        "page_url": page_url,
-                        "location_code": location_code,
-                        "language_code": language_code,
-                    },
-                )
-            except Exception:
-                pass
             return tool_result(
                 {
                     "success": True,
@@ -37273,10 +36872,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "DRAFT; pass status='active' to publish to the online store. Guards: requires an "
             "ACTIVE business_connect_shopify connection; a non-live business may write only to a "
             "partner-development store; refused on autonomous wakes. $0 marginal cost; receipted "
-            "as a shopify.product.create business event. Every push also mirrors the buyable "
-            "catalog to product/shopify-catalog.json, each product carrying its cart_permalink "
-            "— the storefront Buy link: customers pay on Shopify's own hosted checkout, so the "
-            "product site bakes the catalog statically (no token, no new scope, no backend)."
+            "as a shopify.product.create business event."
         ),
         "handler": handle_business_shopify_create_product,
         "requires_api": ["composio"],
