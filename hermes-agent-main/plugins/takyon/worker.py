@@ -59,6 +59,9 @@ _DEFAULT_MAX_TURNS = 30
 # actively calling tools / streaming, but a hung API call or stuck tool with NO activity for this
 # many seconds is interrupted and the job fails (then retries / requeues). 0 disables the guard.
 _DEFAULT_TURN_TIMEOUT = 600.0
+# Idle headroom for the mobile_app bootstrap marathon (see ceo_bootstrap_handler): app build +
+# store-signed publish push a single turn well past the web default without being stuck.
+_MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
 # Default queue poll cadence when a tick drains nothing. Drain itself is tight (run_one in a loop).
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker. Keep the worker-loop default aligned with
@@ -1688,6 +1691,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     except (TypeError, ValueError):
         max_turns = _DEFAULT_MAX_TURNS
     inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
+    # Mobile bootstrap is a marathon turn — research + landing + logo + X + an iOS app build (a
+    # 10-20min docker worker) + a store-signed publish. Its long model sub-steps and build waits
+    # exceed the 600s default and were FALSE-killing the turn mid-build (sipstreak, 2026-07-09,
+    # both attempts). Give it 30min of idle headroom: streaming tokens and the app-build heartbeat
+    # reset the clock continuously, so only a genuine ~30min stall (a real hang) still trips it.
+    if str(archetype or "").strip().lower() == "mobile_app":
+        inactivity_limit = max(inactivity_limit, _MOBILE_BOOTSTRAP_TURN_TIMEOUT)
     schedule = str(payload.get("schedule") or "").strip()
     command = f"/create {slug}"
     progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)
