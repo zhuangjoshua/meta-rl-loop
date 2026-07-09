@@ -620,19 +620,27 @@ def test_history_to_messages_hides_budget_guarded_global_wrapper():
     ]
 
 
-def test_takyon_prompt_create_business_detector_ignores_existing_company_campaign_requests():
-    assert (
-        server._takyon_prompt_may_create_business(
-            "can you generate a video ugc and make a reddit ads campaign for this company"
-        )
-        is False
-    )
+def test_scoped_prompt_routes_product_creation_language_to_current_business():
+    session = {"takyon_current_business": "ching"}
+
+    prompt = server._build_takyon_prompt_text(session, "make the product now")
+
+    assert prompt.startswith("Scope: business:ching")
+    assert "apply to this business and must use its product workflow" in prompt
+    assert "Never create or switch to another business" in prompt
+    assert "takyon_pending_business_create" not in session
 
 
-def test_takyon_prompt_create_business_detector_still_catches_real_create_requests():
-    assert server._takyon_prompt_may_create_business(
-        "create a new business for dog grooming"
+def test_global_natural_language_create_request_cannot_arm_business_creation():
+    session = {"takyon_current_business": ""}
+
+    prompt = server._build_takyon_prompt_text(
+        session,
+        "create a new business for dog grooming",
     )
+
+    assert "Natural-language requests cannot create businesses" in prompt
+    assert "takyon_pending_business_create" not in session
 
 
 def test_history_to_messages_collapses_adjacent_raw_and_scoped_duplicate_user_prompt():

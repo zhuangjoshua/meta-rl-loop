@@ -330,6 +330,26 @@ def test_takyon_dashboard_create_returns_structured_workspace(server, monkeypatc
     assert server._sessions[sid]["takyon_current_business"] == "latexflow"
 
 
+def test_takyon_dashboard_create_rejects_business_scoped_session(server):
+    sid = "takyon-session"
+    server._sessions[sid] = {
+        "takyon_current_business": "ching",
+        "takyon_operator_user_id": "user-1",
+    }
+
+    response = server._methods["takyon.dashboard.create"](
+        "dashboard-create-scoped-1",
+        {
+            "session_id": sid,
+            "goal": "Create another product",
+            "mode": "live",
+        },
+    )
+
+    assert response["error"]["code"] == 4004
+    assert "cannot create a business from business:ching" in response["error"]["message"]
+
+
 def test_takyon_dashboard_create_rejects_bootstrap_false_off_skills_host(server):
     sid = "takyon-session"
     server._sessions[sid] = {

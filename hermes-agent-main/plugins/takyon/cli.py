@@ -4221,14 +4221,20 @@ def _operator_context_message(message: str, current_business: str | None) -> str
             "CEO role: scoped business operator.\n\n"
             f"Operator request:\n{message}\n\n"
             "First read this business state with Takyon business tools. Honor the business work_focus field "
-            "if it is marketing-only or product-only. Keep all durable writes business-scoped."
+            "if it is marketing-only or product-only. Keep all durable writes business-scoped. "
+            "Requests to create, build, or make a product, app, site, feature, or workflow apply to this "
+            "business and must use its product workflow. Never create or switch to another business from "
+            "a scoped request. The current scope is authoritative; do not infer a business name from request "
+            "wording or list businesses to choose a different target."
         )
     return (
         "Scope: global\n"
         "CEO role: account/root-scope operator. Global is not the CEO; it is the top-level Takyon scope.\n\n"
         f"Operator request:\n{message}\n\n"
         "Use global reads for businesses, credentials, policy, skills, and budgets. "
-        "For any business/product/customer state change, create or select the business and use concrete business_* tools."
+        "Natural-language requests cannot create businesses. Business creation requires an explicit /create "
+        "command or the dashboard create form; otherwise select an existing business before changing business, "
+        "product, or customer state."
     )
 
 
@@ -4492,7 +4498,12 @@ def _handle_shell_line(
     if local_answer:
         return local_answer, current_business
 
-    if command in _SHELL_CREATE_COMMANDS:
+    if is_slash and command in _SHELL_CREATE_COMMANDS:
+        if current_business:
+            raise SystemExit(
+                f"cannot create a business from business:{current_business}; use /use global first, "
+                "then run an explicit /create command"
+            )
         command_argv = _shell_create_argv(command, raw_args)
         if len(command_argv) < 2:
             raise SystemExit('usage: /create [--live] [--no-auto] [--follow|--detach] [--slug <slug>] [--archetype app|shopify|saas] [--schedule "every 6h"] <business-or-brief> [goal]')
@@ -4553,6 +4564,7 @@ def _handle_shell_line(
     if not tokens:
         return "", current_business
     command = tokens[0].lower()
+    bare_create_language = not is_slash and command in _SHELL_CREATE_COMMANDS
 
     if is_slash and command == "ceo":
         return _format_ceo_focus(current_business, store, model), current_business
@@ -4570,7 +4582,7 @@ def _handle_shell_line(
     if command in {"help", "commands", "skills", "harness"}:
         return _format_harness_commands(), current_business
 
-    harness_command = _get_harness_command(command)
+    harness_command = None if bare_create_language else _get_harness_command(command)
     if harness_command:
         business = current_business
         if harness_command.get("requires_business"):
@@ -4589,7 +4601,7 @@ def _handle_shell_line(
             raw_hermes=raw_hermes,
         ), current_business
 
-    if command in _local_command_names() and command != "ceo":
+    if command in _local_command_names() and command != "ceo" and not bare_create_language:
         normalized = _command_with_current_business(tokens, current_business)
         result = run_takyon_command(
             normalized,

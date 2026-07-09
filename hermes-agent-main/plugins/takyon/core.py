@@ -19444,6 +19444,11 @@ class TakyonStore:
             existing = self._business(conn, business_slug)
             if existing:
                 self._enforce_operator_business_access(conn, business_slug)
+            elif _boolish(op.get("require_existing"), default=False):
+                raise TakyonError(
+                    f"business:{business_slug} does not exist; new businesses must be created "
+                    "explicitly from global scope with /create or the dashboard create form"
+                )
         credential_gate = _require_api_access(op, business_mode=business_mode)
         if action not in {"business.delete", "control.set"}:
             blocker = self._control_blocker(conn, target_scope)
@@ -19490,6 +19495,11 @@ class TakyonStore:
             work_focus = _normalize_work_focus(op.get("work_focus"), default=None)
             now = _now()
             existing = self._business(conn, slug)
+            if existing is None and _boolish(op.get("require_existing"), default=False):
+                raise TakyonError(
+                    f"business:{slug} does not exist; new businesses must be created "
+                    "explicitly from global scope with /create or the dashboard create form"
+                )
             if existing is None and _is_reserved_public_subdomain(slug):
                 raise TakyonError(
                     f"business slug '{slug}' is reserved for Four Manifold infrastructure and cannot be created as a product host"
@@ -23585,16 +23595,29 @@ def handle_business_list_files(args: dict, **_: Any) -> str:
 
 
 def handle_business_upsert_business(args: dict, **_: Any) -> str:
-    operation = {
-        "action": "business.upsert",
-        "business": args.get("business"),
-        "name": args.get("name") or args.get("business"),
-        "goal": args.get("goal") or "",
-        "mode": args.get("mode"),
-        "work_focus": args.get("work_focus") or args.get("focus"),
-        "metadata": args.get("metadata") or {},
-    }
-    return _commit_tool(args, operation, scope=f"business:{args.get('business')}")
+    try:
+        business = _resolved_business_slug(args, required=True)
+        active_store = _store()
+        # Fail before constructing a write when the target is missing or inaccessible. The
+        # require_existing flag below repeats the existence check transactionally at commit time.
+        active_store.enforce_operator_business_access(business)
+        operation = {
+            "action": "business.upsert",
+            "business": business,
+            "name": args.get("name") or business,
+            "goal": args.get("goal") or "",
+            "mode": args.get("mode"),
+            "work_focus": args.get("work_focus") or args.get("focus"),
+            "metadata": args.get("metadata") or {},
+            # The model-facing tool is update-only. Explicit business creation funnels through
+            # the CLI/dashboard create chokepoint, which owns identity, balance, slug, bootstrap,
+            # and session-scope checks. Enforce this again inside commit normalization/application
+            # so a read/write race can never turn this update into an implicit create.
+            "require_existing": True,
+        }
+        return _commit_tool(args, operation, scope=f"business:{business}", store=active_store)
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
 
 
 def handle_business_delete_business(args: dict, **_: Any) -> str:
@@ -37075,12 +37098,12 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_upsert_business",
-        "description": "Create or update a business, including goal and mode/focus metadata.",
+        "description": "Update the current existing business, including goal and mode/focus metadata. This tool cannot create a business or switch business scope.",
         "handler": handle_business_upsert_business,
         "schema": _schema(
             "business_upsert_business",
-            "Create or update a business.",
-            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional initial mode; live is the only supported value"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            "Update the current existing business.",
+            {"business": _BUSINESS_PROP, "name": {"type": "string"}, "goal": {"type": "string"}, "mode": {"type": "string", "description": "Optional mode; live is the only supported value"}, "work_focus": {"type": "string", "description": "Optional work focus: all, marketing, or product"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "idempotency_key"],
         ),
     },
