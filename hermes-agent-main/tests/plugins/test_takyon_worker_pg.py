@@ -64,6 +64,21 @@ def _local_safebox_authority(monkeypatch):
     monkeypatch.setattr(turn_runtime, "load_takyon_env", lambda *a, **k: [])
 
 
+def _credentialed_dsn(pg_conn) -> str:
+    """A conninfo for THIS test's throwaway DB that can actually RECONNECT. psycopg's
+    ``conn.info.dsn`` deliberately strips the password, which happens to work on trust-auth
+    Postgres but can never open a second connection on password-auth servers (e.g. a dockerized
+    local test PG: ``fe_sendauth: no password supplied``). Rebuild from the operator-supplied
+    TAKYON_TEST_PG_DSN + this test's throwaway dbname — the same recipe as the pg_store_dsn
+    fixture in conftest."""
+    from psycopg.conninfo import make_conninfo
+
+    base = str(os.environ.get("TAKYON_TEST_PG_DSN") or "").strip()
+    if base:
+        return make_conninfo(base, dbname=pg_conn.info.dbname)
+    return pg_conn.info.dsn
+
+
 @pytest.fixture
 def operator_plane_store(pg_conn, monkeypatch):
     """Bind the operator-plane store seam to THIS test's throwaway database.
@@ -77,7 +92,7 @@ def operator_plane_store(pg_conn, monkeypatch):
     call-time ``from .core import TakyonStore`` sites (ceo_wake_handler, turn_runtime's workspace
     context). The store's workspace half is pinned to the local backend so no remote sync gate runs.
     """
-    dsn = pg_conn.info.dsn
+    dsn = _credentialed_dsn(pg_conn)
     tmp_root = Path(tempfile.mkdtemp(prefix="takyon-worker-pg-store-"))
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_root / "bucket"))
@@ -1276,7 +1291,7 @@ def test_best_effort_terminalize_owned_timeout_requeues_running_job(pg_conn, mon
     def _test_lifecycle_conn():
         from plugins.takyon.runtime_app import configure_takyon_pg_session
 
-        conn = psycopg.connect(pg_conn.info.dsn, autocommit=True, prepare_threshold=None)
+        conn = psycopg.connect(_credentialed_dsn(pg_conn), autocommit=True, prepare_threshold=None)
         configure_takyon_pg_session(conn, bypass=True)
         return conn
 

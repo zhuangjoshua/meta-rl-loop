@@ -31,6 +31,7 @@ import importlib.util
 import json
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -425,6 +426,131 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     def _republish_live_dist_to_r2(business, live_root):
         pixel_site["republishes"].append({"business": business, "live_root": str(live_root)})
         return {"status": "published", "live_build_id": "build-test-1", "blocker": ""}
+
+    # Media-spend budget rail (reddit-parity): the launch path derives a bounded schedule from
+    # remaining channel credits, reserves them as the campaign's budget authority, and registers
+    # the campaign in the ad-spend policy registry; sync settles at the cap. Faithful-but-small
+    # stand-ins mirroring core's signatures/return shapes, with recorded calls for assertions.
+    channel_spend: dict = {"reservations": [], "releases": [], "settles": []}
+    ad_spend_policies: dict = {}
+
+    def _creative_credit_int(value):
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _creative_credit_budget_snapshot(business):
+        return {"channels": {"meta": {"remaining_credits": mod._test_meta_channel_credits}}}
+
+    def _ad_channel_live_media_spend_credits(channel, remaining_channel_credits, *, setup_credits=0):
+        credits = max(0, _creative_credit_int(remaining_channel_credits) - _creative_credit_int(setup_credits))
+        if credits <= 0:
+            raise _FakeTakyonError(f"{channel} channel credits are fully consumed")
+        return credits
+
+    def _parse_iso_datetime(value):
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value)) if value else None
+        except (TypeError, ValueError):
+            return None
+
+    def _derive_ad_spend_schedule(*, channel, reserved_credits, requested_daily_budget_usd=None,
+                                  requested_start_at=None, requested_end_at=None):
+        total = _creative_credit_int(reserved_credits)
+        if total <= 0:
+            raise _FakeTakyonError(f"{channel} launch requires at least 1 reserved credit")
+        if requested_daily_budget_usd not in (None, ""):
+            daily = int(round(float(requested_daily_budget_usd) * 100))
+        else:
+            daily = min(total, 1000)
+        daily = max(1, min(daily, total))
+        start = _parse_iso_datetime(requested_start_at) or (datetime.now(timezone.utc) + timedelta(minutes=5))
+        days = max(1, (total + daily - 1) // daily)
+        end = _parse_iso_datetime(requested_end_at) or (start + timedelta(days=days))
+        return {
+            "start_at": start.isoformat(),
+            "end_at": end.isoformat(),
+            "day_count": days,
+            "daily_budget_cents": daily,
+            "daily_budget_usd": round(daily / 100.0, 2),
+            "total_budget_cents": total,
+            "total_budget_usd": round(total / 100.0, 2),
+        }
+
+    def _reserve_channel_spend_credits(business, *, channel, requested_credits, reservation_key, metadata=None):
+        entry = {"business": business, "channel": channel,
+                 "credits": _creative_credit_int(requested_credits),
+                 "reservation_key": reservation_key, "metadata": dict(metadata or {})}
+        channel_spend["reservations"].append(entry)
+        return {"success": True, **entry}
+
+    def _release_channel_spend_credits(reservation_key, *, business, channel, metadata=None):
+        channel_spend["releases"].append({"reservation_key": reservation_key, "business": business,
+                                          "channel": channel, "metadata": dict(metadata or {})})
+        return {"success": True}
+
+    def _settle_channel_spend_credits(reservation_key, *, business, channel, actual_credits, metadata=None):
+        channel_spend["settles"].append({"reservation_key": reservation_key, "business": business,
+                                         "channel": channel, "actual_credits": _creative_credit_int(actual_credits),
+                                         "metadata": dict(metadata or {})})
+        return {"balance_credits": 0, "reserved_credits": 0}
+
+    def _upsert_ad_spend_policy(business, *, channel, slug, reservation_key, reserved_credits,
+                                daily_budget_cents, total_budget_cents, start_at, end_at,
+                                provider_account_id=None, provider_campaign_id=None,
+                                provider_group_id=None, provider_ad_id=None, provider_post_id=None,
+                                status="reserved", metadata=None):
+        policy = types.SimpleNamespace(
+            business_slug=business, channel=channel, slug=slug, reservation_key=reservation_key,
+            reserved_credits=_creative_credit_int(reserved_credits),
+            daily_budget_cents=int(daily_budget_cents), total_budget_cents=int(total_budget_cents),
+            start_at=start_at, end_at=end_at, provider_account_id=provider_account_id,
+            provider_campaign_id=provider_campaign_id, provider_group_id=provider_group_id,
+            provider_ad_id=provider_ad_id, provider_post_id=provider_post_id, status=status,
+            last_synced_spend_cents=0, settled_credits=0, metadata=dict(metadata or {}),
+        )
+        ad_spend_policies[(business, channel, slug)] = policy
+        return policy
+
+    def _update_ad_spend_policy(business, *, channel, slug, status=None,
+                                last_synced_spend_cents=None, settled_credits=None,
+                                metadata_patch=None):
+        policy = ad_spend_policies.get((business, channel, slug))
+        if policy is None:
+            raise _FakeTakyonError(f"no ad spend policy for {business}/{channel}/{slug}")
+        if status is not None:
+            policy.status = status
+        if last_synced_spend_cents is not None:
+            policy.last_synced_spend_cents = int(last_synced_spend_cents)
+        if settled_credits is not None:
+            policy.settled_credits = int(settled_credits)
+        if metadata_patch:
+            policy.metadata.update(dict(metadata_patch))
+        return policy
+
+    def _load_ad_spend_policy(business, *, channel, slug):
+        policy = ad_spend_policies.get((business, channel, slug))
+        if policy is None:
+            raise _FakeTakyonError(f"no ad spend policy for {business}/{channel}/{slug}")
+        return policy
+
+    mod._creative_credit_int = _creative_credit_int
+    mod._creative_credit_budget_snapshot = _creative_credit_budget_snapshot
+    mod._ad_channel_live_media_spend_credits = _ad_channel_live_media_spend_credits
+    mod._parse_iso_datetime = _parse_iso_datetime
+    mod._derive_ad_spend_schedule = _derive_ad_spend_schedule
+    mod._reserve_channel_spend_credits = _reserve_channel_spend_credits
+    mod._release_channel_spend_credits = _release_channel_spend_credits
+    mod._settle_channel_spend_credits = _settle_channel_spend_credits
+    mod._upsert_ad_spend_policy = _upsert_ad_spend_policy
+    mod._update_ad_spend_policy = _update_ad_spend_policy
+    mod._load_ad_spend_policy = _load_ad_spend_policy
+    mod._test_meta_channel_credits = 2000  # $20 of channel media budget by default
+    mod._test_channel_spend = channel_spend
+    mod._test_ad_spend_policies = ad_spend_policies
 
     # Public surface.
     mod._store = _store
