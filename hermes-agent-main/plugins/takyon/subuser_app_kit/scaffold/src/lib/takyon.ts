@@ -38,6 +38,45 @@ export function defaultPlanPriceLabel(): string {
   return `$${amount}/${interval}`;
 }
 
+/** One buyable product in the business's Shopify storefront. */
+export interface StorefrontProduct {
+  productId: string;
+  title: string;
+  price: string;
+  handle: string;
+  cartPermalink: string;
+  previewUrl: string;
+}
+
+/** The business's buyable Shopify catalog, materialized into the surface context at publish time
+ *  (the SAME wiring as `productPlans`). Each entry carries a Shopify cart permalink; the store
+ *  section renders only when this is non-empty, so a non-Shopify business shows nothing. */
+const surfaceCatalog: unknown = (surfaceContext as { shopifyCatalog?: unknown }).shopifyCatalog;
+export const productCatalog: StorefrontProduct[] = Array.isArray(surfaceCatalog)
+  ? (surfaceCatalog as Array<Record<string, unknown>>)
+      .map((p) => ({
+        productId: String(p.product_id ?? ""),
+        title: String(p.title ?? "").trim(),
+        price: String(p.price ?? "").trim(),
+        handle: String(p.handle ?? ""),
+        cartPermalink: String(p.cart_permalink ?? "").trim(),
+        previewUrl: String(p.preview_url ?? ""),
+      }))
+      .filter((p) => p.title && p.cartPermalink)
+  : [];
+
+/** Whether this business has a buyable Shopify storefront (at least one released product). */
+export function hasStorefront(): boolean {
+  return productCatalog.length > 0;
+}
+
+/** "$39.99"-style label for a store-currency price string. Returns "" when unset. */
+export function storePriceLabel(price: string): string {
+  const trimmed = String(price ?? "").trim();
+  if (!trimmed) return "";
+  return trimmed.startsWith("$") ? trimmed : `$${trimmed}`;
+}
+
 /** Errors thrown by the kit's action runner carry classification metadata. */
 export interface TakyonActionError extends Error {
   kind?: string;

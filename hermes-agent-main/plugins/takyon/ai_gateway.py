@@ -351,8 +351,21 @@ def _resolve_plan_for_user(
     session_token: str | None = None,
 ):
     token = str(session_token or "").strip()
-    if token and app_identity._is_app_runtime_user(conn):
-        return _resolve_plan_for_session(conn, business_slug, token)
+    if token:
+        # The SECURITY DEFINER session-plan function is the canonical resolver on every app
+        # plane and is ROLE-AGNOSTIC — do not gate it behind _is_app_runtime_user: that probe
+        # swallows infra errors into "" (app_identity._current_user), and a transient flap
+        # (aborted pooled transaction / wrong-pool handoff right after a service restart)
+        # silently flipped a PAID user onto the RLS-filtered direct-read branch below, which
+        # returned no rows -> a clean but FALSE subscription_required 402 (qaproof0708b,
+        # 2026-07-08: active entitlement, valid session, refused once, fine on retry). Data
+        # absence is an EMPTY payload from the function (handled by the caller as unentitled);
+        # only function unavailability (local/SQLite stores, missing migration) falls through
+        # to the direct reads.
+        try:
+            return _resolve_plan_for_session(conn, business_slug, token)
+        except Exception:  # noqa: BLE001 — fall through only when the function path is unavailable
+            pass
     entitlement = app_entitlements.get_active_entitlement(conn, business_slug, user.id)
     if entitlement is not None and entitlement.plan_key:
         plan = app_entitlements.get_plan_policy(conn, business_slug, entitlement.plan_key)
@@ -384,7 +397,60 @@ def _feature_allowed(plan, feature_name: str) -> bool:
     return False
 
 
+def _platform_default_models() -> set[str]:
+    """The platform's currently-configured default app models (one per provider).
+
+    Resolved the same way the payload builders resolve an unspecified model:
+    ``TAKYON_APP_OPENAI_MODEL``/``TAKYON_APP_ANTHROPIC_MODEL`` env (or the
+    hardcoded fallbacks). These are the models the platform ITSELF routes to
+    when a product action calls ``ctx.generate`` without naming a model.
+    """
+    from .ai_provider import anthropic_model, openai_model
+
+    defaults: set[str] = set()
+    for resolve in (openai_model, anthropic_model):
+        try:
+            value = str(resolve({}) or "").strip()
+        except Exception:  # noqa: BLE001 — a broken resolver must not block the other lane
+            value = ""
+        if value:
+            defaults.add(value)
+    return defaults
+
+
+# Comma-separated extra models the platform sanctions for EVERY business, on top of the
+# per-provider defaults. This is the retroactive-model rail: adding a model here (one env
+# line on the serving planes) makes it usable by ALL existing businesses immediately — no
+# plan-row migration, no reseeding. The pricing table stays the fail-closed cost gate: an
+# unpriced model still refuses at the estimate step regardless of this list.
+_SANCTIONED_MODELS_ENV = "TAKYON_APP_SANCTIONED_MODELS"
+
+
+def _platform_sanctioned_models() -> set[str]:
+    """Platform-sanctioned, always-usable app models: the per-provider defaults plus the
+    ``TAKYON_APP_SANCTIONED_MODELS`` env list (comma-separated). Plan ``model_allowlist``
+    entries ADD to this (business-specific extras); they can never subtract from it."""
+    sanctioned = _platform_default_models()
+    raw = str(os.environ.get(_SANCTIONED_MODELS_ENV) or "")
+    for item in raw.split(","):
+        value = item.strip()
+        if value:
+            sanctioned.add(value)
+    return sanctioned
+
+
 def _model_allowed(plan, model: str) -> bool:
+    # Platform-sanctioned models (per-provider defaults + TAKYON_APP_SANCTIONED_MODELS)
+    # are always usable. Plan ``model_allowlist`` gates CLIENT model choice (explicitly
+    # requested models); it must not strand existing businesses when the operator moves
+    # the platform default or introduces a new model. 2026-07-08 provider split: 219
+    # plans seeded with ["claude-sonnet-4-6"] while the app default moved to
+    # gpt-5.4-mini, so every ctx.generate call (no explicit model) 403'd
+    # model_not_in_plan (observed: aipeekaboo run-visibility). Cost safety is
+    # unaffected — the pricing gate and the reserve/settle money gate still meter
+    # every call, and an unpriced model refuses at the estimate step.
+    if model in _platform_sanctioned_models():
+        return True
     if plan is None or not isinstance(getattr(plan, "metadata", None), dict):
         return False
     metadata = plan.metadata

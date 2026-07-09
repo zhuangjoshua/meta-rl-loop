@@ -64,6 +64,21 @@ def _local_safebox_authority(monkeypatch):
     monkeypatch.setattr(turn_runtime, "load_takyon_env", lambda *a, **k: [])
 
 
+def _credentialed_dsn(pg_conn) -> str:
+    """A conninfo for THIS test's throwaway DB that can actually RECONNECT. psycopg's
+    ``conn.info.dsn`` deliberately strips the password, which happens to work on trust-auth
+    Postgres but can never open a second connection on password-auth servers (e.g. a dockerized
+    local test PG: ``fe_sendauth: no password supplied``). Rebuild from the operator-supplied
+    TAKYON_TEST_PG_DSN + this test's throwaway dbname — the same recipe as the pg_store_dsn
+    fixture in conftest."""
+    from psycopg.conninfo import make_conninfo
+
+    base = str(os.environ.get("TAKYON_TEST_PG_DSN") or "").strip()
+    if base:
+        return make_conninfo(base, dbname=pg_conn.info.dbname)
+    return pg_conn.info.dsn
+
+
 @pytest.fixture
 def operator_plane_store(pg_conn, monkeypatch):
     """Bind the operator-plane store seam to THIS test's throwaway database.
@@ -77,7 +92,7 @@ def operator_plane_store(pg_conn, monkeypatch):
     call-time ``from .core import TakyonStore`` sites (ceo_wake_handler, turn_runtime's workspace
     context). The store's workspace half is pinned to the local backend so no remote sync gate runs.
     """
-    dsn = pg_conn.info.dsn
+    dsn = _credentialed_dsn(pg_conn)
     tmp_root = Path(tempfile.mkdtemp(prefix="takyon-worker-pg-store-"))
     monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
     monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_root / "bucket"))
@@ -607,7 +622,7 @@ def test_ceo_wake_handler_reports_true_cost_in_cents(monkeypatch, tmp_path):
     monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
-    job = SimpleNamespace(business_slug="acme", payload={})
+    job = SimpleNamespace(id="job-cost-1", business_slug="acme", payload={})
     result = worker.ceo_wake_handler(job)
 
     assert result.actual_cost_cents == 7
@@ -1096,7 +1111,7 @@ def test_ceo_wake_handler_honors_payload_max_turns(monkeypatch, tmp_path):
     monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
-    worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={"max_turns": 7}))
+    worker.ceo_wake_handler(SimpleNamespace(id="job-turns-1", business_slug="acme", payload={"max_turns": 7}))
     assert captured["max_turns"] == 7
 
 
@@ -1140,10 +1155,58 @@ def test_ceo_wake_handler_binds_owner_before_loading_prompt(monkeypatch):
     monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("ok", 0.0, "none", True))
 
-    result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+    result = worker.ceo_wake_handler(SimpleNamespace(id="job-bind-1", business_slug="acme", payload={}))
 
     assert result.result["business_slug"] == "acme"
     assert seen["store_operator_user_id"] == "user-123"
+
+
+def test_ceo_wake_handler_orders_refresh_then_distill_then_prompt(monkeypatch):
+    # The wake prompt must be built AFTER the pre-wake insights refresh and the deterministic
+    # episode distillation, so this wake's injected memory + appended learnings already reflect
+    # this wake's own refresh/distill work (regression pin for the stale-prompt ordering bug).
+    import contextlib
+
+    import gateway.session_context as session_context
+
+    order: list[str] = []
+
+    class _FakeStore:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def distill_episode_lessons(self, slug):
+            assert slug == "acme"
+            order.append("distill")
+            return {"distilled": 0}
+
+        def _ceo_cron_prompt(self, slug):
+            order.append("prompt")
+            return "wake prompt"
+
+        def _ceo_cron_toolsets(self):
+            return ["takyon", "web", "skills", "todo"]
+
+    @contextlib.contextmanager
+    def _fake_workspace(*_a, **_k):
+        yield "/tmp/fake-workspace"
+
+    monkeypatch.setattr(core, "TakyonStore", _FakeStore)
+    monkeypatch.setattr(
+        core, "_refresh_stale_live_ad_campaigns",
+        lambda slug: order.append("refresh") or {"refreshed": 0},
+    )
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
+    monkeypatch.setattr(session_context, "set_session_vars", lambda **_k: [])
+    monkeypatch.setattr(session_context, "clear_session_vars", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_record_runtime_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("ok", 0.0, "none", True))
+
+    result = worker.ceo_wake_handler(SimpleNamespace(id="job-order-1", business_slug="acme", payload={}))
+
+    assert result.result["business_slug"] == "acme"
+    assert order == ["refresh", "distill", "prompt"]
 
 
 def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
@@ -1170,7 +1233,7 @@ def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
         return "ok", 0.0, "none", True
 
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
-    result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+    result = worker.ceo_wake_handler(SimpleNamespace(id="job-iso-1", business_slug="acme", payload={}))
 
     assert result.result["business_slug"] == "acme"
     assert seen["user_id"] == "user-123"
@@ -1203,7 +1266,7 @@ def test_ceo_wake_handler_syncs_partial_workspace_on_failed_turn(monkeypatch, tm
     monkeypatch.setattr(worker, "_run_ceo_turn", _fake_turn)
 
     with pytest.raises(RuntimeError, match="turn interrupted"):
-        worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+        worker.ceo_wake_handler(SimpleNamespace(id="job-sync-1", business_slug="acme", payload={}))
 
     resumed = tmp_path / "resumed"
     storage.sync_down(backend, "acme", resumed)
@@ -1276,7 +1339,7 @@ def test_best_effort_terminalize_owned_timeout_requeues_running_job(pg_conn, mon
     def _test_lifecycle_conn():
         from plugins.takyon.runtime_app import configure_takyon_pg_session
 
-        conn = psycopg.connect(pg_conn.info.dsn, autocommit=True, prepare_threshold=None)
+        conn = psycopg.connect(_credentialed_dsn(pg_conn), autocommit=True, prepare_threshold=None)
         configure_takyon_pg_session(conn, bypass=True)
         return conn
 
@@ -1485,7 +1548,7 @@ def test_zero_cost_turn_reports_zero_cents(monkeypatch, tmp_path):
     monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _fake_workspace)
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
     monkeypatch.setattr(worker, "_run_ceo_turn", lambda **_kw: ("", 0.0, "none", True))
-    result = worker.ceo_wake_handler(SimpleNamespace(business_slug="acme", payload={}))
+    result = worker.ceo_wake_handler(SimpleNamespace(id="job-zero-1", business_slug="acme", payload={}))
     assert result.actual_cost_cents == 0
 
 

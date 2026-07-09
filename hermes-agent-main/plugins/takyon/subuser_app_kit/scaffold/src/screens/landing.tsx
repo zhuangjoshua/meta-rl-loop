@@ -9,6 +9,8 @@ import {
 } from "../lib/branding";
 import { resolveViewerCta, useViewerAccess } from "../lib/hooks";
 import { useProductAuth } from "../lib/product-auth";
+import { hasStorefront } from "../lib/takyon";
+import { StoreSection } from "./store";
 
 export function LandingScreen() {
   const access = useViewerAccess();
@@ -43,6 +45,7 @@ export function LandingScreen() {
           </div>
           <nav className="flex flex-wrap gap-2">
             {[
+              ...(hasStorefront() ? [{ to: "/store", label: "Shop" }] : []),
               { to: "/faq", label: "FAQ" },
               { to: "/privacy", label: "Privacy" },
               { to: "/terms", label: "Terms" },
@@ -106,6 +109,8 @@ export function LandingScreen() {
             </div>
           </div>
         </section>
+
+        <StoreSection />
       </div>
     </main>
   );

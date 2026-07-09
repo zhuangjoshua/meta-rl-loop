@@ -59,6 +59,9 @@ _DEFAULT_MAX_TURNS = 30
 # actively calling tools / streaming, but a hung API call or stuck tool with NO activity for this
 # many seconds is interrupted and the job fails (then retries / requeues). 0 disables the guard.
 _DEFAULT_TURN_TIMEOUT = 600.0
+# Idle headroom for the mobile_app bootstrap marathon (see ceo_bootstrap_handler): app build +
+# store-signed publish push a single turn well past the web default without being stuck.
+_MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
 # Default queue poll cadence when a tick drains nothing. Drain itself is tight (run_one in a loop).
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker. Keep the worker-loop default aligned with
@@ -893,6 +896,7 @@ class _RuntimeProgress:
         self._stream_buffer = ""
         self._stream_open = False
         self._stream_last_emit = 0.0
+        self._reasoning_buf = ""
         self._last_activity_monotonic = time.monotonic()
 
     def _touch_activity(self) -> None:
@@ -1040,6 +1044,12 @@ class _RuntimeProgress:
         self._last_nested_activity = text
         self.emit(f"worker -> {text}")
 
+    def _flush_reasoning(self) -> None:
+        note = _normalize_worker_progress_text(self._reasoning_buf)
+        self._reasoning_buf = ""
+        if note:
+            self.emit(f"reasoning -> {note}")
+
     def tool_progress(
         self,
         event_type: str,
@@ -1052,17 +1062,28 @@ class _RuntimeProgress:
             return
         self._touch_activity()
         if event_type == "tool.started":
+            self._flush_reasoning()
             self._last_tool_generating = ""
             suffix = f" · {preview}" if preview else ""
             self.emit(f"tool started -> {name}{suffix}")
         elif event_type == "tool.completed":
+            self._flush_reasoning()
             duration = kwargs.get("duration")
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
         elif event_type in {"reasoning.available", "_thinking"}:
-            note = _normalize_worker_progress_text(preview if _normalize_worker_progress_text(preview) else name)
-            if note:
-                self.emit(f"reasoning -> {note}")
+            # Streaming reasoning arrives as PER-TOKEN BPE deltas. Recording one runtime
+            # event per delta floods the events plane and every renderer that replays it
+            # (follow tail, dashboard) with one word — or half a word — per line (274
+            # fragment lines on paylane0708's bootstrap). Coalesce raw deltas (spacing
+            # intact) and record ONE event per sentence or ~200 chars; flush before
+            # tool-start/complete so ordering is preserved. Mirrors cli._ShellProgress.
+            raw = str(preview if preview is not None else (name or ""))
+            if raw:
+                self._reasoning_buf += raw
+                stripped = self._reasoning_buf.rstrip()
+                if len(stripped) >= 200 or stripped.endswith((".", "!", "?", ":", ";")):
+                    self._flush_reasoning()
 
     def tool_completed(
         self,
@@ -1454,7 +1475,6 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
     slug = job.business_slug
     owner_user_id = _business_owner_user_id(slug)
     store = TakyonStore(operator_user_id=owner_user_id)
-    user_prompt = store._ceo_cron_prompt(slug)
     toolsets = store._ceo_cron_toolsets()
     system_prompt = _load_ceo_prompt()
     progress = _RuntimeProgress(slug=slug, kind="ceo_wake", command=f"/wake {slug}")
@@ -1519,6 +1539,31 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                         )
                 except Exception:
                     pass
+                # Pre-wake deterministic distillation: evaluate matured episodes' measured
+                # metric deltas and keep the significant ones as [measured] lessons (RL rail
+                # R8, fixed slice — code, not model judgment). Runs AFTER the insights refresh
+                # so the "after" snapshot reads fresh delivery numbers, and BEFORE the prompt
+                # build so this wake's appended learnings already include them. Best-effort —
+                # a failed distill must never break the wake.
+                try:
+                    _distilled = store.distill_episode_lessons(slug)
+                    if int(_distilled.get("distilled") or 0):
+                        _record_runtime_event(
+                            slug,
+                            kind="ceo_wake",
+                            status="running",
+                            detail=(
+                                f"Pre-wake distilled {_distilled['distilled']} measured lesson(s) "
+                                "from matured episodes."
+                            ),
+                            command=f"/wake {slug}",
+                        )
+                except Exception:
+                    pass
+                # Build the wake prompt AFTER the pre-wake refresh + distillation (it was
+                # previously built before them, so the injected memory and appended learnings
+                # could not see this wake's own refresh/distill work — a stale-prompt bug).
+                user_prompt = store._ceo_cron_prompt(slug)
                 final_response, cost_usd, cost_status, _turn_completed = _run_ceo_turn(
                     slug=slug,
                     system_prompt=system_prompt,
@@ -1619,12 +1664,23 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         (job.payload or {}).get("landing_animations")
         or _business_metadata(business or {}).get("landing_animations")
     )
+    # Archetype-aware bootstrap: prefer the summary's business row, fall back to a direct row read
+    # (the archetype column is canonical on businesses). Absent/error → "" → web prose unchanged.
+    archetype = str((business or {}).get("archetype") or "").strip().lower()
+    if not archetype:
+        try:
+            with store._connect() as conn:
+                row = store._ensure_business(conn, slug)
+            archetype = str((row or {}).get("archetype") or "").strip().lower()
+        except Exception:
+            archetype = ""
     bootstrap_turn = _ceo_bootstrap_turn_config(
         slug,
         goal,
         active_mode,
         business_name=business_name,
         animations=animations,
+        archetype=archetype,
     )
     user_prompt = str(bootstrap_turn.get("user_prompt") or "")
     system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")
@@ -1635,6 +1691,13 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     except (TypeError, ValueError):
         max_turns = _DEFAULT_MAX_TURNS
     inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
+    # Mobile bootstrap is a marathon turn — research + landing + logo + X + an iOS app build (a
+    # 10-20min docker worker) + a store-signed publish. Its long model sub-steps and build waits
+    # exceed the 600s default and were FALSE-killing the turn mid-build (sipstreak, 2026-07-09,
+    # both attempts). Give it 30min of idle headroom: streaming tokens and the app-build heartbeat
+    # reset the clock continuously, so only a genuine ~30min stall (a real hang) still trips it.
+    if str(archetype or "").strip().lower() == "mobile_app":
+        inactivity_limit = max(inactivity_limit, _MOBILE_BOOTSTRAP_TURN_TIMEOUT)
     schedule = str(payload.get("schedule") or "").strip()
     command = f"/create {slug}"
     progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)

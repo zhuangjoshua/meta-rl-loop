@@ -88,8 +88,8 @@ _TAKYON_SKILL_PREFIX = "takyon-"
 
 
 
-def _clamp_bootstrap_max_turns(goal: str, value: Any) -> int:
-    cap = _bootstrap_turn_cap_for_goal(goal)
+def _clamp_bootstrap_max_turns(goal: str, value: Any, archetype: str = "") -> int:
+    cap = _bootstrap_turn_cap_for_goal(goal, archetype=archetype)
     try:
         raw = int(value or cap)
     except (TypeError, ValueError):
@@ -129,7 +129,7 @@ def _runtime_event_rows_for_business(
             ) recent
             ORDER BY created_at ASC, id ASC
             """,
-            (slug, max(1, min(int(limit or 300), 500))),
+            (slug, max(1, min(int(limit or 300), 2000))),
         ).fetchall()
     return [store._row_to_dict(row) for row in rows]
 
@@ -598,12 +598,34 @@ def _format_cli_value(value: Any) -> str:
                 slug = str(business_ref or "<unknown>")
             follow = value.get("follow") if isinstance(value.get("follow"), dict) else {}
             status = str(follow.get("status") or bootstrap_job.get("status") or "queued")
+            took = str(follow.get("duration_display") or "").strip()
+            took_suffix = f" in {took}" if took else ""
+            # Durable-state truth for a failed/blocked job record: if the site is actually
+            # published, the one-line verdict must say so (job-record status alone reads as a
+            # total failure and misled the operator on test-2).
+            published_build = str(follow.get("site_published_build") or "").strip()
+            published_suffix = (
+                f" — BUT the product site IS built and published (live build {published_build[:12]});"
+                " only later bootstrap steps may be missing"
+                if published_build and status in {"failed", "blocked"}
+                else ""
+            )
+            # The follow-tail capped out while the job kept running its background tail, but the
+            # product site is already published. Do NOT report "Create running" (reads as "still
+            # bootstrapping" — operator complaint): the business is LIVE, the tail is background.
+            if follow.get("site_live_on_detach") and status not in {"failed", "blocked"}:
+                live_suffix = f" (live build {published_build[:12]})" if published_build else ""
+                return (
+                    f"business:{slug} is LIVE{live_suffix}{took_suffix} — bootstrap effectively done; "
+                    "remaining setup finishes in the background. Use /use "
+                    f"{slug} to work it, or `takyon logs -f` to watch the tail."
+                )
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
             job_id = str(bootstrap_job.get("job_id") or "").strip()
             if job_id:
-                return f"Create {status} for business:{slug}. Bootstrap job: {job_id}."
-            return f"Create {status} for business:{slug}."
+                return f"Create {status} for business:{slug}{took_suffix}{published_suffix}. Bootstrap job: {job_id}."
+            return f"Create {status} for business:{slug}{took_suffix}{published_suffix}."
 
     if "summary" in value and "deltas_from_previous_pulse" in value and "windows" in value:
         business = value.get("business") or "<unknown>"
@@ -2388,6 +2410,67 @@ class _RuntimeEventTail:
         print(f"{_color('->', _THEME['secondary'])} {note}", file=self._out, flush=True)
 
 
+def _coerce_event_datetime(value: Any) -> Any:
+    """Best-effort datetime from a job/event timestamp (PG datetime or SQLite ISO text)."""
+    import datetime as _dt
+
+    if isinstance(value, _dt.datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _format_duration_seconds(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _bootstrap_phase_durations(store: TakyonStore, slug: str) -> list[tuple[str, float]]:
+    """Per-workspace worker-phase durations (seconds) from the recorded runtime events.
+
+    Groups the Claude-worker progress events (``command = 'Claude worker -> <workspace>'``)
+    by workspace and takes first->last event time per group. Display-only: derived entirely
+    from already-recorded events, so it works cross-machine and after reattach."""
+    phases: dict[str, list[Any]] = {}
+    try:
+        rows = _runtime_event_rows_for_business(store, slug, limit=2000)
+    except Exception:  # noqa: BLE001 - duration report is display-only
+        return []
+    for event in rows:
+        payload = event.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:  # noqa: BLE001
+                continue
+        if not isinstance(payload, dict):
+            continue
+        command = str(payload.get("command") or "")
+        if not command.startswith("Claude worker -> "):
+            continue
+        stamp = _coerce_event_datetime(event.get("created_at"))
+        if stamp is None:
+            continue
+        phases.setdefault(command.removeprefix("Claude worker -> ").strip() or "worker", []).append(stamp)
+    out: list[tuple[str, float]] = []
+    for workspace, stamps in phases.items():
+        if len(stamps) >= 2:
+            out.append((workspace, (max(stamps) - min(stamps)).total_seconds()))
+    out.sort(key=lambda item: -item[1])
+    return out
+
+
 def _follow_worker_job(
     store: TakyonStore,
     slug: str,
@@ -2524,6 +2607,7 @@ def _follow_worker_job(
     last_status = ""
     record = None
     detached = False
+    detached_live_build = ""  # set when the follow-tail caps out but the site is already published
     try:
         # Prime with already-recorded turns so --follow shows only narration produced from now on.
         try:
@@ -2581,11 +2665,38 @@ def _follow_worker_job(
                 )
                 queued_warned = True
             if elapsed > max_seconds:
-                print(
-                    f"[{label}] detaching after {int(max_seconds)}s; job still {status}. "
-                    "Re-attach with `takyon logs -f`.",
-                    flush=True,
-                )
+                # The follow-tail hit its cap, but a bootstrap keeps a long background TAIL
+                # (research, wake scheduling, launch post) running LONG after the one thing the
+                # operator waits for — the live product site — is already published. Leaving
+                # "[bootstrap] ... job still running" as the last line reads as "stuck / still
+                # bootstrapping" even though the business is usable (operator complaint, ching).
+                # Check the DURABLE live-build pointer: once the site is live, drop the bootstrap
+                # framing entirely and say the business is LIVE — the tail is just background.
+                detach_live_build = ""
+                try:
+                    with store._connect() as conn:
+                        row = conn.execute(
+                            "SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?",
+                            (slug,),
+                        ).fetchone()
+                    if row:
+                        detach_live_build = str((store._row_to_dict(row) or {}).get("live_build_id") or "").strip()
+                except Exception:  # noqa: BLE001 - display-only enrichment
+                    detach_live_build = ""
+                if detach_live_build:
+                    detached_live_build = detach_live_build
+                    print(
+                        f"\n✓ business:{slug} is LIVE (build {detach_live_build[:12]}). The "
+                        "bootstrap is effectively done — its remaining background steps continue on "
+                        "the worker; you don't need to wait. (`takyon logs -f` to watch them.)",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[{label}] detaching after {int(max_seconds)}s; job still {status}. "
+                        "Re-attach with `takyon logs -f`.",
+                        flush=True,
+                    )
                 break
             time.sleep(poll_seconds)
         # Final sweep for trailing narration / log lines written just before the terminal status.
@@ -2596,6 +2707,49 @@ def _follow_worker_job(
     except KeyboardInterrupt:
         detached = True
         print(f"\n[{label}] detached (the worker job keeps running).", flush=True)
+    # Wall-clock duration from the DURABLE job row (queued -> terminal), not the local follow
+    # timer — correct across detach/reattach and cross-machine claims. Phase breakdown comes
+    # from the recorded worker events. Display + report only; never mutates the job.
+    duration_display = ""
+    if record is not None and (last_status or "") in terminal:
+        started_at = _coerce_event_datetime(getattr(record, "created_at", None))
+        ended_at = _coerce_event_datetime(getattr(record, "updated_at", None))
+        if started_at is not None and ended_at is not None:
+            duration_display = _format_duration_seconds((ended_at - started_at).total_seconds())
+            phase_bits = ", ".join(
+                f"{workspace} {_format_duration_seconds(seconds)}"
+                for workspace, seconds in _bootstrap_phase_durations(store, slug)[:4]
+            )
+            print(
+                f"[{label}] {last_status} in {duration_display}"
+                + (f" (worker phases: {phase_bits})" if phase_bits else ""),
+                flush=True,
+            )
+    # A terminal 'failed'/'blocked' JOB record is not the whole truth: the business's durable
+    # outcome can still be good (a retry or recovery run published the site while the job record
+    # kept the first failure — observed on test-2 2026-07-08: job failed on a watchdog kill, yet
+    # the site was built, published, and R2-mirrored 16 minutes later). Verdicts the operator
+    # reads must reflect DURABLE STATE, so check the canonical live-build pointer and say so.
+    live_build_id = ""
+    if (last_status or "") in {"failed", "blocked"}:
+        try:
+            with store._connect() as conn:
+                row = conn.execute(
+                    "SELECT live_build_id FROM app_surface_contracts WHERE business_slug = ?",
+                    (slug,),
+                ).fetchone()
+            if row:
+                live_build_id = str((store._row_to_dict(row) or {}).get("live_build_id") or "").strip()
+        except Exception:  # noqa: BLE001 - verdict enrichment is display-only
+            live_build_id = ""
+        if live_build_id:
+            print(
+                f"[{label}] NOTE: the job record says {last_status}, but the product site IS "
+                f"built and published (live build {live_build_id[:12]}). A later run completed "
+                "the site work; only this job's remaining steps may be missing. The business is "
+                "usable — re-run a wake (or the CEO will on its schedule) to finish the tail.",
+                flush=True,
+            )
     return {
         "action": f"{label}.follow",
         "job_id": str(job_id),
@@ -2603,6 +2757,9 @@ def _follow_worker_job(
         "result": (record.result if record else None),
         "error": (record.error if record else None),
         "detached": detached,
+        **({"duration_display": duration_display} if duration_display else {}),
+        **({"site_published_build": live_build_id or detached_live_build} if (live_build_id or detached_live_build) else {}),
+        **({"site_live_on_detach": True} if detached_live_build else {}),
     }
 
 
@@ -3563,6 +3720,7 @@ class _ShellProgress:
         self.fd: int | None = os.dup(1) if self.enabled else None
         self._last_activity = ""
         self._last_tool_generating = ""
+        self._reasoning_buf = ""
         self._stream_open = False
         self.streamed_chars = 0
         self.raw_hermes = bool(raw_hermes)
@@ -3708,24 +3866,40 @@ class _ShellProgress:
             return
         if not text or text == self._last_activity:
             return
+        self._flush_reasoning()
         self._last_activity = text
         self.emit(f"agent -> {text}")
+
+    def _flush_reasoning(self) -> None:
+        note = _normalize_progress_text(self._reasoning_buf, limit=220)
+        self._reasoning_buf = ""
+        if note:
+            self.emit(f"reasoning -> {note}")
 
     def tool_progress(self, event_type: str, name: str | None = None, preview: str | None = None, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
         if not name:
             return
         if event_type == "tool.started":
+            self._flush_reasoning()
             self._last_tool_generating = ""
             suffix = f" · {preview}" if preview else ""
             self.emit(f"tool started -> {name}{suffix}")
         elif event_type == "tool.completed":
+            self._flush_reasoning()
             duration = kwargs.get("duration")
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
         elif event_type in {"reasoning.available", "_thinking"}:
-            note = _reasoning_progress_text(name, preview)
-            if note:
-                self.emit(f"reasoning -> {note}")
+            # Streaming reasoning arrives as PER-TOKEN deltas (BPE pieces: " up", "sert",
+            # " the" ...). Emitting one line per delta floods the console with one word —
+            # or half a word — per line. Coalesce raw deltas (spacing intact) and emit a
+            # line only at a sentence boundary or once a display line is full.
+            raw = str(preview if preview is not None else (name or ""))
+            if raw:
+                self._reasoning_buf += raw
+                stripped = self._reasoning_buf.rstrip()
+                if len(stripped) >= 200 or stripped.endswith((".", "!", "?", ":", ";")):
+                    self._flush_reasoning()
 
     def tool_started(self, tool_id: str, name: str, args: dict[str, Any]) -> None:
         self.raw_event("tool_call", {"id": tool_id, "name": name, "args": args})
@@ -5410,7 +5584,7 @@ def run_takyon_command(
                 goal=goal,
                 mode=active_mode,
                 schedule=schedule if should_schedule else None,
-                max_turns=_clamp_bootstrap_max_turns(goal, max_turns),
+                max_turns=_clamp_bootstrap_max_turns(goal, max_turns, archetype=str(archetype or "")),
             )
             should_follow = (follow or follow_logs) and not detach
             bootstrap_job_id = str(bootstrap_job.get("job_id") or "").strip()

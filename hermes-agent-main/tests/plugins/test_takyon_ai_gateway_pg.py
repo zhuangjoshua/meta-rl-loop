@@ -326,6 +326,8 @@ def test_gateway_plan_without_feature_metadata_is_403(gateway_client, pg_conn):
 
 
 def test_gateway_model_not_in_plan_is_403(gateway_client, pg_conn):
+    """An EXPLICITLY requested model outside the plan allowlist (and not the
+    platform default) is refused — the allowlist gates client model choice."""
     slug, raw = _provision_business(pg_conn)
     _user, session_token = _provision_session_user(
         pg_conn,
@@ -339,13 +341,45 @@ def test_gateway_model_not_in_plan_is_403(gateway_client, pg_conn):
 
     resp = client.post(
         "/internal/ai-gateway/messages",
-        json=_GENERATE_BODY,
+        json={**_GENERATE_BODY, "model": "claude-forbidden-9"},
         headers=_app_auth(raw, session_token),
     )
 
     assert resp.status_code == 403
-    assert resp.json()["detail"] == {"error": "model_not_in_plan", "model": "claude-sonnet-4-6"}
+    assert resp.json()["detail"] == {"error": "model_not_in_plan", "model": "claude-forbidden-9"}
     assert list_usage_events(pg_conn, slug) == []
+
+
+def test_gateway_platform_default_model_survives_stale_plan_allowlist(gateway_client, pg_conn):
+    """A request that does NOT name a model resolves to the platform default,
+    which must stay usable even when the plan's seeded allowlist predates a
+    platform default-model change (2026-07-08 provider split: 219 live plans
+    pinned ["claude-sonnet-4-6"] while the app default moved — every
+    ctx.generate 403'd model_not_in_plan; observed on aipeekaboo
+    run-visibility). The pricing and money gates still meter the call."""
+    slug, raw = _provision_business(pg_conn)
+    _user, session_token = _provision_session_user(
+        pg_conn,
+        slug,
+        metadata={
+            "features": {"ai_generate": True},
+            # Stale allowlist: does NOT contain the platform default model.
+            "model_allowlist": ["claude-other"],
+        },
+    )
+    client = gateway_client(_canned_caller)
+
+    resp = client.post(
+        "/internal/ai-gateway/messages",
+        json=_GENERATE_BODY,  # no explicit model -> platform default
+        headers=_app_auth(raw, session_token),
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert payload["model"] == "claude-sonnet-4-6"
+    assert len(list_usage_events(pg_conn, slug)) == 1
 
 
 def test_provider_caller_default_blocks_when_unconfigured():

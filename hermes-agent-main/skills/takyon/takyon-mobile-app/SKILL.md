@@ -1,7 +1,7 @@
 ---
 name: takyon-mobile-app
 description: Build, compliance-check, and ship an iOS App Store app for a mobile_app-archetype Takyon business (Expo/EAS, TestFlight, App Store submit).
-version: 1.0.0
+version: 1.1.0
 author: Four Manifold
 license: Proprietary
 platforms: [linux, macos]
@@ -72,10 +72,10 @@ Infer the PHASE from the current app state:
 
 ## Prerequisites
 
-- The business must be archetype `mobile_app`. The mobile archetype is **gated until its end-to-end pipeline is proven** (`readmodular.md` §5): `business_publish_mobile_release` fails closed with `archetype_unavailable:mobile_app` until it is enabled in the archetype registry. Treat that error as "not yet shipped," not as a bug to patch.
+- The business must be archetype `mobile_app` (`business_read_business` confirms; the archetype is enabled in the registry, selectable at create with `--archetype app`).
 - The App Store rails need two provider identities that live ONLY in the safebox (never on the runtime plane, never in `os.environ`): the Expo access token (`expo`) and the App Store Connect API key (`app_store_connect`). Both are resolved server-side through the safebox authority route; this skill never reads them.
-- A real build additionally needs the one-time interactive `eas credentials` Apple-ID login to be completed by the operator. Until then `business_publish_mobile_release` returns `eas_builder_unconfigured` and **reserves no credits** — a truthful blocked receipt, not a fake success. Record the blocker and stop; do not fabricate a build id.
-- The publish action spends **creative credits** (a fixed operator-priced action). It fails closed on insufficient credits, reserves before the provider call, settles at the build TRIGGER (the irreversible-spend point), and releases only if the trigger never happened.
+- The build lane is **host-independent**: on a host with local builder custody the build signs locally; on any other host `business_publish_mobile_release` mints the per-build signing bundle through the safebox `build-credentials` route (the ASC key never leaves the safebox). If NEITHER lane resolves, the tool returns `eas_builder_unconfigured` and **reserves no credits** — a truthful blocked receipt. Record it and stop; do not fabricate a build id.
+- The publish action spends **creative credits** (a fixed operator-priced action). It reserves before the provider call, settles at the build TRIGGER (the irreversible-spend point), and releases only if the trigger never happened. On operator-owned businesses the platform may run with the operator creative-gate bypass (never refused, still fully metered); customer/subuser surfaces stay hard-gated.
 
 ## How to Run
 
@@ -93,7 +93,24 @@ Infer the PHASE from the current app state:
 4. When a release is requested, first call `business_read_store_status`. Stop on a non-`ok` account state for a `production` submit.
 5. Call `business_publish_mobile_release` with the chosen `lane` and an `idempotency_key`. Let it run the compliance gate + credit-gated EAS build.
 6. Re-read the tool result. Report `published`/`queued` only on a real `build_id`; report `blocked` (with the exact gate token) on `archetype_unavailable`, `eas_builder_unconfigured`, insufficient credits, or a compliance failure.
-7. Do not add skill-local money, compliance, or publish logic. The credit reserve→settle-at-trigger→release, the greenlight gate, and the store_release adapter live in the shared tools/rails; this skill only orchestrates them.
+7. If the triggered build later FAILS on the EAS builder, run the **Build-Failure Triage** loop below — never leave a failed build as the final state without either a fixed re-trigger or a recorded blocker.
+8. Do not add skill-local money, compliance, or publish logic. The credit reserve→settle-at-trigger→release, the greenlight gate, and the store_release adapter live in the shared tools/rails; this skill only orchestrates them.
+
+## Build-Failure Triage (the repair loop)
+
+A triggered build can still fail on the remote EAS builder (the trigger settled the credits — that spend is real; the fix loop makes it not wasted). Bounded: **maximum 3 total build attempts per release intent**, then stop and report the receipt trail.
+
+1. **Detect**: `business_read_store_status {business, build_id}` — the `build` block returns `status` (`finished` | `errored` | in-progress states), the signed `artifact_url` when finished, and the provider `error` message when errored. The publish receipt also carries `logs_url` (the expo.dev build page with full phase logs).
+2. **Classify** the failure against the known defect table:
+   - `ERESOLVE` / dependency conflict during install → a package.json/package-lock drift; pin the conflicting dep (the scaffold pins `react-dom` to match `react` for exactly this reason).
+   - `MAC verification failed` / "Distribution certificate ... hasn't been imported" → p12 packaging defect (platform-side; not fixable from the app source — record as a platform blocker).
+   - "doesn't support the X capability" during Xcode signing → app.json declares an entitlement the profile lacks; either drop the entitlement from app.json or re-publish (the credential mint re-syncs capabilities and re-mints the profile).
+   - Config-plugin crash / `expo config` failure → a plugin or app.config edit that breaks evaluation; remove/fix the plugin (managed workflow only).
+   - Metro/bundle errors → real source defects; fix the named files.
+3. **Patch**: delegate the smallest fix via `business_claude_agent_task` (workspace `product/app`). The worker's build gate re-verifies `npm ci` + `tsc` + `expo config` green in-sandbox, so the same defect class cannot come back unverified.
+4. **Re-trigger**: `business_publish_mobile_release` with a **FRESH `idempotency_key`** — a replayed key returns the PRIOR receipt by design and will never trigger a new build.
+5. **Converge**: after a defect class is fixed, note it in `metrics/` — recurring classes belong baked into the `mobile_app_kit` scaffold or the builder (report that recommendation; do not edit platform code from this skill).
+6. **Stop condition**: 3 attempts exhausted, a platform-side blocker (p12/custody/account), or a credit refusal — report `blocked` with the exact receipts and stop.
 
 ## Output Format
 
@@ -136,8 +153,9 @@ Infer the PHASE from the current app state:
 
 | Problem | Fix |
 | --- | --- |
-| `archetype_unavailable:mobile_app` | The mobile pipeline is not enabled yet (`readmodular.md` §5). Record the blocker; do not patch around it. |
-| `eas_builder_unconfigured` | The jailed EAS builder and/or the one-time `eas credentials` Apple-ID login is not provisioned. Record the blocker; no credits were reserved. |
+| `archetype_unavailable:<key>` | That archetype is registered but not enabled in the registry (mobile_app IS enabled; shopify_commerce is not). Record the blocker; do not patch around it. |
+| `eas_builder_unconfigured` | Neither builder lane resolves on this plane: no local custody AND the safebox build-credentials route unreachable/unconfigured (or node/npm/npx/git missing). Record the blocker; no credits were reserved. |
+| Build triggered but later `errored` | Run the Build-Failure Triage loop above (max 3 attempts, fresh idempotency_key each). |
 | `account_health.state != ok` | Apple developer-account issue (often `agreement_blocked`). Resolve in App Store Connect before a `production` submit; a `preview`/TestFlight build may still be possible. |
 | Insufficient creative credits | The release fails closed before the provider call. Surface the shortfall; do not proceed. |
 | Compliance gate failure (greenlight) | The pre-submission scan found a blocker. Fix the app source via `business_claude_agent_task` and re-run the release. |

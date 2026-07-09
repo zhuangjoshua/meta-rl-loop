@@ -535,16 +535,25 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
             requested_daily_budget_usd=round(daily_budget_cents / 100.0, 2),
         )
         daily_budget_cents = int(round(float(schedule["daily_budget_usd"]) * 100))
+        # The real _derive_ad_spend_schedule returns datetime objects, but plan/receipt are
+        # json.dumps'd with no default — store ISO strings (the policy upsert below re-parses
+        # them via _parse_iso_datetime either way). A raw datetime here crashed live-mode
+        # launches at the receipt write; the test harness's stub schedule returned strings,
+        # which is why the suite never caught it.
+        _sched_start = schedule["start_at"]
+        _sched_end = schedule["end_at"]
+        start_iso = _sched_start.isoformat() if hasattr(_sched_start, "isoformat") else str(_sched_start)
+        end_iso = _sched_end.isoformat() if hasattr(_sched_end, "isoformat") else str(_sched_end)
         plan["daily_budget_usd"] = schedule["daily_budget_usd"]
         plan["daily_budget_cents"] = daily_budget_cents
         plan["total_budget_usd"] = schedule["total_budget_usd"]
-        plan["start_at"] = schedule["start_at"]
-        plan["end_at"] = schedule["end_at"]
+        plan["start_at"] = start_iso
+        plan["end_at"] = end_iso
         base_receipt.update({
             "daily_budget_usd": schedule["daily_budget_usd"],
             "total_budget_usd": schedule["total_budget_usd"],
-            "start_at": schedule["start_at"],
-            "end_at": schedule["end_at"],
+            "start_at": start_iso,
+            "end_at": end_iso,
         })
         media_reservation_key = f"{idempotency_key}:meta-media-spend"
         core._reserve_channel_spend_credits(

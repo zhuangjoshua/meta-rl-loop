@@ -4,6 +4,9 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
 import { ProductAuthProvider } from "./lib/product-auth";
 import { LandingScreen } from "./screens/landing";
+// Not lazy: the store lives on the landing chunk already (StoreSection is rendered inline on the
+// landing page), so a separate lazy chunk for /store would never be split out anyway.
+import { StoreScreen } from "./screens/store";
 
 const AppHomeScreen = lazy(() =>
   import("./screens/app-home").then((m) => ({ default: m.AppHomeScreen })),
@@ -37,6 +40,7 @@ createRoot(container).render(
         <Suspense fallback={null}>
           <Routes>
             <Route path="/" element={<LandingScreen />} />
+            <Route path="/store" element={<StoreScreen />} />
             <Route path="/faq" element={<FaqScreen />} />
             <Route path="/privacy" element={<PrivacyScreen />} />
             <Route path="/terms" element={<TermsScreen />} />

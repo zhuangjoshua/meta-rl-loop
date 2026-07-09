@@ -256,6 +256,17 @@ def _replace_openai_gateway_client(agent: Any, context: OperatorGatewayContext) 
     if timeout is not None:
         client_kwargs["timeout"] = timeout
     agent._client_kwargs = client_kwargs
+    # Per-request wire clients (``interruptible_api_call``) are closed after
+    # every request, and the OpenAI SDK ``close()`` also closes whatever
+    # ``http_client`` it wraps — including the shared gateway transport stored
+    # in ``_client_kwargs`` above. Publish a factory so the agent mints a
+    # FRESH gateway transport per request client / primary rebuild instead of
+    # wrapping (and then closing) the primary client's transport. Without
+    # this, the first ``request_complete`` close kills the shared transport
+    # and every later call dies with APIConnectionError (#10933 class).
+    agent._request_http_client_factory = (
+        lambda: build_operator_gateway_http_client(context)
+    )
     agent.client = agent._create_openai_client(
         client_kwargs,
         reason="operator_gateway",
@@ -420,6 +431,52 @@ def _resolve_anthropic_broker_runtime(
     }
 
 
+def _resolve_openai_broker_runtime(
+    context: OperatorGatewayContext,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """The OpenAI (codex_responses) mirror of ``_resolve_anthropic_broker_runtime``: point upstream at
+    ``<safebox>/v1`` (the gateway appends ``/responses``, hitting the safebox's stock-path proxy) and
+    authenticate with a minted ``operator.session`` token. NO raw OpenAI key is ever resolved on this
+    plane — the safebox injects it server-side and meters reserve/settle against the real operator.
+    Fails CLOSED, same contract as the anthropic lane (collaborator machines have no local key at all:
+    turputaru/climuru 401'd with the placeholder key on Sai's machine, 2026-07-08)."""
+    from plugins.takyon import safebox
+
+    broker_base_url = _operator_anthropic_broker_url()
+    if not broker_base_url:
+        raise RuntimeError(
+            "operator broker lockdown is on but no safebox proxy URL is configured "
+            f"(set {_OPERATOR_GATEWAY_BROKER_URL_ENV}, TAKYON_CLAUDE_AGENT_BROKER_URL, or "
+            "TAKYON_SAFEBOX_URL to the safebox ROOT)"
+        )
+    business_slug = str(context.business_slug or "").strip()
+    operator_user_id = _resolve_operator_owner_user_id(context)
+    if not operator_user_id:
+        raise RuntimeError(
+            "operator broker lockdown requires a resolved operator owner to mint an "
+            "operator.session token; it is missing for this CEO turn"
+        )
+    session_token = str(
+        safebox.mint_operator_session_token(business_slug, operator_user_id) or ""
+    ).strip()
+    if not session_token:
+        raise RuntimeError(
+            "the safebox refused to mint an operator.session token for this CEO turn (the operator "
+            "does not own the business / root scope session, or /v1/operator/session-token is "
+            "unavailable)"
+        )
+    return {
+        "provider": context.provider or "custom",
+        "requested_provider": context.requested_provider or context.provider or "custom",
+        "api_mode": "codex_responses",
+        # _upstream_url appends "/responses" for the codex path, so the base is <safebox>/v1 and the
+        # request lands on the safebox's stock-path /v1/responses proxy route.
+        "base_url": f"{broker_base_url}/v1",
+        "api_key": session_token,
+    }
+
+
 def _resolve_operator_owner_user_id(context: OperatorGatewayContext) -> str:
     """Resolve the REAL business-owner user id for the CEO turn's business. Prefers the authoritative
     ``businesses.owner_user_id`` read; falls back to the operator id the launch path already injected on
@@ -444,11 +501,14 @@ def _resolve_runtime_for_request(
     context: OperatorGatewayContext,
     body: dict[str, Any],
 ) -> dict[str, Any]:
-    # Anthropic CEO turns route THROUGH the safebox proxy (key-free, operator.session) under broker
-    # lockdown — the raw provider key is never resolved on this plane. Other api_modes still resolve a
-    # runtime locally (those providers have no safebox proxy route yet).
-    if str(context.api_mode or "").strip().lower() == "anthropic_messages" and _operator_anthropic_broker_lockdown():
+    # Anthropic AND OpenAI CEO turns route THROUGH the safebox proxy (key-free, operator.session)
+    # under broker lockdown — the raw provider key is never resolved on this plane. chat_completions
+    # remains local-resolve (no safebox proxy route yet).
+    mode = str(context.api_mode or "").strip().lower()
+    if mode == "anthropic_messages" and _operator_anthropic_broker_lockdown():
         return _resolve_anthropic_broker_runtime(context, body)
+    if mode == "codex_responses" and _operator_anthropic_broker_lockdown():
+        return _resolve_openai_broker_runtime(context, body)
 
     from takyon_cli.runtime_provider import resolve_runtime_provider
 

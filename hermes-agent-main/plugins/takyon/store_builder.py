@@ -32,6 +32,7 @@ implemented. The lane is carried in the receipt; the submit destination is a lat
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import shutil
@@ -75,6 +76,12 @@ class StoreBuilderCreds:
     dist_cert_id: str
     dist_p12_path: str
     dist_p12_password: str
+    # Host-independent (safebox-minted) lane: when set, the p12 arrives as bytes (base64) instead
+    # of a local file path, and the provisioning profile arrives PRE-MINTED — the safebox already
+    # did the ASC provisioning server-side, so the invoker skips its own ASC calls entirely and the
+    # ASC key fields above are deliberately EMPTY (the .p8 never reaches this host).
+    dist_p12_b64: str = ""
+    preminted_profile_b64: str = ""
 
     def __repr__(self) -> str:  # never leak key material into tracebacks/logs
         return (
@@ -159,6 +166,75 @@ def is_configured(secrets_dir: str | None = None) -> bool:
         return True
     except StoreBuilderUnconfigured:
         return False
+
+
+def resolve_safebox_store_credentials(
+    business_slug: str, *, capabilities: list[str] | None = None
+) -> StoreBuilderCreds:
+    """Resolve builder custody via the safebox build-credentials route — the HOST-INDEPENDENT lane.
+
+    The safebox performs the ASC provisioning server-side (bundle id + capabilities + App Store
+    profile bound to the reused team distribution cert; the ASC .p8 NEVER egresses) and returns the
+    ephemeral per-build signing bundle: team p12 (base64) + password, the pre-minted provisioning
+    profile (base64), and the Expo robot token. The returned creds carry EMPTY ASC key fields —
+    ``local_eas_invoker`` skips its own ASC calls when ``preminted_profile_b64`` is set. Fail-closed:
+    any transport/custody problem raises ``StoreBuilderUnconfigured`` BEFORE any credit reserve."""
+    try:
+        from . import safebox as _safebox
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import safebox as _safebox
+    try:
+        payload = _safebox.store_eas_build_credentials(
+            business_slug, capabilities=list(capabilities or [])
+        )
+    except Exception as exc:
+        raise StoreBuilderUnconfigured(
+            f"store_builder_unconfigured: the safebox build-credentials route did not resolve "
+            f"({str(exc)[:200]}). No credits were reserved."
+        ) from exc
+    expo_token = str(payload.get("expo_token") or "").strip()
+    p12_b64 = str(payload.get("dist_p12_b64") or "").strip()
+    profile_b64 = str(payload.get("profile_b64") or "").strip()
+    p12_password = str(payload.get("dist_p12_password") or "")
+    if not (expo_token and p12_b64 and profile_b64 and p12_password):
+        raise StoreBuilderUnconfigured(
+            "store_builder_unconfigured: the safebox build-credentials response is incomplete "
+            "(needs expo_token, dist_p12_b64, profile_b64, dist_p12_password). No credits were reserved."
+        )
+    return StoreBuilderCreds(
+        key_id="",
+        issuer_id="",
+        team_id=str(payload.get("team_id") or ""),
+        private_key_pem="",
+        expo_token=expo_token,
+        expo_owner=str(payload.get("expo_owner") or "coscale").strip() or "coscale",
+        dist_cert_id=str(payload.get("dist_cert_id") or ""),
+        dist_p12_path="",
+        dist_p12_password=p12_password,
+        dist_p12_b64=p12_b64,
+        preminted_profile_b64=profile_b64,
+    )
+
+
+def builder_mode(secrets_dir: str | None = None) -> str:
+    """How THIS host can run a store build: ``'local'`` (full local custody present), ``'safebox'``
+    (host-independent lane: node toolchain on PATH + a configured remote safebox to mint per-build
+    credentials), or ``''`` (cannot build — callers refuse ``eas_builder_unconfigured`` before any
+    reserve). The safebox lane fails closed at mint time if the route is unreachable/unconfigured."""
+    if is_configured(secrets_dir):
+        return "local"
+    if not all(shutil.which(binary) for binary in ("node", "npm", "npx", "git")):
+        return ""
+    try:
+        from . import safebox as _safebox
+    except ImportError:  # pragma: no cover - alternate load path
+        from plugins.takyon import safebox as _safebox
+    try:
+        if _safebox._use_remote_authority():
+            return "safebox"
+    except Exception:
+        pass
+    return ""
 
 
 # ── ASC provisioning (bundle id / capabilities / profile) ─────────────────────────────────
@@ -394,6 +470,23 @@ def local_eas_invoker(
                 ["npm", "install", "--ignore-scripts", "--no-audit", "--no-fund"],
                 cwd=build_dir, env=child_env, what="npm install",
             )
+            # FREE preflight — catch source-level defects (type errors, config-plugin crashes)
+            # BEFORE the paid trigger. Any raise here propagates out of the thunk → run_build
+            # releases the reservation, so a failing preflight settles ZERO credits. Checks run
+            # only when the tree actually carries the tool (scaffold does), so a minimal tree
+            # cannot fail on a missing binary.
+            if (build_dir / "tsconfig.json").is_file() and (
+                build_dir / "node_modules" / ".bin" / "tsc"
+            ).exists():
+                _run(
+                    ["npx", "--no-install", "tsc", "--noEmit"],
+                    cwd=build_dir, env=child_env, what="preflight: tsc --noEmit",
+                )
+            if (build_dir / "node_modules" / ".bin" / "expo").exists():
+                _run(
+                    ["npx", "--no-install", "expo", "config", "--type", "public"],
+                    cwd=build_dir, env=child_env, what="preflight: expo config",
+                )
             _run(["git", "init", "-q"], cwd=build_dir, env=child_env, what="git init")
             # Credentials must be readable by eas-cli locally but NEVER enter git or the uploaded
             # project archive (eas archives untracked-but-not-ignored files too).
@@ -416,23 +509,37 @@ def local_eas_invoker(
                 cwd=build_dir, env=child_env, what="eas init",
             )
 
-            # ASC provisioning: bundle id + capabilities + store profile bound to the team cert.
-            bundle_resource = _ensure_bundle_id(creds, bundle_identifier, f"takyon {business_slug}")
-            _ensure_capabilities(creds, bundle_resource, capabilities_from_app_config(app_cfg))
-            profile_bytes = _ensure_store_profile(
-                creds, bundle_resource_id=bundle_resource, profile_name=f"takyon {business_slug} appstore"
-            )
+            if creds.preminted_profile_b64:
+                # Host-independent lane: the safebox already did the ASC provisioning server-side
+                # (bundle id + capabilities + profile; the .p8 never reached this host). Just
+                # materialize the pre-minted profile.
+                profile_bytes = base64.b64decode(creds.preminted_profile_b64)
+            else:
+                # ASC provisioning: bundle id + capabilities + store profile bound to the team cert.
+                bundle_resource = _ensure_bundle_id(creds, bundle_identifier, f"takyon {business_slug}")
+                _ensure_capabilities(creds, bundle_resource, capabilities_from_app_config(app_cfg))
+                profile_bytes = _ensure_store_profile(
+                    creds, bundle_resource_id=bundle_resource, profile_name=f"takyon {business_slug} appstore"
+                )
             cred_dir = build_dir / "_store_credentials"
             cred_dir.mkdir(mode=0o700)
             profile_path = cred_dir / "store.mobileprovision"
             profile_path.write_bytes(profile_bytes)
+            dist_p12_path = creds.dist_p12_path
+            if creds.dist_p12_b64:
+                # Safebox lane: the p12 arrives as bytes — materialize it ONLY inside the build
+                # temp dir (0600; the whole build_root is removed in the finally below).
+                ephemeral_p12 = cred_dir / "dist.p12"
+                ephemeral_p12.write_bytes(base64.b64decode(creds.dist_p12_b64))
+                ephemeral_p12.chmod(0o600)
+                dist_p12_path = str(ephemeral_p12)
             (build_dir / "credentials.json").write_text(
                 json.dumps(
                     {
                         "ios": {
                             "provisioningProfilePath": str(profile_path),
                             "distributionCertificate": {
-                                "path": creds.dist_p12_path,
+                                "path": dist_p12_path,
                                 "password": creds.dist_p12_password,
                             },
                         }
@@ -444,6 +551,12 @@ def local_eas_invoker(
             eas_cfg = json.loads((build_dir / "eas.json").read_text())
             eas_cfg.setdefault("build", {}).setdefault("production", {})["credentialsSource"] = "local"
             (build_dir / "eas.json").write_text(json.dumps(eas_cfg, indent=2) + "\n")
+
+            # expo.dev build page (status + full logs) — stamped on every BuildResult so the
+            # repair loop can fetch failure logs without reconstructing the URL.
+            app_slug = str(expo_cfg.get("slug") or business_slug).strip() or business_slug
+            def _logs_url(bid: str) -> str:
+                return f"https://expo.dev/accounts/{creds.expo_owner}/projects/{app_slug}/builds/{bid}"
 
             # Both lanes are store-signed; the eas profile is always `production` (see module doc).
             # Everything from here on is TRIGGER-AMBIGUOUS: the upload may have been accepted even
@@ -458,7 +571,10 @@ def local_eas_invoker(
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
                 reconciled = _reconcile_triggered_build(build_dir, child_env)
                 if reconciled:
-                    return BuildResult(build_id=reconciled, lane=lane, detail="trigger reconciled after CLI failure")
+                    return BuildResult(
+                        build_id=reconciled, lane=lane,
+                        detail="trigger reconciled after CLI failure", logs_url=_logs_url(reconciled),
+                    )
                 raise RuntimeError(f"eas build did not trigger: {exc}") from exc
             build_id = ""
             try:
@@ -471,10 +587,13 @@ def local_eas_invoker(
             if not build_id:
                 reconciled = _reconcile_triggered_build(build_dir, child_env)
                 if reconciled:
-                    return BuildResult(build_id=reconciled, lane=lane, detail="trigger reconciled from unparseable output")
+                    return BuildResult(
+                        build_id=reconciled, lane=lane,
+                        detail="trigger reconciled from unparseable output", logs_url=_logs_url(reconciled),
+                    )
                 raise RuntimeError(f"eas build returned no build id: {(out or '')[:300]}")
             # The TRIGGER: Expo accepted the upload — money is spent; run_build settles on return.
-            return BuildResult(build_id=build_id, lane=lane)
+            return BuildResult(build_id=build_id, lane=lane, logs_url=_logs_url(build_id))
         finally:
             if not keep_build_dir:
                 shutil.rmtree(build_root, ignore_errors=True)
@@ -484,27 +603,42 @@ def local_eas_invoker(
 
 def poll_build(build_id: str, creds: StoreBuilderCreds, *, cwd: str | None = None) -> dict[str, Any]:
     """$0 status read for a triggered build (never touches the reservation). Returns
-    {status, artifact_url, error}."""
-    import os
+    {status, artifact_url, error}.
 
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"),
-        "HOME": os.environ.get("HOME", str(Path.home())),
-        "EXPO_TOKEN": creds.expo_token,
-        "EXPO_NO_TELEMETRY": "1",
+    Uses the EAS GraphQL API directly: `eas build:view` requires a LINKED project directory
+    (extra.eas.projectId), which the ephemeral build dir had but the canonical workspace does not —
+    the API lookup by build id needs only the account token, so this works from any cwd on any host
+    (E2E-found: build:view from $HOME always failed). `cwd` is kept for signature compatibility."""
+    import httpx
+
+    query = {
+        "query": (
+            "query($id: ID!){ builds { byId(buildId: $id) { id status "
+            "artifacts { buildUrl applicationArchiveUrl } error { message } } } }"
+        ),
+        "variables": {"id": str(build_id or "").strip()},
     }
-    proc = subprocess.run(
-        ["npx", "--yes", f"eas-cli@{EAS_CLI_VERSION}", "build:view", build_id, "--json"],
-        cwd=cwd or str(Path.home()), env=env, capture_output=True, text=True, timeout=120,
-    )
-    if proc.returncode != 0:
-        return {"status": "unknown", "artifact_url": "", "error": (proc.stderr or "")[-300:]}
     try:
-        row = json.loads(proc.stdout)
-    except ValueError:
-        return {"status": "unknown", "artifact_url": "", "error": "unparseable build:view output"}
+        resp = httpx.post(
+            "https://api.expo.dev/graphql",
+            json=query,
+            headers={"Authorization": f"Bearer {creds.expo_token}"},
+            timeout=30.0,
+        )
+        body = resp.json() if resp.content else {}
+    except Exception as exc:
+        return {"status": "unknown", "artifact_url": "", "error": str(exc)[:300]}
+    build = (((body.get("data") or {}).get("builds") or {}).get("byId") or {})
+    if not isinstance(build, dict) or not build:
+        errors = body.get("errors") or []
+        detail = json.dumps(errors)[:300] if errors else f"build {build_id} not found"
+        return {"status": "unknown", "artifact_url": "", "error": detail}
+    artifacts = build.get("artifacts") or {}
     return {
-        "status": str(row.get("status") or ""),
-        "artifact_url": str((row.get("artifacts") or {}).get("buildUrl") or ""),
-        "error": str((row.get("error") or {}).get("message") or ""),
+        # GraphQL statuses are UPPERCASE (FINISHED/ERRORED/IN_PROGRESS…); receipts use lowercase.
+        "status": str(build.get("status") or "").lower(),
+        "artifact_url": str(
+            artifacts.get("applicationArchiveUrl") or artifacts.get("buildUrl") or ""
+        ),
+        "error": str(((build.get("error") or {}).get("message")) or ""),
     }

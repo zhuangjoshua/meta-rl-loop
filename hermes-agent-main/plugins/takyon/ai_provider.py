@@ -29,6 +29,10 @@ from agent.usage_pricing import (
 )
 
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+# DeepSeek's Anthropic-compatible Messages endpoint: same wire shape as Anthropic
+# (x-api-key + anthropic-version), different host + key. Canonical for every lane
+# that speaks anthropic-wire to DeepSeek (operator proxy + app broker).
+DEEPSEEK_ANTHROPIC_MESSAGES_URL = "https://api.deepseek.com/anthropic/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 _ONE_MILLION = Decimal("1000000")
@@ -305,9 +309,12 @@ def anthropic_payload(body: dict) -> tuple[dict, str, int]:
     return payload, model, estimate_input_tokens(messages, system)
 
 
-def call_anthropic(payload: dict, api_key: str) -> dict:
+def call_anthropic(payload: dict, api_key: str, *, url: str = ANTHROPIC_MESSAGES_URL) -> dict:
+    """POST an anthropic-wire Messages payload. ``url`` lets anthropic-compatible
+    upstreams (DeepSeek's ``DEEPSEEK_ANTHROPIC_MESSAGES_URL``) reuse the exact same
+    wire shape — headers, timeout, and error contract are identical."""
     request = urllib.request.Request(
-        ANTHROPIC_MESSAGES_URL,
+        url,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
@@ -322,7 +329,7 @@ def call_anthropic(payload: dict, api_key: str) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Anthropic API returned {exc.code}: {body[:500]}") from exc
+        raise RuntimeError(f"Anthropic-wire API at {url.split('/', 3)[2]} returned {exc.code}: {body[:500]}") from exc
 
 
 def openai_key() -> str:

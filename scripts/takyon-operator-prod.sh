@@ -633,8 +633,21 @@ ensure_home() {
     if ! cmp -s "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
       cp "$ROOT/.takyon/config.yaml" "$OPERATOR_HOME/config.yaml"
     fi
-  elif [[ ! -f "$OPERATOR_HOME/config.yaml" ]] && ssh_base "test -f /opt/takyon/.takyon/config.yaml"; then
-    ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml"
+  elif ssh_base "test -f /opt/takyon/.takyon/config.yaml"; then
+    # No workspace config (fresh/stale clone): the VPS runtime config is CANONICAL — adopt it
+    # on EVERY launch, not only when the operator home has none. A stale operator-home config
+    # otherwise survives git pull forever and silently runs dead model lanes (observed
+    # 2026-07-08: a collaborator's machine kept old anthropic/claude-opus-4-8 pins and every
+    # CEO call 400'd while the current rails are gpt-5.5 + deepseek).
+    ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml.vps.tmp" || rm -f "$OPERATOR_HOME/config.yaml.vps.tmp"
+    if [[ -s "$OPERATOR_HOME/config.yaml.vps.tmp" ]]; then
+      if ! cmp -s "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
+        mv "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml"
+        echo "→ Adopted current runtime config from the VPS (model pins refreshed)"
+      else
+        rm -f "$OPERATOR_HOME/config.yaml.vps.tmp"
+      fi
+    fi
   fi
   if ssh_base "test -f /opt/takyon/.takyon/dashboard_session_token"; then
     ssh_base "cat /opt/takyon/.takyon/dashboard_session_token" >"$OPERATOR_HOME/dashboard_session_token"

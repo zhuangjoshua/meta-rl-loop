@@ -205,6 +205,7 @@ CUSTOMER_FACING_AI_COPY_CONTRACT = """Customer-facing AI product copy contract:
 PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 - On desktop, the public `/` first screen should fill most of the viewport and read page-scale, not as a small centered island with large dead gutters on both outer sides.
 - Take exact hero width, container max-width, grid balance, and type scale from your selected design direction; do not leave the page feeling half-empty or bottled up on a laptop screen.
+- Name the product like a real product. The HTML `<title>`, landing headline, visible branding, and SEO/OG tags must carry a human product name and/or plain-language value proposition. NEVER derive them from the business slug or workspace id — an internal slug (e.g. `qaproof0708b`) must not appear in the title, hero, nav brand, or meta tags. If no product name exists yet, coin a short brandable one consistent with the business's research/ and product/ state and use it consistently everywhere.
 """
 # Injected for every product/site worker pass (bootstrap and iterate alike) so the visual-craft
 # floor rides regardless of which design style pack the CEO selected. The capabilities it names
@@ -246,7 +247,11 @@ PRODUCT_BUILD_GATE_CONTRACT = """Customer-facing product build gate (HARD):
 """
 MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 - This is a customer-facing iOS app workspace (Expo SDK 54, managed). Diagnosing an error is NOT done; only a green verify is done.
-- Before you finish, you MUST run `npm install` (if you changed dependencies) and `npx tsc --noEmit` in this workspace and confirm it exits green. Run it yourself with Bash — do not assume.
+- Before you finish, you MUST run and confirm green, yourself, with Bash — do not assume:
+  1. `npm ci --ignore-scripts --no-audit --no-fund` if you changed package.json/package-lock.json — `npm install` only WARNS on peer-dependency conflicts that make the real EAS builder FAIL (ERESOLVE), so `npm ci` strictness is the gate, not install.
+  2. `npx tsc --noEmit` — zero type errors.
+  3. `npx expo config --type public` — the app config must evaluate cleanly (a crashing config plugin kills the paid store build).
+- These same checks run again as the store build's free preflight; a tree that fails them here would burn a paid build there.
 - If you cannot land it green within this pass, do NOT report success. Your FINAL line MUST start with `BLOCKED:` followed by the exact remaining error and the file(s) involved.
 """
 MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App Store rail):
@@ -1568,6 +1573,10 @@ _API_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     # Registered here → never vended over /v1/env; the safebox mints it per-build into the jailed
     # builder, never onto a Takyon-host env.
     "expo": ("TAKYON_EXPO_TOKEN", "EXPO_TOKEN"),
+    # Team distribution-signing custody (host-independent builder lane): the p12 + password live in
+    # safebox Doppler and egress ONLY inside the /v1/store/eas/build-credentials signing bundle —
+    # never over /v1/env (this registration puts them on the provider-key denylist).
+    "app_store_dist": ("APP_STORE_DIST_P12_B64", "APP_STORE_DIST_P12_PASSWORD"),
     "fal": ("FAL_KEY", "FAL_API_KEY"),
     "firecrawl": ("FIRECRAWL_API_KEY",),
     "gemini": ("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -2922,6 +2931,53 @@ def _read_bootstrap_hero_copy(workspace_root: "Path | None") -> dict[str, str]:
     return out
 
 
+def _read_shopify_catalog_products(workspace_root: "Path | None") -> list[dict[str, Any]]:
+    """The business's buyable Shopify catalog (``product/shopify-catalog.json``), materialized into
+    the surface context at publish time so EVERY shopify_commerce product site renders a store
+    section with Buy buttons — the SAME publish-time-injection wiring as ``plans``/``hero``. The
+    mirror file is written by ``business_shopify_create_product`` (buyable catalog projection),
+    which already excludes drafts/variant-less products, so every entry here is public + buyable.
+    Fail-soft: any missing file / parse problem returns [] and the site shows no store section — a
+    non-Shopify business has no catalog file, so it is unaffected by construction.
+
+    (Restored 2026-07-08: originally landed in 6755be74; a concurrent stale-base core.py push
+    (8a0eeb2a) clobbered it while its tests/scaffold half survived — the storefront-rail suite
+    pins it against regressing again.)"""
+    business_root = _starter_business_root(Path(workspace_root) if workspace_root is not None else None)
+    if business_root is None:
+        return []
+    try:
+        # product/shopify-catalog.json == shopify_util.SHOPIFY_CATALOG_RELPATH.
+        catalog_path = business_root / "product" / "shopify-catalog.json"
+        if not catalog_path.is_file():
+            return []
+        data = json.loads(catalog_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return []
+    products = data.get("products") if isinstance(data, dict) else None
+    if not isinstance(products, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for product in products:
+        if not isinstance(product, Mapping):
+            continue
+        title = str(product.get("title") or "").strip()
+        permalink = str(product.get("cart_permalink") or "").strip()
+        if not title or not permalink:
+            continue  # only released, buyable products reach the public bake
+        out.append(
+            {
+                "product_id": str(product.get("product_id") or ""),
+                "title": title[:200],
+                "price": str(product.get("price") or ""),
+                "handle": str(product.get("handle") or ""),
+                "cart_permalink": permalink,
+                "preview_url": str(product.get("preview_url") or ""),
+            }
+        )
+    return out
+
+
 def _subuser_surface_context_payload(
     surface: dict[str, Any] | None,
     *,
@@ -2947,6 +3003,10 @@ def _subuser_surface_context_payload(
         "railState": shape.get("rail_state") or {},
         "auth": _subuser_public_auth_payload(surface),
         "plans": _starter_plan_shape_payload(plans),
+        # Buyable Shopify storefront, baked at publish for every business that has pushed products
+        # (empty for non-Shopify businesses). The scaffold reads this as ``productCatalog`` and
+        # renders the Store section whose Buy buttons deep-link each product's cart_permalink.
+        "shopifyCatalog": _read_shopify_catalog_products(workspace_root),
         "routes": routes,
         "publishTarget": _product_publish_target(slug, (surface or {}).get("publish_target") if isinstance(surface, dict) else None),
         "publicUrl": str((surface or {}).get("public_url") or ""),
@@ -3190,9 +3250,6 @@ def _materialize_mobile_app_workspace(
             "__TAKYON_APP_DESCRIPTION__": display_description,
             "__TAKYON_ORG__": "coscale",
             "__EXPO_ORG__": "coscale",
-            # The real product host (R2 edge): universal links, the licenses page, and the runtime
-            # API all live at <slug>.<PUBLIC_COMPANY_BASE_DOMAIN> — never a hardcoded scaffold guess.
-            "__TAKYON_PRODUCT_HOST__": f"{canonical_slug}.{_company_base_domain()}",
         }
         # app.json is the seed-completion marker (its absence gates re-seeding), so it is written
         # LAST — a crash mid-copy re-seeds cleanly instead of wedging on a partial tree.
@@ -3226,7 +3283,6 @@ def _materialize_mobile_app_workspace(
         app_text = app_text.replace("__TAKYON_SLUG__", canonical_slug).replace("__TAKYON_ORG__", "coscale")
         app_text = app_text.replace("__TAKYON_APP_NAME__", "app").replace("__TAKYON_APP_DESCRIPTION__", "app")
         app_text = app_text.replace("__EXPO_ORG__", "coscale")
-        app_text = app_text.replace("__TAKYON_PRODUCT_HOST__", f"{canonical_slug}.{_company_base_domain()}")
         app_cfg = json.loads(app_text)
         expo_cfg = app_cfg.get("expo") or {}
         expo_cfg["name"] = display_name
@@ -3243,27 +3299,10 @@ def _materialize_mobile_app_workspace(
     kit_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source / "_takyon" / "runtime-client.ts", kit_dir / "runtime-client.ts")
     auth_payload = _subuser_public_auth_payload(surface) or {}
-    # The mobile SurfaceContext.railState type is Record<string, {callable, reason}> — NOT the web
-    # shape's string status map. Convert: a positive status → callable; otherwise carry the status
-    # as the reason. runtimeFeatures already lists the enabled rails, so anything present there is
-    # callable regardless of the raw status label.
-    raw_rail_state = (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {}
-    enabled_features = set(_surface_effective_runtime_features(surface) or [])
-    _POSITIVE_RAIL_STATUS = {"enabled", "declared", "live", "ready", "on", "active", "available"}
-    rail_state = {}
-    for rail, status in (raw_rail_state.items() if isinstance(raw_rail_state, Mapping) else []):
-        status_text = str(status).strip().lower() if not isinstance(status, Mapping) else ""
-        callable_ = rail in enabled_features or status_text in _POSITIVE_RAIL_STATUS or (
-            isinstance(status, Mapping) and bool(status.get("callable"))
-        )
-        entry: dict[str, Any] = {"callable": bool(callable_)}
-        if not callable_ and status_text:
-            entry["reason"] = status_text
-        rail_state[str(rail)] = entry
     context = {
         "runtimeApiBase": f"https://{canonical_slug}.{_company_base_domain()}/api/takyon/apps/{canonical_slug}",
         "runtimeFeatures": _surface_effective_runtime_features(surface),
-        "railState": rail_state,
+        "railState": (_surface_subuser_app_shape(surface) or {}).get("rail_state") or {},
         "auth": {
             "url": str(auth_payload.get("url") or ""),
             "publishableKey": str(auth_payload.get("publishableKey") or ""),
@@ -3368,13 +3407,47 @@ def _starter_strategy_title(value: str, *, slug: str) -> str:
     return title or _humanize_business_slug(slug)
 
 
+def _sanitize_starter_title(title: str, *, slug: str, max_len: int = 90) -> str:
+    """Final hygiene for the machine-derived public <title>: never slug-embedded, never
+    paragraph-length. Salvages a usable clause rather than regressing to the bare slug."""
+    text = str(title or "").strip()
+    slug_l = str(slug or "").strip().lower()
+    if slug_l:
+        # Drop a LEADING slug mention ("<slug> helps ..." -> "Helps ..."); if the slug still
+        # appears mid-string, cut the title at the clause boundary before it.
+        pattern = re.compile(rf"^\W*{re.escape(slug_l)}\b[\s:,-]*", re.IGNORECASE)
+        text = pattern.sub("", text).strip()
+        mid = re.search(rf"(?<![a-z0-9]){re.escape(slug_l)}(?![a-z0-9])", text, re.IGNORECASE)
+        if mid:
+            text = text[: mid.start()].rstrip(" ,;:-").strip()
+    if len(text) > max_len:
+        # One clause: cut at the first sentence/clause boundary past nothing, else word-cut.
+        cut = re.split(r"(?<=[.!?])\s|,\s(?=so\b|and\b|which\b)", text, maxsplit=1)[0].strip()
+        text = cut if len(cut) <= max_len else cut[:max_len].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    text = text.strip().rstrip(",;:-").strip()
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text or _humanize_business_slug(slug)
+
+
 def _starter_title_is_generic(title: str, *, slug: str) -> bool:
     value = str(title or "").strip().lower()
     if not value:
         return True
     if value == str(slug or "").strip().lower():
         return True
-    return value == _humanize_business_slug(slug).strip().lower()
+    if value == _humanize_business_slug(slug).strip().lower():
+        return True
+    # A title that still CONTAINS the internal slug as a token is slug-derived junk, not a
+    # product name — CEO strategy docs are routinely headed "<slug> Strategy (Brief)", and the
+    # old exact-match check let those through as the public <title>/og:title on fresh builds
+    # (observed live: "qaproof0708b Strategy", "acceptinvoice0708 strategy"). Rejecting it here
+    # makes the chain fall through to the worker-authored hero headline / landing <h1> — the
+    # same source that produced the good value-prop titles on droppop/magicslides.
+    slug_token = re.escape(str(slug or "").strip().lower())
+    if slug_token and re.search(rf"(?<![a-z0-9]){slug_token}(?![a-z0-9])", value):
+        return True
+    return False
 
 
 def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, str]:
@@ -3436,6 +3509,12 @@ def _subuser_app_starter_strings(
             strategy_sections.get("core value proposition") or "",
             slug=slug,
         )
+    # The LAST candidate above was never re-checked, so a slug-embedded value prop shipped as
+    # the public <title> verbatim ("paylane0708 helps freelancers ...", 200+ chars, 2026-07-08).
+    # Salvage instead of falling back to the bare slug: drop a LEADING slug mention (the CEO's
+    # docs routinely open with "<slug> helps ..."), recapitalize, and bound to one title-length
+    # sentence clause. Only if nothing salvageable remains does the humanized slug fallback apply.
+    title = _sanitize_starter_title(title, slug=slug)
     description = str((surface or {}).get("notes") or "").strip()
     if not description:
         description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
@@ -3443,6 +3522,18 @@ def _subuser_app_starter_strings(
         description = _starter_strategy_first_line(strategy_sections.get("core value proposition") or "")
     if not description:
         description = str(workspace_copy.get("description") or "").strip()
+    # A minimal strategy (just the slug + one-line goal, no business-name/tagline/value-prop
+    # section) with an unextractable hero headline leaves the title as the bare humanized slug
+    # even when a real value prop DID resolve into the description (observed: sdkfix0708b shipped
+    # <title>Sdkfix0708b</title> while the meta description was a real tagline). Never ship the
+    # bare slug as the title when real copy exists: derive the title from the first sentence of
+    # that description. Runs before the generic "Get started with ..." description fallback so we
+    # only borrow genuine value-prop copy, never the boilerplate.
+    if _starter_title_is_generic(title, slug=slug) and description:
+        first_sentence = re.split(r"(?<=[.!?])\s", description, maxsplit=1)[0].strip()
+        salvaged = _sanitize_starter_title(first_sentence or description, slug=slug)
+        if not _starter_title_is_generic(salvaged, slug=slug):
+            title = salvaged
     if not description:
         description = f"Get started with {title}, manage your account, and access the product online."
     return {
@@ -7828,10 +7919,26 @@ def _run_claude_agent_task_process(
         if data:
             stdout_chunks.append(data)
 
+    def _safe_iter_lines(stream):
+        # Close-safe line iterator. `for line in stream` raises `ValueError: I/O operation on
+        # closed file` if the finally-block below closes the stream while this DAEMON reader is
+        # still iterating — and that crash silences the keepalive ticks (`_notify_claude_worker_
+        # activity`), starving the wake watchdog into a false 600s idle-kill of a live build
+        # (observed 2026-07-08/09, killed 3 CEO bootstraps). readline() surfaces the same close as
+        # a caught ValueError/OSError so the reader ENDS cleanly instead of dying.
+        while True:
+            try:
+                raw = stream.readline()
+            except (ValueError, OSError):
+                return
+            if not raw:
+                return
+            yield raw
+
     def _read_stderr() -> None:
         if proc.stderr is None:
             return
-        for raw_line in proc.stderr:
+        for raw_line in _safe_iter_lines(proc.stderr):
             line = raw_line.rstrip("\r\n")
             if not line:
                 continue
@@ -7850,6 +7957,13 @@ def _run_claude_agent_task_process(
                     workspace_rel=workspace_rel,
                     event=mapping_event,
                 )
+                # EVERY worker event is real wake activity — reasoning/output deltas included.
+                # The phase mapper below deliberately returns "" for most events, and ticking the
+                # inactivity keepalive only on mapped phase lines STARVED the wake watchdog during
+                # reasoning-heavy stretches: it killed LIVE builds at exactly start+600s while
+                # events flowed 13-145/min (test-2, 2026-07-08, failed 2/2 then a recovery run
+                # published anyway). Tick on the raw event first; then emit the mapped line if any.
+                _notify_claude_worker_activity("claude-worker event")
                 # Surface the worker's current step/activity as live job/task progress so the long
                 # Claude-worker phase is no longer blank in the tui_gateway. Concise human lines only;
                 # raw per-tool ticks are filtered out by the mapper.
@@ -7861,6 +7975,7 @@ def _run_claude_agent_task_process(
             if not clean:
                 continue
             stderr_lines.append(clean)
+            _notify_claude_worker_activity(clean)
             _record_claude_agent_runtime_event(
                 business=business,
                 workspace_rel=workspace_rel,
@@ -7884,6 +7999,23 @@ def _run_claude_agent_task_process(
     )
     stdout_thread.start()
     stderr_thread.start()
+    # Independent keepalive heartbeat: tick the wake-activity sink every 30s while the subprocess
+    # runs. The wake watchdog false-kills a turn after 600s without activity, and a long docker
+    # build (10-20min) emits sparse stderr — the earlier attempt to tick on every stderr event
+    # still starved when the reader itself ended/crashed (the 600s false-kills of walkloop/test-2).
+    # This is decoupled from the reader ON PURPOSE. The subprocess has its own hard timeout on
+    # proc.wait below, so a genuine hang is still bounded — this only prevents the FALSE idle-kill.
+    _heartbeat_stop = threading.Event()
+    _heartbeat_ctx = contextvars.copy_context()
+
+    def _heartbeat() -> None:
+        while not _heartbeat_stop.wait(30.0):
+            _notify_claude_worker_activity("claude-worker build heartbeat")
+
+    heartbeat_thread = threading.Thread(
+        target=lambda: _heartbeat_ctx.run(_heartbeat), name="takyon-claude-heartbeat", daemon=True
+    )
+    heartbeat_thread.start()
     try:
         if proc.stdin is not None:
             proc.stdin.write(json.dumps(payload))
@@ -7893,6 +8025,8 @@ def _run_claude_agent_task_process(
         proc.kill()
         raise
     finally:
+        _heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2.0)
         stdout_thread.join(timeout=2.0)
         stderr_thread.join(timeout=2.0)
         if proc.stdout is not None:
@@ -9642,20 +9776,6 @@ def _business_analytics_summary(slug: str, *, days: int = 7) -> dict[str, Any]:
         )
     except Exception as exc:  # provider error or secret-authority unavailable — degrade truthfully
         return {"configured": True, "ok": False, "hostname": hostname, "reason": str(exc)}
-    # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'), on FRESH fetches
-    # only (the TTL cache bounds frequency). Previously these numbers were memory-cached and lost.
-    try:
-        from . import cost_events
-
-        cost_events.record_metrics_observation(
-            provider="umami",
-            name=f"umami:stats:{hostname or website_id}",
-            metrics=stats if isinstance(stats, dict) else {"value": stats},
-            business_slug=slug,
-            identifiers={"website_id": website_id, "hostname": hostname, "window_days": days},
-        )
-    except Exception:
-        pass
     payload = {
         "configured": True,
         "ok": True,
@@ -17384,7 +17504,10 @@ class TakyonStore:
         """RL rail R5: build the CEO's injected wake state (identity + where-I-left-off +
         recent bets) from events. Returned text is prepended to the wake user turn by
         _ceo_cron_prompt, so a planted state-of-mind byte provably enters the cold wake
-        context (floor-1 byte-carrying channel). Never raises — degrades to empty."""
+        context (floor-1 byte-carrying channel). Learnings are NOT rendered here — they ride
+        the separate compressed block that _ceo_cron_prompt APPENDS to the END of the wake
+        prompt (_assemble_wake_learnings), so there is exactly one render path for lessons.
+        Never raises — degrades to empty."""
         slug = _slugify(slug)
         try:
             with self._connect() as conn:
@@ -17392,7 +17515,6 @@ class TakyonStore:
                 som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
                 settled = self._recent_event_payloads(conn, slug, "ceo.episode.settled", episode_limit)
                 opened = self._recent_event_payloads(conn, slug, "ceo.episode.opened", episode_limit)
-                intra_learn, inter_learn = self._retrieve_learnings(conn, slug)
         except Exception:
             return ""
         lines: list[str] = []
@@ -17420,17 +17542,6 @@ class TakyonStore:
                 bets.append(f"- (in flight) {desc}{_format_episode_metrics(p.get('metrics_snapshot'))}")
         if bets:
             lines.append("Your recent bets:\n" + "\n".join(bets[: 2 * episode_limit]))
-        learn_lines: list[str] = []
-        for p in intra_learn:
-            claim = str((p or {}).get("claim") or "").strip()
-            if claim:
-                learn_lines.append(f"- (this business) {claim}")
-        for p in inter_learn:
-            claim = str((p or {}).get("claim") or "").strip()
-            if claim:
-                learn_lines.append(f"- (from similar businesses) {claim}")
-        if learn_lines:
-            lines.append("Learnings:\n" + "\n".join(learn_lines))
         if not lines:
             return ""
         return (
@@ -17532,15 +17643,32 @@ class TakyonStore:
                 out[lid] = decision
         return out
 
-    def _retrieve_learnings(self, conn: Any, slug: str, *, intra_limit: int = 10,
-                            inter_k: int = 5) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """RL rail R7 retrieval: ALL of this business's own learnings (intra, bounded) + top-k
-        cross-business learnings (inter) ranked by tag overlap. Human-REJECTED lessons are excluded
-        — the operator's reject in the CLI actually removes a lesson from what the CEO sees. Never
-        crosses operators. Cheap tag-overlap scoring now (embeddings deferred)."""
-        rejected = {lid for lid, d in self._rl_review_status(conn).items() if d == "reject"}
-        intra_rows = self._rl_fetch_events(conn, ["ceo.learning"], slug=slug, limit=intra_limit * 4)
-        intra = [r["payload"] for r in intra_rows
+    def _retrieve_learnings(self, conn: Any, slug: str, *, intra_limit: int = 40,
+                            inter_k: int = 8) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """RL rail R7 retrieval: this business's own learnings (intra, bounded, newest first) +
+        top-k cross-business learnings (inter) ranked by tag overlap. Human-REJECTED lessons are
+        excluded — the operator's reject in the CLI actually removes a lesson from what the CEO
+        sees. Never crosses operators. Returned payload dicts are annotated with ``_lesson_id`` /
+        ``_effective_status`` ('proven' when human-approved) so the wake renderer can rank
+        provenance without a second fetch. A borrowed lesson whose declared tags share NOTHING
+        with this business's tags is dropped (when both sides declared tags) instead of filling a
+        slot as topical noise. Cheap tag-overlap scoring now (embeddings deferred)."""
+        reviews = self._rl_review_status(conn)
+        rejected = {lid for lid, d in reviews.items() if d == "reject"}
+
+        def annotate(row: dict[str, Any]) -> dict[str, Any]:
+            payload = dict(row.get("payload") or {})
+            payload["_lesson_id"] = str(row.get("id") or "")
+            payload["_effective_status"] = (
+                "proven" if reviews.get(str(row.get("id") or "")) == "approve"
+                else str(payload.get("status") or "candidate")
+            )
+            payload.setdefault("created_at", str(row.get("created_at") or ""))
+            return payload
+
+        intra_rows = self._rl_fetch_events(
+            conn, ["ceo.learning"], slug=slug, limit=max(80, intra_limit * 4))
+        intra = [annotate(r) for r in intra_rows
                  if isinstance(r.get("payload"), dict) and r.get("id") not in rejected][:intra_limit]
         op = str(self._operator_user_id or "").strip()
         biz_tags = self._business_tags(conn, slug)
@@ -17554,31 +17682,58 @@ class TakyonStore:
             learning_op = str(p.get("operator") or "").strip()
             if op and learning_op and learning_op != op:
                 continue  # never surface another operator's learnings
-            scored.append((len(biz_tags & self._tokenize_tags(p.get("tags"))), p))
+            lesson_tags = self._tokenize_tags(p.get("tags"))
+            overlap = len(biz_tags & lesson_tags)
+            if overlap == 0 and biz_tags and lesson_tags:
+                continue  # both sides declared tags and none match: topically irrelevant
+            scored.append((overlap, annotate(row)))
         scored.sort(key=lambda x: x[0], reverse=True)
         inter = [p for _score, p in scored[:inter_k]]
         return intra, inter
 
-    def record_learning(self, slug: str, claim: str, *, tags: Any = None,
-                        scope: str = "business") -> dict[str, Any]:
-        """RL rail R7 write: record a learning. scope='business' -> intra (this business only);
-        scope='shared' -> inter (operator-scoped, surfaced to similar businesses by tag overlap)."""
-        slug = _slugify(slug)
+    def _learning_payload(self, slug: str, claim: str, *, tags: Any = None,
+                          evidence: Any = None, source: str = "") -> dict[str, Any]:
+        """Canonical ceo.learning(.shared) payload shape — the ONE place it is built, used by
+        both the CEO-facing record_learning tool path and the deterministic episode distiller.
+        ``evidence`` links the lesson to what proved it (episode ids, receipt paths, before/
+        after metric dicts); ``source`` records who authored it ('' = the CEO model via the
+        tool, 'auto:metrics' = the deterministic distiller)."""
         claim = str(claim or "").strip()
         if not claim:
             raise TakyonError("learning claim required")
-        scope_kind = str(scope or "business").strip().lower()
-        if scope_kind not in {"business", "shared"}:
-            raise TakyonError("learning scope must be 'business' or 'shared'")
-        tag_set = sorted(self._tokenize_tags(tags))
-        payload = {
+        payload: dict[str, Any] = {
             "claim": claim,
-            "tags": tag_set,
+            "tags": sorted(self._tokenize_tags(tags)),
             "operator": str(self._operator_user_id or "").strip(),
             "authored_by": slug,
             "status": "candidate",
             "created_at": _now(),
         }
+        evidence_list: list[Any] = []
+        if isinstance(evidence, (list, tuple)):
+            evidence_list = [e for e in evidence if isinstance(e, dict) or str(e or "").strip()]
+        elif isinstance(evidence, dict):
+            evidence_list = [evidence]
+        elif evidence is not None and str(evidence).strip():
+            evidence_list = [str(evidence).strip()]
+        if evidence_list:
+            payload["evidence"] = evidence_list
+        if str(source or "").strip():
+            payload["source"] = str(source).strip()
+        return payload
+
+    def record_learning(self, slug: str, claim: str, *, tags: Any = None,
+                        scope: str = "business", evidence: Any = None,
+                        source: str = "") -> dict[str, Any]:
+        """RL rail R7 write: record a learning. scope='business' -> intra (this business only);
+        scope='shared' -> inter (operator-scoped, surfaced to similar businesses by tag overlap).
+        Optional ``evidence`` (episode ids, receipt paths, measured numbers) gives the lesson
+        provenance the retrieval renderer can weigh ([measured] marker)."""
+        slug = _slugify(slug)
+        scope_kind = str(scope or "business").strip().lower()
+        if scope_kind not in {"business", "shared"}:
+            raise TakyonError("learning scope must be 'business' or 'shared'")
+        payload = self._learning_payload(slug, claim, tags=tags, evidence=evidence, source=source)
         with self._connect() as conn:
             self._ensure_business(conn, slug)
             if scope_kind == "shared":
@@ -17593,6 +17748,368 @@ class TakyonStore:
                 )
         return {"success": True, "business": slug, "event_id": event_id, "scope": scope_kind,
                 "event_type": "ceo.learning.shared" if scope_kind == "shared" else "ceo.learning"}
+
+    # --- RL rail R8 (deterministic slice): distill measured episodes into lessons ------------
+    # The metrics→lesson conversion is CODE, not model judgment (operator-mandated): every
+    # episode carries a quantitative metrics_snapshot at open time (R1); once the episode's
+    # window matures, the distiller measures before→now deltas and KEEPS the episode as a
+    # lesson iff a fixed significance threshold is crossed. ceo.episode.settled stays reserved
+    # for the future money-attribution settle job — observation is not settlement.
+
+    # Fixed significance thresholds on before→after metric deltas (absolute value). Spend is
+    # significant on its own so "spent real money, nothing moved" distills as a negative lesson.
+    _RL_SIGNIFICANT_DELTAS: dict[str, int] = {
+        "users": 3,
+        "revenue_cents": 100,     # >= $1.00 of revenue movement
+        "usage_events": 20,
+        "impressions": 1000,
+        "clicks": 25,
+        "views": 1000,
+        "likes": 20,
+        "replies": 5,
+        "reposts": 10,
+        "spend_cents": 500,       # >= $5.00 of ad spend is significant even with zero return
+        # Meta-pixel attributed revenue (insights action_values -> sync receipt totals ->
+        # campaign snapshot): channel-attributed, so a single purchase is meaningful signal.
+        "attributed_revenue_cents": 100,  # >= $1.00 of pixel-attributed purchase value
+        "purchases": 1,
+    }
+
+    @staticmethod
+    def _rl_distill_window_hours() -> tuple[float, float]:
+        """(min_age_hours, max_age_hours) an episode must reach / not exceed to be distilled.
+        Min (default 12h): the bet needs time for its numbers to move before it is judged.
+        Max (default 14d): past this, a before→now delta attributes weeks of unrelated drift
+        to one old bet, so the episode is marked observed/stale instead of minting a
+        misattributed lesson."""
+        def _env_hours(name: str, default: float) -> float:
+            try:
+                value = float(os.environ.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+            return value if value >= 0 else default
+        min_h = _env_hours("TAKYON_RL_DISTILL_MIN_AGE_HOURS", 12.0)
+        max_h = _env_hours("TAKYON_RL_DISTILL_MAX_AGE_HOURS", 336.0)
+        return min_h, max(max_h, min_h)
+
+    @staticmethod
+    def _flatten_metrics_snapshot(snap: Any) -> dict[str, float]:
+        """Flatten an _episode_metrics_snapshot payload into {metric: number}. Product counters
+        stay top-level; campaign entries (reddit/meta) sum across campaigns into impressions /
+        clicks / spend_cents plus pixel-attributed attributed_revenue_cents / purchases when
+        the receipt carries them; X totals merge under their own metric names (an episode has
+        one channel, so the names never collide in practice). Non-numeric keys (captured_at,
+        slugs, statuses) are dropped. Tolerant of partial or legacy snapshots — returns {} for
+        one that carries no numbers."""
+        out: dict[str, float] = {}
+        if not isinstance(snap, Mapping):
+            return out
+
+        def _num(value: Any) -> float | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            return None
+
+        for key in ("users", "revenue_cents", "usage_events"):
+            val = _num(snap.get(key))
+            if val is not None:
+                out[key] = val
+        campaigns = snap.get("campaigns")
+        if isinstance(campaigns, (list, tuple)):
+            for entry in campaigns:
+                if not isinstance(entry, Mapping):
+                    continue
+                for key in ("impressions", "clicks"):
+                    val = _num(entry.get(key))
+                    if val is not None:
+                        out[key] = out.get(key, 0.0) + val
+                spend_cents = _num(entry.get("spend_cents"))
+                if spend_cents is not None:
+                    out["spend_cents"] = out.get("spend_cents", 0.0) + spend_cents
+                else:
+                    # insights-sync receipts carry spend as USD; fold in only when the policy
+                    # row's cents figure is absent so spend is never double counted.
+                    spend_usd = _num(entry.get("spend_usd"))
+                    if spend_usd is not None:
+                        out["spend_cents"] = out.get("spend_cents", 0.0) + spend_usd * 100.0
+                # Meta-pixel attributed purchase value/count (receipt totals via action_values):
+                # the channel-attributed revenue signal, distinct from business-wide revenue_cents.
+                purchase_value_usd = _num(entry.get("purchase_value_usd"))
+                if purchase_value_usd is not None:
+                    out["attributed_revenue_cents"] = (
+                        out.get("attributed_revenue_cents", 0.0) + purchase_value_usd * 100.0)
+                purchase_count = _num(entry.get("purchase_count"))
+                if purchase_count is not None:
+                    out["purchases"] = out.get("purchases", 0.0) + purchase_count
+        x_stats = snap.get("x")
+        if isinstance(x_stats, Mapping):
+            for key in ("views", "impressions", "likes", "replies", "reposts", "clicks"):
+                val = _num(x_stats.get(key))
+                if val is not None:
+                    out[key] = out.get(key, 0.0) + val
+        return out
+
+    @classmethod
+    def _significant_metric_moves(cls, deltas: Mapping[str, Any]) -> dict[str, float]:
+        """The subset of before→after deltas crossing the fixed thresholds (absolute value, so
+        a measured drop is as significant as a gain)."""
+        out: dict[str, float] = {}
+        for key, threshold in cls._RL_SIGNIFICANT_DELTAS.items():
+            try:
+                delta = float(deltas.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(delta) >= float(threshold):
+                out[key] = delta
+        return out
+
+    @staticmethod
+    def _format_metric_delta(key: str, delta: float) -> str:
+        sign = "+" if delta >= 0 else "-"
+        magnitude = abs(delta)
+        if key.endswith("_cents"):
+            label = "revenue" if key == "revenue_cents" else key[:-6].replace("_", " ")
+            return f"{sign}${magnitude / 100:.2f} {label}"
+        return f"{sign}{int(round(magnitude))} {key.replace('_', ' ')}"
+
+    @classmethod
+    def _compose_measured_claim(cls, hypothesis: str, significant: Mapping[str, float],
+                                *, window_hours: float, channel: str | None) -> str:
+        """Deterministic, compact lesson text from an episode's measured outcome. No LLM, no
+        adjectives — the numbers are the claim. 'Measured:' prefix + the [measured] render
+        marker are what let the CEO weigh evidence-backed lessons over narrative ones."""
+        hyp = " ".join(str(hypothesis or "").split())
+        if len(hyp) > 100:
+            hyp = hyp[:97] + "..."
+        window = f"{window_hours:.0f}h" if window_hours < 72 else f"{window_hours / 24:.0f}d"
+        chan = f" on {channel}" if channel else ""
+        moved = {k: v for k, v in significant.items() if k != "spend_cents"}
+        spend = significant.get("spend_cents")
+        if moved:
+            parts = ", ".join(cls._format_metric_delta(k, v) for k, v in sorted(moved.items()))
+            spend_note = f" (spend ${abs(float(spend)) / 100:.2f})" if spend is not None else ""
+            return f"Measured: '{hyp}'{chan} -> {parts} in {window}{spend_note}"
+        return (f"Measured: '{hyp}'{chan} -> no significant movement despite "
+                f"${abs(float(spend or 0.0)) / 100:.2f} ad spend in {window}")
+
+    def distill_episode_lessons(self, slug: str, *, dry_run: bool = False,
+                                now: datetime | None = None) -> dict[str, Any]:
+        """Deterministic metrics→lessons pass (RL rail R8, fixed slice). For every not-yet-
+        observed ceo.episode.opened whose window has matured: before = the episode's open-time
+        metrics_snapshot, after = the same snapshot taken NOW, keep the episode as a lesson IFF
+        the delta crosses a fixed significance threshold. Exactly one append-only
+        ``ceo.episode.observed`` marker is written per evaluated episode (the idempotency
+        ledger: an episode is never judged twice, so a later unrelated metric drift can never be
+        re-attributed to an old bet), and each kept episode writes one ``ceo.learning`` with
+        source='auto:metrics' + evidence carrying the exact before/after/delta numbers. All
+        writes for one pass share one transaction. Per-episode failures are counted, never
+        raised. ``dry_run`` evaluates and reports without writing anything (backtest mode)."""
+        slug = _slugify(slug)
+        now_dt = now or datetime.now(timezone.utc)
+        min_age_h, max_age_h = self._rl_distill_window_hours()
+        summary: dict[str, Any] = {
+            "success": True, "business": slug, "dry_run": bool(dry_run),
+            "checked": 0, "pending": 0, "distilled": 0, "insignificant": 0,
+            "stale": 0, "no_baseline": 0, "errors": 0, "lessons": [],
+        }
+        with self._connect() as conn:
+            self._ensure_business(conn, slug)
+            observed_ids: set[str] = set()
+            for row in self._rl_fetch_events(conn, ["ceo.episode.observed"], slug=slug, limit=2000):
+                payload = row.get("payload") or {}
+                episode_id = str((payload or {}).get("episode_id") or "")
+                if episode_id:
+                    observed_ids.add(episode_id)
+
+            def _mark(marker: dict[str, Any]) -> None:
+                if dry_run:
+                    return
+                self._record_event(conn, scope=f"business:{slug}", business_slug=slug,
+                                   event_type="ceo.episode.observed", payload=marker)
+                observed_ids.add(str(marker.get("episode_id") or ""))
+
+            opened_rows = self._rl_fetch_events(conn, ["ceo.episode.opened"], slug=slug, limit=200)
+            for row in reversed(opened_rows):  # oldest first: deterministic evaluation order
+                payload = row.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
+                episode_id = str(payload.get("episode_id") or "")
+                if not episode_id or episode_id in observed_ids:
+                    continue
+                summary["checked"] += 1
+                try:
+                    opened_dt = (_parse_iso_datetime(payload.get("opened_at"))
+                                 or _parse_iso_datetime(row.get("created_at")))
+                    if opened_dt is None:
+                        raise TakyonError(f"episode {episode_id} has no parseable opened_at")
+                    age_hours = max(0.0, (now_dt - opened_dt).total_seconds() / 3600.0)
+                    if age_hours < min_age_h:
+                        summary["pending"] += 1
+                        continue  # not matured yet; a later wake evaluates it exactly once
+                    channel = str(payload.get("channel") or "").strip() or None
+                    marker: dict[str, Any] = {
+                        "episode_id": episode_id,
+                        "hypothesis": payload.get("hypothesis"),
+                        "channel": channel,
+                        "window_hours": round(age_hours, 2),
+                        "observed_at": _now(),
+                    }
+                    if age_hours > max_age_h:
+                        summary["stale"] += 1
+                        marker["skipped"] = "stale"
+                        _mark(marker)
+                        continue
+                    before = self._flatten_metrics_snapshot(payload.get("metrics_snapshot"))
+                    if not before:
+                        summary["no_baseline"] += 1
+                        marker["skipped"] = "no-baseline"
+                        _mark(marker)
+                        continue
+                    after = self._flatten_metrics_snapshot(
+                        _episode_metrics_snapshot(self, conn, slug, channel))
+                    deltas = {key: after.get(key, 0.0) - before.get(key, 0.0)
+                              for key in (set(before) | set(after))}
+                    significant = self._significant_metric_moves(deltas)
+                    marker.update({
+                        "significant": bool(significant),
+                        "before": before,
+                        "after": after,
+                        "deltas": {k: round(v, 2) for k, v in sorted(deltas.items())},
+                    })
+                    if not significant:
+                        summary["insignificant"] += 1
+                        _mark(marker)
+                        continue
+                    claim = self._compose_measured_claim(
+                        str(payload.get("hypothesis") or ""), significant,
+                        window_hours=age_hours, channel=channel)
+                    evidence_entry = {
+                        "episode_id": episode_id,
+                        "window_hours": round(age_hours, 2),
+                        "before": before,
+                        "after": after,
+                        "deltas": {k: round(v, 2) for k, v in sorted(significant.items())},
+                    }
+                    lesson: dict[str, Any] = {
+                        "episode_id": episode_id, "claim": claim,
+                        "deltas": evidence_entry["deltas"],
+                    }
+                    if not dry_run:
+                        tags = [t for t in (channel, str(payload.get("action_kind") or "").strip()) if t]
+                        lesson_payload = self._learning_payload(
+                            slug, claim, tags=tags, evidence=[evidence_entry], source="auto:metrics")
+                        lesson_event_id = self._record_event(
+                            conn, scope=f"business:{slug}", business_slug=slug,
+                            event_type="ceo.learning", payload=lesson_payload)
+                        marker["lesson_event_id"] = lesson_event_id
+                        lesson["lesson_event_id"] = lesson_event_id
+                        _mark(marker)
+                    summary["lessons"].append(lesson)
+                    summary["distilled"] += 1
+                except Exception:
+                    summary["errors"] += 1
+                    continue
+        return summary
+
+    # --- RL learnings render: the compressed block APPENDED to the END of the wake prompt ----
+
+    @staticmethod
+    def _rl_lessons_char_budget() -> int:
+        """Hard character budget for the rendered learnings block (env-overridable). This is
+        what lets a long-lived business hold MANY lessons in the store without unbounded wake
+        prompt growth — the block compresses to fit, it never grows past the budget."""
+        try:
+            value = int(os.environ.get("TAKYON_RL_LESSONS_CHAR_BUDGET") or 4000)
+        except (TypeError, ValueError):
+            return 4000
+        return max(400, value)
+
+    @staticmethod
+    def _learning_render_entries(payloads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Dedupe + rank lessons for rendering. Near-duplicates (same claim modulo digits and
+        punctuation) collapse into one entry with an (xN) repeat count, keeping the highest-
+        provenance then newest representative. Rank tiers: human-approved 'proven' (2) >
+        evidence-backed / auto-measured (1) > plain narrative candidate (0); newest first
+        within a tier — so an operator-approved or measured lesson can no longer be crowded
+        out of the prompt by newer unreviewed narrative."""
+        def tier(p: Mapping[str, Any]) -> int:
+            if str(p.get("_effective_status") or "") == "proven":
+                return 2
+            if p.get("evidence") or str(p.get("source") or "").startswith("auto:"):
+                return 1
+            return 0
+
+        def dedupe_key(claim: str) -> str:
+            text = re.sub(r"[0-9]+(?:\.[0-9]+)?", "#", claim.lower())
+            text = re.sub(r"[^a-z#]+", " ", text)
+            return " ".join(text.split())
+
+        merged: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for p in payloads:
+            claim = str((p or {}).get("claim") or "").strip()
+            if not claim:
+                continue
+            key = dedupe_key(claim)
+            candidate = {"claim": claim, "tier": tier(p),
+                         "created_at": str(p.get("created_at") or ""), "count": 1}
+            entry = merged.get(key)
+            if entry is None:
+                merged[key] = candidate
+                order.append(key)
+            else:
+                entry["count"] += 1
+                if (candidate["tier"], candidate["created_at"]) > (entry["tier"], entry["created_at"]):
+                    entry.update({k: candidate[k] for k in ("claim", "tier", "created_at")})
+        entries = [merged[k] for k in order]
+        entries.sort(key=lambda e: (e["tier"], e["created_at"]), reverse=True)
+        return entries
+
+    @staticmethod
+    def _render_learning_line(entry: Mapping[str, Any]) -> str:
+        marker = {2: "[proven] ", 1: "[measured] "}.get(int(entry.get("tier") or 0), "")
+        claim = str(entry.get("claim") or "")
+        if len(claim) > 240:
+            claim = claim[:237] + "..."
+        repeat = f" (x{int(entry.get('count') or 1)})" if int(entry.get("count") or 1) > 1 else ""
+        return f"- {marker}{claim}{repeat}"
+
+    def _assemble_wake_learnings(self, slug: str) -> str:
+        """The compressed Learnings block APPENDED to the END of every wake prompt by
+        _ceo_cron_prompt (the recency-weighted position in the context window). Own lessons
+        first, then borrowed cross-business lessons; each group deduped and packed highest-
+        provenance-then-newest into the hard character budget. Never raises — degrades to
+        empty."""
+        slug = _slugify(slug)
+        try:
+            with self._connect() as conn:
+                intra, inter = self._retrieve_learnings(conn, slug)
+        except Exception:
+            return ""
+        budget = self._rl_lessons_char_budget()
+        used = 0
+        blocks: list[str] = []
+        for header, payloads in (("Learnings from this business:", intra),
+                                 ("Learnings from similar businesses:", inter)):
+            lines: list[str] = []
+            for entry in self._learning_render_entries(payloads):
+                line = self._render_learning_line(entry)
+                if used + len(line) + 1 > budget:
+                    break
+                lines.append(line)
+                used += len(line) + 1
+            if lines:
+                blocks.append(header + "\n" + "\n".join(lines))
+        if not blocks:
+            return ""
+        return (
+            "== Learnings (your accumulated playbook; [proven] = operator-approved, "
+            "[measured] = auto-distilled from tracked metric deltas) ==\n"
+            + "\n".join(blocks)
+            + "\n== end learnings =="
+        )
 
     def set_identity(self, slug: str, identity: str) -> dict[str, Any]:
         """RL rail R5: set the CEO's stable identity, injected at the top of every wake."""
@@ -17626,7 +18143,7 @@ class TakyonStore:
         out: list[dict[str, Any]] = []
         with self._connect() as conn:
             reviews = self._rl_review_status(conn, slug=None)
-            for row in self._rl_fetch_events(conn, types, slug=slug, limit=500):
+            for row in self._rl_fetch_events(conn, types, slug=slug, limit=max(500, int(limit))):
                 p = row.get("payload") or {}
                 if not isinstance(p, dict):
                     continue
@@ -17645,6 +18162,7 @@ class TakyonStore:
                     "claim": p.get("claim"),
                     "tags": p.get("tags") or [],
                     "evidence": p.get("evidence") or [],
+                    "source": p.get("source") or "ceo",
                     "status": effective,
                     "human_reviewed": decided is not None,
                     "created_at": row.get("created_at"),
@@ -17682,8 +18200,9 @@ class TakyonStore:
 
     def rl_why(self, episode_id: str) -> dict[str, Any]:
         """Reconstruct the reasoning behind a bet: the bet itself, the context that was injectable
-        just before it (identity + latest state-of-mind), and its settled outcome. All from events;
-        absent pieces are reported as null, never invented."""
+        just before it (identity + latest state-of-mind), its deterministic metric observation
+        (the distiller's before/after/deltas marker, when the episode has been evaluated), and its
+        settled outcome. All from events; absent pieces are reported as null, never invented."""
         episode_id = str(episode_id or "").strip()
         if not episode_id:
             raise TakyonError("episode_id required")
@@ -17697,6 +18216,8 @@ class TakyonStore:
             opened_at = str(op_p.get("opened_at") or opened.get("created_at") or "")
             settled = next((r for r in self._rl_fetch_events(conn, ["ceo.episode.settled"], slug=slug, limit=2000)
                             if str((r.get("payload") or {}).get("episode_id") or "") == episode_id), None)
+            observed = next((r for r in self._rl_fetch_events(conn, ["ceo.episode.observed"], slug=slug, limit=2000)
+                             if str((r.get("payload") or {}).get("episode_id") or "") == episode_id), None)
             # context that existed BEFORE the bet (truthful: latest with created_at <= opened_at)
             def latest_before(event_type: str) -> dict[str, Any] | None:
                 for r in self._rl_fetch_events(conn, [event_type], slug=slug, limit=500):
@@ -17716,41 +18237,51 @@ class TakyonStore:
                 "identity": (identity or {}).get("identity"),
                 "state_of_mind": (som or {}).get("note"),
             },
+            "observation": (observed.get("payload") if observed else None),
+            "observed": observed is not None,
             "outcome": (settled.get("payload") if settled else None),
             "settled": settled is not None,
         }
 
     def rl_status(self, slug: str | None = None) -> dict[str, Any]:
-        """Per-business RL summary from events: counts of episodes (open/settled), lessons by
-        effective status, last activity. Zeros when there is nothing — never padded."""
+        """Per-business RL summary from events: counts of episodes (open/observed/settled),
+        lessons by effective status + authorship, last activity. Zeros when there is nothing —
+        never padded. 'observed' = deterministically evaluated by the metrics distiller;
+        'settled' stays reserved for the future money-attribution settle job."""
         slug = _slugify(slug) if slug else None
         with self._connect() as conn:
             opened = self._rl_fetch_events(conn, ["ceo.episode.opened"], slug=slug, limit=5000)
+            observed = self._rl_fetch_events(conn, ["ceo.episode.observed"], slug=slug, limit=5000)
             settled = self._rl_fetch_events(conn, ["ceo.episode.settled"], slug=slug, limit=5000)
             som = self._rl_fetch_events(conn, ["ceo.state_of_mind"], slug=slug, limit=1)
         lessons = self.rl_lessons(slug, limit=10000)["lessons"]
         by_status: dict[str, int] = {}
         for ln in lessons:
             by_status[ln["status"]] = by_status.get(ln["status"], 0) + 1
+        auto_lessons = sum(1 for ln in lessons if str(ln.get("source") or "").startswith("auto:"))
         rewards = [p.get("reward") for r in settled if isinstance((p := r.get("payload")), dict) and p.get("reward") is not None]
         return {
             "success": True,
             "business": slug or "(all)",
             "episodes_opened": len(opened),
+            "episodes_observed": len(observed),
             "episodes_settled": len(settled),
             "lessons_total": len(lessons),
             "lessons_by_status": by_status,
+            "lessons_auto_distilled": auto_lessons,
             "rewarded_episodes": len(rewards),
             "last_state_of_mind_at": (som[0].get("created_at") if som else None),
             "last_episode_at": (opened[0].get("created_at") if opened else None),
         }
 
     def rl_policy(self, slug: str) -> dict[str, Any]:
-        """The CEO's current injected policy for a business = exactly what _assemble_wake_memory
-        produces (identity + state-of-mind + recent bets + non-rejected learnings). Returns the
-        real injected text plus its structured pieces — this IS the policy, not a description."""
+        """The CEO's current injected policy for a business = exactly what the wake carries:
+        the memory block PREPENDED to the wake user turn (identity + state-of-mind + recent
+        bets) plus the compressed learnings block APPENDED to its end. Returns the real
+        injected text plus its structured pieces — this IS the policy, not a description."""
         slug = _slugify(slug)
-        injected = self._assemble_wake_memory(slug)
+        memory = self._assemble_wake_memory(slug)
+        learnings = self._assemble_wake_learnings(slug)
         with self._connect() as conn:
             identity = self._latest_event_payload(conn, slug, "ceo.identity")
             som = self._latest_event_payload(conn, slug, "ceo.state_of_mind")
@@ -17758,7 +18289,9 @@ class TakyonStore:
         return {
             "success": True,
             "business": slug,
-            "injected_text": injected,
+            "injected_text": memory + ("\n\n" if memory and learnings else "") + learnings,
+            "injected_memory": memory,
+            "injected_learnings": learnings,
             "identity": (identity or {}).get("identity"),
             "state_of_mind": (som or {}).get("note"),
             "active_intra_learnings": [p.get("claim") for p in intra if isinstance(p, dict)],
@@ -21461,6 +21994,7 @@ class TakyonStore:
                 "otherwise just keep metrics/summary.md current with this wake's pulse. "
             )
         memory_block = self._assemble_wake_memory(slug)
+        learnings_block = self._assemble_wake_learnings(slug)
         return (
             memory_block
             + f"CEO wakeup for business:{slug}.\n"
@@ -21492,14 +22026,18 @@ class TakyonStore:
             "metric, event, conversation, ledger, job, or wake data during a wake. "
             "Record the 1-2 moves you choose as bets with business_record_episode, and before you sleep write where "
             "you are leaving off with business_open_state_of_mind so your next wake remembers this one. "
-            "When an outcome teaches you something durable, capture it with business_record_learning (scope 'business' "
-            "for this company's own playbook; scope 'shared' if it should help similar businesses). "
+            "When an outcome teaches you something durable that the numbers cannot express on their own, capture it "
+            "with business_record_learning (scope 'business' for this company's own playbook; scope 'shared' if it "
+            "should help similar businesses; include evidence refs when you have them). Measured outcomes are "
+            "distilled into [measured] lessons automatically from your recorded episodes' metric deltas — do not "
+            "re-record what the numbers already say. "
             f"{daily_summary_line}"
             "All businesses run live. Missing credentials, budget authority, or provider gates are blockers; "
             "do not suppress, mock, or local-publish around external outreach, acquisition, paid spend, customer charging, "
             "or outreach/marketing email delivery. "
             "When the 1-2 tasks are done and this wake's snapshot (and any daily summary) is written, end the turn and sleep "
             "until the next scheduled wake; do not start additional work beyond the capped tasks."
+            + (f"\n\n{learnings_block}" if learnings_block else "")
         )
 
     def _ceo_cron_toolsets(self) -> list[str]:
@@ -22649,6 +23187,7 @@ def handle_business_record_learning(args: dict, **_: Any) -> str:
             str(args.get("claim") or ""),
             tags=args.get("tags"),
             scope=str(args.get("scope") or "business"),
+            evidence=args.get("evidence"),
         ))
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -22720,7 +23259,10 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
     (store_builder.local_eas_invoker, the live-proven recipe) when its explicit-path custody
     resolves, else the fail-closed default (eas_builder_unconfigured). Secrets reach only the
     builder's child process — never this plane's environ, never /v1/env."""
-    _refuse_on_autonomous_wake("mobile releases")
+    # Operator ruling 2026-07-08: no wake refusal here. The operator plane is god-mode — bootstrap
+    # and scheduled wakes may both publish builds (the spend is bounded by the credit rail and the
+    # ≤3-attempt repair loop in the takyon-mobile-app skill). App Store SUBMISSION (the outward,
+    # account-blast-radius step) is a separate lane that keeps its operator_approvals receipt.
     store = _store()
     try:
         business = _resolved_business_slug(args, required=True)
@@ -22786,14 +23328,26 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
             from . import store_builder as _builder
         except ImportError:  # pragma: no cover - alternate load path
             from plugins.takyon import store_builder as _builder
-        if not _builder.is_configured():
+        builder_lane = _builder.builder_mode()
+        if not builder_lane:
             return tool_error(
-                "eas_builder_unconfigured: the store-builder custody (ASC key, Expo token, team "
-                "distribution identity) is not present on this plane, so a real build cannot run. "
-                "No credits were reserved.",
+                "eas_builder_unconfigured: no store-builder lane on this plane — neither local "
+                "custody (TAKYON_STORE_BUILDER_SECRETS_DIR) nor the host-independent safebox lane "
+                "(node/npm/npx/git on PATH + a configured remote safebox). No credits were reserved.",
                 success=False,
             )
-        builder_creds = _builder.resolve_local_store_credentials()
+        if builder_lane == "local":
+            builder_creds = _builder.resolve_local_store_credentials()
+        else:
+            # Host-independent lane: the safebox does the ASC provisioning server-side and returns
+            # the ephemeral signing bundle (fail-closed StoreBuilderUnconfigured before any reserve).
+            try:
+                app_cfg_for_caps = json.loads((app_source / "app.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise TakyonError(f"mobile_app_source_invalid: app.json unreadable ({exc})") from exc
+            builder_creds = _builder.resolve_safebox_store_credentials(
+                business, capabilities=_builder.capabilities_from_app_config(app_cfg_for_caps)
+            )
         invoke_eas = _builder.local_eas_invoker(
             business_slug=business, lane=lane, source_dir=str(app_source), creds=builder_creds
         )
@@ -22867,10 +23421,14 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
                 "business": business,
                 "lane": lane,
                 "build_id": result.build_id,
+                "logs_url": getattr(result, "logs_url", ""),
+                "builder_lane": builder_lane,
                 "detail": result.detail,
                 "compliance": {"passed": True, "lane": gate.get("lane")},
                 "note": "Build triggered and credits settled (spend happens at the Expo trigger). "
-                "Poll the build for the signed artifact; store submission is a separate step.",
+                "Check status with business_read_store_status {build_id}; a FAILED build's fix "
+                "loop is the takyon-mobile-app skill's build-failure triage (max 3 attempts, "
+                "fresh idempotency_key each). Store submission is a separate step.",
             }
         )
     except Exception as exc:
@@ -22900,12 +23458,34 @@ def handle_business_read_store_status(args: dict, **_: Any) -> str:
         except Exception as exc:
             # Never hard-fail a read: a probe/transport error surfaces as a state, not a tool error.
             account_health = {"state": "unreachable", "detail": str(exc)[:200], "status_code": None}
+        # Optional per-build status read ($0, never touches the reservation): the repair loop's
+        # evidence surface. status: finished | errored | in-progress/new/…; errored builds carry
+        # the provider error message, and the expo.dev logs page is in the publish receipt.
+        build_status: dict[str, Any] | None = None
+        requested_build_id = str(args.get("build_id") or "").strip()
+        if requested_build_id:
+            try:
+                try:
+                    from . import store_builder as _builder
+                except ImportError:  # pragma: no cover - alternate load path
+                    from plugins.takyon import store_builder as _builder
+                poll_lane = _builder.builder_mode()
+                if poll_lane == "local":
+                    poll_creds = _builder.resolve_local_store_credentials()
+                elif poll_lane == "safebox":
+                    poll_creds = _builder.resolve_safebox_store_credentials(business)
+                else:
+                    raise TakyonError("eas_builder_unconfigured: no builder lane on this plane")
+                build_status = _builder.poll_build(requested_build_id, poll_creds)
+            except Exception as exc:
+                build_status = {"status": "unknown", "artifact_url": "", "error": str(exc)[:200]}
         return tool_result(
             {
                 "success": True,
                 "business": business,
                 "archetype": archetype,
                 "account_health": account_health,
+                **({"build": {"build_id": requested_build_id, **(build_status or {})}} if requested_build_id else {}),
                 "note": "Apple developer-account health; per-app review/version status lands with the submit lane.",
             }
         )
@@ -26918,48 +27498,6 @@ def _shopify_active_connection(store, business: str) -> tuple[dict[str, Any], di
     return row, connection
 
 
-def _shopify_catalog_commit(
-    store,
-    *,
-    business: str,
-    shop_domain: str,
-    receipt_payloads: list,
-    idempotency_key: str,
-) -> tuple[str, str]:
-    """Project the buyable catalog from receipts (newest first) and mirror it to the business
-    workspace at `product/shopify-catalog.json` through the canonical `store.commit`
-    artifact.write (receipted, path-contained). The product-site build bakes this file into a
-    storefront section whose Buy buttons are Shopify cart permalinks — customers pay on
-    Shopify's hosted checkout, so the subuser plane gains NOTHING. Returns (relpath, error):
-    a mirror failure never fails the push (events + the store remain truth); it is surfaced."""
-    try:
-        from . import shopify_util
-    except ImportError:  # pragma: no cover - alternate load path
-        from plugins.takyon import shopify_util
-    try:
-        catalog = shopify_util.catalog_from_receipts(
-            receipt_payloads, business_slug=business, shop_domain=shop_domain
-        )
-        store.commit(
-            scope=f"business:{business}",
-            operations=[
-                {
-                    "action": "artifact.write",
-                    "business": business,
-                    "path": shopify_util.SHOPIFY_CATALOG_RELPATH,
-                    "content": _json_dumps(catalog) + "\n",
-                    "mode": "replace",
-                }
-            ],
-            idempotency_key=f"{idempotency_key}:catalog",
-            reason="mirror the buyable shopify catalog from event receipts",
-            actor="agent",
-        )
-        return shopify_util.SHOPIFY_CATALOG_RELPATH, ""
-    except Exception as exc:  # noqa: BLE001 - mirror is best-effort; receipts stay truth
-        return "", _truncate_text(str(exc), 300)
-
-
 def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
     """Commerce EXECUTOR against the business's CONNECTED Shopify store (operator ruling
     2026-07-03, "try Shopify"): create ONE product (default variant + price, optional images)
@@ -27037,26 +27575,20 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
         # search — the 2026-07-04 live acceptance proved Shopify's products SEARCH index lags
         # creates by seconds, so a same-title rerun under a new key would otherwise duplicate.
         # A receipt match is verified against the store BY ID (read-your-writes) before adopting.
-        # No LIMIT: this list is the catalog-projection source, so truncation would silently
-        # drop older products from the public mirror. Volume is bounded by push cadence (one
-        # event per push/adopt/tombstone), never by customer traffic.
         with store._connect() as conn:
             receipt_rows = conn.execute(
-                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type IN "
-                "(?, ?) ORDER BY created_at DESC",
-                (business, "shopify.product.create", "shopify.product.tombstone"),
+                "SELECT payload_json FROM events WHERE business_slug = ? AND event_type = ? "
+                "ORDER BY created_at DESC LIMIT 100",
+                (business, "shopify.product.create"),
             ).fetchall()
         receipt_payloads = [
             _json_loads(r["payload_json"] if isinstance(r, Mapping) else r[0], {})
             for r in (receipt_rows or [])
         ]
         candidate_ids = shopify_util.match_product_receipts(
-            [p for p in receipt_payloads if not p.get("tombstone")],
-            title=title,
-            shop_domain=shop_domain,
+            receipt_payloads, title=title, shop_domain=shop_domain
         )
         existing = None
-        dead_ids: list[str] = []
         for candidate_id in candidate_ids:
             try:
                 existing = shopify_util.get_product(
@@ -27071,50 +27603,9 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                 ) from exc
             if existing is not None:
                 break
-            dead_ids.append(candidate_id)
-        tombstone_payloads: list[dict[str, Any]] = []
-        if dead_ids:
-            # The probe PROVED the store deleted these — record tombstones immediately (they
-            # are true observations regardless of what the rest of this call does), so the
-            # catalog projection can never republish a dead Buy button.
-            with store._connect() as conn:
-                for dead_id in dead_ids:
-                    payload = {
-                        "tombstone": True,
-                        "shop_domain": shop_domain,
-                        "product_id": dead_id,
-                        "reason": "product-by-id probe returned null (deleted on the store)",
-                        "idempotency_key": idempotency_key,
-                    }
-                    tombstone_payloads.append(payload)
-                    store._record_event(
-                        conn,
-                        scope=f"business:{business}/app",
-                        business_slug=business,
-                        event_type="shopify.product.tombstone",
-                        payload=payload,
-                    )
         if candidate_ids:
             if existing is not None:
                 product_id = str(existing.get("id") or candidate_id)
-                variant_id, variant_price = shopify_util.first_variant(existing)
-                adopted_status = str(existing.get("status") or "").lower()
-                event_payload = {
-                    "shop_domain": shop_domain,
-                    "product_id": product_id,
-                    "handle": str(existing.get("handle") or ""),
-                    "title": str(existing.get("title") or title),
-                    "status": adopted_status,
-                    "price": variant_price or price,
-                    "variant_id": variant_id,
-                    "preview_url": str(existing.get("onlineStorePreviewUrl") or ""),
-                    "deduped": True,
-                    "dedup_source": "local_receipt",
-                    "media_warnings": [],
-                    "idempotency_key": idempotency_key,
-                    "reason": args.get("reason") or "create shopify product",
-                    "actor": args.get("actor") or "agent",
-                }
                 result = {
                     "success": True,
                     "action": "business_shopify_create_product",
@@ -27126,9 +27617,7 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                     "product_numeric_id": shopify_util._gid_numeric(product_id),
                     "handle": str(existing.get("handle") or ""),
                     "title": str(existing.get("title") or title),
-                    "status": adopted_status,
-                    "variant_id": variant_id,
-                    "price": variant_price or price,
+                    "status": str(existing.get("status") or "").lower(),
                     "online_store_preview_url": str(
                         existing.get("onlineStorePreviewUrl") or ""
                     ),
@@ -27139,37 +27628,15 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                         "exists; adopted it instead of duplicating."
                     ),
                 }
-                permalink = shopify_util.cart_permalink(shop_domain, variant_id)
-                if permalink:
-                    result["cart_permalink"] = permalink
                 numeric = result["product_numeric_id"]
                 if numeric:
                     result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
-                result["catalog_path"] = shopify_util.SHOPIFY_CATALOG_RELPATH
                 with store._connect() as conn:
-                    store._record_event(
-                        conn,
-                        scope=f"business:{business}/app",
-                        business_slug=business,
-                        event_type="shopify.product.create",
-                        payload=event_payload,
-                    )
                     conn.execute(
                         "INSERT INTO idempotency_keys (key, operation_hash, result_json, "
                         "created_at) VALUES (?, ?, ?, ?)",
                         (idempotency_key, op_hash, _json_dumps(result), _now()),
                     )
-                # Mirror AFTER the durable receipt txn — a crash between them leaves receipts
-                # (truth) ahead of the mirror, and the next push's replace-write self-heals.
-                _catalog_path, catalog_error = _shopify_catalog_commit(
-                    store,
-                    business=business,
-                    shop_domain=shop_domain,
-                    receipt_payloads=[event_payload, *tombstone_payloads, *receipt_payloads],
-                    idempotency_key=idempotency_key,
-                )
-                if catalog_error:
-                    result["catalog_mirror_error"] = catalog_error
                 return tool_result(result)
             # The receipted product was deleted on the store — the store is truth; fall through
             # and create a fresh one.
@@ -27213,11 +27680,6 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
             "shop_domain": shop_domain,
             **product,
         }
-        permalink = shopify_util.cart_permalink(
-            shop_domain, str(product.get("variant_id") or "")
-        )
-        if permalink:
-            result["cart_permalink"] = permalink
         numeric = str(product.get("product_numeric_id") or "")
         if numeric:
             result["admin_url"] = f"https://{shop_domain}/admin/products/{numeric}"
@@ -27232,54 +27694,33 @@ def handle_business_shopify_create_product(args: dict, **_: Any) -> str:
                 "Created as DRAFT — activate it in the store admin or create as status='active' "
                 "to publish it to the online storefront."
             )
-        elif permalink:
-            result["note"] = (
-                "Live on the store. The storefront Buy button is the cart_permalink — the "
-                "customer pays on Shopify's hosted checkout; the baked catalog mirror is at "
-                f"{shopify_util.SHOPIFY_CATALOG_RELPATH}."
-            )
-        event_payload = {
-            "shop_domain": shop_domain,
-            "product_id": product.get("product_id"),
-            "handle": product.get("handle"),
-            "title": product.get("title"),
-            "status": product.get("status"),
-            "price": product.get("price"),
-            "variant_id": product.get("variant_id") or "",
-            "preview_url": product.get("online_store_preview_url") or "",
-            "deduped": bool(product.get("deduped")),
-            "media_warnings": product.get("media_warnings") or [],
-            "store_plan": plan_info.get("plan_name"),
-            "partner_development": bool(plan_info.get("partner_development")),
-            "idempotency_key": idempotency_key,
-            "reason": args.get("reason") or "create shopify product",
-            "actor": args.get("actor") or "agent",
-        }
-        result["catalog_path"] = shopify_util.SHOPIFY_CATALOG_RELPATH
         with store._connect() as conn:
             store._record_event(
                 conn,
                 scope=f"business:{business}/app",
                 business_slug=business,
                 event_type="shopify.product.create",
-                payload=event_payload,
+                payload={
+                    "shop_domain": shop_domain,
+                    "product_id": product.get("product_id"),
+                    "handle": product.get("handle"),
+                    "title": product.get("title"),
+                    "status": product.get("status"),
+                    "price": product.get("price"),
+                    "deduped": bool(product.get("deduped")),
+                    "media_warnings": product.get("media_warnings") or [],
+                    "store_plan": plan_info.get("plan_name"),
+                    "partner_development": bool(plan_info.get("partner_development")),
+                    "idempotency_key": idempotency_key,
+                    "reason": args.get("reason") or "create shopify product",
+                    "actor": args.get("actor") or "agent",
+                },
             )
             conn.execute(
                 "INSERT INTO idempotency_keys (key, operation_hash, result_json, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (idempotency_key, op_hash, _json_dumps(result), _now()),
             )
-        # Mirror AFTER the durable receipt txn — a crash between them leaves receipts (truth)
-        # ahead of the mirror, and the next push's replace-write self-heals.
-        _catalog_path, catalog_error = _shopify_catalog_commit(
-            store,
-            business=business,
-            shop_domain=shop_domain,
-            receipt_payloads=[event_payload, *tombstone_payloads, *receipt_payloads],
-            idempotency_key=idempotency_key,
-        )
-        if catalog_error:
-            result["catalog_mirror_error"] = catalog_error
         return tool_result(result)
     except Exception as exc:
         return tool_error(str(exc), success=False)
@@ -27481,6 +27922,31 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
     try:
         store = _store()
         business = _resolved_business_slug(args, required=True)
+        # Launch-post dedupe: a ceo_bootstrap turn publishes EXACTLY ONE launch X post. A
+        # re-enqueued bootstrap (retry after a crash, or a spill to the fallback worker) would
+        # otherwise post a SECOND launch tweet (walkloop double-post, 2026-07-09). If a successful X
+        # post receipt already exists for this business, the launch moment has passed — skip
+        # re-posting and return the existing post. Steady-state wakes (ceo_wake) and explicit chat
+        # posts carry no bootstrap marker, so they are unaffected and post freely.
+        if _active_operator_task_kind() == "ceo_bootstrap":
+            _existing_x = _x_outreach_receipt_candidates(store, business)
+            if _existing_x:
+                _top = _existing_x[0]
+                return tool_result(
+                    {
+                        "success": True,
+                        "action": "business_x_publish_outreach",
+                        "business": business,
+                        "deduped": True,
+                        "post_id": _top.get("post_id"),
+                        "post_url": _top.get("post_url"),
+                        "receipt_path": _top.get("receipt_rel"),
+                        "note": (
+                            "A launch X post already exists for this business; skipped re-posting on "
+                            "this bootstrap re-run (one launch post per business)."
+                        ),
+                    }
+                )
         body = _normalize_outreach_body(args.get("body") or args.get("content"))
         if not body:
             raise TakyonError("body is required")
@@ -27816,24 +28282,6 @@ def handle_business_x_metrics_sync(args: dict, **_: Any) -> str:
             reason=args.get("reason") or "record x metrics sync",
             actor=args.get("actor") or "agent",
         )
-        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): every metric
-        # section X returned for this post, verbatim. Best-effort — never blocks the sync.
-        try:
-            from . import cost_events
-
-            cost_events.record_metrics_observation(
-                provider="x",
-                name=f"x:post:{post_id}",
-                metrics={
-                    "public_metrics": snapshot["public_metrics"],
-                    "non_public_metrics": snapshot["non_public_metrics"],
-                    "organic_metrics": snapshot["organic_metrics"],
-                },
-                business_slug=business,
-                identifiers={"post_id": post_id, "post_url": snapshot["post_url"]},
-            )
-        except Exception:
-            pass
         return tool_result(
             {
                 "success": True,
@@ -28042,6 +28490,21 @@ def _assert_ad_set_budget_authorized(
         )
     except backend.AdSpendCapExceeded as exc:
         raise TakyonError(str(exc))
+
+
+def _operator_creative_gate_disabled() -> bool:
+    """Operator god-mode creative-credit bypass — **ON BY DEFAULT** (operator ruling 2026-07-09;
+    client half — the authoritative half is ``safebox_app._operator_creative_gate_disabled``). The
+    operator plane's client-side credit refusals (balance pre-check, channel-budget check,
+    local-ledger insufficient) stop refusing; local shortfalls are auto-granted as ledgered
+    bypass-tagged top-ups (local-authority planes only), and remote refusal is handled by the
+    safebox authority under the same default. Metering is unchanged — every action still reserves
+    and settles with real cost metadata. Set ``TAKYON_OPERATOR_CREATIVE_GATE_DISABLED=0`` to restore
+    hard gating. Subusers are untouched: this helper only runs inside operator-plane ``business_*``
+    tools."""
+    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 
 
 def _creative_credit_unit_cost(action: str) -> int:
@@ -28886,12 +29349,17 @@ def _reserve_creative_credits(
             owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
         credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
-        if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
+        available_credits = _creative_credit_int(getattr(balances, "balance_credits", 0))
+        # Operator god-mode (TAKYON_OPERATOR_CREATIVE_GATE_DISABLED): skip the client-side refusals;
+        # the safebox authority applies the same bypass (shortfall auto-granted + ledgered) remotely,
+        # and the local branch below tops up the ledger before reserving. Metering is unchanged.
+        gate_disabled = _operator_creative_gate_disabled()
+        if requested > available_credits and not gate_disabled:
             raise credits_backend.InsufficientCreativeCredits(
                 requested_credits=requested,
-                available_credits=_creative_credit_int(getattr(balances, "balance_credits", 0)),
+                available_credits=available_credits,
             )
-        if resolved_bucket:
+        if resolved_bucket and not gate_disabled:
             snapshot = _creative_credit_budget_snapshot_from_conn(
                 store,
                 conn,
@@ -28910,6 +29378,23 @@ def _reserve_creative_credits(
                     reserved_credits=_creative_credit_int(channel.get("reserved_credits")),
                 )
         if not use_safebox_gate:
+            if gate_disabled and requested > available_credits and not safebox._use_remote_authority():
+                # God-mode local top-up — LOCAL-AUTHORITY planes only (dev/rig): grant exactly the
+                # shortfall (idempotent on the reservation key, bypass-tagged) so the reserve below
+                # succeeds. A remote-enabled plane must never mint — its shortfall bypass is the
+                # SAFEBOX route's authority-side grant (and with the audience registered, the
+                # remote path is the one that runs there anyway).
+                credits_backend._local_grant_credits(
+                    conn,
+                    business,
+                    max(1, requested - available_credits),
+                    f"operator-creative-gate-bypass:{reservation_key}",
+                    metadata={
+                        "reason": "operator_creative_gate_disabled",
+                        "action": action,
+                        "shortfall_credits": max(1, requested - available_credits),
+                    },
+                )
             reservation = credits_backend.reserve_credits(
                 conn,
                 business,
@@ -29266,10 +29751,13 @@ def _reserve_channel_spend_credits(
             owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
         credits_backend.open_business_credit_account(conn, business)
         balances = credits_backend.get_business_credit_balances(conn, business)
-        if requested > _creative_credit_int(getattr(balances, "balance_credits", 0)):
+        available_credits = _creative_credit_int(getattr(balances, "balance_credits", 0))
+        # Operator god-mode: same bypass as _reserve_creative_credits (see there for the contract).
+        gate_disabled = _operator_creative_gate_disabled()
+        if requested > available_credits and not gate_disabled:
             raise credits_backend.InsufficientCreativeCredits(
                 requested_credits=requested,
-                available_credits=_creative_credit_int(getattr(balances, "balance_credits", 0)),
+                available_credits=available_credits,
             )
         snapshot = _creative_credit_budget_snapshot_from_conn(
             store,
@@ -29279,7 +29767,7 @@ def _reserve_channel_spend_credits(
         )
         channel_budget = snapshot["channels"].get(bucket, {})
         remaining_credits = _creative_credit_int(channel_budget.get("remaining_credits"))
-        if requested > remaining_credits:
+        if requested > remaining_credits and not gate_disabled:
             raise CreativeCreditBudgetExceeded(
                 bucket=bucket,
                 requested_credits=requested,
@@ -29289,6 +29777,20 @@ def _reserve_channel_spend_credits(
                 reserved_credits=_creative_credit_int(channel_budget.get("reserved_credits")),
             )
         if not use_safebox_gate:
+            if gate_disabled and requested > available_credits and not safebox._use_remote_authority():
+                # Local-authority planes only (dev/rig): a remote-enabled plane must never mint —
+                # its shortfall bypass is the SAFEBOX route's authority-side grant.
+                credits_backend._local_grant_credits(
+                    conn,
+                    business,
+                    max(1, requested - available_credits),
+                    f"operator-creative-gate-bypass:{reservation_key}",
+                    metadata={
+                        "reason": "operator_creative_gate_disabled",
+                        "action": action,
+                        "shortfall_credits": max(1, requested - available_credits),
+                    },
+                )
             reservation = credits_backend.reserve_credits(
                 conn,
                 business,
@@ -29615,7 +30117,7 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
     against measured state instead of narrative: lifetime product counters always (users, revenue,
     usage events), plus the episode channel's live-campaign delivery stats (spend from the policy
     registry; impressions/clicks from the latest insights-sync receipt) for reddit/meta, and the
-    latest X sync totals for channel=x. Best-effort by design: every source is wrapped so a missing
+    aggregated X metrics summary totals for channel=x. Best-effort by design: every source is wrapped so a missing
     table (SQLite dev store has no ad-spend policies), missing file, or provider gap degrades to
     fewer keys — never an exception, never a blocked episode."""
     snap: dict[str, Any] = {"captured_at": _now()}
@@ -29624,8 +30126,13 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
             "SELECT COUNT(*) AS n FROM app_users WHERE business_slug = ?", (slug,)
         ).fetchone()
         snap["users"] = int(_row_value_int(row, "n"))
+        # NET revenue, mirroring the canonical reader (app_payments.get_revenue_summary /
+        # core pulse): reversal rows (refunds/chargebacks) are stored with a POSITIVE
+        # amount_paid_cents but revenue_type='reversal' — they must subtract, or a refund
+        # inside an episode's window would measure as a false positive revenue delta.
         row = conn.execute(
-            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
+            "SELECT COALESCE(SUM(CASE WHEN revenue_type = 'reversal' THEN -amount_paid_cents "
+            "ELSE amount_paid_cents END), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
             (slug,),
         ).fetchone()
         snap["revenue_cents"] = int(_row_value_int(row, "c"))
@@ -29635,12 +30142,42 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
         snap["usage_events"] = int(_row_value_int(row, "n"))
     except Exception:
         pass
+    # Checkout + conversation counters: the judgeable numbers for pricing/checkout bets and for
+    # outreach/support/conversation bets. Same always-on, never-raising posture as the product
+    # counters above (each in its own guard so one missing table costs only its own keys).
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM app_checkout_intents WHERE business_slug = ?", (slug,)
+        ).fetchone()
+        snap["checkout_intents"] = int(_row_value_int(row, "n"))
+    except Exception:
+        pass
+    try:
+        row = conn.execute(
+            """
+            SELECT SUM(CASE WHEN direction = 'inbound' THEN 1 ELSE 0 END) AS inbound,
+                   SUM(CASE WHEN direction = 'inbound' AND status = 'needs_response' THEN 1 ELSE 0 END) AS unresolved
+            FROM conversation_messages WHERE business_slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+        snap["inbound_messages"] = int(_row_value_int(row, "inbound"))
+        snap["unresolved_inbound"] = int(_row_value_int(row, "unresolved"))
+    except Exception:
+        pass
     bucket = _normalize_creative_credit_bucket(channel) if channel else ""
     if bucket in ("reddit", "meta"):
         try:
             backend = _business_ad_spend_backend()
             campaigns: list[dict[str, Any]] = []
-            for policy in backend.list_policies(conn, slug, statuses=list(_PULSE_AD_LIVE_STATUSES)):
+            # Measurement needs a status set that is STABLE across a campaign's lifecycle:
+            # if the "after" snapshot listed only live statuses, a campaign completing (or
+            # settling at its cap) between an episode's open and its observation would vanish
+            # from the after side and mint phantom NEGATIVE delivery deltas. So include the
+            # full lifecycle (reserved/created_paused contribute zeros; completed keeps its
+            # final reconciled numbers), unlike the pulse which deliberately shows live-only.
+            _snapshot_statuses = list(_PULSE_AD_CAMPAIGN_STATUSES) + ["completed"]
+            for policy in backend.list_policies(conn, slug, statuses=_snapshot_statuses):
                 if str(policy.channel or "") != bucket:
                     continue
                 entry: dict[str, Any] = {
@@ -29657,7 +30194,11 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
                         (p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime
                     )
                     totals = (json.loads(latest.read_text(encoding="utf-8")) or {}).get("totals") or {}
-                    for key in ("impressions", "clicks", "spend_usd"):
+                    # purchase_value_usd / purchase_count are the Meta-pixel attributed
+                    # revenue the insights sync aggregates onto the receipt (action_values);
+                    # absent on channels without purchase attribution (e.g. reddit today).
+                    for key in ("impressions", "clicks", "spend_usd",
+                                "purchase_value_usd", "purchase_count"):
                         if totals.get(key) is not None:
                             entry[key] = totals[key]
                 except Exception:
@@ -29669,17 +30210,50 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
             pass
     elif bucket == "x":
         try:
-            syncs_dir = store._resolve_business_file(slug, "metrics/x/syncs", sync=False)
-            latest = max((p for p in syncs_dir.glob("*.json")), key=lambda p: p.stat().st_mtime)
-            receipt = json.loads(latest.read_text(encoding="utf-8")) or {}
-            totals = receipt.get("totals") if isinstance(receipt.get("totals"), dict) else {}
-            x_stats = {
-                k: totals[k]
-                for k in ("views", "impressions", "likes", "replies", "reposts", "clicks")
-                if totals.get(k) is not None
-            }
+            # Business-level X totals live in metrics/x/summary.json (_x_write_summary), NOT in
+            # the per-post sync receipts (those carry only per-post public/organic metric maps
+            # and no "totals" key — reading them here silently yielded nothing). The summary's
+            # totals keep the raw X API metric names, so map them to the snapshot vocabulary.
+            summary_abs = store._resolve_business_file(slug, _x_metrics_summary_rel(), sync=False)
+            summary = json.loads(summary_abs.read_text(encoding="utf-8")) or {}
+            totals = summary.get("totals") if isinstance(summary.get("totals"), dict) else {}
+            public = totals.get("public_metrics") if isinstance(totals.get("public_metrics"), dict) else {}
+            x_stats: dict[str, int] = {}
+            for src, dst in (("impression_count", "impressions"), ("like_count", "likes"),
+                             ("reply_count", "replies")):
+                if public.get(src) is not None:
+                    x_stats[dst] = int(public.get(src) or 0)
+            if public.get("retweet_count") is not None or public.get("quote_count") is not None:
+                x_stats["reposts"] = int(public.get("retweet_count") or 0) + int(public.get("quote_count") or 0)
+            for section in ("non_public_metrics", "organic_metrics"):
+                sec = totals.get(section) if isinstance(totals.get(section), dict) else {}
+                if sec.get("url_link_clicks") is not None:
+                    x_stats["clicks"] = int(sec.get("url_link_clicks") or 0)
+                    break
             if x_stats:
                 snap["x"] = x_stats
+        except Exception:
+            pass
+    if str(channel or "").strip().lower() in (
+        "product", "site", "website", "app", "seo", "content", "landing", "launch",
+    ):
+        # Site/product/content bets are judged on traffic: best-effort web-analytics snapshot
+        # (the helper caches per window and returns {"configured": False} when analytics is off,
+        # so this degrades to nothing rather than a provider hit per episode).
+        try:
+            analytics = _business_analytics_summary(slug)
+            if analytics.get("ok"):
+                stats = analytics.get("stats") if isinstance(analytics.get("stats"), dict) else {}
+                web: dict[str, Any] = {}
+                for key in ("pageviews", "visitors", "uniques", "visits"):
+                    value = stats.get(key)
+                    if isinstance(value, dict):
+                        value = value.get("value")
+                    if value is not None:
+                        web[key] = int(value)
+                if web:
+                    web["window_days"] = analytics.get("window_days")
+                    snap["web"] = web
         except Exception:
             pass
     return snap
@@ -31386,18 +31960,16 @@ _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "logo_generate": "creative.logo",
     "ugc_ad_generate": "creative.ugc",
     "static_ad_generate": "creative.static_ad",
-    # App Store rail: a mobile release is a paid creative action, so on prod (remote safebox
-    # authority) its credit spend MUST go through the audience-bound creative gate — an action with
-    # no audience falls to the generic reserve which fails closed with
-    # creative_credit_spend_requires_creative_gate. No provider route needs this audience (the EAS
-    # build resolves its keys from operator-rail custody, not a safebox-vended provider key); the
-    # audience is purely the reserve/commit/release money gate + owner verification.
-    "mobile_release": "creative.mobile_release",
     **{c.credit_action: c.credit_audience for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "creative.meta_ad_launch",
     "reddit_ad_launch": "creative.reddit_ad_launch",
     "meta_ad_media_spend": "creative.meta_ad_media_spend",
     "reddit_ad_media_spend": "creative.reddit_ad_media_spend",
+    # mobile_release rides the safebox creative gate on prod (c87547a0, E2E-found; restored
+    # 2026-07-09 after a stale-base core.py push clobbered it — safebox_app's reverse map kept
+    # its half, so a missing entry here silently downgraded the reserve to the LOCAL branch,
+    # which correctly refuses on remote planes). Pinned by test_takyon_mobile_oneshot.py.
+    "mobile_release": "creative.mobile_release",
 }
 
 
@@ -33441,22 +34013,6 @@ def handle_business_reddit_ad_insights_sync(args: dict, **_: Any) -> str:
             actor=args.get("actor") or "agent",
         )
         store._sync_business_workspace_remote(business)
-        # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'): the FULL
-        # totals + rows the provider returned (CTR/CPM/spend/whatever comes back), verbatim and
-        # non-prescriptive. Best-effort — never blocks the sync.
-        try:
-            from . import cost_events
-
-            cost_events.record_metrics_observation(
-                provider="reddit",
-                name=f"reddit:{level}:{object_id or slug}",
-                metrics=totals,
-                rows=normalized_rows,
-                business_slug=business,
-                identifiers={"slug": slug, "level": level, "object_id": object_id, **ids},
-            )
-        except Exception:
-            pass
         return tool_result({
             "success": True,
             "action": "business_reddit_ad_insights_sync",
@@ -34965,10 +35521,17 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         ).strip().lower()
         if effort not in {"low", "medium", "high"}:
             effort = "medium" if customer_facing_product_workspace else "high"
-        default_model = (
-            "claude-sonnet-5"
-            if customer_facing_product_workspace
-            else (_model_from_config("claude_agent_default", "deep_work_default") or DEFAULT_CLAUDE_AGENT_MODEL)
+        # The configured coding-worker model (model.claude_agent_default) is the SINGLE source of
+        # truth for BOTH lanes. The customer-facing branch used to hardcode "claude-sonnet-5" and
+        # IGNORE that config, which was a silent trap after the provider split: on any host where
+        # TAKYON_CLAUDE_AGENT_MODEL was not exported (a fresh collaborator clone — the env-fetch
+        # never propagated it), a product/site build fell to claude-sonnet-5, and the safebox proxy
+        # routes claude-* to the platform Anthropic account (credit-dead) -> "Credit balance is too
+        # low", while deepseek-* routes to the live DeepSeek endpoint (climuru on Sai's machine,
+        # 2026-07-08). Honor the config pin first; keep claude-sonnet-5 only as the customer-facing
+        # fallback when no pin is configured. VPS is unchanged (its env var still wins below).
+        default_model = _model_from_config("claude_agent_default", "deep_work_default") or (
+            "claude-sonnet-5" if customer_facing_product_workspace else DEFAULT_CLAUDE_AGENT_MODEL
         )
         model = str(
             args.get("model")
@@ -36270,30 +36833,6 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 dimension_filters=filters,
             )
             rows = list(response.get("rows") or [])
-            # Metrics readback → cost/log ledger (operator_cost_events, kind='metrics'). GSC data
-            # previously had NO persistent sink at all; this is now its canonical record.
-            try:
-                from . import cost_events
-
-                cost_events.record_metrics_observation(
-                    provider="gsc",
-                    name=f"gsc:query:{site_url}",
-                    metrics={
-                        "clicks": response.get("clicks"),
-                        "impressions": response.get("impressions"),
-                        "ctr": response.get("ctr"),
-                        "position": response.get("position"),
-                    },
-                    rows=rows,
-                    identifiers={
-                        "site_url": site_url,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "dimensions": dimensions,
-                    },
-                )
-            except Exception:
-                pass
             return tool_result(
                 {
                     "success": True,
@@ -36329,22 +36868,6 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
-            try:
-                from . import cost_events
-
-                cost_events.record_metrics_observation(
-                    provider="dataforseo",
-                    name=f"dataforseo:{mode}",
-                    metrics={"row_count": len(rows)},
-                    rows=rows,
-                    identifiers={
-                        "keywords": raw_keywords,
-                        "location_code": location_code,
-                        "language_code": language_code,
-                    },
-                )
-            except Exception:
-                pass
             return tool_result(
                 {
                     "success": True,
@@ -36379,23 +36902,6 @@ def handle_business_seo_query_data(args: dict, **_: Any) -> str:
                 login=login,
                 password=password,
             )
-            try:
-                from . import cost_events
-
-                cost_events.record_metrics_observation(
-                    provider="dataforseo",
-                    name=f"dataforseo:{mode}",
-                    metrics={"row_count": len(rows)},
-                    rows=rows,
-                    identifiers={
-                        "keywords": raw_keywords,
-                        "page_url": page_url,
-                        "location_code": location_code,
-                        "language_code": language_code,
-                    },
-                )
-            except Exception:
-                pass
             return tool_result(
                 {
                     "success": True,
@@ -36467,7 +36973,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_record_learning",
         "description": "Record a durable learning. scope 'business' = this business's own playbook (always surfaced for it); scope 'shared' = a cross-business prior surfaced to similar businesses by tag overlap (RL rail R7).",
         "handler": handle_business_record_learning,
-        "schema": _schema("business_record_learning", "Record a learning for this business or the shared cross-business pool.", {"business": _BUSINESS_PROP, "claim": {"type": "string", "description": "The lesson, 1-2 sentences."}, "tags": {"type": "array", "items": {"type": "string"}, "description": "Situation tags for retrieval, e.g. ['b2c','reddit','pre-launch']."}, "scope": {"type": "string", "enum": ["business", "shared"], "description": "'business' (intra, default) or 'shared' (inter/cross-business)."}}, ["business", "claim"]),
+        "schema": _schema("business_record_learning", "Record a learning for this business or the shared cross-business pool.", {"business": _BUSINESS_PROP, "claim": {"type": "string", "description": "The lesson, 1-2 sentences."}, "tags": {"type": "array", "items": {"type": "string"}, "description": "Situation tags for retrieval, e.g. ['b2c','reddit','pre-launch']."}, "scope": {"type": "string", "enum": ["business", "shared"], "description": "'business' (intra, default) or 'shared' (inter/cross-business)."}, "evidence": {"type": "array", "items": {"type": "string"}, "description": "Optional proof refs: episode ids, receipt/file paths, or measured numbers that back this claim."}}, ["business", "claim"]),
     },
     {
         "name": "business_set_identity",
@@ -36498,12 +37004,15 @@ TAKYON_TOOL_DEFINITIONS = [
     },
     {
         "name": "business_read_store_status",
-        "description": "Read a mobile_app business's App Store standing (Apple developer-account health now; per-app review/version status when the submit lane lands). Read-only, fail-open.",
+        "description": "Read a mobile_app business's App Store standing: Apple developer-account health, plus a specific EAS build's status/artifact/error when build_id is passed ($0 poll — the build-failure triage evidence read). Read-only, fail-open.",
         "handler": handle_business_read_store_status,
         "schema": _schema(
             "business_read_store_status",
-            "Read the App Store account/app status for a mobile_app business (account health via the safebox; key never egresses).",
-            {"business": _BUSINESS_PROP},
+            "Read the App Store account/app status for a mobile_app business (account health via the safebox; key never egresses). Pass build_id to also poll that EAS build's status, signed-artifact URL, and error message.",
+            {
+                "business": _BUSINESS_PROP,
+                "build_id": {"type": "string", "description": "Optional EAS build id (from business_publish_mobile_release) to poll: returns status (finished/errored/in-progress), the signed-artifact URL when finished, and the provider error when errored."},
+            },
             ["business"],
         ),
     },
@@ -37173,10 +37682,7 @@ TAKYON_TOOL_DEFINITIONS = [
             "DRAFT; pass status='active' to publish to the online store. Guards: requires an "
             "ACTIVE business_connect_shopify connection; a non-live business may write only to a "
             "partner-development store; refused on autonomous wakes. $0 marginal cost; receipted "
-            "as a shopify.product.create business event. Every push also mirrors the buyable "
-            "catalog to product/shopify-catalog.json, each product carrying its cart_permalink "
-            "— the storefront Buy link: customers pay on Shopify's own hosted checkout, so the "
-            "product site bakes the catalog statically (no token, no new scope, no backend)."
+            "as a shopify.product.create business event."
         ),
         "handler": handle_business_shopify_create_product,
         "requires_api": ["composio"],

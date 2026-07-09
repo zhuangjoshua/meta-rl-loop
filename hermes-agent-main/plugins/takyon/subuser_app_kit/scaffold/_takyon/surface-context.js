@@ -18,4 +18,5 @@ export const surfaceContext = {
   },
   routes: [],
   plans: [],
+  shopifyCatalog: [],
 };

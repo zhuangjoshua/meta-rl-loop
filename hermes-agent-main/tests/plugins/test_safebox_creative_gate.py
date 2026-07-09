@@ -153,6 +153,10 @@ def _reserve(client, *, action="creative.logo", operator="owner_A", units=None, 
 
 # ── (a) refuse on insufficient credits BEFORE any provider call ───────────────────────────────────
 def test_reserve_refuses_insufficient_credits_before_provider(client, ledger, monkeypatch):
+    # The operator creative-gate bypass is ON BY DEFAULT (2026-07-09), which auto-grants the
+    # shortfall instead of refusing. This pins the money-integrity BACKSTOP: with the bypass
+    # explicitly OFF, the gate still refuses (402) before any provider call.
+    monkeypatch.setenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", "0")
     ledger.balance = 1  # logo costs 2 -> insufficient
     # If a provider is ever resolved/called, fail — the refusal must precede it.
     from plugins.takyon import creative_gateway

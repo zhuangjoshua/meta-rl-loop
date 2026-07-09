@@ -61,6 +61,10 @@ from .business_credits import (
 
 _EXACT_SENSITIVE_ENV_KEYS = frozenset(
     {
+        # The team distribution p12 (base64) is raw signing material; "_B64" is not a sensitive
+        # suffix, so it is pinned here explicitly — without this the managed-secret manifest
+        # silently drops it and the safebox build-credentials route fails closed unconfigured.
+        "APP_STORE_DIST_P12_B64",
         "AUTH0_CLIENT_SECRET",
         "AUTH0_SECRET",
         "DATABASE_URL",
@@ -267,6 +271,20 @@ def _remote_headers(*, with_json: bool = False, operator_authority: bool = False
     return headers
 
 
+# Idempotent READ paths may retry on a TRANSPORT failure (tunnel restart, uvicorn worker
+# recycle, dropped keepalive) — re-reading is always safe. Everything else stays single-shot:
+# provider calls and writes must never double-fire on an ambiguous connection error.
+# (Observed: a single tunnel blip on /v1/storage/get failed shelfscan0708's whole bootstrap
+# attempt, 2026-07-08 — "Remote end closed connection without response".)
+_REMOTE_IDEMPOTENT_READ_PATHS = (
+    "/v1/storage/get",
+    "/v1/storage/list-digests",
+    "/v1/storage/list-sizes",
+    "/healthz",
+)
+_REMOTE_READ_RETRY_DELAYS_S = (0.5, 1.5)
+
+
 def _remote_json(
     method: str,
     path: str,
@@ -285,33 +303,43 @@ def _remote_json(
     )
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(f"{base}{path}", data=body, method=method.upper(), headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw.strip() else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        detail = raw.strip() or exc.reason
+    retryable = any(path.startswith(prefix) for prefix in _REMOTE_IDEMPOTENT_READ_PATHS)
+    transport_attempts = (1 + len(_REMOTE_READ_RETRY_DELAYS_S)) if retryable else 1
+    for attempt in range(transport_attempts):
+        req = urllib.request.Request(
+            f"{base}{path}", data=body, method=method.upper(), headers=headers
+        )
         try:
-            parsed = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError:
-            parsed = {"detail": detail}
-        raise RemoteSafeboxError(
-            f"Safebox remote {method.upper()} {path} failed: {parsed}",
-            status_code=exc.code,
-            payload=parsed if isinstance(parsed, dict) else {"detail": detail},
-        ) from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        # Transport failure (timeout / connection refused / DNS), NOT an HTTP status — HTTPError is a
-        # URLError subclass and is handled above, so this only catches unreachable-safebox cases. Fail
-        # closed as a 504 so a brokered provider call surfaces a clean upstream error and never falls
-        # back to a raw key.
-        raise RemoteSafeboxError(
-            f"Safebox remote {method.upper()} {path} unreachable: {exc}",
-            status_code=504,
-            payload={"detail": "safebox_unreachable"},
-        ) from exc
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw.strip() else {}
+        except urllib.error.HTTPError as exc:
+            # An HTTP status is a real answer from the safebox — never retried.
+            raw = exc.read().decode("utf-8", errors="replace")
+            detail = raw.strip() or exc.reason
+            try:
+                parsed = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError:
+                parsed = {"detail": detail}
+            raise RemoteSafeboxError(
+                f"Safebox remote {method.upper()} {path} failed: {parsed}",
+                status_code=exc.code,
+                payload=parsed if isinstance(parsed, dict) else {"detail": detail},
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            # Transport failure (timeout / connection refused / DNS / connection closed), NOT an
+            # HTTP status — HTTPError is a URLError subclass and is handled above. Idempotent reads
+            # retry with backoff; everything else fails closed immediately as a 504 so a brokered
+            # provider call surfaces a clean upstream error and never falls back to a raw key.
+            if attempt + 1 < transport_attempts:
+                time.sleep(_REMOTE_READ_RETRY_DELAYS_S[attempt])
+                continue
+            raise RemoteSafeboxError(
+                f"Safebox remote {method.upper()} {path} unreachable: {exc}",
+                status_code=504,
+                payload={"detail": "safebox_unreachable"},
+            ) from exc
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def _managed_secret_command() -> str:
@@ -3246,6 +3274,23 @@ def store_asc_account_health() -> dict:
     receipt {state, status_code, detail, checked_at} returns — the key never egresses. state is one of
     ok | agreement_blocked | auth_error | error | unreachable."""
     return _remote_json("POST", "/v1/store/asc/account-health", {}, timeout=30.0)
+
+
+def store_eas_build_credentials(business_slug: str, *, capabilities: list | None = None) -> dict:
+    """Mint the per-build store-signing bundle via the safebox (host-independent builder lane).
+
+    The safebox does the ASC provisioning SERVER-SIDE — ensures the business's deterministic bundle
+    id, syncs capabilities, and (re)mints the App Store provisioning profile bound to the custodied
+    team distribution cert — so the ASC .p8 never egresses. The response carries only the ephemeral
+    signing material the eas-cli child process needs: expo_token, dist p12 (base64) + password,
+    profile (base64), team/owner identifiers. Operator-plane only; generous timeout because the ASC
+    provisioning is several sequential Apple API calls."""
+    return _remote_json(
+        "POST",
+        "/v1/store/eas/build-credentials",
+        {"business": str(business_slug or ""), "capabilities": list(capabilities or [])},
+        timeout=180.0,
+    )
 
 
 def openmeter_request(

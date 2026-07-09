@@ -602,6 +602,19 @@ class OperatorBudgetExceeded(Exception):
         )
 
 
+def _operator_creative_gate_disabled() -> bool:
+    """Operator god-mode creative-credit bypass — **ON BY DEFAULT** (operator ruling 2026-07-09).
+    The creative gate never REFUSES an operator-plane action for insufficient credits: the shortfall
+    is auto-granted (ledgered + bypass-tagged) and the reserve retried, so every action still
+    reserves/settles with real cost metadata. Only REFUSAL changes, never metering. Set
+    ``TAKYON_OPERATOR_CREATIVE_GATE_DISABLED=0`` (or false/no/off) to restore hard gating. Subusers
+    stay gated regardless: the creative routes require the internal token + operator client, so the
+    app/customer plane can never reach the bypass."""
+    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
 def _creative_credit_price(audience: str, *, units: int = 1) -> int:
     """The fixed creative-credit price for a creative audience, resolved from the ONE canonical table
     in ``core`` (``_CREATIVE_CREDIT_COST_DEFAULTS`` + env override ``_CREATIVE_CREDIT_COST_ENVS``). The
@@ -1111,6 +1124,15 @@ class _OperatorSessionTokenBody(BaseModel):
     ttl_seconds: int | None = None
 
 
+class _StoreEasBuildCredentialsBody(BaseModel):
+    # Operator-plane mint of the per-build store-signing bundle (App Store rail, host-independent
+    # builder lane). `business` names the owning business (bundle id is DERIVED server-side from it
+    # — never caller-supplied); `capabilities` is the ASC capabilityType list the client derived
+    # from app.json, validated against the known set before any Apple call.
+    business: str
+    capabilities: list[str] | None = None
+
+
 class _CreativeReserveBody(BaseModel):
     # Operator-only creative-credit reserve. The operator MUST own the business (boundary 1). action is
     # one of the creative audiences (creative.logo / creative.ugc / creative.static_ad); units scales
@@ -1576,6 +1598,44 @@ def _anthropic_provider_caller(payload: dict[str, Any]):
         # Settle the BILLED amount (realized provider cost + usage markup), matching the usage rail's
         # pricing contract, the local ai_gateway settle, and the server-side reserve estimate — NOT the
         # bare realized cost, which would silently drop the markup and under-charge every brokered call.
+        _realized, billed = ai_provider.billed_microusd_cost(
+            model, in_tok, out_tok, cache_read_tokens=cache_read, cache_write_tokens=cache_write
+        )
+        return raw, int(billed)
+
+    return _call
+
+
+def _deepseek_key_resolver(_scope: CapabilityScope) -> str:
+    """Resolve the SHARED DeepSeek key LOCALLY on the safebox (never returned to a caller)."""
+    from . import safebox
+
+    try:
+        return str(safebox.first_env_backed_value("DEEPSEEK_API_KEY") or "").strip()
+    except Exception:  # noqa: BLE001 — resolver returns empty; the broker fails closed on it
+        return ""
+
+
+def _deepseek_provider_caller(payload: dict[str, Any]):
+    """Anthropic-wire caller pointed at DeepSeek's anthropic-compatible Messages endpoint.
+
+    Mirrors ``_anthropic_provider_caller`` (same payload parse, same billed-cost settle from the
+    canonical pricing table — deepseek models price via their own entries) with the URL + key swap
+    the operator proxy lane already does (``safebox_provider_proxy``). Direct call, no Cloudflare
+    AIG hop — AIG is provider-configured for Anthropic only."""
+    from . import ai_provider
+
+    built_payload, model, estimated_input_tokens = ai_provider.anthropic_payload(payload or {})
+
+    def _call(scope: CapabilityScope, key: str):
+        raw = ai_provider.call_anthropic(
+            built_payload, key, url=ai_provider.DEEPSEEK_ANTHROPIC_MESSAGES_URL
+        )
+        usage = raw.get("usage") or {}
+        in_tok = int(usage.get("input_tokens") or estimated_input_tokens)
+        out_tok = int(usage.get("output_tokens") or 0)
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
         _realized, billed = ai_provider.billed_microusd_cost(
             model, in_tok, out_tok, cache_read_tokens=cache_read, cache_write_tokens=cache_write
         )
@@ -3231,6 +3291,113 @@ def build_safebox_app() -> FastAPI:
             "checked_at": receipt.get("checked_at"),
         }
 
+    @app.post("/v1/store/eas/build-credentials")
+    def store_eas_build_credentials(
+        request: Request,
+        body: _StoreEasBuildCredentialsBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Mint the per-build store-signing bundle — the host-independent builder lane (App Store
+        rail). The safebox performs the ASC provisioning SERVER-SIDE with the custodied .p8 (ensure
+        the business's DERIVED bundle id, sync capabilities via POST /v1/bundleIdCapabilities —
+        eas-cli's own sync does not persist under ASC-key auth — and (re)mint the App Store
+        provisioning profile bound to the reused team distribution cert). Only the ephemeral signing
+        material the eas-cli child needs egresses: expo_token, team p12 (base64) + password, the
+        pre-minted profile (base64), and identifiers. The .p8 NEVER leaves this host. No npm/expo
+        tooling executes here — Apple API calls + packaging only. Operator-plane only."""
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        business = _require_safe_slug(str(body.business or ""), detail="unsafe_business")
+        try:
+            from plugins.takyon import store_builder as _sb
+        except Exception as exc:  # pragma: no cover - deploy coherence
+            raise HTTPException(status_code=500, detail=f"store_builder_leaf_missing: {exc}") from exc
+        pem = str(
+            safebox.first_env_backed_value(
+                "TAKYON_APP_STORE_CONNECT_PRIVATE_KEY", "APP_STORE_CONNECT_PRIVATE_KEY"
+            )
+            or ""
+        ).strip()
+        key_id = str(safebox.first_env_backed_value("APP_STORE_CONNECT_KEY_ID") or "").strip()
+        issuer_id = str(safebox.first_env_backed_value("APP_STORE_CONNECT_ISSUER_ID") or "").strip()
+        team_id = str(safebox.first_env_backed_value("APPLE_TEAM_ID") or "").strip()
+        expo_token = str(
+            safebox.first_env_backed_value("TAKYON_EXPO_TOKEN", "EXPO_TOKEN") or ""
+        ).strip()
+        expo_owner = str(safebox.first_env_backed_value("EXPO_OWNER") or "coscale").strip() or "coscale"
+        dist_cert_id = str(safebox.first_env_backed_value("APP_STORE_DIST_CERT_ID") or "").strip()
+        dist_p12_b64 = str(safebox.first_env_backed_value("APP_STORE_DIST_P12_B64") or "").strip()
+        dist_p12_password = str(safebox.first_env_backed_value("APP_STORE_DIST_P12_PASSWORD") or "")
+        missing = [
+            name
+            for name, value in (
+                ("APP_STORE_CONNECT_PRIVATE_KEY", pem),
+                ("APP_STORE_CONNECT_KEY_ID", key_id),
+                ("APP_STORE_CONNECT_ISSUER_ID", issuer_id),
+                ("APPLE_TEAM_ID", team_id),
+                ("EXPO_TOKEN", expo_token),
+                ("APP_STORE_DIST_CERT_ID", dist_cert_id),
+                ("APP_STORE_DIST_P12_B64", dist_p12_b64),
+                ("APP_STORE_DIST_P12_PASSWORD", dist_p12_password),
+            )
+            if not value
+        ]
+        if missing:
+            # Fail-closed BEFORE any Apple call; the missing names are the operator's exact fix.
+            raise HTTPException(
+                status_code=404,
+                detail=f"eas_build_credentials_unconfigured:{','.join(missing)}",
+            )
+        # Capabilities are DATA validated against the known ASC set — never free-form strings.
+        known_capabilities = {capability for _, capability in _sb._CAPABILITY_MAP}
+        capabilities: list[str] = []
+        for raw_capability in list(body.capabilities or []):
+            capability = str(raw_capability or "").strip().upper()
+            if not capability:
+                continue
+            if capability not in known_capabilities:
+                raise HTTPException(status_code=400, detail=f"unknown_capability:{capability}")
+            capabilities.append(capability)
+        # The bundle id is DERIVED server-side from the business slug (the same hard
+        # business-isolation rail the builder enforces) — a caller can never provision/sign an
+        # identity it does not own.
+        bundle_id = _sb.expected_bundle_identifier(business)
+        creds = _sb.StoreBuilderCreds(
+            key_id=key_id,
+            issuer_id=issuer_id,
+            team_id=team_id,
+            private_key_pem=pem,
+            expo_token=expo_token,
+            expo_owner=expo_owner,
+            dist_cert_id=dist_cert_id,
+            dist_p12_path="",
+            dist_p12_password=dist_p12_password,
+        )
+        try:
+            bundle_resource = _sb._ensure_bundle_id(creds, bundle_id, f"takyon {business}")
+            _sb._ensure_capabilities(creds, bundle_resource, capabilities)
+            profile_bytes = _sb._ensure_store_profile(
+                creds,
+                bundle_resource_id=bundle_resource,
+                profile_name=f"takyon {business} appstore",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"asc_provisioning_failed: {str(exc)[:300]}"
+            ) from exc
+        return {
+            "business": business,
+            "bundle_identifier": bundle_id,
+            "team_id": team_id,
+            "expo_owner": expo_owner,
+            "expo_token": expo_token,
+            "dist_cert_id": dist_cert_id,
+            "dist_p12_b64": dist_p12_b64,
+            "dist_p12_password": dist_p12_password,
+            "profile_b64": base64.b64encode(profile_bytes).decode("ascii"),
+            "minted_at": int(time.time()),
+        }
+
     @app.post("/v1/gsc/verify")
     def gsc_verify(
         request: Request,
@@ -4288,6 +4455,21 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
+        # DeepSeek models ride the SAME anthropic wire (audience/action unchanged: the client
+        # brokers them as anthropic.messages) but need the key + upstream URL swap the operator
+        # proxy lane already does — without this, a deepseek-* model was sent to the REAL
+        # Anthropic API with the Anthropic key and failed provider_error on every call.
+        from . import ai_provider as _ai
+
+        if _ai._is_deepseek_model(_ai.anthropic_model(body.payload or {})):
+            return _broker_provider_route(
+                body,
+                audience=_ANTHROPIC_AUDIENCE,
+                provider="deepseek",
+                key_resolver=_deepseek_key_resolver,
+                caller_builder=_deepseek_provider_caller,
+                estimate_builder=_anthropic_estimate,
+            )
         return _broker_provider_route(
             body,
             audience=_ANTHROPIC_AUDIENCE,
@@ -4500,14 +4682,41 @@ def build_safebox_app() -> FastAPI:
                 metadata=body.metadata,
             )
         except safebox.InsufficientCreativeCredits as exc:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error": str(exc),
-                    "requested_credits": exc.requested_credits,
-                    "available_credits": exc.available_credits,
-                },
-            ) from exc
+            if not _operator_creative_gate_disabled():
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": str(exc),
+                        "requested_credits": exc.requested_credits,
+                        "available_credits": exc.available_credits,
+                    },
+                ) from exc
+            # Operator god-mode (TAKYON_OPERATOR_CREATIVE_GATE_DISABLED on the safebox host):
+            # never REFUSE an operator-plane creative action for insufficient credits. Grant exactly
+            # the shortfall as a ledgered, bypass-tagged top-up and retry the reserve once — the
+            # reservation/settle flow still runs and still records real cost metadata, so nothing is
+            # unmetered; only the refusal disappears. This route is unreachable from the subuser/app
+            # plane (_require_internal_token + _require_operator_client), so customers stay gated.
+            shortfall = max(1, int(exc.requested_credits or 0) - int(exc.available_credits or 0))
+            with _safebox_db_conn() as conn:
+                safebox._local_grant_credits(
+                    conn,
+                    scope.business_slug,
+                    shortfall,
+                    f"operator-creative-gate-bypass:{reservation_key}",
+                    metadata={
+                        "reason": "operator_creative_gate_disabled",
+                        "action": action,
+                        "audience": audience,
+                        "shortfall_credits": shortfall,
+                    },
+                )
+            reservation = ledger.reserve(
+                scope,
+                reservation_key=reservation_key,
+                units=units,
+                metadata=body.metadata,
+            )
 
         token = mint_capability(
             scope,
