@@ -188,7 +188,12 @@ def test_run_build_without_logs_url_omits_the_key():
 # ── operator creative-gate bypass flag (both halves parse identically) ────────────────────
 
 
-@pytest.mark.parametrize("raw,expected", [("1", True), ("true", True), ("YES", True), ("on", True), ("", False), ("0", False), ("off", False)])
+# ON BY DEFAULT (2026-07-09): unset/empty/1/true/on ⇒ True; only explicit 0/false/no/off ⇒ False.
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("1", True), ("true", True), ("YES", True), ("on", True), ("", True),
+     ("0", False), ("false", False), ("no", False), ("OFF", False)],
+)
 def test_operator_creative_gate_flag_parsing(monkeypatch, raw, expected):
     from plugins.takyon import core, safebox_app
 
@@ -198,6 +203,14 @@ def test_operator_creative_gate_flag_parsing(monkeypatch, raw, expected):
         monkeypatch.delenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", raising=False)
     assert core._operator_creative_gate_disabled() is expected
     assert safebox_app._operator_creative_gate_disabled() is expected
+
+
+def test_operator_creative_gate_default_on_when_unset(monkeypatch):
+    from plugins.takyon import core, safebox_app
+
+    monkeypatch.delenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", raising=False)
+    assert core._operator_creative_gate_disabled() is True
+    assert safebox_app._operator_creative_gate_disabled() is True
 
 
 # ── regression pin: the mobile_release audience must ride the safebox creative gate ───────
@@ -210,3 +223,44 @@ def test_mobile_release_audience_registered_on_both_halves():
 
     assert core._creative_credit_action_audience("mobile_release") == "creative.mobile_release"
     assert safebox_app._CREATIVE_AUDIENCE_CREDIT_ACTION.get("creative.mobile_release") == "mobile_release"
+
+
+# ── X launch-post dedupe across re-enqueued bootstraps ────────────────────────────────────
+
+
+def test_x_launch_post_deduped_on_bootstrap_when_receipt_exists(monkeypatch):
+    import json as _json
+    from plugins.takyon import core
+
+    monkeypatch.setattr(core, "_store", lambda: object())
+    monkeypatch.setattr(core, "_resolved_business_slug", lambda args, required=False: "acme")
+    monkeypatch.setattr(core, "_active_operator_task_kind", lambda: "ceo_bootstrap")
+    monkeypatch.setattr(
+        core, "_x_outreach_receipt_candidates",
+        lambda store, business: [{"post_id": "111", "post_url": "https://x.com/i/status/111", "receipt_rel": "metrics/receipts/outreach/a.json"}],
+    )
+    out = _json.loads(core._handle_live_business_x_publish_outreach({"business": "acme", "channel": "x", "provider": "x", "body": "hi"}))
+    assert out["success"] is True and out["deduped"] is True
+    assert out["post_id"] == "111"
+
+
+def test_x_launch_post_not_deduped_on_wake(monkeypatch):
+    import json as _json
+    from plugins.takyon import core
+
+    # A steady-state wake with an existing receipt must NOT be short-circuited by the bootstrap
+    # dedupe — it falls through to the normal path (which then fails on the stubbed store, proving
+    # the dedupe guard did not fire).
+    monkeypatch.setattr(core, "_store", lambda: object())
+    monkeypatch.setattr(core, "_resolved_business_slug", lambda args, required=False: "acme")
+    monkeypatch.setattr(core, "_active_operator_task_kind", lambda: "ceo_wake")
+    called = {"n": 0}
+
+    def _candidates(store, business):
+        called["n"] += 1
+        return [{"post_id": "111"}]
+
+    monkeypatch.setattr(core, "_x_outreach_receipt_candidates", _candidates)
+    out = _json.loads(core._handle_live_business_x_publish_outreach({"business": "acme", "channel": "x", "provider": "x", "body": "hi"}))
+    assert out.get("deduped") is not True
+    assert called["n"] == 0  # the dedupe branch was never entered on a wake

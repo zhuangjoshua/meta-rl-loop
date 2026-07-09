@@ -7919,10 +7919,26 @@ def _run_claude_agent_task_process(
         if data:
             stdout_chunks.append(data)
 
+    def _safe_iter_lines(stream):
+        # Close-safe line iterator. `for line in stream` raises `ValueError: I/O operation on
+        # closed file` if the finally-block below closes the stream while this DAEMON reader is
+        # still iterating — and that crash silences the keepalive ticks (`_notify_claude_worker_
+        # activity`), starving the wake watchdog into a false 600s idle-kill of a live build
+        # (observed 2026-07-08/09, killed 3 CEO bootstraps). readline() surfaces the same close as
+        # a caught ValueError/OSError so the reader ENDS cleanly instead of dying.
+        while True:
+            try:
+                raw = stream.readline()
+            except (ValueError, OSError):
+                return
+            if not raw:
+                return
+            yield raw
+
     def _read_stderr() -> None:
         if proc.stderr is None:
             return
-        for raw_line in proc.stderr:
+        for raw_line in _safe_iter_lines(proc.stderr):
             line = raw_line.rstrip("\r\n")
             if not line:
                 continue
@@ -7983,6 +7999,23 @@ def _run_claude_agent_task_process(
     )
     stdout_thread.start()
     stderr_thread.start()
+    # Independent keepalive heartbeat: tick the wake-activity sink every 30s while the subprocess
+    # runs. The wake watchdog false-kills a turn after 600s without activity, and a long docker
+    # build (10-20min) emits sparse stderr — the earlier attempt to tick on every stderr event
+    # still starved when the reader itself ended/crashed (the 600s false-kills of walkloop/test-2).
+    # This is decoupled from the reader ON PURPOSE. The subprocess has its own hard timeout on
+    # proc.wait below, so a genuine hang is still bounded — this only prevents the FALSE idle-kill.
+    _heartbeat_stop = threading.Event()
+    _heartbeat_ctx = contextvars.copy_context()
+
+    def _heartbeat() -> None:
+        while not _heartbeat_stop.wait(30.0):
+            _notify_claude_worker_activity("claude-worker build heartbeat")
+
+    heartbeat_thread = threading.Thread(
+        target=lambda: _heartbeat_ctx.run(_heartbeat), name="takyon-claude-heartbeat", daemon=True
+    )
+    heartbeat_thread.start()
     try:
         if proc.stdin is not None:
             proc.stdin.write(json.dumps(payload))
@@ -7992,6 +8025,8 @@ def _run_claude_agent_task_process(
         proc.kill()
         raise
     finally:
+        _heartbeat_stop.set()
+        heartbeat_thread.join(timeout=2.0)
         stdout_thread.join(timeout=2.0)
         stderr_thread.join(timeout=2.0)
         if proc.stdout is not None:
@@ -27887,6 +27922,31 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
     try:
         store = _store()
         business = _resolved_business_slug(args, required=True)
+        # Launch-post dedupe: a ceo_bootstrap turn publishes EXACTLY ONE launch X post. A
+        # re-enqueued bootstrap (retry after a crash, or a spill to the fallback worker) would
+        # otherwise post a SECOND launch tweet (walkloop double-post, 2026-07-09). If a successful X
+        # post receipt already exists for this business, the launch moment has passed — skip
+        # re-posting and return the existing post. Steady-state wakes (ceo_wake) and explicit chat
+        # posts carry no bootstrap marker, so they are unaffected and post freely.
+        if _active_operator_task_kind() == "ceo_bootstrap":
+            _existing_x = _x_outreach_receipt_candidates(store, business)
+            if _existing_x:
+                _top = _existing_x[0]
+                return tool_result(
+                    {
+                        "success": True,
+                        "action": "business_x_publish_outreach",
+                        "business": business,
+                        "deduped": True,
+                        "post_id": _top.get("post_id"),
+                        "post_url": _top.get("post_url"),
+                        "receipt_path": _top.get("receipt_rel"),
+                        "note": (
+                            "A launch X post already exists for this business; skipped re-posting on "
+                            "this bootstrap re-run (one launch post per business)."
+                        ),
+                    }
+                )
         body = _normalize_outreach_body(args.get("body") or args.get("content"))
         if not body:
             raise TakyonError("body is required")
@@ -28433,15 +28493,17 @@ def _assert_ad_set_budget_authorized(
 
 
 def _operator_creative_gate_disabled() -> bool:
-    """Operator god-mode creative-credit bypass (client half; the authoritative half lives in
-    ``safebox_app._operator_creative_gate_disabled`` on the safebox host). When set, the operator
-    plane's client-side credit refusals (balance pre-check, channel-budget check, local-ledger
-    insufficient) stop refusing: local shortfalls are auto-granted as ledgered bypass-tagged
-    top-ups, and remote refusal is handled by the safebox authority under the same flag. Metering
-    is unchanged — every action still reserves and settles with real cost metadata. Subusers are
-    untouched: this helper only runs inside operator-plane ``business_*`` tools."""
-    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED") or "").strip().lower() in {
-        "1", "true", "yes", "on",
+    """Operator god-mode creative-credit bypass — **ON BY DEFAULT** (operator ruling 2026-07-09;
+    client half — the authoritative half is ``safebox_app._operator_creative_gate_disabled``). The
+    operator plane's client-side credit refusals (balance pre-check, channel-budget check,
+    local-ledger insufficient) stop refusing; local shortfalls are auto-granted as ledgered
+    bypass-tagged top-ups (local-authority planes only), and remote refusal is handled by the
+    safebox authority under the same default. Metering is unchanged — every action still reserves
+    and settles with real cost metadata. Set ``TAKYON_OPERATOR_CREATIVE_GATE_DISABLED=0`` to restore
+    hard gating. Subusers are untouched: this helper only runs inside operator-plane ``business_*``
+    tools."""
+    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
     }
 
 

@@ -603,15 +603,15 @@ class OperatorBudgetExceeded(Exception):
 
 
 def _operator_creative_gate_disabled() -> bool:
-    """Operator god-mode creative-credit bypass (mirrors ``TAKYON_OPERATOR_USAGE_GATE_DISABLED``,
-    already live on prod for the usage rail). When the SAFEBOX host sets
-    ``TAKYON_OPERATOR_CREATIVE_GATE_DISABLED``, the creative gate never refuses an operator-plane
-    action for insufficient credits — the shortfall is auto-granted (ledgered + bypass-tagged) and
-    the reserve retried, so every action still reserves/settles with real cost metadata. The flag
-    only changes REFUSAL, never metering. Subusers stay gated: the creative routes require the
-    internal token + operator client, so the app/customer plane can never reach the bypass."""
-    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED") or "").strip().lower() in {
-        "1", "true", "yes", "on",
+    """Operator god-mode creative-credit bypass — **ON BY DEFAULT** (operator ruling 2026-07-09).
+    The creative gate never REFUSES an operator-plane action for insufficient credits: the shortfall
+    is auto-granted (ledgered + bypass-tagged) and the reserve retried, so every action still
+    reserves/settles with real cost metadata. Only REFUSAL changes, never metering. Set
+    ``TAKYON_OPERATOR_CREATIVE_GATE_DISABLED=0`` (or false/no/off) to restore hard gating. Subusers
+    stay gated regardless: the creative routes require the internal token + operator client, so the
+    app/customer plane can never reach the bypass."""
+    return str(os.getenv("TAKYON_OPERATOR_CREATIVE_GATE_DISABLED", "1")).strip().lower() not in {
+        "0", "false", "no", "off",
     }
 
 
