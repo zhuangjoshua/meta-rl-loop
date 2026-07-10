@@ -222,6 +222,7 @@ def test_safebox_deploy_uses_hash_locked_external_environment_before_restart():
     assert rebuild.index("-m pip check") < rebuild.index('mv -Tf "$current.next" "$current"')
     assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in unit
     assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in dev_unit
+    assert "Environment=PUBLIC_COMPANY_BASE_DOMAIN=dev.coscale.app" in dev_unit
 
 
 def test_production_safebox_deploy_defaults_to_exact_checkout_pause_preflight():
