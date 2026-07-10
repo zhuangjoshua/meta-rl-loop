@@ -721,7 +721,7 @@ expected_runtime = {
     'TAKYON_STRIPE_MODE': 'live',
 }
 wrong_runtime = [
-    f'{key}={env.get(key) or "<missing>"}'
+    f'{key}={env.get(key) or \"<missing>\"}'
     for key, expected in expected_runtime.items()
     if env.get(key) != expected
 ]
@@ -739,7 +739,7 @@ expected_models = {
     'CLAUDE_CODE_SUBAGENT_MODEL': 'deepseek-v4-pro',
 }
 wrong = [
-    f'{key}={env.get(key) or "<missing>"}'
+    f'{key}={env.get(key) or \"<missing>\"}'
     for key, expected in expected_models.items()
     if env.get(key) != expected
 ]
