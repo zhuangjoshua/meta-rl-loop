@@ -7675,6 +7675,42 @@ def _notify_claude_worker_activity(line: str) -> None:
         pass
 
 
+# Business-keyed worker-activity clock — the CONTEXT-FREE keepalive the wake watchdog reads.
+# The ContextVar sink above routes ticks to the right progress object, but a lost/unbound context
+# anywhere in the composition silently drops every tick, and the wake watchdog then false-kills a
+# HEALTHY run at exactly tool_start+limit while worker events stream (proofline0710 2026-07-09:
+# killed at start+603s with events flowing 75/min; sipstreak was the mobile flavor of the same).
+# The stderr reader always has `business` in scope, so it stamps this process-global dict directly
+# — no context to lose — and worker.py's inactivity loop takes min(idle, this clock).
+_CLAUDE_WORKER_BUSINESS_ACTIVITY: dict[str, float] = {}
+_CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK = threading.Lock()
+
+
+def _touch_claude_worker_business_activity(business: str) -> None:
+    slug = str(business or "").strip()
+    if not slug:
+        return
+    with _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
+        if len(_CLAUDE_WORKER_BUSINESS_ACTIVITY) > 512 and slug not in _CLAUDE_WORKER_BUSINESS_ACTIVITY:
+            _CLAUDE_WORKER_BUSINESS_ACTIVITY.clear()
+        _CLAUDE_WORKER_BUSINESS_ACTIVITY[slug] = time.monotonic()
+
+
+def claude_worker_seconds_since_activity(business: str) -> float:
+    """Seconds since THIS process last saw a Claude-worker stderr event for `business`.
+
+    Returns +inf when no worker has ever ticked for the business in this process, so callers can
+    min() it against other idle clocks without special-casing."""
+    slug = str(business or "").strip()
+    if not slug:
+        return float("inf")
+    with _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
+        stamp = _CLAUDE_WORKER_BUSINESS_ACTIVITY.get(slug)
+    if stamp is None:
+        return float("inf")
+    return max(0.0, time.monotonic() - stamp)
+
+
 def _emit_claude_worker_progress(line: str) -> None:
     """Push one concise human progress line into the bound worker-progress sink, if any.
 
@@ -7963,6 +7999,7 @@ def _run_claude_agent_task_process(
                 # events flowed 13-145/min (test-2, 2026-07-08, failed 2/2 then a recovery run
                 # published anyway). Tick on the raw event first; then emit the mapped line if any.
                 _notify_claude_worker_activity("claude-worker event")
+                _touch_claude_worker_business_activity(business)
                 # Surface the worker's current step/activity as live job/task progress so the long
                 # Claude-worker phase is no longer blank in the tui_gateway. Concise human lines only;
                 # raw per-tool ticks are filtered out by the mapper.
@@ -7975,6 +8012,7 @@ def _run_claude_agent_task_process(
                 continue
             stderr_lines.append(clean)
             _notify_claude_worker_activity(clean)
+            _touch_claude_worker_business_activity(business)
             _record_claude_agent_runtime_event(
                 business=business,
                 workspace_rel=workspace_rel,
@@ -7996,6 +8034,9 @@ def _run_claude_agent_task_process(
     stderr_thread = threading.Thread(
         target=lambda: _reader_ctx_err.run(_read_stderr), name="takyon-claude-stderr", daemon=True
     )
+    # Stamp the business clock at spawn so the wake watchdog sees the worker as alive during the
+    # quiet pre-stream stretch (docker pull / npm install) before the first stderr line arrives.
+    _touch_claude_worker_business_activity(business)
     stdout_thread.start()
     stderr_thread.start()
     # Independent keepalive heartbeat: tick the wake-activity sink every 30s while the subprocess
