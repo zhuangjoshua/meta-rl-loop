@@ -1322,6 +1322,17 @@ def _run_ceo_turn(
                             idle = min(idle, float(progress.seconds_since_activity()))
                         except Exception:
                             pass
+                    # Context-free third clock: the Claude-worker stderr reader stamps a
+                    # business-keyed timestamp directly in core (no ContextVar routing), so a lost
+                    # sink binding anywhere in the composition can no longer starve this watchdog
+                    # while worker events stream — that false-killed proofline0710 at exactly
+                    # start+603s with events flowing 75/min (sipstreak was the mobile flavor).
+                    try:
+                        from .core import claude_worker_seconds_since_activity
+
+                        idle = min(idle, float(claude_worker_seconds_since_activity(slug)))
+                    except Exception:
+                        pass
                     if idle >= limit:
                         timed_out = True
                         break
