@@ -65,6 +65,7 @@ def test_tracked_wrapper_stops_every_producer_and_proves_safebox_down():
     assert "http://10.116.0.2:8000/healthz" in wrapper
     assert "systemctl is-active --quiet takyon-dashboard.service" not in wrapper
     assert "for unit in takyon-dashboard.service takyon-worker.service" in wrapper
+    assert "export TAKYON_HOME=/opt/takyon/.takyon" in wrapper
 
 
 def test_operator_deploy_orders_cutover_before_prod_service_restart():

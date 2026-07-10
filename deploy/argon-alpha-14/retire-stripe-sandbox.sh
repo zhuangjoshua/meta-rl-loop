@@ -98,6 +98,7 @@ IFS= read -r migration_dsn <"$migration_file"
   || { echo 'root-only migration credential malformed' >&2; exit 1; }
 
 export PYTHONPATH="$TAKYON_REMOTE_RUNTIME"
+export TAKYON_HOME=/opt/takyon/.takyon
 export TAKYON_MIGRATION_DATABASE_URL="$migration_dsn"
 unset migration_dsn
 export TAKYON_ENV=prod
