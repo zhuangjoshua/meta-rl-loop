@@ -13995,6 +13995,140 @@ def _product_static_publish_source(source_root: Path) -> tuple[Path | None, str]
     return None, ""
 
 
+_STRIPE_CHECKOUT_BRANDING_SCHEMA = "takyon.stripe.checkout_branding.v1"
+_CHECKOUT_BRANDING_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _checkout_css_literal(source: str, token: str) -> str:
+    match = re.search(
+        rf"(?:^|[;{{])\s*--{re.escape(token)}\s*:\s*([^;}}]+)",
+        str(source or ""),
+        flags=re.MULTILINE,
+    )
+    return str(match.group(1) if match else "").strip()
+
+
+def _checkout_border_style(radius: str) -> str:
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)px", str(radius or "").strip())
+    if not match:
+        return ""
+    pixels = float(match.group(1))
+    if pixels <= 4:
+        return "rectangular"
+    if pixels >= 999:
+        return "pill"
+    return "rounded"
+
+
+def _compile_stripe_checkout_branding(
+    *,
+    business: str,
+    display_name: str,
+    source_root: Path,
+    public_url: str,
+    live_build_id: str,
+) -> dict[str, Any]:
+    """Compile one frozen Stripe presentation snapshot on the operator plane.
+
+    Checkout never asks the Safebox to inspect product source or derive presentation. The Safebox
+    receives this already-normalized map through its authority-only checkout claim and can only
+    forward an exact allowlist of non-economic Stripe parameters.
+    """
+    slug = _slugify(business)
+    build_id = str(live_build_id or "").strip()
+    name = re.sub(r"\s+", " ", str(display_name or "")).strip()[:100]
+    parsed_public = urllib.parse.urlsplit(str(public_url or "").strip())
+    expected_host = urllib.parse.urlsplit(_product_publish_target(slug)).hostname
+    try:
+        parsed_public_port = parsed_public.port
+    except ValueError:
+        return {}
+    if (
+        not build_id
+        or not name
+        or parsed_public.scheme != "https"
+        or str(parsed_public.hostname or "").lower() != str(expected_host or "").lower()
+        or parsed_public.username
+        or parsed_public.password
+        or parsed_public_port not in {None, 443}
+    ):
+        return {}
+
+    params: dict[str, str] = {"branding_settings[display_name]": name}
+    published_root, _label = _product_static_publish_source(source_root)
+    if published_root is None and (source_root / "index.html").is_file():
+        published_root = source_root.resolve()
+    tokens_path = source_root / "src" / "tokens.css"
+    try:
+        token_source = (
+            tokens_path.read_text(encoding="utf-8")
+            if tokens_path.is_file() and tokens_path.stat().st_size <= 256 * 1024
+            else ""
+        )
+    except OSError:
+        token_source = ""
+    if not token_source and published_root is not None:
+        css_parts: list[str] = []
+        total_bytes = 0
+        for css_path in sorted((published_root / "assets").glob("*.css")):
+            try:
+                size = css_path.stat().st_size
+                if size <= 0 or total_bytes + size > 1024 * 1024:
+                    continue
+                css_parts.append(css_path.read_text(encoding="utf-8"))
+                total_bytes += size
+            except OSError:
+                continue
+        token_source = "\n".join(css_parts)
+    for token, stripe_key in (
+        ("tk-background", "branding_settings[background_color]"),
+        ("tk-primary", "branding_settings[button_color]"),
+    ):
+        value = _checkout_css_literal(token_source, token)
+        if _CHECKOUT_BRANDING_COLOR_RE.fullmatch(value):
+            params[stripe_key] = value.lower()
+    border_style = _checkout_border_style(_checkout_css_literal(token_source, "tk-radius"))
+    if border_style:
+        params["branding_settings[border_style]"] = border_style
+
+    published_logo = published_root / "brand-logo.png" if published_root is not None else None
+    logo_is_valid = False
+    if published_logo is not None:
+        try:
+            logo_is_valid = (
+                published_logo.is_file()
+                and 8 <= published_logo.stat().st_size <= 512 * 1024
+                and published_logo.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+            )
+        except OSError:
+            logo_is_valid = False
+    if logo_is_valid:
+        logo_url = urllib.parse.urljoin(
+            str(public_url).strip().rstrip("/") + "/", "brand-logo.png"
+        )
+        params.update(
+            {
+                "branding_settings[logo][type]": "url",
+                "branding_settings[logo][url]": logo_url,
+                "line_items[0][price_data][product_data][images][0]": logo_url,
+            }
+        )
+
+    canonical = _json_dumps(
+        {
+            "schema": _STRIPE_CHECKOUT_BRANDING_SCHEMA,
+            "source_build_id": build_id,
+            "params": params,
+        }
+    )
+    return {
+        "schema": _STRIPE_CHECKOUT_BRANDING_SCHEMA,
+        "source_build_id": build_id,
+        "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "params": params,
+    }
+
+
 def _product_service_name(slug: str) -> str:
     return f"takyon-product-{_slugify(slug)}"
 
@@ -15323,6 +15457,7 @@ class TakyonStore:
               business_slug TEXT NOT NULL,
               source_revision INTEGER NOT NULL,
               artifact_prefix TEXT NOT NULL,
+              checkout_branding_params_json TEXT NOT NULL DEFAULT '{}',
               status TEXT NOT NULL DEFAULT 'built',
               created_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
@@ -15438,6 +15573,8 @@ class TakyonStore:
               checkout_url TEXT,
               customer_email TEXT,
               metadata_json TEXT,
+              checkout_branding_build_id TEXT,
+              checkout_branding_params_json TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL,
               completed_at TEXT,
@@ -15603,6 +15740,26 @@ class TakyonStore:
         for column, ddl in surface_additions.items():
             if column not in surface_columns:
                 conn.execute(f"ALTER TABLE app_surface_contracts ADD COLUMN {column} {ddl}")
+        product_build_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(product_builds)").fetchall()
+        }
+        if "checkout_branding_params_json" not in product_build_columns:
+            conn.execute(
+                "ALTER TABLE product_builds ADD COLUMN "
+                "checkout_branding_params_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        checkout_intent_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(app_checkout_intents)").fetchall()
+        }
+        if "checkout_branding_build_id" not in checkout_intent_columns:
+            conn.execute(
+                "ALTER TABLE app_checkout_intents ADD COLUMN checkout_branding_build_id TEXT"
+            )
+        if "checkout_branding_params_json" not in checkout_intent_columns:
+            conn.execute(
+                "ALTER TABLE app_checkout_intents ADD COLUMN checkout_branding_params_json TEXT"
+            )
         for row in conn.execute("SELECT business_slug, publish_target FROM app_surface_contracts").fetchall():
             slug = str(row["business_slug"] or "")
             if slug and not str(row["publish_target"] or "").strip():
@@ -20195,15 +20352,43 @@ class TakyonStore:
                     slug,
                 ),
             )
+            checkout_branding: dict[str, Any] = {}
+            if (
+                publish_status == "published"
+                and effective_publish_status == "published"
+                and effective_live_build_id
+                and effective_live_build_id == live_build_id
+            ):
+                source_rel = publish_source_path or str(existing.get("source_path") or "product/site")
+                source_root = self._business_root(slug) / _safe_relpath(
+                    source_rel, field="publish_source_path"
+                )
+                business_row = self._business(conn, slug) or {}
+                checkout_branding = _compile_stripe_checkout_branding(
+                    business=slug,
+                    display_name=str(business_row.get("name") or slug),
+                    source_root=source_root,
+                    public_url=effective_public_url,
+                    live_build_id=effective_live_build_id,
+                )
             if effective_live_build_id:
                 conn.execute(
                     """
-                    INSERT INTO product_builds (build_id, business_slug, source_revision, artifact_prefix, status, created_at)
-                    VALUES (?, ?, ?, ?, 'built', ?)
+                    INSERT INTO product_builds (
+                      build_id, business_slug, source_revision, artifact_prefix,
+                      checkout_branding_params_json, status, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'built', ?)
                     ON CONFLICT(build_id) DO UPDATE SET
                       business_slug = excluded.business_slug,
                       source_revision = excluded.source_revision,
                       artifact_prefix = excluded.artifact_prefix,
+                      checkout_branding_params_json = CASE
+                        WHEN product_builds.checkout_branding_params_json IS NULL
+                          OR trim(product_builds.checkout_branding_params_json) IN ('', '{}')
+                        THEN excluded.checkout_branding_params_json
+                        ELSE product_builds.checkout_branding_params_json
+                      END,
                       status = excluded.status
                     """,
                     (
@@ -20211,6 +20396,7 @@ class TakyonStore:
                         slug,
                         max(0, int(source_revision)),
                         artifact_prefix,
+                        _json_dumps(checkout_branding),
                         _now(),
                     ),
                 )
@@ -20228,6 +20414,7 @@ class TakyonStore:
                     "effective_live_build_id": effective_live_build_id,
                     "effective_live_probe_status": effective_live_probe_status,
                     "preserved_live_state": preserve_live_state,
+                    "checkout_branding_fingerprint": checkout_branding.get("fingerprint"),
                 },
             )
             return {
@@ -20242,6 +20429,7 @@ class TakyonStore:
                 "blocker": blocker,
                 "attempted_publish_status": publish_status,
                 "preserved_live_state": preserve_live_state,
+                "checkout_branding_fingerprint": checkout_branding.get("fingerprint"),
             }
 
         if action == "business.money_shape.set":

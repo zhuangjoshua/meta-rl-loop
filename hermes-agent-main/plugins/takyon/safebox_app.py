@@ -316,6 +316,18 @@ def _require_takyon_app_stripe_params(path: str, params: dict[str, Any]) -> str:
     if path == "checkout/sessions":
         if not _metadata_value(params, "plan_key") or not _metadata_value(params, "checkout_intent_id"):
             raise HTTPException(status_code=403, detail="stripe_checkout_scope_required")
+        if any(str(key).startswith("line_items[") for key in params):
+            raise HTTPException(status_code=403, detail="stripe_checkout_pricing_client_forbidden")
+        forbidden_prefixes = (
+            "branding_settings[",
+            "discounts[",
+            "automatic_tax[",
+            "subscription_data[billing_mode]",
+        )
+        if any(str(key).startswith(forbidden_prefixes) for key in params) or any(
+            key in params for key in ("allow_promotion_codes", "subscription_data[trial_period_days]")
+        ):
+            raise HTTPException(status_code=403, detail="stripe_checkout_presentation_client_forbidden")
         for url_key in ("success_url", "cancel_url"):
             _require_app_checkout_redirect_url(str(params.get(url_key) or ""), business=business)
     return business
@@ -392,6 +404,78 @@ def _plan_stripe_metadata(plan: dict[str, Any], *, account_id: str) -> dict[str,
         "included_action_quota": str(int(plan.get("included_action_quota") or 0)),
         "takyon_stripe_account_id": account_id,
     }
+
+
+_CHECKOUT_BRANDING_SCHEMA = "takyon.stripe.checkout_branding.v1"
+_CHECKOUT_BRANDING_ALLOWED_KEYS = frozenset(
+    {
+        "branding_settings[background_color]",
+        "branding_settings[border_style]",
+        "branding_settings[button_color]",
+        "branding_settings[display_name]",
+        "branding_settings[logo][type]",
+        "branding_settings[logo][url]",
+        "line_items[0][price_data][product_data][images][0]",
+    }
+)
+_CHECKOUT_BRANDING_COLOR_RE = re.compile(r"^#[0-9a-f]{6}$")
+
+
+def _allowlisted_checkout_branding_params(value: Any, *, business: str) -> dict[str, str]:
+    """Validate and forward a precompiled operator-owned snapshot; never derive branding here."""
+    if not isinstance(value, dict) or value.get("schema") != _CHECKOUT_BRANDING_SCHEMA:
+        return {}
+    if not str(value.get("source_build_id") or "").strip():
+        return {}
+    params = value.get("params")
+    if not isinstance(params, dict) or not set(map(str, params)).issubset(
+        _CHECKOUT_BRANDING_ALLOWED_KEYS
+    ):
+        return {}
+    normalized = {str(key): str(raw) for key, raw in params.items() if isinstance(raw, str)}
+    if len(normalized) != len(params):
+        return {}
+
+    display_name = normalized.get("branding_settings[display_name]", "")
+    if not display_name or len(display_name) > 100 or any(ord(ch) < 32 for ch in display_name):
+        return {}
+    for key in ("branding_settings[background_color]", "branding_settings[button_color]"):
+        if key in normalized and not _CHECKOUT_BRANDING_COLOR_RE.fullmatch(normalized[key]):
+            return {}
+    if normalized.get("branding_settings[border_style]") not in {
+        None,
+        "pill",
+        "rectangular",
+        "rounded",
+    }:
+        return {}
+
+    logo_type = normalized.get("branding_settings[logo][type]")
+    logo_url = normalized.get("branding_settings[logo][url]")
+    product_image = normalized.get(
+        "line_items[0][price_data][product_data][images][0]"
+    )
+    if any(item is not None for item in (logo_type, logo_url, product_image)):
+        if logo_type != "url" or not logo_url or product_image != logo_url:
+            return {}
+        parsed = urllib.parse.urlsplit(logo_url)
+        try:
+            parsed_port = parsed.port
+        except ValueError:
+            return {}
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed_port not in {None, 443}
+            or str(parsed.hostname or "").lower()
+            != f"{_require_safe_slug(business)}.{_company_base_domain()}"
+            or parsed.path != "/brand-logo.png"
+            or parsed.query
+            or parsed.fragment
+        ):
+            return {}
+    return normalized
 
 
 def _expected_stripe_livemode(plan: dict[str, Any]) -> bool:
@@ -647,7 +731,18 @@ def _claim_app_checkout_intent_authority(params: dict[str, Any]) -> dict[str, An
         raise HTTPException(status_code=403, detail="stripe_checkout_scope_required")
     if str(params.get("mode") or "subscription").strip() != "subscription":
         raise HTTPException(status_code=403, detail="stripe_checkout_mode_not_allowed")
-    if any(str(key).startswith("line_items[") for key in params):
+    if any(
+        str(key).startswith(
+            (
+                "line_items[",
+                "branding_settings[",
+                "discounts[",
+                "automatic_tax[",
+                "subscription_data[billing_mode]",
+            )
+        )
+        for key in params
+    ) or any(key in params for key in ("allow_promotion_codes", "subscription_data[trial_period_days]")):
         raise HTTPException(status_code=403, detail="stripe_checkout_pricing_client_forbidden")
     submitted_email = str(params.get("customer_email") or "").strip().lower()
     submitted_reference = str(params.get("client_reference_id") or "").strip()
@@ -696,6 +791,7 @@ def _claim_app_checkout_intent_authority(params: dict[str, Any]) -> dict[str, An
     plan_metadata = _db_row_value(row, 10, "plan_metadata")
     plan_metadata = plan_metadata if isinstance(plan_metadata, dict) else {}
     business_mode = str(_db_row_value(row, 11, "business_mode") or "").strip().lower()
+    checkout_branding = _db_row_value(row, 12, "checkout_branding")
     if price_cents <= 0 or currency != "usd" or interval != "month":
         raise HTTPException(status_code=409, detail="stripe_checkout_plan_not_billable")
     plan = {
@@ -714,7 +810,15 @@ def _claim_app_checkout_intent_authority(params: dict[str, Any]) -> dict[str, An
     if _expected_stripe_livemode(plan) is not expected_livemode:
         raise HTTPException(status_code=409, detail="stripe_mode_mismatch")
     binding = _plan_stripe_metadata(plan, account_id=account_id)
-    authoritative: dict[str, Any] = {
+    authoritative: dict[str, Any] = _allowlisted_checkout_branding_params(
+        checkout_branding,
+        business=business,
+    )
+    if any(str(key).startswith("branding_settings[") for key in authoritative):
+        # Checkout branding requires the Clover API version. Preserve the pre-Clover
+        # subscription behavior explicitly instead of accepting its new flexible default.
+        authoritative["subscription_data[billing_mode][type]"] = "classic"
+    authoritative.update({
         "mode": "subscription",
         "line_items[0][quantity]": 1,
         "line_items[0][price_data][currency]": currency,
@@ -729,7 +833,7 @@ def _claim_app_checkout_intent_authority(params: dict[str, Any]) -> dict[str, An
         "metadata[checkout_intent_id]": intent_id,
         "metadata[source]": "takyon_app",
         "subscription_data[metadata][checkout_intent_id]": intent_id,
-    }
+    })
     for key, value in binding.items():
         authoritative[f"line_items[0][price_data][product_data][metadata][{key}]"] = value
         authoritative[f"metadata[{key}]"] = value

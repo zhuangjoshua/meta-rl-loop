@@ -45,7 +45,28 @@ def _plan_dict(*, price_id: str = "price_123", product_id: str = "prod_123") -> 
     }
 
 
-def _checkout_row():
+def _checkout_branding(*, overrides: dict | None = None) -> dict:
+    params = {
+        "branding_settings[display_name]": "Climb Log",
+        "branding_settings[background_color]": "#fafafa",
+        "branding_settings[button_color]": "#5b21b6",
+        "branding_settings[border_style]": "rounded",
+        "branding_settings[logo][type]": "url",
+        "branding_settings[logo][url]": "https://climblog.coscale.app/brand-logo.png",
+        "line_items[0][price_data][product_data][images][0]": (
+            "https://climblog.coscale.app/brand-logo.png"
+        ),
+    }
+    params.update(overrides or {})
+    return {
+        "schema": "takyon.stripe.checkout_branding.v1",
+        "source_build_id": "build-brand-v1",
+        "fingerprint": "a" * 64,
+        "params": params,
+    }
+
+
+def _checkout_row(*, branding: dict | None = None):
     plan = _plan_dict()
     return (
         "00000000-0000-0000-0000-000000000123",
@@ -60,6 +81,7 @@ def _checkout_row():
         plan["included_action_quota"],
         plan["metadata"],
         plan["business_mode"],
+        {} if branding is None else branding,
     )
 
 
@@ -1295,6 +1317,36 @@ def test_generic_stripe_checkout_rejects_all_client_pricing(client, monkeypatch)
     assert resp.json()["detail"] == "stripe_checkout_pricing_client_forbidden"
 
 
+def test_generic_stripe_checkout_rejects_client_branding(client, monkeypatch):
+    request = _checkout_request()
+    request["params"]["branding_settings[display_name]"] = "Impersonated Brand"
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda *args, **kwargs: pytest.fail("client branding reached Stripe"),
+    )
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=request)
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "stripe_checkout_presentation_client_forbidden"
+
+
+def test_generic_stripe_checkout_rejects_client_billing_mode(client, monkeypatch):
+    request = _checkout_request()
+    request["params"]["subscription_data[billing_mode][type]"] = "flexible"
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda *args, **kwargs: pytest.fail("client billing mode reached Stripe"),
+    )
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=request)
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "stripe_checkout_presentation_client_forbidden"
+
+
 def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypatch):
     @contextlib.contextmanager
     def _fake_conn():
@@ -1328,6 +1380,7 @@ def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypa
     assert authoritative["line_items[0][price_data][recurring][interval]"] == "month"
     assert authoritative["client_reference_id"] == "client_ref_123"
     assert "line_items[0][price]" not in authoritative
+    assert "subscription_data[billing_mode][type]" not in authoritative
     for key, value in _catalog_metadata().items():
         assert authoritative[f"metadata[{key}]"] == value
         assert authoritative[f"subscription_data[metadata][{key}]"] == value
@@ -1338,6 +1391,83 @@ def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypa
     assert captured["idempotency_key"] == (
         "takyon-app-checkout-00000000-0000-0000-0000-000000000123"
     )
+
+
+def test_generic_stripe_checkout_forwards_precompiled_business_branding(client, monkeypatch):
+    branding = _checkout_branding()
+
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutConn(_checkout_row(branding=branding))
+
+    captured: dict[str, object] = {}
+
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
+        if path == "account":
+            return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
+        if path == "checkout/sessions":
+            captured["params"] = dict(params or {})
+            return _checkout_session_object(params or {})
+        pytest.fail(f"unexpected stripe path: {path}")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert resp.status_code == 200, resp.text
+    authoritative = captured["params"]
+    assert isinstance(authoritative, dict)
+    for key, value in branding["params"].items():
+        assert authoritative[key] == value
+    assert authoritative["subscription_data[billing_mode][type]"] == "classic"
+    assert authoritative["line_items[0][price_data][unit_amount]"] == 900
+
+
+@pytest.mark.parametrize(
+    "branding",
+    [
+        _checkout_branding(overrides={"line_items[0][price_data][unit_amount]": "1"}),
+        _checkout_branding(
+            overrides={
+                "branding_settings[logo][url]": "https://evil.example/brand-logo.png",
+                "line_items[0][price_data][product_data][images][0]": (
+                    "https://evil.example/brand-logo.png"
+                ),
+            }
+        ),
+        _checkout_branding(overrides={"branding_settings[button_color]": "red"}),
+    ],
+)
+def test_generic_stripe_checkout_drops_invalid_stored_branding(
+    client, monkeypatch, branding
+):
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutConn(_checkout_row(branding=branding))
+
+    captured: dict[str, object] = {}
+
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
+        if path == "account":
+            return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
+        if path == "checkout/sessions":
+            captured["params"] = dict(params or {})
+            return _checkout_session_object(params or {})
+        pytest.fail(f"unexpected stripe path: {path}")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert resp.status_code == 200, resp.text
+    authoritative = captured["params"]
+    assert isinstance(authoritative, dict)
+    assert not any(str(key).startswith("branding_settings[") for key in authoritative)
+    assert "line_items[0][price_data][product_data][images][0]" not in authoritative
+    assert "subscription_data[billing_mode][type]" not in authoritative
+    assert authoritative["line_items[0][price_data][unit_amount]"] == 900
 
 
 def test_generic_stripe_checkout_releases_claim_after_transport_error(client, monkeypatch):

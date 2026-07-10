@@ -184,6 +184,38 @@ def test_request_sets_safebox_constructed_idempotency_header(monkeypatch):
     assert captured["idempotency"] == "takyon-app-checkout-intent-123"
 
 
+def test_branded_checkout_pins_minimum_stripe_api_version(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_secret")
+    versions: list[str | None] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"id":"cs_test_branded"}'
+
+    def _fake_urlopen(request, timeout=None):
+        headers = {str(key).lower(): value for key, value in request.header_items()}
+        versions.append(headers.get("stripe-version"))
+        return _Resp()
+
+    monkeypatch.setattr(stripe_util.urllib.request, "urlopen", _fake_urlopen)
+    stripe_request(
+        "checkout/sessions",
+        {
+            "mode": "subscription",
+            "branding_settings[display_name]": "Climb Log",
+        },
+    )
+    stripe_request("checkout/sessions", {"mode": "subscription"})
+
+    assert versions == ["2025-09-30.clover", None]
+
+
 @pytest.mark.parametrize("key", ["sk_test_secret", "rk_test_secret"])
 def test_request_test_mode_accepts_test_secret_and_restricted_keys(monkeypatch, key):
     monkeypatch.setenv("TAKYON_STRIPE_MODE", "test")

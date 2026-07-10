@@ -37,6 +37,7 @@ class StripeError(Exception):
 
 _VERIFIED_LIVE_ACCOUNTS: set[tuple[str, str]] = set()
 _VERIFIED_LIVE_ACCOUNTS_LOCK = threading.Lock()
+_CHECKOUT_BRANDING_API_VERSION = "2025-09-30.clover"
 
 
 def _stripe_mode() -> str:
@@ -101,6 +102,7 @@ def _stripe_http_request(
     method: str,
     key: str,
     idempotency_key: str | None = None,
+    api_version: str | None = None,
 ) -> dict[str, Any]:
     verb = str(method or "POST").strip().upper() or "POST"
     encoded = urllib.parse.urlencode(
@@ -122,6 +124,11 @@ def _stripe_http_request(
         if not normalized_idempotency_key or len(normalized_idempotency_key) > 255:
             raise StripeError("invalid Stripe idempotency key")
         headers["Idempotency-Key"] = normalized_idempotency_key
+    if api_version is not None:
+        normalized_api_version = str(api_version).strip()
+        if not normalized_api_version:
+            raise StripeError("invalid Stripe API version")
+        headers["Stripe-Version"] = normalized_api_version
     request = urllib.request.Request(
         request_url,
         data=data,
@@ -192,6 +199,12 @@ def stripe_request(
         method=method,
         key=key,
         idempotency_key=idempotency_key,
+        api_version=(
+            _CHECKOUT_BRANDING_API_VERSION
+            if str(path or "").strip().lstrip("/") == "checkout/sessions"
+            and any(str(name).startswith("branding_settings[") for name in params)
+            else None
+        ),
     )
 
 

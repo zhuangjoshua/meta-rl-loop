@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -151,6 +152,125 @@ def test_live_checkout_claim_requires_matching_durable_cutover_target(pg_conn):
         assert claimed[0] == intent
     finally:
         pg_conn.execute("reset session authorization")
+
+
+def test_checkout_claim_freezes_branding_build_across_retry(pg_conn):
+    _owner, slug, app_user, intent = _seed_business(pg_conn)
+    first = {
+        "schema": "takyon.stripe.checkout_branding.v1",
+        "source_build_id": "build-brand-one",
+        "params": {"branding_settings[display_name]": "Brand One"},
+    }
+    second = {
+        "schema": "takyon.stripe.checkout_branding.v1",
+        "source_build_id": "build-brand-two",
+        "params": {"branding_settings[display_name]": "Brand Two"},
+    }
+    for build_id, snapshot in (
+        ("build-brand-one", first),
+        ("build-brand-two", second),
+    ):
+        pg_conn.execute(
+            "insert into product_builds "
+            "(build_id, business_slug, source_revision, artifact_prefix, "
+            "checkout_branding_params_json, status, created_at) "
+            "values (%s, %s, 1, %s, %s, 'built', now())",
+            (build_id, slug, f"products/{slug}/{build_id}", json.dumps(snapshot)),
+        )
+    pg_conn.execute(
+        "insert into app_surface_contracts "
+        "(business_slug, status, source_path, publish_target, publish_policy, mode_behavior, "
+        "done_gate, public_url, publish_status, live_build_id, created_at, updated_at) "
+        "values (%s, 'active', 'product/site', %s, 'publish_after_verify', "
+        "'live_only', 'published', %s, 'published', 'build-brand-one', now()::text, now()::text)",
+        (slug, f"https://{slug}.coscale.app/", f"https://{slug}.coscale.app/"),
+    )
+    # The live pointer is canonical even if this derived status field is stale.
+    pg_conn.execute(
+        "update app_surface_contracts set publish_status = 'blocked' where business_slug = %s",
+        (slug,),
+    )
+
+    pg_conn.execute("set session authorization takyon_safebox_authority")
+    try:
+        claimed = pg_conn.execute(
+            "select * from takyon_safebox_claim_app_checkout_intent("
+            "%s, %s, 'monthly', '', '', null)",
+            (intent, slug),
+        ).fetchone()
+    finally:
+        pg_conn.execute("reset session authorization")
+    assert claimed[12] == first
+
+    mutated_first = {
+        **first,
+        "params": {"branding_settings[display_name]": "Mutated Brand One"},
+    }
+    pg_conn.execute(
+        "update product_builds set checkout_branding_params_json = %s "
+        "where business_slug = %s and build_id = 'build-brand-one'",
+        (json.dumps(mutated_first), slug),
+    )
+
+    pg_conn.execute(
+        "update app_surface_contracts set live_build_id = 'build-brand-two' "
+        "where business_slug = %s",
+        (slug,),
+    )
+    pg_conn.execute("set session authorization takyon_safebox_authority")
+    try:
+        retried = pg_conn.execute(
+            "select * from takyon_safebox_claim_app_checkout_intent("
+            "%s, %s, 'monthly', '', '', null)",
+            (intent, slug),
+        ).fetchone()
+    finally:
+        pg_conn.execute("reset session authorization")
+    assert retried[12] == first
+    assert pg_conn.execute(
+        "select checkout_branding_build_id, checkout_branding_params_json "
+        "from app_checkout_intents where id = %s",
+        (intent,),
+    ).fetchone() == ("build-brand-one", json.dumps(first))
+
+    second_intent = pg_conn.execute(
+        "insert into app_checkout_intents (business_slug, app_user_id, plan_key, "
+        "client_reference_id, customer_email) values (%s, %s, 'monthly', %s, %s) returning id",
+        (slug, app_user, uuid.uuid4().hex, "customer@example.com"),
+    ).fetchone()[0]
+    pg_conn.execute("set session authorization takyon_safebox_authority")
+    try:
+        newly_claimed = pg_conn.execute(
+            "select * from takyon_safebox_claim_app_checkout_intent("
+            "%s, %s, 'monthly', '', '', null)",
+            (second_intent, slug),
+        ).fetchone()
+    finally:
+        pg_conn.execute("reset session authorization")
+    assert newly_claimed[12] == second
+
+    # Replaying 0081 must not mark a never-claimed post-cutover intent as legacy-unbranded.
+    unclaimed_intent = pg_conn.execute(
+        "insert into app_checkout_intents (business_slug, app_user_id, plan_key, "
+        "client_reference_id, customer_email) values (%s, %s, 'monthly', %s, %s) returning id",
+        (slug, app_user, uuid.uuid4().hex, "customer@example.com"),
+    ).fetchone()[0]
+    from plugins.takyon.db.runner import MIGRATIONS_DIR, run_migrations
+
+    # Replaying 0076 by itself must restore the extended function before its transaction commits.
+    pg_conn.execute((MIGRATIONS_DIR / "0076_stripe_live_cutover.sql").read_text())
+    assert pg_conn.execute(
+        "select checkout_branding_build_id, checkout_branding_params_json "
+        "from app_checkout_intents where id = %s",
+        (unclaimed_intent,),
+    ).fetchone() == (None, None)
+
+    run_migrations(pg_conn)
+    assert pg_conn.execute(
+        "select checkout_branding_build_id, checkout_branding_params_json "
+        "from app_checkout_intents where id = %s",
+        (unclaimed_intent,),
+    ).fetchone() == (None, None)
 
 
 def test_provider_scope_binding_replay_preserves_reapproved_connection(pg_conn):

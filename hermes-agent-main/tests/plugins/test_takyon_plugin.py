@@ -1014,6 +1014,96 @@ def test_publish_result_preserves_existing_live_state_on_blocked_republish(tmp_p
     assert surface["metadata"]["takyon_publish_last_attempt"]["status"] == "blocked"
 
 
+def test_published_build_compiles_frozen_stripe_checkout_branding(
+    tmp_path, monkeypatch, pg_store_dsn
+):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path, database_url=pg_store_dsn)
+    publish_target = "https://latexflow.coscale.app/"
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "business.upsert",
+                "business": "latexflow",
+                "name": "LaTeX Flow",
+                "budget": {"amount": 25},
+            }
+        ],
+        "init-checkout-branding",
+    )
+    _commit(
+        store,
+        "business:latexflow",
+        [
+            {
+                "action": "app.surface.upsert",
+                "business": "latexflow",
+                "status": "active",
+                "source_path": "product/site",
+                "routes": ["/"],
+                "publish_target": publish_target,
+            },
+        ],
+        "surface-checkout-branding",
+    )
+    monkeypatch.setattr(store, "_sync_business_workspace_cache", lambda *args, **kwargs: None)
+    site = tmp_path / "businesses" / "latexflow" / "product" / "site"
+    (site / "src").mkdir(parents=True, exist_ok=True)
+    (site / "dist").mkdir(parents=True, exist_ok=True)
+    (site / "src" / "tokens.css").write_text(
+        ":root { --tk-primary: #5B21B6; --tk-background: #FAFAFA; --tk-radius: 18px; }\n",
+        encoding="utf-8",
+    )
+    (site / "dist" / "index.html").write_text("<h1>LaTeX Flow</h1>\n", encoding="utf-8")
+    (site / "dist" / "brand-logo.png").write_bytes(b"\x89PNG\r\n\x1a\nlogo")
+    publish_operation = {
+        "action": "app.surface.publish_result",
+        "business": "latexflow",
+        "publish_status": "published",
+        "publish_target": publish_target,
+        "public_url": publish_target,
+        "published_at": "2026-07-10T12:00:00+00:00",
+        "live_build_id": "build-brand-v1",
+        "receipt_path": "metrics/receipts/product-surface/brand.json",
+        "publish_source_path": "product/site",
+        "artifact_prefix": "products/latexflow/build-brand-v1",
+        "blocker": "",
+    }
+    _commit(store, "business:latexflow", [publish_operation], "publish-checkout-branding")
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT checkout_branding_params_json FROM product_builds WHERE build_id = ?",
+            ("build-brand-v1",),
+        ).fetchone()
+    snapshot = json.loads(str(row["checkout_branding_params_json"]))
+    params = snapshot["params"]
+    assert snapshot["source_build_id"] == "build-brand-v1"
+    assert params["branding_settings[display_name]"] == "LaTeX Flow"
+    assert params["branding_settings[button_color]"] == "#5b21b6"
+    assert params["branding_settings[background_color]"] == "#fafafa"
+    assert params["branding_settings[border_style]"] == "rounded"
+    assert params["branding_settings[logo][url]"] == (
+        "https://latexflow.coscale.app/brand-logo.png"
+    )
+    assert params["line_items[0][price_data][product_data][images][0]"] == params[
+        "branding_settings[logo][url]"
+    ]
+
+    original_fingerprint = snapshot["fingerprint"]
+    (site / "src" / "tokens.css").write_text(
+        ":root { --tk-primary: #000000; --tk-background: #FFFFFF; --tk-radius: 9999px; }\n",
+        encoding="utf-8",
+    )
+    _commit(store, "business:latexflow", [publish_operation], "replay-build-branding")
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT checkout_branding_params_json FROM product_builds WHERE build_id = ?",
+            ("build-brand-v1",),
+        ).fetchone()
+    assert json.loads(str(row["checkout_branding_params_json"]))["fingerprint"] == original_fingerprint
 def test_product_surface_reads_live_pointer_over_stale_publish_status(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "published-sites"))

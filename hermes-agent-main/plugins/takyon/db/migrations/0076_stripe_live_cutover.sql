@@ -74,6 +74,28 @@ create policy app_user_credit_grants_migration_cutover on app_user_credit_grants
 drop function if exists takyon_safebox_claim_app_checkout_intent(
     uuid, text, text, text, text
 );
+-- On a replay after 0081, preserve the extended function under a transaction-local name. This
+-- migration can then rebuild its base shape without exposing a committed downgrade between files.
+do $$
+begin
+    if exists (
+        select 1
+          from information_schema.columns
+         where table_schema = 'public'
+           and table_name = 'app_checkout_intents'
+           and column_name = 'checkout_branding_params_json'
+    ) and to_regprocedure(
+        'public.takyon_safebox_claim_app_checkout_intent(uuid,text,text,text,text,text)'
+    ) is not null then
+        alter function takyon_safebox_claim_app_checkout_intent(
+            uuid, text, text, text, text, text
+        ) rename to takyon_safebox_claim_app_checkout_intent_v0081;
+    end if;
+end
+$$;
+drop function if exists takyon_safebox_claim_app_checkout_intent(
+    uuid, text, text, text, text, text
+);
 create or replace function takyon_safebox_claim_app_checkout_intent(
     p_intent_id uuid,
     p_business_slug text,
@@ -184,6 +206,22 @@ grant execute on function takyon_safebox_claim_app_checkout_intent(
 ) to takyon_safebox_authority;
 grant execute on function takyon_safebox_release_app_checkout_intent(uuid)
     to takyon_safebox_authority;
+
+-- Restore the exact 0081 implementation before this transaction commits on migration replay.
+do $$
+begin
+    if to_regprocedure(
+        'public.takyon_safebox_claim_app_checkout_intent_v0081(uuid,text,text,text,text,text)'
+    ) is not null then
+        drop function takyon_safebox_claim_app_checkout_intent(
+            uuid, text, text, text, text, text
+        );
+        alter function takyon_safebox_claim_app_checkout_intent_v0081(
+            uuid, text, text, text, text, text
+        ) rename to takyon_safebox_claim_app_checkout_intent;
+    end if;
+end
+$$;
 
 -- Refund/dispute custody clawback. Debit whatever is still owed immediately, persist any
 -- shortfall, recover that shortfall from later accruals, and block payouts until it is cleared.
