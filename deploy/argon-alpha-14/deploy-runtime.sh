@@ -41,6 +41,11 @@ if [[ ! -d "$RUNTIME_DIR" ]]; then
   exit 1
 fi
 
+if [[ -L "$RUNTIME_DIR/.venv" ]]; then
+  echo "refusing deploy: runtime .venv is a symlink; remove it before rsync" >&2
+  exit 1
+fi
+
 if [[ ! -f "$BOOTSTRAP_SCRIPT" ]]; then
   echo "bootstrap script not found: $BOOTSTRAP_SCRIPT" >&2
   exit 1
@@ -113,14 +118,15 @@ python3 -m compileall -q \
   "$RUNTIME_DIR/takyon_cli" \
   "$RUNTIME_DIR/tui_gateway"
 
-rsync -az --delete --force \
+rsync -az --delete \
+  --filter='protect /.venv' \
   --exclude '.git/' \
   --exclude '.pytest_cache/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
   --exclude 'node_modules/' \
   --exclude 'web/node_modules/' \
-  --exclude '.venv/' \
+  --exclude '/.venv' \
   -e "ssh -i $TAKYON_VPS_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
   "$RUNTIME_DIR/" \
   "$TAKYON_VPS_HOST:$TAKYON_REMOTE_RUNTIME/"

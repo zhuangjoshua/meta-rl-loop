@@ -1,0 +1,12 @@
+# Safebox-only dependency profile. Compile from the hermes-agent-main root with:
+#
+#   uv pip compile packaging/safebox-requirements.in \
+#     --python-version 3.12 --generate-hashes \
+#     --no-emit-package takyon-agent \
+#     --output-file packaging/safebox-requirements.lock
+#
+# Keeping this profile separate from the optional all-backends environment prevents an unrelated
+# provider extra from changing or blocking the secret-authority runtime.
+setuptools==82.0.1
+wheel==0.47.0
+.[anthropic,fal,gemini,google,logo-postprocess,mcp,postgres,storage-s3,web]

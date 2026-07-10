@@ -13,6 +13,23 @@ file target (`/opt/takyon/secrets/.env`), not only the `.takyon/.env` symlink.
 The service exposes only the Safebox HTTP API on private port `8000`. It does
 not serve dashboard, app, or product-host traffic.
 
+## Dependency boundary
+
+Safebox dependencies are compiled independently in
+`hermes-agent-main/packaging/safebox-requirements.lock`. The service runs the validated,
+versioned environment behind `/opt/takyon/venvs/safebox-current`; source rsync never owns that
+path. `deploy-runtime.sh` verifies the lock, builds a hash-checked candidate, runs `pip check` and
+provider import/API-shape smokes, then changes the pointer and restarts. The previous pointer and
+service unit are retained for automatic rollback.
+
+Never add an ad hoc `pip install` to the live service environment. Update the exact dependency in
+`pyproject.toml` and `tools/lazy_deps.py`, regenerate the Safebox lock with the command documented in
+`packaging/safebox-requirements.in`, and deploy through the tracked rail.
+
+Every runtime deploy also rejects a local `.venv` symlink and uses an anchored rsync exclusion plus
+a receiver-side protection rule. This prevents a source symlink from replacing or deleting a remote
+environment under `rsync --delete`.
+
 The tracked Safebox env contract now also owns the shared Supabase app-auth values:
 
 - `SUPABASE_URL`

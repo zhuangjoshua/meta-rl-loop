@@ -46,7 +46,9 @@ Environment=TAKYON_UVICORN_WORKERS=2
 # Bind the VPC interface only (10.116.0.2 is this host's private address — the same address the
 # operator/subuser planes are pointed at via TAKYON_SAFEBOX_URL). Never bind 0.0.0.0: the public
 # interface must not expose the secret authority even with token auth in front of it.
-ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 10.116.0.2 --port 8000 --workers ${TAKYON_UVICORN_WORKERS}
+# The dependency environment is versioned outside the rsynced source tree. Deploy validates a
+# hash-locked candidate, atomically advances this pointer, and retains the previous target.
+ExecStart=/opt/takyon/venvs/safebox-current/bin/python -m uvicorn plugins.takyon.safebox_app:app --host 10.116.0.2 --port 8000 --workers ${TAKYON_UVICORN_WORKERS}
 Restart=always
 RestartSec=5
 

@@ -118,7 +118,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # loaded by the brand-logo authority route when the Gemini key is
     # provisioned and a logo is actually rendered. Keep in sync with the
     # `gemini` extra in pyproject.toml.
-    "image.gemini": ("google-genai==1.21.0",),
+    "image.gemini": ("google-genai==1.65.0",),
     # Brand-logo post-processing — keys the solid-white Gemini background out to
     # a real alpha channel. Loaded only after a logo is rendered, in
     # plugins/takyon/creative_gateway.py::_key_white_background_to_alpha. Keep

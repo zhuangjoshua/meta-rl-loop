@@ -196,6 +196,39 @@ def test_gemini_raw_prefers_inline_bytes_over_as_image(monkeypatch):
     assert "as_image_used" not in captured  # inline preferred; as_image() never invoked
 
 
+def test_gemini_raw_accepts_google_sdk_image_bytes_fallback(monkeypatch):
+    """google-genai's Image exposes ``image_bytes`` and a path-based ``save`` method, not PIL's
+    file-object signature. The fallback must read the SDK bytes directly."""
+    gw = _gw()
+    raw = b"\x89PNG\r\n\x1a\nSDK-IMAGE"
+
+    class _SdkImage:
+        image_bytes = raw
+
+        def save(self, *args, **kwargs):
+            raise AssertionError("path-based SDK save must not be called")
+
+    class _Part:
+        inline_data = None
+
+        def as_image(self):
+            return _SdkImage()
+
+    class _Models:
+        def generate_content(self, **kwargs):
+            return types.SimpleNamespace(parts=[_Part()])
+
+    class _Client:
+        def __init__(self, *, api_key):
+            self.models = _Models()
+
+    fake_google = types.ModuleType("google")
+    fake_google.genai = types.SimpleNamespace(Client=_Client)
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+
+    assert gw._gemini_generate_image_raw(api_key="gem-key", prompt="icon") == raw
+
+
 def test_gemini_logo_generation_postprocesses_inline_bytes_directly(monkeypatch):
     """Some Gemini responses expose only raw inline bytes. Those bytes go straight
     through the alpha postprocessor, which is responsible for decoding and

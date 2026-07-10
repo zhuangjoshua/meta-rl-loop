@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
+REBUILD_VENV_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/rebuild-venv.sh"
 
 SOURCE_HOST="${TAKYON_SOURCE_HOST:-root@137.184.75.57}"
 SOURCE_KEY="${TAKYON_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -23,6 +24,11 @@ if [[ ! -f "$SERVICE_FILE" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$REBUILD_VENV_SCRIPT" ]]; then
+  echo "Safebox environment builder not found or not executable: $REBUILD_VENV_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$SOURCE_KEY" ]]; then
   echo "source key not found: $SOURCE_KEY" >&2
   exit 1
@@ -36,7 +42,7 @@ fi
 ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y ca-certificates curl rsync
+  apt-get install -y ca-certificates curl rsync python3.12-venv
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_SECRETS'
 "
 
@@ -57,8 +63,14 @@ tar \
   --exclude='*.pyc' \
   --exclude='node_modules' \
   --exclude='web/node_modules' \
+  --exclude='hermes-agent-main/.venv' \
   -cf - "${paths[@]}"
 EOF
+
+TAKYON_VPS_HOST="$TARGET_HOST" \
+TAKYON_VPS_KEY="$TARGET_KEY" \
+TAKYON_REMOTE_RUNTIME="$REMOTE_RUNTIME" \
+  "$REBUILD_VENV_SCRIPT"
 
 scp "${target_ssh[@]}" "$SERVICE_FILE" "$TARGET_HOST:$REMOTE_SERVICE_FILE"
 

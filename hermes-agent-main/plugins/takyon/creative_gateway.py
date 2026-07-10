@@ -349,6 +349,9 @@ def _gemini_generate_image_raw(*, api_key: str, prompt: str) -> bytes:
     def _image_to_png_bytes(image: Any) -> bytes:
         import io
 
+        image_bytes = getattr(image, "image_bytes", None)
+        if image_bytes:
+            return bytes(image_bytes)
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         return buf.getvalue()

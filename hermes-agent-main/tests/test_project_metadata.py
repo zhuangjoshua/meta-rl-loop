@@ -112,6 +112,25 @@ def test_feishu_extra_includes_qrcode_for_qr_login():
     assert any(dep.startswith("qrcode") for dep in feishu_extra)
 
 
+def test_safebox_gemini_dependency_profile_is_consistent_and_locked():
+    root = Path(__file__).resolve().parents[1]
+    optional_dependencies = _load_optional_dependencies()
+    lazy_deps = (root / "tools/lazy_deps.py").read_text()
+    lock = (root / "packaging/safebox-requirements.lock").read_text()
+    requirements_in = (root / "packaging/safebox-requirements.in").read_text()
+
+    assert optional_dependencies["gemini"] == ["google-genai==1.65.0"]
+    assert optional_dependencies["anthropic"] == ["anthropic==0.87.0"]
+    assert '"provider.anthropic": ("anthropic==0.87.0",)' in lazy_deps
+    assert '"image.gemini": ("google-genai==1.65.0",)' in lazy_deps
+    assert "google-genai==1.65.0" in lock
+    assert "tenacity==9.1.4" in lock
+    assert "websockets==16.0" in lock
+    assert "setuptools==82.0.1" in lock
+    assert "wheel==0.47.0" in lock
+    assert ".[anthropic,fal,gemini,google,logo-postprocess,mcp,postgres,storage-s3,web]" in requirements_in
+
+
 def test_dashboard_plugin_manifests_and_assets_are_packaged():
     """Bundled dashboard plugins need their manifests and built assets in
     wheel installs so /api/dashboard/plugins can discover them outside a

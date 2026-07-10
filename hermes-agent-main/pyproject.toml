@@ -71,7 +71,7 @@ dependencies = [
 [project.optional-dependencies]
 # Native Anthropic provider — only needed when provider=anthropic (not via
 # OpenRouter or other aggregators).
-anthropic = ["anthropic==0.86.0"]
+anthropic = ["anthropic==0.87.0"]
 # Postgres backend driver — only needed when TAKYON_DB_BACKEND=postgres (the
 # operator-runtime / control-plane store and the live control-plane host). It is
 # lazily imported (plugins/takyon/runtime_app.py and core.py:_connect_postgres),
@@ -88,7 +88,7 @@ fal = ["fal-client==0.13.1"]
 # Gemini image generation (Nano Banana) for brand-logo rendering — only needed
 # when the Gemini key is provisioned and the logo authority route runs. Lazy-
 # installed via tools/lazy_deps.py (image.gemini); keep the pin in sync there.
-gemini = ["google-genai==1.21.0"]
+gemini = ["google-genai==1.65.0"]
 # Brand-logo post-processing (white-background -> real alpha). Only needed when
 # a logo is actually rendered; lazy-installed via tools/lazy_deps.py
 # (image.logo_postprocess). Keep these pins in sync with tools/lazy_deps.py.

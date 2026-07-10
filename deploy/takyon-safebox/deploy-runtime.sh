@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
+REBUILD_VENV_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/rebuild-venv.sh"
+VERIFY_LOCK_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/verify-requirements-lock.sh"
 SUPABASE_AUTH_HELPER="$ROOT_DIR/deploy/shared/supabase-auth-env.sh"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 
@@ -12,6 +14,7 @@ TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
 TAKYON_REMOTE_RUNTIME="${TAKYON_REMOTE_RUNTIME:-/opt/takyon/hermes-agent-main}"
 TAKYON_REMOTE_SERVICE_FILE="${TAKYON_REMOTE_SERVICE_FILE:-/etc/systemd/system/takyon-safebox.service}"
 TAKYON_REMOTE_SERVICE_NAME="${TAKYON_REMOTE_SERVICE_NAME:-takyon-safebox.service}"
+TAKYON_REMOTE_SAFEBOX_PYTHON="${TAKYON_REMOTE_SAFEBOX_PYTHON:-/opt/takyon/venvs/safebox-current/bin/python}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-0}"
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
@@ -19,8 +22,23 @@ if [[ ! -d "$RUNTIME_DIR" ]]; then
   exit 1
 fi
 
+if [[ -L "$RUNTIME_DIR/.venv" ]]; then
+  echo "refusing deploy: runtime .venv is a symlink; remove it before rsync" >&2
+  exit 1
+fi
+
 if [[ ! -f "$SERVICE_FILE" ]]; then
   echo "service file not found: $SERVICE_FILE" >&2
+  exit 1
+fi
+
+if [[ ! -x "$REBUILD_VENV_SCRIPT" ]]; then
+  echo "Safebox environment builder not found or not executable: $REBUILD_VENV_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -x "$VERIFY_LOCK_SCRIPT" ]]; then
+  echo "Safebox lock verifier not found or not executable: $VERIFY_LOCK_SCRIPT" >&2
   exit 1
 fi
 
@@ -39,6 +57,8 @@ if [[ ! -x "$SUPABASE_AUTH_HELPER" ]]; then
   exit 1
 fi
 
+"$VERIFY_LOCK_SCRIPT"
+
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "bash -s -- safebox /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
   < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
@@ -52,21 +72,29 @@ python3 -m compileall -q \
   "$RUNTIME_DIR/takyon_cli" \
   "$RUNTIME_DIR/tui_gateway"
 
-rsync -az --delete --force \
+rsync -az --delete \
+  --filter='protect /.venv' \
   --exclude '.git/' \
   --exclude '.pytest_cache/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
   --exclude 'node_modules/' \
   --exclude 'web/node_modules/' \
-  --exclude '.venv/' \
+  --exclude '/.venv' \
   -e "ssh -i $TAKYON_VPS_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
   "$RUNTIME_DIR/" \
   "$TAKYON_VPS_HOST:$TAKYON_REMOTE_RUNTIME/"
 
-scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
-  "$SERVICE_FILE" \
-  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_SERVICE_FILE"
+previous_venv_target="$(
+  ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+    "$TAKYON_VPS_HOST" \
+    'if [ -L /opt/takyon/venvs/safebox-current ]; then readlink -f /opt/takyon/venvs/safebox-current; fi'
+)"
+
+TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
+TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+  "$REBUILD_VENV_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
@@ -91,46 +119,33 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
 	  bash -s -- validate-file /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
   < "$SUPABASE_AUTH_HELPER"
 
+remote_service_backup="${TAKYON_REMOTE_SERVICE_FILE}.pre-deploy"
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "set -euo pipefail; cp -p '$TAKYON_REMOTE_SERVICE_FILE' '$remote_service_backup'"
+
+scp -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
+  "$SERVICE_FILE" \
+  "$TAKYON_VPS_HOST:$TAKYON_REMOTE_SERVICE_FILE"
+
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
+  rollback() {
+    rc=\$?
+    trap - EXIT
+    if [ -f '$remote_service_backup' ]; then
+      cp -p '$remote_service_backup' '$TAKYON_REMOTE_SERVICE_FILE'
+    fi
+    if [ -n '$previous_venv_target' ]; then
+      ln -sfn '$previous_venv_target' /opt/takyon/venvs/safebox-current.rollback
+      mv -Tf /opt/takyon/venvs/safebox-current.rollback /opt/takyon/venvs/safebox-current
+    fi
+    systemctl daemon-reload
+    systemctl restart '$TAKYON_REMOTE_SERVICE_NAME' || true
+    exit \$rc
+  }
+  trap rollback EXIT
   cd '$TAKYON_REMOTE_RUNTIME'
-  '$TAKYON_REMOTE_RUNTIME/.venv/bin/python' - <<'PY'
-from tools.lazy_deps import ensure
-
-# Logo rendering, GSC, and official Meta MCP calls run inside Safebox and need their provider/client
-# SDKs present before the service starts.
-ensure('image.gemini', prompt=False)
-ensure('image.logo_postprocess', prompt=False)
-
-import numpy  # noqa: F401
-from PIL import Image  # noqa: F401
-try:
-    import googleapiclient  # noqa: F401
-    import google.oauth2.service_account  # noqa: F401
-except Exception:
-    import subprocess
-    import sys
-
-    subprocess.check_call([
-        sys.executable,
-        '-m',
-        'pip',
-        'install',
-        'google-api-python-client==2.194.0',
-        'google-auth-oauthlib==1.3.1',
-        'google-auth-httplib2==0.3.1',
-    ])
-    import googleapiclient  # noqa: F401
-    import google.oauth2.service_account  # noqa: F401
-try:
-    import mcp  # noqa: F401
-except Exception:
-    import subprocess
-    import sys
-
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'mcp==1.26.0'])
-    import mcp  # noqa: F401
-PY
+  '$TAKYON_REMOTE_SAFEBOX_PYTHON' -m pip check
   python3 -m compileall -q '$TAKYON_REMOTE_RUNTIME/plugins/takyon' '$TAKYON_REMOTE_RUNTIME/takyon_cli' '$TAKYON_REMOTE_RUNTIME/tui_gateway'
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
@@ -138,6 +153,8 @@ PY
   # The service binds the VPC interface only (see the unit), so the health probe targets it too.
   for _ in \$(seq 1 30); do
     if curl -fsS http://10.116.0.2:8000/healthz >/dev/null; then
+      rm -f '$remote_service_backup'
+      trap - EXIT
       exit 0
     fi
     sleep 1

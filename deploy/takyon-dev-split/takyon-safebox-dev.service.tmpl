@@ -34,7 +34,7 @@ Environment=TAKYON_HOST_ROLE=safebox
 Environment=TAKYON_UVICORN_WORKERS=2
 # Bind the dev VPC interface only — never 0.0.0.0; the public interface must not expose the
 # secret authority even with token auth in front of it (same rule as prod).
-ExecStart=/opt/takyon/hermes-agent-main/.venv/bin/python -m uvicorn plugins.takyon.safebox_app:app --host __BIND_IP__ --port 8000 --workers ${TAKYON_UVICORN_WORKERS}
+ExecStart=/opt/takyon/venvs/safebox-current/bin/python -m uvicorn plugins.takyon.safebox_app:app --host __BIND_IP__ --port 8000 --workers ${TAKYON_UVICORN_WORKERS}
 Restart=always
 RestartSec=5
 

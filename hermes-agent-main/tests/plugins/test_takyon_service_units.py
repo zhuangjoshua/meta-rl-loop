@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 import subprocess
 
 
@@ -141,8 +142,74 @@ def test_deploy_scripts_preflight_authority_env_before_sync_or_restart():
         assert "VALIDATE_AUTHORITY_ENV_SCRIPT" in src, plane
         assert f"bash -s -- {plane} /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" in src, plane
         preflight_index = src.index(f"bash -s -- {plane}")
-        assert preflight_index < src.index("rsync -az --delete --force"), plane
+        assert preflight_index < src.index("rsync -az --delete"), plane
         assert preflight_index < src.index("systemctl restart"), plane
+
+
+def test_runtime_deploys_fail_closed_on_venv_symlinks_and_protect_remote_venvs():
+    scripts = (
+        ROOT / "deploy/argon-alpha-14/deploy-runtime.sh",
+        ROOT / "deploy/takyon-subuser/deploy-runtime.sh",
+        ROOT / "deploy/takyon-safebox/deploy-runtime.sh",
+    )
+    for path in scripts:
+        src = path.read_text()
+        preflight = src.index('if [[ -L "$RUNTIME_DIR/.venv" ]]')
+        assert preflight < src.index("ssh -i"), path
+        assert "--filter='protect /.venv'" in src, path
+        assert "--exclude '/.venv'" in src, path
+        assert "rsync -az --delete --force" not in src, path
+
+
+def test_runtime_rsync_rules_cannot_replace_remote_venv_with_source_symlink(tmp_path):
+    rsync = shutil.which("rsync")
+    if not rsync:
+        return
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "payload.txt").write_text("new\n")
+    (source / "elsewhere").mkdir()
+    (source / ".venv").symlink_to(source / "elsewhere", target_is_directory=True)
+    (target / ".venv" / "bin").mkdir(parents=True)
+    marker = target / ".venv" / "bin" / "python"
+    marker.write_text("production-venv\n")
+
+    subprocess.run(
+        [
+            rsync,
+            "-a",
+            "--delete",
+            "--filter=protect /.venv",
+            "--exclude=/.venv",
+            f"{source}/",
+            f"{target}/",
+        ],
+        check=True,
+    )
+
+    assert marker.read_text() == "production-venv\n"
+    assert (target / "payload.txt").read_text() == "new\n"
+
+
+def test_safebox_deploy_uses_hash_locked_external_environment_before_restart():
+    deploy = (ROOT / "deploy/takyon-safebox/deploy-runtime.sh").read_text()
+    rebuild = (ROOT / "deploy/takyon-safebox/rebuild-venv.sh").read_text()
+    bootstrap = (ROOT / "deploy/takyon-safebox/bootstrap-host.sh").read_text()
+    unit = (ROOT / "deploy/takyon-safebox/takyon-safebox.service").read_text()
+    dev_unit = (ROOT / "deploy/takyon-dev-split/takyon-safebox-dev.service.tmpl").read_text()
+
+    assert "hermes-agent-main/.venv" in bootstrap
+    assert '"$REBUILD_VENV_SCRIPT"' in bootstrap
+    assert "from tools.lazy_deps import ensure" not in deploy
+    assert "-m pip check" in deploy
+    assert deploy.index('"$REBUILD_VENV_SCRIPT"') < deploy.index("systemctl restart")
+    assert "--require-hashes" in rebuild
+    assert "--only-binary=:all:" in rebuild
+    assert rebuild.index("-m pip check") < rebuild.index('mv -Tf "$current.next" "$current"')
+    assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in unit
+    assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in dev_unit
 
 
 def test_operator_deploy_can_skip_runtime_migrations_after_manual_apply():
