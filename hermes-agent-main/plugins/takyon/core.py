@@ -18068,6 +18068,82 @@ class TakyonStore:
                     continue
         return summary
 
+    def assemble_roas_run_history(self, slug: str, *,
+                                  channels: tuple[str, ...] = ("meta",)) -> dict[str, Any]:
+        """Production half of the per-skill ROAS feedback loop: for every NEW insights-sync
+        receipt on a channel's campaigns, append ONE truthful run entry — the process (from
+        the campaign's launch plan: creative kind, headline, copy, CTA, budget) + delivery +
+        pixel-attributed purchases/revenue + ROAS (from the sync receipt totals) — to the
+        per-business file ``metrics/roas/<channel>.md``. That file is the run history the
+        channel skill reads before its next run ("do more of what worked"); SKILL.md stays
+        static and shared, the history is per-business state. Idempotent per sync receipt:
+        each entry embeds ``sync <campaign>/<file>`` and existing tokens are skipped, so a
+        sync is recorded exactly once. Best-effort everywhere — a missing/corrupt plan
+        degrades to a plan-less process line, and a per-campaign failure is counted, never
+        raised (the pre-wake hook must not break the wake)."""
+        slug = _slugify(slug)
+        summary: dict[str, Any] = {"success": True, "business": slug,
+                                   "appended": 0, "skipped": 0, "errors": 0, "entries": []}
+        policies: list[tuple[str, Any]] = []
+        try:
+            backend = _business_ad_spend_backend()
+            statuses = list(_PULSE_AD_CAMPAIGN_STATUSES) + ["completed"]
+            with self._connect() as conn:
+                for policy in backend.list_policies(conn, slug, statuses=statuses):
+                    channel = str(policy.channel or "")
+                    if channel in channels:
+                        policies.append((channel, policy))
+        except Exception:
+            summary["errors"] += 1
+            return summary
+        for channel, policy in policies:
+            try:
+                syncs_dir = self._resolve_business_file(
+                    slug, f"metrics/{channel}-ads/{policy.slug}/syncs", sync=False)
+                if not syncs_dir.is_dir():
+                    continue
+                history_path = self._resolve_business_file(
+                    slug, f"metrics/roas/{channel}.md", sync=False)
+                existing = history_path.read_text(encoding="utf-8") if history_path.exists() else ""
+                plan: dict[str, Any] = {}
+                try:
+                    plan_path = self._resolve_business_file(
+                        slug, f"distribution/{channel}-ads/{policy.slug}/plan.json", sync=False)
+                    if plan_path.exists():
+                        loaded = json.loads(plan_path.read_text(encoding="utf-8"))
+                        plan = loaded if isinstance(loaded, dict) else {}
+                except Exception:
+                    plan = {}
+                for sync_file in sorted(syncs_dir.glob("*.json")):
+                    token = f"sync {policy.slug}/{sync_file.name}"
+                    if token in existing:
+                        summary["skipped"] += 1
+                        continue
+                    try:
+                        totals = (json.loads(sync_file.read_text(encoding="utf-8")) or {}).get("totals") or {}
+                    except Exception:
+                        summary["errors"] += 1
+                        continue
+                    if not isinstance(totals, dict) or not totals:
+                        summary["skipped"] += 1
+                        continue
+                    entry = _compose_roas_history_entry(channel, policy.slug, token, plan, totals)
+                    header = "" if existing else (
+                        f"# {channel} run history (per-business skill feedback)\n\n"
+                        "One entry per insights sync. ROAS = pixel-attributed purchase value / ad "
+                        "spend (the sync receipt's own figure). Read this before launching the "
+                        "next campaign and favor what measurably worked.\n\n"
+                    )
+                    history_path.parent.mkdir(parents=True, exist_ok=True)
+                    with history_path.open("a", encoding="utf-8") as fh:
+                        fh.write(header + entry)
+                    existing += header + entry
+                    summary["appended"] += 1
+                    summary["entries"].append(token)
+            except Exception:
+                summary["errors"] += 1
+        return summary
+
     # --- RL learnings render: the compressed block APPENDED to the END of the wake prompt ----
 
     @staticmethod
@@ -30164,6 +30240,48 @@ def _wake_ad_refresh_enabled() -> bool:
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _compose_roas_history_entry(channel: str, campaign: str, token: str,
+                                plan: Mapping[str, Any], totals: Mapping[str, Any]) -> str:
+    """One deterministic run-history line for metrics/roas/<channel>.md — the PROCESS (what
+    the launch plan says was actually made and run) and the MEASURED result (what the sync
+    receipt says came back). No narrative invention: every field is copied from a receipt,
+    and absent fields are omitted or marked n/a rather than guessed."""
+    process_bits: list[str] = []
+    kind = str(plan.get("asset_kind") or "").strip()
+    if kind:
+        process_bits.append(f"{kind} ad")
+    headline = str(plan.get("headline") or "").strip()
+    if headline:
+        process_bits.append(f'headline "{headline}"')
+    message = " ".join(str(plan.get("message") or "").split())
+    if message:
+        if len(message) > 90:
+            message = message[:87] + "..."
+        process_bits.append(f'copy "{message}"')
+    cta = str(plan.get("call_to_action_type") or "").strip()
+    if cta:
+        process_bits.append(f"CTA {cta}")
+    if plan.get("daily_budget_usd") is not None:
+        process_bits.append(f"${plan['daily_budget_usd']}/day")
+    process = ("launched " + ", ".join(process_bits)) if process_bits else (
+        f"ran {channel} campaign (no launch plan recorded)")
+
+    metric_bits: list[str] = []
+    for key, label in (("impressions", "impressions"), ("clicks", "clicks"),
+                       ("purchase_count", "purchases")):
+        if totals.get(key) is not None:
+            metric_bits.append(f"{totals[key]} {label}")
+    if totals.get("purchase_value_usd") is not None:
+        metric_bits.append(f"attributed revenue ${float(totals['purchase_value_usd']):.2f}")
+    spend = totals.get("spend_usd")
+    spend_txt = f"spend ${float(spend):.2f}" if spend is not None else "spend n/a"
+    roas = totals.get("roas")
+    roas_txt = (f"ROAS {float(roas):.2f}" if roas is not None
+                else "ROAS n/a (no attributed revenue synced)")
+    return (f"- campaign {campaign} | {token} | process: {process} | "
+            f"metrics: {', '.join(metric_bits) or 'none synced'} | {spend_txt} | {roas_txt}\n")
+
+
 def _format_episode_metrics(snapshot: Any) -> str:
     """One compact ` [at record: …]` suffix for a wake-memory bet line, from the episode's
     metrics_snapshot. Empty string when the snapshot is absent/empty — old episodes render as
@@ -35849,13 +35967,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     # _run_claude_agent_task_process killed it and re-raised. Do NOT let this escape the
                     # loop and discard the scratch — the SDK runs in permissionMode "acceptEdits", so any
                     # files the worker already wrote are durably on disk in the mounted scratch workspace.
-                    # Preserve them: sync scratch->canonical (best-effort, fail-soft), then mark the result
-                    # BLOCKED + timed_out and break so the existing anti-re-delegation guard (ceo.md rule
-                    # #8) drives a hand-patch / continue-from-partial instead of a cold re-delegation. On
-                    # this path active_store is still the scratch-mounted store (the readback reassignment
-                    # only happens on the success path), so the sync persists the partial scratch. The
-                    # partial is preserved but NOT published: success is False, so the refresh/publish
-                    # block is skipped and the tsc/build gate still guards any later publish.
+                    # Preserve them: sync scratch->canonical (best-effort, fail-soft), mark the result
+                    # BLOCKED + timed_out, then FALL THROUGH (proc=None) so the gated refresh below
+                    # judges the preserved partial with the SAME tsc/build gate as a successful pass.
+                    # Breaking here instead left the CEO blind to a publishable partial: on deltaline0709
+                    # (2026-07-09) the job-end done-gate published the partial CLEAN right after the CEO
+                    # had already wrapped up "not confirmed live" and skipped logo/GSC/launch. On this
+                    # path active_store is still the scratch-mounted store (the readback reassignment
+                    # only happens on the success path), so the sync persists the partial scratch.
                     worker_actual_cents = None  # don't carry a prior attempt's parsed cost into the estimate settle
                     try:
                         partial_sync_status = active_store._sync_business_workspace_remote(business)
@@ -35885,31 +36004,34 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         detail=timeout_line,
                         line=timeout_line,
                     )
-                    break
-                stdout = proc.stdout.strip()
-                stderr = proc.stderr.strip()
-                try:
-                    parsed_result = json.loads(stdout) if stdout else {}
-                    sdk_result = parsed_result if isinstance(parsed_result, dict) else {"success": False, "raw_stdout": _truncate_text(stdout)}
-                except json.JSONDecodeError:
-                    sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
-                try:
-                    worker_actual_cents = int(sdk_result.get("actual_cost_cents"))
-                except (TypeError, ValueError, AttributeError):
-                    worker_actual_cents = None
-                if proc.returncode != 0:
-                    sdk_result.setdefault("success", False)
-                    sdk_result["worker_returncode"] = proc.returncode
-                    if stderr:
-                        sdk_result["worker_stderr"] = _truncate_text(stderr, 12000)
-                    default_error = _format_process_exit_detail(
-                        proc.returncode,
-                        process_label="Claude worker",
-                    )
-                    sdk_result["error"] = _truncate_text(
-                        stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or default_error,
-                        8000,
-                    )
+                    proc = None
+                    stdout = ""
+                    stderr = ""
+                if proc is not None:
+                    stdout = proc.stdout.strip()
+                    stderr = proc.stderr.strip()
+                    try:
+                        parsed_result = json.loads(stdout) if stdout else {}
+                        sdk_result = parsed_result if isinstance(parsed_result, dict) else {"success": False, "raw_stdout": _truncate_text(stdout)}
+                    except json.JSONDecodeError:
+                        sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
+                    try:
+                        worker_actual_cents = int(sdk_result.get("actual_cost_cents"))
+                    except (TypeError, ValueError, AttributeError):
+                        worker_actual_cents = None
+                    if proc.returncode != 0:
+                        sdk_result.setdefault("success", False)
+                        sdk_result["worker_returncode"] = proc.returncode
+                        if stderr:
+                            sdk_result["worker_stderr"] = _truncate_text(stderr, 12000)
+                        default_error = _format_process_exit_detail(
+                            proc.returncode,
+                            process_label="Claude worker",
+                        )
+                        sdk_result["error"] = _truncate_text(
+                            stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or default_error,
+                            8000,
+                        )
                 if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
                     sdk_result["blocked"] = True
                 if sdk_result.get("success"):
@@ -36023,7 +36145,18 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         else:
                             workspace_path = canonical_workspace_path
                 surface_refresh = None
-                if sdk_result.get("success") and refresh_surface:
+                # A timed-out attempt whose partial synced to canonical is judged by the SAME
+                # tsc/build-gated refresh as a successful pass: if the partial passes, it publishes
+                # and the tool result carries the durable truth (site LIVE) so the CEO continues the
+                # launch steps (logo, GSC, launch post) instead of wrapping up blind; if it fails,
+                # the exact build blockers surface and the bounded warm build-retry below gets one
+                # shot at finishing on the still-warm scratch workspace.
+                publishable_partial = (
+                    bool(sdk_result.get("timed_out"))
+                    and str(sdk_result.get("partial_workspace_sync_status") or "") == "synced"
+                    and customer_facing_product_workspace
+                )
+                if (sdk_result.get("success") or publishable_partial) and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
                     app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
                     surface = app.get("surface") or app.get("surface_contract") or {}
@@ -36060,6 +36193,33 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "guidance_selection_reason": guidance_selection_reason,
                     }
                     active_store._sync_business_workspace_remote(business)
+                    if publishable_partial and not sdk_result.get("success") and not str(surface_refresh.get("blocker") or "").strip():
+                        # blocker == "" is the exact published-and-passed predicate of
+                        # _finalize_product_surface_refresh — rewrite the timeout error into the
+                        # durable truth so the CEO acts on the LIVE site, not the dead worker.
+                        publish_info = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
+                        live_url = str(publish_info.get("public_url") or "").strip()
+                        sdk_result["published_from_partial"] = True
+                        sdk_result["error"] = _truncate_text(
+                            f"Claude worker timed out after {int(timeout_ms)}ms, BUT the preserved partial "
+                            "PASSED the build gate and IS PUBLISHED live"
+                            + (f" at {live_url}" if live_url else "")
+                            + ". The site is live — do NOT rebuild or re-delegate the landing; continue the "
+                            "remaining launch steps (logo, Search Console registration, launch post) in this turn.",
+                            8000,
+                        )
+                        published_line = (
+                            "timed-out partial passed the build gate and is PUBLISHED"
+                            + (f" ({live_url})" if live_url else "")
+                            + "; continuing launch steps."
+                        )
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="output",
+                            detail=published_line,
+                            line=published_line,
+                        )
                 should_retry_turn_cap = (
                     not sdk_result.get("success")
                     and customer_facing_product_workspace

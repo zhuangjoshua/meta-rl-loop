@@ -1560,6 +1560,26 @@ def ceo_wake_handler(job: Job) -> JobRunResult:
                         )
                 except Exception:
                     pass
+                # Pre-wake ROAS run-history assembly: append any NEW insights-sync results as
+                # run entries to metrics/roas/<channel>.md — the per-business track record the
+                # channel skill reads before its next launch ("do more of what worked"). Runs
+                # AFTER the insights refresh (fresh receipts) and BEFORE the prompt build.
+                # Best-effort — a failed append must never break the wake.
+                try:
+                    _roas_hist = store.assemble_roas_run_history(slug)
+                    if int(_roas_hist.get("appended") or 0):
+                        _record_runtime_event(
+                            slug,
+                            kind="ceo_wake",
+                            status="running",
+                            detail=(
+                                f"Pre-wake appended {_roas_hist['appended']} run(s) to the "
+                                "metrics/roas/ channel history."
+                            ),
+                            command=f"/wake {slug}",
+                        )
+                except Exception:
+                    pass
                 # Build the wake prompt AFTER the pre-wake refresh + distillation (it was
                 # previously built before them, so the injected memory and appended learnings
                 # could not see this wake's own refresh/distill work — a stale-prompt bug).
