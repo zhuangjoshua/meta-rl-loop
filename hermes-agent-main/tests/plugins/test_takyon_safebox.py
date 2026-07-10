@@ -1185,6 +1185,87 @@ def test_safebox_app_verifies_app_webhook_signature(monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    ("endpoint", "secret_env", "secret"),
+    [
+        (
+            "/v1/stripe/billing-webhook/verify",
+            "STRIPE_BILLING_WEBHOOK_SECRET",
+            "whsec_billing_mode",
+        ),
+        (
+            "/v1/billing/webhook/process",
+            "STRIPE_BILLING_WEBHOOK_SECRET",
+            "whsec_billing_mode",
+        ),
+        (
+            "/v1/stripe/app-webhook/verify",
+            "STRIPE_WEBHOOK_SECRET",
+            "whsec_app_mode",
+        ),
+        (
+            "/v1/stripe/app-webhook/process",
+            "STRIPE_WEBHOOK_SECRET",
+            "whsec_app_mode",
+        ),
+    ],
+)
+def test_safebox_stripe_webhook_paths_reject_livemode_mismatch(
+    monkeypatch, endpoint, secret_env, secret
+):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    monkeypatch.setenv(secret_env, secret)
+    body = json.dumps(
+        {"id": "evt_wrong_mode", "type": "checkout.session.completed", "livemode": False}
+    )
+
+    response = TestClient(build_safebox_app()).post(
+        endpoint,
+        headers={"Authorization": "Bearer shared-token"},
+        json={"raw_body": body, "signature": build_signature_header(body, secret)},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "invalid_livemode"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "secret_env", "secret"),
+    [
+        (
+            "/v1/stripe/billing-webhook/verify",
+            "STRIPE_BILLING_WEBHOOK_SECRET",
+            "whsec_billing_live",
+        ),
+        (
+            "/v1/stripe/app-webhook/verify",
+            "STRIPE_WEBHOOK_SECRET",
+            "whsec_app_live",
+        ),
+    ],
+)
+def test_safebox_stripe_webhook_verifiers_accept_explicit_live_event(
+    monkeypatch, endpoint, secret_env, secret
+):
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "safebox")
+    monkeypatch.setenv("TAKYON_SAFEBOX_TOKEN", "shared-token")
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    monkeypatch.setenv(secret_env, secret)
+    event = {"id": "evt_live", "type": "checkout.session.completed", "livemode": True}
+    body = json.dumps(event)
+
+    response = TestClient(build_safebox_app()).post(
+        endpoint,
+        headers={"Authorization": "Bearer shared-token"},
+        json={"raw_body": body, "signature": build_signature_header(body, secret)},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"event": event}
+
+
 def test_safebox_app_processes_app_webhook_after_signature_verify(monkeypatch):
     from plugins.takyon import app_payments
 

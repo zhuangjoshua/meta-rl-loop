@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import ipaddress
 import json
 import posixpath
@@ -154,6 +155,29 @@ def _unseal_secret(ciphertext: bytes, nonce: bytes) -> str:
     except Exception as exc:  # noqa: BLE001 — bad key/tamper -> fail closed
         raise EgressError(503, "connection_unseal_failed", "credential could not be unsealed") from exc
     return pt.decode("utf-8")
+
+
+def verify_sealed_secret(
+    ciphertext: bytes,
+    nonce: bytes,
+    fingerprint: str,
+) -> None:
+    """Verify an existing Safebox-sealed credential without returning its plaintext.
+
+    This is the narrow migration/reapproval seam for scope binding: after an operator grants the
+    exact canonical connection scope, the Safebox may prove that the already-stored ciphertext is
+    intact and reactivate it without asking the operator to expose the credential again. The
+    plaintext remains process-local to the Safebox and is never returned to a caller.
+    """
+    plaintext = _unseal_secret(ciphertext, nonce)
+    actual = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+    expected = str(fingerprint or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or not hmac.compare_digest(actual, expected):
+        raise EgressError(
+            503,
+            "connection_fingerprint_mismatch",
+            "sealed credential fingerprint verification failed",
+        )
 
 
 # ── connection resolution (spec §safebox_route step 2) ───────────────────────────────────────

@@ -684,10 +684,40 @@ class EnvironmentProvisioner:
             return StepReceipt("stripe", STATUS_ERROR, "create", f"stripe webhook list failed: {exc}")
         for ep in (listed.get("data") or []) if isinstance(listed, dict) else []:
             if isinstance(ep, dict) and str(ep.get("url") or "") == webhook_url:
+                endpoint_id = str(ep.get("id") or "").strip()
+                desired_events = {str(event) for event in events}
+                current_events = {
+                    str(event) for event in (ep.get("enabled_events") or [])
+                }
+                if endpoint_id and current_events != desired_events:
+                    form = urllib.parse.urlencode(
+                        [("enabled_events[]", event) for event in sorted(desired_events)]
+                    )
+                    try:
+                        self.http.request(
+                            "POST",
+                            f"{base}/webhook_endpoints/{endpoint_id}",
+                            headers=headers,
+                            form=form,
+                        )
+                    except Exception as exc:
+                        return StepReceipt(
+                            "stripe",
+                            STATUS_ERROR,
+                            "create",
+                            f"stripe webhook event update failed: {exc}",
+                        )
+                    return StepReceipt(
+                        "stripe",
+                        STATUS_CREATED,
+                        "create",
+                        f"updated stripe TEST webhook events for {webhook_url}",
+                        data={"webhook_endpoint_id": endpoint_id, "events": len(events)},
+                    )
                 return StepReceipt(
                     "stripe", STATUS_EXISTS, "create",
                     f"stripe test webhook already registered for {webhook_url}",
-                    data={"webhook_endpoint_id": ep.get("id")},
+                    data={"webhook_endpoint_id": endpoint_id},
                 )
 
         # Stripe form-encodes list params as enabled_events[].
@@ -2589,6 +2619,7 @@ class EnvironmentProvisioner:
 
         def _migrate_on_operator(ip: str) -> "tuple[bool, str]":
             remote = (
+                "find /opt/takyon/hermes-agent-main -name '._*' -delete 2>/dev/null; "
                 "runuser -u takyon -- env TAKYON_ENV=dev TAKYON_HOST_ROLE=operator "
                 "TAKYON_HOME=/opt/takyon/.takyon HOME=/opt/takyon "
                 "/opt/takyon/hermes-agent-main/takyon migrate"
@@ -2600,67 +2631,37 @@ class EnvironmentProvisioner:
             detail = (result.stdout or result.stderr or "").strip().replace("\n", " ")[-240:]
             return result.returncode == 0, detail or "migrations current"
 
-        # Migrate-before-restart: stage the exact revision on the operator, replay the tracked
-        # idempotent migration rail, and abort activation everywhere if schema convergence fails.
-        # This runs on every deploy because a no-op replay is cheap and avoids a second drifting
-        # "did migrations change?" implementation.
-        pre_synced_roles: set[str] = set()
-        operator_block = ds.get("operator") or {}
-        operator_ip = str(operator_block.get("public_ip") or "").strip()
-        if operator_ip:
-            ok, why = _push_code(operator_ip)
-            if ok:
-                ok, why = _push_public_service_unit(operator_ip, "operator", operator_block)
-            if not ok:
-                receipts.append(StepReceipt(
-                    "operator", STATUS_ERROR, "deploy",
-                    f"{operator_ip}: pre-migration staging failed — {why}",
-                ))
-                return ProvisionResult(self.name, "deploy", tuple(receipts))
-            pre_synced_roles.add("operator")
-            ok, why = _migrate_on_operator(operator_ip)
-            receipts.append(StepReceipt(
-                "migrations", STATUS_CREATED if ok else STATUS_ERROR, "deploy",
-                f"{operator_ip}: {'schema current' if ok else 'migration FAILED'} ({why})",
-            ))
-            if not ok:
-                return ProvisionResult(self.name, "deploy", tuple(receipts))
-        else:
-            receipts.append(StepReceipt(
-                "migrations", STATUS_BLOCKED, "deploy",
-                "no dev operator host is declared; refusing to activate code without the "
-                "migrate-before-restart gate",
-            ))
-            return ProvisionResult(self.name, "deploy", tuple(receipts))
-
-        # safebox + operator: not behind an LB — a plain restart is fine (code-only, .env untouched).
-        for role, block, services in (
+        # Stage singleton code first. Nothing restarts until the operator has applied the staged
+        # migrations, so Safebox/operator/subuser code can never observe an older schema. Install
+        # the staged revision's public unit at the same time; env/secrets remain untouched.
+        singleton_specs = (
             ("safebox", ds.get("safebox") or {}, ["takyon-safebox.service"]),
             ("operator", ds.get("operator") or {},
              ["takyon-docker-broker.service", "takyon-worker.service", "takyon-dashboard.service"]),
-        ):
+        )
+        staged_singletons: list[tuple[str, str, list[str]]] = []
+        staging_failed = False
+        for role, block, services in singleton_specs:
             ip = str((block or {}).get("public_ip") or "").strip()
             if not ip:
                 receipts.append(StepReceipt(role, STATUS_SKIPPED, "deploy", f"no {role} host in dev_split"))
                 continue
-            if role not in pre_synced_roles:
-                ok, why = _push_code(ip)
-                if not ok:
-                    receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
-                    continue
+            ok, why = _push_code(ip)
+            if ok:
                 ok, why = _push_public_service_unit(ip, role, block)
-                if not ok:
-                    receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
-                    continue
-            ok, why = _restart(ip, services)
-            receipts.append(StepReceipt(
-                role, STATUS_CREATED if ok else STATUS_ERROR, "deploy",
-                f"{ip}: rev {short} {'active (' + why + ')' if ok else 'restart FAILED — ' + why}"))
+            if not ok:
+                receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
+                staging_failed = True
+                continue
+            staged_singletons.append((role, ip, services))
 
-        # subuser replicas: DRAIN-AWARE. Sync code to every replica first (staged, still serving old
-        # code), then activate with the zero-loss rolling restart so the LB never black-holes.
-        replicas = [r for r in (ds.get("replicas") or []) if str((r or {}).get("public_ip") or "").strip()]
-        synced = []
+        # Stage every replica before changing schema or restarting anything. A partial sync aborts
+        # the activation phase, preserving the N-replica same-revision contract.
+        replicas = [
+            r for r in (ds.get("replicas") or [])
+            if str((r or {}).get("public_ip") or "").strip()
+        ]
+        synced: list[dict[str, Any]] = []
         for rep in replicas:
             ip = str(rep.get("public_ip")).strip()
             ok, why = _push_code(ip)
@@ -2671,6 +2672,51 @@ class EnvironmentProvisioner:
                 f"{rep.get('name') or ip}: code {'staged' if ok else 'sync FAILED — ' + why}"))
             if ok:
                 synced.append(rep)
+            else:
+                staging_failed = True
+        if staging_failed:
+            receipts.append(StepReceipt(
+                "hosts", STATUS_ERROR, "deploy",
+                "revision did not stage on every declared host; refusing migration and restarts"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+
+        declared_operator_ip = str(((ds.get("operator") or {}).get("public_ip") or "")).strip()
+        operator_ip = next((ip for role, ip, _ in staged_singletons if role == "operator"), "")
+        if not declared_operator_ip:
+            receipts.append(StepReceipt(
+                "database", STATUS_BLOCKED, "deploy",
+                "no dev operator host is declared; refusing every restart because migrations "
+                "cannot run"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        if not operator_ip:
+            receipts.append(StepReceipt(
+                "database", STATUS_ERROR, "deploy",
+                "operator code did not stage; refusing every restart because migrations cannot run"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+        migrated, why = _migrate_on_operator(operator_ip)
+        receipts.append(StepReceipt(
+            "database", STATUS_CREATED if migrated else STATUS_ERROR, "deploy",
+            f"{operator_ip}: staged rev {short} "
+            f"{'migrated before restart' if migrated else 'migration FAILED — ' + why}"))
+        if not migrated:
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+
+        # Singleton services are not behind an LB; activate them only after schema convergence.
+        singleton_restart_failed = False
+        for role, ip, services in staged_singletons:
+            ok, why = _restart(ip, services)
+            receipts.append(StepReceipt(
+                role, STATUS_CREATED if ok else STATUS_ERROR, "deploy",
+                f"{ip}: rev {short} {'active (' + why + ')' if ok else 'restart FAILED — ' + why}"))
+            if not ok:
+                singleton_restart_failed = True
+        if singleton_restart_failed:
+            receipts.append(StepReceipt(
+                "hosts", STATUS_ERROR, "deploy",
+                "singleton activation failed; refusing replica activation"))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+
+        # Replicas activate drain-aware only after schema and singleton convergence.
         if synced:
             receipts.extend(self.rolling_restart().receipts)
         return ProvisionResult(self.name, "deploy", tuple(receipts))

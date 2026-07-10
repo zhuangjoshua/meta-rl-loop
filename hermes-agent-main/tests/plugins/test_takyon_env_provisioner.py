@@ -16,6 +16,7 @@ the load-bearing ones from the plan:
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -350,7 +351,11 @@ def test_stripe_create_is_idempotent_when_webhook_exists():
                    "enabled_events": ["checkout.session.completed"]},
     }
     http = FakeHttp(responses={
-        ("GET", "/webhook_endpoints"): {"data": [{"id": "we_1", "url": "https://dev.coscale.app/api/webhooks/stripe"}]},
+        ("GET", "/webhook_endpoints"): {"data": [{
+            "id": "we_1",
+            "url": "https://dev.coscale.app/api/webhooks/stripe",
+            "enabled_events": ["checkout.session.completed"],
+        }]},
     })
     prov = _provisioner(manifest=manifest, safebox_values={"STRIPE_SECRET_KEY": "sk_test_ABC"}, http=http)
     receipt = prov._create_stripe()
@@ -358,6 +363,49 @@ def test_stripe_create_is_idempotent_when_webhook_exists():
     assert receipt.data["webhook_endpoint_id"] == "we_1"
     # No POST was made — only the idempotency GET.
     assert all(m == "GET" for m, _ in http.calls)
+
+
+def test_stripe_create_updates_existing_webhook_event_drift():
+    desired = ["checkout.session.completed", "charge.refunded"]
+    manifest = {
+        "name": "dev",
+        "domains": {"company_base": "dev.coscale.app"},
+        "database": {"enabled": False},
+        "safebox": {"enabled": False},
+        "stripe": {
+            "enabled": True,
+            "webhook_url": "https://dev.coscale.app/api/webhooks/stripe",
+            "enabled_events": desired,
+        },
+    }
+    http = FakeHttp(
+        responses={
+            ("GET", "/webhook_endpoints"): {
+                "data": [
+                    {
+                        "id": "we_1",
+                        "url": "https://dev.coscale.app/api/webhooks/stripe",
+                        "enabled_events": ["checkout.session.completed"],
+                    }
+                ]
+            },
+            ("POST", "/webhook_endpoints/we_1"): {"id": "we_1"},
+        }
+    )
+    prov = _provisioner(
+        manifest=manifest,
+        safebox_values={"STRIPE_SECRET_KEY": "sk_test_ABC"},
+        http=http,
+    )
+
+    receipt = prov._create_stripe()
+
+    assert receipt.status == ep.STATUS_CREATED
+    assert receipt.data == {"webhook_endpoint_id": "we_1", "events": 2}
+    assert any(
+        method == "POST" and url.endswith("/webhook_endpoints/we_1")
+        for method, url in http.calls
+    )
 
 
 def test_auth0_create_is_idempotent_when_app_exists():
@@ -1104,7 +1152,8 @@ def _drain_fixtures():
         {"id": 918, "name": "takyon-dev-subuser-2",
          "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.12"}]}},
         {"id": 935, "name": "takyon-dev-safebox",
-         "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.13"}]}},
+         "networks": {"v4": [{"type": "private", "ip_address": "10.200.0.4"},
+                             {"type": "public", "ip_address": "203.0.113.13"}]}},
     ]
     lb = {"id": "lb-1", "name": "takyon-dev-subuser-lb", "ip": "203.0.113.99", "tag": "",
           "status": "active", "droplet_ids": [907, 918]}
@@ -1309,6 +1358,21 @@ def test_dev_manifest_declares_rolling_restart_rail():
     assert rr.get("service") == "takyon-subuser.service"
     assert float(rr.get("grace_seconds", 0)) > 0
     assert float(rr.get("rejoin_timeout_seconds", 0)) >= 30
+
+
+def test_dev_deploy_stages_every_host_then_migrates_before_any_restart():
+    source = inspect.getsource(ep.EnvironmentProvisioner.deploy)
+    stage_singletons = source.index("for role, block, services in singleton_specs")
+    stage_replicas = source.index("for rep in replicas")
+    fail_closed = source.index("if staging_failed")
+    migrate = source.index("migrated, why = _migrate_on_operator(operator_ip)")
+    restart_singletons = source.index("for role, ip, services in staged_singletons")
+    restart_replicas = source.index("self.rolling_restart()")
+    assert stage_singletons < stage_replicas < fail_closed < migrate
+    assert migrate < restart_singletons < restart_replicas
+    assert "TAKYON_ENV=dev" in source
+    assert "/opt/takyon/hermes-agent-main/takyon migrate" in source
+    assert "if not declared_operator_ip" in source
 
 
 def test_takyon_env_restart_subcommand_registered():

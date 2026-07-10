@@ -343,6 +343,12 @@ def _ent_from_row(row) -> Entitlement:
 # ── plan catalog ─────────────────────────────────────────────────────────────────
 
 
+def lock_plan_economics(conn, business_slug: str, plan_key: str) -> None:
+    """Serialize plan repricing with Checkout-intent creation/claim in this transaction."""
+    key = f"takyon-plan-economics:{business_slug}:{_normalize_plan_key(plan_key)}"
+    conn.execute("select pg_advisory_xact_lock(hashtextextended(%s, 0))", (key,))
+
+
 def upsert_plan_policy(
     conn,
     business_slug: str,
@@ -387,6 +393,8 @@ def upsert_plan_policy(
     price = int(float(price_cents or 0))
     if price < 0:
         raise InvalidPlan("plan price must be non-negative")
+    if str(currency or "usd").strip().lower() != "usd":
+        raise InvalidPlan("product subscription plans require currency='usd'")
     interval = _normalize_billing_interval(billing_interval)
     # Read the current row once: it supplies the budget default (when omitted), lets the
     # grandfather guard compare incoming vs. live economic terms, and identifies the one legal
@@ -478,9 +486,18 @@ def upsert_plan_policy(
         economics_changed = bool(changed)
         if changed:
             active = count_active_entitlements_for_plan(conn, business_slug, key)
+            nonterminal_stripe = count_nonterminal_stripe_entitlements_for_plan(
+                conn, business_slug, key
+            )
+            open_checkouts = count_open_checkout_intents_for_plan(conn, business_slug, key)
+            has_locked_subscription = nonterminal_stripe > 0
             if active > 0:
+                has_locked_subscription = True
+            if has_locked_subscription or open_checkouts > 0:
                 raise GrandfatheredPlanFrozen(
-                    f"plan '{key}' has {active} active subscriber(s); its economic terms "
+                    f"plan '{key}' has {active} active subscriber(s) and "
+                    f"{nonterminal_stripe} nonterminal Stripe subscription(s) and "
+                    f"{open_checkouts} open checkout(s); its economic terms "
                     f"({', '.join(changed)}) are frozen to protect grandfathered users. To change "
                     f"pricing for new signups, create a NEW plan_key (e.g. '{key}-2') with the new "
                     f"terms and route new checkout to it — existing subscribers stay on '{key}'. "
@@ -522,6 +539,61 @@ def upsert_plan_policy(
             },
         }
     with conn.transaction():
+        lock_plan_economics(conn, business_slug, key)
+        locked_existing = get_plan_policy(conn, business_slug, key)
+        if saleable is None and locked_existing is not None:
+            saleable_value = locked_existing.saleable
+        if locked_existing is None:
+            economics_changed = False
+            changed = []
+        else:
+            locked_current_terms = {
+                "tier": str(locked_existing.tier or "").strip().casefold(),
+                "price_cents": int(locked_existing.price_cents),
+                "currency": str(locked_existing.currency or "usd").lower(),
+                "billing_interval": str(locked_existing.billing_interval),
+                "included_ai_budget_microusd": int(
+                    locked_existing.included_ai_budget_microusd
+                ),
+                "included_action_quota": int(locked_existing.included_action_quota),
+            }
+            locked_incoming_terms = {
+                "tier": tier_value.strip().casefold(),
+                "price_cents": price,
+                "currency": str(currency or "usd").lower(),
+                "billing_interval": interval,
+                "included_ai_budget_microusd": budget,
+                "included_action_quota": quota,
+            }
+            changed = sorted(
+                field
+                for field in locked_current_terms
+                if locked_current_terms[field] != locked_incoming_terms[field]
+            )
+            economics_changed = bool(changed)
+            if economics_changed:
+                active = count_active_entitlements_for_plan(conn, business_slug, key)
+                nonterminal_stripe = count_nonterminal_stripe_entitlements_for_plan(
+                    conn, business_slug, key
+                )
+                open_checkouts = count_open_checkout_intents_for_plan(
+                    conn, business_slug, key
+                )
+                has_locked_subscription = nonterminal_stripe > 0
+                if active > 0:
+                    has_locked_subscription = True
+                if has_locked_subscription or open_checkouts > 0:
+                    raise GrandfatheredPlanFrozen(
+                        f"plan '{key}' has {active} active subscriber(s) and "
+                        f"{nonterminal_stripe} nonterminal Stripe subscription(s) and "
+                        f"{open_checkouts} open checkout(s); its economic terms "
+                        f"({', '.join(changed)}) are frozen"
+                    )
+                if stripe_product_id or stripe_price_id:
+                    raise InvalidPlan(
+                        "economic changes cannot reuse a supplied Stripe product/price; "
+                        "omit both IDs"
+                    )
         row = conn.execute(
             "insert into app_plan_policies "
             "(business_slug, plan_key, tier, price_cents, currency, billing_interval, "
@@ -681,6 +753,35 @@ def count_active_entitlements_for_plan(conn, business_slug: str, plan_key: str) 
         "select count(*) from app_entitlements "
         f"where business_slug = %s and plan_key = %s and status in ({placeholders})",
         (business_slug, _normalize_plan_key(plan_key), *_ACTIVE_STATUSES),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_nonterminal_stripe_entitlements_for_plan(
+    conn, business_slug: str, plan_key: str
+) -> int:
+    """Count Stripe subscriptions whose lifecycle can still collect or retry payment.
+
+    This terminal set is intentionally identical to the session-bound Checkout port: a past_due,
+    unpaid, paused, or incomplete subscription still references this plan's live economics and must
+    freeze them until Stripe reaches a terminal cancellation state.
+    """
+    row = conn.execute(
+        "select count(*) from app_entitlements where business_slug = %s and plan_key = %s "
+        "and source = 'stripe' and stripe_subscription_id is not null "
+        "and lower(status) not in ('canceled', 'cancelled', 'sandbox_retired')",
+        (business_slug, _normalize_plan_key(plan_key)),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_open_checkout_intents_for_plan(conn, business_slug: str, plan_key: str) -> int:
+    """Open Checkout attempts freeze economics for at most 48 hours."""
+    row = conn.execute(
+        "select count(*) from app_checkout_intents where business_slug = %s and plan_key = %s "
+        "and status in ('created', 'stripe_creating', 'pending') "
+        "and created_at > now() - interval '48 hours'",
+        (business_slug, _normalize_plan_key(plan_key)),
     ).fetchone()
     return int(row[0]) if row else 0
 

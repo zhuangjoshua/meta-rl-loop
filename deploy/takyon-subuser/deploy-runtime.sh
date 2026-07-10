@@ -7,6 +7,7 @@ SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
+REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/remove-stripe-authority-env.py"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 PRODUCT_SITES_SOURCE_HOST="${TAKYON_PRODUCT_SITES_SOURCE_HOST:-root@137.184.75.57}"
 PRODUCT_SITES_SOURCE_KEY="${TAKYON_PRODUCT_SITES_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -60,6 +61,11 @@ if [[ ! -f "$VALIDATE_AUTHORITY_ENV_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" ]]; then
+  echo "Stripe authority env cleanup not found: $REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$VERIFY_SUPABASE_AUTH_SCRIPT" ]]; then
   echo "supabase auth verifier not found: $VERIFY_SUPABASE_AUTH_SCRIPT" >&2
   exit 1
@@ -74,6 +80,10 @@ if [[ ( "$TAKYON_SYNC_PRODUCT_SITES" == "1" || "$TAKYON_SYNC_PRODUCT_SOURCE_CACH
   echo "product-sites source key not found: $PRODUCT_SITES_SOURCE_KEY" >&2
   exit 1
 fi
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "python3 - /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  < "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "TAKYON_REQUIRE_MIGRATION_DATABASE_URL='$TAKYON_RUN_DB_MIGRATIONS' TAKYON_REQUIRE_APP_DATABASE_URL='$TAKYON_REQUIRE_APP_DATABASE_URL' bash -s -- subuser /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \

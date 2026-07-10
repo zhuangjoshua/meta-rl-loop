@@ -459,7 +459,7 @@ def test_paid_checkout_without_email_accrues_but_no_entitlement(pg_conn):
     assert app_entitlements.list_entitlements(pg_conn, slug) == []
 
 
-def test_unpaid_checkout_records_session_but_no_revenue_or_accrual(pg_conn):
+def test_unpaid_checkout_waits_for_later_paid_event(pg_conn):
     owner = _owner(pg_conn)
     slug = _business(pg_conn, owner)
     intent = app_payments.create_checkout_intent(
@@ -471,19 +471,73 @@ def test_unpaid_checkout_records_session_but_no_revenue_or_accrual(pg_conn):
                         email="u@x.com", amount_total=900, payment_status="unpaid"),
     )
     proc = result["processed"]
-    assert proc["recorded"] is True
-    assert proc["revenue_recorded"] is False
-    assert proc["accrued_to_owner"] is False
+    assert proc == {
+        "recorded": False,
+        "reason": "payment_not_settled",
+        "business_slug": slug,
+        "plan_key": "pro",
+    }
     assert app_payments.get_revenue_summary(pg_conn, slug)["events"] == 0
     assert custody.get_custody_balances(pg_conn, owner).owed_balance_cents == 0
     assert app_entitlements.list_entitlements(pg_conn, slug) == []
-    # the session row is still recorded (we saw it)
-    sessions = pg_conn.execute(
-        "select payment_status from app_checkout_sessions where business_slug = %s", (slug,)
-    ).fetchall()
-    assert sessions == [("unpaid",)]
-    # the intent is marked completed
-    assert app_payments.get_checkout_intent(pg_conn, slug, intent_id=intent.id).status == "completed"
+    assert pg_conn.execute(
+        "select count(*) from app_checkout_sessions where business_slug = %s", (slug,)
+    ).fetchone()[0] == 0
+    assert app_payments.get_checkout_intent(pg_conn, slug, intent_id=intent.id).status == "created"
+
+    paid = app_payments.record_webhook_and_process(
+        pg_conn,
+        _checkout_event(
+            event_id="evt_paid_after_unpaid",
+            session_id="cs_unpaid",
+            intent_id=intent.id,
+            email="u@x.com",
+            amount_total=900,
+            payment_status="paid",
+        ),
+    )["processed"]
+    assert paid["recorded"] is True
+    assert paid["revenue_recorded"] is True
+    assert len(app_entitlements.list_entitlements(pg_conn, slug)) == 1
+
+
+def test_live_checkout_without_economics_binding_grants_nothing(pg_conn, monkeypatch):
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    owner = str(uuid.uuid4())
+    pg_conn.execute(
+        "insert into users (id, auth0_sub) values (%s, %s)",
+        (owner, f"auth0|{uuid.uuid4().hex}"),
+    )
+    slug = _business(pg_conn, owner)
+    intent = app_payments.create_checkout_intent(
+        pg_conn,
+        slug,
+        plan_key="pro",
+        client_reference_id="ref-live-unbound",
+        customer_email="live@x.com",
+    )
+    event = _checkout_event(
+        event_id="evt_live_unbound",
+        session_id="cs_live_unbound",
+        intent_id=intent.id,
+        email="live@x.com",
+        amount_total=1900,
+        mode="subscription",
+    )
+    event["livemode"] = True
+    event["data"]["object"]["livemode"] = True
+
+    processed = app_payments.record_webhook_and_process(pg_conn, event)["processed"]
+
+    assert processed == {"recorded": False, "reason": "checkout_economics_missing"}
+    assert app_payments.get_revenue_summary(pg_conn, slug)["events"] == 0
+    assert pg_conn.execute(
+        "select count(*) from custody_accounts where user_id = %s", (owner,)
+    ).fetchone()[0] == 0
+    assert app_entitlements.list_entitlements(pg_conn, slug) == []
+    assert pg_conn.execute(
+        "select count(*) from app_checkout_sessions where business_slug = %s", (slug,)
+    ).fetchone()[0] == 0
 
 
 def test_zero_amount_paid_records_revenue_but_no_accrual(pg_conn):

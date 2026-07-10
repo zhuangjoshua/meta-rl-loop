@@ -9,7 +9,8 @@ alter table if exists public.provider_connections
 
 update public.provider_connections
 set status = 'pending', approved_scope_digest = null, updated_at = now()
-where status = 'active';
+where status = 'active'
+  and approved_scope_digest is null;
 
 do $$
 begin

@@ -2151,6 +2151,14 @@ def _takyon_app_tool(raw: str) -> tuple[int, dict[str, Any]]:
     return int(HTTPStatus.OK), payload
 
 
+def _takyon_stripe_webhook_tool(raw: str) -> tuple[int, dict[str, Any]]:
+    """Preserve retryable Safebox failures so Stripe retries instead of discarding the event."""
+    status, payload = _takyon_app_tool(raw)
+    if payload.get("error_code") == "stripe_webhook_unavailable":
+        return int(HTTPStatus.SERVICE_UNAVAILABLE), payload
+    return status, payload
+
+
 async def _takyon_app_tool_off_loop(handler: Any, args: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """Run a synchronous ``handle_business_*`` tool off the event loop.
 
@@ -3465,7 +3473,7 @@ async def takyon_app_api_delete(request: Request, business: str, route: str):
 async def takyon_app_stripe_webhook(request: Request):
     raw_body = (await request.body()).decode("utf-8", errors="replace")
     with app_runtime_database_plane():
-        status, payload = _takyon_app_tool(handle_business_record_stripe_webhook({
+        status, payload = _takyon_stripe_webhook_tool(handle_business_record_stripe_webhook({
             "raw_body": raw_body,
             "stripe_signature": request.headers.get("stripe-signature") or "",
         }))

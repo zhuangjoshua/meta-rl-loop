@@ -123,6 +123,14 @@ def test_upsert_plan_rejects_negative_price(pg_conn):
         app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", price_cents=-1)
 
 
+def test_upsert_product_plan_rejects_non_usd_currency(pg_conn):
+    slug = _business(pg_conn, _owner(pg_conn))
+    with pytest.raises(InvalidPlan, match="currency='usd'"):
+        app_entitlements.upsert_plan_policy(
+            pg_conn, slug, "pro-eur", price_cents=1000, currency="eur"
+        )
+
+
 def test_upsert_monthly_plan_rejects_included_ai_budget_above_plan_price(pg_conn):
     slug = _business(pg_conn, _owner(pg_conn))
     with pytest.raises(InvalidPlan):
@@ -420,6 +428,39 @@ def test_reprice_plan_without_subscribers_is_allowed(pg_conn):
     # no live subscribers → free to re-price in place
     plan = app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=2000)
     assert plan.price_cents == 2000
+
+
+def test_reprice_plan_ignores_stale_checkout_but_freezes_for_fresh_checkout(pg_conn):
+    owner_id = uuid.uuid4()
+    pg_conn.execute(
+        "insert into users (id, auth0_sub) values (%s, %s)",
+        (owner_id, f"auth0|{uuid.uuid4().hex}"),
+    )
+    slug = _business(pg_conn, owner_id)
+    app_entitlements.upsert_plan_policy(pg_conn, slug, "pro", tier="paid", price_cents=1000)
+    pg_conn.execute(
+        "insert into app_checkout_intents (business_slug, plan_key, client_reference_id, "
+        "created_at) values (%s, 'pro', %s, now() - interval '49 hours')",
+        (slug, uuid.uuid4().hex),
+    )
+
+    assert app_entitlements.count_open_checkout_intents_for_plan(pg_conn, slug, "pro") == 0
+    plan = app_entitlements.upsert_plan_policy(
+        pg_conn, slug, "pro", tier="paid", price_cents=2000
+    )
+    assert plan.price_cents == 2000
+
+    pg_conn.execute(
+        "insert into app_checkout_intents (business_slug, plan_key, client_reference_id, "
+        "created_at) values (%s, 'pro', %s, now() - interval '47 hours')",
+        (slug, uuid.uuid4().hex),
+    )
+    assert app_entitlements.count_open_checkout_intents_for_plan(pg_conn, slug, "pro") == 1
+    with pytest.raises(GrandfatheredPlanFrozen):
+        app_entitlements.upsert_plan_policy(
+            pg_conn, slug, "pro", tier="paid", price_cents=3000
+        )
+    assert app_entitlements.get_plan_policy(pg_conn, slug, "pro").price_cents == 2000
 
 
 def test_reprice_plan_with_active_subscriber_is_frozen(pg_conn):

@@ -79,6 +79,18 @@ def test_budget_at_cap_passes(pg_conn):
     assert plan.included_ai_budget_microusd == 5_000_000
 
 
+def test_open_checkout_freezes_plan_economics(pg_conn):
+    slug = _mk_business(pg_conn)
+    ents.upsert_plan_policy(pg_conn, slug, "starter", tier="paid", price_cents=500)
+    pg_conn.execute(
+        "insert into app_checkout_intents (business_slug, plan_key, client_reference_id) "
+        "values (%s, 'starter', %s)",
+        (slug, uuid.uuid4().hex),
+    )
+    with pytest.raises(ents.GrandfatheredPlanFrozen, match="open checkout"):
+        ents.upsert_plan_policy(pg_conn, slug, "starter", tier="paid", price_cents=600)
+
+
 def test_frozen_legacy_non_month_row_identical_repass_passes(pg_conn):
     """The grandfather contract: a legacy one_time row (pre-slice) stays serviceable —
     an idempotent re-pass with identical terms must not trip the month gate or the cap."""

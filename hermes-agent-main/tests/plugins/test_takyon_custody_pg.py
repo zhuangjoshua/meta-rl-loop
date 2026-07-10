@@ -24,7 +24,7 @@ psycopg = pytest.importorskip("psycopg")
 
 from plugins.takyon import custody  # noqa: E402
 from plugins.takyon.control_plane import provision_user_on_first_login  # noqa: E402
-from plugins.takyon.custody import InsufficientCustody  # noqa: E402
+from plugins.takyon.custody import CustodyClawbackPending, InsufficientCustody  # noqa: E402
 
 
 def _sub() -> str:
@@ -160,6 +160,50 @@ def test_payout_is_idempotent(pg_conn):
     assert custody.payout(pg_conn, uid, 5000, "wd-1") == 3000  # drained once
     bal = custody.get_custody_balances(pg_conn, uid)
     assert bal.paid_out_cents == 5000
+
+
+def test_refund_clawback_debits_owed_recovers_shortfall_and_blocks_payout(pg_conn):
+    uid = str(uuid.uuid4())
+    pg_conn.execute(
+        "insert into users (id, auth0_sub) values (%s, %s)",
+        (uid, f"auth0|{uuid.uuid4().hex}"),
+    )
+    slug = _business(pg_conn, uid)
+    custody.open_custody_account(pg_conn, uid)
+    custody.accrue(pg_conn, uid, slug, 8000, "pay-before-refund", fee_bps=0)
+
+    pg_conn.execute("set session authorization takyon_safebox_authority")
+    try:
+        first = custody.clawback(
+            pg_conn, uid, slug, 3000, "refund-1", stripe_ref="ch_1"
+        )
+        assert first == {
+            "applied_cents": 3000,
+            "shortfall_cents": 0,
+            "owed_balance_cents": 5000,
+            "replayed": False,
+        }
+        replay = custody.clawback(
+            pg_conn, uid, slug, 3000, "refund-1", stripe_ref="ch_1"
+        )
+        assert replay["replayed"] is True
+        second = custody.clawback(
+            pg_conn, uid, slug, 7000, "refund-2", stripe_ref="ch_1"
+        )
+        assert second["applied_cents"] == 5000
+        assert second["shortfall_cents"] == 2000
+        assert second["owed_balance_cents"] == 0
+        with pytest.raises(CustodyClawbackPending) as exc:
+            custody.payout(pg_conn, uid, 1, "blocked-payout")
+        assert exc.value.pending_cents == 2000
+        assert custody.accrue(
+            pg_conn, uid, slug, 3000, "pay-after-refund", fee_bps=0
+        ) == 1000
+        assert custody.payout(pg_conn, uid, 1000, "allowed-payout") == 0
+    finally:
+        pg_conn.execute("reset session authorization")
+
+    assert custody.reconcile_custody(pg_conn, uid)["ok"] is True
 
 
 def test_concurrent_accruals_sum_correctly(pg_conn):

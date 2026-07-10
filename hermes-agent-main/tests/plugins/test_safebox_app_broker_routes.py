@@ -45,13 +45,21 @@ def _plan_dict(*, price_id: str = "price_123", product_id: str = "prod_123") -> 
     }
 
 
-def _checkout_row(*, price_id: str = "price_123", saleable: bool = True):
-    plan = _plan_dict(price_id=price_id)
+def _checkout_row():
+    plan = _plan_dict()
     return (
-        "cust_X", "customer@example.com", "created", plan["stripe_price_id"],
-        plan["stripe_product_id"], plan["tier"], plan["price_cents"], plan["currency"],
-        plan["billing_interval"], plan["included_ai_budget_microusd"],
-        plan["included_action_quota"], plan["metadata"], saleable, plan["business_mode"],
+        "00000000-0000-0000-0000-000000000123",
+        "cust_X",
+        "customer@example.com",
+        "client_ref_123",
+        plan["price_cents"],
+        plan["currency"],
+        plan["billing_interval"],
+        plan["tier"],
+        plan["included_ai_budget_microusd"],
+        plan["included_action_quota"],
+        plan["metadata"],
+        plan["business_mode"],
     )
 
 
@@ -94,6 +102,28 @@ def _product_object(*, overrides: dict | None = None) -> dict:
     return value
 
 
+def _checkout_session_object(
+    params: dict,
+    *,
+    session_id: str = "cs_live_123",
+    livemode: bool = True,
+) -> dict:
+    metadata = {
+        key[len("metadata[") : -1]: str(value)
+        for key, value in params.items()
+        if str(key).startswith("metadata[") and str(key).endswith("]")
+    }
+    return {
+        "id": session_id,
+        "object": "checkout.session",
+        "livemode": livemode,
+        "mode": "subscription",
+        "url": f"https://checkout.stripe.com/c/pay/{session_id}",
+        "client_reference_id": params.get("client_reference_id"),
+        "metadata": metadata,
+    }
+
+
 class _OwnerCursor:
     def __init__(self, row):
         self._row = row
@@ -121,6 +151,7 @@ def client(monkeypatch):
     monkeypatch.setenv(safebox_app._OPERATOR_TOKEN_ENV, _OPERATOR_TOKEN)
     monkeypatch.setenv(safebox_app._OPERATOR_CLIENTS_ENV, "testclient")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_unit_test")
+    monkeypatch.setenv("TAKYON_STRIPE_ACCOUNT_ID", _STRIPE_ACCOUNT_ID)
     monkeypatch.setattr(safebox_app, "_stripe_key_livemode", lambda: True)
 
     # Stub the safebox's own DB connection so authorize_*_call can resolve the business owner without a
@@ -145,6 +176,20 @@ def test_app_imports_and_boots(client):
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_stripe_account_proof_returns_no_secret(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app,
+        "_stripe_account_snapshot",
+        lambda: (_STRIPE_ACCOUNT_ID, True),
+    )
+
+    response = client.get("/v1/stripe/account-proof", headers=_auth(operator=False))
+
+    assert response.status_code == 200
+    assert response.json() == {"account_id": _STRIPE_ACCOUNT_ID, "livemode": True}
+    assert "key" not in response.text.lower()
 
 
 def test_new_routes_are_registered_alongside_env_routes():
@@ -1038,30 +1083,169 @@ def test_app_checkout_reconcile_requires_expected_context(client, monkeypatch):
     assert resp.json()["detail"] == "checkout_context_required"
 
 
-class _CheckoutConn:
-    def __init__(self, intent_row, *, catalog_row=None):
-        self.intent_row = intent_row
-        self.catalog_row = _catalog_row() if catalog_row is None else catalog_row
-
+class _CheckoutReconcileConn:
     def execute(self, sql, params=None):
         sql_text = str(sql).lower()
         if "from businesses" in sql_text:
             return _OwnerCursor((1,))
         if "from app_checkout_intents" in sql_text:
+            return _OwnerCursor(("climblog", "cust_X", "customer@example.com"))
+        return _OwnerCursor(None)
+
+    @contextlib.contextmanager
+    def transaction(self):
+        yield
+
+
+def _app_checkout_reconcile_objects(*, subscription_metadata=None):
+    session = {
+        "id": "cs_live_123",
+        "object": "checkout.session",
+        "livemode": True,
+        "status": "complete",
+        "payment_status": "paid",
+        "subscription": "sub_live_123",
+        "metadata": {
+            "business": "climblog",
+            "source": "takyon_app",
+            "checkout_intent_id": "00000000-0000-0000-0000-000000000123",
+        },
+    }
+    subscription = {
+        "id": "sub_live_123",
+        "object": "subscription",
+        "livemode": True,
+        "status": "active",
+        "metadata": subscription_metadata
+        if subscription_metadata is not None
+        else {
+            "business": "climblog",
+            "source": "takyon_app",
+            "takyon_stripe_account_id": _STRIPE_ACCOUNT_ID,
+        },
+    }
+    return session, subscription
+
+
+@pytest.mark.parametrize(
+    "subscription_metadata",
+    [
+        {"business": "climblog", "takyon_stripe_account_id": _STRIPE_ACCOUNT_ID},
+        {
+            "business": "other-business",
+            "source": "takyon_app",
+            "takyon_stripe_account_id": _STRIPE_ACCOUNT_ID,
+        },
+        {
+            "business": "climblog",
+            "source": "takyon_app",
+            "takyon_stripe_account_id": "acct_wrong",
+        },
+    ],
+)
+def test_app_checkout_reconcile_rejects_unbound_subscription(
+    client, monkeypatch, subscription_metadata
+):
+    session, subscription = _app_checkout_reconcile_objects(
+        subscription_metadata=subscription_metadata
+    )
+
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutReconcileConn()
+
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
+        return subscription if path.startswith("subscriptions/") else session
+
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    monkeypatch.setenv("TAKYON_STRIPE_ACCOUNT_ID", _STRIPE_ACCOUNT_ID)
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+    monkeypatch.setattr(
+        app_payments,
+        "reconcile_checkout_session",
+        lambda *a, **k: pytest.fail("unbound subscription reached entitlement grant"),
+    )
+
+    resp = client.post(
+        "/v1/stripe/app-checkout/reconcile",
+        headers=_auth(operator=False),
+        json={
+            "session_id": "cs_live_123",
+            "business_slug": "climblog",
+            "app_user_id": "cust_X",
+        },
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"] == "stripe_subscription_reconcile_pending"
+
+
+def test_app_checkout_reconcile_rolls_back_when_subscription_not_recorded(client, monkeypatch):
+    session, subscription = _app_checkout_reconcile_objects()
+
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield _CheckoutReconcileConn()
+
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
+        return subscription if path.startswith("subscriptions/") else session
+
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    monkeypatch.setenv("TAKYON_STRIPE_ACCOUNT_ID", _STRIPE_ACCOUNT_ID)
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+    monkeypatch.setattr(
+        app_payments, "reconcile_checkout_session", lambda *a, **k: {"recorded": True}
+    )
+    monkeypatch.setattr(
+        app_payments,
+        "reconcile_subscription",
+        lambda *a, **k: {"recorded": False, "reason": "metadata_mismatch"},
+    )
+
+    resp = client.post(
+        "/v1/stripe/app-checkout/reconcile",
+        headers=_auth(operator=False),
+        json={
+            "session_id": "cs_live_123",
+            "business_slug": "climblog",
+            "app_user_id": "cust_X",
+        },
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["detail"] == "stripe_subscription_reconcile_pending"
+
+
+class _CheckoutConn:
+    def __init__(self, intent_row, *, catalog_row=None):
+        self.intent_row = intent_row
+        self.catalog_row = _catalog_row() if catalog_row is None else catalog_row
+        self.released = False
+        self.claim_params = None
+
+    def execute(self, sql, params=None):
+        sql_text = str(sql).lower()
+        if "from businesses" in sql_text:
+            return _OwnerCursor((1,))
+        if "takyon_safebox_claim_app_checkout_intent" in sql_text:
+            self.claim_params = tuple(params or ())
             return _OwnerCursor(self.intent_row)
         if "from app_plan_policies" in sql_text:
             return _OwnerCursor(self.catalog_row)
+        if "takyon_safebox_release_app_checkout_intent" in sql_text:
+            self.released = True
+            return _OwnerCursor((True,))
         return _OwnerCursor(None)
 
 
-def _checkout_request(price_id: str = "price_123", intent_id: str = "intent_123") -> dict:
+def _checkout_request(intent_id: str = "00000000-0000-0000-0000-000000000123") -> dict:
     return {
         "path": "checkout/sessions",
         "method": "POST",
         "params": {
             "mode": "subscription",
-            "line_items[0][price]": price_id,
-            "line_items[0][quantity]": 1,
             "success_url": "https://climblog.coscale.app/app?checkout=success",
             "cancel_url": "https://climblog.coscale.app/app?checkout=cancel",
             "customer_email": "customer@example.com",
@@ -1080,10 +1264,10 @@ def test_generic_stripe_checkout_requires_recorded_intent(client, monkeypatch):
 
     calls: list[str] = []
 
-    def _stripe(path, params=None, *, method="POST"):
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
         calls.append(path)
-        if path == "prices/price_123":
-            return {"metadata": {"business": "climblog", "source": "takyon_app"}}
+        if path == "account":
+            return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
         pytest.fail("checkout session must not be created without a recorded app intent")
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
@@ -1091,31 +1275,24 @@ def test_generic_stripe_checkout_requires_recorded_intent(client, monkeypatch):
 
     resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
 
-    assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"] == "stripe_checkout_intent_required"
-    assert calls == []
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == "stripe_checkout_intent_not_open"
+    assert calls == ["account"]
 
 
-def test_generic_stripe_checkout_requires_intent_plan_price_match(client, monkeypatch):
-    @contextlib.contextmanager
-    def _fake_conn():
-        yield _CheckoutConn(_checkout_row(price_id="price_expected"))
-
-    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+def test_generic_stripe_checkout_rejects_all_client_pricing(client, monkeypatch):
+    request = _checkout_request()
+    request["params"]["line_items[0][price_data][unit_amount]"] = 1
     monkeypatch.setattr(
         safebox_app.safebox,
         "stripe_request",
-        lambda path, params=None, *, method="POST": (
-            {"metadata": {"business": "climblog", "source": "takyon_app"}}
-            if path == "prices/price_123"
-            else pytest.fail("checkout session must not be created for the wrong plan price")
-        ),
+        lambda *args, **kwargs: pytest.fail("client pricing reached Stripe"),
     )
 
-    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=request)
 
-    assert resp.status_code == 403, resp.text
-    assert resp.json()["detail"] == "stripe_price_scope_mismatch"
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "stripe_checkout_pricing_client_forbidden"
 
 
 def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypatch):
@@ -1124,20 +1301,16 @@ def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypa
         yield _CheckoutConn(_checkout_row())
 
     calls: list[str] = []
+    captured: dict[str, object] = {}
 
-    def _stripe(path, params=None, *, method="POST"):
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
         calls.append(path)
         if path == "account":
             return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
-        if path == "prices/price_123":
-            return _price_object()
-        if path == "products/prod_123":
-            return _product_object()
         if path == "checkout/sessions":
-            return {
-                "id": "cs_live_123", "object": "checkout.session", "livemode": True,
-                "url": "https://checkout.stripe.com/c/pay/cs_live_123",
-            }
+            captured["params"] = dict(params or {})
+            captured["idempotency_key"] = idempotency_key
+            return _checkout_session_object(params or {})
         pytest.fail(f"unexpected stripe path: {path}")
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
@@ -1147,105 +1320,225 @@ def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypa
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["id"] == "cs_live_123"
-    assert calls == ["account", "prices/price_123", "products/prod_123", "checkout/sessions"]
+    assert calls == ["account", "checkout/sessions"]
+    authoritative = captured["params"]
+    assert isinstance(authoritative, dict)
+    assert authoritative["line_items[0][price_data][unit_amount]"] == 900
+    assert authoritative["line_items[0][price_data][currency]"] == "usd"
+    assert authoritative["line_items[0][price_data][recurring][interval]"] == "month"
+    assert authoritative["client_reference_id"] == "client_ref_123"
+    assert "line_items[0][price]" not in authoritative
+    for key, value in _catalog_metadata().items():
+        assert authoritative[f"metadata[{key}]"] == value
+        assert authoritative[f"subscription_data[metadata][{key}]"] == value
+        assert (
+            authoritative[f"line_items[0][price_data][product_data][metadata][{key}]"]
+            == value
+        )
+    assert captured["idempotency_key"] == (
+        "takyon-app-checkout-00000000-0000-0000-0000-000000000123"
+    )
+
+
+def test_generic_stripe_checkout_releases_claim_after_transport_error(client, monkeypatch):
+    conn = _CheckoutConn(_checkout_row())
+
+    @contextlib.contextmanager
+    def _fake_conn():
+        yield conn
+
+    calls: list[str] = []
+
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
+        calls.append(path)
+        if path == "account":
+            return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
+        if path == "checkout/sessions":
+            raise RuntimeError("network failed")
+        pytest.fail(f"unexpected stripe path: {path}")
+
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "stripe_error"
+    assert conn.released is True
+    assert calls == ["account", "checkout/sessions"]
 
 
 @pytest.mark.parametrize(
-    ("target", "field", "value", "expected_detail"),
+    ("field", "value"),
     [
-        ("price", "active", False, "stripe_price_economics_mismatch"),
-        ("price", "livemode", False, "stripe_price_economics_mismatch"),
-        ("price", "currency", "eur", "stripe_price_economics_mismatch"),
-        ("price", "unit_amount", 1, "stripe_price_economics_mismatch"),
-        ("price", "recurring", {"interval": "year", "interval_count": 1}, "stripe_price_economics_mismatch"),
-        ("price_metadata", "business_id", "other", "stripe_catalog_metadata_mismatch"),
-        ("price_metadata", "economics_version", "econ_v1_forged", "stripe_catalog_metadata_mismatch"),
-        ("product", "active", False, "stripe_product_scope_mismatch"),
-        ("product_metadata", "plan_key", "cheap", "stripe_catalog_metadata_mismatch"),
+        ("object", "price"),
+        ("livemode", False),
+        ("mode", "payment"),
+        ("id", "cs_test_wrong_mode"),
+        ("url", "https://evil.example/checkout"),
+        ("client_reference_id", "other_customer"),
+        ("metadata", {}),
     ],
 )
-def test_generic_stripe_checkout_rejects_external_catalog_mismatch(
-    client, monkeypatch, target, field, value, expected_detail
+def test_generic_stripe_checkout_releases_claim_after_response_mismatch(
+    client, monkeypatch, field, value
 ):
+    conn = _CheckoutConn(_checkout_row())
+
     @contextlib.contextmanager
     def _fake_conn():
-        yield _CheckoutConn(_checkout_row())
+        yield conn
 
-    price = _price_object()
-    product = _product_object()
-    if target == "price":
-        price[field] = value
-    elif target == "product":
-        product[field] = value
-    elif target == "price_metadata":
-        price["metadata"] = {**price["metadata"], field: value}
-    else:
-        product["metadata"] = {**product["metadata"], field: value}
-
-    def _stripe(path, params=None, *, method="POST"):
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
         if path == "account":
             return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
-        if path == "prices/price_123":
-            return price
-        if path == "products/prod_123":
-            return product
-        pytest.fail("checkout session must not be created for mismatched Stripe catalog state")
+        if path == "checkout/sessions":
+            result = _checkout_session_object(params or {})
+            result[field] = value
+            return result
+        pytest.fail(f"unexpected stripe path: {path}")
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
     monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
 
     resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
 
-    assert resp.status_code in {403, 409}
-    assert resp.json()["detail"] == expected_detail
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "stripe_checkout_create_mismatch"
+    assert conn.released is True
 
 
-def test_generic_stripe_checkout_rejects_deprecated_plan_before_stripe(client, monkeypatch):
+def test_generic_stripe_checkout_idempotent_retry_reuses_one_session(client, monkeypatch):
+    conn = _CheckoutConn(_checkout_row())
+
     @contextlib.contextmanager
     def _fake_conn():
-        yield _CheckoutConn(_checkout_row(saleable=False))
+        yield conn
+
+    sessions: dict[str, dict] = {}
+    keys: list[str] = []
+    calls: list[str] = []
+
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
+        calls.append(path)
+        if path == "account":
+            return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
+        if path == "checkout/sessions":
+            keys.append(idempotency_key)
+            return sessions.setdefault(
+                idempotency_key,
+                _checkout_session_object(params or {}, session_id="cs_live_single"),
+            )
+        pytest.fail(f"unexpected stripe path: {path}")
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+
+    first = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+    second = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["id"] == second.json()["id"] == "cs_live_single"
+    assert len(sessions) == 1
+    assert keys[0] == keys[1] == (
+        "takyon-app-checkout-00000000-0000-0000-0000-000000000123"
+    )
+    assert calls == ["account", "checkout/sessions", "account", "checkout/sessions"]
+    assert conn.released is False
+
+
+def test_checkout_pause_blocks_app_operator_and_creative_creation(client, monkeypatch):
+    monkeypatch.setenv("TAKYON_STRIPE_CHECKOUT_DISABLED", "1")
     monkeypatch.setattr(
         safebox_app.safebox,
         "stripe_request",
-        lambda *args, **kwargs: pytest.fail("deprecated plan must not reach Stripe"),
+        lambda *args, **kwargs: pytest.fail("paused checkout reached Stripe"),
+    )
+    app_resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+    operator_resp = client.post(
+        "/v1/operator/billing/subscription/checkout",
+        headers=_auth(),
+        json={
+            "user_id": "user_A",
+            "plan_id": "pro",
+            "success_url": "https://app.fourmanifold.com/ok",
+            "cancel_url": "https://app.fourmanifold.com/no",
+        },
+    )
+    creative_resp = client.post(
+        "/v1/creative-credits/checkout",
+        headers=_auth(),
+        json={
+            "user_id": "user_A",
+            "business_slug": "climblog",
+            "credits": 100,
+            "success_url": "https://app.fourmanifold.com/ok",
+            "cancel_url": "https://app.fourmanifold.com/no",
+        },
+    )
+    assert app_resp.status_code == operator_resp.status_code == creative_resp.status_code == 503
+    assert app_resp.json()["detail"] == "stripe_checkout_paused"
+    assert operator_resp.json()["detail"] == "stripe_checkout_paused"
+    assert creative_resp.json()["detail"] == "stripe_checkout_paused"
+
+
+def test_generic_checkout_defaults_closed_only_in_live_mode(monkeypatch):
+    monkeypatch.delenv("TAKYON_STRIPE_CHECKOUT_DISABLED", raising=False)
+    monkeypatch.setattr(safebox_app.safebox, "load_env", lambda: {})
+
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    assert safebox_app._stripe_checkout_disabled() is True
+
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "test")
+    assert safebox_app._stripe_checkout_disabled() is False
+
+
+@pytest.mark.parametrize("raw", ["", "typo"])
+def test_malformed_checkout_pause_flags_fail_closed_in_live_mode(monkeypatch, raw):
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    monkeypatch.setenv("TAKYON_STRIPE_CHECKOUT_DISABLED", raw)
+    monkeypatch.setenv("TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED", raw)
+    monkeypatch.setenv("TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED", raw)
+    monkeypatch.setattr(safebox_app.safebox, "load_env", lambda: {})
+
+    assert safebox_app._stripe_checkout_disabled() is True
+    assert (
+        safebox_app._specialized_checkout_disabled(
+            "TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED"
+        )
+        is True
+    )
+    assert (
+        safebox_app._specialized_checkout_disabled(
+            "TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED"
+        )
+        is True
     )
 
-    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
 
-    assert resp.status_code == 409
-    assert resp.json()["detail"] == "stripe_plan_not_saleable"
-
-
-def test_dev_environment_requires_stripe_test_objects(client, monkeypatch):
-    monkeypatch.setenv("TAKYON_ENV", "dev")
-    monkeypatch.setattr(safebox_app, "_stripe_key_livemode", lambda: False)
+def test_live_app_checkout_requires_configured_account_binding(client, monkeypatch):
+    monkeypatch.setenv("TAKYON_ENV", "prod")
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "live")
+    monkeypatch.setenv("TAKYON_STRIPE_CHECKOUT_DISABLED", "0")
+    monkeypatch.delenv("TAKYON_STRIPE_ACCOUNT_ID", raising=False)
+    monkeypatch.setattr(
+        safebox_app,
+        "_stripe_account_snapshot",
+        lambda: (_STRIPE_ACCOUNT_ID, True),
+    )
+    conn = _CheckoutConn(_checkout_row())
 
     @contextlib.contextmanager
     def _fake_conn():
-        yield _CheckoutConn(_checkout_row())
-
-    def _stripe(path, params=None, *, method="POST"):
-        if path == "account":
-            return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
-        if path == "prices/price_123":
-            return _price_object(overrides={"livemode": False})
-        if path == "products/prod_123":
-            return _product_object(overrides={"livemode": False})
-        if path == "checkout/sessions":
-            return {
-                "id": "cs_test_dev", "object": "checkout.session", "livemode": False,
-                "url": "https://checkout.stripe.com/c/pay/cs_test_dev",
-            }
-        pytest.fail(f"unexpected Stripe call: {path}")
+        yield conn
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
-    monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
 
-    resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["id"] == "cs_test_dev"
+    response = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "stripe_live_account_binding_required"
+    assert conn.claim_params is None
 
 
 def test_generic_stripe_checkout_rejects_off_business_redirects(client, monkeypatch):
@@ -1754,9 +2047,10 @@ def test_checkout_redirect_honors_base_declared_in_safebox_env_store(monkeypatch
 
 
 def test_generic_stripe_checkout_accepts_declared_dev_base_redirects(client, monkeypatch):
-    """Route-level proof for the dev twin: with dev.coscale.app declared, the SAME checkout
-    intent authority path mints the session for <slug>.dev.coscale.app redirect URLs."""
+    """The dev twin accepts its declared host while retaining the same intent authority path."""
     monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "dev.coscale.app")
+    monkeypatch.setenv("TAKYON_ENV", "dev")
+    monkeypatch.setattr(safebox_app, "_stripe_key_livemode", lambda: False)
 
     @contextlib.contextmanager
     def _fake_conn():
@@ -1764,19 +2058,14 @@ def test_generic_stripe_checkout_accepts_declared_dev_base_redirects(client, mon
 
     calls: list[str] = []
 
-    def _stripe(path, params=None, *, method="POST"):
+    def _stripe(path, params=None, *, method="POST", idempotency_key=None):
         calls.append(path)
         if path == "account":
             return {"id": _STRIPE_ACCOUNT_ID, "object": "account"}
-        if path == "prices/price_123":
-            return _price_object()
-        if path == "products/prod_123":
-            return _product_object()
         if path == "checkout/sessions":
-            return {
-                "id": "cs_live_dev", "object": "checkout.session", "livemode": True,
-                "url": "https://checkout.stripe.com/c/pay/cs_live_dev",
-            }
+            return _checkout_session_object(
+                params or {}, session_id="cs_test_dev", livemode=False
+            )
         pytest.fail(f"unexpected stripe path: {path}")
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
@@ -1789,5 +2078,6 @@ def test_generic_stripe_checkout_accepts_declared_dev_base_redirects(client, mon
     resp = client.post("/v1/stripe/request", headers=_auth(), json=request)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["id"] == "cs_live_dev"
-    assert calls == ["account", "prices/price_123", "products/prod_123", "checkout/sessions"]
+    assert resp.json()["id"] == "cs_test_dev"
+    assert resp.json()["livemode"] is False
+    assert calls == ["account", "checkout/sessions"]

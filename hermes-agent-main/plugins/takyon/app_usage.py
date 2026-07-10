@@ -405,12 +405,15 @@ def _app_user_period_start(conn, business_slug: str, app_user_id: str, fallback)
     gate agrees on which entitlement funds the customer. Falls back to ``fallback`` (the business
     budget window — conservative: shorter window, never more spendable) when there is no active
     paid entitlement, the period already elapsed (dunning must not mint a fresh allowance), or the
-    period is implausibly long for a monthly plan."""
+    period is implausibly long for a monthly plan. Root-SSH staff-test grants are persistent rather
+    than Stripe-renewed, so their period is the current calendar month; migration 0073 applies the
+    same calendar-month window to both session-bound and Safebox-broker provider reserves."""
     row = conn.execute(
         "select current_period_end,"
         "       (current_period_end > now()"
         "        and current_period_end - interval '1 month' <= now()) as plausible,"
-        "       current_period_end - interval '1 month' as period_start"
+        "       current_period_end - interval '1 month' as period_start,"
+        "       source, date_trunc('month', now()) as calendar_month_start"
         "  from app_entitlements"
         " where business_slug = %s and app_user_id = %s"
         "   and status in ('active', 'trialing')"
@@ -422,6 +425,8 @@ def _app_user_period_start(conn, business_slug: str, app_user_id: str, fallback)
         " limit 1",
         (business_slug, app_user_id),
     ).fetchone()
+    if row is not None and str(row[3] or "") == "operator_ssh":
+        return row[4]
     if row is None or row[0] is None or not bool(row[1]):
         return fallback
     return row[2]

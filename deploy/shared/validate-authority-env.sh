@@ -10,8 +10,9 @@ Validates authority-bearing env names by presence only. It never prints secret
 values. Values are read from the current process environment first, then from
 the supplied env files.
 
-Set TAKYON_REQUIRE_MIGRATION_DATABASE_URL=0 only for deploy modes that do not
-run migrations from the target host.
+The operator migration DSN is root-only and is always forbidden in these
+service-readable files. TAKYON_REQUIRE_MIGRATION_DATABASE_URL applies only to
+legacy subuser deploy modes; production subuser replicas set it to 0.
 
 Set TAKYON_REQUIRE_APP_DATABASE_URL=0 only for a subuser host whose app DSN
 resolves through the safebox authority at runtime (no local DSN by design —
@@ -55,6 +56,7 @@ read_file_value() {
       name = $0
       sub(/=.*/, "", name)
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      sub(/^export[[:space:]]+/, "", name)
       if (name == key) {
         value = substr($0, index($0, "=") + 1)
         found = value
@@ -137,22 +139,32 @@ reject_legacy_database_urls() {
   reject_key TAKYON_RUNTIME_DATABASE_URL "$@"
 }
 
+reject_stripe_authority() {
+  reject_key STRIPE_SECRET_KEY "$@"
+  reject_key STRIPE_SANDBOX_SECRET_KEY "$@"
+  reject_key STRIPE_WEBHOOK_SECRET "$@"
+  reject_key STRIPE_BILLING_WEBHOOK_SECRET "$@"
+  reject_key TAKYON_MANAGED_SECRET_COMMAND "$@"
+  reject_key TAKYON_MANAGED_SECRET_KEYS "$@"
+  reject_key DOPPLER_TOKEN "$@"
+}
+
 env_files=("$@")
 reject_legacy_database_urls "${env_files[@]}"
 require_migration_database_url="${TAKYON_REQUIRE_MIGRATION_DATABASE_URL:-1}"
 
 case "$plane" in
   operator)
+    reject_stripe_authority "${env_files[@]}"
     require_key TAKYON_OPERATOR_DATABASE_URL "${env_files[@]}"
-    if env_truthy "$require_migration_database_url"; then
-      require_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
-    fi
+    reject_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
     require_key TAKYON_SAFEBOX_TOKEN "${env_files[@]}"
     require_key TAKYON_SAFEBOX_OPERATOR_TOKEN "${env_files[@]}"
     reject_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
     reject_key TAKYON_SAFEBOX_DATABASE_URL "${env_files[@]}"
     ;;
   subuser)
+    reject_stripe_authority "${env_files[@]}"
     if env_truthy "${TAKYON_REQUIRE_APP_DATABASE_URL:-1}"; then
       require_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
     fi
@@ -170,6 +182,7 @@ case "$plane" in
     require_key TAKYON_SAFEBOX_OPERATOR_TOKEN "${env_files[@]}"
     reject_key TAKYON_OPERATOR_DATABASE_URL "${env_files[@]}"
     reject_key TAKYON_APP_DATABASE_URL "${env_files[@]}"
+    reject_key TAKYON_MIGRATION_DATABASE_URL "${env_files[@]}"
     ;;
   *)
     usage >&2

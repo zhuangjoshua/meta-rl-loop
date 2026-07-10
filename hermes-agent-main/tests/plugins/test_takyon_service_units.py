@@ -38,6 +38,18 @@ def test_safebox_unit_keeps_capability_signing_authority():
     assert "TAKYON_CAP_SIGNING_KEY" not in names
 
 
+def test_production_runtime_units_pin_stripe_live_mode():
+    for unit_path in (
+        "deploy/argon-alpha-14/takyon-dashboard.service",
+        "deploy/argon-alpha-14/takyon-worker.service",
+        "deploy/takyon-safebox/takyon-safebox.service",
+        "deploy/takyon-subuser/takyon-subuser.service",
+    ):
+        lines = set((ROOT / unit_path).read_text().splitlines())
+        assert "Environment=TAKYON_ENV=prod" in lines, unit_path
+        assert "Environment=TAKYON_STRIPE_MODE=live" in lines, unit_path
+
+
 def test_operator_units_pin_ceo_to_openai_and_worker_to_deepseek():
     required = {
         "Environment=TAKYON_STRICT_MODEL_ROLES=1",
@@ -212,11 +224,28 @@ def test_safebox_deploy_uses_hash_locked_external_environment_before_restart():
     assert "ExecStart=/opt/takyon/venvs/safebox-current/bin/python" in dev_unit
 
 
+def test_production_safebox_deploy_defaults_to_exact_checkout_pause_preflight():
+    deploy = (ROOT / "deploy/takyon-safebox/deploy-runtime.sh").read_text()
+
+    assert 'TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED="${TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED:-1}"' in deploy
+    for assignment in (
+        "TAKYON_STRIPE_CHECKOUT_DISABLED=1",
+        "TAKYON_STRIPE_ACCOUNT_ID=acct_1TXWsW7tYL4lkVC6",
+        "TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED=1",
+        "TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED=1",
+    ):
+        key = assignment.split("=", 1)[0]
+        assert f"grep -hE '^{key}='" in deploy
+        assert f"'{assignment}'" in deploy
+        assert f"grep -Fxq '{assignment}'" in deploy
+
+
 def test_operator_deploy_can_skip_runtime_migrations_after_manual_apply():
     src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
 
     assert 'TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-1}"' in src
-    assert "if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres'" in src
+    assert 'if [[ "$TAKYON_RUN_DB_MIGRATIONS" != "1" ]]' in src
+    assert "run_remote_migrations" in src
 
 
 def test_operator_deploy_drain_probe_survives_ssh_double_quoted_string():
@@ -397,6 +426,85 @@ def test_authority_env_validator_rejects_legacy_database_url_aliases(tmp_path):
     assert result.returncode != 0
     assert "DATABASE_URL" in combined
     assert "legacy-secret" not in combined
+
+
+def test_non_safebox_envs_reject_stripe_authority_secrets(tmp_path):
+    script = ROOT / "deploy/shared/validate-authority-env.sh"
+    required = {
+        "operator": [
+            "TAKYON_OPERATOR_DATABASE_URL=postgres://operator",
+            "TAKYON_SAFEBOX_TOKEN=transport",
+            "TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token",
+        ],
+        "subuser": [
+            "TAKYON_APP_DATABASE_URL=postgres://app",
+            "TAKYON_MIGRATION_DATABASE_URL=postgres://migration",
+            "TAKYON_SAFEBOX_TOKEN=transport",
+        ],
+    }
+    for plane, base in required.items():
+        for key in (
+            "STRIPE_SECRET_KEY",
+            "STRIPE_SANDBOX_SECRET_KEY",
+            "STRIPE_WEBHOOK_SECRET",
+            "STRIPE_BILLING_WEBHOOK_SECRET",
+            "TAKYON_MANAGED_SECRET_COMMAND",
+            "TAKYON_MANAGED_SECRET_KEYS",
+            "DOPPLER_TOKEN",
+        ):
+            env_file = tmp_path / f"{plane}-{key}.env"
+            env_file.write_text("\n".join([*base, f"{key}=must-not-leak"]) + "\n")
+            result = subprocess.run(
+                ["bash", str(script), plane, str(env_file)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                env={"PATH": "/usr/bin:/bin"},
+            )
+            combined = result.stdout + result.stderr
+            assert result.returncode != 0
+            assert key in combined
+            assert "must-not-leak" not in combined
+
+
+def test_authority_env_validator_rejects_export_prefixed_forbidden_keys(tmp_path):
+    script = ROOT / "deploy/shared/validate-authority-env.sh"
+    cases = {
+        "operator": (
+            [
+                "TAKYON_OPERATOR_DATABASE_URL=postgres://operator",
+                "TAKYON_SAFEBOX_TOKEN=transport",
+                "TAKYON_SAFEBOX_OPERATOR_TOKEN=operator-token",
+                "export STRIPE_SECRET_KEY=must-not-leak",
+            ],
+            "STRIPE_SECRET_KEY",
+        ),
+        "subuser": (
+            [
+                "TAKYON_APP_DATABASE_URL=postgres://app",
+                "TAKYON_MIGRATION_DATABASE_URL=postgres://migration",
+                "TAKYON_SAFEBOX_TOKEN=transport",
+                "export TAKYON_OPERATOR_DATABASE_URL=must-not-leak",
+            ],
+            "TAKYON_OPERATOR_DATABASE_URL",
+        ),
+    }
+    for plane, (lines, rejected_key) in cases.items():
+        env_file = tmp_path / f"{plane}-export.env"
+        env_file.write_text("\n".join(lines) + "\n")
+        result = subprocess.run(
+            ["bash", str(script), plane, str(env_file)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert rejected_key in combined
+        assert "must-not-leak" not in combined
 
 
 def test_authority_env_validator_reports_all_errors_without_values(tmp_path):

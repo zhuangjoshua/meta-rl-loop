@@ -165,7 +165,11 @@ def test_subscription_checkout_returns_url_and_stamps_metadata(client, pg_conn, 
 
     p = captured["params"]
     assert p["mode"] == "subscription"
-    assert p["line_items[0][price]"] == "price_test_pro"
+    assert p["line_items[0][price_data][unit_amount]"] == 5000
+    assert p["line_items[0][price_data][currency]"] == "usd"
+    assert p["line_items[0][price_data][recurring][interval]"] == "month"
+    assert "line_items[0][price]" not in p
+    assert not any("[price_data][metadata]" in key for key in p)
     assert p["metadata[purpose]"] == "operator_subscription"
     assert p["metadata[user_id]"] == uid
     assert p["metadata[takyon_plan_name]"] == "Pro"

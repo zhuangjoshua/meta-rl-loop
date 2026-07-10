@@ -66,6 +66,18 @@ class InsufficientCustody(CustodyError):
         )
 
 
+class CustodyClawbackPending(CustodyError):
+    """Payouts are blocked until refunded/disputed customer money is recovered."""
+
+    def __init__(self, *, pending_cents: int) -> None:
+        self.pending_cents = pending_cents
+        super().__init__(f"custody_clawback_pending: {pending_cents} cents")
+
+
+class CustodyClawbackNotFound(CustodyError):
+    """The requested release does not identify this owner's business clawback."""
+
+
 @dataclass(frozen=True)
 class CustodyBalances:
     user_id: str
@@ -108,6 +120,8 @@ def _raise_for_custody_refusal(row, *, user_id: str | None = None) -> None:
             requested_cents=int(_cell(row, 1)),
             owed_cents=int(_cell(row, 2)),
         )
+    if refusal == "custody_clawback_pending":
+        raise CustodyClawbackPending(pending_cents=int(_cell(row, 2)))
     raise CustodyError(f"unexpected gate refusal: {refusal!r}")  # pragma: no cover - defensive
 
 
@@ -210,6 +224,91 @@ def payout(
     ).fetchone()
     _raise_for_custody_refusal(row, user_id=user_id)
     return int(_cell(row, 3))  # new_owed
+
+
+def clawback(
+    conn,
+    user_id: str,
+    business_slug: str,
+    amount_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int | bool]:
+    """Debit refunded/disputed customer money and durably track any unpaid shortfall."""
+    if amount_cents <= 0:
+        raise ValueError("amount_cents must be > 0")
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        raise safebox.SafeboxAuthorityUnavailable(
+            "custody clawback must be derived from a signed app-payment webhook on the safebox"
+        )
+    row = conn.execute(
+        "select * from safebox_custody_clawback(%s, %s, %s, %s, %s, %s::jsonb)",
+        (
+            user_id,
+            business_slug,
+            int(amount_cents),
+            idempotency_key,
+            stripe_ref,
+            json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+        ),
+    ).fetchone()
+    _raise_for_custody_refusal(row, user_id=user_id)
+    return {
+        "applied_cents": int(_cell(row, 1) or 0),
+        "shortfall_cents": int(_cell(row, 2) or 0),
+        "owed_balance_cents": int(_cell(row, 3) or 0),
+        "replayed": bool(_cell(row, 4)),
+    }
+
+
+def release_clawback(
+    conn,
+    user_id: str,
+    business_slug: str,
+    clawback_idempotency_key: str,
+    release_idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int | bool]:
+    """Release one won-dispute clawback without restoring its unfunded shortfall."""
+    if not str(clawback_idempotency_key or "").strip():
+        raise ValueError("clawback_idempotency_key is required")
+    if not str(release_idempotency_key or "").strip():
+        raise ValueError("release_idempotency_key is required")
+    if _remote_safebox_enabled():
+        from . import safebox
+
+        raise safebox.SafeboxAuthorityUnavailable(
+            "custody clawback release must be derived from a signed dispute webhook on the safebox"
+        )
+    row = conn.execute(
+        "select * from safebox_custody_release_clawback(%s, %s, %s, %s, %s, %s::jsonb)",
+        (
+            user_id,
+            business_slug,
+            clawback_idempotency_key,
+            release_idempotency_key,
+            stripe_ref,
+            json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True),
+        ),
+    ).fetchone()
+    refusal = _cell(row, 0)
+    if refusal == "no_custody_account":
+        raise NoCustodyAccount(user_id)
+    if refusal == "custody_clawback_not_found":
+        raise CustodyClawbackNotFound(clawback_idempotency_key)
+    if refusal is not None:
+        raise CustodyError(f"unexpected gate refusal: {refusal!r}")
+    return {
+        "credited_cents": int(_cell(row, 1) or 0),
+        "owed_balance_cents": int(_cell(row, 2) or 0),
+        "replayed": bool(_cell(row, 3)),
+    }
 
 
 def get_custody_balances(conn, user_id: str) -> CustodyBalances:

@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -33,8 +35,55 @@ class StripeError(Exception):
     error instead of a silently-faked success."""
 
 
+_VERIFIED_LIVE_ACCOUNTS: set[tuple[str, str]] = set()
+_VERIFIED_LIVE_ACCOUNTS_LOCK = threading.Lock()
+
+
+def _stripe_mode() -> str:
+    mode = str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() or "test"
+    if mode not in {"test", "live"}:
+        raise StripeError("TAKYON_STRIPE_MODE must be test or live")
+    return mode
+
+
+def _validated_stripe_key(key: Any) -> str:
+    """Return a normalized Stripe secret key only when it matches the explicit mode.
+
+    Test mode is the fail-closed default so an existing deployment cannot start moving real
+    money merely because a live key was provisioned. Live mode additionally requires the
+    production Safebox host; no runtime plane may use a live Stripe credential directly.
+    """
+    mode = _stripe_mode()
+
+    normalized_key = str(key or "").strip()
+    if normalized_key.startswith(("sk_test_", "rk_test_")):
+        key_mode = "test"
+    elif normalized_key.startswith(("sk_live_", "rk_live_")):
+        key_mode = "live"
+    else:
+        raise StripeError(
+            "Stripe secret key has an unrecognized prefix; expected sk_test_/rk_test_ "
+            "or sk_live_/rk_live_"
+        )
+
+    if key_mode != mode:
+        raise StripeError(
+            f"Stripe {key_mode} key does not match TAKYON_STRIPE_MODE={mode}"
+        )
+
+    if mode == "live":
+        takyon_env = str(os.getenv("TAKYON_ENV") or "").strip().lower()
+        host_role = str(os.getenv("TAKYON_HOST_ROLE") or "").strip().lower()
+        if takyon_env != "prod" or host_role != "safebox":
+            raise StripeError(
+                "Stripe live mode requires TAKYON_ENV=prod and TAKYON_HOST_ROLE=safebox"
+            )
+
+    return normalized_key
+
+
 def stripe_key_livemode() -> bool:
-    """Return the configured key's mode without exposing the key; unknown key shapes fail closed."""
+    """Return the configured key's mode without exposing the key."""
     key = str(safebox.read_env_backed_value("STRIPE_SECRET_KEY") or "").strip()
     if not key:
         raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
@@ -44,33 +93,15 @@ def stripe_key_livemode() -> bool:
         return False
     raise StripeError("STRIPE_SECRET_KEY has an unrecognized mode prefix")
 
-def stripe_request(
+
+def _stripe_http_request(
     path: str,
     params: dict[str, Any],
     *,
-    method: str = "POST",
+    method: str,
+    key: str,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Send a Stripe API request to `https://api.stripe.com/v1/{path}` with the shared
-    platform secret key, dropping any None-valued params. POST bodies are form-encoded;
-    GET params are query-encoded. Returns the parsed JSON object.
-    Raises StripeError if STRIPE_SECRET_KEY is absent (the call is never faked) or Stripe
-    returns a non-2xx response."""
-    if safebox._remote_enabled() and not safebox._local_authority_enabled():
-        try:
-            return safebox.stripe_request(path, params, method=method)
-        except safebox.RemoteSafeboxError as exc:
-            raise StripeError(str(exc)) from exc
-    key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
-    if not key:
-        raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
-    # Hard rail (GOAL_RULES §0): this MVP runs Stripe in test mode only. A live secret key
-    # (`sk_live_…`) must NEVER reach the wire — refuse BEFORE any network call so a
-    # mis-provisioned live key cannot move real money. rstrip() guards a trailing-newline key.
-    if str(key).strip().startswith("sk_live_"):
-        raise StripeError(
-            "refusing to use a live Stripe key (sk_live_): this deployment is restricted to "
-            "Stripe test mode (sk_test_)"
-        )
     verb = str(method or "POST").strip().upper() or "POST"
     encoded = urllib.parse.urlencode(
         {k: v for k, v in params.items() if v is not None}
@@ -80,13 +111,21 @@ def stripe_request(
     request_url = base_url
     if verb == "GET" and encoded:
         request_url = f"{base_url}?{encoded}"
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    if idempotency_key is not None:
+        normalized_idempotency_key = str(idempotency_key).strip()
+        if verb != "POST":
+            raise StripeError("Stripe idempotency keys require POST")
+        if not normalized_idempotency_key or len(normalized_idempotency_key) > 255:
+            raise StripeError("invalid Stripe idempotency key")
+        headers["Idempotency-Key"] = normalized_idempotency_key
     request = urllib.request.Request(
         request_url,
         data=data,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
+        headers=headers,
         method=verb,
     )
     try:
@@ -95,6 +134,84 @@ def stripe_request(
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise StripeError(f"Stripe {path} failed: {exc.code} {body}") from exc
+
+
+def _verify_live_account_identity(key: str) -> None:
+    """Verify a live key belongs to the configured account before any money-moving request."""
+    expected_account_id = str(os.getenv("TAKYON_STRIPE_ACCOUNT_ID") or "").strip()
+    if not expected_account_id:
+        raise StripeError("Stripe live mode requires TAKYON_STRIPE_ACCOUNT_ID")
+    key_fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    cache_key = (key_fingerprint, expected_account_id)
+    with _VERIFIED_LIVE_ACCOUNTS_LOCK:
+        if cache_key in _VERIFIED_LIVE_ACCOUNTS:
+            return
+        account = _stripe_http_request("account", {}, method="GET", key=key)
+        actual_account_id = (
+            str(account.get("id") or "").strip() if isinstance(account, dict) else ""
+        )
+        if not actual_account_id:
+            raise StripeError("Stripe live account verification returned no account id")
+        if actual_account_id != expected_account_id:
+            raise StripeError(
+                "Stripe live key account mismatch: "
+                f"expected {expected_account_id}, got {actual_account_id}"
+            )
+        _VERIFIED_LIVE_ACCOUNTS.add(cache_key)
+
+
+def stripe_request(
+    path: str,
+    params: dict[str, Any],
+    *,
+    method: str = "POST",
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Send a mode- and account-gated Stripe API request.
+
+    POST bodies are form-encoded and GET params are query-encoded. Live keys are accepted only
+    on the production Safebox and are verified against TAKYON_STRIPE_ACCOUNT_ID before the first
+    operation for that key in this process.
+    """
+    if safebox._remote_enabled() and not safebox._local_authority_enabled():
+        if idempotency_key is not None:
+            raise StripeError("Stripe idempotency keys are Safebox-local only")
+        try:
+            return safebox.stripe_request(path, params, method=method)
+        except safebox.RemoteSafeboxError as exc:
+            raise StripeError(str(exc)) from exc
+    key = safebox.read_env_backed_value("STRIPE_SECRET_KEY")
+    if not key:
+        raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
+    key = _validated_stripe_key(key)
+    if key.startswith(("sk_live_", "rk_live_")):
+        _verify_live_account_identity(key)
+    return _stripe_http_request(
+        path,
+        params,
+        method=method,
+        key=key,
+        idempotency_key=idempotency_key,
+    )
+
+
+def validate_stripe_webhook_event_mode(event: Any) -> None:
+    """Reject a signed Stripe event whose live/test mode conflicts with this deployment.
+
+    Stripe always sends a boolean ``livemode``. Test mode tolerates old fixtures that omit the
+    field, but a present boolean must still be false. Live mode requires an explicit boolean true
+    so a missing or malformed field can never be interpreted as authorization for real money.
+    """
+    mode = _stripe_mode()
+    livemode = event.get("livemode") if isinstance(event, dict) else None
+    if isinstance(livemode, bool):
+        if livemode != (mode == "live"):
+            raise StripeError(
+                f"Stripe webhook livemode={livemode} does not match TAKYON_STRIPE_MODE={mode}"
+            )
+        return
+    if mode == "live":
+        raise StripeError("Stripe live webhook requires boolean livemode=true")
 
 
 def verify_stripe_signature(raw_body: str, signature: str, secret: str) -> None:

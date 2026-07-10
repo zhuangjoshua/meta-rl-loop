@@ -16,6 +16,9 @@ usage:
   takyon-op [business]
   takyon-op shell [business]
   takyon-op --no-logs [business]
+  takyon-op profile-access grant <business> <email> --plan <plan-key>
+  takyon-op profile-access revoke <business> <email>
+  takyon-op profile-access list [--business <business>] [--email <email>]
   takyon-op -- <raw takyon args...>
 
 Starts the operator Takyon shell on the operator VPS with logs scoped to the active business.
@@ -55,14 +58,54 @@ if [[ -z "$dashboard_pid" || "$dashboard_pid" == "0" || ! -r "/proc/$dashboard_p
   die "$TAKYON_SERVICE is not running or its env is unreadable"
 fi
 
+# This command intentionally never enters the normal Takyon CLI and never drops to the `takyon`
+# service user. The Python entrypoint independently requires euid 0 + SSH_CONNECTION + the operator
+# host role and reads only the dedicated root-owned least-privilege DB credential. The environment
+# is rebuilt from scratch and pinned to prod: caller exports and service secrets cannot influence
+# this rail. `/usr/local/bin/takyon-op` is installed root:root mode 0750 only on this operator host;
+# the sub-user deploy does not install it.
+if [[ "${1:-}" == "profile-access" ]]; then
+  [[ -x "$RUNTIME_DIR/.venv/bin/python" ]] || die "runtime Python not found"
+  [[ -n "${SSH_CONNECTION:-}" ]] || die "profile-access requires an SSH session"
+  command -v sshd >/dev/null 2>&1 || die "sshd is required to verify key-only root access"
+  ssh_client="${SSH_CONNECTION%% *}"
+  ssh_host="$(hostname -f 2>/dev/null || hostname)"
+  sshd_effective="$(sshd -T -C "user=root,host=$ssh_host,addr=$ssh_client" 2>/dev/null)" \
+    || die "could not verify effective root SSH policy"
+  for required in \
+    "pubkeyauthentication yes" \
+    "passwordauthentication no" \
+    "kbdinteractiveauthentication no" \
+    "hostbasedauthentication no" \
+    "gssapiauthentication no" \
+    "kerberosauthentication no"; do
+    grep -Fqx -- "$required" <<<"$sshd_effective" \
+      || die "root SSH is not key-only ($required required)"
+  done
+  shift
+  cd "$RUNTIME_DIR"
+  exec env -i \
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    HOME=/root \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH="$RUNTIME_DIR" \
+    SSH_CONNECTION="$SSH_CONNECTION" \
+    TAKYON_ENV=prod \
+    TAKYON_HOST_ROLE=operator \
+    TAKYON_STRIPE_MODE=live \
+    "$RUNTIME_DIR/.venv/bin/python" -m plugins.takyon.operator_access "$@"
+fi
+
 service_env_value() {
   tr '\0' '\n' <"/proc/$dashboard_pid/environ" | awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}'
 }
 
 safe_url="$(service_env_value TAKYON_SAFEBOX_URL)"
 safe_token="$(service_env_value TAKYON_SAFEBOX_TOKEN)"
+stripe_mode="$(service_env_value TAKYON_STRIPE_MODE)"
 [[ -n "$safe_url" ]] || die "TAKYON_SAFEBOX_URL missing from $TAKYON_SERVICE env"
 [[ -n "$safe_token" ]] || die "TAKYON_SAFEBOX_TOKEN missing from $TAKYON_SERVICE env"
+[[ "$stripe_mode" == "live" ]] || die "TAKYON_STRIPE_MODE is not live in $TAKYON_SERVICE"
 
 strict_model_roles="$(service_env_value TAKYON_STRICT_MODEL_ROLES)"
 ceo_model="$(service_env_value TAKYON_MODEL)"
@@ -105,7 +148,9 @@ fi
 
 export TAKYON_HOME="$TAKYON_HOME_DIR"
 export HOME=/opt/takyon
+export TAKYON_ENV=prod
 export TAKYON_HOST_ROLE=operator
+export TAKYON_STRIPE_MODE="$stripe_mode"
 export TAKYON_SAFEBOX_URL="$safe_url"
 export TAKYON_SAFEBOX_TOKEN="$safe_token"
 export TAKYON_STRICT_MODEL_ROLES="$strict_model_roles"

@@ -154,7 +154,7 @@ def _safebox_body_limit(scope: dict[str, Any]) -> int:
     path = str(scope.get("path") or "")
     if path == "/v1/stripe/request" or path == "/v1/billing/webhook/process":
         return _SAFEBOX_BODY_STRIPE_LIMIT
-    if path == "/v1/connections/deposit":
+    if path in {"/v1/connections/deposit", "/v1/connections/rebind"}:
         return _SAFEBOX_BODY_CONNECTION_LIMIT
     if path.startswith("/v1/providers/") or path == "/v1/storage/put":
         return _SAFEBOX_BODY_LARGE_PROVIDER_LIMIT
@@ -174,6 +174,52 @@ def _normalize_stripe_request(path: str, method: str, params: dict[str, Any] | N
 
 
 _STRIPE_CATALOG_MUTATION_PATHS = frozenset({"products", "prices"})
+
+
+def _stripe_checkout_disabled() -> bool:
+    raw = os.environ.get("TAKYON_STRIPE_CHECKOUT_DISABLED")
+    if raw is None:
+        raw = safebox.load_env().get("TAKYON_STRIPE_CHECKOUT_DISABLED")
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        # A production live-key deploy must not become a money-moving activation merely because
+        # the pause flag was omitted. The operator explicitly writes 0 only after the durable DB
+        # cutover and webhook proofs have completed; dev/test keeps its existing open default.
+        return str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+
+
+def _require_stripe_checkout_enabled() -> None:
+    if _stripe_checkout_disabled():
+        raise HTTPException(status_code=503, detail="stripe_checkout_paused")
+
+
+def _specialized_checkout_disabled(name: str) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        raw = safebox.load_env().get(name)
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        return str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+
+
+def _require_operator_checkout_enabled() -> None:
+    if _specialized_checkout_disabled("TAKYON_STRIPE_OPERATOR_CHECKOUT_DISABLED"):
+        raise HTTPException(status_code=503, detail="stripe_operator_checkout_paused")
+
+
+def _require_creative_checkout_enabled() -> None:
+    if _specialized_checkout_disabled("TAKYON_STRIPE_CREATIVE_CHECKOUT_DISABLED"):
+        raise HTTPException(status_code=503, detail="stripe_creative_checkout_paused")
 
 
 def _storage_provider(provider: str) -> str:
@@ -372,6 +418,107 @@ def _stripe_object_id(value: Any) -> str:
     return ""
 
 
+def _require_app_subscription_proof(
+    subscription: Any,
+    subscription_id: str,
+    *,
+    business: str,
+    detail: str,
+) -> dict[str, Any]:
+    expected_livemode = (
+        str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+    )
+    metadata = (
+        subscription.get("metadata")
+        if isinstance(subscription, dict)
+        and isinstance(subscription.get("metadata"), dict)
+        else {}
+    )
+    expected_account_id = str(os.getenv("TAKYON_STRIPE_ACCOUNT_ID") or "").strip()
+    if (
+        not isinstance(subscription, dict)
+        or str(subscription.get("id") or "") != subscription_id
+        or subscription.get("object") not in {None, "subscription"}
+        or subscription.get("livemode") is not expected_livemode
+        or metadata.get("source") != "takyon_app"
+        or str(metadata.get("business") or "").strip() != business
+        or (
+            expected_livemode
+            and (
+                not expected_account_id
+                or metadata.get("takyon_stripe_account_id") != expected_account_id
+            )
+        )
+    ):
+        raise HTTPException(status_code=503, detail=detail)
+    return subscription
+
+
+def _stripe_payment_subscription_binding(
+    payment_intent_id: str, charge_id: str
+) -> tuple[str, str] | None:
+    if not payment_intent_id and not charge_id:
+        return None
+    with _safebox_db_conn() as conn:
+        rows = conn.execute(
+            "select distinct r.business_slug, "
+            "coalesce(nullif(r.metadata->>'stripe_subscription_id', ''), "
+            "s.stripe_subscription_id) "
+            "from app_revenue_events r "
+            "left join app_checkout_sessions s on "
+            "s.stripe_checkout_session_id = r.stripe_checkout_session_id "
+            "where r.revenue_type in ('checkout', 'subscription_renewal') and "
+            "((%s <> '' and coalesce(r.metadata->'stripe_payment_intent_ids', "
+            "'[]'::jsonb) ? %s) or "
+            "(%s <> '' and coalesce(r.metadata->'stripe_charge_ids', "
+            "'[]'::jsonb) ? %s))",
+            (payment_intent_id, payment_intent_id, charge_id, charge_id),
+        ).fetchall()
+    bindings = {
+        (str(row[0] or "").strip(), str(row[1] or "").strip())
+        for row in rows
+        if str(row[0] or "").strip() and str(row[1] or "").strip()
+    }
+    return next(iter(bindings)) if len(bindings) == 1 else None
+
+
+def _stripe_invoice_with_all_payments(invoice_id: str) -> dict[str, Any]:
+    """Retrieve one Invoice plus the complete paginated InvoicePayment mapping."""
+    invoice_ref = str(invoice_id or "").strip()
+    if not invoice_ref:
+        return {}
+    invoice = safebox.stripe_request(f"invoices/{invoice_ref}", {}, method="GET")
+    if not isinstance(invoice, dict) or str(invoice.get("id") or "") != invoice_ref:
+        return {}
+    payments: list[dict[str, Any]] = []
+    starting_after = ""
+    for _ in range(100):
+        params: dict[str, Any] = {"invoice": invoice_ref, "limit": 100}
+        if starting_after:
+            params["starting_after"] = starting_after
+        page = safebox.stripe_request("invoice_payments", params, method="GET")
+        rows = page.get("data") if isinstance(page, dict) else None
+        if not isinstance(rows, list):
+            return {}
+        typed_rows = [row for row in rows if isinstance(row, dict)]
+        payments.extend(typed_rows)
+        if not bool(page.get("has_more")):
+            break
+        next_cursor = str((typed_rows[-1] if typed_rows else {}).get("id") or "")
+        if not next_cursor or next_cursor == starting_after:
+            return {}
+        starting_after = next_cursor
+    else:
+        return {}
+    invoice["payments"] = {
+        "object": "list",
+        "url": "/v1/invoice_payments",
+        "has_more": False,
+        "data": payments,
+    }
+    return invoice
+
+
 def _validate_checkout_catalog(
     plan: dict[str, Any], *, price: dict[str, Any], product: dict[str, Any],
     account_id: str, key_livemode: bool,
@@ -485,76 +632,126 @@ def _prepare_catalog_mutation(path: str, params: dict[str, Any]) -> tuple[dict[s
     return plan, expected_live
 
 
-def _require_app_checkout_intent_authority(
-    params: dict[str, Any], *, price_id: str
-) -> dict[str, Any]:
+def _claim_app_checkout_intent_authority(params: dict[str, Any]) -> dict[str, Any]:
     """Checkout creation authority is the recorded app checkout intent, not the bearer token.
 
     The product runtime creates the intent through the app DB plane after validating the customer's
     app session. Safebox refuses to create a Stripe Checkout Session unless that intent and plan exist
-    and match the submitted Stripe price. A caller with only the shared transport token plus forged
-    metadata cannot mint checkout sessions.
+    and match the submitted scope. The caller supplies no pricing fields: Safebox atomically claims
+    the still-unused intent and derives the exact monthly price from app_plan_policies.
     """
     business = _require_safe_slug(_metadata_value(params, "business"))
     plan_key = _require_safe_slug(_metadata_value(params, "plan_key"))
     intent_id = str(_metadata_value(params, "checkout_intent_id") or "").strip()
     if not intent_id:
         raise HTTPException(status_code=403, detail="stripe_checkout_scope_required")
-    if not str(price_id or "").strip():
-        raise HTTPException(status_code=403, detail="stripe_price_scope_required")
+    if str(params.get("mode") or "subscription").strip() != "subscription":
+        raise HTTPException(status_code=403, detail="stripe_checkout_mode_not_allowed")
+    if any(str(key).startswith("line_items[") for key in params):
+        raise HTTPException(status_code=403, detail="stripe_checkout_pricing_client_forbidden")
+    submitted_email = str(params.get("customer_email") or "").strip().lower()
+    submitted_reference = str(params.get("client_reference_id") or "").strip()
+    account_id, key_livemode = _stripe_account_snapshot()
+    expected_livemode = _expected_stripe_livemode({"business_mode": "live"})
+    if key_livemode is not expected_livemode:
+        raise HTTPException(status_code=409, detail="stripe_mode_mismatch")
+    live_target_account_id: str | None = None
+    if expected_livemode:
+        configured_account_id = str(os.getenv("TAKYON_STRIPE_ACCOUNT_ID") or "").strip()
+        if not configured_account_id or configured_account_id != account_id:
+            raise HTTPException(
+                status_code=503, detail="stripe_live_account_binding_required"
+            )
+        live_target_account_id = configured_account_id
     with _safebox_db_conn() as conn:
         row = conn.execute(
             """
-            select i.app_user_id, i.customer_email, i.status,
-                   p.stripe_price_id, p.stripe_product_id, p.tier, p.price_cents,
-                   p.currency, p.billing_interval, p.included_ai_budget_microusd,
-                   p.included_action_quota, p.metadata, p.saleable, b.mode
-            from app_checkout_intents i
-            join app_plan_policies p
-              on p.business_slug = i.business_slug
-             and p.plan_key = i.plan_key
-            join businesses b on b.slug = i.business_slug
-            where i.id = %s
-              and i.business_slug = %s
-              and i.plan_key = %s
-            limit 1
+            select * from takyon_safebox_claim_app_checkout_intent(
+                %s::uuid, %s, %s, %s, %s, %s
+            )
             """,
-            (intent_id, business, plan_key),
+            (
+                intent_id,
+                business,
+                plan_key,
+                submitted_email,
+                submitted_reference,
+                live_target_account_id,
+            ),
         ).fetchone()
     if row is None:
-        raise HTTPException(status_code=403, detail="stripe_checkout_intent_required")
-    status = str(_db_row_value(row, 2, "status") or "").strip().lower()
-    if status != "created":
         raise HTTPException(status_code=409, detail="stripe_checkout_intent_not_open")
-    expected_price = str(_db_row_value(row, 3, "stripe_price_id") or "").strip()
-    if not expected_price or expected_price != str(price_id or "").strip():
-        raise HTTPException(status_code=403, detail="stripe_price_scope_mismatch")
-    intent_email = str(_db_row_value(row, 1, "customer_email") or "").strip().lower()
-    param_email = str(params.get("customer_email") or "").strip().lower()
-    if intent_email and param_email and intent_email != param_email:
-        raise HTTPException(status_code=403, detail="stripe_checkout_customer_mismatch")
+    intent_email = str(_db_row_value(row, 2, "customer_email") or "").strip().lower()
+    client_reference_id = str(
+        _db_row_value(row, 3, "client_reference_id") or ""
+    ).strip()
+    price_cents = int(_db_row_value(row, 4, "price_cents") or 0)
+    currency = str(_db_row_value(row, 5, "currency") or "").strip().lower()
+    interval = str(_db_row_value(row, 6, "billing_interval") or "").strip().lower()
+    tier = str(_db_row_value(row, 7, "tier") or "").strip()
+    included_ai_budget_microusd = int(
+        _db_row_value(row, 8, "included_ai_budget_microusd") or 0
+    )
+    included_action_quota = int(_db_row_value(row, 9, "included_action_quota") or 0)
+    plan_metadata = _db_row_value(row, 10, "plan_metadata")
+    plan_metadata = plan_metadata if isinstance(plan_metadata, dict) else {}
+    business_mode = str(_db_row_value(row, 11, "business_mode") or "").strip().lower()
+    if price_cents <= 0 or currency != "usd" or interval != "month":
+        raise HTTPException(status_code=409, detail="stripe_checkout_plan_not_billable")
     plan = {
         "business_slug": business,
         "plan_key": plan_key,
-        "stripe_price_id": expected_price,
-        "stripe_product_id": str(_db_row_value(row, 4, "stripe_product_id") or "").strip(),
-        "tier": str(_db_row_value(row, 5, "tier") or ""),
-        "price_cents": int(_db_row_value(row, 6, "price_cents") or 0),
-        "currency": str(_db_row_value(row, 7, "currency") or "usd"),
-        "billing_interval": str(_db_row_value(row, 8, "billing_interval") or "month"),
-        "included_ai_budget_microusd": int(
-            _db_row_value(row, 9, "included_ai_budget_microusd") or 0
-        ),
-        "included_action_quota": int(_db_row_value(row, 10, "included_action_quota") or 0),
-        "metadata": _db_row_value(row, 11, "metadata")
-        if isinstance(_db_row_value(row, 11, "metadata"), dict) else {},
-        "saleable": bool(_db_row_value(row, 12, "saleable")),
-        "business_mode": str(_db_row_value(row, 13, "mode") or ""),
+        "tier": tier,
+        "price_cents": price_cents,
+        "currency": currency,
+        "billing_interval": interval,
+        "included_ai_budget_microusd": included_ai_budget_microusd,
+        "included_action_quota": included_action_quota,
+        "metadata": plan_metadata,
+        "saleable": True,
+        "business_mode": business_mode,
     }
-    from . import app_entitlements
-    if not app_entitlements.plan_is_saleable(plan):
-        raise HTTPException(status_code=409, detail="stripe_plan_not_saleable")
-    return plan
+    if _expected_stripe_livemode(plan) is not expected_livemode:
+        raise HTTPException(status_code=409, detail="stripe_mode_mismatch")
+    binding = _plan_stripe_metadata(plan, account_id=account_id)
+    authoritative: dict[str, Any] = {
+        "mode": "subscription",
+        "line_items[0][quantity]": 1,
+        "line_items[0][price_data][currency]": currency,
+        "line_items[0][price_data][unit_amount]": price_cents,
+        "line_items[0][price_data][recurring][interval]": "month",
+        "line_items[0][price_data][product_data][name]": f"{business} {plan_key}",
+        "success_url": str(params.get("success_url") or ""),
+        "cancel_url": str(params.get("cancel_url") or ""),
+        "client_reference_id": client_reference_id,
+        "metadata[business]": business,
+        "metadata[plan_key]": plan_key,
+        "metadata[checkout_intent_id]": intent_id,
+        "metadata[source]": "takyon_app",
+        "subscription_data[metadata][checkout_intent_id]": intent_id,
+    }
+    for key, value in binding.items():
+        authoritative[f"line_items[0][price_data][product_data][metadata][{key}]"] = value
+        authoritative[f"metadata[{key}]"] = value
+        authoritative[f"subscription_data[metadata][{key}]"] = value
+    if intent_email:
+        authoritative["customer_email"] = intent_email
+    return {
+        "intent_id": str(_db_row_value(row, 0, "id") or intent_id),
+        "params": authoritative,
+        "expected_metadata": binding,
+        "expected_livemode": expected_livemode,
+        "client_reference_id": client_reference_id,
+    }
+
+
+def _release_app_checkout_intent_claim(intent_id: str) -> None:
+    """Make a failed Stripe attempt retriable with the same intent-bound idempotency key."""
+    with _safebox_db_conn() as conn:
+        conn.execute(
+            "select takyon_safebox_release_app_checkout_intent(%s::uuid)",
+            (str(intent_id),),
+        )
 
 
 def _require_takyon_app_stripe_object(payload: dict[str, Any], *, require_source: bool = False) -> str:
@@ -1327,6 +1524,13 @@ class _ConnectionDepositBody(BaseModel):
     business: str
     connection_slug: str
     secret: str
+
+
+class _ConnectionRebindBody(BaseModel):
+    # Operator-plane, plaintext-free reactivation of an existing sealed credential. This route is
+    # useful only after a fresh approval for the exact canonical connection scope.
+    business: str
+    connection_slug: str
 
 
 class _OperatorSessionTokenBody(BaseModel):
@@ -2628,6 +2832,58 @@ def _mint_capability_token(
     )
 
 
+def _exact_approved_connection_binding(
+    conn,
+    *,
+    business: str,
+    connection_slug: str,
+) -> dict[str, Any]:
+    """Lock and prove one connection against its exact current canonical approval."""
+    from . import egress_gateway, money_shape
+
+    row = conn.execute(
+        "select id, connection_slug, provider_kind, allowed_host, allowed_path_prefix, "
+        "allowed_methods, placement, scope, approval_id, secret_ciphertext, secret_nonce, "
+        "secret_fingerprint from provider_connections "
+        "where business_slug = %s and connection_slug = %s for update",
+        (business, connection_slug),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="connection_unknown")
+    try:
+        scope_snapshot = egress_gateway.normalize_connection_scope(
+            provider_kind=str(row[2] or ""),
+            allowed_host=str(row[3] or ""),
+            allowed_path_prefix=row[4],
+            allowed_methods=row[5],
+            placement=row[6] if isinstance(row[6], dict) else {},
+            scope=str(row[7] or "business"),
+        )
+        approval_payload = egress_gateway.connection_approval_payload(
+            str(row[1] or ""), scope_snapshot
+        )
+        scope_digest = egress_gateway.connection_scope_digest(scope_snapshot)
+        approval_digest = money_shape.payload_digest(approval_payload)
+    except egress_gateway.EgressError as exc:
+        raise HTTPException(status_code=403, detail={"error": exc.code}) from exc
+    approval = conn.execute(
+        "select status from operator_approvals where business_slug = %s "
+        "and action_kind = 'provider_connection_grant' and status = 'approved' "
+        "and id = %s and payload_digest = %s "
+        "and (expires_at is null or expires_at > now()) for update",
+        (business, row[8], approval_digest),
+    ).fetchone()
+    if approval is None:
+        raise HTTPException(status_code=403, detail="connection_not_approved")
+    return {
+        "connection_id": str(row[0]),
+        "scope_digest": scope_digest,
+        "secret_ciphertext": None if row[9] is None else bytes(row[9]),
+        "secret_nonce": None if row[10] is None else bytes(row[10]),
+        "secret_fingerprint": None if row[11] is None else str(row[11]),
+    }
+
+
 def build_safebox_app() -> FastAPI:
     app = FastAPI(title="Takyon Safebox")
     app.add_middleware(
@@ -2639,6 +2895,15 @@ def build_safebox_app() -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/v1/stripe/account-proof")
+    def stripe_account_proof(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Non-secret proof that this running Safebox resolves the bound Stripe account."""
+        _require_internal_token(authorization)
+        account_id, livemode = _stripe_account_snapshot()
+        return {"account_id": account_id, "livemode": livemode}
 
     @app.get("/v1/env/snapshot")
     def env_snapshot(authorization: str | None = Header(default=None)) -> dict[str, dict[str, str]]:
@@ -2799,52 +3064,79 @@ def build_safebox_app() -> FastAPI:
                 # Pin the RLS-bypass GUC to THIS backend for the whole transaction (:6543 probe
                 # gotcha — a session-level SET is not reliably carried across pooled backends).
                 conn.execute("select set_config('takyon.rls_bypass', '1', true)")
-                row = conn.execute(
-                    "select id, connection_slug, provider_kind, allowed_host, allowed_path_prefix, "
-                    "allowed_methods, placement, scope, approval_id from provider_connections "
-                    "where business_slug = %s and connection_slug = %s",
-                    (business, connection_slug),
-                ).fetchone()
-                if row is None:
-                    raise HTTPException(status_code=404, detail="connection_unknown")
-                connection_id, approval_id = str(row[0]), row[8]
-                try:
-                    scope_snapshot = egress_gateway.normalize_connection_scope(
-                        provider_kind=str(row[2] or ""),
-                        allowed_host=str(row[3] or ""),
-                        allowed_path_prefix=row[4],
-                        allowed_methods=row[5],
-                        placement=row[6] if isinstance(row[6], dict) else {},
-                        scope=str(row[7] or "business"),
-                    )
-                    approval_payload = egress_gateway.connection_approval_payload(
-                        str(row[1] or ""), scope_snapshot
-                    )
-                    scope_digest = egress_gateway.connection_scope_digest(scope_snapshot)
-                    from . import money_shape
-                    approval_digest = money_shape.payload_digest(approval_payload)
-                except egress_gateway.EgressError as exc:
-                    raise HTTPException(status_code=403, detail={"error": exc.code}) from exc
-                # Require the exact, still-valid operator approval for the current canonical scope.
-                appr = conn.execute(
-                    "select status from operator_approvals where business_slug = %s "
-                    "and action_kind = 'provider_connection_grant' and status = 'approved' "
-                    "and id = %s and payload_digest = %s "
-                    "and (expires_at is null or expires_at > now())",
-                    (business, approval_id, approval_digest),
-                ).fetchone()
-                if appr is None:
-                    raise HTTPException(status_code=403, detail="connection_not_approved")
+                binding = _exact_approved_connection_binding(
+                    conn,
+                    business=business,
+                    connection_slug=connection_slug,
+                )
                 updated = conn.execute(
                     "update provider_connections set secret_ciphertext = %s, secret_nonce = %s, "
                     "secret_fingerprint = %s, approved_scope_digest = %s, status = 'active', "
                     "updated_at = now() where id = %s "
                     "returning id",
-                    (ct, nonce, fp, scope_digest, connection_id),
+                    (
+                        ct,
+                        nonce,
+                        fp,
+                        binding["scope_digest"],
+                        binding["connection_id"],
+                    ),
                 ).fetchone()
                 if updated is None:
                     raise HTTPException(status_code=500, detail="deposit_write_failed")
         return {"business": business, "connection_slug": connection_slug, "status": "active", "fingerprint": fp}
+
+    @app.post("/v1/connections/rebind")
+    def rebind_connection_secret(
+        request: Request,
+        body: _ConnectionRebindBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Reactivate intact sealed credential material after exact canonical-scope reapproval.
+
+        This never accepts or returns plaintext. Historical approvals that do not digest to the
+        current canonical payload remain unusable; an operator must first approve that exact scope.
+        """
+        from . import egress_gateway
+
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        business = str(body.business or "").strip()
+        connection_slug = str(body.connection_slug or "").strip()
+        if not business or not connection_slug:
+            raise HTTPException(status_code=400, detail="missing_rebind_fields")
+        with _safebox_db_conn() as conn:
+            with conn.transaction():
+                conn.execute("select set_config('takyon.rls_bypass', '1', true)")
+                binding = _exact_approved_connection_binding(
+                    conn,
+                    business=business,
+                    connection_slug=connection_slug,
+                )
+                try:
+                    egress_gateway.verify_sealed_secret(
+                        binding["secret_ciphertext"],
+                        binding["secret_nonce"],
+                        binding["secret_fingerprint"],
+                    )
+                except egress_gateway.EgressError as exc:
+                    raise HTTPException(
+                        status_code=exc.status,
+                        detail={"error": exc.code},
+                    ) from exc
+                updated = conn.execute(
+                    "update provider_connections set approved_scope_digest = %s, "
+                    "status = 'active', updated_at = now() where id = %s returning id",
+                    (binding["scope_digest"], binding["connection_id"]),
+                ).fetchone()
+                if updated is None:
+                    raise HTTPException(status_code=500, detail="rebind_write_failed")
+        return {
+            "business": business,
+            "connection_slug": connection_slug,
+            "status": "active",
+            "fingerprint": binding["secret_fingerprint"],
+        }
 
     @app.post("/v1/user-api-keys/register")
     def register_user_key(
@@ -3141,6 +3433,8 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         _require_operator_client(request)
+        _require_stripe_checkout_enabled()
+        _require_operator_checkout_enabled()
         try:
             return safebox.create_operator_subscription_checkout(
                 body.user_id,
@@ -3200,34 +3494,50 @@ def build_safebox_app() -> FastAPI:
             if method == "POST" and path in _STRIPE_CATALOG_MUTATION_PATHS:
                 catalog_plan, expected_livemode = _prepare_catalog_mutation(path, params)
             if path == "checkout/sessions" and method == "POST":
-                price_id = str(params.get("line_items[0][price]") or "").strip()
-                plan = _require_app_checkout_intent_authority(params, price_id=price_id)
-                account_id, key_livemode = _stripe_account_snapshot()
-                price = safebox.stripe_request(f"prices/{price_id}", {}, method="GET")
-                product_id = _stripe_object_id(price.get("product"))
-                if not product_id:
-                    raise HTTPException(status_code=403, detail="stripe_product_scope_mismatch")
-                product = safebox.stripe_request(f"products/{product_id}", {}, method="GET")
-                _validate_checkout_catalog(
-                    plan,
-                    price=price,
-                    product=product,
-                    account_id=account_id,
-                    key_livemode=key_livemode,
-                )
-                economics_version = _plan_stripe_metadata(
-                    plan, account_id=account_id
-                )["economics_version"]
-                params["metadata[economics_version]"] = economics_version
-                params["subscription_data[metadata][economics_version]"] = economics_version
-            result = safebox.stripe_request(path, params, method=method)
-            if path == "checkout/sessions" and method == "POST":
-                if (
-                    result.get("object") != "checkout.session"
-                    or result.get("livemode") is not _expected_stripe_livemode(plan)
-                ):
-                    raise HTTPException(status_code=502, detail="stripe_checkout_mode_mismatch")
-            elif catalog_plan is not None and expected_livemode is not None:
+                _require_stripe_checkout_enabled()
+                checkout = _claim_app_checkout_intent_authority(params)
+                params = checkout["params"]
+                idempotency_key = f"takyon-app-checkout-{checkout['intent_id']}"
+                try:
+                    result = safebox.stripe_request(
+                        path,
+                        params,
+                        method=method,
+                        idempotency_key=idempotency_key,
+                    )
+                    metadata = (
+                        result.get("metadata")
+                        if isinstance(result, dict) and isinstance(result.get("metadata"), dict)
+                        else {}
+                    )
+                    expected_metadata = dict(checkout["expected_metadata"])
+                    expected_metadata["checkout_intent_id"] = checkout["intent_id"]
+                    session_id = str(result.get("id") or "") if isinstance(result, dict) else ""
+                    session_url = str(result.get("url") or "") if isinstance(result, dict) else ""
+                    parsed_url = urllib.parse.urlsplit(session_url)
+                    expected_prefix = "cs_live_" if checkout["expected_livemode"] else "cs_test_"
+                    if (
+                        not isinstance(result, dict)
+                        or result.get("object") != "checkout.session"
+                        or result.get("livemode") is not checkout["expected_livemode"]
+                        or result.get("mode") != "subscription"
+                        or not session_id.startswith(expected_prefix)
+                        or parsed_url.scheme != "https"
+                        or parsed_url.hostname != "checkout.stripe.com"
+                        or str(result.get("client_reference_id") or "")
+                        != checkout["client_reference_id"]
+                        or any(
+                            str(metadata.get(key) or "") != str(value)
+                            for key, value in expected_metadata.items()
+                        )
+                    ):
+                        raise HTTPException(status_code=502, detail="stripe_checkout_create_mismatch")
+                except Exception:
+                    _release_app_checkout_intent_claim(checkout["intent_id"])
+                    raise
+            else:
+                result = safebox.stripe_request(path, params, method=method)
+            if catalog_plan is not None and expected_livemode is not None:
                 account_id = str(params.get("metadata[takyon_stripe_account_id]") or "")
                 _require_exact_stripe_metadata(
                     result, _plan_stripe_metadata(catalog_plan, account_id=account_id)
@@ -4095,7 +4405,8 @@ def build_safebox_app() -> FastAPI:
         except safebox.StripeBillingWebhookUnconfigured as exc:
             raise HTTPException(status_code=503, detail="billing_webhook_unconfigured") from exc
         except safebox.StripeBillingWebhookInvalidSignature as exc:
-            raise HTTPException(status_code=400, detail="invalid_signature") from exc
+            detail = "invalid_livemode" if str(exc) == "invalid_livemode" else "invalid_signature"
+            raise HTTPException(status_code=400, detail=detail) from exc
         from .control_api import process_billing_webhook_event
 
         with _safebox_db_conn() as conn:
@@ -4174,6 +4485,8 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         _require_operator_client(request)
+        _require_stripe_checkout_enabled()
+        _require_creative_checkout_enabled()
         from . import stripe_util
         from .control_api import create_creative_credit_checkout_session
 
@@ -4258,17 +4571,14 @@ def build_safebox_app() -> FastAPI:
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
-        from . import stripe_util
-
-        secret = safebox.read_env_backed_value("STRIPE_BILLING_WEBHOOK_SECRET")
-        if not secret:
-            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured")
         try:
-            stripe_util.verify_stripe_signature(body.raw_body, body.signature, secret)
-        except stripe_util.StripeError as exc:
-            raise HTTPException(status_code=400, detail="invalid_signature") from exc
-        event = json.loads(body.raw_body)
-        return {"event": event if isinstance(event, dict) else {}}
+            event = safebox.verify_stripe_billing_webhook(body.raw_body, body.signature)
+        except safebox.StripeBillingWebhookUnconfigured as exc:
+            raise HTTPException(status_code=503, detail="billing_webhook_unconfigured") from exc
+        except safebox.StripeBillingWebhookInvalidSignature as exc:
+            detail = "invalid_livemode" if str(exc) == "invalid_livemode" else "invalid_signature"
+            raise HTTPException(status_code=400, detail=detail) from exc
+        return {"event": event}
 
     @app.post("/v1/stripe/app-webhook/verify")
     def verify_stripe_app_webhook(
@@ -4280,17 +4590,14 @@ def build_safebox_app() -> FastAPI:
         # signature is verified here; the parsed event is returned (NEVER the secret) so the runtime
         # plane can reconcile entitlements without ever holding the signing key.
         _require_internal_token(authorization)
-        from . import stripe_util
-
-        secret = safebox.read_env_backed_value("STRIPE_WEBHOOK_SECRET")
-        if not secret:
-            raise HTTPException(status_code=503, detail="app_webhook_unconfigured")
         try:
-            stripe_util.verify_stripe_signature(body.raw_body, body.signature, secret)
-        except stripe_util.StripeError as exc:
-            raise HTTPException(status_code=400, detail="invalid_signature") from exc
-        event = json.loads(body.raw_body)
-        return {"event": event if isinstance(event, dict) else {}}
+            event = safebox.verify_stripe_app_webhook(body.raw_body, body.signature)
+        except safebox.StripeAppWebhookUnconfigured as exc:
+            raise HTTPException(status_code=503, detail="app_webhook_unconfigured") from exc
+        except safebox.StripeAppWebhookInvalidSignature as exc:
+            detail = "invalid_livemode" if str(exc) == "invalid_livemode" else "invalid_signature"
+            raise HTTPException(status_code=400, detail=detail) from exc
+        return {"event": event}
 
     @app.post("/v1/stripe/app-webhook/process")
     def process_stripe_app_webhook(
@@ -4306,11 +4613,247 @@ def build_safebox_app() -> FastAPI:
         except safebox.StripeAppWebhookUnconfigured as exc:
             raise HTTPException(status_code=503, detail="app_webhook_unconfigured") from exc
         except safebox.StripeAppWebhookInvalidSignature as exc:
-            raise HTTPException(status_code=400, detail="invalid_signature") from exc
+            detail = "invalid_livemode" if str(exc) == "invalid_livemode" else "invalid_signature"
+            raise HTTPException(status_code=400, detail=detail) from exc
         from . import app_payments
 
+        event_type = str(event.get("type") or "")
+        obj = (event.get("data") or {}).get("object") or {}
+        checkout_subscription: dict[str, Any] | None = None
+        if str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live":
+            proof_path = ""
+            proof_id = ""
+            if event_type == "checkout.session.completed":
+                proof_id = str(obj.get("id") or "")
+                proof_path = f"checkout/sessions/{proof_id}"
+            elif event_type in {
+                "customer.subscription.created",
+                "customer.subscription.updated",
+                "customer.subscription.deleted",
+            }:
+                proof_id = str(obj.get("id") or "")
+                proof_path = f"subscriptions/{proof_id}"
+            elif event_type in {"invoice.paid", "invoice.payment_failed"}:
+                proof_id = str(obj.get("id") or "")
+                proof_path = f"invoices/{proof_id}"
+            elif event_type == "charge.refunded":
+                proof_id = str(obj.get("id") or "")
+                proof_path = f"charges/{proof_id}"
+            elif event_type in {
+                "charge.dispute.created",
+                "charge.dispute.updated",
+                "charge.dispute.closed",
+                "charge.dispute.funds_withdrawn",
+                "charge.dispute.funds_reinstated",
+            }:
+                proof_id = str(obj.get("id") or "")
+                proof_path = f"disputes/{proof_id}"
+            if proof_path and proof_id:
+                try:
+                    proof = (
+                        _stripe_invoice_with_all_payments(proof_id)
+                        if event_type in {"invoice.paid", "invoice.payment_failed"}
+                        else safebox.stripe_request(proof_path, {}, method="GET")
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503, detail="stripe_account_object_proof_pending"
+                    ) from exc
+                if (
+                    not isinstance(proof, dict)
+                    or str(proof.get("id") or "") != proof_id
+                    or proof.get("livemode") is not True
+                ):
+                    raise HTTPException(
+                        status_code=503, detail="stripe_account_object_proof_pending"
+                    )
+                if event_type in {
+                    "charge.dispute.created",
+                    "charge.dispute.updated",
+                    "charge.dispute.closed",
+                    "charge.dispute.funds_withdrawn",
+                    "charge.dispute.funds_reinstated",
+                }:
+                    obj.clear()
+                    obj.update(proof)
+                    charge_id = _stripe_object_id(obj.get("charge"))
+                    if not charge_id:
+                        raise HTTPException(
+                            status_code=503, detail="stripe_account_object_proof_pending"
+                        )
+                    try:
+                        charge = safebox.stripe_request(
+                            f"charges/{charge_id}", {}, method="GET"
+                        )
+                    except Exception as exc:
+                        raise HTTPException(
+                            status_code=503, detail="stripe_account_object_proof_pending"
+                        ) from exc
+                    if (
+                        not isinstance(charge, dict)
+                        or str(charge.get("id") or "") != charge_id
+                        or charge.get("livemode") is not True
+                    ):
+                        raise HTTPException(
+                            status_code=503, detail="stripe_account_object_proof_pending"
+                        )
+                    charge_gross_cents = charge.get("amount")
+                    charge_refunded_cents = charge.get("amount_refunded")
+                    if (
+                        not isinstance(charge_gross_cents, int)
+                        or isinstance(charge_gross_cents, bool)
+                        or not isinstance(charge_refunded_cents, int)
+                        or isinstance(charge_refunded_cents, bool)
+                        or charge_gross_cents < 0
+                        or charge_refunded_cents < 0
+                        or charge_refunded_cents > charge_gross_cents
+                    ):
+                        raise HTTPException(
+                            status_code=503, detail="stripe_account_object_proof_pending"
+                        )
+                    obj.update(
+                        {
+                            key: charge.get(key)
+                            for key in (
+                                "currency",
+                                "customer",
+                                "invoice",
+                                "metadata",
+                                "payment_intent",
+                            )
+                        }
+                    )
+                    obj["_takyon_charge_gross_cents"] = charge_gross_cents
+                    obj["_takyon_charge_amount_refunded_cents"] = (
+                        charge_refunded_cents
+                    )
+                    if str(obj.get("status") or "").strip().lower() in {
+                        "won",
+                        "warning_closed",
+                    }:
+                        payment_intent_id = _stripe_object_id(
+                            charge.get("payment_intent")
+                        )
+                        binding = _stripe_payment_subscription_binding(
+                            payment_intent_id, charge_id
+                        )
+                        if binding is None:
+                            raise HTTPException(
+                                status_code=503,
+                                detail="stripe_account_object_proof_pending",
+                            )
+                        bound_business, subscription_id = binding
+                        try:
+                            subscription = safebox.stripe_request(
+                                f"subscriptions/{subscription_id}", {}, method="GET"
+                            )
+                        except Exception as exc:
+                            raise HTTPException(
+                                status_code=503,
+                                detail="stripe_account_object_proof_pending",
+                            ) from exc
+                        obj["_takyon_subscription"] = _require_app_subscription_proof(
+                            subscription,
+                            subscription_id,
+                            business=bound_business,
+                            detail="stripe_account_object_proof_pending",
+                        )
+                else:
+                    # Webhook delivery can be out of order. Reconcile the current Stripe object
+                    # fetched under the configured live account, not the stale event snapshot.
+                    obj.clear()
+                    obj.update(proof)
+                    if event_type in {"invoice.paid", "invoice.payment_failed"}:
+                        subscription_id = app_payments._invoice_subscription_id(obj)
+                        if subscription_id:
+                            try:
+                                subscription = safebox.stripe_request(
+                                    f"subscriptions/{subscription_id}", {}, method="GET"
+                                )
+                            except Exception as exc:
+                                raise HTTPException(
+                                    status_code=503,
+                                    detail="stripe_account_object_proof_pending",
+                                ) from exc
+                            if (
+                                not isinstance(subscription, dict)
+                                or str(subscription.get("id") or "")
+                                != subscription_id
+                                or subscription.get("livemode") is not True
+                            ):
+                                raise HTTPException(
+                                    status_code=503,
+                                    detail="stripe_account_object_proof_pending",
+                                )
+                            obj["_takyon_subscription"] = subscription
+                    if event_type == "checkout.session.completed":
+                        invoice_id = _stripe_object_id(obj.get("invoice"))
+                        if invoice_id:
+                            try:
+                                invoice = _stripe_invoice_with_all_payments(invoice_id)
+                            except Exception as exc:
+                                raise HTTPException(
+                                    status_code=503,
+                                    detail="stripe_account_object_proof_pending",
+                                ) from exc
+                            if (
+                                not invoice
+                                or invoice.get("livemode") is not True
+                            ):
+                                raise HTTPException(
+                                    status_code=503,
+                                    detail="stripe_account_object_proof_pending",
+                                )
+                            obj["_takyon_invoice"] = invoice
+
+        checkout_metadata = (
+            obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+        )
+        if (
+            event_type == "checkout.session.completed"
+            and checkout_metadata.get("source") == "takyon_app"
+        ):
+            checkout_business = str(checkout_metadata.get("business") or "").strip()
+            subscription_id = _stripe_object_id(obj.get("subscription"))
+            if not checkout_business or not subscription_id.startswith("sub_"):
+                raise HTTPException(
+                    status_code=503, detail="stripe_subscription_reconcile_pending"
+                )
+            try:
+                subscription = safebox.stripe_request(
+                    f"subscriptions/{subscription_id}", {}, method="GET"
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail="stripe_subscription_reconcile_pending"
+                ) from exc
+            checkout_subscription = _require_app_subscription_proof(
+                subscription,
+                subscription_id,
+                business=checkout_business,
+                detail="stripe_subscription_reconcile_pending",
+            )
+
         with _safebox_db_conn() as conn:
-            return app_payments.record_webhook_and_process(conn, event)
+            try:
+                if checkout_subscription is None:
+                    result = app_payments.record_webhook_and_process(conn, event)
+                else:
+                    with conn.transaction():
+                        result = app_payments.record_webhook_and_process(conn, event)
+                        subscription_result = app_payments.reconcile_subscription(
+                            conn, checkout_subscription
+                        )
+                        if not bool(subscription_result.get("recorded")):
+                            raise app_payments.RetryableWebhookEvent(
+                                "stripe_subscription_reconcile_pending"
+                            )
+                        result["subscription"] = subscription_result
+            except app_payments.RetryableWebhookEvent as exc:
+                raise HTTPException(
+                    status_code=503, detail="stripe_event_dependency_pending"
+                ) from exc
+            return result
 
     @app.post("/v1/shopify/app-webhook/process")
     def process_shopify_app_webhook(
@@ -4377,54 +4920,106 @@ def build_safebox_app() -> FastAPI:
             raise HTTPException(status_code=403, detail="checkout_business_mismatch")
         if str(session.get("status") or "").strip().lower() != "complete":
             raise HTTPException(status_code=409, detail="checkout_session_not_complete")
-        if str(session.get("payment_status") or "").strip().lower() not in {"paid", "no_payment_required"}:
+        if str(session.get("payment_status") or "").strip().lower() != "paid":
             raise HTTPException(status_code=409, detail="checkout_session_unpaid")
 
         metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
         intent_id = str(metadata.get("checkout_intent_id") or "").strip()
         client_reference_id = str(session.get("client_reference_id") or "").strip()
-        with _safebox_db_conn() as conn:
-            intent = None
-            if intent_id:
-                intent = conn.execute(
-                    "select business_slug, app_user_id, customer_email "
-                    "from app_checkout_intents where id = %s",
-                    (intent_id,),
-                ).fetchone()
-            if intent is None and client_reference_id:
-                intent = conn.execute(
-                    "select business_slug, app_user_id, customer_email "
-                    "from app_checkout_intents where client_reference_id = %s",
-                    (client_reference_id,),
-                ).fetchone()
-            if intent is None:
-                raise HTTPException(status_code=404, detail="missing_checkout_intent")
-            intent_business = str(intent[0] or "").strip()
-            intent_user = str(intent[1] or "").strip()
-            intent_email = str(intent[2] or "").strip().lower()
-            if intent_business != business:
-                raise HTTPException(status_code=403, detail="checkout_intent_business_mismatch")
-            if expected_user and intent_user and intent_user != expected_user:
-                raise HTTPException(status_code=403, detail="checkout_user_mismatch")
-            if expected_email and intent_email and intent_email != expected_email:
-                raise HTTPException(status_code=403, detail="checkout_email_mismatch")
-            checkout_result = app_payments.reconcile_checkout_session(
-                conn,
-                session,
-                provider_event_id=f"checkout.session.reconcile:{session_id}",
-                event_created=session.get("created"),
+        invoice_id = _stripe_object_id(session.get("invoice"))
+        if invoice_id:
+            try:
+                invoice = _stripe_invoice_with_all_payments(invoice_id)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail="stripe_invoice_payment_evidence_pending"
+                ) from exc
+            if not invoice:
+                raise HTTPException(
+                    status_code=503, detail="stripe_invoice_payment_evidence_pending"
+                )
+            session["_takyon_invoice"] = invoice
+        subscription_id = _stripe_object_id(session.get("subscription"))
+        if not subscription_id:
+            raise HTTPException(
+                status_code=503, detail="stripe_subscription_reconcile_pending"
             )
-            subscription_result = None
-            subscription_id = str(session.get("subscription") or "").strip()
-            if subscription_id:
-                try:
-                    subscription = safebox.stripe_request(
-                        f"subscriptions/{subscription_id}", {}, method="GET"
+        try:
+            subscription = safebox.stripe_request(
+                f"subscriptions/{subscription_id}", {}, method="GET"
+            )
+        except stripe_util.StripeError as exc:
+            raise HTTPException(
+                status_code=503, detail="stripe_subscription_reconcile_pending"
+            ) from exc
+        expected_livemode = (
+            str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+        )
+        if (
+            not isinstance(subscription, dict)
+            or str(subscription.get("id") or "") != subscription_id
+            or subscription.get("object") not in {None, "subscription"}
+            or subscription.get("livemode") is not expected_livemode
+        ):
+            raise HTTPException(
+                status_code=503, detail="stripe_subscription_reconcile_pending"
+            )
+        subscription_metadata = (
+            subscription.get("metadata")
+            if isinstance(subscription.get("metadata"), dict)
+            else {}
+        )
+        expected_account_id = str(os.getenv("TAKYON_STRIPE_ACCOUNT_ID") or "").strip()
+        if (
+            subscription_metadata.get("source") != "takyon_app"
+            or str(subscription_metadata.get("business") or "").strip() != business
+            or not expected_account_id
+            or subscription_metadata.get("takyon_stripe_account_id") != expected_account_id
+        ):
+            raise HTTPException(
+                status_code=503, detail="stripe_subscription_reconcile_pending"
+            )
+        with _safebox_db_conn() as conn:
+            with conn.transaction():
+                intent = None
+                if intent_id:
+                    intent = conn.execute(
+                        "select business_slug, app_user_id, customer_email "
+                        "from app_checkout_intents where id = %s",
+                        (intent_id,),
+                    ).fetchone()
+                if intent is None and client_reference_id:
+                    intent = conn.execute(
+                        "select business_slug, app_user_id, customer_email "
+                        "from app_checkout_intents where client_reference_id = %s",
+                        (client_reference_id,),
+                    ).fetchone()
+                if intent is None:
+                    raise HTTPException(status_code=404, detail="missing_checkout_intent")
+                intent_business = str(intent[0] or "").strip()
+                intent_user = str(intent[1] or "").strip()
+                intent_email = str(intent[2] or "").strip().lower()
+                if intent_business != business:
+                    raise HTTPException(
+                        status_code=403, detail="checkout_intent_business_mismatch"
                     )
-                except stripe_util.StripeError:
-                    subscription = {}
-                if isinstance(subscription, dict) and subscription:
-                    subscription_result = app_payments.reconcile_subscription(conn, subscription)
+                if expected_user and intent_user and intent_user != expected_user:
+                    raise HTTPException(status_code=403, detail="checkout_user_mismatch")
+                if expected_email and intent_email and intent_email != expected_email:
+                    raise HTTPException(status_code=403, detail="checkout_email_mismatch")
+                checkout_result = app_payments.reconcile_checkout_session(
+                    conn,
+                    session,
+                    provider_event_id=f"checkout.session.reconcile:{session_id}",
+                    event_created=session.get("created"),
+                )
+                subscription_result = app_payments.reconcile_subscription(
+                    conn, subscription
+                )
+                if not bool(subscription_result.get("recorded")):
+                    raise HTTPException(
+                        status_code=503, detail="stripe_subscription_reconcile_pending"
+                    )
         return {
             "ok": True,
             "session_id": session_id,
@@ -4465,6 +5060,20 @@ def build_safebox_app() -> FastAPI:
         amount_refunded = int(charge.get("amount_refunded") or 0)
         if amount_refunded <= 0:
             raise HTTPException(status_code=409, detail="charge_not_refunded")
+        try:
+            refunds = safebox.stripe_request(
+                "refunds", {"charge": charge_id, "limit": 1}, method="GET"
+            )
+        except stripe_util.StripeError as exc:
+            raise HTTPException(status_code=502, detail="stripe_refund_evidence_error") from exc
+        refund_rows = refunds.get("data") if isinstance(refunds, dict) else None
+        latest_refund = refund_rows[0] if isinstance(refund_rows, list) and refund_rows else None
+        if (
+            not isinstance(latest_refund, dict)
+            or _stripe_object_id(latest_refund.get("charge")) != charge_id
+            or int(latest_refund.get("created") or 0) <= 0
+        ):
+            raise HTTPException(status_code=503, detail="stripe_refund_evidence_pending")
 
         payment_intent_id = str(charge.get("payment_intent") or "").strip()
         customer_id = str(charge.get("customer") or "").strip()
@@ -4491,26 +5100,13 @@ def build_safebox_app() -> FastAPI:
                 raise HTTPException(status_code=403, detail="reversal_business_mismatch")
             if expected_session and expected_session != session_id:
                 raise HTTPException(status_code=403, detail="reversal_checkout_session_mismatch")
-            existing = conn.execute(
-                "select id from app_revenue_events "
-                "where business_slug = %s and stripe_object_type = 'charge' "
-                "and stripe_object_id = %s and revenue_type = 'reversal' "
-                "and status = 'refunded' limit 1",
-                (business, charge_id),
-            ).fetchone()
-            if existing is not None:
-                return {
-                    "ok": True,
-                    "charge_id": charge_id,
-                    "business_slug": business,
-                    "checkout_session_id": session_id,
-                    "deduplicated": True,
-                    "processed": None,
-                }
             event = {
-                "id": f"charge.refunded.reconcile:{charge_id}:{amount_refunded}",
+                "id": (
+                    "charge.refunded.reconcile:"
+                    f"{str(latest_refund.get('id') or charge_id)}:{amount_refunded}"
+                ),
                 "type": "charge.refunded",
-                "created": charge.get("created"),
+                "created": latest_refund.get("created"),
                 "data": {"object": charge},
             }
             processed = app_payments.record_webhook_and_process(conn, event)
@@ -4519,7 +5115,8 @@ def build_safebox_app() -> FastAPI:
             "charge_id": charge_id,
             "business_slug": business,
             "checkout_session_id": session_id,
-            "deduplicated": False,
+            "deduplicated": bool(processed.get("deduplicated"))
+            or not bool((processed.get("processed") or {}).get("reversal_recorded")),
             "processed": processed,
         }
 

@@ -12790,6 +12790,22 @@ def _normalize_email(value: str) -> str:
     return email
 
 
+def _stripe_revenue_environment() -> str:
+    """Select exactly one Stripe ledger environment; unknown/missing never becomes live."""
+    return (
+        "live"
+        if str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+        else "test"
+    )
+
+
+def _stripe_revenue_environment_predicate(conn: Any) -> str:
+    """Return the same fail-closed environment filter for each supported SQL shape."""
+    if isinstance(conn, _PGConn):
+        return "COALESCE(metadata->>'stripe_environment', 'test') = ?"
+    return "COALESCE(json_extract(metadata_json, '$.stripe_environment'), 'test') = ?"
+
+
 def _is_service_email(value: Any) -> bool:
     try:
         from . import app_actions as takyon_app_actions
@@ -17061,8 +17077,10 @@ class TakyonStore:
             (slug, budget["current_period_start"]),
         ).fetchone()
         revenue = conn.execute(
-            "SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ?",
-            (slug,),
+            "SELECT COALESCE(SUM(CASE WHEN revenue_type = 'reversal' THEN -amount_paid_cents ELSE amount_paid_cents END), 0) AS cents, COUNT(*) AS count "
+            "FROM app_revenue_events WHERE business_slug = ? "
+            f"AND {_stripe_revenue_environment_predicate(conn)}",
+            (slug, _stripe_revenue_environment()),
         ).fetchone()
         return {
             "budget": budget,
@@ -17191,14 +17209,15 @@ class TakyonStore:
                     (slug, start, end),
                 )
                 revenue = one(
-                    """
+                    f"""
                     SELECT COUNT(*) AS events,
-                           COALESCE(SUM(amount_paid_cents), 0) AS amount_paid_cents,
+                           COALESCE(SUM(CASE WHEN revenue_type = 'reversal' THEN -amount_paid_cents ELSE amount_paid_cents END), 0) AS amount_paid_cents,
                            COUNT(DISTINCT customer_email) AS paying_emails
                     FROM app_revenue_events
                     WHERE business_slug = ? AND occurred_at >= ? AND occurred_at <= ?
+                      AND {_stripe_revenue_environment_predicate(conn)}
                     """,
-                    (slug, start, end),
+                    (slug, start, end, _stripe_revenue_environment()),
                 )
                 conversations = one(
                     """
@@ -18507,13 +18526,19 @@ class TakyonStore:
             revenue_rows = [
                 self._row_to_dict(row)
                 for row in conn.execute(
-                    """
-                    SELECT occurred_at, amount_paid_cents
+                    f"""
+                    SELECT occurred_at, amount_paid_cents, revenue_type
                     FROM app_revenue_events
                     WHERE business_slug = ? AND occurred_at >= ? AND occurred_at < ?
+                      AND {_stripe_revenue_environment_predicate(conn)}
                     ORDER BY occurred_at ASC
                     """,
-                    (slug, previous_start.isoformat(), end_exclusive.isoformat()),
+                    (
+                        slug,
+                        previous_start.isoformat(),
+                        end_exclusive.isoformat(),
+                        _stripe_revenue_environment(),
+                    ),
                 ).fetchall()
             ]
             user_rows = [
@@ -18546,6 +18571,8 @@ class TakyonStore:
             if occurred_at is None:
                 continue
             amount = int(row.get("amount_paid_cents") or 0)
+            if str(row.get("revenue_type") or "").strip().lower() == "reversal":
+                amount = -amount
             index = bucket_index(occurred_at)
             if index is not None:
                 revenue_series[index] += amount
@@ -20462,8 +20489,6 @@ class TakyonStore:
                             composition,
                             tier=tier,
                             currency=str(op.get("currency") or "usd").lower(),
-                            stripe_product_id=op.get("stripe_product_id"),
-                            stripe_price_id=op.get("stripe_price_id"),
                             source=str(op.get("source") or "takyon"),
                             notes=str(op.get("notes") or ""),
                             metadata=metadata,
@@ -20529,8 +20554,6 @@ class TakyonStore:
                             billing_interval=interval,
                             included_ai_budget_microusd=included_ai_budget_microusd,
                             included_action_quota=included_action_quota,
-                            stripe_product_id=op.get("stripe_product_id"),
-                            stripe_price_id=op.get("stripe_price_id"),
                             source=str(op.get("source") or "takyon"),
                             notes=str(op.get("notes") or ""),
                             metadata=metadata,
@@ -20546,19 +20569,6 @@ class TakyonStore:
                     (slug, plan_key),
                 ).fetchone()
             )
-            if (
-                _effective_business_mode(op.get("business_mode")) == "live"
-                and int(persisted_plan.get("price_cents") or 0) > 0
-                and leaves["entitlements"].plan_is_saleable(persisted_plan)
-                and not str(persisted_plan.get("stripe_price_id") or "").strip()
-            ):
-                business = self._ensure_business(conn, slug)
-                persisted_plan = _ensure_stripe_price(
-                    conn,
-                    slug,
-                    persisted_plan,
-                    str(business.get("name") or slug),
-                )
             self._rewrite_app_files(conn, slug)
             event_payload = {"plan_key": plan_key, "price_cents": price_cents}
             event_payload["stripe_price_id"] = persisted_plan.get("stripe_price_id")
@@ -23116,13 +23126,6 @@ def _ugc_ad_record(args: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def _stripe_request(path: str, params: dict[str, Any]) -> dict[str, Any]:
-    try:
-        return safebox.stripe_request(path, params, method="POST")
-    except Exception as exc:
-        raise TakyonError(f"Stripe {path} failed: {exc}") from exc
-
-
 def _stripe_object_id(value: Any) -> str | None:
     if isinstance(value, str):
         return value
@@ -23137,53 +23140,6 @@ def _subscription_entitlement_status(status: str) -> str:
     if status in {"canceled", "cancelled"}:
         return "cancelled"
     return "past_due"
-
-
-def _ensure_stripe_price(conn: sqlite3.Connection, slug: str, plan: dict[str, Any], business_name: str) -> dict[str, Any]:
-    from . import app_entitlements
-
-    if not app_entitlements.plan_is_saleable(plan):
-        raise TakyonError("deprecated or inactive plans cannot be provisioned for checkout")
-    if plan.get("stripe_price_id"):
-        return plan
-    if int(plan.get("price_cents") or 0) <= 0:
-        raise TakyonError("paid checkout requires a plan with price_cents > 0")
-    economics_version = app_entitlements.plan_economics_version_from_mapping(
-        {**plan, "business_slug": slug}
-    )
-    metadata = {
-        "business": slug,
-        "business_id": slug,
-        "plan_key": plan["plan_key"],
-        "source": "takyon_app",
-        "economics_version": economics_version,
-        "tier": str(plan.get("tier") or ""),
-        "currency": str(plan.get("currency") or "usd").lower(),
-        "price_cents": str(int(plan.get("price_cents") or 0)),
-        "billing_interval": str(plan.get("billing_interval") or "month"),
-        "included_ai_budget_microusd": str(int(plan.get("included_ai_budget_microusd") or 0)),
-        "included_action_quota": str(int(plan.get("included_action_quota") or 0)),
-    }
-    product = _stripe_request("products", {
-        "name": f"{business_name} {plan['plan_key']}",
-        **{f"metadata[{key}]": value for key, value in metadata.items()},
-    })
-    price_params: dict[str, Any] = {
-        "product": product["id"],
-        "currency": plan.get("currency") or "usd",
-        "unit_amount": int(plan.get("price_cents") or 0),
-        **{f"metadata[{key}]": value for key, value in metadata.items()},
-    }
-    # Monthly-only: every subuser plan is a monthly recurring subscription price.
-    price_params["recurring[interval]"] = "month"
-    price = _stripe_request("prices", price_params)
-    conn.execute(
-        "UPDATE app_plan_policies SET stripe_product_id = ?, stripe_price_id = ?, updated_at = ? WHERE business_slug = ? AND plan_key = ?",
-        (product["id"], price["id"], _now(), slug, plan["plan_key"]),
-    )
-    plan["stripe_product_id"] = product["id"]
-    plan["stripe_price_id"] = price["id"]
-    return plan
 
 
 def _schema(name: str, description: str, properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -24379,8 +24335,6 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
         "included_ai_budget_microusd": args.get("included_ai_budget_microusd"),
         "included_action_quota": 0 if args.get("included_action_quota") in {None, ""} else args.get("included_action_quota"),
         "saleable": args.get("saleable"),
-        "stripe_product_id": args.get("stripe_product_id"),
-        "stripe_price_id": args.get("stripe_price_id"),
         "source": args.get("source") or "takyon",
         "notes": args.get("notes") or "",
         "metadata": args.get("metadata") or {},
@@ -25334,7 +25288,11 @@ def _entitlement_anchored_period_start(leaf, entitlements: list[dict[str, Any]])
     best_rank = candidates[0][0]
     within = [item for item in candidates if item[0] == best_rank]
     within.sort(key=lambda item: item[1], reverse=True)
-    period_end = within[0][2].get("current_period_end")
+    funding_entitlement = within[0][2]
+    if str(funding_entitlement.get("source") or "").strip().lower() == "operator_ssh":
+        row = leaf.execute("select date_trunc('month', now())").fetchone()
+        return None if row is None else row[0]
+    period_end = funding_entitlement.get("current_period_end")
     if not period_end:
         return None
     row = leaf.execute(
@@ -25479,8 +25437,13 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                         (business, session_hash, period_start),
                     ).fetchone()
                     revenue_row = leaf.execute(
-                        "select amount_paid_cents, count from takyon_app_account_revenue_summary(%s, %s)",
-                        (business, session_hash),
+                        "select amount_paid_cents, count "
+                        "from takyon_app_account_revenue_summary(%s, %s, %s)",
+                        (
+                            business,
+                            session_hash,
+                            _stripe_revenue_environment(),
+                        ),
                     ).fetchone()
                 usage = {
                     "count": int((usage_row or [0, 0, 0])[0] or 0),
@@ -25503,7 +25466,12 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                         "SELECT COUNT(*) AS count, COALESCE(SUM(estimated_cost_microusd), 0) AS estimated, COALESCE(SUM(actual_cost_microusd), 0) AS actual FROM app_usage_events WHERE business_slug = ? AND app_user_id = ? AND created_at >= ?",
                         (business, user["id"], period_start),
                     ).fetchone()
-                    revenue = conn.execute("SELECT COALESCE(SUM(amount_paid_cents), 0) AS cents, COUNT(*) AS count FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?)", (business, user["email"])).fetchone()
+                    revenue = conn.execute(
+                        "SELECT COALESCE(SUM(CASE WHEN revenue_type = 'reversal' THEN -amount_paid_cents ELSE amount_paid_cents END), 0) AS cents, COUNT(*) AS count "
+                        "FROM app_revenue_events WHERE business_slug = ? AND lower(customer_email) = lower(?) "
+                        f"AND {_stripe_revenue_environment_predicate(conn)}",
+                        (business, user["email"], _stripe_revenue_environment()),
+                    ).fetchone()
             for entitlement in entitlements:
                 metadata = entitlement.get("metadata") if isinstance(entitlement.get("metadata"), dict) else {}
                 if "cancel_at_period_end" not in entitlement and "cancel_at_period_end" in metadata:
@@ -27090,9 +27058,6 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                         raise TakyonError(f"app plan not found: {plan_key}")
                     if not leaves["entitlements"].plan_is_saleable(plan):
                         raise TakyonError("app plan is deprecated or unavailable for new checkout")
-                    if not test_mode and not str(plan.get("stripe_price_id") or "").strip():
-                        raise TakyonError("app plan is not configured for Stripe checkout")
-
                     canonical_base = _product_publish_target(business).rstrip("/")
                     success_url = f"{canonical_base}/app?checkout=success"
                     cancel_url = f"{canonical_base}/app?checkout=cancel"
@@ -27101,23 +27066,42 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     mode = "subscription"
                     client_reference_id = uuid.uuid4().hex
                     checkout_metadata = dict(args.get("metadata") or {})
-                    intent = store._row_to_dict(
-                        conn.execute(
-                            "INSERT INTO app_checkout_intents "
-                            "(business_slug, app_user_id, plan_key, status, client_reference_id, customer_email, metadata) "
-                            "VALUES (?, ?, ?, 'created', ?, ?, ?::jsonb) "
-                            "RETURNING *",
-                            (
+                    try:
+                        with store._leaf_conn(conn) as raw:
+                            intent = leaves["payments"].create_session_checkout_intent(
+                                raw,
                                 business,
-                                user.id,
-                                plan_key,
-                                client_reference_id,
-                                customer_email,
-                                _json_dumps(checkout_metadata),
-                            ),
-                        ).fetchone()
-                    )
-                    intent_id = str(intent["id"])
+                                session_hash=_hash_token(session_token),
+                                plan_key=plan_key,
+                                client_reference_id=client_reference_id,
+                                metadata=checkout_metadata,
+                            )
+                    except leaves["payments"].ActiveSubscriptionExists as exc:
+                        raise TakyonError(
+                            "app account already has a Stripe subscription"
+                        ) from exc
+                    except leaves["payments"].CheckoutAlreadyOpen as exc:
+                        raise TakyonError(
+                            f"app checkout already open for plan: {exc}"
+                        ) from exc
+                    intent_id = str(intent.id)
+                    client_reference_id = str(intent.client_reference_id)
+                    plan_key = str(intent.plan_key)
+                    if intent.stripe_checkout_session_id and intent.checkout_url:
+                        return tool_result(
+                            {
+                                "success": True,
+                                "business": business,
+                                "mode": "test" if test_mode else "live",
+                                "plan_key": plan_key,
+                                "checkout_intent_id": intent_id,
+                                "stripe_checkout_session_id": intent.stripe_checkout_session_id,
+                                "checkout_url": intent.checkout_url,
+                                "url": intent.checkout_url,
+                                "client_reference_id": client_reference_id,
+                                "reused": True,
+                            }
+                        )
                     if test_mode:
                         checkout_url = success_url
                         conn.execute(
@@ -27169,8 +27153,6 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
 
                     params: dict[str, Any] = {
                         "mode": mode,
-                        "line_items[0][price]": plan["stripe_price_id"],
-                        "line_items[0][quantity]": 1,
                         "success_url": success_url,
                         "cancel_url": cancel_url,
                         "client_reference_id": client_reference_id,
@@ -27372,21 +27354,66 @@ def handle_business_record_stripe_webhook(args: dict, **_: Any) -> str:
             # caller-supplied amounts.
             try:
                 outcome = safebox.process_stripe_app_webhook(str(raw_body), str(signature))
-            except safebox.StripeAppWebhookUnconfigured as exc:
-                raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET") from exc
-            except safebox.StripeAppWebhookInvalidSignature as exc:
-                raise TakyonError("Stripe signature verification failed") from exc
-            if not isinstance(outcome, dict):
-                raise TakyonError("Stripe webhook processing returned no outcome")
+            except safebox.StripeAppWebhookInvalidSignature:
+                return tool_error(
+                    "Stripe signature verification failed",
+                    success=False,
+                    error_code="stripe_webhook_invalid_signature",
+                )
+            except safebox.StripeAppWebhookUnconfigured:
+                return tool_error(
+                    "Stripe webhook verification requires STRIPE_WEBHOOK_SECRET",
+                    success=False,
+                    error_code="stripe_webhook_unavailable",
+                    retryable=True,
+                )
+            except (
+                safebox.SafeboxAuthorityUnavailable,
+                safebox.ManagedSecretLookupError,
+                safebox.RemoteSafeboxError,
+            ):
+                return tool_error(
+                    "Stripe webhook authority unavailable",
+                    success=False,
+                    error_code="stripe_webhook_unavailable",
+                    retryable=True,
+                )
+            if not isinstance(outcome, dict) or not outcome.get("provider_event_id"):
+                return tool_error(
+                    "Stripe webhook authority unavailable",
+                    success=False,
+                    error_code="stripe_webhook_unavailable",
+                    retryable=True,
+                )
             event_id = str(outcome.get("provider_event_id") or uuid.uuid4().hex)
             event_type = str(outcome.get("type") or "")
         else:
             try:
                 event = safebox.verify_stripe_app_webhook(str(raw_body), str(signature))
-            except safebox.StripeAppWebhookUnconfigured as exc:
-                raise TakyonError("Stripe webhook verification requires STRIPE_WEBHOOK_SECRET") from exc
-            except safebox.StripeAppWebhookInvalidSignature as exc:
-                raise TakyonError("Stripe signature verification failed") from exc
+            except safebox.StripeAppWebhookInvalidSignature:
+                return tool_error(
+                    "Stripe signature verification failed",
+                    success=False,
+                    error_code="stripe_webhook_invalid_signature",
+                )
+            except safebox.StripeAppWebhookUnconfigured:
+                return tool_error(
+                    "Stripe webhook verification requires STRIPE_WEBHOOK_SECRET",
+                    success=False,
+                    error_code="stripe_webhook_unavailable",
+                    retryable=True,
+                )
+            except (
+                safebox.SafeboxAuthorityUnavailable,
+                safebox.ManagedSecretLookupError,
+                safebox.RemoteSafeboxError,
+            ):
+                return tool_error(
+                    "Stripe webhook authority unavailable",
+                    success=False,
+                    error_code="stripe_webhook_unavailable",
+                    retryable=True,
+                )
             if not isinstance(event, dict):
                 raise TakyonError("Stripe event payload is required")
             event_id = str(event.get("id") or uuid.uuid4().hex)
@@ -30350,8 +30377,9 @@ def _episode_metrics_snapshot(store: "TakyonStore", conn: Any, slug: str, channe
         # inside an episode's window would measure as a false positive revenue delta.
         row = conn.execute(
             "SELECT COALESCE(SUM(CASE WHEN revenue_type = 'reversal' THEN -amount_paid_cents "
-            "ELSE amount_paid_cents END), 0) AS c FROM app_revenue_events WHERE business_slug = ?",
-            (slug,),
+            "ELSE amount_paid_cents END), 0) AS c FROM app_revenue_events WHERE business_slug = ? "
+            f"AND {_stripe_revenue_environment_predicate(conn)}",
+            (slug, _stripe_revenue_environment()),
         ).fetchone()
         snap["revenue_cents"] = int(_row_value_int(row, "c"))
         row = conn.execute(

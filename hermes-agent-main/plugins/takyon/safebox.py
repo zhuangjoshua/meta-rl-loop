@@ -449,7 +449,13 @@ def _public_config_value(name: str) -> str:
     return str(load_env().get(name) or "").strip()
 
 
-def stripe_request(path: str, params: dict[str, Any] | None = None, *, method: str = "POST") -> dict[str, Any]:
+def stripe_request(
+    path: str,
+    params: dict[str, Any] | None = None,
+    *,
+    method: str = "POST",
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
     """Run one tightly allowlisted Stripe API operation on the safebox.
 
     Runtime planes use this instead of fetching ``STRIPE_SECRET_KEY``. The safebox route validates the
@@ -461,6 +467,8 @@ def stripe_request(path: str, params: dict[str, Any] | None = None, *, method: s
     if not stripe_path:
         raise ValueError("stripe path is required")
     if _remote_enabled() and not _local_authority_enabled():
+        if idempotency_key is not None:
+            raise ValueError("Stripe idempotency keys are Safebox-local only")
         operator_authority = stripe_method == "POST" and stripe_path in {"products", "prices"}
         payload = _remote_json(
             "POST",
@@ -472,7 +480,12 @@ def stripe_request(path: str, params: dict[str, Any] | None = None, *, method: s
         return payload if isinstance(payload, dict) else {}
     from . import stripe_util
 
-    return stripe_util.stripe_request(stripe_path, dict(params or {}), method=stripe_method)
+    return stripe_util.stripe_request(
+        stripe_path,
+        dict(params or {}),
+        method=stripe_method,
+        idempotency_key=idempotency_key,
+    )
 
 
 def send_postmark_email(
@@ -980,6 +993,23 @@ def deposit_connection_secret(
     )
 
 
+def rebind_connection_secret(
+    *, business: str, connection_slug: str, timeout: float = 30.0
+) -> dict[str, Any]:
+    """Operator-plane client for plaintext-free exact-scope credential reactivation.
+
+    The Safebox refuses unless the connection points to an approved, unexpired approval whose
+    payload is the exact current canonical scope and its existing sealed credential verifies.
+    """
+    return _remote_json(
+        "POST",
+        "/v1/connections/rebind",
+        {"business": str(business), "connection_slug": str(connection_slug)},
+        timeout=timeout,
+        operator_authority=True,
+    )
+
+
 # ── Operator/platform provider proxy client ─────────────────────────────────────────────────────
 # Operator/platform/worker counterpart to ``broker_provider_call``: instead of the metered, capability
 # -gated business broker (/v1/providers/*), these helpers talk to the TRUSTED operator/platform PROXY
@@ -1425,6 +1455,54 @@ def _local_payout_custody(
             amount_cents,
             idempotency_key,
             stripe_ref=stripe_ref,
+        )
+
+
+def _local_clawback_custody(
+    conn,
+    user_id: str,
+    business_slug: str,
+    amount_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int | bool]:
+    from . import custody
+
+    with _creative_credit_conn(conn) as custody_conn:
+        return custody.clawback(
+            custody_conn,
+            user_id,
+            business_slug,
+            amount_cents,
+            idempotency_key,
+            stripe_ref=stripe_ref,
+            metadata=metadata,
+        )
+
+
+def _local_release_custody_clawback(
+    conn,
+    user_id: str,
+    business_slug: str,
+    clawback_idempotency_key: str,
+    release_idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int | bool]:
+    from . import custody
+
+    with _creative_credit_conn(conn) as custody_conn:
+        return custody.release_clawback(
+            custody_conn,
+            user_id,
+            business_slug,
+            clawback_idempotency_key,
+            release_idempotency_key,
+            stripe_ref=stripe_ref,
+            metadata=metadata,
         )
 
 
@@ -2326,6 +2404,58 @@ def payout_custody(
     )
 
 
+def clawback_custody(
+    conn,
+    user_id: str,
+    business_slug: str,
+    amount_cents: int,
+    idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int | bool]:
+    """Safebox-local refund/dispute custody clawback primitive."""
+    if _remote_enabled() and not _local_authority_enabled():
+        raise SafeboxAuthorityUnavailable(
+            "custody clawback must be derived from a signed app-payment webhook on the safebox"
+        )
+    return _local_clawback_custody(
+        conn,
+        user_id,
+        business_slug,
+        amount_cents,
+        idempotency_key,
+        stripe_ref=stripe_ref,
+        metadata=metadata,
+    )
+
+
+def release_custody_clawback(
+    conn,
+    user_id: str,
+    business_slug: str,
+    clawback_idempotency_key: str,
+    release_idempotency_key: str,
+    *,
+    stripe_ref: str | None = None,
+    metadata: dict | None = None,
+) -> dict[str, int | bool]:
+    """Safebox-only idempotent release for one won Stripe dispute clawback."""
+    if _remote_enabled() and not _local_authority_enabled():
+        raise SafeboxAuthorityUnavailable(
+            "custody clawback release must be derived from a signed dispute webhook on the safebox"
+        )
+    return _local_release_custody_clawback(
+        conn,
+        user_id,
+        business_slug,
+        clawback_idempotency_key,
+        release_idempotency_key,
+        stripe_ref=stripe_ref,
+        metadata=metadata,
+    )
+
+
 def process_stripe_app_webhook(raw_body: str, signature: str) -> dict[str, Any]:
     """Verify and process the flow-B product app webhook on the safebox."""
     body = str(raw_body or "")
@@ -2409,19 +2539,65 @@ def reconcile_app_checkout_session(
         raise RuntimeError("checkout_session_not_complete")
     if str(session.get("payment_status") or "").strip().lower() not in {"paid", "no_payment_required"}:
         raise RuntimeError("checkout_session_unpaid")
+    invoice_value = session.get("invoice")
+    invoice_id = (
+        str(invoice_value.get("id") or "").strip()
+        if isinstance(invoice_value, dict)
+        else str(invoice_value or "").strip()
+    )
+    if invoice_id:
+        invoice = stripe_util.stripe_request(f"invoices/{invoice_id}", {}, method="GET")
+        if not isinstance(invoice, dict) or str(invoice.get("id") or "") != invoice_id:
+            raise RuntimeError("stripe_invoice_payment_evidence_pending")
+        rows: list[dict[str, Any]] = []
+        starting_after = ""
+        for _ in range(100):
+            params: dict[str, Any] = {"invoice": invoice_id, "limit": 100}
+            if starting_after:
+                params["starting_after"] = starting_after
+            page = stripe_util.stripe_request("invoice_payments", params, method="GET")
+            data = page.get("data") if isinstance(page, dict) else None
+            if not isinstance(data, list):
+                raise RuntimeError("stripe_invoice_payment_evidence_pending")
+            typed = [row for row in data if isinstance(row, dict)]
+            rows.extend(typed)
+            if not bool(page.get("has_more")):
+                break
+            cursor = str((typed[-1] if typed else {}).get("id") or "")
+            if not cursor or cursor == starting_after:
+                raise RuntimeError("stripe_invoice_payment_evidence_pending")
+            starting_after = cursor
+        else:
+            raise RuntimeError("stripe_invoice_payment_evidence_pending")
+        invoice["payments"] = {"data": rows, "has_more": False}
+        session["_takyon_invoice"] = invoice
+    subscription_value = session.get("subscription")
+    subscription_id = (
+        str(subscription_value.get("id") or "").strip()
+        if isinstance(subscription_value, dict)
+        else str(subscription_value or "").strip()
+    )
+    if not subscription_id:
+        raise RuntimeError("stripe_subscription_reconcile_pending")
+    subscription = stripe_util.stripe_request(
+        f"subscriptions/{subscription_id}", {}, method="GET"
+    )
+    if (
+        not isinstance(subscription, dict)
+        or str(subscription.get("id") or "") != subscription_id
+    ):
+        raise RuntimeError("stripe_subscription_reconcile_pending")
     with _creative_credit_conn(conn) as payment_conn:
-        result = app_payments.reconcile_checkout_session(
-            payment_conn,
-            session,
-            provider_event_id=f"checkout.session.reconcile:{stripe_session_id}",
-            event_created=session.get("created"),
-        )
-        subscription_result = None
-        subscription_id = str(session.get("subscription") or "").strip()
-        if subscription_id:
-            subscription = stripe_util.stripe_request(f"subscriptions/{subscription_id}", {}, method="GET")
-            if isinstance(subscription, dict):
-                subscription_result = app_payments.reconcile_subscription(payment_conn, subscription)
+        with payment_conn.transaction():
+            result = app_payments.reconcile_checkout_session(
+                payment_conn,
+                session,
+                provider_event_id=f"checkout.session.reconcile:{stripe_session_id}",
+                event_created=session.get("created"),
+            )
+            subscription_result = app_payments.reconcile_subscription(
+                payment_conn, subscription
+            )
     return {
         "ok": True,
         "session_id": stripe_session_id,
@@ -2723,6 +2899,10 @@ def verify_stripe_billing_webhook(raw_body: str, signature: str) -> dict[str, An
     except stripe_util.StripeError as exc:
         raise StripeBillingWebhookInvalidSignature("invalid_signature") from exc
     event = json.loads(body)
+    try:
+        stripe_util.validate_stripe_webhook_event_mode(event)
+    except stripe_util.StripeError as exc:
+        raise StripeBillingWebhookInvalidSignature("invalid_livemode") from exc
     return event if isinstance(event, dict) else {}
 
 
@@ -2765,6 +2945,10 @@ def verify_stripe_app_webhook(raw_body: str, signature: str) -> dict[str, Any]:
     except stripe_util.StripeError as exc:
         raise StripeAppWebhookInvalidSignature("invalid_signature") from exc
     event = json.loads(body)
+    try:
+        stripe_util.validate_stripe_webhook_event_mode(event)
+    except stripe_util.StripeError as exc:
+        raise StripeAppWebhookInvalidSignature("invalid_livemode") from exc
     return event if isinstance(event, dict) else {}
 
 

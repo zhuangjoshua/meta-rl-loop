@@ -8,10 +8,14 @@ REPAIR_PRODUCT_RUNTIME_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/repair-product-ru
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
+REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/remove-stripe-authority-env.py"
+ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/isolate-operator-migration-dsn.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 OPERATOR_CLI_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-op"
+PROVISION_OPERATOR_ACCESS_DB_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/provision-operator-access-db.sh"
+RETIRE_STRIPE_SANDBOX_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/retire-stripe-sandbox.sh"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
 TAKYON_VPS_KEY="${TAKYON_VPS_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -23,6 +27,7 @@ TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE="${TAKYON_REMOTE_DOCKER_BROKER_SERVICE_
 TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
 TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-1}"
+TAKYON_FINALIZE_STRIPE_LIVE="${TAKYON_FINALIZE_STRIPE_LIVE:-0}"
 TAKYON_BOOTSTRAP_HOST="${TAKYON_BOOTSTRAP_HOST:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
 TAKYON_SMOKE_HOST="${TAKYON_SMOKE_HOST:-https://app.fourmanifold.com/}"
@@ -71,6 +76,16 @@ if [[ ! -f "$OPERATOR_CLI_FILE" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$PROVISION_OPERATOR_ACCESS_DB_SCRIPT" ]]; then
+  echo "operator-access database provisioner not executable: $PROVISION_OPERATOR_ACCESS_DB_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -x "$RETIRE_STRIPE_SANDBOX_SCRIPT" ]]; then
+  echo "Stripe sandbox retirement script not executable: $RETIRE_STRIPE_SANDBOX_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$SEED_XURL_AUTH_SCRIPT" ]]; then
   echo "xurl auth seed script not found: $SEED_XURL_AUTH_SCRIPT" >&2
   exit 1
@@ -91,10 +106,28 @@ if [[ ! -f "$VALIDATE_AUTHORITY_ENV_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" ]]; then
+  echo "Stripe authority env cleanup not found: $REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" >&2
+  exit 1
+fi
+
+if [[ ! -x "$ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT" ]]; then
+  echo "operator migration credential isolator not executable: $ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$TAKYON_VPS_KEY" ]]; then
   echo "deploy key not found: $TAKYON_VPS_KEY" >&2
   exit 1
 fi
+
+TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
+TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+  "$ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT"
+
+ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
+  "python3 - /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
+  < "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "bash -s -- operator /opt/takyon/.takyon/.env /opt/takyon/secrets/.env" \
@@ -161,11 +194,40 @@ fi
 
 run_remote_migrations() {
   ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
-    "set -euo pipefail
-    if [[ '$TAKYON_RUN_DB_MIGRATIONS' == '1' ]] && grep -F -- 'TAKYON_DB_BACKEND=postgres' '$TAKYON_REMOTE_SERVICE_FILE' >/dev/null; then
-      runuser -u takyon -- env TAKYON_HOME=/opt/takyon/.takyon HOME=/opt/takyon PYTHONUNBUFFERED=1 TAKYON_DB_BACKEND=postgres TAKYON_HOST_ROLE=operator TAKYON_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
-        '$TAKYON_REMOTE_RUNTIME/.venv/bin/takyon-cli' migrate
-    fi"
+    "exec env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
+      TAKYON_RUN_DB_MIGRATIONS='$TAKYON_RUN_DB_MIGRATIONS' \
+      TAKYON_REMOTE_SERVICE_FILE='$TAKYON_REMOTE_SERVICE_FILE' \
+      TAKYON_REMOTE_RUNTIME='$TAKYON_REMOTE_RUNTIME' \
+      TAKYON_REMOTE_SAFEBOX_URL='$TAKYON_REMOTE_SAFEBOX_URL' \
+      bash -s" <<'REMOTE_MIGRATE'
+set -euo pipefail
+if [[ "$TAKYON_RUN_DB_MIGRATIONS" != "1" ]] \
+  || ! grep -F -- 'TAKYON_DB_BACKEND=postgres' "$TAKYON_REMOTE_SERVICE_FILE" >/dev/null; then
+  exit 0
+fi
+migration_dir=/root/.config/takyon/migration
+migration_file="$migration_dir/database-url"
+[[ "$(stat -c '%u:%g:%a' "$migration_dir")" == '0:0:700' ]] \
+  || { echo 'root-only migration credential directory permissions invalid' >&2; exit 1; }
+[[ -f "$migration_file" && ! -L "$migration_file" ]] \
+  || { echo 'root-only migration credential missing' >&2; exit 1; }
+[[ "$(stat -c '%u:%g:%a' "$migration_file")" == '0:0:600' ]] \
+  || { echo 'root-only migration credential permissions invalid' >&2; exit 1; }
+IFS= read -r migration_dsn <"$migration_file"
+[[ "$migration_dsn" == postgres://* || "$migration_dsn" == postgresql://* ]] \
+  || { echo 'root-only migration credential malformed' >&2; exit 1; }
+export TAKYON_HOME=/opt/takyon/.takyon
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="$TAKYON_REMOTE_RUNTIME"
+export TAKYON_ENV=prod
+export TAKYON_DB_BACKEND=postgres
+export TAKYON_HOST_ROLE=operator
+export TAKYON_SAFEBOX_URL="$TAKYON_REMOTE_SAFEBOX_URL"
+export TAKYON_MIGRATION_DATABASE_URL="$migration_dsn"
+unset migration_dsn
+exec "$TAKYON_REMOTE_RUNTIME/.venv/bin/takyon-cli" migrate
+REMOTE_MIGRATE
 }
 
 wait_for_remote_runtime_idle() {
@@ -228,6 +290,18 @@ TAKYON_STOP_CORE_SERVICES=1 \
   "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
 
 run_remote_migrations
+
+if [[ "$TAKYON_FINALIZE_STRIPE_LIVE" == "1" ]]; then
+  TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
+  TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+  TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+    "$RETIRE_STRIPE_SANDBOX_SCRIPT"
+fi
+
+TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
+TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
+TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
+  "$PROVISION_OPERATOR_ACCESS_DB_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail
@@ -367,6 +441,13 @@ PY
     systemctl restart takyon-worker.service
     systemctl is-active --quiet takyon-worker.service
   fi
+  if grep -Eq '^[[:space:]]*(export[[:space:]]+)?(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' \
+      /opt/takyon/.takyon/.env /opt/takyon/secrets/.env 2>/dev/null; then
+    echo 'migration credential remains in a service-readable env file' >&2
+    exit 1
+  fi
+  test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration)\" = '0:0:700'
+  test \"\$(stat -c '%u:%g:%a' /root/.config/takyon/migration/database-url)\" = '0:0:600'
   for unit in takyon-dashboard.service takyon-worker.service; do
     pid=\$(systemctl show -p MainPID --value "\$unit")
     [ "\$pid" != 0 ]
@@ -379,6 +460,10 @@ PY
     grep -Fx -- 'ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
     grep -Fx -- 'ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
     grep -Fx -- 'CLAUDE_CODE_SUBAGENT_MODEL=deepseek-v4-pro' <<<"\$process_env" >/dev/null
+    if grep -Eq '^(TAKYON_MIGRATION_DATABASE_URL|MIGRATION_DATABASE_URL)=' <<<"\$process_env"; then
+      echo "migration credential present in \$unit process environment" >&2
+      exit 1
+    fi
   done"
 
 if [[ "$TAKYON_APPLY_CADDY" == "1" ]]; then

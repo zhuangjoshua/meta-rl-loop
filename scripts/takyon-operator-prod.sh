@@ -311,6 +311,7 @@ load_dev_operator_env() {
     # shellcheck disable=SC1090
     eval "$(fetch_dev_remote_env_exports)"
     export TAKYON_ENV=dev
+    export TAKYON_STRIPE_MODE=test
     export TAKYON_HOME="$OPERATOR_HOME"
     export TAKYON_HOST_ROLE=operator
     export TAKYON_DB_BACKEND=postgres
@@ -337,6 +338,7 @@ load_dev_operator_env() {
   ensure_dev_safebox_up
   ensure_dev_schema_current
   export TAKYON_ENV=dev
+  export TAKYON_STRIPE_MODE=test
   export TAKYON_HOME="$OPERATOR_HOME"
   export TAKYON_HOST_ROLE=operator
   export TAKYON_DB_BACKEND=postgres
@@ -657,6 +659,8 @@ import subprocess
 import sys
 
 keys = {
+    'TAKYON_ENV',
+    'TAKYON_STRIPE_MODE',
     'TAKYON_OPERATOR_DATABASE_URL',
     'TAKYON_SAFEBOX_TOKEN',
     'TAKYON_SAFEBOX_OPERATOR_TOKEN',
@@ -712,6 +716,18 @@ missing = [
 if missing:
     raise SystemExit('missing required operator env: ' + ', '.join(missing))
 
+expected_runtime = {
+    'TAKYON_ENV': 'prod',
+    'TAKYON_STRIPE_MODE': 'live',
+}
+wrong_runtime = [
+    f'{key}={env.get(key) or "<missing>"}'
+    for key, expected in expected_runtime.items()
+    if env.get(key) != expected
+]
+if wrong_runtime:
+    raise SystemExit('operator runtime pins do not match production contract: ' + ', '.join(wrong_runtime))
+
 expected_models = {
     'TAKYON_STRICT_MODEL_ROLES': '1',
     'TAKYON_MODEL': 'gpt-5.5',
@@ -748,6 +764,8 @@ load_operator_env() {
   # shellcheck disable=SC1090
   eval "$(fetch_operator_env_exports)"
 
+  export TAKYON_ENV=prod
+  export TAKYON_STRIPE_MODE=live
   export TAKYON_HOME="$OPERATOR_HOME"
   export HOME="$HOME"
   export TAKYON_HOST_ROLE=operator

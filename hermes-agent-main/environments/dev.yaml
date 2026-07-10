@@ -164,10 +164,17 @@ stripe:
   # Event types the dev endpoint subscribes to (mirrors the prod subuser app webhook surface).
   enabled_events:
     - checkout.session.completed
+    - customer.subscription.created
     - customer.subscription.updated
     - customer.subscription.deleted
     - invoice.paid
     - invoice.payment_failed
+    - charge.refunded
+    - charge.dispute.created
+    - charge.dispute.updated
+    - charge.dispute.closed
+    - charge.dispute.funds_withdrawn
+    - charge.dispute.funds_reinstated
 
 # (f) DigitalOcean dev split (Stage 4b) — the two-replica subuser plane behind a VPC LB, plus the
 #     singleton dev safebox host. Operator approved the recurring dev cost (2026-07-02, ~$30/mo

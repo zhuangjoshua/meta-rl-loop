@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,7 +34,7 @@ _UNAUTH_HEADERS = {"WWW-Authenticate": "Bearer"}
 
 class OperatorSubscriptionCheckoutRequest(BaseModel):
     """Body for POST /v1/billing/subscription/checkout. `plan_id` selects one configured
-    operator tier; the server maps it to the tier's Stripe price (the caller never supplies
+    operator tier; the server maps it to trusted price_data (the caller never supplies
     a price or amount, so a tier's economic terms cannot be substituted)."""
 
     plan_id: str = Field(..., min_length=1)
@@ -323,12 +324,9 @@ def operator_plan_name_for_business(conn, business_slug: str) -> str | None:
 def _operator_plan_catalog() -> list[dict[str, Any]]:
     """Configured operator subscription tiers from `TAKYON_OPERATOR_PLANS_JSON`.
 
-    Multi-tier operator billing is BUY-not-build (GOAL_RULES §4): every tier maps to a
-    real Stripe Price (`price_id`) on a Stripe Product, and the recurring allowance/plan
-    name ride as price metadata that `sync_operator_subscription_allowance` already
-    resolves (`takyon_plan_name` / `takyon_allowance_weekly_cents`). This catalog is the
-    operator-facing menu the dashboard renders and the checkout endpoint validates a
-    chosen tier against; it never invents a price the operator did not configure in Stripe.
+    Amount, currency, and interval are trusted deployment config, never caller input. Checkout
+    uses those values as inline Stripe price_data, avoiding environment-specific catalog IDs.
+    A legacy price_id remains accepted only when amount_cents is absent.
 
     Shape: a JSON array of objects with `id` (stable tier key), `price_id` (Stripe price),
     and `name`, plus optional `description`, `weekly_allowance_cents`, `amount_cents`,
@@ -351,9 +349,6 @@ def _operator_plan_catalog() -> list[dict[str, Any]]:
                     continue
                 plan_id = str(item.get("id") or "").strip()
                 price_id = str(item.get("price_id") or item.get("priceId") or "").strip()
-                if not plan_id or not price_id or plan_id in seen:
-                    continue
-                seen.add(plan_id)
                 feature_list = item.get("features")
                 features = (
                     [str(f).strip() for f in feature_list if str(f).strip()]
@@ -368,6 +363,21 @@ def _operator_plan_catalog() -> list[dict[str, Any]]:
                     amount_cents = max(0, int(item.get("amount_cents") or 0))
                 except (TypeError, ValueError):
                     amount_cents = 0
+                currency = str(item.get("currency") or "usd").strip().lower()
+                interval = str(item.get("interval") or "month").strip().lower()
+                has_inline_price = (
+                    amount_cents > 0
+                    and bool(re.fullmatch(r"[a-z]{3}", currency))
+                    and interval == "month"
+                )
+                live_mode = str(os.getenv("TAKYON_STRIPE_MODE") or "test").strip().lower() == "live"
+                if (
+                    not plan_id
+                    or plan_id in seen
+                    or (not has_inline_price and (not price_id or live_mode))
+                ):
+                    continue
+                seen.add(plan_id)
                 plans.append(
                     {
                         "id": plan_id,
@@ -377,8 +387,8 @@ def _operator_plan_catalog() -> list[dict[str, Any]]:
                         "tagline": str(item.get("tagline") or ""),
                         "weekly_allowance_cents": weekly_allowance_cents,
                         "amount_cents": amount_cents,
-                        "currency": str(item.get("currency") or "usd").lower(),
-                        "interval": str(item.get("interval") or "month").lower(),
+                        "currency": currency,
+                        "interval": interval,
                         "featured": bool(item.get("featured")),
                         "features": features,
                     }
@@ -475,7 +485,6 @@ def create_operator_subscription_checkout_session(
         "client_reference_id": user_id,
         "success_url": success_url,
         "cancel_url": cancel_url,
-        "line_items[0][price]": plan["price_id"],
         "line_items[0][quantity]": 1,
         "metadata[purpose]": "operator_subscription",
         "metadata[user_id]": user_id,
@@ -486,6 +495,19 @@ def create_operator_subscription_checkout_session(
         "subscription_data[metadata][takyon_plan_id]": plan["id"],
         "subscription_data[metadata][takyon_plan_name]": plan["name"],
     }
+    if int(plan.get("amount_cents") or 0) > 0:
+        params.update(
+            {
+                "line_items[0][price_data][currency]": plan["currency"],
+                "line_items[0][price_data][unit_amount]": int(plan["amount_cents"]),
+                "line_items[0][price_data][recurring][interval]": "month",
+                "line_items[0][price_data][product_data][name]": plan["name"],
+                "line_items[0][price_data][product_data][metadata][source]": "takyon_operator",
+                "line_items[0][price_data][product_data][metadata][takyon_plan_id]": plan["id"],
+            }
+        )
+    else:
+        params["line_items[0][price]"] = plan["price_id"]
     if int(plan.get("weekly_allowance_cents") or 0) > 0:
         weekly = int(plan["weekly_allowance_cents"])
         params["metadata[takyon_allowance_weekly_cents]"] = weekly

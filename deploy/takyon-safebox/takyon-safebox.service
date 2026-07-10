@@ -31,6 +31,8 @@ Environment=TAKYON_HOME=/opt/takyon/.takyon
 Environment=HOME=/opt/takyon
 Environment=PYTHONUNBUFFERED=1
 Environment=TAKYON_HOST_ROLE=safebox
+Environment=TAKYON_ENV=prod
+Environment=TAKYON_STRIPE_MODE=live
 # Must match the operator/subuser planes' PUBLIC_COMPANY_BASE_DOMAIN: the checkout redirect gate
 # (_require_app_checkout_redirect_url) only allows <slug>.<this base>, so a stale value breaks every
 # product checkout with stripe_redirect_not_allowed (2026-07-05 incident: secrets/.env still said
