@@ -14,7 +14,6 @@ SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
 DOCKER_BROKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-docker-broker.service"
 OPERATOR_CLI_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-op"
-PROVISION_OPERATOR_ACCESS_DB_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/provision-operator-access-db.sh"
 RETIRE_STRIPE_SANDBOX_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/retire-stripe-sandbox.sh"
 
 TAKYON_VPS_HOST="${TAKYON_VPS_HOST:-root@137.184.75.57}"
@@ -73,11 +72,6 @@ fi
 
 if [[ ! -f "$OPERATOR_CLI_FILE" ]]; then
   echo "operator CLI wrapper not found: $OPERATOR_CLI_FILE" >&2
-  exit 1
-fi
-
-if [[ ! -x "$PROVISION_OPERATOR_ACCESS_DB_SCRIPT" ]]; then
-  echo "operator-access database provisioner not executable: $PROVISION_OPERATOR_ACCESS_DB_SCRIPT" >&2
   exit 1
 fi
 
@@ -297,11 +291,6 @@ if [[ "$TAKYON_FINALIZE_STRIPE_LIVE" == "1" ]]; then
   TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
     "$RETIRE_STRIPE_SANDBOX_SCRIPT"
 fi
-
-TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
-TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
-TAKYON_REMOTE_RUNTIME="$TAKYON_REMOTE_RUNTIME" \
-  "$PROVISION_OPERATOR_ACCESS_DB_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
   "set -euo pipefail

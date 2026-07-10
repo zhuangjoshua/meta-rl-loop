@@ -241,10 +241,9 @@ def test_function_acl_and_direct_insert_are_fail_closed(pg_conn):
         "select has_function_privilege('takyon_app_runtime', %s, 'execute'), "
         "has_function_privilege('takyon_app', %s, 'execute'), "
         "has_function_privilege('takyon_operator_runtime', %s, 'execute'), "
-        "has_function_privilege('takyon_operator_access', %s, 'execute'), "
         "has_function_privilege('takyon_safebox_authority', %s, 'execute')",
-        (signature,) * 5,
-    ).fetchone() == (True, True, False, False, False)
+        (signature,) * 4,
+    ).fetchone() == (True, True, False, False)
 
     pg_conn.execute("set role takyon_operator_runtime")
     try:

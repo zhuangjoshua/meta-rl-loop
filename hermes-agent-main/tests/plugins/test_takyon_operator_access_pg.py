@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from pathlib import Path
-
 import pytest
 
 psycopg = pytest.importorskip("psycopg")
@@ -65,7 +63,7 @@ def _setup(pg_conn, *, email: str = "sai@fourmanifold.com", verified: bool = Tru
 
 
 def _access_call(pg_conn, callback):
-    pg_conn.execute("set session authorization takyon_operator_access")
+    pg_conn.execute("set session authorization takyon_migration")
     try:
         return callback()
     finally:
@@ -243,85 +241,14 @@ def test_web_runtime_roles_cannot_execute_or_read_ssh_grants(pg_conn):
         pg_conn.execute("reset role")
 
 
-def test_dedicated_login_has_only_three_ports_and_no_memberships_or_tables(pg_conn):
-    pg_conn.execute("set session authorization takyon_operator_access")
-    try:
-        assert pg_conn.execute(
-            "select rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolbypassrls, rolconnlimit "
-            "from pg_roles where rolname = current_user"
-        ).fetchone() == (False, False, False, False, False, 2)
-        assert (
-            pg_conn.execute(
-                "select exists(select 1 from pg_auth_members where "
-                "member = (select oid from pg_roles where rolname = current_user) "
-                "or roleid = (select oid from pg_roles where rolname = current_user))"
-            ).fetchone()[0]
-            is False
-        )
-        assert (
-            pg_conn.execute(
-                "select has_function_privilege(current_user, "
-                "'operator_ssh_list_app_access(text,text)', 'execute')"
-            ).fetchone()[0]
-            is True
-        )
-        assert {
-            row[0]
-            for row in pg_conn.execute(
-                "select p.oid::regprocedure::text from pg_proc p "
-                "join pg_namespace n on n.oid = p.pronamespace "
-                "where n.nspname = 'public' "
-                "and has_function_privilege(current_user, p.oid, 'execute') "
-                "and not exists (select 1 from pg_depend d "
-                "where d.classid = 'pg_proc'::regclass and d.objid = p.oid "
-                "and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e')"
-            ).fetchall()
-        } == {
-            "operator_ssh_grant_app_access(text,text,text,uuid,inet,text)",
-            "operator_ssh_revoke_app_access(text,text,uuid,inet,text)",
-            "operator_ssh_list_app_access(text,text)",
-        }
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            pg_conn.execute("select * from app_operator_access_grants").fetchall()
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            pg_conn.execute(
-                "select * from app_supabase_verified_email_bindings"
-            ).fetchall()
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            pg_conn.execute(
-                "select operator_ssh_revoke_stale_access(null, null, 'attempt')"
-            ).fetchone()
-    finally:
-        pg_conn.execute("reset session authorization")
-
-
-def test_role_membership_and_set_role_paths_are_repaired_and_rejected(pg_conn):
-    migration = (
-        Path(__file__).resolve().parents[2]
-        / "plugins/takyon/db/migrations/0073_operator_ssh_profile_access.sql"
-    ).read_text()
-
-    pg_conn.execute("grant takyon_operator_access to takyon_operator_runtime")
-    pg_conn.execute(migration)
-    pg_conn.execute("grant takyon_operator_runtime to takyon_operator_access")
-    pg_conn.execute(migration)
-    access_oid = pg_conn.execute(
-        "select oid from pg_roles where rolname = 'takyon_operator_access'"
-    ).fetchone()[0]
-    assert (
-        pg_conn.execute(
-            "select count(*) from pg_auth_members where roleid = %s or member = %s",
-            (access_oid, access_oid),
-        ).fetchone()[0]
-        == 0
-    )
-
-    # Even a superuser test session that SET ROLEs to the dedicated role lacks the actual login's
-    # session_user and is rejected inside the SECURITY DEFINER function.
-    pg_conn.execute("set role takyon_operator_access")
+def test_set_role_cannot_impersonate_root_only_migration_login(pg_conn):
+    # SET ROLE changes current_user, not session_user. A runtime that somehow gained membership
+    # still cannot impersonate the root-only connection used by the SSH launcher.
+    pg_conn.execute("set role takyon_migration")
     try:
         with pytest.raises(
-            psycopg.errors.InsufficientPrivilege, match="operator_access_role_required"
+            psycopg.errors.InsufficientPrivilege,
+            match="operator_migration_role_required",
         ):
             pg_conn.execute(
                 "select * from operator_ssh_list_app_access(null, null)"
@@ -329,6 +256,8 @@ def test_role_membership_and_set_role_paths_are_repaired_and_rejected(pg_conn):
     finally:
         pg_conn.execute("reset role")
 
+
+def test_future_migration_functions_are_not_public(pg_conn):
     pg_conn.execute("set role takyon_migration")
     try:
         pg_conn.execute(
@@ -337,7 +266,7 @@ def test_role_membership_and_set_role_paths_are_repaired_and_rejected(pg_conn):
         )
     finally:
         pg_conn.execute("reset role")
-    pg_conn.execute("set session authorization takyon_operator_access")
+    pg_conn.execute("set role takyon_operator_runtime")
     try:
         assert (
             pg_conn.execute(
@@ -347,7 +276,7 @@ def test_role_membership_and_set_role_paths_are_repaired_and_rejected(pg_conn):
             is False
         )
     finally:
-        pg_conn.execute("reset session authorization")
+        pg_conn.execute("reset role")
     pg_conn.execute("drop function operator_access_future_probe()")
 
 

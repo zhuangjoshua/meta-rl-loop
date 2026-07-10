@@ -203,7 +203,7 @@ alter function takyon_app_create_checkout_intent(text, text, text, text, jsonb)
 
 revoke execute on function takyon_app_create_checkout_intent(text, text, text, text, jsonb)
     from public, takyon_operator_runtime, takyon_safebox_authority, takyon_runtime,
-         takyon_operator_access, safebox;
+         safebox;
 grant execute on function takyon_app_create_checkout_intent(text, text, text, text, jsonb)
     to takyon_app_runtime, takyon_app;
 

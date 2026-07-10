@@ -67,11 +67,9 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   fi
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_SECRETS'
-  # Root-SSH-only product-profile grants keep their dedicated least-privilege DB credential here.
-  # Runtime services run as `takyon` with ProtectHome and can neither traverse nor read this path.
-  install -d -o root -g root -m 0700 \
-    /root/.config/takyon/migration \
-    /root/.config/takyon/operator-access
+  # Runtime services run as `takyon` with ProtectHome and cannot traverse the root-only migration
+  # credential used by migrations and the root-SSH profile-access command.
+  install -d -o root -g root -m 0700 /root/.config/takyon/migration
   # The tracked units run as the dedicated non-root 'takyon' user. Docker authority lives in the
   # dedicated broker unit only, so the user itself must not remain in the docker group. The
   # runtime tree stays root-owned (read-only to the services via the units' ReadOnlyPaths).

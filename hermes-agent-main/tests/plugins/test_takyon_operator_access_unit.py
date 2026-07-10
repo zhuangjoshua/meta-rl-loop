@@ -101,7 +101,7 @@ def test_context_requires_root_operator_and_real_ssh_shape():
         )
 
 
-def test_grant_calls_only_dedicated_role_function_with_normalized_scope():
+def test_grant_calls_only_bounded_function_with_normalized_scope():
     receipt = (
         uuid.uuid4(),
         uuid.uuid4(),
@@ -138,7 +138,7 @@ def test_grant_calls_only_dedicated_role_function_with_normalized_scope():
     assert result["changed"] is True
 
 
-def test_revoke_calls_only_dedicated_role_function():
+def test_revoke_calls_only_bounded_function():
     receipt = (
         uuid.uuid4(),
         uuid.uuid4(),
@@ -200,7 +200,7 @@ def test_list_calls_bounded_function_not_private_table():
     assert result["grants"][0]["used_microusd"] == 123
 
 
-def test_run_reads_only_root_narrow_dsn_after_ssh_check(monkeypatch):
+def test_run_reads_only_root_migration_dsn_after_ssh_check(monkeypatch):
     import psycopg
 
     receipt = (
@@ -221,7 +221,7 @@ def test_run_reads_only_root_narrow_dsn_after_ssh_check(monkeypatch):
     monkeypatch.setattr(
         operator_access,
         "_read_access_database_url",
-        lambda: seen.append("credential") or "postgresql://takyon_operator_access/db",
+        lambda: seen.append("credential") or "postgresql://takyon_migration/db",
     )
     monkeypatch.setattr(
         operator_access,
@@ -244,7 +244,7 @@ def test_run_reads_only_root_narrow_dsn_after_ssh_check(monkeypatch):
 
     assert seen[0] == "credential"
     assert any(
-        item[0] == "connect" and item[1] == "postgresql://takyon_operator_access/db"
+        item[0] == "connect" and item[1] == "postgresql://takyon_migration/db"
         for item in seen
     )
     assert ("assert", True) in seen
@@ -266,6 +266,9 @@ def test_operator_launcher_keeps_profile_access_out_of_normal_web_cli():
     assert "TAKYON_MIGRATION_DATABASE_URL" not in branch
     assert "resolve_database_url" not in branch
     assert "/root/.config/takyon/operator-access" not in launcher
+    assert operator_access._ACCESS_DATABASE_URL_FILE == (
+        "/root/.config/takyon/migration/database-url"
+    )
     assert "sshd -T -C" in branch
     assert '"pubkeyauthentication yes"' in branch
     assert '"passwordauthentication no"' in branch

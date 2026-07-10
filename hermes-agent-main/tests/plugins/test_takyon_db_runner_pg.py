@@ -20,6 +20,7 @@ from plugins.takyon.db.runner import (  # noqa: E402
     assert_migration_topology,
     migration_files,
     run_migrations,
+    topology_sql_path,
 )
 
 
@@ -60,6 +61,49 @@ def test_run_migrations_is_idempotent(pg_conn_raw):
     assert first == second
     assert _table_exists(pg_conn_raw, "users")
     assert _table_exists(pg_conn_raw, "app_gateway_keys")
+
+
+def test_cutover_migrations_run_as_nocreaterole_production_principal(pg_conn_raw):
+    role_before = pg_conn_raw.execute(
+        "select exists(select 1 from pg_roles where rolname = 'takyon_operator_access')"
+    ).fetchone()[0]
+    assert pg_conn_raw.execute(
+        "select rolsuper, rolcreaterole, rolcreatedb, rolbypassrls "
+        "from pg_roles where rolname = 'takyon_migration'"
+    ).fetchone() == (False, False, False, False)
+
+    # Production already has 0001-0072. Seed that exact pre-cutover schema with the test admin,
+    # then replay the canonical all-files runner as the real non-CREATEROLE migration principal.
+    for path in migration_files():
+        if path.name >= "0073_":
+            break
+        pg_conn_raw.execute(path.read_text())
+    pg_conn_raw.execute(topology_sql_path().read_text())
+
+    pg_conn_raw.execute("set session authorization takyon_migration")
+    try:
+        assert pg_conn_raw.execute(
+            "select current_user, session_user"
+        ).fetchone() == ("takyon_migration", "takyon_migration")
+        assert_migration_topology(pg_conn_raw)
+        applied = []
+        for path in migration_files():
+            if path.name < "0073_":
+                continue
+            pg_conn_raw.execute(path.read_text())
+            applied.append(path.name)
+    finally:
+        pg_conn_raw.execute("reset session authorization")
+
+    assert applied == [path.name for path in migration_files() if path.name >= "0073_"]
+    assert _table_exists(pg_conn_raw, "app_operator_access_grants")
+    assert pg_conn_raw.execute(
+        "select exists(select 1 from pg_roles where rolname = 'takyon_operator_access')"
+    ).fetchone()[0] is role_before
+    assert all(
+        "takyon_operator_access" not in path.read_text()
+        for path in migration_files()
+    )
 
 
 def test_assert_migration_topology_accepts_prepared_migration_role(pg_conn_raw):

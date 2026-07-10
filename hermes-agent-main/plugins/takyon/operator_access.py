@@ -2,8 +2,8 @@
 
 This module is deliberately not registered as a Takyon CLI/web command. The only tracked entrypoint
 is the root-owned ``/usr/local/bin/takyon-op profile-access ...`` launcher on the operator VPS.
-Database writes go through a dedicated least-privilege login and three bounded functions from
-migration 0073; normal entitlement code remains Stripe-evidence-only.
+Database writes use the root-only migration credential and three bounded functions from migration
+0073; normal entitlement code remains Stripe-evidence-only.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from typing import Any
 
 
 _STAFF_EMAIL_RE = re.compile(r"^[^@\s]+@fourmanifold[.]com$", re.IGNORECASE)
-_ACCESS_DATABASE_URL_FILE = "/root/.config/takyon/operator-access/database-url"
-_ACCESS_DATABASE_ROLE = "takyon_operator_access"
+_ACCESS_DATABASE_URL_FILE = "/root/.config/takyon/migration/database-url"
+_ACCESS_DATABASE_ROLE = "takyon_migration"
 _SAFE_DATABASE_ERRORS = {
     "verified_active_profile_required": "verified active profile required",
     "fresh_verified_supabase_login_required": "profile must sign in again before grant",
@@ -133,7 +133,7 @@ def require_root_ssh_operator_context(
 
 
 def _read_access_database_url(path: str = _ACCESS_DATABASE_URL_FILE) -> str:
-    """Read the narrow login from a root-owned, non-symlinked 0600 file.
+    """Read the isolated migration login from a root-owned, non-symlinked 0600 file.
 
     The operator runtime cannot read ``/root`` (OS permissions plus ``ProtectHome``). The file is
     never sourced as shell and its value is never added to the process environment.
@@ -149,22 +149,22 @@ def _read_access_database_url(path: str = _ACCESS_DATABASE_URL_FILE) -> str:
             or stat.S_IMODE(parent_info.st_mode) != 0o700
         ):
             raise OperatorAccessError(
-                "operator-access credential directory must be root:root mode 0700"
+                "operator migration credential directory must be root:root mode 0700"
             )
         info = os.lstat(path)
     except OperatorAccessError:
         raise
     except OSError as exc:
         raise OperatorAccessError(
-            "operator-access database credential is unavailable"
+            "operator migration database credential is unavailable"
         ) from exc
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
         raise OperatorAccessError(
-            "operator-access database credential must be a regular file"
+            "operator migration database credential must be a regular file"
         )
     if info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
         raise OperatorAccessError(
-            "operator-access database credential must be root:root mode 0600"
+            "operator migration database credential must be root:root mode 0600"
         )
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -173,12 +173,12 @@ def _read_access_database_url(path: str = _ACCESS_DATABASE_URL_FILE) -> str:
             opened = os.fstat(fd)
             if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
                 raise OperatorAccessError(
-                    "operator-access database credential changed while opening"
+                    "operator migration database credential changed while opening"
                 )
             value = os.read(fd, 16_384).decode("utf-8").strip()
             if os.read(fd, 1):
                 raise OperatorAccessError(
-                    "operator-access database credential is oversized"
+                    "operator migration database credential is oversized"
                 )
         finally:
             os.close(fd)
@@ -186,14 +186,14 @@ def _read_access_database_url(path: str = _ACCESS_DATABASE_URL_FILE) -> str:
         raise
     except (OSError, UnicodeError) as exc:
         raise OperatorAccessError(
-            "operator-access database credential is unreadable"
+            "operator migration database credential is unreadable"
         ) from exc
     if (
         not value.startswith(("postgres://", "postgresql://"))
         or "\n" in value
         or "\x00" in value
     ):
-        raise OperatorAccessError("operator-access database credential is malformed")
+        raise OperatorAccessError("operator migration database credential is malformed")
     return value
 
 
@@ -205,7 +205,7 @@ def _assert_access_database_role(conn) -> None:
         or str(row[1]) != _ACCESS_DATABASE_ROLE
     ):
         raise OperatorAccessError(
-            "operator-access database credential has the wrong role"
+            "operator migration database credential has the wrong role"
         )
 
 

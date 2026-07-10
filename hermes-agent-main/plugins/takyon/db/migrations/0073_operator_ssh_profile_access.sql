@@ -8,62 +8,17 @@
 --   * the profile email must be exactly @fourmanifold.com;
 --   * the grant must name an existing monthly app plan, so feature/model allowlists and the
 --     existing per-user provider-spend ceiling remain authoritative;
---   * only the dedicated takyon_operator_access login can execute grant/revoke/list. It owns no
---     tables and has no role memberships. Its password is generated during operator deployment
---     and stored only under root's unreadable home on that host;
+--   * only the isolated takyon_migration credential can execute grant/revoke/list. That credential
+--     is stored under root's unreadable home on the operator host, absent from every service env,
+--     and the tracked launcher independently requires key-only root SSH before reading it;
 --   * normal app_entitlements.grant_entitlement remains Stripe-evidence-only.
 --
 -- app_operator_access_grants is the private DB audit/source record. Product and operator web
 -- roles receive no privileges on it. The linked app_entitlements row is the normal runtime
 -- projection, with source='operator_ssh' and no Stripe identifiers.
 
-do $$
-declare
-    parent_role text;
-    member_role text;
-begin
-    if not exists (select 1 from pg_roles where rolname = 'takyon_operator_access') then
-        -- No password is set here. The role cannot authenticate until the root-only tracked
-        -- deploy provisioner mints a random credential after this migration commits.
-        create role takyon_operator_access
-            login noinherit nosuperuser nobypassrls nocreatedb nocreaterole noreplication
-            connection limit 2;
-    else
-        alter role takyon_operator_access
-            login noinherit nosuperuser nobypassrls nocreatedb nocreaterole noreplication
-            connection limit 2;
-    end if;
-    -- A re-apply repairs accidental role inheritance instead of trusting prior catalog state.
-    for parent_role in
-        select parent.rolname
-          from pg_auth_members memberships
-          join pg_roles member on member.oid = memberships.member
-          join pg_roles parent on parent.oid = memberships.roleid
-         where member.rolname = 'takyon_operator_access'
-    loop
-        execute format('revoke %I from takyon_operator_access', parent_role);
-    end loop;
-    -- Also remove every role that could SET ROLE to this login. Otherwise a compromised runtime
-    -- membership could reach the ports without possessing the root-only password.
-    for member_role in
-        select member.rolname
-          from pg_auth_members memberships
-          join pg_roles parent on parent.oid = memberships.roleid
-          join pg_roles member on member.oid = memberships.member
-         where parent.rolname = 'takyon_operator_access'
-    loop
-        execute format('revoke takyon_operator_access from %I', member_role);
-    end loop;
-end $$;
-
-alter role takyon_operator_access set statement_timeout = '15s';
-alter role takyon_operator_access set lock_timeout = '5s';
-alter role takyon_operator_access set idle_in_transaction_session_timeout = '15s';
-alter role takyon_operator_access set search_path = public, pg_temp;
-grant usage on schema public to takyon_operator_access;
-
 -- Future migration-created functions must opt into callers explicitly. Without this, PostgreSQL's
--- default PUBLIC EXECUTE would silently expand the dedicated login after a later deploy.
+-- default PUBLIC EXECUTE would silently expand runtime callers after a later deploy.
 alter default privileges for role takyon_migration
     revoke execute on functions from public;
 alter default privileges
@@ -468,8 +423,8 @@ declare
     v_grant_id uuid := gen_random_uuid();
     v_entitlement_id uuid := gen_random_uuid();
 begin
-    if session_user <> 'takyon_operator_access' then
-        raise exception 'operator_access_role_required' using errcode = '42501';
+    if session_user <> 'takyon_migration' then
+        raise exception 'operator_migration_role_required' using errcode = '42501';
     end if;
     if v_business = '' or v_plan_key = '' or p_request_id is null
        or p_ssh_client is null or v_host = '' then
@@ -637,8 +592,8 @@ declare
     v_host text := trim(coalesce(p_operator_host, ''));
     v_grant app_operator_access_grants%rowtype;
 begin
-    if session_user <> 'takyon_operator_access' then
-        raise exception 'operator_access_role_required' using errcode = '42501';
+    if session_user <> 'takyon_migration' then
+        raise exception 'operator_migration_role_required' using errcode = '42501';
     end if;
     if v_business = '' or p_request_id is null or p_ssh_client is null or v_host = '' then
         raise exception 'complete_operator_ssh_grant_context_required' using errcode = '22023';
@@ -752,8 +707,8 @@ declare
     v_business text := nullif(trim(coalesce(p_business_slug, '')), '');
     v_email text := nullif(lower(trim(coalesce(p_email, ''))), '');
 begin
-    if session_user <> 'takyon_operator_access' then
-        raise exception 'operator_access_role_required' using errcode = '42501';
+    if session_user <> 'takyon_migration' then
+        raise exception 'operator_migration_role_required' using errcode = '42501';
     end if;
     if v_email is not null and v_email !~ '^[^@[:space:]]+@fourmanifold[.]com$' then
         raise exception 'fourmanifold_email_required' using errcode = '22023';
@@ -1021,8 +976,7 @@ begin
 end;
 $$;
 
--- PUBLIC functions default to EXECUTE; close that default explicitly. The dedicated login gets no
--- table/sequence privileges and exactly the three bounded function ports below.
+-- PUBLIC functions default to EXECUTE; close that default explicitly for every runtime role.
 alter table app_supabase_verified_email_bindings owner to takyon_migration;
 alter table app_operator_access_grants owner to takyon_migration;
 alter function operator_ssh_sync_user_tier(text, uuid) owner to takyon_migration;
@@ -1043,16 +997,10 @@ revoke all on app_supabase_verified_email_bindings, app_operator_access_grants f
     takyon_app_runtime,
     takyon_runtime,
     takyon_operator_runtime,
-    takyon_safebox_authority,
-    takyon_operator_access;
-
-revoke all privileges on all tables in schema public from takyon_operator_access;
-revoke all privileges on all sequences in schema public from takyon_operator_access;
-revoke all privileges on all functions in schema public from takyon_operator_access;
+    takyon_safebox_authority;
 
 -- Close the remaining legacy PUBLIC application-function grants. Extension-owned citext helpers
--- remain normal SQL primitives; every Takyon-owned function executable by the dedicated login is
--- now one of the three explicit ports below.
+-- remain normal SQL primitives.
 revoke execute on function dispatch_due_wakes() from public;
 grant execute on function dispatch_due_wakes()
     to takyon_runtime, takyon_operator_runtime, takyon_migration;
@@ -1078,16 +1026,16 @@ grant execute on function takyon_rls_bypass(),
 
 revoke execute on function operator_ssh_sync_user_tier(text, uuid)
     from public, takyon_app, takyon_app_runtime, takyon_runtime,
-         takyon_operator_runtime, takyon_safebox_authority, takyon_operator_access;
+         takyon_operator_runtime, takyon_safebox_authority;
 revoke execute on function operator_ssh_revoke_stale_access(text, uuid, text)
     from public, takyon_app, takyon_app_runtime, takyon_runtime,
-         takyon_operator_runtime, takyon_safebox_authority, takyon_operator_access;
+         takyon_operator_runtime, takyon_safebox_authority;
 revoke execute on function operator_ssh_revoke_on_app_user_change()
     from public, takyon_app, takyon_app_runtime, takyon_runtime,
-         takyon_operator_runtime, takyon_safebox_authority, takyon_operator_access;
+         takyon_operator_runtime, takyon_safebox_authority;
 revoke execute on function operator_ssh_revoke_on_business_change()
     from public, takyon_app, takyon_app_runtime, takyon_runtime,
-         takyon_operator_runtime, takyon_safebox_authority, takyon_operator_access;
+         takyon_operator_runtime, takyon_safebox_authority;
 
 revoke execute on function takyon_app_bind_supabase_session(
     text, text, text, text, text, integer
@@ -1099,22 +1047,22 @@ grant execute on function takyon_app_bind_supabase_session(
 revoke execute on function operator_ssh_grant_app_access(
     text, text, text, uuid, inet, text
 ) from public, takyon_app, takyon_app_runtime, takyon_runtime,
-       takyon_operator_runtime, takyon_safebox_authority, takyon_migration;
+       takyon_operator_runtime, takyon_safebox_authority;
 revoke execute on function operator_ssh_revoke_app_access(
     text, text, uuid, inet, text
 ) from public, takyon_app, takyon_app_runtime, takyon_runtime,
-       takyon_operator_runtime, takyon_safebox_authority, takyon_migration;
+       takyon_operator_runtime, takyon_safebox_authority;
 revoke execute on function operator_ssh_list_app_access(text, text)
     from public, takyon_app, takyon_app_runtime, takyon_runtime,
-         takyon_operator_runtime, takyon_safebox_authority, takyon_migration;
+         takyon_operator_runtime, takyon_safebox_authority;
 grant execute on function operator_ssh_grant_app_access(
     text, text, text, uuid, inet, text
-) to takyon_operator_access;
+) to takyon_migration;
 grant execute on function operator_ssh_revoke_app_access(
     text, text, uuid, inet, text
-) to takyon_operator_access;
+) to takyon_migration;
 grant execute on function operator_ssh_list_app_access(text, text)
-    to takyon_operator_access;
+    to takyon_migration;
 
 revoke execute on function safebox_reserve_usage(
     text, bigint, text, uuid, bigint, text, text, text, text, text, jsonb
