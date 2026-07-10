@@ -26,6 +26,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from . import safebox
+from .request_limits import RequestBodyLimitMiddleware, request_method_may_have_body
 from .safebox_capability import CapabilityScope, mint_capability, verify_capability
 from .safebox_nonce import pg_claim_nonce
 
@@ -143,6 +144,21 @@ _ACTION_AUDIENCE_DEFAULTS = {
 # Default short TTL for minted capability tokens (seconds). The token is also single-use (nonce) and
 # audience-bound, so a leaked token does exactly one {tenant, action, <=cost} thing within this window.
 _CAP_TTL_SECONDS = 300
+_SAFEBOX_BODY_DEFAULT_LIMIT = 8 * 1024 * 1024
+_SAFEBOX_BODY_LARGE_PROVIDER_LIMIT = 32 * 1024 * 1024
+_SAFEBOX_BODY_STRIPE_LIMIT = 512 * 1024
+_SAFEBOX_BODY_CONNECTION_LIMIT = 128 * 1024
+
+
+def _safebox_body_limit(scope: dict[str, Any]) -> int:
+    path = str(scope.get("path") or "")
+    if path == "/v1/stripe/request" or path == "/v1/billing/webhook/process":
+        return _SAFEBOX_BODY_STRIPE_LIMIT
+    if path == "/v1/connections/deposit":
+        return _SAFEBOX_BODY_CONNECTION_LIMIT
+    if path.startswith("/v1/providers/") or path == "/v1/storage/put":
+        return _SAFEBOX_BODY_LARGE_PROVIDER_LIMIT
+    return _SAFEBOX_BODY_DEFAULT_LIMIT
 
 
 def _normalize_stripe_request(path: str, method: str, params: dict[str, Any] | None) -> tuple[str, str, dict[str, Any]]:
@@ -293,7 +309,185 @@ def _db_row_value(row: Any, index: int, key: str) -> Any:
             return None
 
 
-def _require_app_checkout_intent_authority(params: dict[str, Any], *, price_id: str) -> None:
+def _stripe_key_livemode() -> bool:
+    from . import stripe_util
+
+    return stripe_util.stripe_key_livemode()
+
+
+def _stripe_account_snapshot() -> tuple[str, bool]:
+    account = safebox.stripe_request("account", {}, method="GET")
+    if not isinstance(account, dict):
+        raise HTTPException(status_code=502, detail="stripe_account_invalid")
+    account_id = str(account.get("id") or "").strip()
+    if not account_id.startswith("acct_") or account.get("object") not in {None, "account"}:
+        raise HTTPException(status_code=502, detail="stripe_account_invalid")
+    configured_id = str(os.environ.get("TAKYON_STRIPE_ACCOUNT_ID") or "").strip()
+    if configured_id and configured_id != account_id:
+        raise HTTPException(status_code=503, detail="stripe_account_mismatch")
+    return account_id, _stripe_key_livemode()
+
+
+def _plan_stripe_metadata(plan: dict[str, Any], *, account_id: str) -> dict[str, str]:
+    from . import app_entitlements
+
+    business = str(plan.get("business_slug") or "").strip()
+    return {
+        "business": business,
+        "business_id": business,
+        "plan_key": str(plan.get("plan_key") or "").strip(),
+        "source": "takyon_app",
+        "economics_version": app_entitlements.plan_economics_version_from_mapping(plan),
+        "tier": str(plan.get("tier") or ""),
+        "currency": str(plan.get("currency") or "usd").lower(),
+        "price_cents": str(int(plan.get("price_cents") or 0)),
+        "billing_interval": str(plan.get("billing_interval") or "month"),
+        "included_ai_budget_microusd": str(int(plan.get("included_ai_budget_microusd") or 0)),
+        "included_action_quota": str(int(plan.get("included_action_quota") or 0)),
+        "takyon_stripe_account_id": account_id,
+    }
+
+
+def _expected_stripe_livemode(plan: dict[str, Any]) -> bool:
+    if str(plan.get("business_mode") or "").strip().lower() != "live":
+        raise HTTPException(status_code=409, detail="stripe_business_not_live")
+    # The prod-shaped dev twin intentionally uses Stripe's test universe. Production units leave
+    # TAKYON_ENV unset or set it to prod, so a live business there requires a live key/object.
+    return str(os.environ.get("TAKYON_ENV") or "prod").strip().lower() not in {"dev", "test"}
+
+
+def _require_exact_stripe_metadata(payload: dict[str, Any], expected: dict[str, str]) -> None:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="stripe_catalog_invalid")
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if any(str(metadata.get(key) or "") != value for key, value in expected.items()):
+        raise HTTPException(status_code=403, detail="stripe_catalog_metadata_mismatch")
+
+
+def _stripe_object_id(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("id") or "").strip()
+    return ""
+
+
+def _validate_checkout_catalog(
+    plan: dict[str, Any], *, price: dict[str, Any], product: dict[str, Any],
+    account_id: str, key_livemode: bool,
+) -> None:
+    expected_live = _expected_stripe_livemode(plan)
+    if key_livemode is not expected_live:
+        raise HTTPException(status_code=409, detail="stripe_mode_mismatch")
+    expected_price_id = str(plan.get("stripe_price_id") or "").strip()
+    expected_product_id = str(plan.get("stripe_product_id") or "").strip()
+    product_id = _stripe_object_id(price.get("product"))
+    recurring = price.get("recurring") if isinstance(price.get("recurring"), dict) else {}
+    if (
+        price.get("object") != "price"
+        or str(price.get("id") or "") != expected_price_id
+        or price.get("active") is not True
+        or price.get("livemode") is not expected_live
+        or str(price.get("type") or "") != "recurring"
+        or str(price.get("currency") or "").lower() != str(plan.get("currency") or "usd").lower()
+        or int(price.get("unit_amount") or -1) != int(plan.get("price_cents") or 0)
+        or str(recurring.get("interval") or "") != str(plan.get("billing_interval") or "month")
+        or int(recurring.get("interval_count") or 1) != 1
+        or not expected_product_id
+        or product_id != expected_product_id
+    ):
+        raise HTTPException(status_code=403, detail="stripe_price_economics_mismatch")
+    if (
+        product.get("object") != "product"
+        or str(product.get("id") or "") != expected_product_id
+        or product.get("active") is not True
+        or product.get("livemode") is not expected_live
+    ):
+        raise HTTPException(status_code=403, detail="stripe_product_scope_mismatch")
+    expected_metadata = _plan_stripe_metadata(plan, account_id=account_id)
+    _require_exact_stripe_metadata(price, expected_metadata)
+    _require_exact_stripe_metadata(product, expected_metadata)
+
+
+def _load_catalog_plan(business: str, plan_key: str) -> dict[str, Any]:
+    with _safebox_db_conn() as conn:
+        row = conn.execute(
+            """
+            select p.stripe_price_id, p.stripe_product_id, p.tier, p.price_cents,
+                   p.currency, p.billing_interval, p.included_ai_budget_microusd,
+                   p.included_action_quota, p.metadata, p.saleable, b.mode
+            from app_plan_policies p
+            join businesses b on b.slug = p.business_slug
+            where p.business_slug = %s and p.plan_key = %s
+            limit 1
+            """,
+            (business, plan_key),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=403, detail="stripe_plan_scope_required")
+    plan = {
+        "business_slug": business,
+        "plan_key": plan_key,
+        "stripe_price_id": str(_db_row_value(row, 0, "stripe_price_id") or "").strip(),
+        "stripe_product_id": str(_db_row_value(row, 1, "stripe_product_id") or "").strip(),
+        "tier": str(_db_row_value(row, 2, "tier") or ""),
+        "price_cents": int(_db_row_value(row, 3, "price_cents") or 0),
+        "currency": str(_db_row_value(row, 4, "currency") or "usd"),
+        "billing_interval": str(_db_row_value(row, 5, "billing_interval") or "month"),
+        "included_ai_budget_microusd": int(
+            _db_row_value(row, 6, "included_ai_budget_microusd") or 0
+        ),
+        "included_action_quota": int(_db_row_value(row, 7, "included_action_quota") or 0),
+        "metadata": _db_row_value(row, 8, "metadata")
+        if isinstance(_db_row_value(row, 8, "metadata"), dict) else {},
+        "saleable": bool(_db_row_value(row, 9, "saleable")),
+        "business_mode": str(_db_row_value(row, 10, "mode") or ""),
+    }
+    from . import app_entitlements
+    if not app_entitlements.plan_is_saleable(plan):
+        raise HTTPException(status_code=409, detail="stripe_plan_not_saleable")
+    return plan
+
+
+def _prepare_catalog_mutation(path: str, params: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    business = _require_safe_slug(_metadata_value(params, "business"))
+    plan_key = _require_safe_slug(_metadata_value(params, "plan_key"))
+    plan = _load_catalog_plan(business, plan_key)
+    account_id, key_livemode = _stripe_account_snapshot()
+    expected_live = _expected_stripe_livemode(plan)
+    if key_livemode is not expected_live:
+        raise HTTPException(status_code=409, detail="stripe_mode_mismatch")
+    expected_metadata = _plan_stripe_metadata(plan, account_id=account_id)
+    for key, value in expected_metadata.items():
+        if key == "takyon_stripe_account_id":
+            params[f"metadata[{key}]"] = value
+        elif _metadata_value(params, key) != value:
+            raise HTTPException(status_code=403, detail="stripe_catalog_metadata_mismatch")
+    if path == "prices":
+        if (
+            int(params.get("unit_amount") or -1) != int(plan["price_cents"])
+            or str(params.get("currency") or "").lower() != str(plan["currency"]).lower()
+            or str(params.get("recurring[interval]") or "") != str(plan["billing_interval"])
+        ):
+            raise HTTPException(status_code=403, detail="stripe_price_economics_mismatch")
+        product_id = str(params.get("product") or "").strip()
+        if not product_id:
+            raise HTTPException(status_code=403, detail="stripe_product_scope_mismatch")
+        product = safebox.stripe_request(f"products/{product_id}", {}, method="GET")
+        if (
+            product.get("object") != "product"
+            or str(product.get("id") or "") != product_id
+            or product.get("active") is not True
+            or product.get("livemode") is not expected_live
+        ):
+            raise HTTPException(status_code=403, detail="stripe_product_scope_mismatch")
+        _require_exact_stripe_metadata(product, expected_metadata)
+    return plan, expected_live
+
+
+def _require_app_checkout_intent_authority(
+    params: dict[str, Any], *, price_id: str
+) -> dict[str, Any]:
     """Checkout creation authority is the recorded app checkout intent, not the bearer token.
 
     The product runtime creates the intent through the app DB plane after validating the customer's
@@ -311,11 +505,15 @@ def _require_app_checkout_intent_authority(params: dict[str, Any], *, price_id: 
     with _safebox_db_conn() as conn:
         row = conn.execute(
             """
-            select i.app_user_id, i.customer_email, i.status, p.stripe_price_id
+            select i.app_user_id, i.customer_email, i.status,
+                   p.stripe_price_id, p.stripe_product_id, p.tier, p.price_cents,
+                   p.currency, p.billing_interval, p.included_ai_budget_microusd,
+                   p.included_action_quota, p.metadata, p.saleable, b.mode
             from app_checkout_intents i
             join app_plan_policies p
               on p.business_slug = i.business_slug
              and p.plan_key = i.plan_key
+            join businesses b on b.slug = i.business_slug
             where i.id = %s
               and i.business_slug = %s
               and i.plan_key = %s
@@ -329,12 +527,34 @@ def _require_app_checkout_intent_authority(params: dict[str, Any], *, price_id: 
     if status != "created":
         raise HTTPException(status_code=409, detail="stripe_checkout_intent_not_open")
     expected_price = str(_db_row_value(row, 3, "stripe_price_id") or "").strip()
-    if expected_price and expected_price != str(price_id or "").strip():
+    if not expected_price or expected_price != str(price_id or "").strip():
         raise HTTPException(status_code=403, detail="stripe_price_scope_mismatch")
     intent_email = str(_db_row_value(row, 1, "customer_email") or "").strip().lower()
     param_email = str(params.get("customer_email") or "").strip().lower()
     if intent_email and param_email and intent_email != param_email:
         raise HTTPException(status_code=403, detail="stripe_checkout_customer_mismatch")
+    plan = {
+        "business_slug": business,
+        "plan_key": plan_key,
+        "stripe_price_id": expected_price,
+        "stripe_product_id": str(_db_row_value(row, 4, "stripe_product_id") or "").strip(),
+        "tier": str(_db_row_value(row, 5, "tier") or ""),
+        "price_cents": int(_db_row_value(row, 6, "price_cents") or 0),
+        "currency": str(_db_row_value(row, 7, "currency") or "usd"),
+        "billing_interval": str(_db_row_value(row, 8, "billing_interval") or "month"),
+        "included_ai_budget_microusd": int(
+            _db_row_value(row, 9, "included_ai_budget_microusd") or 0
+        ),
+        "included_action_quota": int(_db_row_value(row, 10, "included_action_quota") or 0),
+        "metadata": _db_row_value(row, 11, "metadata")
+        if isinstance(_db_row_value(row, 11, "metadata"), dict) else {},
+        "saleable": bool(_db_row_value(row, 12, "saleable")),
+        "business_mode": str(_db_row_value(row, 13, "mode") or ""),
+    }
+    from . import app_entitlements
+    if not app_entitlements.plan_is_saleable(plan):
+        raise HTTPException(status_code=409, detail="stripe_plan_not_saleable")
+    return plan
 
 
 def _require_takyon_app_stripe_object(payload: dict[str, Any], *, require_source: bool = False) -> str:
@@ -2410,6 +2630,11 @@ def _mint_capability_token(
 
 def build_safebox_app() -> FastAPI:
     app = FastAPI(title="Takyon Safebox")
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        limit_resolver=_safebox_body_limit,
+        require_content_length=request_method_may_have_body,
+    )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -2575,32 +2800,47 @@ def build_safebox_app() -> FastAPI:
                 # gotcha — a session-level SET is not reliably carried across pooled backends).
                 conn.execute("select set_config('takyon.rls_bypass', '1', true)")
                 row = conn.execute(
-                    "select id, allowed_host, approval_id from provider_connections "
+                    "select id, connection_slug, provider_kind, allowed_host, allowed_path_prefix, "
+                    "allowed_methods, placement, scope, approval_id from provider_connections "
                     "where business_slug = %s and connection_slug = %s",
                     (business, connection_slug),
                 ).fetchone()
                 if row is None:
                     raise HTTPException(status_code=404, detail="connection_unknown")
-                connection_id, allowed_host, approval_id = str(row[0]), str(row[1] or ""), row[2]
-                # must-fix #7/#9/#12: re-assert the host policy at deposit (defense in depth vs a row
-                # created before a denylist entry existed).
-                denied = egress_gateway.host_denied_for_egress(allowed_host)
-                if denied:
-                    raise HTTPException(status_code=403, detail={"error": denied})
-                # Require an APPROVED operator_approvals row (the human decided this connection).
+                connection_id, approval_id = str(row[0]), row[8]
+                try:
+                    scope_snapshot = egress_gateway.normalize_connection_scope(
+                        provider_kind=str(row[2] or ""),
+                        allowed_host=str(row[3] or ""),
+                        allowed_path_prefix=row[4],
+                        allowed_methods=row[5],
+                        placement=row[6] if isinstance(row[6], dict) else {},
+                        scope=str(row[7] or "business"),
+                    )
+                    approval_payload = egress_gateway.connection_approval_payload(
+                        str(row[1] or ""), scope_snapshot
+                    )
+                    scope_digest = egress_gateway.connection_scope_digest(scope_snapshot)
+                    from . import money_shape
+                    approval_digest = money_shape.payload_digest(approval_payload)
+                except egress_gateway.EgressError as exc:
+                    raise HTTPException(status_code=403, detail={"error": exc.code}) from exc
+                # Require the exact, still-valid operator approval for the current canonical scope.
                 appr = conn.execute(
                     "select status from operator_approvals where business_slug = %s "
                     "and action_kind = 'provider_connection_grant' and status = 'approved' "
-                    "and (id = %s or %s is null)",
-                    (business, approval_id, approval_id),
+                    "and id = %s and payload_digest = %s "
+                    "and (expires_at is null or expires_at > now())",
+                    (business, approval_id, approval_digest),
                 ).fetchone()
                 if appr is None:
                     raise HTTPException(status_code=403, detail="connection_not_approved")
                 updated = conn.execute(
                     "update provider_connections set secret_ciphertext = %s, secret_nonce = %s, "
-                    "secret_fingerprint = %s, status = 'active', updated_at = now() where id = %s "
+                    "secret_fingerprint = %s, approved_scope_digest = %s, status = 'active', "
+                    "updated_at = now() where id = %s "
                     "returning id",
-                    (ct, nonce, fp, connection_id),
+                    (ct, nonce, fp, scope_digest, connection_id),
                 ).fetchone()
                 if updated is None:
                     raise HTTPException(status_code=500, detail="deposit_write_failed")
@@ -2952,18 +3192,53 @@ def build_safebox_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_internal_token(authorization)
         path, method, params = _normalize_stripe_request(body.path, body.method or "POST", body.params)
+        catalog_plan: dict[str, Any] | None = None
+        expected_livemode: bool | None = None
         if method == "POST" and path in _STRIPE_CATALOG_MUTATION_PATHS:
             _require_operator_client(request)
         try:
+            if method == "POST" and path in _STRIPE_CATALOG_MUTATION_PATHS:
+                catalog_plan, expected_livemode = _prepare_catalog_mutation(path, params)
             if path == "checkout/sessions" and method == "POST":
                 price_id = str(params.get("line_items[0][price]") or "").strip()
-                if price_id:
-                    price = safebox.stripe_request(f"prices/{price_id}", {}, method="GET")
-                    business = _require_takyon_app_stripe_object(price, require_source=True)
-                    if business != _metadata_value(params, "business"):
-                        raise HTTPException(status_code=403, detail="stripe_price_scope_mismatch")
-                _require_app_checkout_intent_authority(params, price_id=price_id)
+                plan = _require_app_checkout_intent_authority(params, price_id=price_id)
+                account_id, key_livemode = _stripe_account_snapshot()
+                price = safebox.stripe_request(f"prices/{price_id}", {}, method="GET")
+                product_id = _stripe_object_id(price.get("product"))
+                if not product_id:
+                    raise HTTPException(status_code=403, detail="stripe_product_scope_mismatch")
+                product = safebox.stripe_request(f"products/{product_id}", {}, method="GET")
+                _validate_checkout_catalog(
+                    plan,
+                    price=price,
+                    product=product,
+                    account_id=account_id,
+                    key_livemode=key_livemode,
+                )
+                economics_version = _plan_stripe_metadata(
+                    plan, account_id=account_id
+                )["economics_version"]
+                params["metadata[economics_version]"] = economics_version
+                params["subscription_data[metadata][economics_version]"] = economics_version
             result = safebox.stripe_request(path, params, method=method)
+            if path == "checkout/sessions" and method == "POST":
+                if (
+                    result.get("object") != "checkout.session"
+                    or result.get("livemode") is not _expected_stripe_livemode(plan)
+                ):
+                    raise HTTPException(status_code=502, detail="stripe_checkout_mode_mismatch")
+            elif catalog_plan is not None and expected_livemode is not None:
+                account_id = str(params.get("metadata[takyon_stripe_account_id]") or "")
+                _require_exact_stripe_metadata(
+                    result, _plan_stripe_metadata(catalog_plan, account_id=account_id)
+                )
+                expected_object = "product" if path == "products" else "price"
+                if (
+                    result.get("object") != expected_object
+                    or result.get("active") is not True
+                    or result.get("livemode") is not expected_livemode
+                ):
+                    raise HTTPException(status_code=502, detail="stripe_catalog_create_mismatch")
             return result
         except Exception as exc:
             if isinstance(exc, HTTPException):

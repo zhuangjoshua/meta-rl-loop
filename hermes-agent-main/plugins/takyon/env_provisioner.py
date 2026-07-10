@@ -2285,6 +2285,7 @@ class EnvironmentProvisioner:
             "caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile.staged >/dev/null 2>&1\n"
             "mv /etc/caddy/Caddyfile.staged /etc/caddy/Caddyfile\n"
             "systemctl reload caddy\n"
+            "systemctl daemon-reload\n"
             f"systemctl restart {service}\n"
             "code=000\n"
             "for _ in $(seq 1 60); do\n"
@@ -2523,6 +2524,57 @@ class EnvironmentProvisioner:
             return (r.returncode == 0), ("synced" if r.returncode == 0
                                          else f"rsync failed: {(r.stderr or '').strip()[:160]}")
 
+        def _push_public_service_unit(
+            ip: str, role: str, block: Mapping[str, Any]
+        ) -> "tuple[bool, str]":
+            """Install only the tracked public-service unit from the staged revision.
+
+            This is code/config deployment, not bootstrap: it never touches host env or managed
+            secrets. Rendering uses only the already-resolved non-secret dev topology.
+            """
+            template_name = {
+                "operator": "takyon-dashboard-dev.service.tmpl",
+                "safebox": "takyon-safebox-dev.service.tmpl",
+                "subuser": "takyon-subuser-dev.service.tmpl",
+            }.get(role)
+            service_name = {
+                "operator": "takyon-dashboard.service",
+                "safebox": "takyon-safebox.service",
+                "subuser": "takyon-subuser.service",
+            }.get(role)
+            if not template_name or not service_name:
+                return False, f"unknown public service role {role!r}"
+            template_path = tree_root / "deploy" / "takyon-dev-split" / template_name
+            if not template_path.is_file():
+                return False, f"staged revision is missing {template_path.name}"
+            rendered = template_path.read_text(encoding="utf-8")
+            safebox_ip = str((ds.get("safebox") or {}).get("private_ip") or "").strip()
+            rendered = rendered.replace("__NODE_NAME__", str(block.get("name") or role))
+            rendered = rendered.replace("__SAFEBOX_VPC_IP__", safebox_ip)
+            rendered = rendered.replace("__BIND_IP__", str(block.get("private_ip") or "").strip())
+            if "__TAKYON_UID__" in rendered:
+                uid_read = subprocess.run(
+                    ["ssh", *ssh_base, f"root@{ip}", "id -u takyon"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                uid = str(uid_read.stdout or "").strip()
+                if uid_read.returncode != 0 or not uid.isdigit():
+                    return False, "could not resolve remote takyon uid for unit rendering"
+                rendered = rendered.replace("__TAKYON_UID__", uid)
+            if re.search(r"__[A-Z0-9_]+__", rendered):
+                return False, "staged unit contains an unresolved deployment placeholder"
+            staged_unit = staged / f"{role}-{service_name}"
+            staged_unit.write_text(rendered, encoding="utf-8")
+            copied = subprocess.run(
+                ["scp", *ssh_base, str(staged_unit), f"root@{ip}:/etc/systemd/system/{service_name}"],
+                capture_output=True, text=True, timeout=60,
+            )
+            return (
+                copied.returncode == 0,
+                "unit synced" if copied.returncode == 0
+                else f"unit sync failed: {(copied.stderr or '').strip()[:160]}",
+            )
+
         def _restart(ip: str, services: "list[str]") -> "tuple[bool, str]":
             remote = (
                 "find /opt/takyon/hermes-agent-main -name '._*' -delete 2>/dev/null; "
@@ -2535,6 +2587,52 @@ class EnvironmentProvisioner:
                                capture_output=True, text=True, timeout=180)
             return (r.returncode == 0), (r.stdout or r.stderr or "").strip().replace("\n", " ")[:160]
 
+        def _migrate_on_operator(ip: str) -> "tuple[bool, str]":
+            remote = (
+                "runuser -u takyon -- env TAKYON_ENV=dev TAKYON_HOST_ROLE=operator "
+                "TAKYON_HOME=/opt/takyon/.takyon HOME=/opt/takyon "
+                "/opt/takyon/hermes-agent-main/takyon migrate"
+            )
+            result = subprocess.run(
+                ["ssh", *ssh_base, f"root@{ip}", remote],
+                capture_output=True, text=True, timeout=600,
+            )
+            detail = (result.stdout or result.stderr or "").strip().replace("\n", " ")[-240:]
+            return result.returncode == 0, detail or "migrations current"
+
+        # Migrate-before-restart: stage the exact revision on the operator, replay the tracked
+        # idempotent migration rail, and abort activation everywhere if schema convergence fails.
+        # This runs on every deploy because a no-op replay is cheap and avoids a second drifting
+        # "did migrations change?" implementation.
+        pre_synced_roles: set[str] = set()
+        operator_block = ds.get("operator") or {}
+        operator_ip = str(operator_block.get("public_ip") or "").strip()
+        if operator_ip:
+            ok, why = _push_code(operator_ip)
+            if ok:
+                ok, why = _push_public_service_unit(operator_ip, "operator", operator_block)
+            if not ok:
+                receipts.append(StepReceipt(
+                    "operator", STATUS_ERROR, "deploy",
+                    f"{operator_ip}: pre-migration staging failed — {why}",
+                ))
+                return ProvisionResult(self.name, "deploy", tuple(receipts))
+            pre_synced_roles.add("operator")
+            ok, why = _migrate_on_operator(operator_ip)
+            receipts.append(StepReceipt(
+                "migrations", STATUS_CREATED if ok else STATUS_ERROR, "deploy",
+                f"{operator_ip}: {'schema current' if ok else 'migration FAILED'} ({why})",
+            ))
+            if not ok:
+                return ProvisionResult(self.name, "deploy", tuple(receipts))
+        else:
+            receipts.append(StepReceipt(
+                "migrations", STATUS_BLOCKED, "deploy",
+                "no dev operator host is declared; refusing to activate code without the "
+                "migrate-before-restart gate",
+            ))
+            return ProvisionResult(self.name, "deploy", tuple(receipts))
+
         # safebox + operator: not behind an LB — a plain restart is fine (code-only, .env untouched).
         for role, block, services in (
             ("safebox", ds.get("safebox") or {}, ["takyon-safebox.service"]),
@@ -2545,10 +2643,15 @@ class EnvironmentProvisioner:
             if not ip:
                 receipts.append(StepReceipt(role, STATUS_SKIPPED, "deploy", f"no {role} host in dev_split"))
                 continue
-            ok, why = _push_code(ip)
-            if not ok:
-                receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
-                continue
+            if role not in pre_synced_roles:
+                ok, why = _push_code(ip)
+                if not ok:
+                    receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
+                    continue
+                ok, why = _push_public_service_unit(ip, role, block)
+                if not ok:
+                    receipts.append(StepReceipt(role, STATUS_ERROR, "deploy", f"{ip}: {why}"))
+                    continue
             ok, why = _restart(ip, services)
             receipts.append(StepReceipt(
                 role, STATUS_CREATED if ok else STATUS_ERROR, "deploy",
@@ -2561,6 +2664,8 @@ class EnvironmentProvisioner:
         for rep in replicas:
             ip = str(rep.get("public_ip")).strip()
             ok, why = _push_code(ip)
+            if ok:
+                ok, why = _push_public_service_unit(ip, "subuser", rep)
             receipts.append(StepReceipt(
                 "subuser", STATUS_EXISTS if ok else STATUS_ERROR, "deploy",
                 f"{rep.get('name') or ip}: code {'staged' if ok else 'sync FAILED — ' + why}"))

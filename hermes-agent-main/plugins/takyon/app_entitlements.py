@@ -27,6 +27,7 @@ businesses(slug). The email→sub-user resolution reuses `app_identity.upsert_ap
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -61,6 +62,8 @@ _BASELINE_GATEWAY_FEATURES = ("ai_generate",)
 # migration). A plan written from a PlanComposition stores its full derivation here so the
 # composed economics are auditable and the composition is re-derivable.
 _COMPOSITION_METADATA_KEY = "takyon_plan_composition"
+_ECONOMICS_VERSION_METADATA_KEY = "takyon_economics_version"
+_UNBUYABLE_PLAN_STATUSES = {"archived", "deprecated", "disabled", "inactive", "retired"}
 
 # Statuses that actually confer a tier; everything else (cancelled, past_due, …) does not.
 _ACTIVE_STATUSES = ("active", "trialing")
@@ -114,6 +117,7 @@ class PlanPolicy:
     source: str
     notes: str
     metadata: dict
+    saleable: bool = True
 
 
 @dataclass(frozen=True)
@@ -138,7 +142,7 @@ class Entitlement:
 _PLAN_COLUMNS = (
     "id, business_slug, plan_key, tier, price_cents, currency, billing_interval, "
     "included_ai_budget_microusd, included_action_quota, stripe_product_id, "
-    "stripe_price_id, source, notes, metadata"
+    "stripe_price_id, source, notes, metadata, saleable"
 )
 _ENT_COLUMNS = (
     "id, business_slug, app_user_id, tier, status, source, "
@@ -161,6 +165,67 @@ def _normalize_plan_key(value: str) -> str:
 def _normalize_billing_interval(value: str) -> str:
     raw = str(value or "month").strip().lower().replace("-", "_")
     return "month" if raw in _MONTH_SPELLINGS else raw
+
+
+def _normalize_saleable(value, *, default: bool) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+    raise InvalidPlan("saleable must be a boolean")
+
+
+def plan_economics_version(
+    *, business_slug: str, plan_key: str, tier: str, price_cents: int, currency: str,
+    billing_interval: str, included_ai_budget_microusd: int, included_action_quota: int,
+) -> str:
+    """Deterministic immutable version of every checkout-relevant internal economic term."""
+    payload = {
+        "business_id": str(business_slug or "").strip().lower(),
+        "plan_key": _normalize_plan_key(plan_key),
+        "tier": str(tier or "").strip().casefold(),
+        "price_cents": int(price_cents),
+        "currency": str(currency or "usd").strip().lower(),
+        "billing_interval": _normalize_billing_interval(billing_interval),
+        "included_ai_budget_microusd": int(included_ai_budget_microusd),
+        "included_action_quota": int(included_action_quota),
+    }
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return "econ_v1_" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def plan_economics_version_from_mapping(plan: dict) -> str:
+    return plan_economics_version(
+        business_slug=str(plan.get("business_slug") or plan.get("business") or ""),
+        plan_key=str(plan.get("plan_key") or ""),
+        tier=str(plan.get("tier") or ""),
+        price_cents=int(plan.get("price_cents") or 0),
+        currency=str(plan.get("currency") or "usd"),
+        billing_interval=str(plan.get("billing_interval") or "month"),
+        included_ai_budget_microusd=int(plan.get("included_ai_budget_microusd") or 0),
+        included_action_quota=int(plan.get("included_action_quota") or 0),
+    )
+
+
+def plan_is_saleable(plan) -> bool:
+    if isinstance(plan, PlanPolicy):
+        saleable, metadata = plan.saleable, plan.metadata
+    elif isinstance(plan, dict):
+        saleable = _normalize_saleable(plan.get("saleable"), default=True)
+        metadata = plan.get("metadata") if isinstance(plan.get("metadata"), dict) else {}
+    else:
+        return False
+    status = str(
+        metadata.get("status") or metadata.get("lifecycle_status") or ""
+    ).strip().lower()
+    return bool(saleable) and status not in _UNBUYABLE_PLAN_STATUSES
 
 
 def _contains_unlimited(value) -> bool:
@@ -254,6 +319,7 @@ def _plan_from_row(row) -> PlanPolicy:
         source=str(row[11]),
         notes=str(row[12]),
         metadata=row[13] if isinstance(row[13], dict) else {},
+        saleable=bool(row[14]),
     )
 
 
@@ -293,6 +359,7 @@ def upsert_plan_policy(
     source: str = "takyon",
     notes: str = "",
     metadata: dict | None = None,
+    saleable: bool | None = None,
     money_shape_task_kind: str = "",
 ) -> PlanPolicy:
     """Create or update a plan in the business's catalog, idempotent on (business_slug, plan_key).
@@ -325,6 +392,10 @@ def upsert_plan_policy(
     # grandfather guard compare incoming vs. live economic terms, and identifies the one legal
     # non-month case — an idempotent re-pass of a frozen legacy row's identical terms.
     existing = get_plan_policy(conn, business_slug, key)
+    saleable_value = _normalize_saleable(
+        saleable,
+        default=(existing.saleable if existing is not None else True),
+    )
     budget_source = (
         existing.included_ai_budget_microusd
         if existing is not None and included_ai_budget_microusd in {None, ""}
@@ -384,6 +455,8 @@ def upsert_plan_policy(
     # new version); existing subscribers stay on the frozen row. There is no override flag: this is
     # an invariant, not a toggle, so the CEO cannot bypass it. (Non-economic fields — notes,
     # metadata, Stripe linkage — stay editable; an idempotent re-upsert with identical terms passes.)
+    economics_changed = False
+    changed: list[str] = []
     if existing is not None:
         incoming_terms = {
             "tier": tier_value.strip().casefold(),
@@ -402,6 +475,7 @@ def upsert_plan_policy(
             "included_action_quota": int(existing.included_action_quota),
         }
         changed = sorted(k for k in current_terms if current_terms[k] != incoming_terms[k])
+        economics_changed = bool(changed)
         if changed:
             active = count_active_entitlements_for_plan(conn, business_slug, key)
             if active > 0:
@@ -415,8 +489,23 @@ def upsert_plan_policy(
                     f"subscribers onto new pricing is a separate billing migration (OpenMeter-owned; "
                     f"not available yet)."
                 )
+    if economics_changed and (stripe_product_id or stripe_price_id):
+        raise InvalidPlan(
+            "economic changes cannot reuse a supplied Stripe product/price; omit both IDs so a "
+            "new externally verified price is provisioned for the new economics"
+        )
     meta = _ensure_baseline_gateway_features(
         _preserve_gateway_allowlist_metadata(dict(metadata or {}), existing)
+    )
+    meta[_ECONOMICS_VERSION_METADATA_KEY] = plan_economics_version(
+        business_slug=business_slug,
+        plan_key=key,
+        tier=tier_value,
+        price_cents=price,
+        currency=str(currency or "usd").lower(),
+        billing_interval=interval,
+        included_ai_budget_microusd=budget,
+        included_action_quota=quota,
     )
     warnings = plan_validation_warnings(key, tier_value, quota, meta)
     if warnings:
@@ -437,8 +526,8 @@ def upsert_plan_policy(
             "insert into app_plan_policies "
             "(business_slug, plan_key, tier, price_cents, currency, billing_interval, "
             " included_ai_budget_microusd, included_action_quota, stripe_product_id, "
-            " stripe_price_id, source, notes, metadata) "
-            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
+            " stripe_price_id, source, notes, metadata, saleable) "
+            "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s) "
             "on conflict (business_slug, plan_key) do update set "
             " tier = excluded.tier, "
             " price_cents = excluded.price_cents, "
@@ -446,11 +535,14 @@ def upsert_plan_policy(
             " billing_interval = excluded.billing_interval, "
             " included_ai_budget_microusd = excluded.included_ai_budget_microusd, "
             " included_action_quota = excluded.included_action_quota, "
-            " stripe_product_id = coalesce(excluded.stripe_product_id, app_plan_policies.stripe_product_id), "
-            " stripe_price_id = coalesce(excluded.stripe_price_id, app_plan_policies.stripe_price_id), "
+            " stripe_product_id = case when %s then excluded.stripe_product_id "
+            "                          else coalesce(excluded.stripe_product_id, app_plan_policies.stripe_product_id) end, "
+            " stripe_price_id = case when %s then excluded.stripe_price_id "
+            "                        else coalesce(excluded.stripe_price_id, app_plan_policies.stripe_price_id) end, "
             " source = excluded.source, "
             " notes = excluded.notes, "
             " metadata = excluded.metadata, "
+            " saleable = excluded.saleable, "
             " updated_at = now() "
             f"returning {_PLAN_COLUMNS}",
             (
@@ -467,6 +559,9 @@ def upsert_plan_policy(
                 str(source or "takyon"),
                 str(notes or ""),
                 _json_dumps(meta),
+                saleable_value,
+                economics_changed,
+                economics_changed,
             ),
         ).fetchone()
     return _plan_from_row(row)
@@ -485,6 +580,7 @@ def upsert_plan_from_composition(
     source: str = "takyon",
     notes: str = "",
     metadata: dict | None = None,
+    saleable: bool | None = None,
     money_shape_task_kind: str = "",
 ) -> PlanPolicy:
     """Write a plan whose economics are DERIVED from a `PlanComposition` (UC4 keystone, plan §2.7).
@@ -548,6 +644,7 @@ def upsert_plan_from_composition(
         source=source,
         notes=notes,
         metadata=meta,
+        saleable=saleable,
         money_shape_task_kind=money_shape_task_kind,
     )
 

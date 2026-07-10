@@ -496,6 +496,17 @@ def build_runtime_app(
     )
 
     app = FastAPI(title="Takyon Runtime")
+    from .request_limits import RequestBodyLimitMiddleware, request_method_may_have_body
+
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        limit_resolver=lambda scope: (
+            256 * 1024
+            if str(scope.get("path") or "").endswith("/billing/webhook")
+            else 1024 * 1024
+        ),
+        require_content_length=request_method_may_have_body,
+    )
 
     enforce_operator_role = not (database_url or operator_database_url)
     enforce_app_role = not (database_url or app_database_url)

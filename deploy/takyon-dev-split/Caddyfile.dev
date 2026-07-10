@@ -9,6 +9,11 @@
 }
 
 :80 {
+	# Coarse edge ceiling; ASGI applies tighter route-specific and streamed-body limits.
+	request_body {
+		max_size 9MB
+	}
+
 	# Node identity on EVERY response (rendered per replica by bootstrap-dev-droplet.sh and by
 	# the drain rail's front-converge step). The graceful-drain rejoin gate
 	# (EnvironmentProvisioner.rolling_restart, `takyon env restart <env>`) polls the LB until

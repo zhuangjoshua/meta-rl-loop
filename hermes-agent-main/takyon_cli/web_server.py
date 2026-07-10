@@ -60,6 +60,7 @@ from takyon_cli.config import (
 )
 from gateway.status import get_running_pid, read_runtime_status
 from plugins.takyon.app_runtime_constants import APP_SESSION_COOKIE
+from plugins.takyon.request_limits import RequestBodyLimitMiddleware, request_method_may_have_body
 from plugins.takyon.core import (
     app_runtime_database_plane,
     handle_business_act_on_app_connection,
@@ -1071,6 +1072,37 @@ _DEFAULT_APP_DIRECTORY_RATE_LIMIT = 60
 _DEFAULT_APP_DIRECTORY_RATE_WINDOW_SECONDS = 60
 _DEFAULT_APP_ACTION_RATE_LIMIT = 20
 _DEFAULT_APP_ACTION_RATE_WINDOW_SECONDS = 60
+_HTTP_BODY_DEFAULT_LIMIT = 1024 * 1024
+_HTTP_BODY_AUTH_LIMIT = 64 * 1024
+_HTTP_BODY_PROFILE_LIMIT = 128 * 1024
+_HTTP_BODY_STRIPE_WEBHOOK_LIMIT = 256 * 1024
+_HTTP_BODY_SHOPIFY_WEBHOOK_LIMIT = 1024 * 1024
+_HTTP_BODY_ACTION_LIMIT = 8 * 1024 * 1024
+_HTTP_BODY_MEDIA_LIMIT = 5_242_880 + 256 * 1024
+
+
+def _http_body_limit(scope: dict[str, Any]) -> int:
+    path = str(scope.get("path") or "")
+    if path == "/api/webhooks/stripe":
+        return _HTTP_BODY_STRIPE_WEBHOOK_LIMIT
+    if path == "/api/webhooks/shopify":
+        return _HTTP_BODY_SHOPIFY_WEBHOOK_LIMIT
+    if re.fullmatch(r"/api/takyon/apps/[^/]+/actions/[^/]+", path):
+        return _HTTP_BODY_ACTION_LIMIT
+    if re.fullmatch(r"/api/takyon/apps/[^/]+/media", path):
+        return _HTTP_BODY_MEDIA_LIMIT
+    if re.fullmatch(r"/api/takyon/apps/[^/]+/auth/(?:request|session|verify)", path):
+        return _HTTP_BODY_AUTH_LIMIT
+    if re.fullmatch(r"/api/takyon/apps/[^/]+/(?:checkout|profile)", path):
+        return _HTTP_BODY_PROFILE_LIMIT
+    return _HTTP_BODY_DEFAULT_LIMIT
+
+
+def _public_body_requires_length(scope: dict[str, Any]) -> bool:
+    path = str(scope.get("path") or "")
+    return request_method_may_have_body(scope) and (
+        path.startswith("/api/takyon/apps/") or path.startswith("/api/webhooks/")
+    )
 
 # CORS: restrict to localhost origins only.  The web UI is intended to run
 # locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
@@ -1081,6 +1113,11 @@ app.add_middleware(
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    limit_resolver=_http_body_limit,
+    require_content_length=_public_body_requires_length,
 )
 
 # ---------------------------------------------------------------------------
@@ -3250,11 +3287,17 @@ async def _app_post_media_upload(request: Request, business: str, raw_body: byte
         return _takyon_app_json(HTTPStatus.UNAUTHORIZED, {"success": False, "error": "missing app session"})
     if len(raw_body) > int(takyon_app_media._max_bytes()):
         return _takyon_app_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"success": False, "error": "media too large"})
-    form = await request.form()
+    max_file_bytes = int(takyon_app_media._max_bytes())
+    form = await request.form(max_files=1, max_fields=8, max_part_size=max_file_bytes)
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
         return _takyon_app_json(HTTPStatus.BAD_REQUEST, {"success": False, "error": "missing file field"})
-    content = await upload.read()
+    content = await upload.read(max_file_bytes + 1)
+    if len(content) > max_file_bytes:
+        return _takyon_app_json(
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            {"success": False, "error": "media too large"},
+        )
     status, payload = await _takyon_app_tool_off_loop(handle_business_upload_app_media, {
         "business": business,
         "session_token": token,

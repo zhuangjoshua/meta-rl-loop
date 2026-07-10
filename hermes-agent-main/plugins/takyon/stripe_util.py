@@ -32,6 +32,18 @@ class StripeError(Exception):
     Raised (never swallowed) so a missing key or bad signature surfaces as a clear
     error instead of a silently-faked success."""
 
+
+def stripe_key_livemode() -> bool:
+    """Return the configured key's mode without exposing the key; unknown key shapes fail closed."""
+    key = str(safebox.read_env_backed_value("STRIPE_SECRET_KEY") or "").strip()
+    if not key:
+        raise StripeError("Stripe action requires STRIPE_SECRET_KEY")
+    if key.startswith(("sk_live_", "rk_live_")):
+        return True
+    if key.startswith(("sk_test_", "rk_test_")):
+        return False
+    raise StripeError("STRIPE_SECRET_KEY has an unrecognized mode prefix")
+
 def stripe_request(
     path: str,
     params: dict[str, Any],

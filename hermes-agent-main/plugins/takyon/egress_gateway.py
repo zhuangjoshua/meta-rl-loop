@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import hmac
 import ipaddress
+import json
+import posixpath
+import re
 import socket
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
 
@@ -33,6 +35,16 @@ _UPSTREAM_TIMEOUT_S = 30
 _MAX_REQUEST_BYTES = 256 * 1024      # must-fix #9/#14: cap forwarded request body
 _MAX_RESPONSE_BYTES = 1024 * 1024    # must-fix #9: cap response body
 _INTERNAL_HOST_SUFFIXES = (".localhost", ".internal", ".local", ".cluster.local")
+_HTTP_METHOD_RE = re.compile(r"^[A-Z][A-Z0-9_-]{0,31}$")
+_ALLOWED_EGRESS_METHODS = frozenset({"DELETE", "GET", "HEAD", "PATCH", "POST", "PUT"})
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_MALFORMED_PERCENT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_ENCODED_PATH_DELIMITER_RE = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
+_ENCODED_DOT_RE = re.compile(r"%2e", re.IGNORECASE)
+_FORBIDDEN_CREDENTIAL_HEADERS = frozenset({
+    "connection", "content-length", "cookie", "host", "proxy-authorization", "set-cookie",
+    "te", "trailer", "transfer-encoding", "upgrade",
+})
 
 # must-fix #7: platform-self egress denylist — _is_internal_host does NOT block the platform's own
 # PUBLIC IPs/hosts, so a misconfigured/attacker-approved connection could otherwise turn
@@ -91,6 +103,7 @@ class ProviderConnection:
     placement: dict
     scope: str
     status: str
+    approved_scope_digest: str | None = None
     secret_ciphertext: bytes | None = None
     secret_nonce: bytes | None = None
     secret_fingerprint: str | None = None
@@ -157,7 +170,7 @@ def resolve_active_connection(conn, business_slug: str, connection_slug: str) ->
     row = conn.execute(
         "select id, business_slug, connection_slug, provider_kind, allowed_host, "
         "allowed_path_prefix, allowed_methods, placement, scope, status, "
-        "secret_ciphertext, secret_nonce, secret_fingerprint "
+        "approved_scope_digest, secret_ciphertext, secret_nonce, secret_fingerprint "
         "from provider_connections "
         "where business_slug = %s and connection_slug = %s and status = 'active'",
         (business_slug, connection_slug),
@@ -177,9 +190,10 @@ def resolve_active_connection(conn, business_slug: str, connection_slug: str) ->
         allowed_path_prefix=(None if row[5] is None else str(row[5])),
         allowed_methods=tuple(str(m).upper() for m in (row[6] or ())),
         placement=placement, scope=scope, status=str(row[9]),
-        secret_ciphertext=(None if row[10] is None else bytes(row[10])),
-        secret_nonce=(None if row[11] is None else bytes(row[11])),
-        secret_fingerprint=(None if row[12] is None else str(row[12])),
+        approved_scope_digest=(None if row[10] is None else str(row[10])),
+        secret_ciphertext=(None if row[11] is None else bytes(row[11])),
+        secret_nonce=(None if row[12] is None else bytes(row[12])),
+        secret_fingerprint=(None if row[13] is None else str(row[13])),
     )
 
 
@@ -233,32 +247,162 @@ def _resolve_pinned_ip(host: str) -> str:
     return addrs[0]
 
 
+def _canonical_host(host: str) -> str:
+    """Return one DNS authority with no scheme, port, userinfo, or Unicode ambiguity."""
+    raw = str(host or "").strip().rstrip(".")
+    if not raw or any(ord(c) < 0x21 or ord(c) == 0x7F for c in raw):
+        raise EgressError(400, "bad_host", "connection host is empty or contains control characters")
+    if any(token in raw for token in ("://", "/", "\\", "@", "?", "#", ":")):
+        raise EgressError(400, "bad_host", "connection host must be a bare DNS name without a port")
+    try:
+        value = raw.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise EgressError(400, "bad_host", "connection host is not valid IDNA") from exc
+    if len(value) > 253:
+        raise EgressError(400, "bad_host", "connection host is too long")
+    labels = value.split(".")
+    if any(
+        not label or len(label) > 63 or label.startswith("-") or label.endswith("-")
+        or not re.fullmatch(r"[a-z0-9-]+", label)
+        for label in labels
+    ):
+        raise EgressError(400, "bad_host", "connection host is not a valid DNS name")
+    return value
+
+
+def _canonical_path(path: str, *, field: str) -> str:
+    """Decode and normalize exactly once, rejecting every ambiguous path representation first."""
+    raw = str(path or "")
+    if not raw.startswith("/") or raw.startswith("//"):
+        raise EgressError(400, "bad_path", f"{field} must be an absolute-path reference")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in raw):
+        raise EgressError(400, "bad_path", f"{field} contains a control character")
+    if "\\" in raw or "?" in raw or "#" in raw:
+        raise EgressError(400, "bad_path", f"{field} must not contain backslashes, query, or fragment")
+    if _MALFORMED_PERCENT_RE.search(raw):
+        raise EgressError(400, "bad_path", f"{field} contains malformed percent encoding")
+    if _ENCODED_PATH_DELIMITER_RE.search(raw) or _ENCODED_DOT_RE.search(raw):
+        raise EgressError(400, "bad_path", f"{field} contains encoded path delimiters or dots")
+    try:
+        decoded = unquote(raw, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise EgressError(400, "bad_path", f"{field} contains invalid UTF-8 encoding") from exc
+    if "\\" in decoded or "%" in decoded:
+        raise EgressError(400, "bad_path", f"{field} contains a double-encoded path component")
+    segments = decoded.split("/")
+    if any(segment in {".", ".."} for segment in segments):
+        raise EgressError(400, "bad_path", f"{field} contains dot traversal")
+    normalized = posixpath.normpath(decoded)
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if decoded.endswith("/") and normalized != "/":
+        normalized += "/"
+    # Build the wire path from the normalized Unicode path, never from the raw caller string.
+    return quote(normalized, safe="/-._~!$&'()*+,;=:@")
+
+
+def _path_within_prefix(path: str, prefix: str) -> bool:
+    if prefix.endswith("/"):
+        return path.startswith(prefix)
+    root = prefix.rstrip("/") or "/"
+    if root == "/":
+        return True
+    return path == root or path.startswith(root + "/")
+
+
+def normalize_connection_scope(
+    *, provider_kind: str, allowed_host: str, allowed_path_prefix: str | None,
+    allowed_methods: Any, placement: dict | None, scope: str,
+) -> dict[str, Any]:
+    """Canonical authority snapshot used at request, approval, deposit, and call time."""
+    provider = str(provider_kind or "").strip().lower()
+    if not provider or len(provider) > 96 or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", provider):
+        raise EgressError(400, "bad_provider_kind", "provider_kind is not a safe identifier")
+    host = _canonical_host(allowed_host)
+    denied = host_denied_for_egress(host)
+    if denied:
+        raise EgressError(403, denied, "connection host is not permitted for egress")
+    prefix = None if allowed_path_prefix in {None, ""} else _canonical_path(
+        str(allowed_path_prefix), field="allowed_path_prefix"
+    )
+    if isinstance(allowed_methods, str) or not isinstance(allowed_methods, (list, tuple, set)):
+        raise EgressError(400, "bad_methods", "allowed_methods must be a non-empty list")
+    methods = sorted({str(method or "").strip().upper() for method in allowed_methods})
+    if (
+        not methods
+        or any(not _HTTP_METHOD_RE.fullmatch(method) for method in methods)
+        or any(method not in _ALLOWED_EGRESS_METHODS for method in methods)
+    ):
+        raise EgressError(400, "bad_methods", "allowed_methods contains an invalid HTTP method")
+    placement_value = dict(placement or {})
+    placement_type = str(placement_value.get("type") or "header").strip().lower()
+    header_name = str(placement_value.get("name") or "").strip().lower()
+    if (
+        placement_type != "header" or not _HEADER_NAME_RE.fullmatch(header_name)
+        or header_name in _FORBIDDEN_CREDENTIAL_HEADERS
+    ):
+        raise EgressError(400, "unsupported_placement", "credential placement must be a safe header")
+    scope_value = str(scope or "business").strip().lower()
+    if scope_value != "business":
+        raise EgressError(400, "per_customer_unsupported", "per-customer connections are not enabled")
+    return {
+        "provider_kind": provider,
+        "allowed_host": host,
+        "allowed_path_prefix": prefix,
+        "allowed_methods": methods,
+        "placement": {"type": "header", "name": header_name},
+        "scope": scope_value,
+    }
+
+
+def connection_scope_digest(scope_snapshot: dict[str, Any]) -> str:
+    canonical = json.dumps(scope_snapshot, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def connection_approval_payload(connection_slug: str, scope_snapshot: dict[str, Any]) -> dict[str, Any]:
+    slug = str(connection_slug or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,95}", slug):
+        raise EgressError(400, "bad_connection_slug", "connection_slug is not a safe identifier")
+    return {"connection_slug": slug, **scope_snapshot}
+
+
+def connection_scope_from_connection(connection: ProviderConnection) -> dict[str, Any]:
+    return normalize_connection_scope(
+        provider_kind=connection.provider_kind,
+        allowed_host=connection.allowed_host,
+        allowed_path_prefix=connection.allowed_path_prefix,
+        allowed_methods=connection.allowed_methods,
+        placement=connection.placement,
+        scope=connection.scope,
+    )
+
+
 def _safe_relative_url(path: str, query: dict | None, allowed_path_prefix: str | None) -> str:
-    """must-fix #2,#4: build a safe relative URL. NEVER concatenate into authority: require a
-    leading '/', reject '@', leading '//', backslashes, and any CR/LF/NUL/control char in path and
-    query keys/values. Enforce allowed_path_prefix when set. The absolute URL is re-parsed and
-    re-asserted in call_egress() before any request."""
-    p = str(path or "")
-    if not p.startswith("/"):
-        raise EgressError(400, "bad_path", "path must start with '/'")
-    if p.startswith("//") or "@" in p or "\\" in p:
-        raise EgressError(400, "bad_path", "path contains a forbidden character")
-    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in p):
-        raise EgressError(400, "bad_path", "path contains a control character")
-    if allowed_path_prefix and not p.startswith(allowed_path_prefix):
+    """Build the outbound target only from validated, normalized path/query components."""
+    canonical_path = _canonical_path(path, field="path")
+    canonical_prefix = (
+        None if allowed_path_prefix in {None, ""}
+        else _canonical_path(str(allowed_path_prefix), field="allowed_path_prefix")
+    )
+    if canonical_prefix and not _path_within_prefix(canonical_path, canonical_prefix):
         raise EgressError(403, "path_not_allowed", "path is outside the connection's allowed prefix")
-    if query:
-        parts = []
-        for k, v in query.items():
-            ks, vs = str(k), str(v)
-            for s in (ks, vs):
-                if any(ord(c) < 0x20 or ord(c) == 0x7F for c in s):
-                    raise EgressError(400, "bad_query", "query contains a control character")
-            parts.append((ks, vs))
-        from urllib.parse import urlencode
-        sep = "&" if "?" in p else "?"
-        p = p + sep + urlencode(parts)
-    return p
+    if not query:
+        return canonical_path
+    if not isinstance(query, dict):
+        raise EgressError(400, "bad_query", "query must be an object")
+    parts: list[tuple[str, str]] = []
+    for key, value in query.items():
+        values = value if isinstance(value, (list, tuple)) else (value,)
+        for item in values:
+            key_text, value_text = str(key), str(item)
+            if any(
+                ord(char) < 0x20 or ord(char) == 0x7F
+                for char in key_text + value_text
+            ):
+                raise EgressError(400, "bad_query", "query contains a control character")
+            parts.append((key_text, value_text))
+    return canonical_path + "?" + urlencode(parts, doseq=False)
 
 
 def _clean_forward_headers(headers: dict | None, placement: dict) -> dict:
@@ -320,35 +464,41 @@ def build_request(
 ):
     """Assemble + fully validate the outbound request BEFORE any socket. Returns
     (method, url, pinned_ip, headers, body_bytes). Raises EgressError on any policy violation."""
+    approved_scope = connection_scope_from_connection(connection)
+    live_digest = connection_scope_digest(approved_scope)
+    if not connection.approved_scope_digest or connection.approved_scope_digest != live_digest:
+        raise EgressError(
+            403, "connection_scope_not_approved",
+            "the active credential is not bound to the connection's current authority scope",
+        )
+
     m = str(method or "GET").strip().upper()
-    if m not in connection.allowed_methods:
+    if m not in approved_scope["allowed_methods"]:
         raise EgressError(405, "method_not_allowed", "method is not allowed for this connection")
 
-    denied = host_denied_for_egress(connection.allowed_host)
-    if denied:
-        raise EgressError(403, denied, "connection host is not permitted for egress")
-
-    rel = _safe_relative_url(path, query, connection.allowed_path_prefix)
-    url = "https://" + connection.allowed_host + rel
+    host = str(approved_scope["allowed_host"])
+    rel = _safe_relative_url(path, query, approved_scope["allowed_path_prefix"])
+    url = "https://" + host + rel
 
     # must-fix #2: re-parse the FINAL assembled URL and re-assert authority — no userinfo, exact
     # host, https, expected/absent port. This catches any assembly slip before we attach the key.
     parts = urlsplit(url)
     if parts.scheme != "https":
         raise EgressError(400, "bad_scheme", "egress is https-only")
-    if (parts.hostname or "").lower() != connection.allowed_host:
+    if (parts.hostname or "").lower() != host:
         raise EgressError(400, "host_mismatch", "assembled host does not equal the connection host")
     if parts.username or parts.password:
         raise EgressError(400, "userinfo_forbidden", "credentials in the URL are forbidden")
     if parts.port not in (None, 443):
         raise EgressError(400, "port_forbidden", "only the default https port is permitted")
 
-    pinned_ip = _resolve_pinned_ip(connection.allowed_host)
+    pinned_ip = _resolve_pinned_ip(host)
 
-    fwd = _clean_forward_headers(headers, connection.placement)
-    _, final_headers = _attach_credential(url, fwd, url, connection.placement, secret)
+    placement = dict(approved_scope["placement"])
+    fwd = _clean_forward_headers(headers, placement)
+    _, final_headers = _attach_credential(url, fwd, url, placement, secret)
     # Force Host to the allowed host regardless of the pinned IP connection.
-    final_headers["host"] = connection.allowed_host
+    final_headers["host"] = host
 
     body_bytes = b""
     if body is not None:
@@ -369,6 +519,7 @@ def call_egress(
     m, url, pinned_ip, final_headers, body_bytes = build_request(
         connection, method=method, path=path, query=query, headers=headers, body=body, secret=secret,
     )
+    approved_host = str(urlsplit(url).hostname or "")
 
     # must-fix #1: REAL transport IP-pin. Connect to the exact vetted public IP with TLS
     # server_hostname=allowed_host and verification ON — httpx never re-resolves the hostname, so
@@ -377,7 +528,7 @@ def call_egress(
     # httpx resolves the URL host itself; to pin, we point the request at the IP and carry the SNI
     # host via the Host header + a TLS context whose check_hostname targets allowed_host. httpx
     # supports this via `extensions={"sni_hostname": ...}` on the request URL when host is an IP.
-    pinned_url = url.replace("https://" + connection.allowed_host, "https://" + pinned_ip, 1)
+    pinned_url = url.replace("https://" + approved_host, "https://" + pinned_ip, 1)
 
     # must-fix #9: never follow redirects (a 3xx could carry the credential to a new host); refuse 3xx.
     try:
@@ -385,7 +536,7 @@ def call_egress(
                           verify=True) as client:
             req = client.build_request(
                 m, pinned_url, headers=final_headers, content=body_bytes or None,
-                extensions={"sni_hostname": connection.allowed_host},
+                extensions={"sni_hostname": approved_host},
             )
             resp = client.send(req, stream=True)
             try:

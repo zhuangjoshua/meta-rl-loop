@@ -492,6 +492,28 @@ def reconcile_checkout_session(
     payment_status = session.get("payment_status")
     currency = session.get("currency")
     amount_total = int(session.get("amount_total") or 0)
+    plan_policy = app_entitlements.get_plan_policy(conn, business, plan_key)
+    session_economics_version = str(metadata.get("economics_version") or "").strip()
+    if session_economics_version:
+        if plan_policy is None:
+            return {"recorded": False, "reason": "checkout_plan_missing"}
+        current_economics_version = app_entitlements.plan_economics_version(
+            business_slug=plan_policy.business_slug,
+            plan_key=plan_policy.plan_key,
+            tier=plan_policy.tier,
+            price_cents=plan_policy.price_cents,
+            currency=plan_policy.currency,
+            billing_interval=plan_policy.billing_interval,
+            included_ai_budget_microusd=plan_policy.included_ai_budget_microusd,
+            included_action_quota=plan_policy.included_action_quota,
+        )
+        if (
+            session_economics_version != current_economics_version
+            or str(currency or "").lower() != str(plan_policy.currency or "").lower()
+            or amount_total != int(plan_policy.price_cents)
+            or str(session.get("mode") or "") != "subscription"
+        ):
+            return {"recorded": False, "reason": "checkout_economics_mismatch"}
 
     inserted = conn.execute(
         "insert into app_checkout_sessions "
@@ -613,7 +635,6 @@ def reconcile_checkout_session(
         )
         app_user_id = entitlement.app_user_id
 
-    plan_policy = app_entitlements.get_plan_policy(conn, business, plan_key)
     payout_split = _owner_payout_split(plan_policy, amount_total)
     revenue_metadata = {
         **metadata,

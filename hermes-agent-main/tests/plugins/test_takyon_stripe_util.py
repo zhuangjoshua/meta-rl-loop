@@ -75,6 +75,21 @@ def test_request_without_key_raises(monkeypatch):
         stripe_request("checkout/sessions", {"mode": "payment"})
 
 
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [("sk_live_x", True), ("rk_live_x", True), ("sk_test_x", False), ("rk_test_x", False)],
+)
+def test_stripe_key_livemode_is_derived_from_key_prefix(monkeypatch, key, expected):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", key)
+    assert stripe_util.stripe_key_livemode() is expected
+
+
+def test_stripe_key_livemode_rejects_unknown_key_shape(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "not-a-stripe-key")
+    with pytest.raises(StripeError, match="unrecognized mode"):
+        stripe_util.stripe_key_livemode()
+
+
 def test_request_loads_key_from_safebox_env(monkeypatch):
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     monkeypatch.setattr(

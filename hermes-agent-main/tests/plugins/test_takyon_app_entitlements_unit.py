@@ -77,6 +77,28 @@ def test_baseline_gateway_features_respects_explicit_opt_out():
     assert merged["features"]["ai_generate"] is False
 
 
+def test_economics_version_changes_with_price_or_allowance():
+    base = dict(
+        business_slug="biz", plan_key="monthly", tier="paid", price_cents=900,
+        currency="usd", billing_interval="month", included_ai_budget_microusd=5_000_000,
+        included_action_quota=0,
+    )
+    version = app_entitlements.plan_economics_version(**base)
+    assert version.startswith("econ_v1_")
+    assert version != app_entitlements.plan_economics_version(**{**base, "price_cents": 901})
+    assert version != app_entitlements.plan_economics_version(
+        **{**base, "included_ai_budget_microusd": 5_000_001}
+    )
+
+
+def test_deprecated_or_explicitly_unsaleable_plan_is_unbuyable():
+    assert app_entitlements.plan_is_saleable({"saleable": True, "metadata": {}}) is True
+    assert app_entitlements.plan_is_saleable({"saleable": False, "metadata": {}}) is False
+    assert app_entitlements.plan_is_saleable(
+        {"saleable": True, "metadata": {"status": "deprecated"}}
+    ) is False
+
+
 def test_baseline_gateway_features_appended_to_legacy_list():
     merged = app_entitlements._ensure_baseline_gateway_features(
         {"features": ["prompt_scoring", "mention_tracking"]}

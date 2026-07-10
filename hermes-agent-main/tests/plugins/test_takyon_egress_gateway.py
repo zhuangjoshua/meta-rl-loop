@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from dataclasses import replace
 
 import pytest
 
@@ -16,12 +17,14 @@ from plugins.takyon import egress_gateway as eg
 
 
 def _conn(host="api.stripe.com", methods=("GET", "POST"), prefix=None, placement=None):
-    return eg.ProviderConnection(
+    connection = eg.ProviderConnection(
         id="1", business_slug="b", connection_slug="s", provider_kind="stripe",
         allowed_host=host, allowed_path_prefix=prefix, allowed_methods=methods,
         placement=placement or {"type": "header", "name": "Authorization"},
         scope="business", status="active",
     )
+    snapshot = eg.connection_scope_from_connection(connection)
+    return replace(connection, approved_scope_digest=eg.connection_scope_digest(snapshot))
 
 
 def _build(**kw):
@@ -80,6 +83,55 @@ def test_method_and_path_prefix_enforced():
     assert e.value.code == "path_not_allowed"
 
 
+@pytest.mark.parametrize("path", [
+    "/v1/allowed/../admin",
+    "/v1/allowed/./x",
+    "/v1/allowed/%2e%2e/admin",
+    "/v1/allowed/%2Fadmin",
+    "/v1/allowed/%5cadmin",
+    "/v1/allowed/%252e%252e/admin",
+    "/v1/allowed?next=/admin",
+    "https://evil.example/v1/allowed",
+])
+def test_path_canonicalization_bypasses_refused(path):
+    with pytest.raises(eg.EgressError) as exc:
+        eg.build_request(
+            _conn(prefix="/v1/allowed/"), method="GET", path=path, query=None,
+            headers=None, body=None, secret="k",
+        )
+    assert exc.value.code == "bad_path"
+
+
+def test_prefix_comparison_is_segment_bounded():
+    with pytest.raises(eg.EgressError) as exc:
+        eg.build_request(
+            _conn(prefix="/v1/foo"), method="GET", path="/v1/foobar", query=None,
+            headers=None, body=None, secret="k",
+        )
+    assert exc.value.code == "path_not_allowed"
+
+
+def test_active_credential_requires_exact_approved_scope_snapshot():
+    connection = replace(_conn(prefix="/v1/foo"), allowed_path_prefix="/v1/admin")
+    with pytest.raises(eg.EgressError) as exc:
+        eg.build_request(
+            connection, method="GET", path="/v1/admin", query=None,
+            headers=None, body=None, secret="k",
+        )
+    assert exc.value.code == "connection_scope_not_approved"
+
+
+def test_tunnel_and_trace_methods_cannot_be_approved():
+    for method in ("CONNECT", "TRACE"):
+        with pytest.raises(eg.EgressError) as exc:
+            eg.normalize_connection_scope(
+                provider_kind="github", allowed_host="api.github.com",
+                allowed_path_prefix="/", allowed_methods=[method],
+                placement={"type": "header", "name": "authorization"}, scope="business",
+            )
+        assert exc.value.code == "bad_methods"
+
+
 @pytest.mark.parametrize("placement", [{"type": "query", "name": "api_key"}, {"type": "basic", "name": "u"}])
 def test_query_and_basic_secret_placement_refused(placement):
     with pytest.raises(eg.EgressError) as e:
@@ -93,7 +145,7 @@ def test_header_smuggling_dropped_credential_and_host_forced():
         headers={"authorization": "Bearer attacker", "host": "evil.com", "accept": "application/json", "cookie": "x=y"},
         body=None, secret="sk_live_REAL",
     )
-    assert hdrs["Authorization"] == "sk_live_REAL"
+    assert hdrs["authorization"] == "sk_live_REAL"
     assert hdrs["host"] == "api.stripe.com"
     assert "cookie" not in hdrs
     assert url == "https://api.stripe.com/v1/charges"

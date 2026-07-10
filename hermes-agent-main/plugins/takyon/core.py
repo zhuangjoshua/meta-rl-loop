@@ -20295,30 +20295,29 @@ class TakyonStore:
             leaf = _money_shape_leaf()
             connection_slug = str(op.get("connection_slug") or "").strip()
             provider_kind = str(op.get("provider_kind") or "").strip()
-            allowed_host = str(op.get("allowed_host") or "").strip().lower().rstrip(".")
+            allowed_host = str(op.get("allowed_host") or "").strip()
             allowed_path_prefix = op.get("allowed_path_prefix")
             allowed_methods = op.get("allowed_methods") or ["GET", "POST"]
             placement = op.get("placement") or {"type": "header", "name": "Authorization"}
             conn_scope = str(op.get("scope") or "business").strip().lower()
             if not connection_slug or not provider_kind or not allowed_host:
                 raise TakyonError("connection_slug, provider_kind, and allowed_host are required")
-            # v1: per-customer credential vault does not exist yet — refuse the shape (must-fix #11).
-            if conn_scope != "business":
-                raise TakyonError("scope='per_customer' is not supported yet; use scope='business'")
-            # must-fix #7/#9/#12: refuse platform-self / metered-provider / internal hosts at creation.
-            denied = egress_gateway.host_denied_for_egress(allowed_host)
-            if denied:
-                raise TakyonError(
-                    f"host '{allowed_host}' is not permitted for egress ({denied}); "
-                    "metered providers use their own priced tools, and platform/internal hosts are refused"
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,95}", connection_slug):
+                raise TakyonError("connection_slug must be a lowercase safe identifier")
+            try:
+                scope_snapshot = egress_gateway.normalize_connection_scope(
+                    provider_kind=provider_kind,
+                    allowed_host=allowed_host,
+                    allowed_path_prefix=allowed_path_prefix,
+                    allowed_methods=allowed_methods,
+                    placement=placement,
+                    scope=conn_scope,
                 )
-            if str((placement or {}).get("type") or "header").lower() != "header":
-                raise TakyonError("only 'header' credential placement is supported in v1")
-            approval_payload = {
-                "connection_slug": connection_slug, "provider_kind": provider_kind,
-                "allowed_host": allowed_host, "allowed_path_prefix": allowed_path_prefix,
-                "allowed_methods": list(allowed_methods), "placement": placement, "scope": conn_scope,
-            }
+            except egress_gateway.EgressError as exc:
+                raise TakyonError(f"invalid provider connection scope: {exc.code}: {exc.detail}") from exc
+            approval_payload = egress_gateway.connection_approval_payload(
+                connection_slug, scope_snapshot
+            )
             with self._leaf_conn(conn) as raw:
                 approval = leaf.request_approval(
                     raw, slug, "provider_connection_grant", approval_payload,
@@ -20327,23 +20326,25 @@ class TakyonStore:
                 raw.execute(
                     "insert into provider_connections "
                     "(business_slug, connection_slug, provider_kind, allowed_host, allowed_path_prefix, "
-                    " allowed_methods, placement, scope, status, approval_id) "
-                    "values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,'pending',%s) "
+                    " allowed_methods, placement, scope, approval_id) "
+                    "values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s) "
                     "on conflict (business_slug, connection_slug) do update set "
                     "  provider_kind = excluded.provider_kind, allowed_host = excluded.allowed_host, "
                     "  allowed_path_prefix = excluded.allowed_path_prefix, "
                     "  allowed_methods = excluded.allowed_methods, placement = excluded.placement, "
                     "  scope = excluded.scope, approval_id = excluded.approval_id, "
-                    "  status = case when provider_connections.status = 'active' "
-                    "                then 'active' else 'pending' end, "
                     "  updated_at = now()",
-                    (slug, connection_slug, provider_kind, allowed_host, allowed_path_prefix,
-                     list(allowed_methods), json.dumps(placement), conn_scope, approval.id),
+                    (
+                        slug, connection_slug, scope_snapshot["provider_kind"],
+                        scope_snapshot["allowed_host"], scope_snapshot["allowed_path_prefix"],
+                        scope_snapshot["allowed_methods"], json.dumps(scope_snapshot["placement"]),
+                        scope_snapshot["scope"], approval.id,
+                    ),
                 )
             self._record_event(
                 conn, scope=f"business:{slug}", business_slug=slug, event_type=action,
-                payload={"connection_slug": connection_slug, "provider_kind": provider_kind,
-                         "allowed_host": allowed_host, "approval_status": approval.status,
+                payload={"connection_slug": connection_slug, "provider_kind": scope_snapshot["provider_kind"],
+                         "allowed_host": scope_snapshot["allowed_host"], "approval_status": approval.status,
                          "reason": reason, "actor": actor},
             )
             return {
@@ -20466,6 +20467,7 @@ class TakyonStore:
                             source=str(op.get("source") or "takyon"),
                             notes=str(op.get("notes") or ""),
                             metadata=metadata,
+                            saleable=op.get("saleable"),
                             money_shape_task_kind=money_shape_task_kind,
                         )
                 except (
@@ -20532,6 +20534,7 @@ class TakyonStore:
                             source=str(op.get("source") or "takyon"),
                             notes=str(op.get("notes") or ""),
                             metadata=metadata,
+                            saleable=op.get("saleable"),
                             money_shape_task_kind=money_shape_task_kind,
                         )
                 except (leaves["entitlements"].EntitlementError, _money_shape_error()) as exc:
@@ -20546,6 +20549,7 @@ class TakyonStore:
             if (
                 _effective_business_mode(op.get("business_mode")) == "live"
                 and int(persisted_plan.get("price_cents") or 0) > 0
+                and leaves["entitlements"].plan_is_saleable(persisted_plan)
                 and not str(persisted_plan.get("stripe_price_id") or "").strip()
             ):
                 business = self._ensure_business(conn, slug)
@@ -23136,24 +23140,39 @@ def _subscription_entitlement_status(status: str) -> str:
 
 
 def _ensure_stripe_price(conn: sqlite3.Connection, slug: str, plan: dict[str, Any], business_name: str) -> dict[str, Any]:
+    from . import app_entitlements
+
+    if not app_entitlements.plan_is_saleable(plan):
+        raise TakyonError("deprecated or inactive plans cannot be provisioned for checkout")
     if plan.get("stripe_price_id"):
         return plan
     if int(plan.get("price_cents") or 0) <= 0:
         raise TakyonError("paid checkout requires a plan with price_cents > 0")
-    metadata = {"business": slug, "plan_key": plan["plan_key"], "source": "takyon_app"}
+    economics_version = app_entitlements.plan_economics_version_from_mapping(
+        {**plan, "business_slug": slug}
+    )
+    metadata = {
+        "business": slug,
+        "business_id": slug,
+        "plan_key": plan["plan_key"],
+        "source": "takyon_app",
+        "economics_version": economics_version,
+        "tier": str(plan.get("tier") or ""),
+        "currency": str(plan.get("currency") or "usd").lower(),
+        "price_cents": str(int(plan.get("price_cents") or 0)),
+        "billing_interval": str(plan.get("billing_interval") or "month"),
+        "included_ai_budget_microusd": str(int(plan.get("included_ai_budget_microusd") or 0)),
+        "included_action_quota": str(int(plan.get("included_action_quota") or 0)),
+    }
     product = _stripe_request("products", {
         "name": f"{business_name} {plan['plan_key']}",
-        "metadata[business]": slug,
-        "metadata[plan_key]": plan["plan_key"],
-        "metadata[source]": metadata["source"],
+        **{f"metadata[{key}]": value for key, value in metadata.items()},
     })
     price_params: dict[str, Any] = {
         "product": product["id"],
         "currency": plan.get("currency") or "usd",
         "unit_amount": int(plan.get("price_cents") or 0),
-        "metadata[business]": slug,
-        "metadata[plan_key]": plan["plan_key"],
-        "metadata[source]": metadata["source"],
+        **{f"metadata[{key}]": value for key, value in metadata.items()},
     }
     # Monthly-only: every subuser plan is a monthly recurring subscription price.
     price_params["recurring[interval]"] = "month"
@@ -24359,6 +24378,7 @@ def handle_business_upsert_app_plan(args: dict, **_: Any) -> str:
         "billing_interval": args.get("billing_interval") or "month",
         "included_ai_budget_microusd": args.get("included_ai_budget_microusd"),
         "included_action_quota": 0 if args.get("included_action_quota") in {None, ""} else args.get("included_action_quota"),
+        "saleable": args.get("saleable"),
         "stripe_product_id": args.get("stripe_product_id"),
         "stripe_price_id": args.get("stripe_price_id"),
         "source": args.get("source") or "takyon",
@@ -27068,6 +27088,8 @@ def handle_business_create_app_checkout(args: dict, **_: Any) -> str:
                     )
                     if not plan:
                         raise TakyonError(f"app plan not found: {plan_key}")
+                    if not leaves["entitlements"].plan_is_saleable(plan):
+                        raise TakyonError("app plan is deprecated or unavailable for new checkout")
                     if not test_mode and not str(plan.get("stripe_price_id") or "").strip():
                         raise TakyonError("app plan is not configured for Stripe checkout")
 
@@ -37534,7 +37556,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_upsert_app_plan",
         "description": "Create or update a business product app plan policy, including Stripe price linkage and included usage.",
         "handler": handle_business_upsert_app_plan,
-        "schema": _schema("business_upsert_app_plan", "Create/update a product app plan (a recurring SUBSCRIPTION offer; refused on a credit-packs or COGS-pass-through business). PREFER passing `composition` (priced components + margin policy) so price and AI budget are DERIVED, never typed — adding a feature is adding a component. A plan with active subscribers has its economic terms FROZEN: to change pricing, create a new plan_key and route new checkout to it — existing subscribers stay grandfathered on the old plan_key.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string", "description": "Stable id of the price offer. Treat it as an immutable version: never re-price a plan_key that has subscribers; mint a new one (e.g. 'pro-2') for new pricing."}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "composition": _COMPOSITION_PROP, "price_cents": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). Still margin-gated: refused if the AI budget exceeds the price."}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized. Subuser plans are monthly-only; non-month is refused for new plans."}, "included_ai_budget_microusd": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
+        "schema": _schema("business_upsert_app_plan", "Create/update a product app plan (a recurring SUBSCRIPTION offer; refused on a credit-packs or COGS-pass-through business). PREFER passing `composition` (priced components + margin policy) so price and AI budget are DERIVED, never typed — adding a feature is adding a component. A plan with active subscribers has its economic terms FROZEN: to change pricing, create a new plan_key and route new checkout to it — existing subscribers stay grandfathered on the old plan_key. Set saleable=false to retire this exact plan version from new checkout.", {"business": _BUSINESS_PROP, "plan_key": {"type": "string", "description": "Stable id of the price offer. Treat it as an immutable version: never re-price a plan_key that has subscribers; mint a new one (e.g. 'pro-2') for new pricing."}, "tier": {"type": "string", "description": "Entitlement tier unlocked by this plan"}, "composition": _COMPOSITION_PROP, "price_cents": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). Still margin-gated: refused if the AI budget exceeds the price."}, "currency": {"type": "string"}, "billing_interval": {"type": "string", "enum": ["month", "year", "one_time"], "description": "Canonical interval. Common aliases like monthly/yearly/once are normalized. Subuser plans are monthly-only; non-month is refused for new plans."}, "included_ai_budget_microusd": {"type": "integer", "description": "Transitional freehand path (ignored when `composition` is given). For monthly plans this must stay between 0 and the monthly price expressed in microusd (`price_cents * 10_000`)."}, "included_action_quota": {"type": "integer"}, "saleable": {"type": "boolean", "description": "False retires this plan from new checkout without changing existing subscriptions."}, "stripe_product_id": {"type": "string"}, "stripe_price_id": {"type": "string"}, "notes": {"type": "string"}, "metadata": {"type": "object"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "plan_key", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_customer",
