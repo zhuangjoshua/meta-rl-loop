@@ -633,10 +633,18 @@ ensure_home() {
   mkdir -p "$OPERATOR_HOME" "$LOCAL_PROD_ROOT/logs"
   # The production VPS config is canonical. A workspace-local config must never override the
   # production CEO/worker model split on the Mac-primary compute rail.
-  ssh_base "test -f /opt/takyon/.takyon/config.yaml" || die "operator VPS config is missing"
-  ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml.vps.tmp" \
-    || die "failed to fetch canonical operator VPS config"
-  [[ -s "$OPERATOR_HOME/config.yaml.vps.tmp" ]] || die "operator VPS config is empty"
+  # Retry the fetch: startup fires many ssh_base calls in a burst (plus the persistent tunnels),
+  # so a single dropped SSH under transient load must not abort the whole console boot with a
+  # false "config is empty" — a fresh connection almost always succeeds.
+  local _cfg_try
+  for _cfg_try in 1 2 3 4 5; do
+    if ssh_base "cat /opt/takyon/.takyon/config.yaml" >"$OPERATOR_HOME/config.yaml.vps.tmp" 2>/dev/null \
+        && [[ -s "$OPERATOR_HOME/config.yaml.vps.tmp" ]]; then
+      break
+    fi
+    [[ "$_cfg_try" == 5 ]] && die "operator VPS config is empty after 5 attempts (SSH to $SSH_HOST unstable?)"
+    sleep 2
+  done
   if ! cmp -s "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml" 2>/dev/null; then
     mv "$OPERATOR_HOME/config.yaml.vps.tmp" "$OPERATOR_HOME/config.yaml"
     echo "→ Adopted canonical runtime config from the VPS"
