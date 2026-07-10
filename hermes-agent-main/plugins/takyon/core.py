@@ -35967,13 +35967,14 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     # _run_claude_agent_task_process killed it and re-raised. Do NOT let this escape the
                     # loop and discard the scratch — the SDK runs in permissionMode "acceptEdits", so any
                     # files the worker already wrote are durably on disk in the mounted scratch workspace.
-                    # Preserve them: sync scratch->canonical (best-effort, fail-soft), then mark the result
-                    # BLOCKED + timed_out and break so the existing anti-re-delegation guard (ceo.md rule
-                    # #8) drives a hand-patch / continue-from-partial instead of a cold re-delegation. On
-                    # this path active_store is still the scratch-mounted store (the readback reassignment
-                    # only happens on the success path), so the sync persists the partial scratch. The
-                    # partial is preserved but NOT published: success is False, so the refresh/publish
-                    # block is skipped and the tsc/build gate still guards any later publish.
+                    # Preserve them: sync scratch->canonical (best-effort, fail-soft), mark the result
+                    # BLOCKED + timed_out, then FALL THROUGH (proc=None) so the gated refresh below
+                    # judges the preserved partial with the SAME tsc/build gate as a successful pass.
+                    # Breaking here instead left the CEO blind to a publishable partial: on deltaline0709
+                    # (2026-07-09) the job-end done-gate published the partial CLEAN right after the CEO
+                    # had already wrapped up "not confirmed live" and skipped logo/GSC/launch. On this
+                    # path active_store is still the scratch-mounted store (the readback reassignment
+                    # only happens on the success path), so the sync persists the partial scratch.
                     worker_actual_cents = None  # don't carry a prior attempt's parsed cost into the estimate settle
                     try:
                         partial_sync_status = active_store._sync_business_workspace_remote(business)
@@ -36003,31 +36004,34 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         detail=timeout_line,
                         line=timeout_line,
                     )
-                    break
-                stdout = proc.stdout.strip()
-                stderr = proc.stderr.strip()
-                try:
-                    parsed_result = json.loads(stdout) if stdout else {}
-                    sdk_result = parsed_result if isinstance(parsed_result, dict) else {"success": False, "raw_stdout": _truncate_text(stdout)}
-                except json.JSONDecodeError:
-                    sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
-                try:
-                    worker_actual_cents = int(sdk_result.get("actual_cost_cents"))
-                except (TypeError, ValueError, AttributeError):
-                    worker_actual_cents = None
-                if proc.returncode != 0:
-                    sdk_result.setdefault("success", False)
-                    sdk_result["worker_returncode"] = proc.returncode
-                    if stderr:
-                        sdk_result["worker_stderr"] = _truncate_text(stderr, 12000)
-                    default_error = _format_process_exit_detail(
-                        proc.returncode,
-                        process_label="Claude worker",
-                    )
-                    sdk_result["error"] = _truncate_text(
-                        stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or default_error,
-                        8000,
-                    )
+                    proc = None
+                    stdout = ""
+                    stderr = ""
+                if proc is not None:
+                    stdout = proc.stdout.strip()
+                    stderr = proc.stderr.strip()
+                    try:
+                        parsed_result = json.loads(stdout) if stdout else {}
+                        sdk_result = parsed_result if isinstance(parsed_result, dict) else {"success": False, "raw_stdout": _truncate_text(stdout)}
+                    except json.JSONDecodeError:
+                        sdk_result = {"success": False, "raw_stdout": _truncate_text(stdout)}
+                    try:
+                        worker_actual_cents = int(sdk_result.get("actual_cost_cents"))
+                    except (TypeError, ValueError, AttributeError):
+                        worker_actual_cents = None
+                    if proc.returncode != 0:
+                        sdk_result.setdefault("success", False)
+                        sdk_result["worker_returncode"] = proc.returncode
+                        if stderr:
+                            sdk_result["worker_stderr"] = _truncate_text(stderr, 12000)
+                        default_error = _format_process_exit_detail(
+                            proc.returncode,
+                            process_label="Claude worker",
+                        )
+                        sdk_result["error"] = _truncate_text(
+                            stderr or sdk_result.get("error") or sdk_result.get("raw_stdout") or default_error,
+                            8000,
+                        )
                 if sdk_result.get("success") and _claude_agent_summary_is_blocked(sdk_result.get("summary")):
                     sdk_result["blocked"] = True
                 if sdk_result.get("success"):
@@ -36141,7 +36145,18 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         else:
                             workspace_path = canonical_workspace_path
                 surface_refresh = None
-                if sdk_result.get("success") and refresh_surface:
+                # A timed-out attempt whose partial synced to canonical is judged by the SAME
+                # tsc/build-gated refresh as a successful pass: if the partial passes, it publishes
+                # and the tool result carries the durable truth (site LIVE) so the CEO continues the
+                # launch steps (logo, GSC, launch post) instead of wrapping up blind; if it fails,
+                # the exact build blockers surface and the bounded warm build-retry below gets one
+                # shot at finishing on the still-warm scratch workspace.
+                publishable_partial = (
+                    bool(sdk_result.get("timed_out"))
+                    and str(sdk_result.get("partial_workspace_sync_status") or "") == "synced"
+                    and customer_facing_product_workspace
+                )
+                if (sdk_result.get("success") or publishable_partial) and refresh_surface:
                     summary = active_store.read(scope=f"business:{business}", query="summary", include=["app"])
                     app = summary.get("app") if isinstance(summary.get("app"), dict) else {}
                     surface = app.get("surface") or app.get("surface_contract") or {}
@@ -36178,6 +36193,33 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "guidance_selection_reason": guidance_selection_reason,
                     }
                     active_store._sync_business_workspace_remote(business)
+                    if publishable_partial and not sdk_result.get("success") and not str(surface_refresh.get("blocker") or "").strip():
+                        # blocker == "" is the exact published-and-passed predicate of
+                        # _finalize_product_surface_refresh — rewrite the timeout error into the
+                        # durable truth so the CEO acts on the LIVE site, not the dead worker.
+                        publish_info = surface_refresh.get("publish") if isinstance(surface_refresh.get("publish"), dict) else {}
+                        live_url = str(publish_info.get("public_url") or "").strip()
+                        sdk_result["published_from_partial"] = True
+                        sdk_result["error"] = _truncate_text(
+                            f"Claude worker timed out after {int(timeout_ms)}ms, BUT the preserved partial "
+                            "PASSED the build gate and IS PUBLISHED live"
+                            + (f" at {live_url}" if live_url else "")
+                            + ". The site is live — do NOT rebuild or re-delegate the landing; continue the "
+                            "remaining launch steps (logo, Search Console registration, launch post) in this turn.",
+                            8000,
+                        )
+                        published_line = (
+                            "timed-out partial passed the build gate and is PUBLISHED"
+                            + (f" ({live_url})" if live_url else "")
+                            + "; continuing launch steps."
+                        )
+                        _record_claude_agent_runtime_event(
+                            business=business,
+                            workspace_rel=workspace_rel,
+                            status="output",
+                            detail=published_line,
+                            line=published_line,
+                        )
                 should_retry_turn_cap = (
                     not sdk_result.get("success")
                     and customer_facing_product_workspace
