@@ -1322,15 +1322,23 @@ def _run_ceo_turn(
                             idle = min(idle, float(progress.seconds_since_activity()))
                         except Exception:
                             pass
-                    # Context-free third clock: the Claude-worker stderr reader stamps a
-                    # business-keyed timestamp directly in core (no ContextVar routing), so a lost
-                    # sink binding anywhere in the composition can no longer starve this watchdog
-                    # while worker events stream — that false-killed proofline0710 at exactly
-                    # start+603s with events flowing 75/min (sipstreak was the mobile flavor).
+                    # Context-free worker clocks: the Claude-worker stderr reader stamps timestamps
+                    # in core directly (no ContextVar routing), so a lost sink binding anywhere in the
+                    # composition can no longer starve this watchdog while worker events stream — that
+                    # false-killed proofline0710/steadyflow0710 at exactly start+~600s with events
+                    # flowing 75/min (sipstreak was the mobile flavor). Two clocks, min of both:
+                    #  - business-keyed (tight, correct when the tool business == this turn's slug)
+                    #  - any-worker (business-agnostic; valid because worker concurrency == 1, so any
+                    #    streaming worker IS this turn's) — the belt-and-suspenders that holds even if
+                    #    the keyed lookup ever misses.
                     try:
-                        from .core import claude_worker_seconds_since_activity
+                        from .core import (
+                            claude_worker_seconds_since_activity,
+                            claude_worker_seconds_since_any_activity,
+                        )
 
                         idle = min(idle, float(claude_worker_seconds_since_activity(slug)))
+                        idle = min(idle, float(claude_worker_seconds_since_any_activity()))
                     except Exception:
                         pass
                     if idle >= limit:
