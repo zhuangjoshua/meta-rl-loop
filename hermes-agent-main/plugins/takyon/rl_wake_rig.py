@@ -81,12 +81,18 @@ class RigWorld:
         roas = max(0.05, self.rng.gauss(self.mapping.get(kind, 1.0), self.noise))
         value = round(spend_usd * roas, 2)
         purchases = max(1, int(round(value / 19.0)))  # ~$19 plan price per purchase
+        clicks = int(spend_usd * self.rng.uniform(15, 22))
+        # Outbound click-throughs are a subset of all clicks; conversion rate follows from
+        # purchases/link_clicks, same as the production aggregator computes it.
+        link_clicks = max(purchases, int(clicks * self.rng.uniform(0.55, 0.8)))
         return {
             "rows": 1,
             "spend_cents": int(round(spend_usd * 100)),
             "spend_usd": spend_usd,
             "impressions": int(spend_usd * self.rng.uniform(900, 1400)),
-            "clicks": int(spend_usd * self.rng.uniform(15, 22)),
+            "clicks": clicks,
+            "link_clicks": link_clicks,
+            "link_click_conversion_rate": round((purchases / link_clicks) * 100.0, 4),
             "purchase_count": purchases,
             "purchase_value_usd": value,
             "roas": round(value / spend_usd, 4),
@@ -432,6 +438,18 @@ def inject_outcomes(store: Any, slug: str, world: RigWorld) -> int:
         syncs.mkdir(parents=True, exist_ok=True)
         totals = world.sync_totals(str(plan.get("asset_kind") or "video"))
         (syncs / "rig-sync-1.json").write_text(json.dumps({"totals": totals}), encoding="utf-8")
+        # A measured outcome means the campaign ran its bounded course: settle it to
+        # completed — the same transition a production insights sync applies on an
+        # exhausted budget / passed end date — freeing the one-live-campaign slot the
+        # launch tool enforces, so the next wake can launch its successor.
+        from plugins.takyon import core as takyon_core
+        try:
+            takyon_core._update_ad_spend_policy(
+                slug, channel="meta", slug=campaign, status="completed",
+                metadata_patch={"rig_settled": True},
+            )
+        except Exception:
+            pass
         injected += 1
     return injected
 

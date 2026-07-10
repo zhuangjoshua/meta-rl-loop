@@ -47,6 +47,9 @@ def _dt_now() -> datetime:
 # ── Defaults / constants ──────────────────────────────────────────────────────────────────────────
 _DEFAULT_OBJECTIVE = "OUTCOME_TRAFFIC"
 _DEFAULT_CALL_TO_ACTION = "LEARN_MORE"
+# Ad-spend policy statuses that hold the per-business "one live meta campaign" slot.
+# "paused" and "completed" do NOT hold it: pausing or completion frees the slot.
+_LIVE_SLOT_STATUSES = ("reserved", "created_paused", "active")
 _DEFAULT_OPTIMIZATION_GOAL = "LINK_CLICKS"
 _DEFAULT_BILLING_EVENT = "IMPRESSIONS"
 _DEFAULT_BID_STRATEGY = "LOWEST_COST_WITHOUT_CAP"
@@ -422,6 +425,27 @@ def handle_business_meta_ad_launch(args: dict, **_: Any) -> str:
                 "receipt": receipt_rel,
                 "value": prior,
             })
+
+        # ── One live campaign at a time (operator policy, hard rail) ──
+        # At most ONE Meta campaign may hold live/spending status per business. Launching
+        # while another campaign is reserved/created_paused/active fails CLOSED here, before
+        # any credit reserve or provider call. Pausing the current campaign
+        # (business_meta_ad_control action='pause') or letting it complete (insights sync
+        # settles on exhausted budget / passed end date) frees the slot. Same-slug retries
+        # pass through — the receipt idempotency above already governs re-runs. A store
+        # failure here propagates (fail closed): if the slot cannot be verified, no launch.
+        live_holders = [
+            p for p in core._list_ad_spend_policies(business, statuses=list(_LIVE_SLOT_STATUSES))
+            if str(getattr(p, "channel", "")) == "meta" and str(getattr(p, "slug", "")) != slug
+        ]
+        if live_holders:
+            holder = live_holders[0]
+            raise core.TakyonError(
+                f"one live meta campaign at a time: campaign '{holder.slug}' currently holds the "
+                f"live slot (status {holder.status}). Pause it first with business_meta_ad_control "
+                "(action='pause') or let it complete (business_meta_ad_insights_sync settles it once "
+                "its budget is spent or its end date has passed), then relaunch."
+            )
 
         plan = {
             "idempotency_key": idempotency_key,
@@ -931,14 +955,42 @@ def handle_business_meta_ad_control(args: dict, **_: Any) -> str:
                 params={"status": "PAUSED"},
             )
             applied = {"status": "PAUSED"}
+            # Pausing frees the per-business "one live meta campaign" slot: mirror the pause
+            # onto the ad-spend policy row the launch guard reads. Best-effort — a launch
+            # that predates policy rows holds no slot to free.
+            try:
+                core._update_ad_spend_policy(
+                    business, channel="meta", slug=slug, status="paused",
+                    metadata_patch={"paused_at": core._now(), "paused_object_id": object_id},
+                )
+            except Exception:
+                pass
         else:  # activate
             _require_authorized_meta_object_id(store, business, slug, object_id)
+            # Activating re-claims the live slot, so it must respect the same
+            # one-live-campaign rail as launch: refuse while another campaign holds it.
+            other_live = [
+                p for p in core._list_ad_spend_policies(business, statuses=list(_LIVE_SLOT_STATUSES))
+                if str(getattr(p, "channel", "")) == "meta" and str(getattr(p, "slug", "")) != slug
+            ]
+            if other_live:
+                raise core.TakyonError(
+                    f"one live meta campaign at a time: campaign '{other_live[0].slug}' holds the "
+                    f"live slot (status {other_live[0].status}); pause it before activating '{slug}'."
+                )
             result = core.safebox.meta_graph_forward(
                 method="POST",
                 path=object_id,
                 params={"status": "ACTIVE"},
             )
             applied = {"status": "ACTIVE"}
+            try:
+                core._update_ad_spend_policy(
+                    business, channel="meta", slug=slug, status="active",
+                    metadata_patch={"activated_at": core._now(), "activated_object_id": object_id},
+                )
+            except Exception:
+                pass
 
         action = {
             **base_action,

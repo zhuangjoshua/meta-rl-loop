@@ -18193,6 +18193,21 @@ class TakyonStore:
                         "One entry per insights sync. ROAS = pixel-attributed purchase value / ad "
                         "spend (the sync receipt's own figure). Read this before launching the "
                         "next campaign and favor what measurably worked.\n\n"
+                        "Operator policy: judge the CURRENT campaign by its latest measured ROAS. "
+                        f"At or above {_ROAS_HISTORY_HOLD_THRESHOLD} -> HOLD: leave it running, sync "
+                        "and monitor, do not launch a new campaign. Below "
+                        f"{_ROAS_HISTORY_HOLD_THRESHOLD} -> launch ONE new campaign with a changed "
+                        "approach informed by the entries below; never repeat an approach that "
+                        "measurably failed. Entries with ROAS n/a are not evidence either way.\n\n"
+                        "Diagnose a below-threshold run with the funnel split: MANY link clicks but "
+                        "LOW link-click conversion -> the ad works, the LANDING SITE is the problem — "
+                        "KEEP the current campaign running (do not pause it, do not launch a new one) "
+                        "and route this wake's work to the product skill (takyon-product, which owns "
+                        "the landing/app surface) to fix the landing experience; the running ad then "
+                        "measures the fix on the next sync. Record the handoff in the wake note. "
+                        "FEW link clicks but healthy conversion -> the site works, "
+                        "the AD CREATIVE is the problem — change the creative approach (route upstream "
+                        "to the creative skills for a new asset if needed).\n\n"
                     )
                     history_path.parent.mkdir(parents=True, exist_ok=True)
                     with history_path.open("a", encoding="utf-8") as fh:
@@ -30330,6 +30345,13 @@ def _wake_ad_refresh_enabled() -> bool:
     return str(raw or "").strip().lower() not in {"0", "false", "no", "off"}
 
 
+# Operator hold/relaunch threshold rendered into the roas run-history header (the note the
+# channel skill reads): latest measured ROAS at/above this -> hold and monitor the current
+# campaign; below it -> launch one changed-approach successor. Policy lives HERE (the appended
+# per-business note), deliberately NOT in the shared SKILL.md.
+_ROAS_HISTORY_HOLD_THRESHOLD = 2.5
+
+
 def _compose_roas_history_entry(channel: str, campaign: str, token: str,
                                 plan: Mapping[str, Any], totals: Mapping[str, Any]) -> str:
     """One deterministic run-history line for metrics/roas/<channel>.md — the PROCESS (what
@@ -30358,9 +30380,12 @@ def _compose_roas_history_entry(channel: str, campaign: str, token: str,
 
     metric_bits: list[str] = []
     for key, label in (("impressions", "impressions"), ("clicks", "clicks"),
+                       ("link_clicks", "link clicks"),
                        ("purchase_count", "purchases")):
         if totals.get(key) is not None:
             metric_bits.append(f"{totals[key]} {label}")
+    if totals.get("link_click_conversion_rate") is not None:
+        metric_bits.append(f"link-click conversion {float(totals['link_click_conversion_rate']):.2f}%")
     if totals.get("purchase_value_usd") is not None:
         metric_bits.append(f"attributed revenue ${float(totals['purchase_value_usd']):.2f}")
     spend = totals.get("spend_usd")
@@ -32371,6 +32396,8 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "purchase_value_cents": 0,
         "purchase_value_usd": 0.0,
         "roas": None,
+        "link_clicks": 0,
+        "link_click_conversion_rate": None,
         "currency": None,
         "date_start": None,
         "date_stop": None,
@@ -32398,6 +32425,12 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         purchase_count = _meta_first_action_metric(row.get("actions"), _META_PURCHASE_ACTION_TYPES)
         if purchase_count is not None:
             totals["purchase_count"] += int(round(purchase_count))
+        # Outbound LINK clicks (`link_click` action) — distinct from `clicks`, which is Meta's
+        # all-clicks (reactions, profile taps, expands). Link clicks are the funnel's midpoint:
+        # ad -> click-through -> landing site -> purchase.
+        link_clicks = _meta_first_action_metric(row.get("actions"), ("link_click",))
+        if link_clicks is not None:
+            totals["link_clicks"] += int(round(link_clicks))
 
     totals["spend_usd"] = round(totals["spend_cents"] / 100.0, 2)
     totals["purchase_value_usd"] = round(totals["purchase_value_cents"] / 100.0, 2)
@@ -32409,6 +32442,12 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     # ROAS = Meta-attributed revenue / ad spend. Only meaningful once spend is non-zero.
     if totals["spend_cents"] > 0:
         totals["roas"] = round(totals["purchase_value_cents"] / totals["spend_cents"], 4)
+    # Conversion rate from link clicks (purchases per click-through, %): splits the funnel —
+    # plenty of link clicks + low rate points at the landing site; few link clicks + healthy
+    # rate points at the ad creative.
+    if totals["link_clicks"] > 0:
+        totals["link_click_conversion_rate"] = round(
+            (totals["purchase_count"] / totals["link_clicks"]) * 100.0, 4)
     return totals
 
 

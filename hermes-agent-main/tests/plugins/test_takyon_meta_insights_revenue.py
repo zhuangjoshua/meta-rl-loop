@@ -33,6 +33,30 @@ def test_purchase_value_and_roas_from_action_values():
     assert totals["roas"] == 4.0
 
 
+def test_link_clicks_and_conversion_rate_from_actions():
+    rows = [
+        _row(
+            spend="25.00",
+            action_values=[{"action_type": "purchase", "value": "100.00"}],
+            actions=[
+                {"action_type": "purchase", "value": "2"},
+                {"action_type": "link_click", "value": "40"},
+            ],
+        )
+    ]
+    totals = core._meta_aggregate_insights_rows(rows)
+    assert totals["link_clicks"] == 40
+    # conversion rate from link clicks = 2 / 40 = 5%
+    assert totals["link_click_conversion_rate"] == 5.0
+
+
+def test_no_link_clicks_leaves_conversion_rate_null():
+    rows = [_row(spend="10.00", action_values=[], actions=[{"action_type": "purchase", "value": "1"}])]
+    totals = core._meta_aggregate_insights_rows(rows)
+    assert totals["link_clicks"] == 0
+    assert totals["link_click_conversion_rate"] is None
+
+
 def test_purchase_synonyms_are_counted_once_not_summed():
     # Meta lists the SAME purchase under several synonym action_types with identical value;
     # the aggregator must take ONE, not sum them (which would triple-count).

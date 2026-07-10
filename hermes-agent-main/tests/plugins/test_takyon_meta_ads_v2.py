@@ -537,6 +537,13 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
             raise _FakeTakyonError(f"no ad spend policy for {business}/{channel}/{slug}")
         return policy
 
+    def _list_ad_spend_policies(business, *, statuses=None):
+        wanted = {str(s) for s in statuses} if statuses else None
+        return [
+            policy for (biz, _chan, _slug), policy in ad_spend_policies.items()
+            if biz == business and (wanted is None or str(policy.status) in wanted)
+        ]
+
     mod._creative_credit_int = _creative_credit_int
     mod._creative_credit_budget_snapshot = _creative_credit_budget_snapshot
     mod._ad_channel_live_media_spend_credits = _ad_channel_live_media_spend_credits
@@ -548,6 +555,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._upsert_ad_spend_policy = _upsert_ad_spend_policy
     mod._update_ad_spend_policy = _update_ad_spend_policy
     mod._load_ad_spend_policy = _load_ad_spend_policy
+    mod._list_ad_spend_policies = _list_ad_spend_policies
     mod._test_meta_channel_credits = 2000  # $20 of channel media budget by default
     mod._test_channel_spend = channel_spend
     mod._test_ad_spend_policies = ad_spend_policies
@@ -1143,6 +1151,73 @@ def test_launch_requires_idempotency_key(harness):
         if not decoded.get("success", True):
             raise harness.core.TakyonError(decoded.get("error", "missing idempotency_key"))
         raise AssertionError("expected missing idempotency_key to be rejected")
+
+
+# --------------------------------------------------------------------------- #
+# Launch: one live campaign at a time (hard rail).
+# --------------------------------------------------------------------------- #
+def _launch_image(harness, slug, key):
+    harness.write_business_file("clipbook", f"product/static-ads/{slug}/{slug}.png", b"png-bytes")
+    return _result(harness.module.handle_business_meta_ad_launch(_launch_args(
+        asset_kind="image", slug=slug, idempotency_key=key,
+        asset_path=f"product/static-ads/{slug}/{slug}.png",
+    )))
+
+
+def test_launch_blocked_while_another_campaign_holds_live_slot(harness):
+    harness.set_business_mode("clipbook", "live")
+    first = _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")
+    assert first["success"] is True  # holds the slot as created_paused
+
+    second = _launch_image(harness, "demo-meta-2", "clipbook-meta-demo-v2")
+    assert second["success"] is False
+    assert "one live meta campaign at a time" in second["error"]
+    assert "demo-meta" in second["error"]
+    # Fails closed BEFORE any provider work for the second campaign: only the
+    # first campaign's object creates happened.
+    assert _mcp_tools(harness).count("ads_create_campaign") == 1
+
+
+def test_launch_same_slug_retry_not_blocked_by_own_slot(harness):
+    harness.set_business_mode("clipbook", "live")
+    first = _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")
+    assert first["success"] is True
+
+    retry = _result(harness.module.handle_business_meta_ad_launch(_launch_args(
+        asset_kind="image", slug="demo-meta", idempotency_key="clipbook-meta-demo-v1",
+        asset_path="product/static-ads/demo-meta/demo-meta.png",
+    )))
+    assert retry["success"] is True
+    assert retry.get("idempotent") is True
+
+
+def test_pause_frees_the_live_slot_for_the_next_launch(harness):
+    harness.set_business_mode("clipbook", "live")
+    first = _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")
+    assert first["success"] is True
+
+    paused = _result(harness.module.handle_business_meta_ad_control(
+        _control_args(operation="pause", object_id="campaign-1")))
+    assert paused["success"] is True
+
+    second = _launch_image(harness, "demo-meta-2", "clipbook-meta-demo-v2")
+    assert second["success"] is True
+    assert _mcp_tools(harness).count("ads_create_campaign") == 2
+
+
+def test_activate_blocked_while_another_campaign_holds_live_slot(harness):
+    harness.set_business_mode("clipbook", "live")
+    assert _launch_image(harness, "demo-meta", "clipbook-meta-demo-v1")["success"] is True
+    assert _result(harness.module.handle_business_meta_ad_control(
+        _control_args(operation="pause", object_id="campaign-1")))["success"] is True
+    assert _launch_image(harness, "demo-meta-2", "clipbook-meta-demo-v2")["success"] is True
+
+    # demo-meta-2 now holds the slot; re-activating demo-meta must refuse.
+    reactivate = _result(harness.module.handle_business_meta_ad_control(
+        _control_args(operation="activate", object_id="campaign-1", slug="demo-meta",
+                      idempotency_key="clipbook-meta-control-v2")))
+    assert reactivate["success"] is False
+    assert "one live meta campaign at a time" in reactivate["error"]
 
 
 # --------------------------------------------------------------------------- #
