@@ -7684,16 +7684,29 @@ def _notify_claude_worker_activity(line: str) -> None:
 # — no context to lose — and worker.py's inactivity loop takes min(idle, this clock).
 _CLAUDE_WORKER_BUSINESS_ACTIVITY: dict[str, float] = {}
 _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK = threading.Lock()
+# Un-keyed companion: the last time ANY Claude-worker stderr event was seen in this process, whatever
+# the business. Both operator + subuser worker planes run claude-agent-task at concurrency 1
+# (exclusive pool), so at any instant at most ONE claude-agent-task is streaming — "any worker
+# activity" therefore unambiguously means "the current turn's worker." This is the ROBUST keepalive:
+# it needs NO key match between the stderr reader's `business` and the wake watchdog's turn slug, so a
+# subtle slug/business divergence (or a run where the business-keyed lookup returned +inf) can no
+# longer starve the watchdog while a worker streams. It is strictly MORE lenient than the keyed clock
+# — the correct direction for a bug whose whole failure mode is over-eager killing of a healthy turn
+# (test-2, sipstreak, proofline0710, steadyflow0710). NOTE: only valid while worker concurrency == 1;
+# if a plane ever runs >1 concurrent claude-agent-task per process, gate this on the active count.
+_CLAUDE_WORKER_ANY_ACTIVITY: list[float] = [0.0]  # 1-slot mutable cell (no lock needed for a float write)
 
 
 def _touch_claude_worker_business_activity(business: str) -> None:
+    now = time.monotonic()
+    _CLAUDE_WORKER_ANY_ACTIVITY[0] = now  # un-keyed companion (concurrency-1 keepalive)
     slug = str(business or "").strip()
     if not slug:
         return
     with _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
         if len(_CLAUDE_WORKER_BUSINESS_ACTIVITY) > 512 and slug not in _CLAUDE_WORKER_BUSINESS_ACTIVITY:
             _CLAUDE_WORKER_BUSINESS_ACTIVITY.clear()
-        _CLAUDE_WORKER_BUSINESS_ACTIVITY[slug] = time.monotonic()
+        _CLAUDE_WORKER_BUSINESS_ACTIVITY[slug] = now
 
 
 def claude_worker_seconds_since_activity(business: str) -> float:
@@ -7707,6 +7720,17 @@ def claude_worker_seconds_since_activity(business: str) -> float:
     with _CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
         stamp = _CLAUDE_WORKER_BUSINESS_ACTIVITY.get(slug)
     if stamp is None:
+        return float("inf")
+    return max(0.0, time.monotonic() - stamp)
+
+
+def claude_worker_seconds_since_any_activity() -> float:
+    """Seconds since ANY Claude-worker stderr event in this process (business-agnostic).
+
+    Returns +inf before the first worker event. Valid as a turn keepalive only under worker
+    concurrency 1 (both planes) — see the note on ``_CLAUDE_WORKER_ANY_ACTIVITY``."""
+    stamp = _CLAUDE_WORKER_ANY_ACTIVITY[0]
+    if not stamp:
         return float("inf")
     return max(0.0, time.monotonic() - stamp)
 
