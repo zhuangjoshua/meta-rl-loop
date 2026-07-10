@@ -11,7 +11,8 @@ from pathlib import Path
 import psycopg
 
 from plugins.takyon import core
-from plugins.takyon.operator_access import _read_access_database_url
+from plugins.takyon.operator_access import OperatorAccessError, _read_access_database_url
+from plugins.takyon.runtime_app import resolve_database_url
 
 
 def main() -> int:
@@ -19,6 +20,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--company-base-domain")
     args = parser.parse_args()
+    core.load_takyon_env()
     if args.company_base_domain:
         os.environ["PUBLIC_COMPANY_BASE_DOMAIN"] = core._company_base_domain(
             args.company_base_domain
@@ -27,6 +29,13 @@ def main() -> int:
     if product_root is None:
         raise SystemExit("product site root is unavailable")
 
+    try:
+        database_url = _read_access_database_url()
+    except OperatorAccessError:
+        if str(os.getenv("TAKYON_ENV") or "").strip().lower() != "dev":
+            raise
+        database_url = resolve_database_url(plane="migration")
+
     counts = {
         "eligible": 0,
         "compiled": 0,
@@ -34,7 +43,7 @@ def main() -> int:
         "missing_build": 0,
         "unchanged": 0,
     }
-    with psycopg.connect(_read_access_database_url(), autocommit=True) as conn:
+    with psycopg.connect(database_url, autocommit=True) as conn:
         current_user, session_user = conn.execute(
             "select current_user, session_user"
         ).fetchone()
