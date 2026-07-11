@@ -36993,15 +36993,18 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
                 if sdk_result.get("success"):
-                    summary_text = _truncate_text(str(sdk_result.get("summary") or "").strip(), 280)
-                    if summary_text:
-                        _record_claude_agent_runtime_event(
-                            business=business,
-                            workspace_rel=workspace_rel,
-                            status="completed",
-                            detail=summary_text,
-                            line=summary_text,
-                        )
+                    # The SDK summary often contains the worker's internal design deliberation
+                    # ("Now I have full context... Reading this as... Dial: variance=..."). Preserve
+                    # it in the tool result for the CEO, but never replay it into the customer-facing
+                    # runtime event stream. Completion gets one stable outcome line.
+                    completed_line = f"Claude worker completed for {workspace_rel}."
+                    _record_claude_agent_runtime_event(
+                        business=business,
+                        workspace_rel=workspace_rel,
+                        status="completed",
+                        detail=completed_line,
+                        line=completed_line,
+                    )
                 else:
                     error_text = _truncate_text(str(sdk_result.get("error") or stderr or "Claude worker failed.").strip(), 280)
                     if error_text:

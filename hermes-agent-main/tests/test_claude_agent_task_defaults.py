@@ -145,11 +145,21 @@ class _FakeStore:
 def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_site_work(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     captured: dict[str, object] = {}
+    runtime_events: list[dict[str, object]] = []
 
     def fake_process(*, payload: dict[str, object], **kwargs):
         captured["payload"] = payload
         Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
-        return types.SimpleNamespace(returncode=0, stdout=json.dumps({"success": True, "summary": "ok"}), stderr="")
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "success": True,
+                    "summary": "Now I have full context. Reading this as: an editorial landing. Dial: variance=5.",
+                }
+            ),
+            stderr="",
+        )
 
     monkeypatch.setattr(takyon_core, "_store", lambda: _FakeStore(tmp_path))
     monkeypatch.setattr(takyon_core, "_session_business_slug", lambda: "latexflow")
@@ -164,7 +174,11 @@ def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_si
         "_finalize_operator_task_budget",
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
     )
-    monkeypatch.setattr(takyon_core, "_record_claude_agent_runtime_event", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_record_claude_agent_runtime_event",
+        lambda **kwargs: runtime_events.append(kwargs),
+    )
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
     monkeypatch.setattr(
         takyon_core,
@@ -188,6 +202,9 @@ def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_si
     payload = captured["payload"]
     assert result["success"] is True
     assert payload["maxTurns"] == 60
+    completed = [event for event in runtime_events if event.get("status") == "completed"]
+    assert completed[-1]["detail"] == "Claude worker completed for product/site."
+    assert not any("Reading this as" in str(event) for event in runtime_events)
     assert payload["timeoutMs"] == 1200000
     assert payload["maxBudgetUsd"] == 8.0
     assert payload["effort"] == "medium"

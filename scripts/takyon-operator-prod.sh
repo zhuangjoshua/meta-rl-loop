@@ -872,6 +872,11 @@ dashboard_tunnel_healthy() {
   curl --silent --fail --max-time 2 "$LOCAL_DASHBOARD_URL/healthz" >/dev/null 2>&1
 }
 
+local_tcp_port_listening() {
+  local port="$1"
+  nc -z 127.0.0.1 "$port" >/dev/null 2>&1
+}
+
 tunnel_healthy() {
   safebox_tunnel_healthy && dashboard_tunnel_healthy
 }
@@ -978,14 +983,22 @@ monitor_console_tunnels() {
   while true; do
     sleep "$CONSOLE_TUNNEL_MONITOR_SECONDS"
     if ! safebox_tunnel_healthy; then
-      stop_pid_file_process "$safebox_pid_file"
-      echo "Safebox tunnel dropped; restarting..."
-      start_managed_tunnel "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" "$safebox_log" "$safebox_pid_file" || true
+      # A shared tunnel owned by another operator shell can keep the local listener alive while the
+      # remote service briefly restarts. Do not race it by binding the same port; the next monitor
+      # tick will health-check the existing listener again.
+      if ! local_tcp_port_listening "$LOCAL_SAFEBOX_PORT"; then
+        stop_pid_file_process "$safebox_pid_file"
+        echo "Safebox tunnel dropped; restarting..."
+        start_managed_tunnel "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" "$safebox_log" "$safebox_pid_file" || true
+      fi
     fi
     if [[ "$TARGET" == "dev" ]]; then
       continue
     fi
     if ! dashboard_tunnel_healthy; then
+      if local_tcp_port_listening "$LOCAL_DASHBOARD_PORT"; then
+        continue
+      fi
       stop_pid_file_process "$dashboard_pid_file"
       echo "Operator dashboard tunnel dropped; restarting..."
       start_managed_tunnel "Operator dashboard" "dashboard-tunnel" "$LOCAL_DASHBOARD_URL/healthz" "$dashboard_log" "$dashboard_pid_file" || true

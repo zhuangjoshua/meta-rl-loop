@@ -231,6 +231,50 @@ def test_runtime_progress_records_ceo_stream_deltas(monkeypatch):
     assert recorded[-1]["extra"]["stream"] == "message_flush"
 
 
+def test_runtime_progress_buffers_one_assistant_message_until_boundary(monkeypatch):
+    recorded = []
+
+    monkeypatch.setattr(
+        worker,
+        "_record_runtime_event",
+        lambda slug, **kwargs: recorded.append({"slug": slug, **kwargs}),
+    )
+    progress = worker._RuntimeProgress(
+        slug="demo", kind="ceo_bootstrap", command="/create demo"
+    )
+
+    progress.stream_delta("Status for demo: ")
+    progress.stream_delta("the landing is ready.")
+    assert recorded == []
+
+    progress.finish_stream()
+    deltas = [
+        row for row in recorded if row.get("extra", {}).get("stream") == "message_delta"
+    ]
+    assert [row["line"] for row in deltas] == [
+        "Status for demo: the landing is ready."
+    ]
+    assert recorded[-1]["extra"]["stream"] == "message_flush"
+
+
+def test_runtime_progress_suppresses_transport_heartbeat_chatter(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(
+        worker,
+        "_record_runtime_event",
+        lambda slug, **kwargs: recorded.append({"slug": slug, **kwargs}),
+    )
+    progress = worker._RuntimeProgress(
+        slug="demo", kind="ceo_bootstrap", command="/create demo"
+    )
+
+    progress.activity("waiting for non-streaming API response")
+    progress.activity("waiting for non-streaming response (31s elapsed)")
+    progress.activity("receiving stream response")
+
+    assert recorded == []
+
+
 def test_runtime_progress_suppresses_reasoning_summary(monkeypatch):
     recorded = []
 

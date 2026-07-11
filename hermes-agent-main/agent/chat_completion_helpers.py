@@ -193,16 +193,27 @@ def interruptible_api_call(agent, api_kwargs: dict):
         # Stale-call detector: kill the connection if no response
         # arrives within the configured timeout.
         _elapsed = time.time() - _call_start
-        if _elapsed > _stale_timeout:
+        # Responses API calls stream internally inside this wrapper. A live event resets the
+        # request-local inactivity clock; only a genuinely silent stream may be aborted. Using wall
+        # time here started a retry at 300s while the original daemon thread continued streaming,
+        # interleaving two assistant answers and duplicating model spend.
+        _stale_elapsed = _elapsed
+        if agent.api_mode == "codex_responses":
+            try:
+                _last_event = float(getattr(agent, "_codex_stream_last_event_ts", _call_start))
+                _stale_elapsed = max(0.0, time.time() - _last_event)
+            except (TypeError, ValueError):
+                _stale_elapsed = _elapsed
+        if _stale_elapsed > _stale_timeout:
             _est_ctx = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
             logger.warning(
                 "Non-streaming API call stale for %.0fs (threshold %.0fs). "
                 "model=%s context=~%s tokens. Killing connection.",
-                _elapsed, _stale_timeout,
+                _stale_elapsed, _stale_timeout,
                 api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
             )
             agent._emit_status(
-                f"⚠️ No response from provider for {int(_elapsed)}s "
+                f"⚠️ No response from provider for {int(_stale_elapsed)}s "
                 f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
                 f"Aborting call."
             )
@@ -215,13 +226,13 @@ def interruptible_api_call(agent, api_kwargs: dict):
             except Exception:
                 pass
             agent._touch_activity(
-                f"stale non-streaming call killed after {int(_elapsed)}s"
+                f"stale non-streaming call killed after {int(_stale_elapsed)}s"
             )
             # Wait briefly for the thread to notice the closed connection.
             t.join(timeout=2.0)
             if result["error"] is None and result["response"] is None:
                 result["error"] = TimeoutError(
-                    f"Non-streaming API call timed out after {int(_elapsed)}s "
+                    f"Non-streaming API call timed out after {int(_stale_elapsed)}s "
                     f"with no response (threshold: {int(_stale_timeout)}s)"
                 )
             break

@@ -187,6 +187,11 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     # returns empty output (e.g. chatgpt.com backend-api sends
     # response.incomplete instead of response.completed).
     agent._codex_streamed_text_parts: list = []
+    # ``interruptible_api_call`` wraps Responses streaming in a worker thread. Its ordinary
+    # non-streaming stale guard must measure inactivity, not total wall time, or a long but active
+    # Responses stream is killed at 300s and retried while the original thread is still delivering
+    # deltas. That produced two interleaved CEO answers in the production CLI.
+    agent._codex_stream_last_event_ts = time.time()
     for attempt in range(max_stream_retries + 1):
         if agent._interrupt_requested:
             raise InterruptedError("Agent interrupted before Codex stream retry")
@@ -194,6 +199,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         try:
             with active_client.responses.stream(**api_kwargs) as stream:
                 for event in stream:
+                    agent._codex_stream_last_event_ts = time.time()
                     agent._touch_activity("receiving stream response")
                     if agent._interrupt_requested:
                         break

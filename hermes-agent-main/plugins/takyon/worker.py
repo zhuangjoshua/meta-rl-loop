@@ -974,9 +974,11 @@ class _RuntimeProgress:
         self._touch_activity()
         self._stream_open = True
         self._stream_buffer += text
-        now = time.monotonic()
-        if "\n" in self._stream_buffer or len(self._stream_buffer) >= 80 or now - self._stream_last_emit >= 0.35:
-            self._flush_stream_buffer()
+        # CEO model deltas are transport detail, not durable event boundaries. Keep the current
+        # assistant message buffered until a tool starts or the response completes; otherwise a
+        # sparse upstream stream becomes dozens of broken chat fragments interleaved with transport
+        # heartbeats. The overall /create stream remains live through curated updates and tool/task
+        # milestones, while each assistant message is emitted exactly once and intact.
 
     def _flush_stream_buffer(self) -> None:
         if not self._stream_buffer:
@@ -1042,6 +1044,13 @@ class _RuntimeProgress:
 
     def activity(self, desc: str) -> None:
         text = str(desc or "").strip()
+        if (
+            text == "receiving stream response"
+            or text == "waiting for non-streaming API response"
+            or text.startswith("waiting for non-streaming response (")
+        ):
+            self._touch_activity()
+            return
         if not text or text == self._last_activity:
             return
         self._touch_activity()
