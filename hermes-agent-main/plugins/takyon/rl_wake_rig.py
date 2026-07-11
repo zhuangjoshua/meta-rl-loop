@@ -363,15 +363,20 @@ def seed_business(dsn: str, store: Any, slug: str) -> None:
     from plugins.takyon.control_plane import provision_user_on_first_login
 
     goal = (
-        "Grow through paid Meta ads ONLY. Each wake: launch exactly ONE new meta ad campaign "
-        "with business_meta_ad_launch (objective Traffic, mode paused, link_url "
-        "https://demo.localtest.me, daily_budget_usd 10). Choose the creative kind "
-        "deliberately: asset_kind 'video' (asset_path product/ugc-ads/shared/ad.mp4, "
-        "thumbnail_path product/ugc-ads/shared/thumbnail.png) or "
-        "asset_kind 'image' (asset_path product/static-ads/shared/hero.png) — read "
-        "metrics/roas/meta.md first and pick the kind with the better measured ROAS. "
-        "Use a fresh campaign slug each time (rig-c1, rig-c2, ...). Do not do research, "
-        "posting, SEO, or product work."
+        "Grow through paid Meta ads ONLY. Campaigns run for multiple days, so each wake is a "
+        "CHECK-IN on the live campaign, not automatically a launch. Every wake: read "
+        "metrics/roas/meta.md FIRST — its header is the operator policy, follow it exactly. "
+        "Hold a live campaign whose latest measured ROAS is at or above the policy threshold "
+        "(no new launch). Cut a live campaign that is measurably below it: pause it with "
+        "business_meta_ad_control (operation 'pause', the receipt's campaign_id), then launch "
+        "exactly ONE changed-approach replacement with business_meta_ad_launch (objective "
+        "Traffic, mode paused, link_url https://demo.localtest.me, daily_budget_usd 10). "
+        "When NO campaign is live (the last one completed), launch ONE new campaign informed "
+        "by the history. Creative kinds: asset_kind 'video' (asset_path "
+        "product/ugc-ads/shared/ad.mp4, thumbnail_path product/ugc-ads/shared/thumbnail.png) "
+        "or asset_kind 'image' (asset_path product/static-ads/shared/hero.png). Use a fresh "
+        "campaign slug each time (rig-c1, rig-c2, ...). Only one campaign may be live at a "
+        "time. Do not do research, posting, SEO, or product work."
     )
     with psycopg.connect(dsn, autocommit=True) as conn:
         # first-login provisioning creates the user AND its billing account (grant_allowance
@@ -426,58 +431,89 @@ def launched_campaigns(store: Any, slug: str) -> dict[str, dict[str, Any]]:
     return out
 
 
-def inject_outcomes(store: Any, slug: str, world: RigWorld) -> int:
-    """For every launched campaign that has no sync receipt yet, write ONE — totals drawn
-    from the sealed truth for the creative kind the plan actually used. This is the single
-    deliberately-fake seam: 'what did the campaign return'."""
+def inject_outcomes(store: Any, slug: str, world: RigWorld,
+                    tracker: dict[str, dict[str, Any]], campaign_wakes: int) -> int:
+    """PRODUCTION-RHYTHM injection: a campaign's schedule spans ``campaign_wakes`` wakes, and
+    each wake every LIVE campaign receives one period's worth of delivery. The sync receipt
+    carries CUMULATIVE campaign totals (the same semantics a real insights sync has), so the
+    run-history note shows an evolving mid-flight ROAS the CEO must judge on partial data.
+    Settlement to ``completed`` happens ONLY when the schedule ends (period == campaign_wakes)
+    — the same budget-exhausted transition production applies. A campaign the CEO paused
+    mid-flight stops delivering and stays paused: cutting a loser early really does stop the
+    (fake) spend. ``campaign_wakes=1`` reproduces the level-3 compressed behavior."""
+    from plugins.takyon import core as takyon_core
+
     injected = 0
     for campaign, plan in launched_campaigns(store, slug).items():
-        syncs = store._resolve_business_file(slug, f"metrics/meta-ads/{campaign}/syncs", sync=False)
-        if syncs.is_dir() and any(syncs.glob("*.json")):
-            continue
-        syncs.mkdir(parents=True, exist_ok=True)
-        totals = world.sync_totals(str(plan.get("asset_kind") or "video"))
-        (syncs / "rig-sync-1.json").write_text(json.dumps({"totals": totals}), encoding="utf-8")
-        # A measured outcome means the campaign ran its bounded course: settle it to
-        # completed — the same transition a production insights sync applies on an
-        # exhausted budget / passed end date — freeing the one-live-campaign slot the
-        # launch tool enforces, so the next wake can launch its successor.
-        from plugins.takyon import core as takyon_core
+        state = tracker.setdefault(campaign, {
+            "kind": str(plan.get("asset_kind") or "video"), "period": 0,
+            "spend_usd": 0.0, "revenue_usd": 0.0, "impressions": 0,
+            "clicks": 0, "link_clicks": 0, "purchases": 0,
+        })
+        if state["period"] >= campaign_wakes:
+            continue  # schedule already finished and settled
         try:
-            takyon_core._update_ad_spend_policy(
-                slug, channel="meta", slug=campaign, status="completed",
-                metadata_patch={"rig_settled": True},
-            )
+            policy = takyon_core._load_ad_spend_policy(slug, channel="meta", slug=campaign)
+            policy_status = str(getattr(policy, "status", "") or "")
         except Exception:
-            pass
+            policy_status = ""
+        if policy_status == "paused":
+            # The CEO cut this campaign mid-flight: no further delivery, no settle — the
+            # unspent remainder of its schedule is money the cut saved.
+            state.setdefault("cut_at_period", state["period"])
+            continue
+        state["period"] += 1
+        period_draw = world.sync_totals(state["kind"])
+        state["spend_usd"] = round(state["spend_usd"] + period_draw["spend_usd"], 2)
+        state["revenue_usd"] = round(state["revenue_usd"] + period_draw["purchase_value_usd"], 2)
+        for key in ("impressions", "clicks", "link_clicks", "purchases"):
+            state[key] += int(period_draw[key if key != "purchases" else "purchase_count"])
+        totals = {
+            "rows": state["period"],
+            "spend_cents": int(round(state["spend_usd"] * 100)),
+            "spend_usd": state["spend_usd"],
+            "impressions": state["impressions"],
+            "clicks": state["clicks"],
+            "link_clicks": state["link_clicks"],
+            "link_click_conversion_rate": (
+                round((state["purchases"] / state["link_clicks"]) * 100.0, 4)
+                if state["link_clicks"] else None),
+            "purchase_count": state["purchases"],
+            "purchase_value_usd": state["revenue_usd"],
+            "roas": (round(state["revenue_usd"] / state["spend_usd"], 4)
+                     if state["spend_usd"] else None),
+        }
+        syncs = store._resolve_business_file(slug, f"metrics/meta-ads/{campaign}/syncs", sync=False)
+        syncs.mkdir(parents=True, exist_ok=True)
+        (syncs / f"rig-sync-{state['period']}.json").write_text(
+            json.dumps({"totals": totals}), encoding="utf-8")
+        if state["period"] >= campaign_wakes:
+            try:
+                takyon_core._update_ad_spend_policy(
+                    slug, channel="meta", slug=campaign, status="completed",
+                    metadata_patch={"rig_settled": True},
+                )
+            except Exception:
+                pass
         injected += 1
     return injected
 
 
 _HIST_KIND_RE = re.compile(r"(video|image) ad.*?ROAS ([0-9]+(?:\.[0-9]+)?)")
+_HIST_ENTRY_RE = re.compile(
+    r"campaign (rig-c\d+) \|.*?(video|image) ad.*?ROAS ([0-9]+(?:\.[0-9]+)?)")
+
+_HOLD_THRESHOLD = 2.5  # mirrors core._ROAS_HISTORY_HOLD_THRESHOLD (the note-header policy)
 
 
-def fake_ceo_wake(store: Any, slug: str, wake_idx: int) -> None:
-    """Zero-token stand-in for the agent turn: reads the SAME run history the real skill is
-    instructed to read, picks the creative kind with the better average measured ROAS
-    (untried kinds first), and calls the REAL launch handler end to end."""
+def _rig_launch(store: Any, slug: str, kind: str, campaign: str, wake_idx: int) -> None:
     from plugins.takyon import meta_ads_v2
 
-    history_path = store._resolve_business_file(slug, "metrics/roas/meta.md", sync=False)
-    text = history_path.read_text(encoding="utf-8") if history_path.exists() else ""
-    samples: dict[str, list[float]] = {}
-    for match in _HIST_KIND_RE.finditer(text):
-        samples.setdefault(match.group(1), []).append(float(match.group(2)))
-    unseen = [k for k in KINDS if k not in samples]
-    if unseen:
-        kind = unseen[wake_idx % len(unseen)]
-    else:
-        kind = max(KINDS, key=lambda k: sum(samples[k]) / len(samples[k]))
     asset = ("product/ugc-ads/shared/ad.mp4" if kind == "video"
              else "product/static-ads/shared/hero.png")
     raw = meta_ads_v2.handle_business_meta_ad_launch({
         "business": slug,
-        "slug": f"rig-c{wake_idx + 1}",
+        "slug": campaign,
         "asset_kind": kind,
         "asset_path": asset,
         **({"thumbnail_path": "product/ugc-ads/shared/thumbnail.png"} if kind == "video" else {}),
@@ -487,11 +523,70 @@ def fake_ceo_wake(store: Any, slug: str, wake_idx: int) -> None:
         "objective": "OUTCOME_TRAFFIC",
         "mode": "paused",
         "daily_budget_usd": 10,
-        "idempotency_key": f"rig-{slug}-w{wake_idx + 1}",
+        "idempotency_key": f"rig-{slug}-{campaign}",
     })
     payload = json.loads(raw)
     if not payload.get("success"):
         raise RuntimeError(f"fake-ceo launch failed: {payload.get('error')}")
+
+
+def fake_ceo_wake(store: Any, slug: str, wake_idx: int) -> None:
+    """Zero-token stand-in for the agent turn, following the SAME operator policy the note
+    header states, at production rhythm:
+    - live campaign with latest cumulative ROAS >= threshold (or no reading yet) -> HOLD;
+    - live campaign measurably below threshold -> CUT (pause via the REAL control tool,
+      which frees the one-live-campaign slot) and launch ONE changed-approach successor;
+    - no live campaign -> launch: a measured winner's kind if one exists, else an untried
+      kind, else the best measured mean."""
+    from plugins.takyon import core as takyon_core, meta_ads_v2
+
+    history_path = store._resolve_business_file(slug, "metrics/roas/meta.md", sync=False)
+    text = history_path.read_text(encoding="utf-8") if history_path.exists() else ""
+    latest_by_campaign: dict[str, tuple[str, float]] = {}
+    samples: dict[str, list[float]] = {}
+    for match in _HIST_ENTRY_RE.finditer(text):
+        latest_by_campaign[match.group(1)] = (match.group(2), float(match.group(3)))
+    for kind_name, roas in latest_by_campaign.values():
+        samples.setdefault(kind_name, []).append(roas)
+
+    live = [p for p in takyon_core._list_ad_spend_policies(
+                slug, statuses=["reserved", "created_paused", "active"])
+            if str(getattr(p, "channel", "")) == "meta"]
+    next_campaign = f"rig-c{len(launched_campaigns(store, slug)) + 1}"
+
+    if live:
+        current = str(live[0].slug)
+        reading = latest_by_campaign.get(current)
+        if reading is None or reading[1] >= _HOLD_THRESHOLD:
+            return  # HOLD: performing (or no measured evidence yet) — leave it running
+        # CUT: pause through the real control tool using the receipt's real object id.
+        receipt_path = store._resolve_business_file(
+            slug, f"distribution/meta-ads/{current}/receipt.json", sync=False)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        object_id = str(((receipt.get("ids") or {}).get("campaign_id")) or "")
+        raw = meta_ads_v2.handle_business_meta_ad_control({
+            "business": slug, "slug": current, "operation": "pause",
+            "object_id": object_id, "idempotency_key": f"rig-cut-{current}",
+        })
+        if not json.loads(raw).get("success"):
+            raise RuntimeError(f"fake-ceo cut failed: {raw}")
+        bad_kind = reading[0]
+        kind = next(k for k in KINDS if k != bad_kind)
+        _rig_launch(store, slug, kind, next_campaign, wake_idx)
+        return
+
+    # No live campaign: continue a measured winner if one exists; otherwise explore an
+    # untried kind; otherwise take the best measured mean.
+    means = {k: sum(v) / len(v) for k, v in samples.items()}
+    winners = [k for k, m in means.items() if m >= _HOLD_THRESHOLD]
+    untried = [k for k in KINDS if k not in samples]
+    if winners:
+        kind = max(winners, key=lambda k: means[k])
+    elif untried:
+        kind = untried[wake_idx % len(untried)]
+    else:
+        kind = max(means, key=lambda k: means[k])
+    _rig_launch(store, slug, kind, next_campaign, wake_idx)
 
 
 def real_ceo_wake(slug: str, wake_idx: int, *, max_turns: int) -> None:
@@ -508,13 +603,46 @@ def real_ceo_wake(slug: str, wake_idx: int, *, max_turns: int) -> None:
 
 # ------------------------------------------------------------------ scoring + report
 
-def score(store: Any, slug: str, world: RigWorld, wakes: int) -> dict[str, Any]:
+def score(store: Any, slug: str, world: RigWorld, wakes: int,
+          tracker: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    from plugins.takyon import core as takyon_core
+
     plans = launched_campaigns(store, slug)
     ordered = [plan for _name, plan in sorted(plans.items())]
     kinds = [str(p.get("asset_kind") or "?") for p in ordered]
     best = world.best_kind()
     late = kinds[len(kinds) // 2:]
     history_path = store._resolve_business_file(slug, "metrics/roas/meta.md", sync=False)
+
+    # Mid-flight behavior (production rhythm): per-campaign timelines + the two behaviors
+    # the choice metric can't see — did winners get HELD to completion, did losers get CUT
+    # before burning their whole schedule?
+    timelines: list[dict[str, Any]] = []
+    winners_cut_early = 0
+    losers_cut_early = 0
+    losers_run_full = 0
+    for campaign in sorted(plans):
+        state = (tracker or {}).get(campaign, {})
+        try:
+            policy = takyon_core._load_ad_spend_policy(slug, channel="meta", slug=campaign)
+            status = str(getattr(policy, "status", "") or "")
+        except Exception:
+            status = "?"
+        kind = str(plans[campaign].get("asset_kind") or "?")
+        spend = float(state.get("spend_usd") or 0.0)
+        roas = round(float(state.get("revenue_usd") or 0.0) / spend, 2) if spend else None
+        timelines.append({
+            "campaign": campaign, "kind": kind, "status": status,
+            "periods_delivered": int(state.get("period") or 0),
+            "cumulative_roas": roas,
+        })
+        if status == "paused":
+            if kind == best:
+                winners_cut_early += 1
+            else:
+                losers_cut_early += 1
+        elif status == "completed" and kind != best:
+            losers_run_full += 1
     return {
         "wakes": wakes,
         "campaigns_launched": len(kinds),
@@ -523,15 +651,20 @@ def score(store: Any, slug: str, world: RigWorld, wakes: int) -> dict[str, Any]:
         "true_best_kind": best,
         "late_share_on_best": (round(sum(1 for k in late if k == best) / len(late), 4)
                                if late else None),
+        "campaign_timelines": timelines,
+        "winners_cut_early": winners_cut_early,   # want 0: winners are HELD, never paused
+        "losers_cut_early": losers_cut_early,     # want >0 when a loser flew: cut, not ridden
+        "losers_run_full_schedule": losers_run_full,  # each one = budget a timely cut would have saved
         "history_file": str(history_path),
     }
 
 
 def run(dsn: str, *, wakes: int, seed: int, fake_ceo: bool, model: str, provider: str,
-        transport: str, max_turns: int) -> dict[str, Any]:
+        transport: str, max_turns: int, campaign_wakes: int = 3) -> dict[str, Any]:
     home = Path(tempfile.mkdtemp(prefix="rl-wake-rig-home-"))
     slug = f"rig{uuid.uuid4().hex[:8]}"
     world = RigWorld(seed)
+    tracker: dict[str, dict[str, Any]] = {}
     with rig_environment(dsn, home, model=model, provider=provider, transport=transport) as ctx:
         from plugins.takyon import core as takyon_core
 
@@ -540,22 +673,26 @@ def run(dsn: str, *, wakes: int, seed: int, fake_ceo: bool, model: str, provider
         store = takyon_core.TakyonStore()
         seed_business(dsn, store, slug)
         for i in range(wakes):
-            # outcomes for last wake's launches land first (as the pre-wake insights
-            # refresh would have), then the wake runs: the REAL pre-wake assembler turns
-            # them into run-history entries the skill reads this wake. The operator
-            # (played by the rig) also allocates this period's channel budget.
+            # PRODUCTION RHYTHM: each wake, every live campaign first receives one period's
+            # partial delivery (as the pre-wake insights refresh would have pulled), then
+            # the wake runs — the REAL pre-wake assembler turns the new partial receipts
+            # into run-history entries the CEO reads THIS wake and must judge mid-flight.
+            # The operator (played by the rig) also allocates this period's channel budget.
             set_meta_channel_budget(store, slug, 40_000 * (i + 1))
-            inject_outcomes(store, slug, world)
+            inject_outcomes(store, slug, world, tracker, campaign_wakes)
             if fake_ceo:
                 store.assemble_roas_run_history(slug)  # the worker hook, invoked directly
                 fake_ceo_wake(store, slug, i)
             else:
                 real_ceo_wake(slug, i, max_turns=max_turns)
+            live_now = sum(1 for c, s in tracker.items()
+                           if 0 < s.get("period", 0) < campaign_wakes and "cut_at_period" not in s)
             print(f"  wake {i + 1}/{wakes} done "
-                  f"({len(launched_campaigns(store, slug))} campaign(s) so far)")
-        inject_outcomes(store, slug, world)
+                  f"({len(launched_campaigns(store, slug))} campaign(s), {live_now} mid-flight)")
+        inject_outcomes(store, slug, world, tracker, campaign_wakes)
         store.assemble_roas_run_history(slug)
-        report = score(store, slug, world, wakes)
+        report = score(store, slug, world, wakes, tracker)
+    report["campaign_wakes"] = campaign_wakes
     report["takyon_home"] = str(home)
     report["business"] = slug
     return report
@@ -575,6 +712,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "'gateway' uses the operator-gateway lane as configured")
     ap.add_argument("--max-turns", type=int, default=24,
                     help="hard cap on agent iterations per real wake (cost guard)")
+    ap.add_argument("--campaign-wakes", type=int, default=3,
+                    help="how many wakes one campaign's schedule spans (production rhythm: "
+                         "each wake injects one period of PARTIAL cumulative results and the "
+                         "CEO judges mid-flight; 1 = the old compressed one-wake-per-campaign)")
     args = ap.parse_args(argv)
     if not args.dsn:
         print("error: set TAKYON_TEST_PG_DSN (a migrated throwaway Postgres) or pass --dsn",
@@ -583,12 +724,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     report = run(args.dsn, wakes=args.wakes, seed=args.seed, fake_ceo=args.fake_ceo,
                  model=args.model, provider=args.provider, transport=args.transport,
-                 max_turns=args.max_turns)
+                 max_turns=args.max_turns, campaign_wakes=args.campaign_wakes)
     print("\n── level-3 rig report ──")
-    for key in ("business", "wakes", "campaigns_launched", "kinds_in_order",
-                "sealed_truth", "true_best_kind", "late_share_on_best",
+    for key in ("business", "wakes", "campaign_wakes", "campaigns_launched",
+                "kinds_in_order", "sealed_truth", "true_best_kind", "late_share_on_best",
+                "winners_cut_early", "losers_cut_early", "losers_run_full_schedule",
                 "history_file", "takyon_home"):
-        print(f"  {key:<22} {report[key]}")
+        print(f"  {key:<26} {report[key]}")
+    print("  campaign timelines:")
+    for t in report.get("campaign_timelines", []):
+        print(f"    {t['campaign']:<10} {t['kind']:<6} {t['status']:<14} "
+              f"periods={t['periods_delivered']} cumROAS={t['cumulative_roas']}")
     return 0
 
 
