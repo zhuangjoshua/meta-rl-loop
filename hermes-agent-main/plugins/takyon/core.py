@@ -65,6 +65,11 @@ from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
 from .app_runtime_constants import APP_SESSION_COOKIE
+from .product_claims import (
+    customer_feature_claims,
+    feature_claim_blocker,
+    unsupported_feature_claims,
+)
 from . import (
     app_supabase_auth,
     channel_registry as _channel_registry,
@@ -2322,6 +2327,25 @@ def _surface_product_workflow_metadata(surface: dict[str, Any] | None) -> dict[s
     return dict(payload)
 
 
+def _surface_product_display_name(surface: dict[str, Any] | None) -> str:
+    """Canonical customer-visible product name carried by the shell contract.
+
+    The business slug remains a routing identifier.  Owned scaffold files must never turn it
+    into branding merely because strategy prose is missing or temporarily unavailable.
+    """
+    if not isinstance(surface, dict):
+        return ""
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    return str(metadata.get("product_display_name") or "").strip()[:100]
+
+
+def _surface_requires_complete_workflow(surface: dict[str, Any] | None) -> bool:
+    if not isinstance(surface, dict):
+        return False
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), dict) else {}
+    return _normalize_surface_bool(metadata.get("workflow_completion_required")) is True
+
+
 def _normalize_surface_bool(raw: Any) -> bool | None:
     if raw is None:
         return None
@@ -2995,7 +3019,7 @@ def _subuser_surface_context_payload(
     effective_runtime_features = _surface_effective_runtime_features(surface)
     hero = _read_bootstrap_hero_copy(workspace_root)
     strategy_title, strategy_sections = _starter_strategy_sections(workspace_root)
-    raw_display_name = (
+    raw_display_name = _surface_product_display_name(surface) or (
         strategy_sections.get("business name")
         or strategy_sections.get("product name")
         or strategy_sections.get("brand name")
@@ -3033,7 +3057,7 @@ def _subuser_surface_context_payload(
         # without a paid logo call. business_generate_logo (credit-gated) publishes a real logo PNG
         # into public/, and ``brandLogoUrl`` below then makes the UI prefer it over this monogram.
         "brandAccent": _brand_mark_accent(slug),
-        "brandMarkSvg": _brand_mark_svg(slug),
+        "brandMarkSvg": _brand_mark_svg(slug, display_name=display_name),
         # "" until a paid logo is published; "/brand-logo.png" once business_generate_logo succeeds.
         "brandLogoUrl": str(brand_logo_url or ""),
     }
@@ -3220,7 +3244,11 @@ def _materialize_subuser_app_kit(
     # the seeded monogram in its browser tab forever. Re-run the deterministic favicon injector here so
     # a published logo becomes the tab favicon on the next normal build — no paid re-generation needed.
     # Idempotent: a no-op when the favicon already points at the right asset.
-    _seed_brand_mark_assets(workspace_root, slug=slug)
+    _seed_brand_mark_assets(
+        workspace_root,
+        slug=slug,
+        display_name=_surface_product_display_name(materialized_surface),
+    )
     _inject_favicon_links(workspace_root)
 
 
@@ -3387,6 +3415,20 @@ def _starter_strategy_sections(workspace_root: Path | None) -> tuple[str, dict[s
         current_lines = []
 
     for raw_line in body.splitlines():
+        # Fast bootstrap briefs often use a canonical identity list rather than one heading per
+        # field (``- **One-line tagline:** ...``). Those labels are still authored strategy truth;
+        # promote them into the same section map instead of falling through to arbitrary UI copy.
+        inline = re.match(r"^\s*[-*]\s+\*\*([^*]+?)\s*:?\*\*\s*:?\s*(.+?)\s*$", raw_line)
+        if inline:
+            label = _normalize_heading_text(inline.group(1).rstrip(":"))
+            label = {
+                "one line tagline": "tagline",
+                "one-line tagline": "tagline",
+                "canonical business name": "business name",
+            }.get(label, label)
+            value = inline.group(2).strip()
+            if label and value:
+                sections.setdefault(label, value)
         match = heading_re.match(raw_line)
         if match:
             level = len(match.group(1))
@@ -3504,12 +3546,17 @@ def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, 
     except OSError:
         return copy
 
+    selected_h1_end = 0
     for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", landing, flags=re.DOTALL):
         title = _clean_literal(match.group(1))
         if title and "Welcome to" not in title and not _is_transient_access_failure(title):
             copy.setdefault("title", title[:160])
+            selected_h1_end = match.end()
             break
-    for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", landing, flags=re.DOTALL):
+    # A landing module may define illustrative cards/previews before the real LandingScreen.
+    # Metadata must follow the selected public H1, never the first unrelated <p> in file order.
+    description_source = landing[selected_h1_end:] if selected_h1_end else landing
+    for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", description_source, flags=re.DOTALL):
         description = _clean_literal(match.group(1))
         if (
             description
@@ -3530,8 +3577,9 @@ def _subuser_app_starter_strings(
 ) -> dict[str, Any]:
     strategy_title, strategy_sections = _starter_strategy_sections(workspace_root)
     workspace_copy = _starter_workspace_marketing_copy(workspace_root)
+    canonical_display_name = _surface_product_display_name(surface)
     title = _starter_strategy_title(
-        strategy_sections.get("business name") or strategy_title,
+        canonical_display_name or strategy_sections.get("business name") or strategy_title,
         slug=slug,
     )
     if _starter_title_is_generic(title, slug=slug) and workspace_copy.get("title"):
@@ -7220,10 +7268,11 @@ def _brand_mark_initials(slug: str) -> str:
     return (parts[0][:1] + parts[1][:1]).upper()
 
 
-def _brand_mark_svg(slug: str) -> str:
+def _brand_mark_svg(slug: str, *, display_name: str = "") -> str:
     """A free, self-contained SVG monogram favicon. No external assets, no provider call."""
     accent = _brand_mark_accent(slug)
-    initials = html.escape(_brand_mark_initials(slug))
+    public_name = str(display_name or "").strip() or _humanize_business_slug(slug)
+    initials = html.escape(_brand_mark_initials(public_name))
     font_size = 30 if len(initials) > 1 else 38
     # Browser tab favicons need INTRINSIC dimensions on the root <svg>: with only a viewBox (no
     # width/height) Chrome and Safari load the file (200) but cannot rasterize it for the tab and
@@ -7232,7 +7281,7 @@ def _brand_mark_svg(slug: str) -> str:
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" '
         'viewBox="0 0 64 64" role="img" '
-        f'aria-label="{html.escape(_humanize_business_slug(slug))}">'
+        f'aria-label="{html.escape(public_name)}">'
         f'<rect width="64" height="64" rx="14" fill="{accent}"/>'
         f'<text x="50%" y="50%" dy="0.02em" fill="#ffffff" font-family="-apple-system,'
         'BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif" '
@@ -7253,13 +7302,18 @@ def _is_auto_seeded_brand_mark(text: str) -> bool:
     return signature
 
 
-def _seed_brand_mark_assets(workspace_root: Path, *, slug: str) -> None:
+def _seed_brand_mark_assets(
+    workspace_root: Path,
+    *,
+    slug: str,
+    display_name: str = "",
+) -> None:
     """Seed public/favicon.svg. Never overwrites a paid ``business_generate_logo`` result or a
     worker-authored mark — those win. But a STALE auto-seeded monogram (e.g. an older format that
     lacked root ``width``/``height`` and therefore did not render in browser tabs) is upgraded in place
     to the current monogram, so existing businesses pick up the favicon-rendering fix on rebuild."""
     favicon = workspace_root / "public" / "favicon.svg"
-    current = _brand_mark_svg(slug)
+    current = _brand_mark_svg(slug, display_name=display_name)
     if favicon.exists():
         try:
             existing = favicon.read_text(encoding="utf-8")
@@ -7392,7 +7446,11 @@ def _materialize_subuser_app_scaffold(
     # Free brand mark: seed a deterministic SVG monogram favicon (no provider call) and
     # make sure index.html links it. vite copies public/favicon.svg verbatim into dist/,
     # so the published slug host serves /favicon.svg instead of 404ing.
-    _seed_brand_mark_assets(workspace_root, slug=slug)
+    _seed_brand_mark_assets(
+        workspace_root,
+        slug=slug,
+        display_name=_surface_product_display_name(surface),
+    )
     _inject_favicon_links(workspace_root)
     # Warm start: the scaffold copy above just wrote the pinned package-lock.json into the workspace,
     # so the workspace lock now matches the scaffold lock exactly. Drop in the prebaked node_modules
@@ -7575,6 +7633,15 @@ def _subuser_app_worker_contract_block(
             "",
         ]
     )
+    product_display_name = _surface_product_display_name(surface)
+    if product_display_name:
+        lines.append(
+            f"- Canonical customer-visible product name: {product_display_name}. Use it in public branding; never derive a name from the routing slug."
+        )
+    if _surface_requires_complete_workflow(surface):
+        lines.append(
+            "- FINAL WORKFLOW GATE IS ACTIVE: publish will refuse an unchanged app-home starter or a product without a UI-referenced real action, ctx.generate(...), saveRecord(...), and listRecords/getRecord/useRecords reopen wiring. Finish those source-backed behaviors before reporting success."
+        )
     if routes:
         lines.append(f"- Current declared product routes: {', '.join(routes)}")
     if declared_runtime_features:
@@ -7784,6 +7851,12 @@ def claude_worker_seconds_since_any_activity() -> float:
     if not stamp:
         return float("inf")
     return max(0.0, time.monotonic() - stamp)
+
+
+def _claude_worker_heartbeat_tick(business: str) -> None:
+    """One context-independent liveness tick for a running coding-worker subprocess."""
+    _touch_claude_worker_business_activity(business)
+    _notify_claude_worker_activity("claude-worker build heartbeat")
 
 
 def _emit_claude_worker_progress(line: str) -> None:
@@ -8125,7 +8198,11 @@ def _run_claude_agent_task_process(
 
     def _heartbeat() -> None:
         while not _heartbeat_stop.wait(30.0):
-            _notify_claude_worker_activity("claude-worker build heartbeat")
+            # The outer CEO watchdog reads these context-free clocks directly.  A ContextVar
+            # activity sink can be absent after delegation crosses a thread/job boundary, so the
+            # independent subprocess heartbeat must stamp the same liveness source as stderr
+            # events.  proc.wait's timeout below remains the hard bound for a genuine hang.
+            _claude_worker_heartbeat_tick(business)
 
     heartbeat_thread = threading.Thread(
         target=lambda: _heartbeat_ctx.run(_heartbeat), name="takyon-claude-heartbeat", daemon=True
@@ -8165,6 +8242,35 @@ def _run_claude_agent_task_process(
         stdout="".join(stdout_chunks),
         stderr="\n".join(stderr_lines).strip(),
     )
+
+
+def _retryable_docker_bind_mount_failure(
+    process: subprocess.CompletedProcess[str],
+    *,
+    workspace_path: Path,
+) -> bool:
+    """Return true only when Docker rejected a proven-local bind before container start."""
+    if int(getattr(process, "returncode", 0) or 0) != 125:
+        return False
+    detail = "\n".join(
+        str(value or "")
+        for value in (getattr(process, "stderr", ""), getattr(process, "stdout", ""))
+    ).lower()
+    if not any(
+        marker in detail
+        for marker in (
+            "bind source path does not exist",
+            "error while creating mount source path",
+            "invalid mount config for type \"bind\"",
+            "invalid mount config for type bind",
+        )
+    ):
+        return False
+    if str(Path(workspace_path)).lower() not in detail:
+        return False
+    # A genuinely absent workspace is a materialization failure and must fail loud.  Retry only
+    # Docker Desktop's transient disagreement with an already-materialized host directory.
+    return Path(workspace_path).is_dir()
 
 
 def _docker_server_arch(docker_exe: str) -> str:
@@ -10854,6 +10960,91 @@ def _app_access_gate_null_markers(root: Path) -> list[dict[str, Any]]:
     return markers
 
 
+def _requested_workflow_completeness_markers(
+    root: Path,
+    surface: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Static proof floor for a surface that promises a requested SaaS workflow.
+
+    Compile success proves syntax, not that the worker replaced the seeded access shell with the
+    requested product.  This gate is deliberately source-of-truth based: the canonical surface
+    opts into final-workflow completion, then the product must contain a customized `/app`, a UI-
+    referenced real action, brokered generation, and durable record save/reopen calls.
+    """
+    if not _surface_requires_complete_workflow(surface):
+        return []
+    gaps: list[tuple[str, str]] = []
+    app_home = root / "src" / "screens" / "app-home.tsx"
+    scaffold_home = _subuser_app_scaffold_source_dir() / "src" / "screens" / "app-home.tsx"
+    try:
+        if not app_home.is_file():
+            gaps.append(("src/screens/app-home.tsx", "requested workflow app screen is missing"))
+        elif scaffold_home.is_file() and app_home.read_bytes() == scaffold_home.read_bytes():
+            gaps.append(
+                (
+                    "src/screens/app-home.tsx",
+                    "requested workflow app screen is byte-identical to the seeded access starter",
+                )
+            )
+    except OSError as exc:
+        gaps.append(("src/screens/app-home.tsx", f"could not verify requested workflow app screen: {exc}"))
+
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+    try:
+        referenced_actions = takyon_app_actions._referenced_action_names_in_source(root)
+        runnable_actions = takyon_app_actions.site_http_action_names(root, surface or {})
+        if not referenced_actions or not (referenced_actions & runnable_actions):
+            gaps.append(
+                (
+                    "actions/",
+                    "requested workflow has no UI-referenced runnable action file",
+                )
+            )
+        action_sources: list[str] = []
+        for action_path in sorted((root / "actions").glob("*.ts"))[:20]:
+            try:
+                action_sources.append(action_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+        if not any(re.search(r"\bctx\s*\.\s*generate\s*\(", text) for text in action_sources):
+            gaps.append(("actions/", "requested workflow action does not call ctx.generate(...)"))
+        authored_sources: list[str] = []
+        for source_path in sorted((root / "src").rglob("*"))[:300]:
+            if not source_path.is_file() or source_path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+                continue
+            try:
+                authored_sources.append(source_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+        authored_sources.extend(action_sources)
+        has_save = any(re.search(r"\bsaveRecord\s*\(", text) for text in authored_sources)
+        has_reopen = any(
+            re.search(r"\b(?:listRecords|getRecord|useRecords)\s*\(", text)
+            for text in authored_sources
+        )
+        if not has_save or not has_reopen:
+            gaps.append(
+                (
+                    "src/screens/app-home.tsx",
+                    "requested workflow does not both save and reopen customer work through the records rail",
+                )
+            )
+    except Exception as exc:
+        gaps.append(("product/site", f"could not verify requested workflow wiring: {exc}"))
+
+    return [
+        {
+            "path": path,
+            "issue": "requested_workflow_incomplete",
+            "snippet": detail,
+        }
+        for path, detail in gaps
+    ]
+
+
 def _scaffold_theme_unfinished_blocker(refresh: dict[str, Any]) -> str:
     """Do-not-publish gate: a build that still ships the scaffold's placeholder theme is unfinished.
 
@@ -10911,6 +11102,28 @@ def _app_access_gate_null_unfinished_blocker(refresh: dict[str, Any]) -> str:
                 "`useProductAuth()` and `resolveViewerCta()`"
             )
     return ""
+
+
+def _requested_workflow_unfinished_blocker(refresh: dict[str, Any]) -> str:
+    """Do-not-publish gate for a buildable but incomplete requested SaaS workflow."""
+    if not isinstance(refresh, dict):
+        return ""
+    inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
+    markers = inventory.get("risk_markers") if isinstance(inventory.get("risk_markers"), list) else []
+    gaps = [
+        str(marker.get("snippet") or "").strip()
+        for marker in markers
+        if isinstance(marker, dict)
+        and str(marker.get("issue") or "").strip() == "requested_workflow_incomplete"
+    ]
+    gaps = [gap for gap in gaps if gap]
+    if not gaps:
+        return ""
+    return (
+        "requested SaaS workflow is incomplete even though the source builds: "
+        + "; ".join(gaps[:6])
+        + " — finish the real action-backed, durably persisted `/app` workflow before publish"
+    )
 
 
 def _merge_surface_refresh_blocker(refresh: dict[str, Any], blocker: str) -> dict[str, Any]:
@@ -11152,6 +11365,8 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "workflow_markers": [],
         "risk_markers": [],
         "claim_snippets": [],
+        "customer_feature_claims": [],
+        "unsupported_feature_claims": [],
         "pretend_findings": [],
         "forbidden_findings": [],
         "files_scanned": 0,
@@ -11279,6 +11494,7 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
                 risk_markers.append(placeholder_marker)
             risk_markers.extend(_scaffold_visible_shell_markers(root))
             risk_markers.extend(_app_access_gate_null_markers(root))
+            risk_markers.extend(_requested_workflow_completeness_markers(root, surface))
     except Exception as exc:
         risk_markers.append({"path": source_rel, "issue": "stack_gate_scan_unavailable", "snippet": _truncate_text(str(exc), 160)})
 
@@ -11292,6 +11508,8 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "workflow_markers": sorted(workflow_markers),
         "risk_markers": risk_markers,
         "claim_snippets": claim_snippets,
+        "customer_feature_claims": customer_feature_claims(root),
+        "unsupported_feature_claims": unsupported_feature_claims(root),
         "files_scanned": files_scanned,
         "files_skipped": files_skipped,
     })
@@ -11316,6 +11534,8 @@ def _product_inventory(business_root: Path, source_path: str, *, surface: dict[s
             "workflow_markers": [],
             "risk_markers": [],
             "claim_snippets": [],
+            "customer_feature_claims": [],
+            "unsupported_feature_claims": [],
             "pretend_findings": [],
             "forbidden_findings": [],
             "files_scanned": 0,
@@ -11559,6 +11779,12 @@ def _validate_product_surface_contract(
         if isinstance(item, dict)
     )
     kind = _surface_contract_kind(surface)
+    unsupported_claims = [
+        item for item in (inventory.get("unsupported_feature_claims") or [])
+        if isinstance(item, dict)
+    ]
+    if unsupported_claims:
+        return False, feature_claim_blocker(unsupported_claims[0])
     checkout_is_presented = (
         kind.get("checkout")
         or "billing_or_checkout" in risk_issues
@@ -17080,6 +17306,7 @@ class TakyonStore:
             "",
             "## Shell Record",
             "",
+            f"- Product display name: {_surface_product_display_name(surface_for_files) or 'not set'}",
             f"- Source path: {surface_for_files.get('source_path') or 'not set'}",
             f"- Runtime API base fallback: {surface_for_files.get('runtime_api_base') or f'/api/takyon/apps/{slug}'}",
             f"- Runtime rails: {', '.join(_surface_runtime_features(surface_for_files)) or 'none declared'}",
@@ -17094,6 +17321,7 @@ class TakyonStore:
             else "- Bootstrap shell rails available now: not applicable",
             f"- Publish target: {surface_for_files.get('publish_target') or _product_publish_target(slug)}",
             f"- Notes: {surface_for_files.get('notes') or 'not set'}",
+            f"- Requested workflow completion gate: {'required' if _surface_requires_complete_workflow(surface_for_files) else 'not required'}",
             (
                 lambda _tone: f"- Product chat tone: {_tone} — {(PRODUCT_CHAT_TONE_PRESETS.get(_tone) or {}).get('summary') or 'neutral product-assistant voice.'}"
             )(_surface_product_chat_tone(surface_for_files)),
@@ -20202,6 +20430,41 @@ class TakyonStore:
                 rail_state=op.get("rail_state"),
                 frontend_stack=frontend_stack_value,
             )
+            existing_display_name = _surface_product_display_name(existing)
+            requested_display_name = str(op.get("display_name") or "").strip()
+            if op.get("display_name") is not None and not requested_display_name:
+                raise TakyonError("display_name must be a non-empty customer-visible product name")
+            if requested_display_name and _starter_title_is_generic(requested_display_name, slug=slug):
+                raise TakyonError(
+                    "display_name must be a human product name, not the routing business slug"
+                )
+            display_name = requested_display_name or existing_display_name
+            if not display_name:
+                strategy_title, strategy_sections = _starter_strategy_sections(self._business_root(slug))
+                strategy_name = (
+                    strategy_sections.get("product name")
+                    or strategy_sections.get("brand name")
+                    or strategy_sections.get("business name")
+                    or strategy_title
+                )
+                strategy_name = _starter_strategy_title(strategy_name, slug=slug)
+                if not _starter_title_is_generic(strategy_name, slug=slug):
+                    display_name = strategy_name
+            if not display_name:
+                business_row = conn.execute(
+                    "SELECT name FROM businesses WHERE slug = ?",
+                    (slug,),
+                ).fetchone()
+                display_name = str(
+                    (business_row["name"] if business_row is not None else "") or ""
+                ).strip()
+            if display_name:
+                metadata["product_display_name"] = re.sub(r"\s+", " ", display_name).strip()[:100]
+            if op.get("workflow_completion_required") is not None:
+                required_workflow = _normalize_surface_bool(op.get("workflow_completion_required"))
+                if required_workflow is None:
+                    raise TakyonError("workflow_completion_required must be a boolean")
+                metadata["workflow_completion_required"] = required_workflow
             # Product-chat tone preset (customer-facing product assistant voice). Omitted
             # tone keeps the prior selection; any value normalizes to a known preset, so a
             # stray string can never inject an unknown voice into the build worker contract.
@@ -20367,6 +20630,8 @@ class TakyonStore:
                 "surface_contract": "product/surface.md",
                 "source_path": source_path,
                 "runtime_features": runtime_features,
+                "display_name": _surface_product_display_name({"metadata": metadata}),
+                "workflow_completion_required": _surface_requires_complete_workflow({"metadata": metadata}),
                 "publish_target": publish_target,
             }
 
@@ -24403,6 +24668,8 @@ def handle_business_upsert_app_surface_contract(args: dict, **_: Any) -> str:
         "runtime_api_base": args.get("runtime_api_base"),
         "runtime_features": args.get("runtime_features"),
         "rail_state": args.get("rail_state"),
+        "display_name": args.get("display_name"),
+        "workflow_completion_required": args.get("workflow_completion_required"),
         "tone": args.get("tone"),
         "routes": args.get("routes") or [],
         "publish_target": args.get("publish_target"),
@@ -24459,6 +24726,7 @@ def _finalize_product_surface_refresh(
         _scaffold_theme_unfinished_blocker(refresh),
         _scaffold_visible_shell_unfinished_blocker(refresh),
         _app_access_gate_null_unfinished_blocker(refresh),
+        _requested_workflow_unfinished_blocker(refresh),
     ):
         if blocker:
             refresh = _merge_surface_refresh_blocker(refresh, blocker)
@@ -36551,15 +36819,36 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             business=business,
                             operator_user_id=operator_user_id,
                         )
-                        proc = _run_claude_agent_task_process(
-                            run_cmd=run_cmd,
-                            payload=docker_payload,
-                            cwd=worker_cwd,
-                            timeout_ms=timeout_ms,
-                            env=worker_env,
-                            business=business,
-                            workspace_rel=workspace_rel,
-                        )
+                        # Docker Desktop can briefly miss a just-materialized product/app scratch
+                        # directory in its VM file-sharing layer.  Exit 125 with a bind-setup
+                        # diagnostic means the container never started, so two bounded retries are
+                        # safe: no model request, edit, or billable side effect occurred.  Ordinary
+                        # worker failures are never replayed here.
+                        for bind_attempt in range(3):
+                            proc = _run_claude_agent_task_process(
+                                run_cmd=run_cmd,
+                                payload=docker_payload,
+                                cwd=worker_cwd,
+                                timeout_ms=timeout_ms,
+                                env=worker_env,
+                                business=business,
+                                workspace_rel=workspace_rel,
+                            )
+                            if not _retryable_docker_bind_mount_failure(
+                                proc,
+                                workspace_path=workspace_path,
+                            ) or bind_attempt >= 2:
+                                break
+                            workspace_path.mkdir(parents=True, exist_ok=True)
+                            try:
+                                directory_fd = os.open(str(workspace_path), os.O_RDONLY)
+                                try:
+                                    os.fsync(directory_fd)
+                                finally:
+                                    os.close(directory_fd)
+                            except OSError:
+                                pass
+                            time.sleep(0.25 * (bind_attempt + 1))
                     else:
                         # Non-docker host subprocess: same broker-lockdown contract as the docker lane —
                         # ANTHROPIC_BASE_URL = safebox proxy ROOT + a minted operator.session token (real
@@ -38110,6 +38399,8 @@ TAKYON_TOOL_DEFINITIONS = [
                 "runtime_api_base": {"type": "string"},
                 "runtime_features": {"type": "array", "items": {"type": "string"}, "description": "Declared shared backend rails for this app surface. Bootstrap app shells are pinned to auth/account/profile/checkout."},
                 "rail_state": {"type": "object", "description": "Optional per-rail truth for declared runtime features, such as auth=declared, checkout=blocked, actions=broken, or usage=live."},
+                "display_name": {"type": "string", "description": "Canonical customer-visible product name. This is branding, never the routing slug; owned navigation, metadata, and surface context use it consistently."},
+                "workflow_completion_required": {"type": "boolean", "description": "Set true immediately before the final requested SaaS workflow build. While true, publish refuses an unchanged access starter or a workflow without a real action, AI generation, and durable records wiring."},
                 "tone": {"type": "string", "enum": ["default", "poke"], "description": "Voice preset for the customer-facing product chat/assistant (the generate rail), NOT the operator CEO shell. 'default' is neutral; 'poke' is short, warm, lightly playful, no corporate hedging, always ends on a proactive next step. Recorded on the surface contract and injected into the product-build worker so the generated product assistant speaks in this voice. Omit to keep the current selection (defaults to 'default')."},
                 "routes": {"type": "array", "items": {"type": "object"}},
                 "publish_target": {"type": "string", "description": "Public URL target; defaults to https://<business>.coscale.app/"},

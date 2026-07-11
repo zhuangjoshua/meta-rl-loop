@@ -13,6 +13,40 @@ from plugins.takyon import storage as takyon_storage
 from plugins.takyon.core import handle_business_claude_agent_task
 
 
+def test_docker_bind_retry_is_limited_to_prestart_mount_failure(tmp_path):
+    workspace = tmp_path / "product" / "app"
+    workspace.mkdir(parents=True)
+    mount_failure = subprocess.CompletedProcess(
+        ["docker", "run"],
+        125,
+        stdout="",
+        stderr=(
+            "docker: Error response from daemon: invalid mount config for type \"bind\": "
+            f"bind source path does not exist: {workspace}"
+        ),
+    )
+    worker_failure = subprocess.CompletedProcess(
+        ["docker", "run"],
+        1,
+        stdout="",
+        stderr="npm run build failed",
+    )
+
+    assert takyon_core._retryable_docker_bind_mount_failure(
+        mount_failure,
+        workspace_path=workspace,
+    )
+    assert not takyon_core._retryable_docker_bind_mount_failure(
+        worker_failure,
+        workspace_path=workspace,
+    )
+    workspace.rmdir()
+    assert not takyon_core._retryable_docker_bind_mount_failure(
+        mount_failure,
+        workspace_path=workspace,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _pin_test_coding_worker_model(monkeypatch):
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")
@@ -1138,15 +1172,42 @@ def test_claude_agent_operator_session_audience_accepted_by_proxy(monkeypatch):
     """The worker mints an operator.session token (via /v1/operator/session-token); the proxy's operator
     authorizer accepts that audience on every Anthropic call, so the minted token is a credential the
     proxy authorizes."""
-    from plugins.takyon import safebox_app
+    import time
+
+    from plugins.takyon import safebox_app, safebox_provider_proxy
+    from plugins.takyon.safebox_capability import CapabilityScope, mint_capability
 
     # The session-token mint binds the operator.session audience, and the proxy authorizer always folds
     # that audience into its accepted set (safebox_provider_proxy._authorize_operator_proxy).
     assert safebox_app._OPERATOR_SESSION_AUDIENCE == "operator.session"
-    assert (
-        safebox_app._ACTION_AUDIENCE_DEFAULTS[safebox_app._OPERATOR_SESSION_AUDIENCE]
-        == safebox_app._OPERATOR_SESSION_AUDIENCE
+    # It must NOT be admitted by the product/sub-user single-use action map: operator sessions are
+    # minted only by the dedicated ownership-proven endpoint.
+    assert safebox_app._OPERATOR_SESSION_AUDIENCE not in safebox_app._ACTION_AUDIENCE_DEFAULTS
+
+    signing_key = b"operator-session-test-signing-key"
+    monkeypatch.setenv("TAKYON_CAP_SIGNING_KEY", signing_key.decode())
+    now = int(time.time())
+    token = mint_capability(
+        CapabilityScope(
+            takyon_user_id="operator-1",
+            business_slug="example-business",
+            app_user_id=None,
+            action=safebox_app._OPERATOR_SESSION_AUDIENCE,
+            max_cost_microusd=100_000,
+        ),
+        signing_key=signing_key,
+        audience=safebox_app._OPERATOR_SESSION_AUDIENCE,
+        nonce="session-1",
+        issued_at=now,
+        ttl_seconds=300,
     )
+    authorized = safebox_provider_proxy._authorize_operator_proxy(
+        f"Bearer {token}",
+        None,
+        capability_audiences=frozenset({"anthropic.messages"}),
+    )
+    assert authorized.scope.takyon_user_id == "operator-1"
+    assert authorized.via == "capability:operator.session"
 
 
 def test_run_claude_agent_task_in_docker_resolves_anthropic_env_from_safebox(tmp_path, monkeypatch):
@@ -1905,13 +1966,14 @@ def test_claude_agent_task_script_forces_local_terminal_work_inside_outer_docker
     assert 'env.TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE = "0";' in text
 
 
-def test_claude_agent_task_script_enables_partial_summarized_reasoning_trace():
+def test_claude_agent_task_script_keeps_partial_messages_but_suppresses_private_reasoning():
     script = Path(__file__).resolve().parents[1] / "scripts" / "takyon-claude-agent-task.mjs"
     text = script.read_text(encoding="utf-8")
     assert "includePartialMessages: true" in text
     assert 'thinking: { type: "adaptive", display: "summarized" }' in text
     assert 'delta.type !== "thinking_delta"' in text
-    assert '`reasoning -> ${summary}`' in text
+    assert "Thinking deltas are private model reasoning" in text
+    assert 'entry_key: "claude-planning"' in text
 
 
 def test_claude_agent_task_ignores_worker_surface_contract_patch_and_refreshes_once(tmp_path, monkeypatch):
@@ -2144,17 +2206,32 @@ def test_claude_agent_task_timeout_settles_estimate_not_double_charge(tmp_path, 
     assert finalize_calls[-1]["actual_cents"] is None
 
 
-def test_claude_agent_task_timeout_does_not_publish_partial(tmp_path, monkeypatch):
-    """A timed-out partial build must never publish: success is False so the refresh/publish block is
-    skipped and surface_refresh stays None."""
+def test_claude_agent_task_timeout_runs_publish_gates_and_blocks_incomplete_partial(tmp_path, monkeypatch):
+    """A timed-out partial runs the canonical refresh/completeness gate, but an incomplete source
+    remains blocked instead of being promoted merely because the worker wrote files."""
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
 
     def fake_process(*, payload: dict[str, object], **kwargs):
         Path(str(payload["cwd"]), "index.html").write_text("<h1>partial</h1>\n", encoding="utf-8")
         raise subprocess.TimeoutExpired(cmd=["node"], timeout=1.0)
 
-    def boom_refresh(**kwargs):
-        raise AssertionError("publish must not run on a timed-out partial build")
+    refresh_calls: list[dict[str, object]] = []
+
+    def blocked_refresh(**kwargs):
+        refresh_calls.append(dict(kwargs))
+        return {
+            "status": "failed",
+            "kind": "vite",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/timeout-partial.json",
+            "inventory": {},
+            "error": "requested SaaS workflow is incomplete",
+            "blocker": "requested SaaS workflow is incomplete",
+            "publish": {
+                "status": "blocked",
+                "blocker": "requested SaaS workflow is incomplete",
+            },
+        }
 
     _patch_non_docker_product_site(monkeypatch, _FakeStore(tmp_path))
     monkeypatch.setattr(takyon_core, "_reserve_operator_task_budget", lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800})
@@ -2163,7 +2240,7 @@ def test_claude_agent_task_timeout_does_not_publish_partial(tmp_path, monkeypatc
         "_finalize_operator_task_budget",
         lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "settled_estimate"},
     )
-    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", boom_refresh)
+    monkeypatch.setattr(takyon_core, "_finalize_product_surface_refresh", blocked_refresh)
     monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
 
     result = json.loads(
@@ -2181,4 +2258,6 @@ def test_claude_agent_task_timeout_does_not_publish_partial(tmp_path, monkeypatc
 
     assert result["success"] is False
     assert result["timed_out"] is True
-    assert result["surface_refresh"] is None
+    assert refresh_calls
+    assert result["surface_refresh"]["publish"]["status"] == "blocked"
+    assert "incomplete" in result["surface_refresh"]["blocker"]

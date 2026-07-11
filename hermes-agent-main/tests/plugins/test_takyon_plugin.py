@@ -2005,6 +2005,52 @@ def test_bootstrap_app_surface_seed_ignores_burned_shape_args(tmp_path, monkeypa
     assert "customer_experience" not in (surface.get("metadata") or {})
 
 
+def test_surface_contract_persists_product_display_name_and_workflow_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = TakyonStore(tmp_path)
+    _commit(
+        store,
+        "business:qa-proposal-0711",
+        [
+            {
+                "action": "business.upsert",
+                "business": "qa-proposal-0711",
+                "name": "Qa Proposal 0711",
+                "budget": {"amount": 25},
+            }
+        ],
+        "init-product-identity",
+    )
+
+    result = json.loads(
+        handle_business_upsert_app_surface_contract(
+            {
+                "business": "qa-proposal-0711",
+                "display_name": "Draftwell",
+                "workflow_completion_required": True,
+                "source_path": "product/site",
+                "runtime_features": ["auth", "account", "profile", "checkout"],
+                "routes": [{"path": "/"}, {"path": "/app"}],
+                "idempotency_key": "surface-product-identity",
+            }
+        )
+    )
+
+    assert result["success"] is True
+    assert result["results"][0]["display_name"] == "Draftwell"
+    assert result["results"][0]["workflow_completion_required"] is True
+    surface = store.read(scope="business:qa-proposal-0711", query="summary", include=["app"])["app"][
+        "surface_contract"
+    ]
+    assert surface["metadata"]["product_display_name"] == "Draftwell"
+    assert surface["metadata"]["workflow_completion_required"] is True
+    surface_md = (tmp_path / "businesses" / "qa-proposal-0711" / "product" / "surface.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Product display name: Draftwell" in surface_md
+    assert "Requested workflow completion gate: required" in surface_md
+
+
 def test_bootstrap_app_surface_seed_ignores_burned_workflow_args(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = TakyonStore(tmp_path)

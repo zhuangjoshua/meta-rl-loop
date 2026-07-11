@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import threading
 import uuid
+import contextlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1210,17 +1211,25 @@ def test_ceo_wake_handler_orders_refresh_then_distill_then_prompt(monkeypatch):
 
 
 def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
-    backend = storage.LocalStorageBackend(tmp_path / "bucket")
     seed = tmp_path / "seed"
     (seed / "research").mkdir(parents=True, exist_ok=True)
     (seed / "research" / "strategy.md").write_text("seed\n")
-    storage.sync_up(backend, "acme", seed)
-
-    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
 
     seen: dict[str, str] = {}
+
+    @contextlib.contextmanager
+    def _isolated_workspace(slug, **_kwargs):
+        home = Path(tempfile.mkdtemp(prefix="wake-unit-", dir=str(tmp_path)))
+        workspace = home / "businesses" / slug
+        shutil.copytree(seed, workspace)
+        seen["mounted_home"] = str(home)
+        try:
+            yield home
+        finally:
+            shutil.rmtree(home, ignore_errors=True)
+
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _isolated_workspace)
 
     def _fake_turn(*, slug, **_kw):
         workspace_root = get_session_env("TAKYON_SESSION_WORKSPACE_ROOT")
@@ -1240,21 +1249,28 @@ def test_ceo_wake_handler_runs_in_isolated_workspace(monkeypatch, tmp_path):
     assert seen["workspace_root"]
     assert not Path(seen["workspace_root"]).exists()
 
-    resumed = tmp_path / "resumed"
-    storage.sync_down(backend, "acme", resumed)
-    assert (resumed / "metrics" / "summary.md").read_text() == "fresh\n"
 
-
-def test_ceo_wake_handler_syncs_partial_workspace_on_failed_turn(monkeypatch, tmp_path):
-    backend = storage.LocalStorageBackend(tmp_path / "bucket")
+def test_ceo_wake_handler_propagates_failed_turn_and_cleans_workspace(monkeypatch, tmp_path):
     seed = tmp_path / "seed"
     (seed / "research").mkdir(parents=True, exist_ok=True)
     (seed / "research" / "strategy.md").write_text("seed\n")
-    storage.sync_up(backend, "acme", seed)
-
-    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
-    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "bucket"))
     monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-123")
+    seen: dict[str, str] = {}
+
+    @contextlib.contextmanager
+    def _isolated_workspace(slug, **_kwargs):
+        home = Path(tempfile.mkdtemp(prefix="wake-failed-unit-", dir=str(tmp_path)))
+        workspace = home / "businesses" / slug
+        shutil.copytree(seed, workspace)
+        seen["mounted_home"] = str(home)
+        try:
+            yield home
+        finally:
+            partial = workspace / "product" / "surface.md"
+            seen["partial"] = partial.read_text() if partial.exists() else ""
+            shutil.rmtree(home, ignore_errors=True)
+
+    monkeypatch.setattr(turn_runtime, "_business_workspace_execution_context", _isolated_workspace)
 
     def _fake_turn(*, slug, **_kw):
         workspace_root = get_session_env("TAKYON_SESSION_WORKSPACE_ROOT")
@@ -1268,9 +1284,8 @@ def test_ceo_wake_handler_syncs_partial_workspace_on_failed_turn(monkeypatch, tm
     with pytest.raises(RuntimeError, match="turn interrupted"):
         worker.ceo_wake_handler(SimpleNamespace(id="job-sync-1", business_slug="acme", payload={}))
 
-    resumed = tmp_path / "resumed"
-    storage.sync_down(backend, "acme", resumed)
-    assert (resumed / "product" / "surface.md").read_text() == "partial surface\n"
+    assert seen["partial"] == "partial surface\n"
+    assert not Path(seen["mounted_home"]).exists()
 
 
 def test_ceo_wake_timeout_calls_owned_timeout_finalizer(monkeypatch):
@@ -1920,6 +1935,58 @@ def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch)
 
     result = worker.ceo_bootstrap_handler(job)
     assert isinstance(result, jobs.JobRunResult)
+
+
+def test_bootstrap_passes_bounded_runtime_and_durable_publish_probe(monkeypatch):
+    captured_turn: dict[str, Any] = {}
+
+    def _bounded_turn(**kwargs):
+        captured_turn.update(kwargs)
+        return "bounded after publish", 0.25, "exact", False
+
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+        run_turn=_bounded_turn,
+    )
+    monkeypatch.setattr(worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True)
+    monkeypatch.setattr(worker, "_bootstrap_has_live_delegated_child", lambda *_a, **_k: True)
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-bounded-live", business_slug="acme", payload={})
+    )
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert captured_turn["wall_clock_limit"] == worker._DEFAULT_BOOTSTRAP_WALL_TIMEOUT
+    assert captured_turn["completion_grace_seconds"] == worker._DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE
+    assert captured_turn["completion_probe"]() is True
+    assert captured_turn["external_activity_probe"]() is True
+
+
+def test_bootstrap_child_liveness_uses_fresh_durable_job_claim():
+    import contextlib
+
+    seen: dict[str, Any] = {}
+
+    class _Conn:
+        def execute(self, sql, params):
+            seen["sql"] = sql
+            seen["params"] = params
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield _Conn()
+
+    assert worker._bootstrap_has_live_delegated_child(_Store(), "acme") is True
+    assert "claude.agent_task" in seen["sql"]
+    assert "locked_at" in seen["sql"]
+    assert seen["params"] == ("acme", 60.0)
 
 
 def test_bootstrap_post_turn_surface_refresh_exception_does_not_requeue(monkeypatch):

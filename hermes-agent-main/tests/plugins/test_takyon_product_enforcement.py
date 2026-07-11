@@ -533,6 +533,64 @@ def test_scaffold_visible_shell_blocks_publish():
     assert "/privacy" in blocker
 
 
+def test_requested_workflow_gate_rejects_buildable_unchanged_app_starter(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    seed = "export function AppHomeScreen() { return <main>Starter</main>; }\n"
+    scaffold_home.write_text(seed, encoding="utf-8")
+    site_home.write_text(seed, encoding="utf-8")
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {"metadata": {"workflow_completion_required": True}}
+
+    markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    refresh = {"status": "passed", "inventory": {"risk_markers": markers}}
+    blocker = takyon_core._requested_workflow_unfinished_blocker(refresh)
+
+    assert any("byte-identical" in marker["snippet"] for marker in markers)
+    assert any("no UI-referenced runnable action" in marker["snippet"] for marker in markers)
+    assert "incomplete even though the source builds" in blocker
+    assert "before publish" in blocker
+
+
+def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    action = site / "actions" / "generate-proposal.ts"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    action.parent.mkdir(parents=True)
+    scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
+    site_home.write_text(
+        'const runner = useActionRunner("generate-proposal");\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    action.write_text(
+        "export default async function generateProposal(payload, ctx) {\n"
+        "  const generated = await ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
+        "  return { text: generated.text };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {"metadata": {"workflow_completion_required": True}}
+
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+    assert takyon_core._requested_workflow_unfinished_blocker(
+        {"status": "passed", "inventory": {"risk_markers": []}}
+    ) == ""
+
+
 def test_app_access_gate_null_markers_flag_blank_app_routes(tmp_path):
     from plugins.takyon import core as takyon_core
 
@@ -761,6 +819,149 @@ def test_starter_metadata_never_promotes_transient_auth_failure_to_seo_copy(tmp_
     assert metadata["title"] == "Proposal Flow"
     assert "Sign-in is temporarily unavailable" not in metadata["title"]
     assert "Sign-in is temporarily unavailable" not in metadata["description"]
+
+
+def test_starter_metadata_uses_canonical_inline_strategy_truth_not_fictional_preview(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    strategy = tmp_path / "research" / "strategy.md"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        """# internal0711 strategy
+
+## Canonical business identity
+
+- **Business name:** ProposalFlow
+- **One-line tagline:** Turn a client brief into a proposal you can save and revise.
+- **Core value proposition:** A proposal workspace for independent consultants.
+""",
+        encoding="utf-8",
+    )
+    landing = tmp_path / "product" / "site" / "src" / "screens" / "landing.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        """
+function FictionalPreview() {
+  return <p>This proposal targets a 25% reduction in client drop-off.</p>;
+}
+export function LandingScreen() {
+  return <main><h1>Proposals that close.</h1><p>Draft a proposal from your client brief.</p></main>;
+}
+""",
+        encoding="utf-8",
+    )
+
+    metadata = takyon_core._subuser_app_starter_strings(
+        _app_shell_surface("vite_react_ts"),
+        slug="internal0711",
+        workspace_root=tmp_path / "product" / "site",
+    )
+
+    assert metadata["title"] == "ProposalFlow"
+    assert metadata["description"] == "Turn a client brief into a proposal you can save and revise."
+    assert "25%" not in metadata["description"]
+
+
+def test_workspace_metadata_description_follows_public_h1_not_earlier_preview(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    landing = tmp_path / "src" / "screens" / "landing.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        """
+function Preview() { return <p>Example project targets a 25% reduction in drop-off.</p>; }
+export function LandingScreen() {
+  return <main><h1>Proposals that close.</h1><p>Draft and revise client proposals in one workspace.</p></main>;
+}
+""",
+        encoding="utf-8",
+    )
+
+    copy = takyon_core._starter_workspace_marketing_copy(tmp_path)
+
+    assert copy == {
+        "title": "Proposals that close.",
+        "description": "Draft and revise client proposals in one workspace.",
+    }
+
+
+def test_product_inventory_blocks_customer_feature_promises_without_implementation(tmp_path):
+    business_root = tmp_path / "businesses" / "proposalflow"
+    site = business_root / "product" / "site"
+    landing = site / "src" / "screens" / "landing.tsx"
+    app = site / "src" / "screens" / "app-home.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        """
+export function LandingScreen() {
+  return <main><p>Export to PDF for professional delivery.</p><p>Save templates and reuse what works.</p></main>;
+}
+""",
+        encoding="utf-8",
+    )
+    app.write_text("export function AppHomeScreen() { return <main>Workspace</main>; }\n", encoding="utf-8")
+
+    inventory = _bounded_product_inventory(business_root, "product/site")
+
+    assert {item["kind"] for item in inventory["unsupported_feature_claims"]} == {
+        "pdf_export",
+        "template_library",
+    }
+    ok, blocker = _validate_product_surface_contract(inventory, {})
+    assert not ok
+    assert "promises PDF export" in blocker
+    assert "no implementation evidence" in blocker
+
+
+def test_product_inventory_accepts_feature_promises_with_functional_evidence(tmp_path):
+    business_root = tmp_path / "businesses" / "proposalflow"
+    site = business_root / "product" / "site"
+    landing = site / "src" / "screens" / "landing.tsx"
+    app = site / "src" / "screens" / "app-home.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        "export function LandingScreen() { return <p>Export to PDF and use our template library.</p>; }\n",
+        encoding="utf-8",
+    )
+    app.write_text(
+        """
+export async function exportProposal() {
+  const blob = new Blob(["proposal"], { type: "application/pdf" });
+  return blob;
+}
+export async function saveTemplate(client) {
+  return client.saveRecord({ type: "template", data: {} });
+}
+""",
+        encoding="utf-8",
+    )
+
+    inventory = _bounded_product_inventory(business_root, "product/site")
+
+    assert inventory["customer_feature_claims"]
+    assert inventory["unsupported_feature_claims"] == []
+
+
+def test_template_claim_does_not_borrow_unrelated_record_persistence(tmp_path):
+    business_root = tmp_path / "businesses" / "proposalflow"
+    site = business_root / "product" / "site"
+    landing = site / "src" / "screens" / "landing.tsx"
+    app = site / "src" / "screens" / "app-home.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        "export function LandingScreen() { return <p>Use our template library.</p>; }\n",
+        encoding="utf-8",
+    )
+    app.write_text(
+        "export async function saveProposal(client) { return client.saveRecord({ type: 'proposal', data: {} }); }\n",
+        encoding="utf-8",
+    )
+
+    inventory = _bounded_product_inventory(business_root, "product/site")
+
+    assert [item["kind"] for item in inventory["unsupported_feature_claims"]] == [
+        "template_library"
+    ]
 
 
 def test_starter_refresh_uses_custom_landing_copy_when_notes_are_empty(tmp_path):
