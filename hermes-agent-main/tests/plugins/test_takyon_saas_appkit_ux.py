@@ -106,3 +106,47 @@ def test_surface_context_carries_strategy_product_name_instead_of_internal_slug(
     assert payload["businessName"] == "Threadline"
     branding = read("src/lib/branding.ts")
     assert "businessName" in branding
+
+
+def test_surface_contract_display_name_outranks_slug_and_strategy(tmp_path):
+    business_root = tmp_path / "businesses" / "qa-proposal-0711"
+    workspace = business_root / "product" / "site"
+    strategy = business_root / "research" / "strategy.md"
+    workspace.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text("# Wrong Legacy Name strategy\n", encoding="utf-8")
+    surface = {"metadata": {"product_display_name": "Draftwell"}}
+
+    payload = takyon_core._subuser_surface_context_payload(
+        surface, slug="qa-proposal-0711", workspace_root=workspace
+    )
+    metadata = takyon_core._subuser_app_starter_strings(
+        surface, slug="qa-proposal-0711", workspace_root=workspace
+    )
+
+    assert payload["businessName"] == "Draftwell"
+    assert 'aria-label="Draftwell"' in payload["brandMarkSvg"]
+    assert ">DR</text>" in payload["brandMarkSvg"]
+    assert metadata["title"] == "Draftwell"
+    assert "qa-proposal-0711" not in payload["businessName"].lower()
+    assert "surfaceContext.business" not in read("src/lib/branding.ts")
+    worker_contract = takyon_core._subuser_app_worker_contract_block(
+        {
+            "metadata": {
+                "product_display_name": "Draftwell",
+                "workflow_completion_required": True,
+            }
+        },
+        plans_configured=True,
+    )
+    assert "Canonical customer-visible product name: Draftwell" in worker_contract
+    assert "FINAL WORKFLOW GATE IS ACTIVE" in worker_contract
+
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "qa-proposal-0711",
+        "Generate and save proposals, then reopen and revise them",
+        "live",
+        archetype="saas",
+    )
+    assert "display_name: the ONE human product display name" in prompt
+    assert "workflow_completion_required: true" in prompt

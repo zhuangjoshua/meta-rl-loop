@@ -533,6 +533,64 @@ def test_scaffold_visible_shell_blocks_publish():
     assert "/privacy" in blocker
 
 
+def test_requested_workflow_gate_rejects_buildable_unchanged_app_starter(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    seed = "export function AppHomeScreen() { return <main>Starter</main>; }\n"
+    scaffold_home.write_text(seed, encoding="utf-8")
+    site_home.write_text(seed, encoding="utf-8")
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {"metadata": {"workflow_completion_required": True}}
+
+    markers = takyon_core._requested_workflow_completeness_markers(site, surface)
+    refresh = {"status": "passed", "inventory": {"risk_markers": markers}}
+    blocker = takyon_core._requested_workflow_unfinished_blocker(refresh)
+
+    assert any("byte-identical" in marker["snippet"] for marker in markers)
+    assert any("no UI-referenced runnable action" in marker["snippet"] for marker in markers)
+    assert "incomplete even though the source builds" in blocker
+    assert "before publish" in blocker
+
+
+def test_requested_workflow_gate_accepts_action_generate_and_records_wiring(tmp_path, monkeypatch):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = tmp_path / "scaffold"
+    site = tmp_path / "product" / "site"
+    scaffold_home = scaffold / "src" / "screens" / "app-home.tsx"
+    site_home = site / "src" / "screens" / "app-home.tsx"
+    action = site / "actions" / "generate-proposal.ts"
+    scaffold_home.parent.mkdir(parents=True)
+    site_home.parent.mkdir(parents=True)
+    action.parent.mkdir(parents=True)
+    scaffold_home.write_text("export const AppHomeScreen = () => <main>Starter</main>;\n", encoding="utf-8")
+    site_home.write_text(
+        'const runner = useActionRunner("generate-proposal");\n'
+        "async function saveAndReopen() { await saveRecord({ record_type: 'proposal' }); return listRecords('proposal'); }\n",
+        encoding="utf-8",
+    )
+    action.write_text(
+        "export default async function generateProposal(payload, ctx) {\n"
+        "  const generated = await ctx.generate({ messages: [{ role: 'user', content: String(payload) }] });\n"
+        "  return { text: generated.text };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(takyon_core, "_subuser_app_scaffold_source_dir", lambda: scaffold)
+    surface = {"metadata": {"workflow_completion_required": True}}
+
+    assert takyon_core._requested_workflow_completeness_markers(site, surface) == []
+    assert takyon_core._requested_workflow_unfinished_blocker(
+        {"status": "passed", "inventory": {"risk_markers": []}}
+    ) == ""
+
+
 def test_app_access_gate_null_markers_flag_blank_app_routes(tmp_path):
     from plugins.takyon import core as takyon_core
 
