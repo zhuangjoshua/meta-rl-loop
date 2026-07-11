@@ -1,13 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2020",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": ["ES2020"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "jsx": "react-jsx",
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
+    "noImplicitAny": true,
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -15,12 +13,9 @@
     "resolveJsonModule": true,
     "useDefineForClassFields": true,
     "noEmit": true,
-    "allowJs": true,
-    "checkJs": true,
-    "baseUrl": ".",
-    "paths": {
-      "@takyon/*": ["./_takyon/*"]
-    }
+    "allowJs": false,
+    "types": []
   },
-  "include": ["src", "vite.config.ts"]
+  "files": ["action-env.d.ts"],
+  "include": ["actions/**/*.ts"]
 }

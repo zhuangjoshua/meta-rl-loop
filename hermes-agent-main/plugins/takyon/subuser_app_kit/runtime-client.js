@@ -1,5 +1,6 @@
 const DEFAULT_FRONTEND_API_MODE = "prefixed_runtime_api";
 const ALLOW_CALL_STATES = new Set(["live", "declared"]);
+const RECORD_REF_PREFIX = "takyon-record-v1.";
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -44,6 +45,59 @@ function joinRoute(base, route) {
 
 function encodeRoutePart(value) {
   return encodeURIComponent(String(value || "").trim());
+}
+
+// A RecordRef is an opaque, serializable handle over the runtime's canonical (type, id) pair.
+// It is deliberately NOT an authority token: the records rail still resolves the current session
+// and owner scope on every read. App code receives refs from save/list/read responses and passes
+// them back unchanged instead of deriving a second identifier from titles, slugs, or form state.
+function recordRefFromRecord(record) {
+  if (!isObject(record)) return "";
+  const type = String(record.type || record.record_type || "").trim();
+  const id = String(record.id || record.record_id || "").trim();
+  if (!type || !id) return "";
+  return `${RECORD_REF_PREFIX}${encodeURIComponent(JSON.stringify([1, type, id]))}`;
+}
+
+function recordKeyFromRef(ref) {
+  if (typeof ref !== "string" || !ref.startsWith(RECORD_REF_PREFIX)) {
+    throw new TypeError(
+      "record_ref is invalid; pass the ref returned by saveRecord, listRecords, or readRecord",
+    );
+  }
+  try {
+    const decoded = JSON.parse(decodeURIComponent(ref.slice(RECORD_REF_PREFIX.length)));
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 3 ||
+      decoded[0] !== 1 ||
+      typeof decoded[1] !== "string" ||
+      !decoded[1].trim() ||
+      typeof decoded[2] !== "string" ||
+      !decoded[2].trim()
+    ) {
+      throw new Error("invalid record ref payload");
+    }
+    return { type: decoded[1], id: decoded[2] };
+  } catch {
+    throw new TypeError(
+      "record_ref is invalid; pass the ref returned by saveRecord, listRecords, or readRecord",
+    );
+  }
+}
+
+function recordWithRef(record) {
+  if (!isObject(record)) return record;
+  const ref = recordRefFromRecord(record);
+  return ref ? { ...record, ref } : record;
+}
+
+function payloadWithRecordRefs(payload) {
+  if (!isObject(payload)) return payload;
+  const out = { ...payload };
+  if (isObject(payload.record)) out.record = recordWithRef(payload.record);
+  if (Array.isArray(payload.records)) out.records = payload.records.map(recordWithRef);
+  return out;
 }
 
 export function resolveSubuserRuntimeBase(config = {}) {
@@ -267,7 +321,7 @@ export function createSubuserRuntimeClient(context = {}) {
       // records-v2: a bounded server-side query when filters/sort/cursor are present;
       // otherwise the plain newest-first GET list.
       if (options.filters || options.sort || options.cursor) {
-        return jsonRequest(routeUrl("records/query"), {
+        return payloadWithRecordRefs(await jsonRequest(routeUrl("records/query"), {
           method: "POST",
           body: JSON.stringify({
             record_type: recordType || undefined,
@@ -276,7 +330,7 @@ export function createSubuserRuntimeClient(context = {}) {
             cursor: options.cursor || undefined,
             limit: options.limit != null && options.limit !== "" ? options.limit : undefined,
           }),
-        });
+        }));
       }
       const params = new URLSearchParams();
       if (recordType) params.set("type", recordType);
@@ -284,16 +338,29 @@ export function createSubuserRuntimeClient(context = {}) {
         params.set("limit", String(options.limit));
       }
       const suffix = params.toString();
-      return jsonRequest(`${routeUrl("records")}${suffix ? `?${suffix}` : ""}`, {
+      return payloadWithRecordRefs(await jsonRequest(`${routeUrl("records")}${suffix ? `?${suffix}` : ""}`, {
         method: "GET",
-      });
+      }));
     },
-    async getRecord(type, id) {
+    async getRecord(refOrType, legacyId) {
       ensureRail("records");
-      return jsonRequest(
-        routeUrl(`records/${encodeRoutePart(type)}/${encodeRoutePart(id)}`),
+      // One argument is the canonical API. The positional (type, id) form remains only so already
+      // published products keep working while generated products migrate to runtime-owned refs.
+      const key = legacyId === undefined
+        ? recordKeyFromRef(refOrType)
+        : { type: String(refOrType || "").trim(), id: String(legacyId || "").trim() };
+      return payloadWithRecordRefs(await jsonRequest(
+        routeUrl(`records/${encodeRoutePart(key.type)}/${encodeRoutePart(key.id)}`),
         { method: "GET" },
-      );
+      ));
+    },
+    async readRecord(ref) {
+      ensureRail("records");
+      const key = recordKeyFromRef(ref);
+      return payloadWithRecordRefs(await jsonRequest(
+        routeUrl(`records/${encodeRoutePart(key.type)}/${encodeRoutePart(key.id)}`),
+        { method: "GET" },
+      ));
     },
     async saveRecord(payload = {}) {
       ensureRail("records");
@@ -305,21 +372,24 @@ export function createSubuserRuntimeClient(context = {}) {
       const route = recordId
         ? `records/${encodeRoutePart(recordType)}/${encodeRoutePart(recordId)}`
         : "records";
-      return jsonRequest(routeUrl(route), {
+      return payloadWithRecordRefs(await jsonRequest(routeUrl(route), {
         method: "POST",
         body: JSON.stringify({
           ...payload,
           record_type: recordType,
           record_id: recordId || undefined,
         }),
-      });
+      }));
     },
-    async deleteRecord(type, id) {
+    async deleteRecord(refOrType, legacyId) {
       ensureRail("records");
-      return jsonRequest(
-        routeUrl(`records/${encodeRoutePart(type)}/${encodeRoutePart(id)}`),
+      const key = legacyId === undefined
+        ? recordKeyFromRef(refOrType)
+        : { type: String(refOrType || "").trim(), id: String(legacyId || "").trim() };
+      return payloadWithRecordRefs(await jsonRequest(
+        routeUrl(`records/${encodeRoutePart(key.type)}/${encodeRoutePart(key.id)}`),
         { method: "DELETE" },
-      );
+      ));
     },
     async checkout(payload = {}) {
       ensureRail("checkout");

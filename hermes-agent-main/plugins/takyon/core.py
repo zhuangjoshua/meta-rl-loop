@@ -3459,6 +3459,17 @@ def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, 
         text = re.sub(r"\s+", " ", text).strip()
         return re.sub(r"[*_`]+", "", text).strip()
 
+    def _is_transient_access_failure(value: str) -> bool:
+        lowered = str(value or "").strip().lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "sign-in is temporarily unavailable",
+                "sign in is temporarily unavailable",
+                "please try again shortly",
+            )
+        )
+
     copy: dict[str, str] = {}
     hero = _read_bootstrap_hero_copy(workspace_root)
     if hero.get("headline"):
@@ -3476,12 +3487,17 @@ def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, 
 
     for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", landing, flags=re.DOTALL):
         title = _clean_literal(match.group(1))
-        if title and "Welcome to" not in title:
+        if title and "Welcome to" not in title and not _is_transient_access_failure(title):
             copy.setdefault("title", title[:160])
             break
     for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", landing, flags=re.DOTALL):
         description = _clean_literal(match.group(1))
-        if description and "Sign in with Google" not in description and len(description) >= 24:
+        if (
+            description
+            and "Sign in with Google" not in description
+            and not _is_transient_access_failure(description)
+            and len(description) >= 24
+        ):
             copy.setdefault("description", description[:240])
             break
     return copy
@@ -3514,6 +3530,7 @@ def _subuser_app_starter_strings(
     # docs routinely open with "<slug> helps ..."), recapitalize, and bound to one title-length
     # sentence clause. Only if nothing salvageable remains does the humanized slug fallback apply.
     title = _sanitize_starter_title(title, slug=slug)
+    description_from_surface_notes = bool(str((surface or {}).get("notes") or "").strip())
     description = str((surface or {}).get("notes") or "").strip()
     if not description:
         description = _starter_strategy_first_line(strategy_sections.get("tagline") or "")
@@ -3528,7 +3545,7 @@ def _subuser_app_starter_strings(
     # bare slug as the title when real copy exists: derive the title from the first sentence of
     # that description. Runs before the generic "Get started with ..." description fallback so we
     # only borrow genuine value-prop copy, never the boilerplate.
-    if _starter_title_is_generic(title, slug=slug) and description:
+    if _starter_title_is_generic(title, slug=slug) and description and not description_from_surface_notes:
         first_sentence = re.split(r"(?<=[.!?])\s", description, maxsplit=1)[0].strip()
         salvaged = _sanitize_starter_title(first_sentence or description, slug=slug)
         if not _starter_title_is_generic(salvaged, slug=slug):
@@ -7569,6 +7586,8 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- `./_takyon/ui-primitives.js` exports small blocked/pricing/usage/API helpers.",
         "- `./_takyon/tokens.css` exports neutral shared tokens and state styles.",
         "- AppKit-owned rail helpers are canonical behavior, not inspiration. Preserve the behavior of the scaffold wrappers in `src/lib/takyon.ts` and `src/lib/hooks.ts`, and build your own product pages around those shared client/hooks unless you are intentionally changing that rail's logic.",
+        "- Records use runtime-owned references: `saveRecord(...)`, `listRecords(...)`, and record reads return `record.ref`; pass that exact ref to `readRecord(ref)` or `getRecord(ref)`. Never derive a record locator from a title, route slug, form value, or a second generated id, and never use positional `getRecord(type, id)` in generated product code.",
+        "- Backend actions compile in the server action environment, not the browser environment. Type every handler as `(payload: TakyonActionPayload, ctx: TakyonActionContext)`; do not annotate either parameter as `any`, and do not use DOM/WebWorker globals that the action type environment does not provide.",
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
@@ -11525,6 +11544,15 @@ def _validate_product_surface_contract(
             "runtime checkout rail; wire the CTA through starterCheckout/client.checkout() or "
             "POST /api/takyon/apps/<business>/checkout instead of linking back to /app",
         )
+    if (
+        ("actions" in runtime_features or "actions" in runtime_integrations)
+        and re.search(r"\bunlimited\b", claim_text, re.IGNORECASE)
+    ):
+        return (
+            False,
+            "product source promises unlimited action-backed usage, but product actions are "
+            "quota- and budget-gated; replace unlimited claims with the exact plan allowance",
+        )
     return True, ""
 
 
@@ -11762,6 +11790,8 @@ def _normalize_next_config_typescript(root: Path) -> dict[str, Any]:
 _SCAFFOLD_BUILD_CONFIG_FILES = (
     "package-lock.json",
     "tsconfig.json",
+    "tsconfig.actions.json",
+    "action-env.d.ts",
     "vite.config.ts",
     "postcss.config.js",
     "tailwind.config.js",
@@ -14536,12 +14566,18 @@ def _publish_product_surface_path(
     publish_root = _product_publish_root()
     backend = storage.get_storage_backend()
     build_digests = storage.workspace_file_digests(publish_source)
+    try:
+        from . import app_actions as takyon_app_actions
+    except Exception:
+        from plugins.takyon import app_actions as takyon_app_actions
+    action_bundle = takyon_app_actions.build_action_bundle(source_root)
     build_id = hashlib.sha256(
         _json_dumps(
             {
                 "slug": _slugify(slug),
                 "source_revision": int(source_revision or 0),
                 "files": build_digests,
+                "action_bundle_sha256": action_bundle["sha256"],
             }
         ).encode("utf-8")
     ).hexdigest()[:32]
@@ -14651,6 +14687,9 @@ def _publish_product_surface_path(
             "live_probe_detail": "",
             "artifact_prefix": artifact_prefix,
             "source_revision": int(source_revision or 0),
+            "action_bundle_json": action_bundle["json"],
+            "action_bundle_sha256": action_bundle["sha256"],
+            "action_bundle_file_count": action_bundle["file_count"],
             "source_cache_sync": source_cache_sync,
             "blocker": "",
         }
@@ -15490,6 +15529,8 @@ class TakyonStore:
               source_revision INTEGER NOT NULL,
               artifact_prefix TEXT NOT NULL,
               checkout_branding_params_json TEXT NOT NULL DEFAULT '{}',
+              action_bundle_json TEXT NOT NULL DEFAULT '{}',
+              action_bundle_sha256 TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT 'built',
               created_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
@@ -15780,6 +15821,14 @@ class TakyonStore:
                 "ALTER TABLE product_builds ADD COLUMN "
                 "checkout_branding_params_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "action_bundle_json" not in product_build_columns:
+            conn.execute(
+                "ALTER TABLE product_builds ADD COLUMN action_bundle_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "action_bundle_sha256" not in product_build_columns:
+            conn.execute(
+                "ALTER TABLE product_builds ADD COLUMN action_bundle_sha256 TEXT NOT NULL DEFAULT ''"
+            )
         checkout_intent_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(app_checkout_intents)").fetchall()
@@ -15919,6 +15968,8 @@ class TakyonStore:
               business_slug TEXT NOT NULL,
               source_revision INTEGER NOT NULL,
               artifact_prefix TEXT NOT NULL,
+              action_bundle_json TEXT NOT NULL DEFAULT '{}',
+              action_bundle_sha256 TEXT NOT NULL DEFAULT '',
               status TEXT NOT NULL DEFAULT 'built',
               created_at TEXT NOT NULL,
               FOREIGN KEY (business_slug) REFERENCES businesses(slug) ON DELETE CASCADE
@@ -20304,6 +20355,8 @@ class TakyonStore:
             if op.get("publish_source_path"):
                 publish_source_path = _safe_relpath(str(op.get("publish_source_path")), field="publish_source_path").as_posix()
             artifact_prefix = str(op.get("artifact_prefix") or "").strip()
+            action_bundle_json = str(op.get("action_bundle_json") or "").strip()
+            action_bundle_sha256 = str(op.get("action_bundle_sha256") or "").strip().lower()
             try:
                 source_revision = int(op.get("source_revision") or 0)
             except (TypeError, ValueError):
@@ -20339,6 +20392,7 @@ class TakyonStore:
                 "receipt_path": receipt_path,
                 "publish_source_path": publish_source_path,
                 "artifact_prefix": artifact_prefix,
+                "action_bundle_sha256": action_bundle_sha256,
                 "blocker": blocker,
             }
             metadata = {
@@ -20408,9 +20462,10 @@ class TakyonStore:
                     """
                     INSERT INTO product_builds (
                       build_id, business_slug, source_revision, artifact_prefix,
-                      checkout_branding_params_json, status, created_at
+                      checkout_branding_params_json, action_bundle_json,
+                      action_bundle_sha256, status, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, 'built', ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'built', ?)
                     ON CONFLICT(build_id) DO UPDATE SET
                       business_slug = excluded.business_slug,
                       source_revision = excluded.source_revision,
@@ -20421,6 +20476,18 @@ class TakyonStore:
                         THEN excluded.checkout_branding_params_json
                         ELSE product_builds.checkout_branding_params_json
                       END,
+                      action_bundle_json = CASE
+                        WHEN product_builds.action_bundle_sha256 IS NULL
+                          OR trim(product_builds.action_bundle_sha256) = ''
+                        THEN excluded.action_bundle_json
+                        ELSE product_builds.action_bundle_json
+                      END,
+                      action_bundle_sha256 = CASE
+                        WHEN product_builds.action_bundle_sha256 IS NULL
+                          OR trim(product_builds.action_bundle_sha256) = ''
+                        THEN excluded.action_bundle_sha256
+                        ELSE product_builds.action_bundle_sha256
+                      END,
                       status = excluded.status
                     """,
                     (
@@ -20429,6 +20496,8 @@ class TakyonStore:
                         max(0, int(source_revision)),
                         artifact_prefix,
                         _json_dumps(checkout_branding),
+                        action_bundle_json,
+                        action_bundle_sha256,
                         _now(),
                     ),
                 )
@@ -24520,6 +24589,8 @@ def _product_surface_refresh_operations(
                 "receipt_path": surface_refresh.get("receipt_path"),
                 "publish_source_path": publish.get("publish_source_path") or surface_refresh.get("source_path") or "",
                 "artifact_prefix": publish.get("artifact_prefix") or "",
+                "action_bundle_json": publish.get("action_bundle_json") or "",
+                "action_bundle_sha256": publish.get("action_bundle_sha256") or "",
                 "source_revision": int(publish.get("source_revision") or 0),
                 "blocker": publish_blocker,
             }
