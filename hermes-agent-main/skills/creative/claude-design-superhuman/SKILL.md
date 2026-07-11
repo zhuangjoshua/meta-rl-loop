@@ -1,16 +1,13 @@
 ---
 name: claude-design-superhuman
-description: Shared premium productivity design system for speed, focus, and executive-feeling software. Pair with claude-design.
-version: 1.0.0
-author: Four Manifold
+description: Shared premium productivity design system for speed, focus, and executive-feeling software. Layer beneath taste-frontend and claude-design.
 license: Apache-2.0
-platforms: [linux, macos]
-tags: [design-system, frontend, productivity, premium]
 ---
 
 # Claude Design Superhuman
 
-Pair this with `claude-design` when the product should feel fast, premium, and highly focused.
+Layer this beneath `taste-frontend` and `claude-design` when the product should feel fast, premium,
+and highly focused. Taste adapts this vocabulary to the brief; do not copy it verbatim.
 
 ## When To Use
 

@@ -1,16 +1,14 @@
 ---
 name: claude-design-brutalist
-description: Shared industrial-brutalist design system for dev tools, security/infra, terminal-adjacent, and experimental technical brands. Pair with claude-design.
-version: 1.0.0
-author: Four Manifold
+description: Shared industrial-brutalist design system for dev tools, security/infra, terminal-adjacent, and experimental technical brands. Layer beneath taste-frontend and claude-design.
 license: MIT
-platforms: [linux, macos]
-tags: [design-system, frontend, brutalist, devtools, technical]
 ---
 
 # Claude Design Brutalist
 
-Pair this with `claude-design` when the product should feel raw, mechanical, precise, and unapologetically technical: Swiss print rigor fused with tactical-terminal telemetry.
+Layer this beneath `taste-frontend` and `claude-design` when the product should feel raw, mechanical,
+precise, and unapologetically technical: Swiss print rigor fused with tactical-terminal telemetry.
+Taste adapts this vocabulary to the brief; do not copy it verbatim.
 
 ## When To Use
 

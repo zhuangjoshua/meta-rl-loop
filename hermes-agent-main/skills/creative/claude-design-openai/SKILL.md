@@ -1,16 +1,13 @@
 ---
 name: claude-design-openai
-description: Shared calm product design system for serious AI, prosumer, and productivity surfaces. Pair with claude-design.
-version: 1.0.0
-author: Four Manifold
+description: Shared calm product design system for serious AI, prosumer, and productivity surfaces. Layer beneath taste-frontend and claude-design.
 license: Apache-2.0
-platforms: [linux, macos]
-tags: [design-system, frontend, ui, product]
 ---
 
 # Claude Design OpenAI
 
-Pair this with `claude-design` when the product should feel calm, serious, restrained, and trustworthy.
+Layer this beneath `taste-frontend` and `claude-design` when the product should feel calm, serious,
+restrained, and trustworthy. Taste adapts this vocabulary to the brief; do not copy it verbatim.
 
 ## When To Use
 

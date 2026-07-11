@@ -1985,11 +1985,26 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
-# Default guidance used when the caller passes no `guidance_skills`. Taste infers the direction from
-# the business brief instead of forcing every product through one of a few preset visual brands.
+# Default hierarchy for customer-facing product work. Taste is the art-direction layer; Claude
+# Design is the implementation method beneath it. A caller may add ONE fitting claude-design-* style
+# system, but may not remove the two shared layers from product/site work.
 _DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
     "taste-frontend",
+    "claude-design",
 )
+
+
+def _layer_product_design_guidance(skills: list[str]) -> list[str]:
+    """Put Taste above the shared design method while preserving optional guidance order."""
+    by_key = {skill.lower(): skill for skill in skills}
+    layered = [
+        by_key.get("taste-frontend", "taste-frontend"),
+        by_key.get("claude-design", "claude-design"),
+    ]
+    layered.extend(skill for skill in skills if skill.lower() not in {"taste-frontend", "claude-design"})
+    return layered
+
+
 def _resolve_worker_guidance_skills(
     args: dict[str, Any],
     workspace_raw: str,
@@ -1997,12 +2012,23 @@ def _resolve_worker_guidance_skills(
     surface: dict[str, Any] | None = None,
     instruction: str = "",
 ) -> tuple[list[str], str]:
+    is_product_surface = (
+        _workspace_needs_runtime_ui_contract(workspace_raw)
+        or _workspace_needs_customer_ai_copy_contract(workspace_raw)
+    )
     if "guidance_skills" in args:
-        return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
-    # Every product/site pass receives the same brief-driven visual method. The injected App Kit
-    # contract remains authoritative for routes and behavior.
-    if _workspace_needs_runtime_ui_contract(workspace_raw) or _workspace_needs_customer_ai_copy_contract(workspace_raw):
-        return list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS), "auto-selected Taste guidance for customer-facing product surface"
+        explicit = _normalize_guidance_skills(args.get("guidance_skills"))
+        if is_product_surface:
+            return (
+                _layer_product_design_guidance(explicit),
+                "layered Taste and Claude Design above explicit customer-facing guidance",
+            )
+        return explicit, "used explicit guidance_skills from caller"
+    if is_product_surface:
+        return (
+            list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS),
+            "auto-layered Taste above Claude Design for customer-facing product surface",
+        )
     return [], ""
 
 
@@ -8895,15 +8921,17 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         resolved_names.append(skill_name)
         section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
         excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
-        if (
-            skill_name.lower() == "taste-frontend"
-            or skill_name.lower() == "claude-design"
-            or skill_name.lower().startswith("claude-design-")
-        ):
+        if skill_name.lower() == "taste-frontend":
             preamble = (
-                "Treat this guidance as the required design contract for this run. "
-                "Follow its visual direction, component posture, and hard rules unless the business brief explicitly conflicts. "
-                "Do not silently substitute a different aesthetic."
+                "Treat Taste as the required top-level art-direction and quality-control layer. "
+                "Use it to interpret the brief and adapt the lower design method/system; do not "
+                "discard the selected system or copy it mechanically."
+            )
+        elif skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
+            preamble = (
+                "Treat this as lower-layer design guidance beneath Taste. Follow its craft rules and "
+                "concrete visual system, while allowing Taste to adapt it to the business brief instead "
+                "of reproducing a house style verbatim."
             )
         else:
             preamble = (
@@ -8919,23 +8947,26 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         design_reference = _excerpt_guidance_design_reference(skill_file, skill_name)
         if design_reference:
             blocks.append(design_reference)
-    design_pack_count = sum(
-        1
-        for name in resolved_names
-        if (
-            name.lower() == "taste-frontend"
-            or name.lower() == "claude-design"
-            or name.lower().startswith("claude-design-")
-        )
-    )
-    if design_pack_count >= 2:
+    lower_design_names = [name for name in resolved_names if name.lower() == "claude-design" or name.lower().startswith("claude-design-")]
+    concrete_style_names = [name for name in resolved_names if name.lower().startswith("claude-design-")]
+    if "taste-frontend" in {name.lower() for name in resolved_names} and lower_design_names:
         blocks.insert(
             0,
             (
-                "[Design direction selection]\n"
-                "Multiple design packs are provided. Choose exactly ONE coherent visual direction from the "
-                "business brief and follow it consistently across the surface. Do not blend packs or mix their "
-                "aesthetics; treat the others only as contrast references."
+                "[Design guidance hierarchy]\n"
+                "Taste is the top-level brief interpretation and quality-control layer. Claude Design is the "
+                "implementation method beneath it, and any single claude-design-* skill is a concrete visual "
+                "system beneath both. Apply all layers in that order: Taste adapts the system to this business; "
+                "it does not replace the system, and the system does not override the brief."
+            ),
+        )
+    if len(concrete_style_names) >= 2:
+        blocks.insert(
+            1 if blocks and blocks[0].startswith("[Design guidance hierarchy]") else 0,
+            (
+                "[Design system selection]\n"
+                "Multiple concrete style systems were supplied. Choose exactly ONE from the business brief and "
+                "use the others only as contrast references; never blend their house aesthetics."
             ),
         )
     return resolved_names, "\n\n".join(blocks).strip()
@@ -39359,7 +39390,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction. Every product/site task defaults to taste-frontend, which infers a business-specific direction while preserving the injected App Kit behavior contract. Pass an explicit empty list only to opt out."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction. Every product/site task always layers taste-frontend above claude-design; callers may add one fitting claude-design-* visual system. The injected App Kit behavior contract remains authoritative."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},

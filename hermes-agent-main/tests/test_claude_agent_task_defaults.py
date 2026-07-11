@@ -402,8 +402,8 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend"]
-    assert result["guidance_selection_reason"] == "auto-selected Taste guidance for customer-facing product surface"
+    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
+    assert result["guidance_selection_reason"] == "auto-layered Taste above Claude Design for customer-facing product surface"
     assert "[Hermes guidance skill: default-product-site]" in instruction
 
 
@@ -625,8 +625,8 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend"]
-    assert result["guidance_selection_reason"] == "auto-selected Taste guidance for customer-facing product surface"
+    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
+    assert result["guidance_selection_reason"] == "auto-layered Taste above Claude Design for customer-facing product surface"
     assert "[Hermes guidance skill: inferred-product-site]" in instruction
 
 
@@ -743,7 +743,8 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
     )
 
     assert result["success"] is True
-    assert result["guidance_skills"] == []
+    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
+    assert result["guidance_selection_reason"] == "layered Taste and Claude Design above explicit customer-facing guidance"
 
 
 def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_path, monkeypatch):

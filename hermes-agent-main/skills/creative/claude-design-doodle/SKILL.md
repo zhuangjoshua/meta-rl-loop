@@ -1,16 +1,13 @@
 ---
 name: claude-design-doodle
-description: Shared whimsical consumer design system for playful, casual, pet, or kid-adjacent product surfaces. Pair with claude-design.
-version: 1.0.0
-author: Four Manifold
+description: Shared whimsical consumer design system for playful, casual, pet, or kid-adjacent product surfaces. Layer beneath taste-frontend and claude-design.
 license: Apache-2.0
-platforms: [linux, macos]
-tags: [design-system, frontend, consumer, whimsical, playful]
 ---
 
 # Claude Design Doodle
 
-Pair this with `claude-design` when the product should feel whimsical, friendly, and intentionally lighthearted.
+Layer this beneath `taste-frontend` and `claude-design` when the product should feel whimsical,
+friendly, and intentionally lighthearted. Taste adapts this vocabulary to the brief; do not copy it verbatim.
 
 ## When To Use
 

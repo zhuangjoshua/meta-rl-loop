@@ -1,16 +1,13 @@
 ---
 name: claude-design-stripe
-description: Shared premium commercial design system for fintech, infra, and polished B2B surfaces. Pair with claude-design.
-version: 1.0.0
-author: Four Manifold
+description: Shared premium commercial design system for fintech, infra, and polished B2B surfaces. Layer beneath taste-frontend and claude-design.
 license: Apache-2.0
-platforms: [linux, macos]
-tags: [design-system, frontend, b2b, fintech]
 ---
 
 # Claude Design Stripe
 
-Pair this with `claude-design` when the product should feel premium, commercial, precise, and polished.
+Layer this beneath `taste-frontend` and `claude-design` when the product should feel premium,
+commercial, precise, and polished. Taste adapts this vocabulary to the brief; do not copy it verbatim.
 
 ## When To Use
 

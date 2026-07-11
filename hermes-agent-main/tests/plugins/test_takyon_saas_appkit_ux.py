@@ -80,7 +80,8 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
         "saas-appkit-test", "Build a SaaS workflow", "live", archetype="web_saas"
     )
     assert "Preserve and render the canonical `PublicSiteHeader`" in prompt
-    assert 'guidance_skills: pass exactly ["taste-frontend"]' in prompt
+    assert 'guidance_skills: pass exactly THREE — "taste-frontend" first, "claude-design" second' in prompt
+    assert "Taste sits above and adapts the selected system; it never replaces it." in prompt
     assert "without prescribing a section count or layout family" in prompt
     assert "route graph and required public/auth behavior are immutable" in prompt
     assert "business_generate_site_image" in prompt

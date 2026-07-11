@@ -1,14 +1,17 @@
 ---
 name: taste-frontend
-description: Brief-driven, anti-template visual design guidance for every Takyon product/site worker pass. Use for landing pages, public pages, product UI, and later product iterations while preserving the injected App Kit route, auth, checkout, entitlement, account, and action contracts.
+description: Top-level, brief-driven art direction and anti-template quality control for every Takyon product/site worker pass. Layer above claude-design and an optional claude-design-* visual system for landing pages, public pages, product UI, and later iterations while preserving the injected App Kit behavior contract.
 license: MIT
 ---
 
 # Taste Frontend for Takyon
 
-Apply this to every `product/site` task. The App Kit contract owns behavior; this skill owns visual
-quality. Never change routes, destinations, auth, checkout, entitlements, account semantics, action
-files, analytics hooks, legal copy, or the click graph merely to improve appearance.
+Apply this to every `product/site` task as the top design layer. The App Kit contract owns behavior;
+Taste interprets the brief and controls art direction; `claude-design` supplies the implementation
+method; one optional `claude-design-*` skill supplies a concrete visual system. Adapt that system to
+the business instead of replacing it or copying its house aesthetic verbatim. Never change routes,
+destinations, auth, checkout, entitlements, account semantics, action files, analytics hooks, legal
+copy, or the click graph merely to improve appearance.
 
 ## Design Read
 
@@ -42,6 +45,10 @@ across unrelated businesses.
 
 ## Design System
 
+- Apply the layers in order: App Kit behavior, Taste art direction, Claude Design method, then one
+  optional concrete visual system. Resolve conflicts upward in that order.
+- Treat a `claude-design-*` system as a vocabulary of typography, spacing, color, and components,
+  not a template. Taste may transform its expression to fit the brief while preserving its craft.
 - Establish one coherent token language in `src/tokens.css`: typography, palette, surfaces, spacing,
   radii, shadows, focus, and motion.
 - Public and product pages share that language without sharing the same composition. A cinematic

@@ -1,16 +1,14 @@
 ---
 name: claude-design
-description: Distilled Open Design method for high-quality product/site frontend work. Pass it alongside the shared style packs so Claude can choose one coherent visual direction from the brief.
-version: 1.0.0
-author: Four Manifold
+description: Distilled implementation method for high-quality product/site frontend work. Layer beneath taste-frontend and above at most one shared claude-design-* visual system.
 license: Apache-2.0
-platforms: [linux, macos]
-tags: [design, html, ui, ux, frontend, product, landing, dashboard]
 ---
 
 # Claude Design
 
-Use this skill for outward-facing `product/site` work when visual quality matters. This skill provides the method. Pass it alongside the shared style packs:
+Use this skill for outward-facing `product/site` work beneath `taste-frontend`. Taste interprets the
+brief and controls art direction; this skill provides the implementation method. Add at most one
+shared visual system beneath both:
 
 - `claude-design-openai`
 - `claude-design-stripe`
@@ -18,7 +16,8 @@ Use this skill for outward-facing `product/site` work when visual quality matter
 - `claude-design-doodle`
 - `claude-design-brutalist`
 
-Do not mix multiple style skills in the same worker run.
+Do not mix multiple style skills in the same worker run. Do not override Taste's brief-specific art
+direction with a preset's house aesthetic.
 
 ## When To Use
 
@@ -41,7 +40,7 @@ Choose one coherent visual direction from the available style packs before build
 
 ## Workflow
 
-1. Read the brief and identify the audience, core job, and emotional tone before choosing the look.
+1. Follow Taste's reading of the brief, audience, core job, and emotional tone before choosing the look.
 2. Choose one style pack and stay inside its typography, spacing, color, and component posture.
 3. Build from a coherent page rhythm, not isolated pretty sections.
 4. Keep the interface honest: real controls, real labels, real states, no poster-only hero fakery.
@@ -138,7 +137,7 @@ Then run the mechanical pass — each of these is a countable check, not a vibe:
 
 ## Hard Rules
 
-- Use this skill with the shared style packs, but commit to one coherent visual direction in the artifact.
+- Use this skill beneath Taste and with at most one shared style pack; commit to one coherent visual direction in the artifact.
 - Do not mix visual systems.
 - Do not flood the page with accent color.
 - Do not use filler copy, fake numbers, or fake backend behavior.

@@ -3278,8 +3278,27 @@ def test_claude_agent_task_distills_guidance_skill_into_worker_instruction(tmp_p
     )
 
     skills_dir = tmp_path / "skills"
+    taste_file = skills_dir / "creative" / "taste-frontend" / "SKILL.md"
     skill_file = skills_dir / "creative" / "claude-design" / "SKILL.md"
+    taste_file.parent.mkdir(parents=True, exist_ok=True)
     skill_file.parent.mkdir(parents=True, exist_ok=True)
+    taste_file.write_text(
+        """---
+name: taste-frontend
+---
+
+# Taste Frontend
+
+## Design Read
+
+- Interpret the business brief before applying a visual system.
+
+## Design System
+
+- Adapt the lower design system instead of replacing it.
+""",
+        encoding="utf-8",
+    )
     skill_file.write_text(
         """---
 name: claude-design
@@ -3337,7 +3356,11 @@ Use this skill for strong product UI work.
 
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design"]
+    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
+    assert result["guidance_selection_reason"] == "layered Taste and Claude Design above explicit customer-facing guidance"
+    assert "[Design guidance hierarchy]" in instruction
+    assert "Taste is the top-level brief interpretation" in instruction
+    assert "[Hermes guidance skill: taste-frontend]" in instruction
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "## Workflow" in instruction
     assert "Build the artifact with intentional hierarchy." in instruction
@@ -3355,11 +3378,31 @@ def test_claude_agent_task_distills_method_and_style_guidance_skills(tmp_path, m
     )
 
     skills_dir = tmp_path / "skills"
+    taste_file = skills_dir / "creative" / "taste-frontend" / "SKILL.md"
     method_file = skills_dir / "creative" / "claude-design" / "SKILL.md"
     style_file = skills_dir / "creative" / "claude-design-doodle" / "SKILL.md"
     style_design_file = skills_dir / "creative" / "claude-design-doodle" / "DESIGN.md"
+    taste_file.parent.mkdir(parents=True, exist_ok=True)
     method_file.parent.mkdir(parents=True, exist_ok=True)
     style_file.parent.mkdir(parents=True, exist_ok=True)
+
+    taste_file.write_text(
+        """---
+name: taste-frontend
+---
+
+# Taste Frontend
+
+## Design Read
+
+- Interpret the business brief before applying a visual system.
+
+## Design System
+
+- Adapt the lower design system instead of replacing it.
+""",
+        encoding="utf-8",
+    )
 
     method_file.write_text(
         """---
@@ -3450,7 +3493,10 @@ Playful shared design system.
 
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
-    assert result["guidance_skills"] == ["claude-design", "claude-design-doodle"]
+    assert result["guidance_skills"] == ["taste-frontend", "claude-design", "claude-design-doodle"]
+    assert "[Design guidance hierarchy]" in instruction
+    assert "Taste is the top-level brief interpretation" in instruction
+    assert "[Hermes guidance skill: taste-frontend]" in instruction
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "[Hermes guidance skill: claude-design-doodle]" in instruction
     assert "[Hermes design reference: claude-design-doodle / DESIGN.md]" in instruction
