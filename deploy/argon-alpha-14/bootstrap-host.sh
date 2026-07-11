@@ -67,7 +67,7 @@ ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail
   fi
   command -v xurl >/dev/null 2>&1 || [ -x /root/.local/bin/xurl ]
   install -d '$REMOTE_ROOT' '$REMOTE_HOME' '$REMOTE_HOME/businesses' '$REMOTE_SECRETS'
-  # Runtime services run as `takyon` with ProtectHome and cannot traverse the root-only migration
+  # Runtime services run as the takyon user with ProtectHome and cannot traverse the root-only migration
   # credential used by migrations and the root-SSH profile-access command.
   install -d -o root -g root -m 0700 /root/.config/takyon/migration
   # The tracked units run as the dedicated non-root 'takyon' user. Docker authority lives in the
