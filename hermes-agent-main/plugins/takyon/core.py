@@ -65,6 +65,11 @@ from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
 from .app_runtime_constants import APP_SESSION_COOKIE
+from .product_claims import (
+    customer_feature_claims,
+    feature_claim_blocker,
+    unsupported_feature_claims,
+)
 from . import (
     app_supabase_auth,
     channel_registry as _channel_registry,
@@ -3405,6 +3410,20 @@ def _starter_strategy_sections(workspace_root: Path | None) -> tuple[str, dict[s
         current_lines = []
 
     for raw_line in body.splitlines():
+        # Fast bootstrap briefs often use a canonical identity list rather than one heading per
+        # field (``- **One-line tagline:** ...``). Those labels are still authored strategy truth;
+        # promote them into the same section map instead of falling through to arbitrary UI copy.
+        inline = re.match(r"^\s*[-*]\s+\*\*([^*]+?)\s*:?\*\*\s*:?\s*(.+?)\s*$", raw_line)
+        if inline:
+            label = _normalize_heading_text(inline.group(1).rstrip(":"))
+            label = {
+                "one line tagline": "tagline",
+                "one-line tagline": "tagline",
+                "canonical business name": "business name",
+            }.get(label, label)
+            value = inline.group(2).strip()
+            if label and value:
+                sections.setdefault(label, value)
         match = heading_re.match(raw_line)
         if match:
             level = len(match.group(1))
@@ -3522,12 +3541,17 @@ def _starter_workspace_marketing_copy(workspace_root: Path | None) -> dict[str, 
     except OSError:
         return copy
 
+    selected_h1_end = 0
     for match in re.finditer(r"<h1\b[^>]*>(.*?)</h1>", landing, flags=re.DOTALL):
         title = _clean_literal(match.group(1))
         if title and "Welcome to" not in title and not _is_transient_access_failure(title):
             copy.setdefault("title", title[:160])
+            selected_h1_end = match.end()
             break
-    for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", landing, flags=re.DOTALL):
+    # A landing module may define illustrative cards/previews before the real LandingScreen.
+    # Metadata must follow the selected public H1, never the first unrelated <p> in file order.
+    description_source = landing[selected_h1_end:] if selected_h1_end else landing
+    for match in re.finditer(r"<p\b[^>]*>(.*?)</p>", description_source, flags=re.DOTALL):
         description = _clean_literal(match.group(1))
         if (
             description
@@ -11323,6 +11347,8 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "workflow_markers": [],
         "risk_markers": [],
         "claim_snippets": [],
+        "customer_feature_claims": [],
+        "unsupported_feature_claims": [],
         "pretend_findings": [],
         "forbidden_findings": [],
         "files_scanned": 0,
@@ -11464,6 +11490,8 @@ def _bounded_product_inventory(business_root: Path, source_path: str, *, surface
         "workflow_markers": sorted(workflow_markers),
         "risk_markers": risk_markers,
         "claim_snippets": claim_snippets,
+        "customer_feature_claims": customer_feature_claims(root),
+        "unsupported_feature_claims": unsupported_feature_claims(root),
         "files_scanned": files_scanned,
         "files_skipped": files_skipped,
     })
@@ -11488,6 +11516,8 @@ def _product_inventory(business_root: Path, source_path: str, *, surface: dict[s
             "workflow_markers": [],
             "risk_markers": [],
             "claim_snippets": [],
+            "customer_feature_claims": [],
+            "unsupported_feature_claims": [],
             "pretend_findings": [],
             "forbidden_findings": [],
             "files_scanned": 0,
@@ -11731,6 +11761,12 @@ def _validate_product_surface_contract(
         if isinstance(item, dict)
     )
     kind = _surface_contract_kind(surface)
+    unsupported_claims = [
+        item for item in (inventory.get("unsupported_feature_claims") or [])
+        if isinstance(item, dict)
+    ]
+    if unsupported_claims:
+        return False, feature_claim_blocker(unsupported_claims[0])
     checkout_is_presented = (
         kind.get("checkout")
         or "billing_or_checkout" in risk_issues
