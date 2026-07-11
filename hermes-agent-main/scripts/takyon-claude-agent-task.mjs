@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const PROGRESS_PREFIX = "TAKYON_SDK_EVENT ";
 const SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -138,39 +139,23 @@ function humanizeLabel(value) {
   return cleaned.replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-const thinkingBlockState = new Map();
+const thinkingBlockState = new Set();
+let emittedPlanningMilestone = false;
 
-// Thinking blocks the stream lane already emitted (compact form). The final assistant message
-// repeats the FULL thinking text of blocks that partial-message streaming already printed
-// piecewise — without this memory the fallback lane re-emits the whole block as one more line.
-const emittedThinkingSummaries = new Set();
-
-function _rememberEmittedThinking(text) {
-  const summary = compactText(text, 220);
-  if (!summary) return;
-  if (emittedThinkingSummaries.size >= 200) emittedThinkingSummaries.clear();
-  emittedThinkingSummaries.add(summary);
-}
-
-function reasoningProgressEvent(note, { entryKey = "claude-reasoning", traceStatus = "running", traceSummary = "" } = {}) {
-  const summary = compactText(note, 220);
-  if (!summary) return null;
-  const line = `reasoning -> ${summary}`;
-  // The trace entry updates IN PLACE by entry_key, so it can carry the cumulative block summary;
-  // the terminal line cannot (each event prints as a new line), so it carries only `note`.
-  const fullSummary = compactText(traceSummary, 220) || summary;
+function planningProgressEvent() {
+  const detail = "Claude is inspecting the product and preparing the implementation.";
   return {
     kind: "claude_agent_sdk",
-    status: "output",
-    detail: line,
-    line,
+    status: "trace",
+    detail,
+    line: detail,
     trace: {
       kind: "reasoning",
-      entry_key: entryKey,
-      label: "Reasoning",
-      detail: fullSummary,
-      status: traceStatus,
-      summary: fullSummary,
+      entry_key: "claude-planning",
+      label: "Planning",
+      detail,
+      status: "running",
+      summary: detail,
     },
   };
 }
@@ -186,39 +171,6 @@ function assistantThinkingText(message) {
     .join("\n");
 }
 
-function _ensureThinkingState(index, initialValue = "") {
-  const key = Number(index);
-  let state = thinkingBlockState.get(key);
-  if (!state) {
-    state = { buffer: "", lastEmitted: "", lastEmitLength: 0 };
-    thinkingBlockState.set(key, state);
-  }
-  if (typeof initialValue === "string" && initialValue) {
-    state.buffer = initialValue;
-  }
-  return state;
-}
-
-function _flushThinkingState(index, { traceStatus = "running" } = {}) {
-  const key = Number(index);
-  const state = thinkingBlockState.get(key);
-  if (!state) return null;
-  // Terminal line = ONLY the text added since the last flush. Emitting the whole accumulated
-  // buffer each flush printed a stack of near-identical growing lines in the shell ("agent
-  // return is like russian nesting dolls", ching 2026-07-09). The cumulative summary still
-  // reaches the trace lane via traceSummary, which updates in place by entry_key.
-  const delta = state.buffer.slice(state.lastEmitLength);
-  const deltaSummary = compactText(delta, 220);
-  if (!deltaSummary) return null;
-  state.lastEmitted = compactText(state.buffer, 220);
-  state.lastEmitLength = state.buffer.length;
-  return reasoningProgressEvent(deltaSummary, {
-    entryKey: `claude-reasoning:${key}`,
-    traceStatus,
-    traceSummary: state.buffer,
-  });
-}
-
 function thinkingProgressEventFromStream(message) {
   const record = message && typeof message === "object" ? message : null;
   const event = record && record.type === "stream_event" && record.event && typeof record.event === "object"
@@ -228,29 +180,22 @@ function thinkingProgressEventFromStream(message) {
   if (event.type === "content_block_start") {
     const block = event.content_block && typeof event.content_block === "object" ? event.content_block : null;
     if (block?.type !== "thinking") return null;
-    _ensureThinkingState(event.index, typeof block.thinking === "string" ? block.thinking : "");
-    return null;
+    thinkingBlockState.add(Number(event.index));
+    if (emittedPlanningMilestone) return null;
+    emittedPlanningMilestone = true;
+    return planningProgressEvent();
   }
   if (event.type === "content_block_delta") {
     const delta = event.delta && typeof event.delta === "object" ? event.delta : null;
     if (!delta || delta.type !== "thinking_delta") return null;
-    const chunk = typeof delta.thinking === "string" ? delta.thinking : "";
-    if (!chunk) return null;
-    const state = _ensureThinkingState(event.index);
-    state.buffer += chunk;
-    const shouldEmit = (
-      state.buffer.length - state.lastEmitLength >= 80
-      || /[.!?]\s*$/.test(chunk)
-      || chunk.includes("\n")
-    );
-    return shouldEmit ? _flushThinkingState(event.index) : null;
+    // Thinking deltas are private model reasoning, not user-facing progress. Streaming their
+    // arbitrary token boundaries caused split words, cumulative replay, and hundreds of lines
+    // of design deliberation. Tool/task events below remain the authoritative progress lane.
+    return null;
   }
   if (event.type === "content_block_stop") {
-    const state = thinkingBlockState.get(Number(event.index));
-    const progress = _flushThinkingState(event.index, { traceStatus: "completed" });
-    if (state && state.buffer) _rememberEmittedThinking(state.buffer);
     thinkingBlockState.delete(Number(event.index));
-    return progress;
+    return null;
   }
   return null;
 }
@@ -262,16 +207,9 @@ function progressEventFromSdkMessage(message) {
   if (thinkingProgress) return thinkingProgress;
   const assistantThinking = assistantThinkingText(record);
   if (assistantThinking) {
-    // Skip blocks the partial-message stream already emitted piecewise — the final assistant
-    // message carries the full thinking text again and would re-print it as one more line.
-    const summary = compactText(assistantThinking, 220);
-    if (emittedThinkingSummaries.has(summary)) return null;
-    _rememberEmittedThinking(assistantThinking);
-    return reasoningProgressEvent(assistantThinking, {
-      entryKey: `claude-reasoning:${String(record.uuid || "assistant").trim() || "assistant"}`,
-      traceStatus: "completed",
-      traceSummary: assistantThinking,
-    });
+    // The completed assistant envelope repeats thinking blocks after their stream events. Never
+    // expose that private reasoning or replay it as a second, larger progress message.
+    return null;
   }
   if (record.type === "system" && record.subtype === "task_started") {
     const entryKey = `claude-task:${String(record.task_id || record.uuid || "task").trim()}`;
@@ -404,6 +342,8 @@ function buildPrompt(input) {
     "",
     `Make the smallest useful changes that satisfy the task. Preserve existing business files unless the instruction asks to update them. ${noteRule}`,
     "",
+    "Execution posture (HARD): begin with targeted file inspection, then implement immediately. Do not narrate design exploration, produce an implementation plan, or spend a turn deliberating before using tools. Keep private reasoning private; expose only concise tool progress and the final result.",
+    "",
     "Do not claim external execution happened. If the task needs a vendor/API/payment/deploy/posting action you cannot perform, report the blocker in the final summary instead of pretending it ran.",
     "Do not create request/spec/verification markdown files unless the instruction explicitly asks for them.",
     ...(buildGate ? ["", buildGate] : []),
@@ -419,6 +359,9 @@ function buildPrompt(input) {
 }
 
 async function main() {
+  thinkingBlockState.clear();
+  emittedPlanningMilestone = false;
+  lastProgressSignature = "";
   const raw = await readStdin();
   const input = JSON.parse(raw || "{}");
   const cwd = path.resolve(String(input.cwd || "."));
@@ -598,7 +541,15 @@ async function main() {
   }));
 }
 
-main().catch((error) => {
+export {
+  buildPrompt,
+  progressEventFromSdkMessage,
+};
+
+const isMainModule = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMainModule) main().catch((error) => {
   emitProgress({
     kind: "claude_agent_sdk",
     status: "failed",
