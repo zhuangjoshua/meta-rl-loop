@@ -39,9 +39,12 @@ _IMPLEMENTATION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r"\bdownload\b[^\n]{0,160}\.md\b|\.md\b[^\n]{0,160}\bdownload\b", re.I),
     ),
 }
-_TEMPLATE_TERM = re.compile(r"\btemplates?\b", re.I)
 _DURABLE_TEMPLATE_RAIL = re.compile(
-    r"\b(?:saveRecord|listRecords|readRecord|getRecord|invokeAction|useRecords)\s*\(", re.I
+    r"(?:"
+    r"\b(?:saveRecord|listRecords|readRecord|getRecord|invokeAction|useRecords)\s*\([^)]{0,240}\btemplates?\b"
+    r"|\btemplates?\b[^\n]{0,240}\b(?:saveRecord|listRecords|readRecord|getRecord|invokeAction|useRecords)\s*\("
+    r")",
+    re.I,
 )
 
 
@@ -115,7 +118,10 @@ def implemented_claim_capabilities(root: Path) -> set[str]:
     for kind, patterns in _IMPLEMENTATION_PATTERNS.items():
         if any(pattern.search(text) for pattern in patterns):
             capabilities.add(kind)
-    if _TEMPLATE_TERM.search(text) and _DURABLE_TEMPLATE_RAIL.search(text):
+    # A records call somewhere in the app is not evidence of a template library. Bind the
+    # template record/action name to the durable call itself so ordinary proposal persistence
+    # cannot accidentally legalize an unrelated marketing promise.
+    if _DURABLE_TEMPLATE_RAIL.search(text):
         capabilities.add("template_library")
     return capabilities
 
@@ -147,4 +153,3 @@ def feature_claim_blocker(finding: dict[str, Any]) -> str:
         "but the functional product source contains no implementation evidence for that capability; "
         "implement it in the customer workflow using the runtime-backed rails or remove the promise"
     )
-

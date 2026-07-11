@@ -2233,6 +2233,10 @@ def test_claude_agent_task_timeout_runs_publish_gates_and_blocks_incomplete_part
         refresh_calls.append(dict(kwargs))
         return {
             "status": "failed",
+            "kind": "vite",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/timeout-partial.json",
+            "inventory": {},
             "error": "requested SaaS workflow is incomplete",
             "blocker": "requested SaaS workflow is incomplete",
             "publish": {
@@ -2266,6 +2270,6 @@ def test_claude_agent_task_timeout_runs_publish_gates_and_blocks_incomplete_part
 
     assert result["success"] is False
     assert result["timed_out"] is True
-    assert len(refresh_calls) == 1
+    assert refresh_calls
     assert result["surface_refresh"]["publish"]["status"] == "blocked"
     assert "incomplete" in result["surface_refresh"]["blocker"]

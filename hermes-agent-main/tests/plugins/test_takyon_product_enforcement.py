@@ -942,6 +942,28 @@ export async function saveTemplate(client) {
     assert inventory["unsupported_feature_claims"] == []
 
 
+def test_template_claim_does_not_borrow_unrelated_record_persistence(tmp_path):
+    business_root = tmp_path / "businesses" / "proposalflow"
+    site = business_root / "product" / "site"
+    landing = site / "src" / "screens" / "landing.tsx"
+    app = site / "src" / "screens" / "app-home.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        "export function LandingScreen() { return <p>Use our template library.</p>; }\n",
+        encoding="utf-8",
+    )
+    app.write_text(
+        "export async function saveProposal(client) { return client.saveRecord({ type: 'proposal', data: {} }); }\n",
+        encoding="utf-8",
+    )
+
+    inventory = _bounded_product_inventory(business_root, "product/site")
+
+    assert [item["kind"] for item in inventory["unsupported_feature_claims"]] == [
+        "template_library"
+    ]
+
+
 def test_starter_refresh_uses_custom_landing_copy_when_notes_are_empty(tmp_path):
     from plugins.takyon import core as takyon_core
 
