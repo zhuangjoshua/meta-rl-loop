@@ -33,12 +33,16 @@ def test_site_image_tool_writes_key_free_public_asset(tmp_path, monkeypatch):
     encoded = base64.b64encode(b"site-image-bytes").decode("ascii")
 
     def fake_gated(spec, **kwargs):
-        assert spec.canonical_id == "image:openai-site"
-        assert kwargs["payload"]["model"] == "gpt-image-2"
-        processed = kwargs["on_result"]({"data": [{"b64_json": encoded}]})
+        assert spec.canonical_id == "image:gemini-site"
+        assert kwargs["payload"] == {
+            "prompt": "A precise, product-specific hero image without text.",
+            "aspect_ratio": "16:9",
+            "image_size": "1K",
+        }
+        processed = kwargs["on_result"]({"image_base64": encoded, "format": "raw"})
         return {
-            "provider": "openai",
-            "model": "gpt-image-2",
+            "provider": "gemini",
+            "model": "gemini-3.1-flash-image",
             "provider_cost_usd": 0.10,
             "credits_charged": 2,
             "balance_credits": 8,
@@ -93,11 +97,11 @@ def test_site_image_tool_is_authority_only():
     }
 
 
-def test_site_image_capability_is_scoped_to_openai_images():
+def test_site_image_capability_is_scoped_to_gemini_site_images():
     from plugins.takyon import safebox_app
 
     audience = safebox_app._CREATIVE_SITE_IMAGE_AUDIENCE
     assert safebox_app._CREATIVE_AUDIENCE_CREDIT_ACTION[audience] == "site_image_generate"
-    assert audience in safebox_app._CREATIVE_OPENAI_AUDIENCES
-    assert audience not in safebox_app._CREATIVE_GEMINI_AUDIENCES
+    assert audience in safebox_app._CREATIVE_GEMINI_AUDIENCES
+    assert audience not in safebox_app._CREATIVE_OPENAI_AUDIENCES
     assert audience not in safebox_app._CREATIVE_FAL_AUDIENCES

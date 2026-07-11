@@ -32247,9 +32247,9 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
 
 
 def handle_business_generate_site_image(args: dict, **_: Any) -> str:
-    """Generate one business-owned site image through the existing gated OpenAI Images route.
+    """Generate one business-owned site image through the gated Gemini site-image route.
 
-    The coding worker receives only the published path. The OpenAI key stays on the safebox, and the
+    The coding worker receives only the published path. The Gemini key stays on the safebox, and the
     provider call is structurally wrapped in reserve -> commit/release by gated_creative_call.
     """
     store = _store()
@@ -32270,12 +32270,9 @@ def handle_business_generate_site_image(args: dict, **_: Any) -> str:
             )
 
         slug = _file_slug(str(args.get("slug") or "site-image"), "site-image")
-        size = str(args.get("size") or "1536x1024").strip().lower()
-        if size not in {"1024x1024", "1536x1024", "1024x1536"}:
-            raise TakyonError("size must be 1024x1024, 1536x1024, or 1024x1536")
-        quality = str(args.get("quality") or "high").strip().lower()
-        if quality not in {"low", "medium", "high", "auto"}:
-            raise TakyonError("quality must be low, medium, high, or auto")
+        aspect_ratio = str(args.get("aspect_ratio") or "16:9").strip()
+        if aspect_ratio not in {"16:9", "4:3", "1:1", "3:4", "9:16"}:
+            raise TakyonError("aspect_ratio must be 16:9, 4:3, 1:1, 3:4, or 9:16")
 
         asset_rel = f"product/site/public/generated/{slug}.png"
         receipt_rel = f"product/site/.takyon/site-images/{slug}.json"
@@ -32301,45 +32298,38 @@ def handle_business_generate_site_image(args: dict, **_: Any) -> str:
         with store._connect() as conn:
             owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
 
-        from .creative_provider_registry import _OPENAI_SITE_IMAGE, gated_creative_call
+        from .creative_provider_registry import _GEMINI_SITE_IMAGE, gated_creative_call
 
         metadata = {
             "business": business,
             "slug": slug,
             "asset_path": asset_rel,
-            "size": size,
-            "quality": quality,
+            "aspect_ratio": aspect_ratio,
             "purpose": str(args.get("purpose") or "site imagery").strip()[:200],
         }
 
         def _persist_image(result: dict[str, Any]) -> dict[str, Any]:
-            data = result.get("data") if isinstance(result, Mapping) else None
-            first = data[0] if isinstance(data, list) and data else None
-            encoded = first.get("b64_json") if isinstance(first, Mapping) else None
+            encoded = result.get("image_base64") if isinstance(result, Mapping) else None
             if not encoded:
-                raise TakyonError("OpenAI image route returned no image bytes")
+                raise TakyonError("Gemini site-image route returned no image bytes")
             try:
                 image_bytes = base64.b64decode(str(encoded), validate=True)
             except Exception as exc:
-                raise TakyonError("OpenAI image route returned invalid image bytes") from exc
+                raise TakyonError("Gemini site-image route returned invalid image bytes") from exc
             if not image_bytes:
-                raise TakyonError("OpenAI image route returned an empty image")
+                raise TakyonError("Gemini site-image route returned an empty image")
             _atomic_write_bytes(asset_abs, image_bytes)
             return {"asset_path": asset_rel, "bytes": len(image_bytes)}
 
         generated = gated_creative_call(
-            _OPENAI_SITE_IMAGE,
+            _GEMINI_SITE_IMAGE,
             business=business,
             operator_user_id=owner_user_id,
             reservation_key=f"site-image:{business}:{idempotency_key}",
             payload={
-                "model": _OPENAI_SITE_IMAGE.model,
                 "prompt": prompt,
-                "n": 1,
-                "size": size,
-                "quality": quality,
-                "background": str(args.get("background") or "auto").strip() or "auto",
-                "output_format": "png",
+                "aspect_ratio": aspect_ratio,
+                "image_size": "1K",
             },
             metadata=metadata,
             on_result=_persist_image,
@@ -32354,8 +32344,7 @@ def handle_business_generate_site_image(args: dict, **_: Any) -> str:
             "slug": slug,
             "asset_path": asset_rel,
             "public_path": f"/generated/{slug}.png",
-            "size": size,
-            "quality": quality,
+            "aspect_ratio": aspect_ratio,
             "purpose": metadata["purpose"],
             "prompt": prompt,
             "provider": generated.get("provider"),
@@ -39054,8 +39043,8 @@ TAKYON_TOOL_DEFINITIONS = [
     {
         "name": "business_generate_site_image",
         "description": (
-            "Generate one business-owned image for a product/site through OpenAI gpt-image-2. "
-            "The OpenAI key remains on the Safebox; the creative rail reserves and settles before "
+            "Generate one business-owned image for a product/site through Gemini image generation. "
+            "The Gemini key remains on the Safebox; the creative rail reserves and settles before "
             "publishing the PNG under product/site/public/generated/. Live-only."
         ),
         "handler": handle_business_generate_site_image,
@@ -39067,9 +39056,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "slug": {"type": "string", "description": "Stable filename slug; output is product/site/public/generated/<slug>.png."},
                 "prompt": {"type": "string", "description": "Art-directed image prompt grounded in the business and the image's actual page role."},
                 "purpose": {"type": "string", "description": "Short role such as hero background, product detail, or section texture."},
-                "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"], "description": "Output size; defaults to landscape 1536x1024."},
-                "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "OpenAI image quality; defaults to high."},
-                "background": {"type": "string", "enum": ["auto", "opaque", "transparent"], "description": "Background mode; defaults to auto."},
+                "aspect_ratio": {"type": "string", "enum": ["16:9", "4:3", "1:1", "3:4", "9:16"], "description": "Gemini output aspect ratio; defaults to landscape 16:9."},
                 "idempotency_key": _IDEMPOTENCY_PROP,
                 "reason": _REASON_PROP,
                 "actor": _ACTOR_PROP,
