@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TAKYON_VPS_HOST_EXPLICIT="${TAKYON_VPS_HOST+x}"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
 SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
@@ -30,6 +31,41 @@ TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"
 # design — takyon-subuser-2); see deploy/shared/validate-authority-env.sh.
 TAKYON_REQUIRE_APP_DATABASE_URL="${TAKYON_REQUIRE_APP_DATABASE_URL:-1}"
 TAKYON_DENO_VERSION="${TAKYON_DENO_VERSION:-2.8.3}"
+TAKYON_HEALTH_WAIT_SECONDS="${TAKYON_HEALTH_WAIT_SECONDS:-90}"
+TAKYON_SUBUSER_FANOUT_CHILD="${TAKYON_SUBUSER_FANOUT_CHILD:-0}"
+TAKYON_SUBUSER_PRIMARY_HOST="${TAKYON_SUBUSER_PRIMARY_HOST:-root@134.209.123.8}"
+TAKYON_SUBUSER_REPLICA_HOSTS="${TAKYON_SUBUSER_REPLICA_HOSTS:-root@206.81.10.173}"
+
+# Local production deploys default to the complete sub-user plane. CI and one-host repair callers
+# already export TAKYON_VPS_HOST, so they retain the narrow single-host behavior. Build the dashboard
+# bundle once, validate the primary with its app DSN requirement, then deploy every authority-isolated
+# replica with the same exact source tree.
+if [[ "$TAKYON_SUBUSER_FANOUT_CHILD" != "1" && -z "$TAKYON_VPS_HOST_EXPLICIT" ]]; then
+  hosts=("$TAKYON_SUBUSER_PRIMARY_HOST")
+  IFS=',' read -r -a replica_hosts <<< "$TAKYON_SUBUSER_REPLICA_HOSTS"
+  for replica_host in "${replica_hosts[@]}"; do
+    replica_host="${replica_host//[[:space:]]/}"
+    [[ -n "$replica_host" ]] && hosts+=("$replica_host")
+  done
+  run_web_build="$TAKYON_RUN_WEB_BUILD"
+  for index in "${!hosts[@]}"; do
+    require_app_database_url=0
+    [[ "$index" == "0" ]] && require_app_database_url=1
+    env \
+      TAKYON_SUBUSER_FANOUT_CHILD=1 \
+      TAKYON_VPS_HOST="${hosts[$index]}" \
+      TAKYON_REQUIRE_APP_DATABASE_URL="$require_app_database_url" \
+      TAKYON_RUN_WEB_BUILD="$run_web_build" \
+      "$0"
+    run_web_build=0
+  done
+  exit 0
+fi
+
+if ! [[ "$TAKYON_HEALTH_WAIT_SECONDS" =~ ^[0-9]+$ ]] || (( TAKYON_HEALTH_WAIT_SECONDS < 1 )); then
+  echo "TAKYON_HEALTH_WAIT_SECONDS must be a positive integer" >&2
+  exit 1
+fi
 
 if [[ ! -d "$RUNTIME_DIR" ]]; then
   echo "runtime directory not found: $RUNTIME_DIR" >&2
@@ -184,7 +220,7 @@ PY
   systemctl daemon-reload
   systemctl restart '$TAKYON_REMOTE_SERVICE_NAME'
   systemctl is-active --quiet '$TAKYON_REMOTE_SERVICE_NAME'
-  for _ in \$(seq 1 30); do
+  for _ in \$(seq 1 '$TAKYON_HEALTH_WAIT_SECONDS'); do
     if curl -fsS http://127.0.0.1:9119/healthz >/dev/null; then
       break
     fi
