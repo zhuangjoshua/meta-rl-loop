@@ -1072,6 +1072,15 @@ require_docker_for_worker() {
   if ! docker version >/dev/null 2>&1; then
     die "Docker is not reachable; start Docker Desktop before running the local worker pool"
   fi
+  local worker_image="${TAKYON_CLAUDE_AGENT_DOCKER_IMAGE:-${TERMINAL_DOCKER_IMAGE:-nikolaik/python-nodejs:python3.11-nodejs20}}"
+  if ! docker run --rm \
+    --entrypoint /bin/sh \
+    --mount "type=bind,src=$RUNTIME_DIR,dst=/takyon-runtime,readonly" \
+    "$worker_image" \
+    -c 'test -d /takyon-runtime/agent && test -d /takyon-runtime/plugins/takyon' \
+    >/dev/null 2>&1; then
+    die "Docker cannot bind-mount the runtime checkout at $RUNTIME_DIR; move or create the checkout under a Docker Desktop shared path (normally /Users/...) before starting the production worker"
+  fi
 }
 
 ensure_deno_toolchain() {
