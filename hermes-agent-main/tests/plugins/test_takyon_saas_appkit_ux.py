@@ -90,6 +90,33 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
 
 def test_navigation_component_is_force_refreshed_with_appkit_rails():
     assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/components/social-proof-marquee.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/lib/interaction-sounds.ts" in takyon_core._STARTER_OWNED_REFRESH_FILES
+
+
+def test_landing_has_truthful_coscale_social_proof_and_default_interaction_sounds():
+    landing = read("src/screens/landing.tsx")
+    proof = read("src/components/social-proof-marquee.tsx")
+    main = read("src/main.tsx")
+    sounds = read("src/lib/interaction-sounds.ts")
+    assert "SocialProofMarquee" in landing
+    assert "Used by professionals building with Coscale" in proof
+    assert "animate-proof-marquee" in proof
+    assert "installInteractionSounds" in main
+    assert 'closest("button")' in sounds
+
+
+def test_pricing_uses_only_published_plan_price_and_limits():
+    support = read("src/screens/support.tsx")
+    takyon = read("src/lib/takyon.ts")
+    assert "defaultPlanPriceLabel" in support
+    assert "defaultPlanLimitLabels" in support
+    assert "Plan limits" in support
+    assert "includedActionQuota" in takyon
+    assert "includedAiBudgetMicrousd" in takyon
+    contract = takyon_core._subuser_app_kit_contract_block(None)
+    assert "never invent a promotion" in contract
+    assert "defaultPlanLimitLabels()" in contract
 
 
 def test_surface_context_carries_strategy_product_name_instead_of_internal_slug(tmp_path):

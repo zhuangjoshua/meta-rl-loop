@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../co
 import { businessDisplayName } from "../lib/branding";
 import { resolveViewerCta, useViewerAccess } from "../lib/hooks";
 import { useProductAuth } from "../lib/product-auth";
-import { defaultPlanPriceLabel } from "../lib/takyon";
+import { defaultPlanLimitLabels, defaultPlanPriceLabel } from "../lib/takyon";
 
 const faqItems = [
   {
@@ -60,6 +60,7 @@ export function PricingScreen() {
   const cta = resolveViewerCta(access);
   const productName = businessDisplayName();
   const price = defaultPlanPriceLabel();
+  const limits = defaultPlanLimitLabels();
 
   return (
     <main className="min-h-screen bg-background">
@@ -78,6 +79,16 @@ export function PricingScreen() {
               <CardDescription>Everything required to use the product.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
+              <div className="rounded-lg border border-border bg-muted/40 p-4">
+                <p className="text-sm font-semibold text-foreground">Plan limits</p>
+                {limits.length ? (
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted-foreground">
+                    {limits.map((limit) => <li key={limit}>{limit}</li>)}
+                  </ul>
+                ) : (
+                  <p className="mt-2 text-sm text-muted-foreground">No numeric usage limit is configured for this plan.</p>
+                )}
+              </div>
               {access.loading ? (
                 <div className="h-12 animate-pulse rounded bg-muted" />
               ) : access.authenticated ? (

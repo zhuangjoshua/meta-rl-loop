@@ -38,6 +38,23 @@ export function defaultPlanPriceLabel(): string {
   return `$${amount}/${interval}`;
 }
 
+/** Customer-facing limits derived only from the published billing plan. Never invents an offer. */
+export function defaultPlanLimitLabels(): string[] {
+  const plan = productPlans[0];
+  if (!plan) return [];
+  const labels: string[] = [];
+  const actionQuota = Number(plan.includedActionQuota ?? plan.included_action_quota ?? 0);
+  if (Number.isFinite(actionQuota) && actionQuota > 0) {
+    labels.push(`${actionQuota.toLocaleString()} product actions per billing period`);
+  }
+  const aiBudgetMicrousd = Number(plan.includedAiBudgetMicrousd ?? plan.included_ai_budget_microusd ?? 0);
+  if (Number.isFinite(aiBudgetMicrousd) && aiBudgetMicrousd > 0) {
+    const dollars = aiBudgetMicrousd / 1_000_000;
+    labels.push(`${dollars.toLocaleString(undefined, { style: "currency", currency: "USD" })} AI usage allowance per billing period`);
+  }
+  return labels;
+}
+
 /** One buyable product in the business's Shopify storefront. */
 export interface StorefrontProduct {
   productId: string;

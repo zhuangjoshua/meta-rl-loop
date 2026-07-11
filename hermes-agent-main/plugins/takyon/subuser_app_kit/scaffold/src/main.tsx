@@ -2,6 +2,7 @@ import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
+import { installInteractionSounds } from "./lib/interaction-sounds";
 import { ProductAuthProvider } from "./lib/product-auth";
 import { LandingScreen } from "./screens/landing";
 // Not lazy: the store lives on the landing chunk already (StoreSection is rendered inline on the
@@ -35,6 +36,8 @@ const ProfileScreen = lazy(() =>
 
 const container = document.getElementById("root");
 if (!container) throw new Error("root element missing");
+
+installInteractionSounds();
 
 createRoot(container).render(
   <StrictMode>

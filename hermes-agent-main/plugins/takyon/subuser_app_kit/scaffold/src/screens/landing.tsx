@@ -1,5 +1,6 @@
 import { Navigate } from "react-router-dom";
 import { PublicSiteHeader } from "../components/site-navigation";
+import { SocialProofMarquee } from "../components/social-proof-marquee";
 import { Skeleton } from "../components/ui/skeleton";
 import {
   brandHeroEyebrow,
@@ -108,6 +109,8 @@ export function LandingScreen() {
           </div>
         </div>
       </section>
+
+      <SocialProofMarquee />
 
       <section className="border-y border-border bg-card">
         <div className="mx-auto grid w-full max-w-7xl gap-6 px-6 py-12 md:grid-cols-3">
