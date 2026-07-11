@@ -25,7 +25,10 @@ TAKYON_REMOTE_WORKER_SERVICE_FILE="${TAKYON_REMOTE_WORKER_SERVICE_FILE:-/etc/sys
 TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE="${TAKYON_REMOTE_DOCKER_BROKER_SERVICE_FILE:-/etc/systemd/system/takyon-docker-broker.service}"
 TAKYON_REMOTE_SAFEBOX_URL="${TAKYON_REMOTE_SAFEBOX_URL:-http://10.116.0.2:8000}"
 TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"
-TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-1}"
+# Migrations are an explicit deploy step only when this revision adds db/migrations/*.sql. Replaying
+# every historical DDL file on an ordinary code deploy can wait on live Mac-owned transactions and
+# is not a no-cost health check. Call with TAKYON_RUN_DB_MIGRATIONS=1 for migration-bearing revisions.
+TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"
 TAKYON_FINALIZE_STRIPE_LIVE="${TAKYON_FINALIZE_STRIPE_LIVE:-0}"
 TAKYON_BOOTSTRAP_HOST="${TAKYON_BOOTSTRAP_HOST:-1}"
 TAKYON_APPLY_CADDY="${TAKYON_APPLY_CADDY:-0}"
@@ -288,13 +291,16 @@ PY"
 
 wait_for_remote_runtime_idle
 
+# Migrations are additive and run against the newly rsynced tree. Apply them while the current
+# services are still healthy, then enter the short stop/restart window. A slow advisory-lock wait
+# must never turn into operator-dashboard downtime.
+run_remote_migrations
+
 TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
   TAKYON_VPS_KEY="$TAKYON_VPS_KEY" \
 TAKYON_REMOTE_HOME="$TAKYON_REMOTE_HOME" \
 TAKYON_STOP_CORE_SERVICES=1 \
   "$REPAIR_PRODUCT_RUNTIME_SCRIPT"
-
-run_remote_migrations
 
 if [[ "$TAKYON_FINALIZE_STRIPE_LIVE" == "1" ]]; then
   TAKYON_VPS_HOST="$TAKYON_VPS_HOST" \
