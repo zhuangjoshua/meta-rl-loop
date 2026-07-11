@@ -124,6 +124,7 @@ TAKYON_AUTHORITY_TOOL_NAMES = frozenset(
         "business_set_channel_credit_budgets",
         "business_ugc_ad_generate",
         "business_static_ad_generate",
+        "business_generate_site_image",
         "business_generate_logo",
         "business_register_search_console",
         "business_meta_ad_launch",
@@ -207,7 +208,7 @@ PUBLIC_LANDING_COMPOSITION_CONTRACT = """Public landing composition floor:
 - Name the product like a real product. The HTML `<title>`, landing headline, visible branding, and SEO/OG tags must carry a human product name and/or plain-language value proposition. NEVER derive them from the business slug or workspace id — an internal slug (e.g. `qaproof0708b`) must not appear in the title, hero, nav brand, or meta tags. If no product name exists yet, coin a short brandable one consistent with the business's research/ and product/ state and use it consistently everywhere.
 """
 # Injected for every product/site worker pass (bootstrap and iterate alike) so the visual-craft
-# floor rides regardless of which design style pack the CEO selected. The capabilities it names
+# floor rides alongside the brief-driven Taste guidance. The capabilities it names
 # (`lucide-react`, `framer-motion`) are pinned in the scaffold's own package.json — worker-added
 # deps are force-restored away on every refresh, so this contract must only ever name deps the
 # scaffold itself pins.
@@ -289,6 +290,15 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-doodle": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-design-brutalist": ("When To Use", "Visual Direction", "Typography", "Color and Tokens", "Components", "Hard Rules"),
     "claude-refresh-audit": ("When To Use", "Audit Method", "Design Audit", "Fix Priority", "Rules"),
+    "taste-frontend": (
+        "Design Read",
+        "Fluid Composition",
+        "Design System",
+        "Product UI",
+        "Assets",
+        "Anti-Slop",
+        "Preflight",
+    ),
 }
 _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-openai": (
@@ -1970,14 +1980,10 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
-# Fallback design packs used ONLY when the caller passes no `guidance_skills`. The bootstrap CEO
-# now selects the single fitting style pack per business and passes it explicitly, so this default
-# is a backstop. Keep it lean — base method + one generic style — so a caller that omits guidance
-# never silently makes the worker carry all six packs through its whole loop. Per-business fit comes
-# from the CEO's explicit pick; this fallback is intentionally generic.
+# Default guidance used when the caller passes no `guidance_skills`. Taste infers the direction from
+# the business brief instead of forcing every product through one of a few preset visual brands.
 _DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
-    "claude-design",
-    "claude-design-openai",
+    "taste-frontend",
 )
 def _resolve_worker_guidance_skills(
     args: dict[str, Any],
@@ -1988,11 +1994,10 @@ def _resolve_worker_guidance_skills(
 ) -> tuple[list[str], str]:
     if "guidance_skills" in args:
         return _normalize_guidance_skills(args.get("guidance_skills")), "used explicit guidance_skills from caller"
-    # Customer-facing product surfaces default to the full design-pack set so the worker always
-    # builds with a coherent visual direction instead of bare layout rules. The caller can still
-    # narrow to a subset, or pass an explicit ``guidance_skills: []`` to opt out.
+    # Every product/site pass receives the same brief-driven visual method. The injected App Kit
+    # contract remains authoritative for routes and behavior.
     if _workspace_needs_runtime_ui_contract(workspace_raw) or _workspace_needs_customer_ai_copy_contract(workspace_raw):
-        return list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS), "auto-selected design packs for customer-facing product surface"
+        return list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS), "auto-selected Taste guidance for customer-facing product surface"
     return [], ""
 
 
@@ -8776,7 +8781,11 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         resolved_names.append(skill_name)
         section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
         excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
-        if skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
+        if (
+            skill_name.lower() == "taste-frontend"
+            or skill_name.lower() == "claude-design"
+            or skill_name.lower().startswith("claude-design-")
+        ):
             preamble = (
                 "Treat this guidance as the required design contract for this run. "
                 "Follow its visual direction, component posture, and hard rules unless the business brief explicitly conflicts. "
@@ -8799,7 +8808,11 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
     design_pack_count = sum(
         1
         for name in resolved_names
-        if name.lower() == "claude-design" or name.lower().startswith("claude-design-")
+        if (
+            name.lower() == "taste-frontend"
+            or name.lower() == "claude-design"
+            or name.lower().startswith("claude-design-")
+        )
     )
     if design_pack_count >= 2:
         blocks.insert(
@@ -31959,6 +31972,164 @@ def handle_business_generate_logo(args: dict, **_: Any) -> str:
         return tool_error(str(exc), success=False)
 
 
+def handle_business_generate_site_image(args: dict, **_: Any) -> str:
+    """Generate one business-owned site image through the existing gated OpenAI Images route.
+
+    The coding worker receives only the published path. The OpenAI key stays on the safebox, and the
+    provider call is structurally wrapped in reserve -> commit/release by gated_creative_call.
+    """
+    store = _store()
+    try:
+        business = _resolved_business_slug(args, required=True)
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        prompt = str(args.get("prompt") or "").strip()
+        if not idempotency_key:
+            raise TakyonError("idempotency_key is required")
+        if not prompt:
+            raise TakyonError("prompt is required")
+        if len(prompt) > 12_000:
+            raise TakyonError("prompt is too long (max 12000 characters)")
+        if _business_mode(store, business) == "test":
+            raise TakyonError(
+                "business_generate_site_image requires a live business; site image generation "
+                "spends real provider money and is not stubbed in test mode"
+            )
+
+        slug = _file_slug(str(args.get("slug") or "site-image"), "site-image")
+        size = str(args.get("size") or "1536x1024").strip().lower()
+        if size not in {"1024x1024", "1536x1024", "1024x1536"}:
+            raise TakyonError("size must be 1024x1024, 1536x1024, or 1024x1536")
+        quality = str(args.get("quality") or "high").strip().lower()
+        if quality not in {"low", "medium", "high", "auto"}:
+            raise TakyonError("quality must be low, medium, high, or auto")
+
+        asset_rel = f"product/site/public/generated/{slug}.png"
+        receipt_rel = f"product/site/.takyon/site-images/{slug}.json"
+        asset_abs = store._resolve_business_file(business, asset_rel)
+        receipt_abs = store._resolve_business_file(business, receipt_rel)
+        prior = _read_existing_receipt(receipt_abs, idempotency_key)
+        if prior is not None and asset_abs.exists():
+            return tool_result(
+                {
+                    "success": bool(prior.get("success", True)),
+                    "action": "business_generate_site_image",
+                    "business": business,
+                    "slug": slug,
+                    "idempotent": True,
+                    "status": prior.get("status"),
+                    "asset_path": asset_rel,
+                    "public_path": f"/generated/{slug}.png",
+                    "receipt": receipt_rel,
+                    "value": prior,
+                }
+            )
+
+        with store._connect() as conn:
+            owner_user_id = _business_owner_user_id_for_creative(store, conn, business)
+
+        from .creative_provider_registry import _OPENAI_SITE_IMAGE, gated_creative_call
+
+        metadata = {
+            "business": business,
+            "slug": slug,
+            "asset_path": asset_rel,
+            "size": size,
+            "quality": quality,
+            "purpose": str(args.get("purpose") or "site imagery").strip()[:200],
+        }
+
+        def _persist_image(result: dict[str, Any]) -> dict[str, Any]:
+            data = result.get("data") if isinstance(result, Mapping) else None
+            first = data[0] if isinstance(data, list) and data else None
+            encoded = first.get("b64_json") if isinstance(first, Mapping) else None
+            if not encoded:
+                raise TakyonError("OpenAI image route returned no image bytes")
+            try:
+                image_bytes = base64.b64decode(str(encoded), validate=True)
+            except Exception as exc:
+                raise TakyonError("OpenAI image route returned invalid image bytes") from exc
+            if not image_bytes:
+                raise TakyonError("OpenAI image route returned an empty image")
+            _atomic_write_bytes(asset_abs, image_bytes)
+            return {"asset_path": asset_rel, "bytes": len(image_bytes)}
+
+        generated = gated_creative_call(
+            _OPENAI_SITE_IMAGE,
+            business=business,
+            operator_user_id=owner_user_id,
+            reservation_key=f"site-image:{business}:{idempotency_key}",
+            payload={
+                "model": _OPENAI_SITE_IMAGE.model,
+                "prompt": prompt,
+                "n": 1,
+                "size": size,
+                "quality": quality,
+                "background": str(args.get("background") or "auto").strip() or "auto",
+                "output_format": "png",
+            },
+            metadata=metadata,
+            on_result=_persist_image,
+        )
+        processed = generated.get("processed") if isinstance(generated.get("processed"), Mapping) else {}
+        receipt = {
+            "success": True,
+            "status": "created",
+            "action": "business_generate_site_image",
+            "idempotency_key": idempotency_key,
+            "business": business,
+            "slug": slug,
+            "asset_path": asset_rel,
+            "public_path": f"/generated/{slug}.png",
+            "size": size,
+            "quality": quality,
+            "purpose": metadata["purpose"],
+            "prompt": prompt,
+            "provider": generated.get("provider"),
+            "model": generated.get("model"),
+            "provider_cost_usd": generated.get("provider_cost_usd"),
+            "credits_charged": generated.get("credits_charged"),
+            "balance_credits": generated.get("balance_credits"),
+            "reserved_credits": generated.get("reserved_credits"),
+            "bytes": processed.get("bytes"),
+            "created_at": _now(),
+        }
+        _atomic_write_text(receipt_abs, json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
+        store.commit(
+            scope=f"business:{business}/product:site-image/{slug}",
+            operations=[
+                {
+                    "action": "event.record",
+                    "business": business,
+                    "event_type": "site_image.generate",
+                    "payload": receipt,
+                }
+            ],
+            idempotency_key=f"{idempotency_key}:receipt",
+            reason=args.get("reason") or "record generated site image",
+            actor=args.get("actor") or "agent",
+        )
+        store._sync_business_workspace_remote(business)
+        return tool_result(
+            {
+                "success": True,
+                "action": "business_generate_site_image",
+                "business": business,
+                "slug": slug,
+                "status": "created",
+                "asset_path": asset_rel,
+                "public_path": receipt["public_path"],
+                "receipt": receipt_rel,
+                "provider_cost_usd": receipt["provider_cost_usd"],
+                "credits_charged": receipt["credits_charged"],
+                "balance_credits": receipt["balance_credits"],
+                "reserved_credits": receipt["reserved_credits"],
+                "value": receipt,
+            }
+        )
+    except Exception as exc:
+        return tool_error(str(exc), success=False)
+
+
 # Google Search Console verification: aliases live in core._API_ENV_ALIASES under
 # "google_search_console" -> TAKYON_GSC_SERVICE_ACCOUNT_KEY. The service-account JSON is held by the
 # safebox (private secret-authority host) and resolved ONLY through the authority route below; the
@@ -32544,6 +32715,7 @@ _CREATIVE_CREDIT_COST_DEFAULTS = {
     "ugc_ad_generate": 8,
     "static_ad_generate": 2,
     "logo_generate": 2,
+    "site_image_generate": 2,
     # App Store rail (readmodular §2.5/§7): a mobile release (EAS build + TestFlight) is a fixed
     # operator-priced creative-credit action; the exact EAS $ cost is recorded in the credit metadata
     # at settle from usage_pricing ('eas','build_ios'). Reserve→settle-at-trigger→release (store_build).
@@ -32561,6 +32733,7 @@ _CREATIVE_CREDIT_COST_ENVS = {
     "ugc_ad_generate": "TAKYON_CREATIVE_CREDITS_UGC_AD",
     "static_ad_generate": "TAKYON_CREATIVE_CREDITS_STATIC_AD",
     "logo_generate": "TAKYON_CREATIVE_CREDITS_LOGO",
+    "site_image_generate": "TAKYON_CREATIVE_CREDITS_SITE_IMAGE",
     "mobile_release": "TAKYON_CREATIVE_CREDITS_MOBILE_RELEASE",
     **{c.credit_action: c.credit_cost_env for c in _channel_registry.CHANNEL_REGISTRY.values()},
     "meta_ad_launch": "TAKYON_CREATIVE_CREDITS_META_LAUNCH",
@@ -32575,6 +32748,7 @@ _CREATIVE_CREDIT_ACTION_DEFAULT_BUCKETS = {
 }
 _CREATIVE_CREDIT_ACTION_AUDIENCES = {
     "logo_generate": "creative.logo",
+    "site_image_generate": "creative.site_image",
     "ugc_ad_generate": "creative.ugc",
     "static_ad_generate": "creative.static_ad",
     **{c.credit_action: c.credit_audience for c in _channel_registry.CHANNEL_REGISTRY.values()},
@@ -38581,6 +38755,32 @@ TAKYON_TOOL_DEFINITIONS = [
         ),
     },
     {
+        "name": "business_generate_site_image",
+        "description": (
+            "Generate one business-owned image for a product/site through OpenAI gpt-image-2. "
+            "The OpenAI key remains on the Safebox; the creative rail reserves and settles before "
+            "publishing the PNG under product/site/public/generated/. Live-only."
+        ),
+        "handler": handle_business_generate_site_image,
+        "schema": _schema(
+            "business_generate_site_image",
+            "Generate one key-safe, credit-metered image for a business product site.",
+            {
+                "business": _BUSINESS_PROP,
+                "slug": {"type": "string", "description": "Stable filename slug; output is product/site/public/generated/<slug>.png."},
+                "prompt": {"type": "string", "description": "Art-directed image prompt grounded in the business and the image's actual page role."},
+                "purpose": {"type": "string", "description": "Short role such as hero background, product detail, or section texture."},
+                "size": {"type": "string", "enum": ["1024x1024", "1536x1024", "1024x1536"], "description": "Output size; defaults to landscape 1536x1024."},
+                "quality": {"type": "string", "enum": ["low", "medium", "high", "auto"], "description": "OpenAI image quality; defaults to high."},
+                "background": {"type": "string", "enum": ["auto", "opaque", "transparent"], "description": "Background mode; defaults to auto."},
+                "idempotency_key": _IDEMPOTENCY_PROP,
+                "reason": _REASON_PROP,
+                "actor": _ACTOR_PROP,
+            },
+            ["business", "slug", "prompt", "idempotency_key"],
+        ),
+    },
+    {
         "name": "business_generate_logo",
         "description": (
             "Generate a business-scoped brand logo with Nano Banana (Gemini gemini-2.5-flash-image): "
@@ -38851,7 +39051,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction, such as claude-design plus ONE shared style pack (claude-design-openai, claude-design-stripe, claude-design-superhuman, claude-design-doodle, claude-design-brutalist), and claude-refresh-audit on UI-refresh passes. When omitted on a customer-facing product workspace, the runtime auto-injects claude-design plus a generic style pack; pass an explicit empty list to opt out."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction. Every product/site task defaults to taste-frontend, which infers a business-specific direction while preserving the injected App Kit behavior contract. Pass an explicit empty list only to opt out."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},

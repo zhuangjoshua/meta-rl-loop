@@ -67,7 +67,7 @@ def test_record_lists_keep_last_success_across_tabs_and_refresh_failures():
     assert "setRecords([])" not in catch_block
 
 
-def test_saas_worker_contract_requires_product_visuals_proof_and_durable_full_page_workflow():
+def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_fluid():
     contract = takyon_core._subuser_app_kit_contract_block(None)
     assert "PublicSiteHeader" in contract
     assert "distinct Log in and Sign up" in contract
@@ -80,7 +80,10 @@ def test_saas_worker_contract_requires_product_visuals_proof_and_durable_full_pa
         "saas-appkit-test", "Build a SaaS workflow", "live", archetype="web_saas"
     )
     assert "Preserve and render the canonical `PublicSiteHeader`" in prompt
-    assert "at least two polished, product-specific representations" in prompt
+    assert 'guidance_skills: pass exactly ["taste-frontend"]' in prompt
+    assert "without prescribing a section count or layout family" in prompt
+    assert "route graph and required public/auth behavior are immutable" in prompt
+    assert "business_generate_site_image" in prompt
     assert "Persist every created/generated customer artifact" in prompt
     assert "Upgrade landing proof from the verified research" in prompt
 

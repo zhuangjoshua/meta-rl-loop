@@ -13,6 +13,6 @@ Operator arguments:
 
 Use explicit business evidence: goal, audience, offer, product state, conversion evidence, support/conversation state, and any existing product or website files. Prefer updating the canonical product surface and source directly instead of seeding a separate design brief artifact.
 
-For focused edits inside the business workspace, use the owning Takyon skill and let it delegate `business_claude_agent_task` when needed; this keeps path containment, budget allocation, and audit truth on the owner rail instead of a generic helper. For non-trivial `product/site` design work, pass `guidance_skills: ["claude-design"]`. Do not run daemons, mutate global repo files, or write outside this business workspace.
+For focused edits inside the business workspace, use the owning Takyon skill and let it delegate `business_claude_agent_task` when needed; this keeps path containment, budget allocation, and audit truth on the owner rail instead of a generic helper. For every `product/site` design pass, pass `guidance_skills: ["taste-frontend"]`. Taste controls presentation; the App Kit route, auth, checkout, entitlement, account, and action contracts remain immutable. Do not run daemons, mutate global repo files, or write outside this business workspace.
 
 Design work should leave durable business context behind in the canonical surface/source path: rationale, assets or source changes, QA notes, and next open questions.

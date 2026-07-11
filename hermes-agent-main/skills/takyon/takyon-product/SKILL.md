@@ -9,12 +9,13 @@ metadata:
   hermes:
     category: takyon
     tags: [takyon, product, website, app, workflow, pricing]
-    related_skills: [takyon-market-research, takyon-app-runtime, takyon-distribution]
+    related_skills: [takyon-market-research, takyon-app-runtime, takyon-distribution, taste-frontend, taste-imagegen-web]
     requires_toolsets: [takyon, takyon-authority]
     requires_tools:
       - business_read_business
       - business_upsert_app_surface_contract
       - business_upsert_app_plan
+      - business_generate_site_image
       - business_claude_agent_task
       - business_refresh_product_surface
       - business_check_runtime_capabilities
@@ -82,7 +83,8 @@ The platform contract for product source — action-file shape, `user` + `entitl
 5. Delegate ONE bounded `business_claude_agent_task` on `product/site/`:
    - `business`, fresh `idempotency_key`, `workspace: product/site`, `refresh_surface: true`.
    - `instruction`: name the concrete product goal for this phase in business terms (the real customer job for `/app`, the specific flow/screen/price to change, the brand/offer to land on the landing page) plus the business + research context. Do NOT restate the platform contract — it is injected.
-   - `guidance_skills`: pass `claude-design` plus exactly ONE style pack chosen from the brief — `claude-design-openai` (calm AI/prosumer), `claude-design-stripe` (premium commercial/fintech), `claude-design-superhuman` (executive speed/focus), `claude-design-doodle` (playful consumer), `claude-design-brutalist` (dev tools, security/infra, technical/terminal brands). Reuse the pack recorded in the business design brief on later passes instead of re-choosing. On UI-refresh passes over an existing surface, add `claude-refresh-audit` so the worker audits before editing.
+   - `guidance_skills`: pass `taste-frontend` on every `product/site` build or iteration. It infers the visual direction from the business instead of forcing a preset style. The injected App Kit contract still owns routes, navigation, auth, checkout, entitlements, account behavior, and actions.
+   - Before delegating, inspect existing brand/product media. If the chosen direction genuinely needs imagery and no truthful asset exists, load `taste-imagegen-web`, then call `business_generate_site_image` once per required asset with a stable slug, page-role-specific prompt, and fresh idempotency key. Give the returned `public_path` values to the worker. A typography-led direction may require no generated image; never generate filler.
    - **Give the pinned worker enough room per call.** Pass a higher turn/budget/time ceiling than the tool defaults, because this is the highest-leverage product pass and a tight default budget makes the worker bail mid-build:
      - Do not pass `model`. The deployment pins the coding worker to `deepseek-v4-pro` for the entire run, and the runtime rejects model overrides or substitutions.
      - `max_turns` — above the product default of 60 (cap 90), so a real workflow build finishes in one warm pass instead of hitting the turn cap.
@@ -141,7 +143,7 @@ Do not report done until the publish floor (and the action floor, when an action
 
 1. Infer the phase from current product state; do not restart a real product unless the operator asked for that.
 2. Route product craft to the `business_claude_agent_task` worker with business context, research, and a clear goal; do not micromanage build steps in the instruction.
-3. Do not restate the code-injected worker contract (action-file shape, `user`+`entitlements[]`, forbidden legacy gates, route skeleton, no-free-tier/no-trial); point the worker at it and let it carry the invariants.
+3. Do not restate the code-injected worker contract (action-file shape, `user`+`entitlements[]`, forbidden legacy gates, route skeleton, no-free-tier/no-trial); point the worker at it and let it carry the invariants. Taste controls presentation, never the click graph.
 4. Un-nerf the worker per call (stronger model + higher `max_turns`/`budget_usd`/`timeout_ms`); never change the tool defaults that bootstrap rides.
 5. Treat plan catalog mutations as authoritative runtime changes, not marketing copy. Change pricing by minting a new `plan_key` version; keep grandfathered legacy plan rows; keep `included_ai_budget_microusd <= price_cents * 10_000`.
 6. Keep access/account/subscription state on the shared runtime helpers; the single offer is one monthly paid subscription (the worker's injected contract enforces no free tier / no trial).

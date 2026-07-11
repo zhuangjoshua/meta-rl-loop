@@ -368,14 +368,8 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    # Backstop default when the caller omits guidance_skills: base method + one generic style,
-    # NOT all six. The bootstrap CEO normally passes the single fitting pack explicitly; this lean
-    # fallback keeps an omitting caller from carrying all six packs through the worker loop.
-    assert result["guidance_skills"] == [
-        "claude-design",
-        "claude-design-openai",
-    ]
-    assert result["guidance_selection_reason"] == "auto-selected design packs for customer-facing product surface"
+    assert result["guidance_skills"] == ["taste-frontend"]
+    assert result["guidance_selection_reason"] == "auto-selected Taste guidance for customer-facing product surface"
     assert "[Hermes guidance skill: default-product-site]" in instruction
 
 
@@ -597,14 +591,8 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    # The lean backstop default is base method + one generic style — NOT a per-business pick and NOT
-    # all six. The CEO selects the fitting pack explicitly in the bootstrap path; this fallback only
-    # fires when guidance_skills is omitted entirely.
-    assert result["guidance_skills"] == [
-        "claude-design",
-        "claude-design-openai",
-    ]
-    assert result["guidance_selection_reason"] == "auto-selected design packs for customer-facing product surface"
+    assert result["guidance_skills"] == ["taste-frontend"]
+    assert result["guidance_selection_reason"] == "auto-selected Taste guidance for customer-facing product surface"
     assert "[Hermes guidance skill: inferred-product-site]" in instruction
 
 

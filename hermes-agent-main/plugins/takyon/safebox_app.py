@@ -93,6 +93,7 @@ _OPERATOR_SESSION_TTL_MAX_SECONDS = 6 * 3600
 _CREATIVE_LOGO_AUDIENCE = "creative.logo"
 _CREATIVE_UGC_AUDIENCE = "creative.ugc"
 _CREATIVE_STATIC_AD_AUDIENCE = "creative.static_ad"
+_CREATIVE_SITE_IMAGE_AUDIENCE = "creative.site_image"
 _CREATIVE_X_PUBLISH_AUDIENCE = "creative.x_publish"
 _CREATIVE_REDDIT_PUBLISH_AUDIENCE = "creative.reddit_publish"
 _CREATIVE_META_AD_LAUNCH_AUDIENCE = "creative.meta_ad_launch"
@@ -113,6 +114,7 @@ _CREATIVE_AUDIENCE_CREDIT_ACTION = {
     _CREATIVE_LOGO_AUDIENCE: "logo_generate",
     _CREATIVE_UGC_AUDIENCE: "ugc_ad_generate",
     _CREATIVE_STATIC_AD_AUDIENCE: "static_ad_generate",
+    _CREATIVE_SITE_IMAGE_AUDIENCE: "site_image_generate",
     _CREATIVE_X_PUBLISH_AUDIENCE: "x_publish_outreach",
     _CREATIVE_REDDIT_PUBLISH_AUDIENCE: "reddit_publish_outreach",
     _CREATIVE_META_AD_LAUNCH_AUDIENCE: "meta_ad_launch",
@@ -127,7 +129,9 @@ _CREATIVE_AUDIENCE_CREDIT_ACTION = {
 # capability may hit OpenAI. This binds the reserved creative action to exactly the providers that
 # action legitimately uses, so a cheap action's token cannot drive an unrelated provider.
 _CREATIVE_GEMINI_AUDIENCES = frozenset({_CREATIVE_LOGO_AUDIENCE})
-_CREATIVE_OPENAI_AUDIENCES = frozenset({_CREATIVE_UGC_AUDIENCE, _CREATIVE_STATIC_AD_AUDIENCE})
+_CREATIVE_OPENAI_AUDIENCES = frozenset(
+    {_CREATIVE_UGC_AUDIENCE, _CREATIVE_STATIC_AD_AUDIENCE, _CREATIVE_SITE_IMAGE_AUDIENCE}
+)
 _CREATIVE_FAL_AUDIENCES = frozenset({_CREATIVE_UGC_AUDIENCE})
 
 # Default action -> audience so a token minted for a known provider action is directly brokerable by

@@ -1728,6 +1728,8 @@ def test_bundled_claude_design_guidance_skills_exist():
         "claude-design-doodle",
         "claude-design-brutalist",
         "claude-refresh-audit",
+        "taste-frontend",
+        "taste-imagegen-web",
     }
     found = {path.parent.name for path in skills_root.glob("*/SKILL.md")}
     assert expected.issubset(found)
