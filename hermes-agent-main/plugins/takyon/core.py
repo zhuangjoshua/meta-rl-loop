@@ -3419,6 +3419,8 @@ def _starter_strategy_sections(workspace_root: Path | None) -> tuple[str, dict[s
         # field (``- **One-line tagline:** ...``). Those labels are still authored strategy truth;
         # promote them into the same section map instead of falling through to arbitrary UI copy.
         inline = re.match(r"^\s*[-*]\s+\*\*([^*]+?)\s*:?\*\*\s*:?\s*(.+?)\s*$", raw_line)
+        if not inline:
+            inline = re.match(r"^\s*[-*]\s+([^:]{1,80})\s*:\s*(.+?)\s*$", raw_line)
         if inline:
             label = _normalize_heading_text(inline.group(1).rstrip(":"))
             label = {

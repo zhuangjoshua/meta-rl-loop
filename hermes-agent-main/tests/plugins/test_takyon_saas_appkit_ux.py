@@ -182,3 +182,22 @@ def test_surface_contract_display_name_outranks_slug_and_strategy(tmp_path):
     )
     assert "display_name: the ONE human product display name" in prompt
     assert "workflow_completion_required: true" in prompt
+
+
+def test_surface_context_reads_unbolded_product_name_from_identity_list(tmp_path):
+    business_root = tmp_path / "businesses" / "internal-slug-0711"
+    workspace = business_root / "product" / "site"
+    strategy = business_root / "research" / "strategy.md"
+    workspace.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "# Briefly initial landing brief — idea-only fast pass\n\n"
+        "## Canonical identity\n\n"
+        "- Business record name: internal-slug-0711\n"
+        "- Product name: Briefly\n",
+        encoding="utf-8",
+    )
+    payload = takyon_core._subuser_surface_context_payload(
+        None, slug="internal-slug-0711", workspace_root=workspace
+    )
+    assert payload["businessName"] == "Briefly"
