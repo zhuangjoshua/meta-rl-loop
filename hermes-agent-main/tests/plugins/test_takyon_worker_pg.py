@@ -1922,6 +1922,58 @@ def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch)
     assert isinstance(result, jobs.JobRunResult)
 
 
+def test_bootstrap_passes_bounded_runtime_and_durable_publish_probe(monkeypatch):
+    captured_turn: dict[str, Any] = {}
+
+    def _bounded_turn(**kwargs):
+        captured_turn.update(kwargs)
+        return "bounded after publish", 0.25, "exact", False
+
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=False,
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+        run_turn=_bounded_turn,
+    )
+    monkeypatch.setattr(worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True)
+    monkeypatch.setattr(worker, "_bootstrap_has_live_delegated_child", lambda *_a, **_k: True)
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-bounded-live", business_slug="acme", payload={})
+    )
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert captured_turn["wall_clock_limit"] == worker._DEFAULT_BOOTSTRAP_WALL_TIMEOUT
+    assert captured_turn["completion_grace_seconds"] == worker._DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE
+    assert captured_turn["completion_probe"]() is True
+    assert captured_turn["external_activity_probe"]() is True
+
+
+def test_bootstrap_child_liveness_uses_fresh_durable_job_claim():
+    import contextlib
+
+    seen: dict[str, Any] = {}
+
+    class _Conn:
+        def execute(self, sql, params):
+            seen["sql"] = sql
+            seen["params"] = params
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+    class _Store:
+        @contextlib.contextmanager
+        def _connect(self):
+            yield _Conn()
+
+    assert worker._bootstrap_has_live_delegated_child(_Store(), "acme") is True
+    assert "claude.agent_task" in seen["sql"]
+    assert "locked_at" in seen["sql"]
+    assert seen["params"] == ("acme", 60.0)
+
+
 def test_bootstrap_post_turn_surface_refresh_exception_does_not_requeue(monkeypatch):
     # The post-turn surface refresh RAISES (e.g. a lost job claim → JobNotRunning, or a transient DB
     # blip). The turn completed cleanly, so the build is done: the handler must swallow the post-turn

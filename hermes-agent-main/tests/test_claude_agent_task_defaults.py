@@ -13,6 +13,40 @@ from plugins.takyon import storage as takyon_storage
 from plugins.takyon.core import handle_business_claude_agent_task
 
 
+def test_docker_bind_retry_is_limited_to_prestart_mount_failure(tmp_path):
+    workspace = tmp_path / "product" / "app"
+    workspace.mkdir(parents=True)
+    mount_failure = subprocess.CompletedProcess(
+        ["docker", "run"],
+        125,
+        stdout="",
+        stderr=(
+            "docker: Error response from daemon: invalid mount config for type \"bind\": "
+            f"bind source path does not exist: {workspace}"
+        ),
+    )
+    worker_failure = subprocess.CompletedProcess(
+        ["docker", "run"],
+        1,
+        stdout="",
+        stderr="npm run build failed",
+    )
+
+    assert takyon_core._retryable_docker_bind_mount_failure(
+        mount_failure,
+        workspace_path=workspace,
+    )
+    assert not takyon_core._retryable_docker_bind_mount_failure(
+        worker_failure,
+        workspace_path=workspace,
+    )
+    workspace.rmdir()
+    assert not takyon_core._retryable_docker_bind_mount_failure(
+        mount_failure,
+        workspace_path=workspace,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _pin_test_coding_worker_model(monkeypatch):
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")

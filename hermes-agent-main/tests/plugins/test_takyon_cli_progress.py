@@ -571,6 +571,49 @@ def test_claude_worker_progress_notifies_activity_sink_even_for_duplicates():
     ]
 
 
+def test_claude_worker_heartbeat_updates_context_free_watchdog_clocks():
+    takyon_core._CLAUDE_WORKER_ANY_ACTIVITY[0] = 0.0
+    with takyon_core._CLAUDE_WORKER_BUSINESS_ACTIVITY_LOCK:
+        takyon_core._CLAUDE_WORKER_BUSINESS_ACTIVITY.pop("heartbeat-demo", None)
+
+    takyon_core._claude_worker_heartbeat_tick("heartbeat-demo")
+
+    assert takyon_core.claude_worker_seconds_since_activity("heartbeat-demo") < 1.0
+    assert takyon_core.claude_worker_seconds_since_any_activity() < 1.0
+
+
+def test_ceo_turn_bounds_absolute_and_post_publish_tails():
+    assert worker._ceo_turn_bound_reason(
+        now=3001.0,
+        started_at=0.0,
+        wall_clock_limit=3000.0,
+        completion_observed_at=None,
+        completion_grace_seconds=600.0,
+    ) == "reached 3000s bootstrap wall-clock limit"
+    assert worker._ceo_turn_bound_reason(
+        now=701.0,
+        started_at=0.0,
+        wall_clock_limit=3000.0,
+        completion_observed_at=100.0,
+        completion_grace_seconds=600.0,
+    ) == "durable product publish remained complete for 600s grace window"
+    assert worker._ceo_turn_bound_reason(
+        now=699.0,
+        started_at=0.0,
+        wall_clock_limit=3000.0,
+        completion_observed_at=100.0,
+        completion_grace_seconds=600.0,
+    ) == ""
+    assert worker._ceo_turn_bound_reason(
+        now=9000.0,
+        started_at=0.0,
+        wall_clock_limit=3000.0,
+        completion_observed_at=100.0,
+        completion_grace_seconds=600.0,
+        active_external_work=True,
+    ) == ""
+
+
 def test_worker_run_ceo_turn_treats_claude_worker_progress_as_activity_for_inactivity_guard(monkeypatch):
     wait_calls = {"count": 0}
 

@@ -43,7 +43,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from . import app_usage, billing, composio_distribution, jobs, wakes
 from .jobs import Job, JobOutcome, JobRunResult
@@ -62,6 +62,14 @@ _DEFAULT_TURN_TIMEOUT = 600.0
 # Idle headroom for the mobile_app bootstrap marathon (see ceo_bootstrap_handler): app build +
 # store-signed publish push a single turn well past the web default without being stuck.
 _MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
+# A bootstrap is one bounded launch transaction, not an unbounded background agent session.  The
+# coding workers inside it retain their own tighter per-call ceilings; these bounds cap the outer
+# CEO choreography even while it remains active.  A durable publish gets a short grace window for
+# launch bookkeeping, then stops; an absolute ceiling catches runs that never reach publish.
+_DEFAULT_BOOTSTRAP_WALL_TIMEOUT = 3000.0
+_MOBILE_BOOTSTRAP_WALL_TIMEOUT = 3300.0
+_DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE = 600.0
+_BOOTSTRAP_COMPLETION_PROBE_INTERVAL = 15.0
 # Default queue poll cadence when a tick drains nothing. Drain itself is tight (run_one in a loop).
 _DEFAULT_POLL_SECONDS = 15.0
 # Reclaim claims older than this from a crashed worker. Keep the worker-loop default aligned with
@@ -1112,6 +1120,33 @@ class _RuntimeProgress:
         )
 
 
+def _ceo_turn_bound_reason(
+    *,
+    now: float,
+    started_at: float,
+    wall_clock_limit: float,
+    completion_observed_at: float | None,
+    completion_grace_seconds: float,
+    active_external_work: bool = False,
+) -> str:
+    if active_external_work:
+        return ""
+    absolute_limit = max(0.0, float(wall_clock_limit or 0.0))
+    if absolute_limit and now - started_at >= absolute_limit:
+        return f"reached {int(absolute_limit)}s bootstrap wall-clock limit"
+    completion_grace = max(0.0, float(completion_grace_seconds or 0.0))
+    if (
+        completion_observed_at is not None
+        and completion_grace
+        and now - completion_observed_at >= completion_grace
+    ):
+        return (
+            "durable product publish remained complete for "
+            f"{int(completion_grace)}s grace window"
+        )
+    return ""
+
+
 def _run_ceo_turn(
     *,
     slug: str,
@@ -1120,11 +1155,15 @@ def _run_ceo_turn(
     toolsets: list[str],
     max_turns: int,
     inactivity_limit: float,
+    wall_clock_limit: float = 0.0,
+    completion_probe: Callable[[], bool] | None = None,
+    completion_grace_seconds: float = 0.0,
+    external_activity_probe: Callable[[], bool] | None = None,
     api_retry_floor: int = 0,
     progress: _RuntimeProgress | None = None,
-) -> tuple[str, float, str]:
+) -> tuple[str, float, str, bool]:
     """Run ONE CEO wake turn for ``business:<slug>`` and return ``(final_response, cost_usd,
-    cost_status)``.
+    cost_status, turn_completed)``.
 
     Built to be the SAME CEO the interactive shell runs (``cli._run_agent``): the stable
     ``prompts/ceo.md`` as the ephemeral system prompt, the per-business wake instructions
@@ -1238,6 +1277,7 @@ def _run_ceo_turn(
             nested(line)
 
     turn_started = time.time()
+    turn_started_monotonic = time.monotonic()
 
     def _emit_turn_event(
         status: str,
@@ -1301,6 +1341,9 @@ def _run_ceo_turn(
         run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}
         future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
         timed_out = False
+        bounded_stop_reason = ""
+        completion_observed_at: float | None = None
+        next_completion_probe_at = turn_started_monotonic
         try:
             if limit is None:
                 result = future.result()
@@ -1331,16 +1374,71 @@ def _run_ceo_turn(
                     #  - any-worker (business-agnostic; valid because worker concurrency == 1, so any
                     #    streaming worker IS this turn's) — the belt-and-suspenders that holds even if
                     #    the keyed lookup ever misses.
+                    claude_worker_idle = float("inf")
                     try:
                         from .core import (
                             claude_worker_seconds_since_activity,
                             claude_worker_seconds_since_any_activity,
                         )
 
-                        idle = min(idle, float(claude_worker_seconds_since_activity(slug)))
-                        idle = min(idle, float(claude_worker_seconds_since_any_activity()))
+                        claude_worker_idle = min(
+                            float(claude_worker_seconds_since_activity(slug)),
+                            float(claude_worker_seconds_since_any_activity()),
+                        )
+                        idle = min(idle, claude_worker_idle)
                     except Exception:
                         pass
+                    now_monotonic = time.monotonic()
+                    active_external_work = claude_worker_idle < 60.0
+                    # A delegated child job has its own durable claim heartbeat.  Consult it when
+                    # the in-process clocks look quiet or the outer wall limit is due.  This covers
+                    # a child running in another worker process: the parent CEO claim must remain
+                    # live until that bounded child terminates, never requeue alongside it.
+                    if not active_external_work and callable(external_activity_probe) and (
+                        idle >= min(30.0, float(limit) / 4.0)
+                        or (
+                            wall_clock_limit
+                            and now_monotonic - turn_started_monotonic
+                            >= float(wall_clock_limit)
+                        )
+                    ):
+                        try:
+                            active_external_work = bool(external_activity_probe())
+                        except Exception:
+                            # Fail closed against duplicate builds: if canonical child-liveness
+                            # state cannot be read, do not expire/requeue the parent on that poll.
+                            # The child subprocess keeps its own hard timeout and the next poll
+                            # retries the durable claim read.
+                            active_external_work = True
+                        if active_external_work:
+                            idle = 0.0
+                    if callable(completion_probe) and now_monotonic >= next_completion_probe_at:
+                        next_completion_probe_at = (
+                            now_monotonic + _BOOTSTRAP_COMPLETION_PROBE_INTERVAL
+                        )
+                        try:
+                            if bool(completion_probe()) and completion_observed_at is None:
+                                completion_observed_at = now_monotonic
+                        except Exception:
+                            # A transient read failure must not stop a live launch.  The absolute
+                            # ceiling remains, and the next bounded probe retries canonical state.
+                            pass
+                    if active_external_work and completion_observed_at is not None:
+                        # The post-publish grace is for CEO launch bookkeeping, not time spent
+                        # blocked on a still-running delegated child.  Pause it until that child's
+                        # durable claim ends; the absolute outer ceiling is applied immediately
+                        # afterward if the child itself ran beyond it.
+                        completion_observed_at = now_monotonic
+                    bounded_stop_reason = _ceo_turn_bound_reason(
+                        now=now_monotonic,
+                        started_at=turn_started_monotonic,
+                        wall_clock_limit=wall_clock_limit,
+                        completion_observed_at=completion_observed_at,
+                        completion_grace_seconds=completion_grace_seconds,
+                        active_external_work=active_external_work,
+                    )
+                    if bounded_stop_reason:
+                        break
                     if idle >= limit:
                         timed_out = True
                         break
@@ -1359,6 +1457,23 @@ def _run_ceo_turn(
         raise TimeoutError(
             f"CEO wake for business:{slug} idle past {int(limit)}s inactivity limit"
         )
+
+    if bounded_stop_reason:
+        if hasattr(agent, "interrupt"):
+            agent.interrupt(f"CEO bootstrap stopped: {bounded_stop_reason}")
+        final_response = f"Launch work stopped at its bounded runtime: {bounded_stop_reason}."
+        _record_ceo_turn_chat(slug, final_response)
+        cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
+        cost_status = str(getattr(agent, "session_cost_status", "unknown") or "unknown")
+        _emit_turn_event(
+            "bounded",
+            error=bounded_stop_reason,
+            completed=False,
+            response_head=final_response,
+        )
+        # The bootstrap handler resolves this incomplete turn against durable publish/actions
+        # truth.  A complete live product settles once; a pre-publish cap fails/requeues normally.
+        return final_response, cost_usd, cost_status, False
 
     if not isinstance(result, dict):
         raise RuntimeError(
@@ -1477,6 +1592,55 @@ def _bootstrap_real_http_actions(store: Any, slug: str) -> set[str]:
         return takyon_app_actions.site_http_action_names(site_root, surface_with_workflow)
     except Exception:
         return set()
+
+
+def _bootstrap_has_durable_live_product(
+    store: Any,
+    slug: str,
+    *,
+    workflow_requested: bool,
+) -> bool:
+    """Canonical completion probe for bounding the post-publish bootstrap tail."""
+    try:
+        with store._connect() as conn:
+            surface = store._app_surface_contract(conn, slug)
+    except Exception:
+        return False
+    if not isinstance(surface, Mapping):
+        return False
+    metadata = surface.get("metadata") if isinstance(surface.get("metadata"), Mapping) else {}
+    publish = metadata.get("takyon_publish") if isinstance(metadata.get("takyon_publish"), Mapping) else {}
+    publish_status = str(
+        publish.get("status") or surface.get("publish_status") or ""
+    ).strip().lower()
+    if publish_status != "published":
+        return False
+    if workflow_requested and not _bootstrap_real_http_actions(store, slug):
+        return False
+    return True
+
+
+def _bootstrap_has_live_delegated_child(
+    store: Any,
+    slug: str,
+    *,
+    freshness_seconds: float = 60.0,
+) -> bool:
+    """Whether a delegated build child still owns a fresh durable job claim."""
+    with store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM jobs
+            WHERE business_slug = ?
+              AND kind IN ('claude.agent_task', 'product.surface_refresh')
+              AND status = 'running'
+              AND locked_at > now() - make_interval(secs => ?)
+            LIMIT 1
+            """,
+            (slug, max(30.0, float(freshness_seconds))),
+        ).fetchone()
+    return row is not None
 
 
 def ceo_wake_handler(job: Job) -> JobRunResult:
@@ -1669,6 +1833,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     from gateway.session_context import clear_session_vars, set_session_vars
 
     from .turn_runtime import (
+        _bootstrap_goal_requests_product_workflow,
         _business_workspace_execution_context,
         _ceo_bootstrap_turn_config,
     )
@@ -1681,6 +1846,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     business = summary.get("business") if isinstance(summary.get("business"), dict) else {}
     active_mode = "live"
     goal = str((job.payload or {}).get("goal") or (business or {}).get("goal") or "").strip()
+    workflow_requested = _bootstrap_goal_requests_product_workflow(goal)
     business_name = str((business or {}).get("name") or "").strip()
     # Opt-in landing-hero animations (--animation at create). Persisted on the business metadata;
     # read it robustly whether the summary exposes a parsed `metadata` dict or a raw metadata_json
@@ -1737,6 +1903,28 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     # reset the clock continuously, so only a genuine ~30min stall (a real hang) still trips it.
     if str(archetype or "").strip().lower() == "mobile_app":
         inactivity_limit = max(inactivity_limit, _MOBILE_BOOTSTRAP_TURN_TIMEOUT)
+    wall_ceiling = (
+        _MOBILE_BOOTSTRAP_WALL_TIMEOUT
+        if str(archetype or "").strip().lower() == "mobile_app"
+        else _DEFAULT_BOOTSTRAP_WALL_TIMEOUT
+    )
+    wall_clock_limit = min(
+        wall_ceiling,
+        max(
+            60.0,
+            _env_float("TAKYON_WORKER_BOOTSTRAP_WALL_TIMEOUT", wall_ceiling),
+        ),
+    )
+    completion_grace_seconds = min(
+        900.0,
+        max(
+            60.0,
+            _env_float(
+                "TAKYON_WORKER_BOOTSTRAP_POST_PUBLISH_GRACE",
+                _DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE,
+            ),
+        ),
+    )
     schedule = str(payload.get("schedule") or "").strip()
     command = f"/create {slug}"
     progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)
@@ -1778,6 +1966,17 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     toolsets=toolsets,
                     max_turns=max_turns,
                     inactivity_limit=inactivity_limit,
+                    wall_clock_limit=wall_clock_limit,
+                    completion_probe=lambda: _bootstrap_has_durable_live_product(
+                        store,
+                        slug,
+                        workflow_requested=workflow_requested,
+                    ),
+                    completion_grace_seconds=completion_grace_seconds,
+                    external_activity_probe=lambda: _bootstrap_has_live_delegated_child(
+                        store,
+                        slug,
+                    ),
                     api_retry_floor=_BOOTSTRAP_API_RETRY_FLOOR,
                     progress=progress,
                 )
@@ -1866,12 +2065,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     # OR its product site published — unless the goal explicitly requested a real signed-in workflow
     # and the published source still has no real HTTP action backing `/app`. In that workflow case a
     # published access shell is incomplete and must requeue rather than settling a fake "done".
-    try:
-        from .turn_runtime import _bootstrap_goal_requests_product_workflow
-    except Exception:
-        from plugins.takyon.turn_runtime import _bootstrap_goal_requests_product_workflow
-
-    workflow_requested = _bootstrap_goal_requests_product_workflow(goal)
     real_http_actions = _bootstrap_real_http_actions(store, slug) if workflow_requested else set()
     bootstrap_done = (bool(turn_completed) or publish_status == "published") and (
         not workflow_requested or bool(real_http_actions)

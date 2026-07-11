@@ -7819,6 +7819,12 @@ def claude_worker_seconds_since_any_activity() -> float:
     return max(0.0, time.monotonic() - stamp)
 
 
+def _claude_worker_heartbeat_tick(business: str) -> None:
+    """One context-independent liveness tick for a running coding-worker subprocess."""
+    _touch_claude_worker_business_activity(business)
+    _notify_claude_worker_activity("claude-worker build heartbeat")
+
+
 def _emit_claude_worker_progress(line: str) -> None:
     """Push one concise human progress line into the bound worker-progress sink, if any.
 
@@ -8158,7 +8164,11 @@ def _run_claude_agent_task_process(
 
     def _heartbeat() -> None:
         while not _heartbeat_stop.wait(30.0):
-            _notify_claude_worker_activity("claude-worker build heartbeat")
+            # The outer CEO watchdog reads these context-free clocks directly.  A ContextVar
+            # activity sink can be absent after delegation crosses a thread/job boundary, so the
+            # independent subprocess heartbeat must stamp the same liveness source as stderr
+            # events.  proc.wait's timeout below remains the hard bound for a genuine hang.
+            _claude_worker_heartbeat_tick(business)
 
     heartbeat_thread = threading.Thread(
         target=lambda: _heartbeat_ctx.run(_heartbeat), name="takyon-claude-heartbeat", daemon=True
@@ -8198,6 +8208,35 @@ def _run_claude_agent_task_process(
         stdout="".join(stdout_chunks),
         stderr="\n".join(stderr_lines).strip(),
     )
+
+
+def _retryable_docker_bind_mount_failure(
+    process: subprocess.CompletedProcess[str],
+    *,
+    workspace_path: Path,
+) -> bool:
+    """Return true only when Docker rejected a proven-local bind before container start."""
+    if int(getattr(process, "returncode", 0) or 0) != 125:
+        return False
+    detail = "\n".join(
+        str(value or "")
+        for value in (getattr(process, "stderr", ""), getattr(process, "stdout", ""))
+    ).lower()
+    if not any(
+        marker in detail
+        for marker in (
+            "bind source path does not exist",
+            "error while creating mount source path",
+            "invalid mount config for type \"bind\"",
+            "invalid mount config for type bind",
+        )
+    ):
+        return False
+    if str(Path(workspace_path)).lower() not in detail:
+        return False
+    # A genuinely absent workspace is a materialization failure and must fail loud.  Retry only
+    # Docker Desktop's transient disagreement with an already-materialized host directory.
+    return Path(workspace_path).is_dir()
 
 
 def _docker_server_arch(docker_exe: str) -> str:
@@ -36565,15 +36604,36 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             business=business,
                             operator_user_id=operator_user_id,
                         )
-                        proc = _run_claude_agent_task_process(
-                            run_cmd=run_cmd,
-                            payload=docker_payload,
-                            cwd=worker_cwd,
-                            timeout_ms=timeout_ms,
-                            env=worker_env,
-                            business=business,
-                            workspace_rel=workspace_rel,
-                        )
+                        # Docker Desktop can briefly miss a just-materialized product/app scratch
+                        # directory in its VM file-sharing layer.  Exit 125 with a bind-setup
+                        # diagnostic means the container never started, so two bounded retries are
+                        # safe: no model request, edit, or billable side effect occurred.  Ordinary
+                        # worker failures are never replayed here.
+                        for bind_attempt in range(3):
+                            proc = _run_claude_agent_task_process(
+                                run_cmd=run_cmd,
+                                payload=docker_payload,
+                                cwd=worker_cwd,
+                                timeout_ms=timeout_ms,
+                                env=worker_env,
+                                business=business,
+                                workspace_rel=workspace_rel,
+                            )
+                            if not _retryable_docker_bind_mount_failure(
+                                proc,
+                                workspace_path=workspace_path,
+                            ) or bind_attempt >= 2:
+                                break
+                            workspace_path.mkdir(parents=True, exist_ok=True)
+                            try:
+                                directory_fd = os.open(str(workspace_path), os.O_RDONLY)
+                                try:
+                                    os.fsync(directory_fd)
+                                finally:
+                                    os.close(directory_fd)
+                            except OSError:
+                                pass
+                            time.sleep(0.25 * (bind_attempt + 1))
                     else:
                         # Non-docker host subprocess: same broker-lockdown contract as the docker lane —
                         # ANTHROPIC_BASE_URL = safebox proxy ROOT + a minted operator.session token (real
