@@ -12,7 +12,8 @@ class _FakeStore:
     def __init__(self, root: Path):
         self.root = root
 
-    def _business_root(self, slug: str) -> Path:
+    def _business_root(self, slug: str, *, sync: bool = True) -> Path:
+        del sync
         return self.root / "businesses" / slug
 
     def _resolve_business_file(
@@ -35,7 +36,17 @@ class _FakeStore:
             raise takyon_core.TakyonError("path escaped business root")
         return path
 
-    def commit(self, *, scope: str, operations: list[dict], idempotency_key: str, reason: str, actor: str):
+    def commit(
+        self,
+        *,
+        scope: str,
+        operations: list[dict],
+        idempotency_key: str,
+        reason: str,
+        actor: str,
+        principal=None,
+    ):
+        del principal
         op = dict(operations[0])
         slug = str(op.get("business") or "").strip()
         action = str(op.get("action") or "")
@@ -60,7 +71,7 @@ def test_business_write_file_returns_verified_postcondition(tmp_path, monkeypatc
         wrote = json.loads(
             handle_business_write_file(
                 {
-                    "path": "product/site/index.html",
+                    "path": "product/site/src/screens/home.tsx",
                     "content": "<h1>Alpha</h1>\n",
                     "idempotency_key": "verified-write",
                 }
@@ -68,7 +79,7 @@ def test_business_write_file_returns_verified_postcondition(tmp_path, monkeypatc
         )
         assert wrote["success"] is True
         assert wrote["verification"]["verified"] is True
-        assert wrote["path"] == "product/site/index.html"
+        assert wrote["path"] == "product/site/src/screens/home.tsx"
     finally:
         clear_session_vars(tokens)
 
@@ -77,7 +88,7 @@ def test_business_write_file_fails_when_postcondition_does_not_land(tmp_path, mo
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
     store = _FakeStore(tmp_path)
     monkeypatch.setattr(takyon_core, "_store", lambda: store)
-    file_path = store._business_root("alpha") / "product" / "site" / "index.html"
+    file_path = store._business_root("alpha") / "product" / "site" / "src" / "screens" / "home.tsx"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text("<h1>Old</h1>\n", encoding="utf-8")
 
@@ -88,7 +99,7 @@ def test_business_write_file_fails_when_postcondition_does_not_land(tmp_path, mo
         wrote = json.loads(
             handle_business_write_file(
                 {
-                    "path": "product/site/index.html",
+                    "path": "product/site/src/screens/home.tsx",
                     "content": "<h1>New</h1>\n",
                     "idempotency_key": "failed-write",
                 }
@@ -119,7 +130,7 @@ def test_business_write_file_reuses_one_store_for_read_write_verify(tmp_path, mo
         wrote = json.loads(
             handle_business_write_file(
                 {
-                    "path": "product/site/index.html",
+                    "path": "product/site/src/screens/home.tsx",
                     "content": "<h1>Only once</h1>\n",
                     "idempotency_key": "single-store-write",
                 }
@@ -127,6 +138,46 @@ def test_business_write_file_reuses_one_store_for_read_write_verify(tmp_path, mo
         )
         assert wrote["success"] is True
         assert calls["count"] == 1
-        assert store._resolve_business_file("alpha", "product/site/index.html").read_text(encoding="utf-8") == "<h1>Only once</h1>\n"
+        assert store._resolve_business_file("alpha", "product/site/src/screens/home.tsx").read_text(encoding="utf-8") == "<h1>Only once</h1>\n"
+    finally:
+        clear_session_vars(tokens)
+
+
+def test_business_write_file_schema_constrains_write_mode():
+    definitions = {definition["name"]: definition for definition in takyon_core.TAKYON_TOOL_DEFINITIONS}
+
+    for tool_name in ("business_write_file", "business_record_memory"):
+        mode = definitions[tool_name]["schema"]["parameters"]["properties"]["mode"]
+        assert mode["enum"] == ["replace", "append"]
+        assert mode["default"] == "replace"
+
+
+def test_business_write_file_normalizes_overwrite_alias(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = _FakeStore(tmp_path)
+    committed_modes: list[str] = []
+    original_commit = store.commit
+
+    def _capturing_commit(**kwargs):
+        committed_modes.append(str(kwargs["operations"][0].get("mode") or ""))
+        return original_commit(**kwargs)
+
+    monkeypatch.setattr(store, "commit", _capturing_commit)
+    monkeypatch.setattr(takyon_core, "_store", lambda: store)
+
+    tokens = set_session_vars(business_slug="alpha")
+    try:
+        wrote = json.loads(
+            handle_business_write_file(
+                {
+                    "path": "product/site/notes.txt",
+                    "content": "replacement\n",
+                    "mode": "overwrite",
+                    "idempotency_key": "overwrite-alias",
+                }
+            )
+        )
+        assert wrote["success"] is True
+        assert committed_modes == ["replace"]
     finally:
         clear_session_vars(tokens)

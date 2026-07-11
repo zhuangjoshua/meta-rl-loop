@@ -23824,6 +23824,12 @@ def _schema(name: str, description: str, properties: dict[str, Any], required: l
 _BUSINESS_PROP = {"type": "string", "description": "Business slug, e.g. latexflow"}
 _IDEMPOTENCY_PROP = {"type": "string", "description": "Stable unique key for this exact durable action"}
 _REASON_PROP = {"type": "string", "description": "Why this action is being taken"}
+_WRITE_MODE_PROP = {
+    "type": "string",
+    "enum": ["replace", "append"],
+    "default": "replace",
+    "description": "replace (default) or append",
+}
 _ACTOR_PROP = {"type": "string", "description": "agent, operator, cron, or system"}
 _REQUIRES_API_PROP = {
     "type": "array",
@@ -24589,6 +24595,8 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
     business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
+    if mode in {"overwrite", "write"}:
+        mode = "replace"
     content = str(args.get("content") or "")
     rel, file_path = _resolved_business_output_path_for_action(
         store,
@@ -24660,6 +24668,8 @@ def handle_business_record_memory(args: dict, **_: Any) -> str:
     business = _resolved_business_slug(args, required=True)
     store = _store()
     mode = str(args.get("mode") or "replace").strip().lower()
+    if mode in {"overwrite", "write"}:
+        mode = "replace"
     content = str(args.get("content") or "")
     _, file_path = _resolved_business_output_path_for_action(
         store,
@@ -38418,7 +38428,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "schema": _schema(
             "business_write_file",
             "Write a business-scoped file.",
-            {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
+            {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": _WRITE_MODE_PROP, "requires_api": _REQUIRES_API_PROP, "requires_env": _REQUIRES_ENV_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP},
             ["business", "path", "content", "idempotency_key"],
         ),
     },
@@ -38432,7 +38442,7 @@ TAKYON_TOOL_DEFINITIONS = [
         "name": "business_record_memory",
         "description": "Write flexible per-business memory under research/ for strategy, pricing, product, distribution, learning, and CEO notes.",
         "handler": handle_business_record_memory,
-        "schema": _schema("business_record_memory", "Write business research memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string"}, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
+        "schema": _schema("business_record_memory", "Write business research memory.", {"business": _BUSINESS_PROP, "path": {"type": "string"}, "content": {"type": "string"}, "mode": _WRITE_MODE_PROP, "idempotency_key": _IDEMPOTENCY_PROP, "reason": _REASON_PROP, "actor": _ACTOR_PROP}, ["business", "path", "content", "idempotency_key"]),
     },
     {
         "name": "business_upsert_app_surface_contract",
