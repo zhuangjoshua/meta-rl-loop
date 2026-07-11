@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNTIME_DIR="$ROOT_DIR/hermes-agent-main"
+WEB_BUILD_SCRIPT="$ROOT_DIR/deploy/shared/build-web-locked.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/takyon-safebox/takyon-safebox.service"
 REBUILD_VENV_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/rebuild-venv.sh"
 VERIFY_LOCK_SCRIPT="$ROOT_DIR/deploy/takyon-safebox/verify-requirements-lock.sh"
@@ -58,6 +59,11 @@ if [[ ! -x "$SUPABASE_AUTH_HELPER" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$WEB_BUILD_SCRIPT" ]]; then
+  echo "web build helper not found: $WEB_BUILD_SCRIPT" >&2
+  exit 1
+fi
+
 "$VERIFY_LOCK_SCRIPT"
 
 ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$TAKYON_VPS_HOST" \
@@ -80,7 +86,7 @@ if [[ "$TAKYON_REQUIRE_STRIPE_CHECKOUT_PAUSED" == "1" ]]; then
 fi
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
-  (cd "$RUNTIME_DIR/web" && npm ci && npm run build)
+  bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR/web"
 fi
 
 python3 -m compileall -q \

@@ -9,6 +9,7 @@ SEED_XURL_AUTH_SCRIPT="$ROOT_DIR/deploy/shared/seed-xurl-auth.sh"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/remove-stripe-authority-env.py"
+WEB_BUILD_SCRIPT="$ROOT_DIR/deploy/shared/build-web-locked.sh"
 ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT="$ROOT_DIR/deploy/argon-alpha-14/isolate-operator-migration-dsn.sh"
 SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-dashboard.service"
 WORKER_SERVICE_FILE="$ROOT_DIR/deploy/argon-alpha-14/takyon-worker.service"
@@ -108,6 +109,11 @@ if [[ ! -f "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$WEB_BUILD_SCRIPT" ]]; then
+  echo "web build helper not found: $WEB_BUILD_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -x "$ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT" ]]; then
   echo "operator migration credential isolator not executable: $ISOLATE_OPERATOR_MIGRATION_DSN_SCRIPT" >&2
   exit 1
@@ -140,7 +146,7 @@ if [[ "$TAKYON_BOOTSTRAP_HOST" == "1" ]]; then
 fi
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
-  (cd "$RUNTIME_DIR/web" && npm ci && npm run build)
+  bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR/web"
 fi
 
 python3 -m compileall -q \

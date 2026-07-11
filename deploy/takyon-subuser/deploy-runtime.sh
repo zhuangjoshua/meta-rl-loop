@@ -9,6 +9,7 @@ SERVICE_FILE="$ROOT_DIR/deploy/takyon-subuser/takyon-subuser.service"
 ENSURE_DENO_SCRIPT="$ROOT_DIR/deploy/shared/ensure-deno.sh"
 VALIDATE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/validate-authority-env.sh"
 REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT="$ROOT_DIR/deploy/shared/remove-stripe-authority-env.py"
+WEB_BUILD_SCRIPT="$ROOT_DIR/deploy/shared/build-web-locked.sh"
 VERIFY_SUPABASE_AUTH_SCRIPT="$RUNTIME_DIR/scripts/verify-supabase-auth-runtime.py"
 PRODUCT_SITES_SOURCE_HOST="${TAKYON_PRODUCT_SITES_SOURCE_HOST:-root@137.184.75.57}"
 PRODUCT_SITES_SOURCE_KEY="${TAKYON_PRODUCT_SITES_SOURCE_KEY:-$HOME/.ssh/takyon_argon_alpha14}"
@@ -102,6 +103,11 @@ if [[ ! -f "$REMOVE_STRIPE_AUTHORITY_ENV_SCRIPT" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$WEB_BUILD_SCRIPT" ]]; then
+  echo "web build helper not found: $WEB_BUILD_SCRIPT" >&2
+  exit 1
+fi
+
 if [[ ! -f "$VERIFY_SUPABASE_AUTH_SCRIPT" ]]; then
   echo "supabase auth verifier not found: $VERIFY_SUPABASE_AUTH_SCRIPT" >&2
   exit 1
@@ -126,7 +132,7 @@ ssh -i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-n
   < "$VALIDATE_AUTHORITY_ENV_SCRIPT"
 
 if [[ "$TAKYON_RUN_WEB_BUILD" == "1" ]]; then
-  (cd "$RUNTIME_DIR/web" && npm ci && npm run build)
+  bash "$WEB_BUILD_SCRIPT" "$RUNTIME_DIR/web"
 fi
 
 python3 -m compileall -q \
