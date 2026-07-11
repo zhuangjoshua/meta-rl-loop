@@ -1937,6 +1937,39 @@ def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch)
     assert isinstance(result, jobs.JobRunResult)
 
 
+def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_identity(monkeypatch):
+    prompts: list[str] = []
+    completion_checks = iter([False, True])
+
+    def _turn(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return "continue", 0.10, "exact", True
+
+    _install_bootstrap_handler_stubs(
+        monkeypatch,
+        turn_completed=True,
+        run_turn=_turn,
+        goal="Build a proposal SaaS where customers generate, save, revise, and delete proposals.",
+        surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_has_durable_live_product",
+        lambda *_a, **_k: next(completion_checks),
+    )
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"proposal"})
+
+    result = worker.ceo_bootstrap_handler(
+        SimpleNamespace(id="job-same-run", business_slug="acme", payload={})
+    )
+
+    assert isinstance(result, jobs.JobRunResult)
+    assert len(prompts) == 2
+    assert "SAME in-progress bootstrap" in prompts[1]
+    assert "Preserve the canonical business/product name" in prompts[1]
+    assert "do not restart, rebrand, or redo completed work" in prompts[1]
+
+
 def test_bootstrap_passes_bounded_runtime_and_durable_publish_probe(monkeypatch):
     captured_turn: dict[str, Any] = {}
 

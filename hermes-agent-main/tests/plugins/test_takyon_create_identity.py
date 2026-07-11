@@ -76,7 +76,9 @@ def test_bootstrap_prompt_pins_canonical_business_name():
     )
 
     assert "Canonical business name: Longer" in prompt
-    assert "Use exactly the business name above. Do not invent a second company, umbrella brand, or product name." in prompt
+    assert "Treat the canonical business name above as the owner/account name." in prompt
+    assert "choose ONE short human product display name" in prompt
+    assert "Do not invent a second competing brand." in prompt
 
 
 def test_bootstrap_prompt_requires_bold_landing_and_branded_appkit_auth_surface():

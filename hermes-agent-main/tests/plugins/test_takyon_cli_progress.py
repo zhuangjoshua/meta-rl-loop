@@ -188,7 +188,7 @@ def test_stream_delta_uses_natural_text_writer(monkeypatch):
     assert output == "abcdef\n"
 
 
-def test_shell_progress_surfaces_reasoning_summary():
+def test_shell_progress_suppresses_reasoning_summary():
     read_fd, write_fd = os.pipe()
     progress = cli._ShellProgress(False)
     progress.fd = write_fd
@@ -210,7 +210,7 @@ def test_shell_progress_surfaces_reasoning_summary():
         except OSError:
             pass
 
-    assert "reasoning -> Plan the landing brief before running the product surface tools." in output
+    assert "reasoning ->" not in output
 
 
 def test_runtime_progress_records_ceo_stream_deltas(monkeypatch):
@@ -231,7 +231,7 @@ def test_runtime_progress_records_ceo_stream_deltas(monkeypatch):
     assert recorded[-1]["extra"]["stream"] == "message_flush"
 
 
-def test_runtime_progress_records_reasoning_summary(monkeypatch):
+def test_runtime_progress_suppresses_reasoning_summary(monkeypatch):
     recorded = []
 
     def fake_record(slug, **kwargs):
@@ -248,7 +248,7 @@ def test_runtime_progress_records_reasoning_summary(monkeypatch):
     )
 
     lines = [item.get("line") for item in recorded if item.get("status") == "output"]
-    assert "reasoning -> Plan the landing brief before running the product surface tools." in lines
+    assert not any(str(line or "").startswith("reasoning ->") for line in lines)
 
 
 def test_runtime_progress_activity_age_resets_on_output(monkeypatch):
@@ -261,7 +261,7 @@ def test_runtime_progress_activity_age_resets_on_output(monkeypatch):
     assert progress.seconds_since_activity() < 1.0
 
 
-def test_run_agent_wires_reasoning_config_and_callback(monkeypatch):
+def test_run_agent_keeps_reasoning_internal(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeProgress:
@@ -318,9 +318,7 @@ def test_run_agent_wires_reasoning_config_and_callback(monkeypatch):
 
         def run_conversation(self, _prompt, stream_callback=None):
             captured["stream_callback"] = stream_callback
-            callback = captured["agent_kwargs"]["reasoning_callback"]
-            assert callback is not None
-            callback("Plan the landing brief before running the product surface tools.")
+            assert captured["agent_kwargs"]["reasoning_callback"] is None
             return {"final_response": "Done"}
 
     def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
@@ -357,20 +355,10 @@ def test_run_agent_wires_reasoning_config_and_callback(monkeypatch):
 
     assert response == "Done"
     assert captured["agent_kwargs"]["reasoning_config"] == {"enabled": True, "effort": "medium"}
-    assert captured["progress"].tool_progress_calls == [
-        (
-            (
-                "reasoning.available",
-                "_thinking",
-                "Plan the landing brief before running the product surface tools.",
-                None,
-            ),
-            {},
-        )
-    ]
+    assert captured["progress"].tool_progress_calls == []
 
 
-def test_worker_run_ceo_turn_wires_reasoning_config_and_callback(monkeypatch):
+def test_worker_run_ceo_turn_keeps_reasoning_internal(monkeypatch):
     captured: dict[str, object] = {}
 
     class FakeProgress:
@@ -409,9 +397,7 @@ def test_worker_run_ceo_turn_wires_reasoning_config_and_callback(monkeypatch):
 
         def run_conversation(self, _prompt, stream_callback=None):
             captured["stream_callback"] = stream_callback
-            callback = captured["agent_kwargs"]["reasoning_callback"]
-            assert callback is not None
-            callback("Draft the pricing copy before the checkout pass.")
+            assert captured["agent_kwargs"]["reasoning_callback"] is None
             return {"final_response": "Done", "completed": True}
 
     def fake_builder(*, runtime, model, operator_user_id, business_slug, agent_kwargs):
@@ -447,17 +433,7 @@ def test_worker_run_ceo_turn_wires_reasoning_config_and_callback(monkeypatch):
     assert cost_status == "ok"
     assert turn_completed is True
     assert captured["agent_kwargs"]["reasoning_config"] == {"enabled": True, "effort": "medium"}
-    assert progress.tool_progress_calls == [
-        (
-            (
-                "reasoning.available",
-                "_thinking",
-                "Draft the pricing copy before the checkout pass.",
-                None,
-            ),
-            {},
-        )
-    ]
+    assert progress.tool_progress_calls == []
 
 
 def test_worker_run_ceo_turn_treats_runtime_progress_as_activity_for_inactivity_guard(monkeypatch):
@@ -979,7 +955,7 @@ def test_runtime_event_tail_prints_claude_worker_runtime_events():
     assert "Claude worker started for product/site." in output
     assert "— Claude worker:running —" in output
     assert "Generating the landing page." in output
-    assert "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks." in output
+    assert "reasoning -> Sketch the landing flow, then tighten the CTA before the build checks." not in output
     assert "— Claude worker:completed —" in output
     assert "Worker finished cleanly." in output
     assert "tool started -> business_read_business" in output
@@ -1083,7 +1059,7 @@ def test_runtime_event_tail_dedupes_immediate_worker_note_repeats():
         except OSError:
             pass
 
-    assert output.count(repeated_note) == 1
+    assert output.count(repeated_note) == 0
 
 
 def test_follow_worker_job_dedupes_immediate_worker_note_repeats(monkeypatch):
@@ -1170,7 +1146,7 @@ def test_follow_worker_job_dedupes_immediate_worker_note_repeats(monkeypatch):
         )
 
     output = out.getvalue()
-    assert output.count(repeated_note) == 1
+    assert output.count(repeated_note) == 0
     assert result["status"] == "completed"
 
 

@@ -79,6 +79,10 @@ _STALE_SECONDS = 900
 # absorbed inside the SAME CEO turn instead of burning the whole bootstrap job's only retry and
 # failing the business after a few seconds of bad luck.
 _BOOTSTRAP_API_RETRY_FLOOR = 6
+# A publish/completeness gate is normal product feedback, not an instruction to fail the durable job
+# and remount a new workspace. Keep bounded continuations inside the same job/workspace so the CEO
+# repairs existing work without rebranding or rebuilding from scratch.
+_BOOTSTRAP_MAX_SAME_JOB_TURNS = 3
 # Release product-AI usage holds whose provider call crashed before settle/release.
 _APP_USAGE_HOLD_TTL_SECONDS = 3600
 _X_POST_CHAR_LIMIT = 280
@@ -1053,10 +1057,7 @@ class _RuntimeProgress:
         self.emit(f"worker -> {text}")
 
     def _flush_reasoning(self) -> None:
-        note = _normalize_worker_progress_text(self._reasoning_buf)
         self._reasoning_buf = ""
-        if note:
-            self.emit(f"reasoning -> {note}")
 
     def tool_progress(
         self,
@@ -1080,18 +1081,9 @@ class _RuntimeProgress:
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
         elif event_type in {"reasoning.available", "_thinking"}:
-            # Streaming reasoning arrives as PER-TOKEN BPE deltas. Recording one runtime
-            # event per delta floods the events plane and every renderer that replays it
-            # (follow tail, dashboard) with one word — or half a word — per line (274
-            # fragment lines on paylane0708's bootstrap). Coalesce raw deltas (spacing
-            # intact) and record ONE event per sentence or ~200 chars; flush before
-            # tool-start/complete so ordering is preserved. Mirrors cli._ShellProgress.
-            raw = str(preview if preview is not None else (name or ""))
-            if raw:
-                self._reasoning_buf += raw
-                stripped = self._reasoning_buf.rstrip()
-                if len(stripped) >= 200 or stripped.endswith((".", "!", "?", ":", ";")):
-                    self._flush_reasoning()
+            # Never persist raw reasoning to the durable events plane. Curated CEO updates are the
+            # only customer-visible planning rail.
+            return
 
     def tool_completed(
         self,
@@ -1928,6 +1920,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     schedule = str(payload.get("schedule") or "").strip()
     command = f"/create {slug}"
     progress = _RuntimeProgress(slug=slug, kind="ceo_bootstrap", command=command)
+    bootstrap_started_monotonic = time.monotonic()
 
     tokens: list[object] = []
     try:
@@ -1959,27 +1952,66 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             # run_id carries the durable job id so every cost/log event inside the turn
             # correlates to this job (operator_cost_events, migration 0070).
             with _bound_operator_task_context(run_id=str(job.id), task_kind="ceo_bootstrap"):
-                final_response, cost_usd, cost_status, turn_completed = _run_ceo_turn(
-                    slug=slug,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    toolsets=toolsets,
-                    max_turns=max_turns,
-                    inactivity_limit=inactivity_limit,
-                    wall_clock_limit=wall_clock_limit,
-                    completion_probe=lambda: _bootstrap_has_durable_live_product(
-                        store,
-                        slug,
-                        workflow_requested=workflow_requested,
-                    ),
-                    completion_grace_seconds=completion_grace_seconds,
-                    external_activity_probe=lambda: _bootstrap_has_live_delegated_child(
-                        store,
-                        slug,
-                    ),
-                    api_retry_floor=_BOOTSTRAP_API_RETRY_FLOOR,
-                    progress=progress,
-                )
+                final_response = ""
+                cost_usd = 0.0
+                cost_status = "unknown"
+                turn_completed = False
+                next_prompt = user_prompt
+                for same_job_turn in range(1, _BOOTSTRAP_MAX_SAME_JOB_TURNS + 1):
+                    elapsed = time.monotonic() - bootstrap_started_monotonic
+                    if same_job_turn > 1 and elapsed >= wall_clock_limit:
+                        break
+                    response, turn_cost_usd, turn_cost_status, turn_completed = _run_ceo_turn(
+                        slug=slug,
+                        system_prompt=system_prompt,
+                        user_prompt=next_prompt,
+                        toolsets=toolsets,
+                        max_turns=max_turns,
+                        inactivity_limit=inactivity_limit,
+                        wall_clock_limit=(
+                            wall_clock_limit
+                            if same_job_turn == 1
+                            else max(60.0, wall_clock_limit - elapsed)
+                        ),
+                        completion_probe=lambda: _bootstrap_has_durable_live_product(
+                            store,
+                            slug,
+                            workflow_requested=workflow_requested,
+                        ),
+                        completion_grace_seconds=completion_grace_seconds,
+                        external_activity_probe=lambda: _bootstrap_has_live_delegated_child(
+                            store,
+                            slug,
+                        ),
+                        api_retry_floor=_BOOTSTRAP_API_RETRY_FLOOR,
+                        progress=progress,
+                    )
+                    final_response = response
+                    cost_usd += turn_cost_usd
+                    cost_status = turn_cost_status
+                    try:
+                        durable_complete = _bootstrap_has_durable_live_product(
+                            store,
+                            slug,
+                            workflow_requested=workflow_requested,
+                        )
+                    except Exception:
+                        durable_complete = False
+                    if durable_complete or (turn_completed and not workflow_requested):
+                        break
+                    if same_job_turn >= _BOOTSTRAP_MAX_SAME_JOB_TURNS:
+                        break
+                    next_prompt = (
+                        f"Continue the SAME in-progress bootstrap for business:{slug}. This is a "
+                        "bounded same-job continuation, not a new launch. Preserve the canonical "
+                        "business/product name already stored for this business. Inspect and reuse "
+                        "the existing product files, surface contract, receipts, actions, and build "
+                        "artifacts; do not restart, rebrand, or redo completed work. Resolve the "
+                        "current publish/completeness blocker and continue immediately. Do not "
+                        "conclude with a status report or next-step suggestion until the public "
+                        "product is published and every customer workflow requested in the original "
+                        "goal is implemented with real runtime-backed actions and verified."
+                    )
     except Exception as exc:
         if _is_ceo_inactivity_timeout(exc):
             status = _best_effort_terminalize_owned_timeout(job, error=str(exc))

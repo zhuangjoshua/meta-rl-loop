@@ -158,6 +158,10 @@ def _runtime_event_tail_entry(event: Mapping[str, Any] | dict[str, Any] | None) 
     command = str(payload.get("command") or "").strip()
     kind = str(payload.get("kind") or "").strip().lower()
     text = str(payload.get("line") or payload.get("detail") or "").strip()
+    # Historical builds persisted raw chain-of-thought notes before the producer was fixed. Keep
+    # those rows for auditability, but never replay them into an operator/customer console.
+    if text.lower().startswith("reasoning ->"):
+        return None
     if not (command.startswith("Claude worker ->") or kind in {"claude_agent_sdk", "task"}):
         if str(event.get("event_type") or "") == "dashboard.run.output" and text:
             return {"mode": "runtime_note", "text": text}
@@ -3871,10 +3875,7 @@ class _ShellProgress:
         self.emit(f"agent -> {text}")
 
     def _flush_reasoning(self) -> None:
-        note = _normalize_progress_text(self._reasoning_buf, limit=220)
         self._reasoning_buf = ""
-        if note:
-            self.emit(f"reasoning -> {note}")
 
     def tool_progress(self, event_type: str, name: str | None = None, preview: str | None = None, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
         if not name:
@@ -3890,16 +3891,9 @@ class _ShellProgress:
             suffix = f" · {duration:.1f}s" if isinstance(duration, (int, float)) else ""
             self.emit(f"tool completed -> {name}{suffix}")
         elif event_type in {"reasoning.available", "_thinking"}:
-            # Streaming reasoning arrives as PER-TOKEN deltas (BPE pieces: " up", "sert",
-            # " the" ...). Emitting one line per delta floods the console with one word —
-            # or half a word — per line. Coalesce raw deltas (spacing intact) and emit a
-            # line only at a sentence boundary or once a display line is full.
-            raw = str(preview if preview is not None else (name or ""))
-            if raw:
-                self._reasoning_buf += raw
-                stripped = self._reasoning_buf.rstrip()
-                if len(stripped) >= 200 or stripped.endswith((".", "!", "?", ":", ";")):
-                    self._flush_reasoning()
+            # Raw model reasoning is intentionally never rendered. Curated CEO updates carry
+            # customer-visible planning and progress.
+            return
 
     def tool_started(self, tool_id: str, name: str, args: dict[str, Any]) -> None:
         self.raw_event("tool_call", {"id": tool_id, "name": name, "args": args})

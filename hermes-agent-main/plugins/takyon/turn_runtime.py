@@ -142,23 +142,10 @@ def _takyon_reasoning_config(effort: str | None = None) -> dict[str, Any]:
 
 
 def _reasoning_progress_callback(progress: Any) -> Callable[[str], None] | None:
-    if progress is None:
-        return None
-
-    def _callback(text: str) -> None:
-        # Pass the RAW delta through. Reasoning streams as BPE pieces (" up", "sert", " the")
-        # and BOTH downstream coalescers (cli._ShellProgress / worker progress) buffer raw
-        # deltas "spacing intact" and normalize at flush time. Normalizing PER DELTA here
-        # stripped every piece's leading space before the buffer ever saw it, so flushed
-        # lines printed with the words jammed together ("Ineedtoexecuteourstrategy...").
-        raw = str(text or "")
-        if not raw:
-            return
-        if raw.strip() in {"(empty)", "_thinking"}:
-            return
-        progress.tool_progress("reasoning.available", "_thinking", raw, None)
-
-    return _callback
+    # Product/operator progress is a public status rail, not a chain-of-thought rail. The model may
+    # use reasoning internally, but raw deltas must never be persisted to events or replayed by the
+    # CLI/dashboard. Curated business_post_operator_update milestones are the sole planning surface.
+    return None
 
 
 def _business_root(slug: str) -> Path:
