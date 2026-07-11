@@ -1,10 +1,15 @@
 import { surfaceContext } from "@takyon/surface-context.js";
 
 export function businessDisplayName(): string {
-  const raw = String(surfaceContext.business || "").trim().toLowerCase();
-  const parts = raw.split(/[^a-z0-9]+/).filter(Boolean);
+  const raw = String(
+    (surfaceContext as Record<string, unknown>).businessName || surfaceContext.business || "",
+  ).trim();
+  const parts = raw.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   if (!parts.length) return "Takyon app";
-  return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+  if (raw === raw.toLowerCase()) {
+    return parts.map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
+  }
+  return raw;
 }
 
 // Free brand mark injected by the surface-context payload (no paid logo call at bootstrap).

@@ -2989,11 +2989,25 @@ def _subuser_surface_context_payload(
     routes = _surface_routes(surface)
     effective_runtime_features = _surface_effective_runtime_features(surface)
     hero = _read_bootstrap_hero_copy(workspace_root)
+    strategy_title, strategy_sections = _starter_strategy_sections(workspace_root)
+    raw_display_name = (
+        strategy_sections.get("business name")
+        or strategy_sections.get("product name")
+        or strategy_sections.get("brand name")
+        or strategy_title
+    )
+    display_name = _starter_strategy_title(raw_display_name, slug=slug)
+    display_name = re.sub(
+        r"\s+(?:strategy(?:\s+brief)?|brief)$", "", display_name, flags=re.IGNORECASE
+    ).strip()
+    if _starter_title_is_generic(display_name, slug=slug):
+        display_name = "Product"
     return {
         "heroEyebrow": hero.get("eyebrow", ""),
         "heroHeadline": hero.get("headline", ""),
         "heroSubhead": hero.get("subhead", ""),
         "business": slug,
+        "businessName": display_name,
         "frontendApiMode": SUBUSER_FRONTEND_API_MODE,
         "kitPath": shape.get("kit_path") or SUBUSER_KIT_DIRNAME,
         "frontendStack": shape.get("frontend_stack") or DEFAULT_SUBUSER_FRONTEND_STACK,

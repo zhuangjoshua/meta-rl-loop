@@ -85,3 +85,22 @@ def test_saas_worker_contract_requires_product_visuals_proof_and_durable_full_pa
 
 def test_navigation_component_is_force_refreshed_with_appkit_rails():
     assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
+
+
+def test_surface_context_carries_strategy_product_name_instead_of_internal_slug(tmp_path):
+    business_root = tmp_path / "businesses" / "internal-slug-0711"
+    workspace = business_root / "product" / "site"
+    strategy = business_root / "research" / "strategy.md"
+    workspace.mkdir(parents=True)
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "# Threadline strategy brief\n\n## Business Name\nThreadline\n",
+        encoding="utf-8",
+    )
+    payload = takyon_core._subuser_surface_context_payload(
+        None, slug="internal-slug-0711", workspace_root=workspace
+    )
+    assert payload["business"] == "internal-slug-0711"
+    assert payload["businessName"] == "Threadline"
+    branding = read("src/lib/branding.ts")
+    assert "businessName" in branding
