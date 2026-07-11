@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { client, defaultSubscribePlanKey, productPlans, type TakyonActionError } from "./takyon";
+import { setSubscribeAfterAuth, shouldSubscribeAfterAuth } from "./product-auth";
 
 export interface SessionUser {
   [key: string]: unknown;
@@ -97,13 +98,10 @@ function activePaidEntitlement(entitlement: Record<string, unknown>): boolean {
 
 export function isAccountEntitled(payload: AccountPayload | null): boolean {
   if (!payload || !isObject(payload)) return false;
-  if (payload.entitled === true) return true;
-  if (isObject(payload.plan) && payload.plan.active === true) return true;
   if (accountEntitlements(payload).some((entitlement) => activePaidEntitlement(entitlement))) {
     return true;
   }
-  const user = accountUser(payload);
-  return isPaidTier(user?.tier);
+  return false;
 }
 
 export function subscriptionStateFromAccount(payload: AccountPayload | null): string {
@@ -129,10 +127,6 @@ export function subscriptionStateFromAccount(payload: AccountPayload | null): st
       return (rank[left] ?? 9) - (rank[right] ?? 9);
     });
   if (ranked[0]) return ranked[0];
-  const user = accountUser(payload);
-  if (isPaidTier(user?.tier)) {
-    return lowerText(user?.tier) === "trial" ? "trialing" : "active";
-  }
   return "none";
 }
 
@@ -187,24 +181,6 @@ export function resolveViewerCta(access: Pick<ViewerAccessResult, "authenticated
  *  so every business gets a working subscribe without the generated UI wiring it by hand. When a
  *  signed-in, not-yet-entitled viewer carries intent=subscribe, start checkout via the shared rail
  *  and redirect to the returned URL; on no-URL/failure, clear the intent so it can be retried. */
-const RESUME_SUBSCRIBE_KEY = "takyon.resumeSubscribe";
-
-function readResumeSubscribe(): boolean {
-  try {
-    return window.sessionStorage.getItem(RESUME_SUBSCRIBE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-function setResumeSubscribe(on: boolean): void {
-  try {
-    if (on) window.sessionStorage.setItem(RESUME_SUBSCRIBE_KEY, "1");
-    else window.sessionStorage.removeItem(RESUME_SUBSCRIBE_KEY);
-  } catch {
-    /* sessionStorage unavailable (private mode / SSR) — degrade to same-load only */
-  }
-}
-
 export function useSubscribeIntent(
   access: Pick<ViewerAccessResult, "authenticated" | "entitled" | "loading">,
   intent: string | null,
@@ -218,7 +194,7 @@ export function useSubscribeIntent(
     // FIXED redirect path (config.redirectPath) that drops the ?intent=subscribe query, so a
     // signed-out Subscribe click used to lead to the sign-in gate and then silently do nothing
     // (intent lost). We persist the intent in sessionStorage and resume on return.
-    const wantsSubscribe = intent === "subscribe" || readResumeSubscribe();
+    const wantsSubscribe = intent === "subscribe" || shouldSubscribeAfterAuth();
     if (!wantsSubscribe) {
       startedRef.current = false;
       return;
@@ -226,13 +202,13 @@ export function useSubscribeIntent(
     if (access.loading) return;
     if (access.entitled) {
       // Already subscribed — nothing to buy; clear any stale resume flag.
-      setResumeSubscribe(false);
+      setSubscribeAfterAuth(false);
       return;
     }
     if (!access.authenticated) {
       // Stash the intent across the sign-in OAuth redirect; the app's sign-in gate is already
       // shown. On return (authenticated) this effect re-runs and resumes checkout below.
-      setResumeSubscribe(true);
+      setSubscribeAfterAuth(true);
       return;
     }
     if (startedRef.current) return;
@@ -245,7 +221,7 @@ export function useSubscribeIntent(
         const response = await client.checkout(planKey ? { plan_key: planKey } : {});
         const url = String((response && (response.url || response.checkout_url)) || "").trim();
         if (!cancelled && url) {
-          setResumeSubscribe(false);
+          setSubscribeAfterAuth(false);
           window.location.assign(url);
           return;
         }
@@ -256,7 +232,7 @@ export function useSubscribeIntent(
       if (cancelled) return;
       // Do NOT swallow failures silently (the old bare `catch {}` made a failed Subscribe look
       // dead). Clear the resume flag and surface ?checkout=error so the app shows a retry banner.
-      setResumeSubscribe(false);
+      setSubscribeAfterAuth(false);
       const next = new URLSearchParams(window.location.search);
       next.delete("intent");
       if (failed) next.set("checkout", "error");
@@ -600,9 +576,11 @@ export interface UseRecordsResult {
   refresh: () => Promise<void>;
 }
 
+const recordsCache = new Map<string, RecordItem[]>();
+
 /** Lists records of one type via client.listRecords({ type }); refresh re-lists. */
 export function useRecords(type: string): UseRecordsResult {
-  const [records, setRecords] = useState<RecordItem[]>([]);
+  const [records, setRecords] = useState<RecordItem[]>(() => recordsCache.get(type) ?? []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const aliveRef = useRef(true);
@@ -622,11 +600,11 @@ export function useRecords(type: string): UseRecordsResult {
       const list = Array.isArray(payload?.records)
         ? (payload.records as RecordItem[])
         : [];
+      recordsCache.set(type, list);
       setRecords(list);
       setError(null);
     } catch (err) {
       if (!aliveRef.current) return;
-      setRecords([]);
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       if (aliveRef.current) setLoading(false);
@@ -634,8 +612,9 @@ export function useRecords(type: string): UseRecordsResult {
   }, [type]);
 
   useEffect(() => {
+    setRecords(recordsCache.get(type) ?? []);
     void refresh();
-  }, [refresh]);
+  }, [refresh, type]);
 
   return { records, loading, error, refresh };
 }

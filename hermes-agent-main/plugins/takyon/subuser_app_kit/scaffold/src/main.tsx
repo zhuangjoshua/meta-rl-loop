@@ -23,6 +23,9 @@ const FaqScreen = lazy(() =>
 const PrivacyScreen = lazy(() =>
   import("./screens/support").then((m) => ({ default: m.PrivacyScreen })),
 );
+const PricingScreen = lazy(() =>
+  import("./screens/support").then((m) => ({ default: m.PricingScreen })),
+);
 const TermsScreen = lazy(() =>
   import("./screens/support").then((m) => ({ default: m.TermsScreen })),
 );
@@ -42,6 +45,7 @@ createRoot(container).render(
             <Route path="/" element={<LandingScreen />} />
             <Route path="/store" element={<StoreScreen />} />
             <Route path="/faq" element={<FaqScreen />} />
+            <Route path="/pricing" element={<PricingScreen />} />
             <Route path="/privacy" element={<PrivacyScreen />} />
             <Route path="/terms" element={<TermsScreen />} />
             <Route path="/articles" element={<ArticlesScreen />} />

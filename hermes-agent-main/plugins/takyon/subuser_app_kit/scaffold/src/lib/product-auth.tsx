@@ -27,12 +27,31 @@ interface ProductAuthContextValue {
   busy: boolean;
   error: string | null;
   signInWithGoogle: () => Promise<void>;
+  signUpWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
   clearError: () => void;
 }
 
 const ProductAuthContext = createContext<ProductAuthContextValue | null>(null);
 let browserSupabaseClient: SupabaseClient | null | undefined;
+const SUBSCRIBE_AFTER_AUTH_KEY = "takyon.subscribeAfterAuth";
+
+export function setSubscribeAfterAuth(enabled: boolean): void {
+  try {
+    if (enabled) window.sessionStorage.setItem(SUBSCRIBE_AFTER_AUTH_KEY, "1");
+    else window.sessionStorage.removeItem(SUBSCRIBE_AFTER_AUTH_KEY);
+  } catch {
+    /* Storage can be unavailable in private mode; the visible access gate remains usable. */
+  }
+}
+
+export function shouldSubscribeAfterAuth(): boolean {
+  try {
+    return window.sessionStorage.getItem(SUBSCRIBE_AFTER_AUTH_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -159,9 +178,10 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
     };
   }, [config, configured, location.hash, location.pathname, location.search, navigate]);
 
-  async function signInWithGoogle() {
+  async function startGoogleAuth(subscribeAfterAuth: boolean) {
     setBusy(true);
     setError(null);
+    setSubscribeAfterAuth(subscribeAfterAuth);
     try {
       if (!configured) {
         throw new Error("Supabase Auth is not configured for this product.");
@@ -182,8 +202,17 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
       if (signInError) throw signInError;
     } catch (err) {
       setError(displayError(err));
+      setSubscribeAfterAuth(false);
       setBusy(false);
     }
+  }
+
+  async function signInWithGoogle() {
+    await startGoogleAuth(false);
+  }
+
+  async function signUpWithGoogle() {
+    await startGoogleAuth(true);
   }
 
   async function logout() {
@@ -214,6 +243,7 @@ export function ProductAuthProvider({ children }: { children: ReactNode }) {
         busy,
         error,
         signInWithGoogle,
+        signUpWithGoogle,
         logout,
         clearError: () => setError(null),
       }}

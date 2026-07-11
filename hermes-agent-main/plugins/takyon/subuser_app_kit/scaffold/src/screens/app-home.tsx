@@ -10,7 +10,7 @@ import {
 } from "../components/ui/card";
 import { Skeleton } from "../components/ui/skeleton";
 import { businessDisplayName, formatUsageAllowance } from "../lib/branding";
-import { resolveViewerCta, useViewerAccess } from "../lib/hooks";
+import { useViewerAccess } from "../lib/hooks";
 import { useProductAuth } from "../lib/product-auth";
 
 function accountEmail(access: ReturnType<typeof useViewerAccess>): string {
@@ -27,7 +27,6 @@ function weeklyAllocationLine(access: ReturnType<typeof useViewerAccess>): strin
 export function AppHomeScreen() {
   const access = useViewerAccess();
   const auth = useProductAuth();
-  const cta = resolveViewerCta(access);
   const productName = businessDisplayName();
   const weeklyAllocation = weeklyAllocationLine(access);
 
@@ -77,8 +76,8 @@ export function AppHomeScreen() {
             <Badge>{access.subscriptionState || "signed_in"}</Badge>
             <span className="text-sm text-muted-foreground">{productName}</span>
           </div>
-          <CardTitle>You're signed in.</CardTitle>
-          <CardDescription>Welcome back to {productName}.</CardDescription>
+          <CardTitle>Your workspace is ready.</CardTitle>
+          <CardDescription>Continue your work in {productName}.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
           <div className="rounded border border-border bg-background p-4">
@@ -95,16 +94,10 @@ export function AppHomeScreen() {
           ) : null}
           <div className="flex flex-wrap gap-3">
             <Link
-              to={cta.primaryHref}
-              className="inline-flex h-11 items-center justify-center rounded bg-primary px-5 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
-            >
-              {cta.primaryLabel}
-            </Link>
-            <Link
               to="/app/profile"
               className="inline-flex h-11 items-center justify-center rounded border border-border bg-card px-5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              Open account
+              Account settings
             </Link>
           </div>
         </CardContent>

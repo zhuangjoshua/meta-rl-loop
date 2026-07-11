@@ -7388,6 +7388,7 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/lib/hooks.ts",
     "src/lib/product-auth.tsx",
     "src/lib/branding.ts",
+    "src/components/site-navigation.tsx",
     "src/screens/app-layout.tsx",
 )
 
@@ -7571,10 +7572,17 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Scaffold-owned and force-rewritten from the bundled scaffold on EVERY product build/kit materialize — never edit these; any change to them is silently reverted before the build: "
         + ", ".join(f"`{rel}`" for rel in _STARTER_OWNED_REFRESH_FILES)
         + ". If a screen needs a helper these files do not export, add it to a NEW worker-owned module under `src/lib/` (different filename) or define it in the screen itself.",
-        "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers in `src/lib/hooks.ts` instead of hardcoding paid-vs-unpaid copy.",
+        "- Use the canonical `PublicSiteHeader` from `src/components/site-navigation.tsx` on the landing and every public support page. It owns the stable signed-out Home/Pricing/FAQ/Privacy/Terms nav, distinct Log in and Sign up actions, the signed-in App/Account nav, and loading-state stability; do not replace it with page-specific nav variants.",
+        "- Landing and pricing CTAs must derive from real runtime session/account state through the shared helpers: the public landing has distinct Log in and Sign up actions, never a price-first Subscribe/Open app button. Log in calls `signInWithGoogle()`; Sign up calls `signUpWithGoogle()`, which preserves the intent through OAuth and proceeds directly to checkout. Pricing uses the resolved access state.",
+        "- Authenticated viewers visiting `/` go directly to `/app`. The canonical `/app` layout owns the sign-in/subscription gate and renders the product immediately for entitled viewers; never add another landing, welcome, enter-product, or self-linking Open app screen inside `src/screens/app-home.tsx`.",
+        "- Public nested pages such as FAQ, privacy, terms, articles, and guides must not show Open app or Subscribe CTAs. Use `BackButton` on nested pages; the only public conversion surfaces are the landing's Log in/Sign up actions and the pricing page.",
+        "- Treat the signed-in product as a full-width application workspace. Do not wrap the primary `/app` workflow in a narrow centered marketing container or a single small card; use the available viewport for the real workflow while preserving readable inner regions.",
+        "- Every created or generated customer artifact must survive tab and route changes: persist it through `saveRecord(...)`, render lists from `listRecords(...)`/`useRecords(...)`, and keep stale successful records visible if a refresh transiently fails. Component-local action results and browser storage are not durable product state.",
+        "- The landing must show polished, product-specific UI visuals as the visitor scrolls (real representations of the workflow, not generic icon cards) and a prominent proof section. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
+        "- The public header is a visually separated banner (border/background/shadow) and remains structurally static within signed-out and signed-in states. Do not vary its options by public page.",
         "- Takyon app products do NOT support a free plan or free tier. There is exactly one paid entitlement; an unentitled viewer has no usable access and must be routed to subscribe. Do not invent free-tier copy or UI: no \"Free plan\", \"Free · N/month\", \"N free per month\", \"free account\", \"free trial\", \"no credit card\", or freemium framing anywhere (landing, app home, profile, or pricing). Show the single paid plan and a subscribe-first gate; the free shape is unsupported runtime-side, so advertising it ships a promise the product cannot keep.",
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
-        "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, continue, or open app.",
+        "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, or continue.",
         "- The shared account rail returns canonical account truth as `user` plus `entitlements[]`; if a screen needs subscription/access state, derive it from those helpers instead of reviving legacy `has_active_subscription`, nested `subscription.status`, or custom `client.account()` field guesses.",
         "- Do not hand-roll subscription gates inside `src/screens/app-home.tsx` or `src/screens/profile.tsx` when the shared hooks already answer whether the viewer should subscribe, continue, update billing, or open the app.",
         "- Never return `null` for anonymous or unentitled viewers on `/app` or `/app/profile`; render a visible sign-in/subscribe/account gate wired to `useProductAuth()` and `resolveViewerCta()`.",
@@ -7582,7 +7590,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Do not spend bootstrap/design time rebuilding runtime plumbing that the kit already wires.",
         "- Use the shared kit as substrate, not as a cap on ambition. The platform shape is constrained; the product UX above it is not.",
         f"- Put business-specific UI outside `./{kit_path}/` unless you are intentionally updating the shared kit. Reuse the seeded auth/paywall/account rail wrappers instead of reinventing them.",
-        "- The route skeleton is already wired in `src/main.tsx` for `/`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile`.",
+        "- The route skeleton is already wired in `src/main.tsx` for `/`, `/pricing`, `/faq`, `/privacy`, `/terms`, `/articles`, `/app`, and `/app/profile`.",
         "- `src/screens/support.tsx` owns the support-route pages, `src/screens/app-layout.tsx` owns the shared `/app` shell, `src/screens/app-home.tsx` owns the main app view, and `src/screens/profile.tsx` owns `/app/profile`.",
     ]
     return "\n".join(lines).strip()
