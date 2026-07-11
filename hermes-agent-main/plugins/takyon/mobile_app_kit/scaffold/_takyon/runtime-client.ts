@@ -18,6 +18,84 @@
 
 export type Rail = string;
 
+declare const recordRefBrand: unique symbol;
+export type RecordRef = string & { readonly [recordRefBrand]: "TakyonRecordRef" };
+
+export interface AppRecord {
+  id: string;
+  type: string;
+  ref: RecordRef;
+  [key: string]: unknown;
+}
+
+export interface RecordResponse {
+  record: AppRecord;
+  [key: string]: unknown;
+}
+
+export interface RecordListResponse {
+  records: AppRecord[];
+  [key: string]: unknown;
+}
+
+const RECORD_REF_PREFIX = "takyon-record-v1.";
+
+function isObject(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function recordRefFromRecord(record: unknown): RecordRef | "" {
+  if (!isObject(record)) return "";
+  const type = String(record.type || record.record_type || "").trim();
+  const id = String(record.id || record.record_id || "").trim();
+  if (!type || !id) return "";
+  return `${RECORD_REF_PREFIX}${encodeURIComponent(JSON.stringify([1, type, id]))}` as RecordRef;
+}
+
+function recordKeyFromRef(ref: RecordRef): { type: string; id: string } {
+  if (typeof ref !== "string" || !ref.startsWith(RECORD_REF_PREFIX)) {
+    throw new TypeError(
+      "record_ref is invalid; pass the ref returned by saveRecord, listRecords, or readRecord",
+    );
+  }
+  try {
+    const decoded: unknown = JSON.parse(decodeURIComponent(ref.slice(RECORD_REF_PREFIX.length)));
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 3 ||
+      decoded[0] !== 1 ||
+      typeof decoded[1] !== "string" ||
+      !decoded[1].trim() ||
+      typeof decoded[2] !== "string" ||
+      !decoded[2].trim()
+    ) {
+      throw new Error("invalid record ref payload");
+    }
+    return { type: decoded[1], id: decoded[2] };
+  } catch {
+    throw new TypeError(
+      "record_ref is invalid; pass the ref returned by saveRecord, listRecords, or readRecord",
+    );
+  }
+}
+
+function payloadWithRecordRefs(payload: any): any {
+  if (!isObject(payload)) return payload;
+  const out = { ...payload };
+  if (isObject(payload.record)) {
+    const ref = recordRefFromRecord(payload.record);
+    out.record = ref ? { ...payload.record, ref } : payload.record;
+  }
+  if (Array.isArray(payload.records)) {
+    out.records = payload.records.map((record: unknown) => {
+      if (!isObject(record)) return record;
+      const ref = recordRefFromRecord(record);
+      return ref ? { ...record, ref } : record;
+    });
+  }
+  return out;
+}
+
 export interface SurfaceContext {
   runtimeApiBase: string; // absolute for mobile
   runtimeFeatures?: Rail[];
@@ -77,10 +155,11 @@ export interface MobileRuntimeClient {
   profile(): Promise<any>;
   updateProfile(p: Record<string, unknown>): Promise<any>;
   // records
-  listRecords(o?: Record<string, unknown>): Promise<{ records: any[] }>;
-  getRecord(type: string, id: string): Promise<any>;
-  saveRecord(p: Record<string, unknown>): Promise<any>;
-  deleteRecord(type: string, id: string): Promise<any>;
+  listRecords(o?: Record<string, unknown>): Promise<RecordListResponse>;
+  getRecord(ref: RecordRef): Promise<RecordResponse>;
+  readRecord(ref: RecordRef): Promise<RecordResponse>;
+  saveRecord(p: Record<string, unknown>): Promise<RecordResponse>;
+  deleteRecord(ref: RecordRef): Promise<RecordResponse>;
   // paid rails (brokered server-side)
   generate(payload: Record<string, unknown>): Promise<any>;
   search(payload: Record<string, unknown>): Promise<any>;
@@ -133,6 +212,44 @@ export function createMobileRuntimeClient(
       );
     }
     return body;
+  }
+
+  async function getRecord(ref: RecordRef): Promise<RecordResponse>;
+  async function getRecord(type: string, id: string): Promise<RecordResponse>;
+  async function getRecord(refOrType: RecordRef | string, legacyId?: string): Promise<RecordResponse> {
+    ensureRail("records");
+    const key = legacyId === undefined
+      ? recordKeyFromRef(refOrType as RecordRef)
+      : { type: String(refOrType || "").trim(), id: String(legacyId || "").trim() };
+    return payloadWithRecordRefs(
+      await req(`records/${encodeURIComponent(key.type)}/${encodeURIComponent(key.id)}`, {
+        method: "GET",
+      }),
+    );
+  }
+
+  async function readRecord(ref: RecordRef): Promise<RecordResponse> {
+    ensureRail("records");
+    const key = recordKeyFromRef(ref);
+    return payloadWithRecordRefs(
+      await req(`records/${encodeURIComponent(key.type)}/${encodeURIComponent(key.id)}`, {
+        method: "GET",
+      }),
+    );
+  }
+
+  async function deleteRecord(ref: RecordRef): Promise<RecordResponse>;
+  async function deleteRecord(type: string, id: string): Promise<RecordResponse>;
+  async function deleteRecord(refOrType: RecordRef | string, legacyId?: string): Promise<RecordResponse> {
+    ensureRail("records");
+    const key = legacyId === undefined
+      ? recordKeyFromRef(refOrType as RecordRef)
+      : { type: String(refOrType || "").trim(), id: String(legacyId || "").trim() };
+    return payloadWithRecordRefs(
+      await req(`records/${encodeURIComponent(key.type)}/${encodeURIComponent(key.id)}`, {
+        method: "DELETE",
+      }),
+    );
   }
 
   return {
@@ -194,20 +311,19 @@ export function createMobileRuntimeClient(
     async listRecords(o = {}) {
       ensureRail("records");
       const qs = new URLSearchParams(o as Record<string, string>).toString();
-      return req(`records${qs ? `?${qs}` : ""}`, { method: "GET" });
+      return payloadWithRecordRefs(
+        await req(`records${qs ? `?${qs}` : ""}`, { method: "GET" }),
+      );
     },
-    async getRecord(type, id) {
-      ensureRail("records");
-      return req(`records/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, { method: "GET" });
-    },
+    getRecord,
+    readRecord,
     async saveRecord(p) {
       ensureRail("records");
-      return req("records", { method: "POST", body: JSON.stringify(p) });
+      return payloadWithRecordRefs(
+        await req("records", { method: "POST", body: JSON.stringify(p) }),
+      );
     },
-    async deleteRecord(type, id) {
-      ensureRail("records");
-      return req(`records/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, { method: "DELETE" });
-    },
+    deleteRecord,
 
     async generate(payload) {
       ensureRail("generate");

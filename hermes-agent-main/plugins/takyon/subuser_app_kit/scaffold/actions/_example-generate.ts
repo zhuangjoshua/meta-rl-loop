@@ -12,7 +12,7 @@
 //
 // This file's name starts with "_", so the action runtime ignores it — it is a reference only.
 // Copy it to `actions/<your-action>.ts` and rename the export's intent.
-export default async function run(payload, ctx) {
+export default async function run(payload: TakyonActionPayload, ctx: TakyonActionContext) {
   const data = await ctx.generate({
     max_tokens: 1024,
     system: "You are a helpful assistant.",

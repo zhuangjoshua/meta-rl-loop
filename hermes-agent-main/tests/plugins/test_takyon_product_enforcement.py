@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+
+import pytest
 
 from plugins.takyon.core import (
     WORKER_CAPABILITY_CONTRACT,
@@ -335,6 +339,35 @@ def test_vite_ai_surface_accepts_use_action_runner(tmp_path):
 
     assert ok is True
     assert blocker == ""
+
+
+def test_action_backed_product_refuses_unlimited_usage_claim(tmp_path):
+    site = tmp_path / "product" / "site"
+    site.mkdir(parents=True)
+    (site / "index.html").write_text(
+        "<main>Subscribe to unlock unlimited proposals and revisions.</main>\n"
+        "<script>client.checkout({ plan_key: 'pro' });</script>\n",
+        encoding="utf-8",
+    )
+    (site / "actions").mkdir()
+    (site / "actions" / "generate.ts").write_text(
+        "export default async (payload, ctx) => ({ ok: true });\n", encoding="utf-8"
+    )
+    (site / "src").mkdir()
+    (site / "src" / "app.ts").write_text(
+        'client.invokeAction("generate", {});\n', encoding="utf-8"
+    )
+    surface = {
+        "runtime_features": ["auth", "account", "checkout", "actions"],
+        "routes": [{"path": "/"}, {"path": "/app"}],
+        "metadata": {"product_workflow": {"actions": [{"name": "generate", "trigger": "http"}]}},
+    }
+
+    inventory = _bounded_product_inventory(tmp_path, "product/site", surface=surface)
+    ok, blocker = _validate_product_surface_contract(inventory, surface)
+
+    assert ok is False
+    assert "unlimited action-backed usage" in blocker
 
 
 def test_pinned_stack_gate_treats_legacy_alias_as_vite_stack(tmp_path):
@@ -708,6 +741,28 @@ def test_starter_owned_metadata_refreshes_on_rebuild(tmp_path):
     assert "__STARTER_PUBLIC_ORIGIN__" not in llms
 
 
+def test_starter_metadata_never_promotes_transient_auth_failure_to_seo_copy(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    landing = tmp_path / "src" / "screens" / "landing.tsx"
+    landing.parent.mkdir(parents=True)
+    landing.write_text(
+        "<h1>Sign-in is temporarily unavailable.</h1>"
+        "<p>Sign-in is temporarily unavailable. Please try again shortly.</p>\n",
+        encoding="utf-8",
+    )
+    surface = _app_shell_surface("vite_react_ts")
+    surface["notes"] = "Proposal workflow for independent consultants."
+
+    metadata = takyon_core._subuser_app_starter_strings(
+        surface, slug="proposal-flow", workspace_root=tmp_path
+    )
+
+    assert metadata["title"] == "Proposal Flow"
+    assert "Sign-in is temporarily unavailable" not in metadata["title"]
+    assert "Sign-in is temporarily unavailable" not in metadata["description"]
+
+
 def test_starter_refresh_uses_custom_landing_copy_when_notes_are_empty(tmp_path):
     from plugins.takyon import core as takyon_core
 
@@ -812,16 +867,25 @@ def test_product_build_normalizer_restores_scaffold_owned_config(tmp_path):
         "package.json",
         "package-lock.json",
         "tsconfig.json",
+        "tsconfig.actions.json",
+        "action-env.d.ts",
         "vite.config.ts",
         "vite.config.js",
     }
     normalized_package = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
     assert normalized_package["name"] == "plantmeter-587969"
     assert normalized_package["scripts"]["build"] == "vite build"
-    assert normalized_package["scripts"]["typecheck"] == "tsc --noEmit"
+    assert normalized_package["scripts"]["typecheck"] == (
+        "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.actions.json"
+    )
     assert normalized_package["dependencies"]["@supabase/supabase-js"] == "2.108.2"
     assert not (tmp_path / "vite.config.js").exists()
     assert '"@takyon/*": ["./_takyon/*"]' in (tmp_path / "tsconfig.json").read_text(encoding="utf-8")
+    action_config = json.loads((tmp_path / "tsconfig.actions.json").read_text(encoding="utf-8"))
+    assert action_config["compilerOptions"]["lib"] == ["ES2020"]
+    assert action_config["compilerOptions"]["noImplicitAny"] is True
+    assert action_config["files"] == ["action-env.d.ts"]
+    assert action_config["include"] == ["actions/**/*.ts"]
     assert '"@takyon": new URL("./_takyon", import.meta.url).pathname' in (
         tmp_path / "vite.config.ts"
     ).read_text(encoding="utf-8")
@@ -829,6 +893,131 @@ def test_product_build_normalizer_restores_scaffold_owned_config(tmp_path):
         takyon_core._subuser_app_scaffold_source_dir() / "package-lock.json"
     ).read_bytes()
     assert (tmp_path / "package-lock.json").read_bytes() == scaffold_lock
+
+
+def test_scaffold_typechecks_browser_and_action_code_in_separate_global_environments(tmp_path):
+    from plugins.takyon import core as takyon_core
+
+    scaffold = takyon_core._subuser_app_scaffold_source_dir()
+    tsc = scaffold / "node_modules" / ".bin" / "tsc"
+    if shutil.which("node") is None or not tsc.is_file():
+        pytest.skip("scaffold TypeScript compiler is not installed")
+
+    shutil.copy2(scaffold / "tsconfig.json", tmp_path / "tsconfig.json")
+    shutil.copy2(scaffold / "tsconfig.actions.json", tmp_path / "tsconfig.actions.json")
+    shutil.copy2(scaffold / "action-env.d.ts", tmp_path / "action-env.d.ts")
+    src = tmp_path / "src"
+    actions = tmp_path / "actions"
+    kit = tmp_path / "_takyon"
+    src.mkdir()
+    actions.mkdir()
+    kit.mkdir()
+    shutil.copy2(
+        scaffold.parent / "runtime-client.d.ts",
+        kit / "runtime-client.d.ts",
+    )
+    # Mirror a real materialized workspace: the platform JS implementation is present beside its
+    # declaration, but the browser project typechecks product source through that declaration
+    # boundary instead of strict-checking platform-owned JS as if it were generated app source.
+    shutil.copy2(
+        scaffold.parent / "runtime-client.js",
+        kit / "runtime-client.js",
+    )
+    (src / "browser.ts").write_text(
+        "export const browserUrl = window.location.href;\n"
+        "export const browserTitle = document.title;\n",
+        encoding="utf-8",
+    )
+    no_actions = subprocess.run(
+        [str(tsc), "--noEmit", "-p", "tsconfig.actions.json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert no_actions.returncode == 0, no_actions.stdout + no_actions.stderr
+    action = actions / "run.ts"
+    action.write_text(
+        'import type { RecordRef } from "../_takyon/runtime-client.js";\n'
+        "export default async function run(\n"
+        "  payload: { url: string; ref: RecordRef },\n"
+        "  ctx: TakyonActionContext,\n"
+        ") {\n"
+        "  const response = await fetch(String(payload.url));\n"
+        "  const record = await ctx.readRecord(payload.ref);\n"
+        "  return { ok: response.ok, record };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    browser = subprocess.run(
+        [str(tsc), "--noEmit", "-p", "tsconfig.json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert browser.returncode == 0, browser.stdout + browser.stderr
+    server_safe = subprocess.run(
+        [str(tsc), "--noEmit", "-p", "tsconfig.actions.json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert server_safe.returncode == 0, server_safe.stdout + server_safe.stderr
+
+    action.write_text(
+        "export default async function run(\n"
+        "  payload: TakyonActionPayload,\n"
+        "  ctx: TakyonActionContext,\n"
+        ") {\n"
+        "  await ctx.getRecord(\"proposal\", \"ui-invented-slug\");\n"
+        "  await ctx.publishRecord(\"ui-invented-slug\");\n"
+        "  return {\n"
+        "    payload,\n"
+        "    window,\n"
+        "    document,\n"
+        "    location,\n"
+        "    navigator,\n"
+        "    caches,\n"
+        "    indexedDB,\n"
+        "    self,\n"
+        "    globalLocation: globalThis.location,\n"
+        "  };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    browser_only = subprocess.run(
+        [str(tsc), "--noEmit", "-p", "tsconfig.actions.json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    diagnostics = browser_only.stdout + browser_only.stderr
+    assert browser_only.returncode != 0
+    for unavailable in ("window", "document", "location", "navigator", "caches", "indexedDB", "self"):
+        assert unavailable in diagnostics
+    assert "Expected 1 arguments, but got 2" in diagnostics
+    assert "Property 'publishRecord' does not exist" in diagnostics
+
+    (src / "unchecked-record-read.js").write_text(
+        'import { createSubuserRuntimeClient } from "../_takyon/runtime-client.js";\n'
+        'const client = createSubuserRuntimeClient({ runtimeFeatures: ["records"] });\n'
+        'client.getRecord("proposal", "ui-invented-slug");\n',
+        encoding="utf-8",
+    )
+    checked_javascript = subprocess.run(
+        [str(tsc), "--noEmit", "-p", "tsconfig.json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    js_diagnostics = checked_javascript.stdout + checked_javascript.stderr
+    assert checked_javascript.returncode != 0
+    assert "Expected 1 arguments, but got 2" in js_diagnostics
 
 
 def test_frontend_stack_creation_default():

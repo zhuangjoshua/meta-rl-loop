@@ -69,6 +69,9 @@ _SERVICE_EMAIL_SUFFIX = ".takyon.invalid"
 _ACTION_REQUEST_BODY_LIMIT = 8 * 1024 * 1024  # raised from 64KB to allow image-bearing action payloads (identify-rock, solve-homework)
 _ACTION_STDOUT_LIMIT = 256 * 1024
 _ACTION_STDERR_LIMIT = 16 * 1024
+_ACTION_BUNDLE_MAX_BYTES = 512 * 1024
+_ACTION_BUNDLE_MAX_FILES = 64
+_ACTION_BUNDLE_VERSION = 1
 _ACTION_MIN_INTERVAL_SECONDS = 15 * 60
 _ACTION_CONTEXT_PREFIX = "/api/takyon/apps/{business}"
 # Platform rails a server-side action may call. The action runs where these rails are reachable and
@@ -782,6 +785,189 @@ def site_http_action_names(site_root: Path, surface: Mapping[str, Any]) -> set[s
     return http_runnable
 
 
+def build_action_bundle(site_root: Path) -> dict[str, Any]:
+    """Compile the immutable server-action artifact stored with one live product build.
+
+    Static HTML is already distributed through the build artifact/R2 pointer. Server actions cannot
+    depend on a producer host SSHing mutable source into every serving replica: the producer may be
+    the Mac or the delayed operator VPS, and the sub-user plane is N-replica. This bounded bundle is
+    therefore part of the build identity and is the sole action source consumed at invocation time.
+    """
+    root = Path(site_root).resolve()
+    candidates = sorted((root / "actions").glob("*.ts")) if (root / "actions").is_dir() else []
+    runtime_client = root / "_takyon" / "runtime-client.js"
+    if runtime_client.is_file():
+        candidates.append(runtime_client)
+    if len(candidates) > _ACTION_BUNDLE_MAX_FILES:
+        raise ActionContractError(
+            f"action bundle has {len(candidates)} files; maximum is {_ACTION_BUNDLE_MAX_FILES}"
+        )
+
+    files: list[dict[str, str]] = []
+    total = 0
+    for path in candidates:
+        resolved = path.resolve()
+        if root not in resolved.parents or path.is_symlink():
+            raise ActionContractError(f"action bundle path escaped product/site: {path}")
+        rel = resolved.relative_to(root).as_posix()
+        if not (rel.startswith("actions/") and rel.endswith(".ts")) and rel != "_takyon/runtime-client.js":
+            raise ActionContractError(f"action bundle contains unsupported path: {rel}")
+        try:
+            content = resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ActionContractError(f"action bundle file is not readable UTF-8: {rel}: {exc}") from exc
+        size = len(content.encode("utf-8"))
+        total += size
+        if total > _ACTION_BUNDLE_MAX_BYTES:
+            raise ActionContractError(
+                f"action bundle exceeds {_ACTION_BUNDLE_MAX_BYTES} bytes"
+            )
+        files.append(
+            {
+                "path": rel,
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "content": content,
+            }
+        )
+
+    payload = {
+        "version": _ACTION_BUNDLE_VERSION,
+        "files": files,
+        "http_action_names": sorted(site_http_action_names(root, {})),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > _ACTION_BUNDLE_MAX_BYTES:
+        raise ActionContractError(
+            f"encoded action bundle exceeds {_ACTION_BUNDLE_MAX_BYTES} bytes"
+        )
+    return {
+        "json": encoded,
+        "sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "file_count": len(files),
+        "http_action_names": payload["http_action_names"],
+    }
+
+
+def _live_action_bundle_row(
+    conn: Any,
+    *,
+    business_slug: str,
+    live_build_id: str,
+    session_token: str,
+) -> Any:
+    if not _is_pg_conn(conn):
+        return conn.execute(
+            "SELECT action_bundle_json, action_bundle_sha256 FROM product_builds "
+            "WHERE business_slug = ? AND build_id = ?",
+            (business_slug, live_build_id),
+        ).fetchone()
+    current = conn.execute("SELECT current_user AS role").fetchone()
+    role = str(_row_value(current, "role", 0) or "").strip()
+    if role in {"takyon_app", "takyon_app_runtime"}:
+        session_hash = hashlib.sha256(str(session_token or "").encode("utf-8")).hexdigest()
+        return conn.execute(
+            "SELECT action_bundle_json, action_bundle_sha256 "
+            "FROM takyon_app_live_action_bundle(%s, %s)",
+            (business_slug, session_hash),
+        ).fetchone()
+    return conn.execute(
+        "SELECT action_bundle_json, action_bundle_sha256 FROM product_builds "
+        "WHERE business_slug = %s AND build_id = %s",
+        (business_slug, live_build_id),
+    ).fetchone()
+
+
+def materialize_live_action_bundle(
+    store: Any,
+    *,
+    business_slug: str,
+    surface: Mapping[str, Any],
+    session_token: str,
+) -> tuple[Path, set[str]]:
+    """Verify and materialize the live build's action bundle into a build-keyed local cache."""
+    build_id = str(surface.get("live_build_id") or "").strip().lower()
+    if not build_id:
+        raise ActionContractError("app surface has no live build for action execution")
+    with store._connect() as conn:
+        row = _live_action_bundle_row(
+            conn,
+            business_slug=business_slug,
+            live_build_id=build_id,
+            session_token=session_token,
+        )
+    if row is None:
+        raise ActionContractError(f"live build {build_id} has no action bundle")
+    encoded = str(_row_value(row, "action_bundle_json", 0) or "").strip()
+    expected_digest = str(_row_value(row, "action_bundle_sha256", 1) or "").strip().lower()
+    actual_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if not encoded or not expected_digest or actual_digest != expected_digest:
+        raise ActionContractError(f"live build {build_id} action bundle digest mismatch")
+    if len(encoded.encode("utf-8")) > _ACTION_BUNDLE_MAX_BYTES:
+        raise ActionContractError("live action bundle exceeds the runtime size limit")
+    try:
+        payload = json.loads(encoded)
+    except json.JSONDecodeError as exc:
+        raise ActionContractError("live action bundle is invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("version") != _ACTION_BUNDLE_VERSION:
+        raise ActionContractError("live action bundle version is unsupported")
+    files = payload.get("files")
+    if not isinstance(files, list) or len(files) > _ACTION_BUNDLE_MAX_FILES:
+        raise ActionContractError("live action bundle file list is invalid")
+
+    cache_root = (Path(store.root) / "cache" / "action-bundles" / business_slug / build_id).resolve()
+    allowed_root = (Path(store.root) / "cache" / "action-bundles").resolve()
+    if allowed_root not in cache_root.parents:
+        raise ActionContractError("action bundle cache path escaped its root")
+    marker = cache_root / ".bundle-sha256"
+    cached_ok = marker.is_file() and marker.read_text(encoding="utf-8").strip() == expected_digest
+    normalized_files: list[tuple[str, str, str]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            raise ActionContractError("live action bundle contains an invalid file entry")
+        rel = str(item.get("path") or "").strip().replace("\\", "/")
+        content = item.get("content")
+        digest = str(item.get("sha256") or "").strip().lower()
+        if not isinstance(content, str):
+            raise ActionContractError(f"live action bundle file has invalid content: {rel}")
+        if not (rel.startswith("actions/") and rel.endswith(".ts")) and rel != "_takyon/runtime-client.js":
+            raise ActionContractError(f"live action bundle contains unsupported path: {rel}")
+        target = (cache_root / rel).resolve()
+        if cache_root not in target.parents:
+            raise ActionContractError(f"live action bundle path escaped cache: {rel}")
+        if hashlib.sha256(content.encode("utf-8")).hexdigest() != digest:
+            raise ActionContractError(f"live action bundle file digest mismatch: {rel}")
+        normalized_files.append((rel, content, digest))
+        if cached_ok:
+            try:
+                cached_ok = hashlib.sha256(target.read_bytes()).hexdigest() == digest
+            except OSError:
+                cached_ok = False
+
+    if not cached_ok:
+        parent = cache_root.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{build_id}.", dir=str(parent)))
+        try:
+            for rel, content, _digest in normalized_files:
+                target = staging / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            (staging / ".bundle-sha256").write_text(expected_digest + "\n", encoding="utf-8")
+            if cache_root.exists():
+                shutil.rmtree(cache_root)
+            os.replace(staging, cache_root)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+
+    certified = {
+        str(name or "").strip().lower()
+        for name in (payload.get("http_action_names") or [])
+        if _ACTION_NAME_RE.match(str(name or "").strip().lower())
+    }
+    return cache_root, certified
+
+
 def surface_http_action_names(
     *,
     store: Any,
@@ -1320,12 +1506,17 @@ def invoke_action(
     if not isinstance(surface, Mapping) or str(surface.get("status") or "").strip() == "missing":
         raise ActionContractError("app surface contract is missing")
     workflow = _surface_product_workflow_shape(dict(surface))
-    # Customer app invokes run on the deployed sub-user plane. The runtime source
-    # artifact is shipped to that host by the sub-user deploy rail alongside the
-    # static product site; re-materializing the operator workspace here can wipe
-    # that deployed cache and replace it with stale/missing storage state before
-    # Deno loads the handler.
-    site_root = store._business_root(business_slug, sync=False) / "product" / "site"
+    session_token = str(principal.get("session_token") or "").strip()
+    if not session_token:
+        raise AppActionError("session_token is required")
+    # Every serving replica resolves the exact immutable bundle attached to the live build. This
+    # removes producer-host SSH and mutable workspace caches from the execution contract.
+    site_root, certified_http_actions = materialize_live_action_bundle(
+        store,
+        business_slug=business_slug,
+        surface=surface,
+        session_token=session_token,
+    )
     specs = file_backed_action_specs(site_root, workflow)
     outbound_hosts = normalize_outbound_hosts(workflow.get("outbound_hosts"))
     validate_action_contract(specs=specs, outbound_hosts=outbound_hosts, runtime_features=list(surface.get("runtime_features") or []))
@@ -1338,11 +1529,8 @@ def invoke_action(
     # Customer-invokable (non-schedule) actions must be in the SAME HTTP-certified set the surface
     # declaration gate computes — a real, UI-referenced, handler-backed action. This refuses an
     # invoke of an undeclared / un-exposed / stub action file that merely happens to exist on disk.
-    if trigger != "schedule" and action_name not in site_http_action_names(site_root, surface):
+    if trigger != "schedule" and action_name not in certified_http_actions:
         raise ActionContractError(f"action {action_name} is not an HTTP-certified action for this product")
-    session_token = str(principal.get("session_token") or "").strip()
-    if not session_token:
-        raise AppActionError("session_token is required")
     # Pin the action hairpin (ctx.saveRecord / listRecords / generate) to the business's OWN
     # published origin, not the request-derived inbound origin. A product reached via a non-product
     # or legacy host (e.g. app.fourmanifold.com or a now-dark *.fourmanifold.com) would otherwise

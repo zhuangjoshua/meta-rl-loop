@@ -1427,6 +1427,8 @@ def test_product_surface_refresh_operations_persist_runtime_features_without_htt
                 "status": "published",
                 "public_url": "https://biz.fourmanifold.com/",
                 "publish_target": "https://biz.fourmanifold.com/",
+                "action_bundle_json": '{"files":[],"http_action_names":[],"version":1}',
+                "action_bundle_sha256": "abc123",
             },
         },
         surface={
@@ -1444,6 +1446,9 @@ def test_product_surface_refresh_operations_persist_runtime_features_without_htt
 
     upsert = next(op for op in operations if op.get("action") == "app.surface.upsert")
     assert upsert["runtime_features"] == ["auth", "account"]
+    publish_result = next(op for op in operations if op.get("action") == "app.surface.publish_result")
+    assert publish_result["action_bundle_sha256"] == "abc123"
+    assert '"version":1' in publish_result["action_bundle_json"]
 
 
 def test_action_blocker_passes_when_ui_call_matches_declared_spec_and_file(tmp_path, monkeypatch):
@@ -1952,6 +1957,11 @@ def _principal(uid="u_A", tier="paid"):
 
 
 def _stub_runtime_config(monkeypatch):
+    def _materialize_fixture(store, *, business_slug, surface, session_token):
+        site_root = store._business_root(business_slug, sync=False) / "product" / "site"
+        return site_root, app_actions.site_http_action_names(site_root, surface)
+
+    monkeypatch.setattr(app_actions, "materialize_live_action_bundle", _materialize_fixture)
     monkeypatch.setattr(
         app_actions,
         "_action_runtime_config",
@@ -1988,9 +1998,8 @@ def test_invoke_refuses_undeclared_uncertified_action(tmp_path, monkeypatch):
         )
 
 
-def test_invoke_uses_deployed_source_cache_without_workspace_sync(tmp_path, monkeypatch):
-    """Customer action execution must use the deployed sub-user source cache, not re-materialize the
-    operator workspace and risk wiping the just-shipped handler before Deno loads it."""
+def test_invoke_uses_materialized_bundle_without_workspace_sync(tmp_path, monkeypatch):
+    """Customer action execution consumes a materialized build artifact without workspace sync."""
     store = _InvokeStore(tmp_path, _HTTP_SURFACE)
     _write_action_file(store, "biz", "coach", _REAL_HANDLER)
     store.business_root_sync_flags.clear()
@@ -2013,6 +2022,54 @@ def test_invoke_uses_deployed_source_cache_without_workspace_sync(tmp_path, monk
     assert store.business_root_sync_flags
     assert set(store.business_root_sync_flags) == {False}
     assert store.resolve_file_sync_flags == [False]
+
+
+def test_live_action_bundle_materializes_build_keyed_verified_artifact(tmp_path):
+    source = tmp_path / "source" / "product" / "site"
+    actions = source / "actions"
+    kit = source / "_takyon"
+    actions.mkdir(parents=True)
+    kit.mkdir(parents=True)
+    (actions / "coach.ts").write_text(_REAL_HANDLER, encoding="utf-8")
+    (kit / "runtime-client.js").write_text("export const runtime = true;\n", encoding="utf-8")
+    (source / "src").mkdir()
+    (source / "src" / "app.ts").write_text('client.invokeAction("coach", {});\n', encoding="utf-8")
+    bundle = app_actions.build_action_bundle(source)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE product_builds (build_id TEXT, business_slug TEXT, "
+        "action_bundle_json TEXT, action_bundle_sha256 TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO product_builds VALUES (?, ?, ?, ?)",
+        ("build-a", "biz", bundle["json"], bundle["sha256"]),
+    )
+
+    class Store:
+        root = tmp_path / "runtime"
+
+        @contextmanager
+        def _connect(self):
+            yield conn
+
+    root, certified = app_actions.materialize_live_action_bundle(
+        Store(), business_slug="biz", surface={"live_build_id": "build-a"}, session_token="session"
+    )
+    assert certified == {"coach"}
+    assert (root / "actions" / "coach.ts").read_text(encoding="utf-8") == _REAL_HANDLER
+    assert (root / "_takyon" / "runtime-client.js").is_file()
+    assert (root / ".bundle-sha256").read_text(encoding="utf-8").strip() == bundle["sha256"]
+
+    conn.execute(
+        "UPDATE product_builds SET action_bundle_sha256 = ? WHERE build_id = ?",
+        ("0" * 64, "build-a"),
+    )
+    with pytest.raises(app_actions.ActionContractError, match="digest mismatch"):
+        app_actions.materialize_live_action_bundle(
+            Store(), business_slug="biz", surface={"live_build_id": "build-a"}, session_token="session"
+        )
 
 
 def test_invoke_replay_returns_cached_success_without_rerunning(tmp_path, monkeypatch):
