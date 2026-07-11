@@ -256,7 +256,18 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
             (f\"$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\",),
         )
         work_requests = int(cur.fetchone()[0] or 0)
-        cur.execute(\"SELECT COUNT(*) FROM jobs WHERE status = 'running'\")
+        # Restarting the operator VPS services cannot terminate a job claimed by an operator Mac;
+        # those workers execute from their own local runtime trees. Drain only claims that may live
+        # in the target-host process we are about to restart, while still failing closed for empty or
+        # unknown owner labels.
+        cur.execute(
+            \"\"\"
+            SELECT COUNT(*)
+            FROM jobs
+            WHERE status = 'running'
+              AND COALESCE(locked_by, '') NOT LIKE 'mac-operator-%'
+            \"\"\"
+        )
         worker_jobs = int(cur.fetchone()[0] or 0)
 print(f\"{work_requests} {worker_jobs}\")
 PY"
