@@ -18647,6 +18647,21 @@ class TakyonStore:
         slug = _slugify(slug)
         summary: dict[str, Any] = {"success": True, "business": slug,
                                    "appended": 0, "skipped": 0, "errors": 0, "entries": []}
+        # The OPERATOR POLICY header must exist BEFORE the first campaign ever launches —
+        # not only once the first synced entry lands. Observed failure (level-3 rig, real
+        # model): with no policy visible on the early wakes, the CEO authored its own ROAS
+        # doctrine in its strategy files and anchored on it for the rest of the run, never
+        # applying the operator's thresholds. Pre-creating the header makes the policy the
+        # first ad doctrine the business ever sees.
+        for channel in channels:
+            try:
+                history_path = self._resolve_business_file(
+                    slug, f"metrics/roas/{channel}.md", sync=False)
+                if not history_path.exists():
+                    history_path.parent.mkdir(parents=True, exist_ok=True)
+                    history_path.write_text(_roas_history_header(channel), encoding="utf-8")
+            except Exception:
+                summary["errors"] += 1
         policies: list[tuple[str, Any]] = []
         try:
             backend = _business_ad_spend_backend()
@@ -18691,27 +18706,7 @@ class TakyonStore:
                         summary["skipped"] += 1
                         continue
                     entry = _compose_roas_history_entry(channel, policy.slug, token, plan, totals)
-                    header = "" if existing else (
-                        f"# {channel} run history (per-business skill feedback)\n\n"
-                        "One entry per insights sync. ROAS = pixel-attributed purchase value / ad "
-                        "spend (the sync receipt's own figure). Read this before launching the "
-                        "next campaign and favor what measurably worked.\n\n"
-                        "Operator policy: judge the CURRENT campaign by its latest measured ROAS. "
-                        f"At or above {_ROAS_HISTORY_HOLD_THRESHOLD} -> HOLD: leave it running, sync "
-                        "and monitor, do not launch a new campaign. Below "
-                        f"{_ROAS_HISTORY_HOLD_THRESHOLD} -> launch ONE new campaign with a changed "
-                        "approach informed by the entries below; never repeat an approach that "
-                        "measurably failed. Entries with ROAS n/a are not evidence either way.\n\n"
-                        "Diagnose a below-threshold run with the funnel split: MANY link clicks but "
-                        "LOW link-click conversion -> the ad works, the LANDING SITE is the problem — "
-                        "KEEP the current campaign running (do not pause it, do not launch a new one) "
-                        "and route this wake's work to the product skill (takyon-product, which owns "
-                        "the landing/app surface) to fix the landing experience; the running ad then "
-                        "measures the fix on the next sync. Record the handoff in the wake note. "
-                        "FEW link clicks but healthy conversion -> the site works, "
-                        "the AD CREATIVE is the problem — change the creative approach (route upstream "
-                        "to the creative skills for a new asset if needed).\n\n"
-                    )
+                    header = "" if existing else _roas_history_header(channel)
                     history_path.parent.mkdir(parents=True, exist_ok=True)
                     with history_path.open("a", encoding="utf-8") as fh:
                         fh.write(header + entry)
@@ -30944,6 +30939,33 @@ def _wake_ad_refresh_enabled() -> bool:
 # campaign; below it -> launch one changed-approach successor. Policy lives HERE (the appended
 # per-business note), deliberately NOT in the shared SKILL.md.
 _ROAS_HISTORY_HOLD_THRESHOLD = 2.5
+
+
+def _roas_history_header(channel: str) -> str:
+    """The operator-policy header of metrics/roas/<channel>.md — the FIRST ad doctrine a
+    business ever sees (the assembler pre-creates the file with this header before any
+    campaign launches, so the policy exists before the CEO can author its own)."""
+    return (
+        f"# {channel} run history (per-business skill feedback)\n\n"
+        "One entry per insights sync. ROAS = pixel-attributed purchase value / ad "
+        "spend (the sync receipt's own figure). Read this before launching the "
+        "next campaign and favor what measurably worked.\n\n"
+        "Operator policy: judge the CURRENT campaign by its latest measured ROAS. "
+        f"At or above {_ROAS_HISTORY_HOLD_THRESHOLD} -> HOLD: leave it running, sync "
+        "and monitor, do not launch a new campaign. Below "
+        f"{_ROAS_HISTORY_HOLD_THRESHOLD} -> launch ONE new campaign with a changed "
+        "approach informed by the entries below; never repeat an approach that "
+        "measurably failed. Entries with ROAS n/a are not evidence either way.\n\n"
+        "Diagnose a below-threshold run with the funnel split: MANY link clicks but "
+        "LOW link-click conversion -> the ad works, the LANDING SITE is the problem — "
+        "KEEP the current campaign running (do not pause it, do not launch a new one) "
+        "and route this wake's work to the product skill (takyon-product, which owns "
+        "the landing/app surface) to fix the landing experience; the running ad then "
+        "measures the fix on the next sync. Record the handoff in the wake note. "
+        "FEW link clicks but healthy conversion -> the site works, "
+        "the AD CREATIVE is the problem — change the creative approach (route upstream "
+        "to the creative skills for a new asset if needed).\n\n"
+    )
 
 
 def _compose_roas_history_entry(channel: str, campaign: str, token: str,

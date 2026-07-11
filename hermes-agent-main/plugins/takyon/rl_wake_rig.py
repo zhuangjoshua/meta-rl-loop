@@ -78,13 +78,22 @@ class RigWorld:
         return max(self.mapping, key=lambda k: self.mapping[k])
 
     def sync_totals(self, kind: str, spend_usd: float = 10.41) -> dict[str, Any]:
-        roas = max(0.05, self.rng.gauss(self.mapping.get(kind, 1.0), self.noise))
-        value = round(spend_usd * roas, 2)
-        purchases = max(1, int(round(value / 19.0)))  # ~$19 plan price per purchase
-        clicks = int(spend_usd * self.rng.uniform(15, 22))
-        # Outbound click-throughs are a subset of all clicks; conversion rate follows from
-        # purchases/link_clicks, same as the production aggregator computes it.
-        link_clicks = max(purchases, int(clicks * self.rng.uniform(0.55, 0.8)))
+        """One period of delivery. Creative quality expresses itself the way REALITY does —
+        through CLICK-THROUGH: a bad creative fails to attract link clicks; conversion among
+        those who do click is kind-independent (the landing page is the same page). ROAS then
+        EMERGES from link_clicks x conversion x price instead of being set directly. This
+        matters because the operator's funnel policy diagnoses by shape: few link clicks +
+        healthy conversion -> creative problem (cut/switch); many clicks + low conversion ->
+        landing problem (keep ad, fix site). The first world model set ROAS directly with
+        kind-independent clicks, so every loser masqueraded as a landing-page problem and the
+        policy's cut-the-creative branch was unreachable (observed: a real CEO correctly
+        followed the funnel policy and never cut the sealed loser)."""
+        quality = max(0.15, self.rng.gauss(self.mapping.get(kind, 1.0), self.noise))
+        link_clicks = max(1, int(round(spend_usd * quality * self.rng.uniform(2.4, 3.0))))
+        clicks = int(link_clicks * self.rng.uniform(1.3, 1.7))
+        conversion = max(0.008, self.rng.gauss(0.019, 0.004))  # page quality: kind-independent
+        purchases = int(round(link_clicks * conversion))
+        value = round(purchases * self.rng.uniform(17.0, 21.0), 2)  # ~$19 plan price
         return {
             "rows": 1,
             "spend_cents": int(round(spend_usd * 100)),
@@ -110,6 +119,13 @@ class RigSafebox:
         self.values = {"META_AD_ACCOUNT_ID": "act_1234567890", "META_PAGE_ID": "9876543210"}
         self.calls: list[dict[str, Any]] = []
         self._n = 0
+        # object_id -> [insights row]. The rig registers every campaign's CUMULATIVE
+        # delivery here as it injects periods, so the CEO's own mid-wake insight syncs
+        # return the SAME truth the note records. The first real production-rhythm run
+        # failed on exactly this contradiction: the note said ROAS 1.18 while the live
+        # sync said zero-delivery, and the CEO rationally trusted the live API and froze
+        # in a 'needs data' state for seven wakes.
+        self.insights_rows: dict[str, list[dict[str, Any]]] = {}
 
     def _next(self, prefix: str) -> str:
         self._n += 1
@@ -147,6 +163,9 @@ class RigSafebox:
         self.calls.append({"op": "graph", "method": method, "path": path,
                            "params": dict(params or {})})
         if str(method).upper() == "GET":
+            if path.rstrip("/").endswith("/insights"):
+                object_id = path.rstrip("/").rsplit("/insights", 1)[0]
+                return {"data": [dict(r) for r in self.insights_rows.get(object_id, [])]}
             return {"data": []}
         return {"success": True, "id": self._next("obj")}
 
@@ -432,7 +451,8 @@ def launched_campaigns(store: Any, slug: str) -> dict[str, dict[str, Any]]:
 
 
 def inject_outcomes(store: Any, slug: str, world: RigWorld,
-                    tracker: dict[str, dict[str, Any]], campaign_wakes: int) -> int:
+                    tracker: dict[str, dict[str, Any]], campaign_wakes: int,
+                    safebox: "RigSafebox | None" = None) -> int:
     """PRODUCTION-RHYTHM injection: a campaign's schedule spans ``campaign_wakes`` wakes, and
     each wake every LIVE campaign receives one period's worth of delivery. The sync receipt
     carries CUMULATIVE campaign totals (the same semantics a real insights sync has), so the
@@ -487,6 +507,34 @@ def inject_outcomes(store: Any, slug: str, world: RigWorld,
         syncs.mkdir(parents=True, exist_ok=True)
         (syncs / f"rig-sync-{state['period']}.json").write_text(
             json.dumps({"totals": totals}), encoding="utf-8")
+        # Keep the LIVE sync surface consistent with the note: register the same cumulative
+        # delivery as an insights row on the stub, keyed by every real object id the CEO's
+        # own business_meta_ad_insights_sync can query (the receipt's campaign/adset/ad).
+        # The real aggregator then computes receipt totals matching what the rig injected.
+        if safebox is not None:
+            row = {
+                "date_start": "2026-07-01",
+                "date_stop": f"2026-07-{min(28, state['period'] + 1):02d}",
+                "spend": f"{state['spend_usd']:.2f}",
+                "impressions": str(state["impressions"]),
+                "clicks": str(state["clicks"]),
+                "actions": [
+                    {"action_type": "purchase", "value": str(state["purchases"])},
+                    {"action_type": "link_click", "value": str(state["link_clicks"])},
+                ],
+                "action_values": [
+                    {"action_type": "purchase", "value": f"{state['revenue_usd']:.2f}"},
+                ],
+            }
+            try:
+                receipt_path = store._resolve_business_file(
+                    slug, f"distribution/meta-ads/{campaign}/receipt.json", sync=False)
+                ids = (json.loads(receipt_path.read_text(encoding="utf-8")).get("ids") or {})
+                for oid in {str(v) for k, v in ids.items()
+                            if v and k in ("campaign_id", "adset_id", "ad_id")}:
+                    safebox.insights_rows[oid] = [row]
+            except Exception:
+                pass
         if state["period"] >= campaign_wakes:
             try:
                 takyon_core._update_ad_spend_policy(
@@ -679,7 +727,7 @@ def run(dsn: str, *, wakes: int, seed: int, fake_ceo: bool, model: str, provider
             # into run-history entries the CEO reads THIS wake and must judge mid-flight.
             # The operator (played by the rig) also allocates this period's channel budget.
             set_meta_channel_budget(store, slug, 40_000 * (i + 1))
-            inject_outcomes(store, slug, world, tracker, campaign_wakes)
+            inject_outcomes(store, slug, world, tracker, campaign_wakes, safebox=ctx["safebox"])
             if fake_ceo:
                 store.assemble_roas_run_history(slug)  # the worker hook, invoked directly
                 fake_ceo_wake(store, slug, i)
@@ -689,7 +737,7 @@ def run(dsn: str, *, wakes: int, seed: int, fake_ceo: bool, model: str, provider
                            if 0 < s.get("period", 0) < campaign_wakes and "cut_at_period" not in s)
             print(f"  wake {i + 1}/{wakes} done "
                   f"({len(launched_campaigns(store, slug))} campaign(s), {live_now} mid-flight)")
-        inject_outcomes(store, slug, world, tracker, campaign_wakes)
+        inject_outcomes(store, slug, world, tracker, campaign_wakes, safebox=ctx["safebox"])
         store.assemble_roas_run_history(slug)
         report = score(store, slug, world, wakes, tracker)
     report["campaign_wakes"] = campaign_wakes

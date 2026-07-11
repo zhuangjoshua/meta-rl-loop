@@ -159,9 +159,32 @@ def test_no_attributed_revenue_marks_roas_na(pg_store, pg_store_dsn):
     assert "spend $8.00" in text
 
 
-def test_no_campaigns_is_a_quiet_noop(pg_store, pg_store_dsn):
+def test_no_campaigns_appends_nothing_but_precreates_policy_header(pg_store, pg_store_dsn):
     _seed_business(pg_store_dsn, "roashist6")
     out = pg_store.assemble_roas_run_history("roashist6")
     assert out == {"success": True, "business": "roashist6", "appended": 0,
                    "skipped": 0, "errors": 0, "entries": []}
-    assert _history(pg_store, "roashist6") == ""
+    # The OPERATOR POLICY header must exist BEFORE the first campaign ever launches —
+    # with no policy visible on the early wakes, a real CEO was observed authoring its
+    # own ROAS doctrine and anchoring on it instead of the operator's thresholds.
+    text = _history(pg_store, "roashist6")
+    assert text.startswith("# meta run history")
+    assert "Operator policy" in text
+    assert str(takyon_core._ROAS_HISTORY_HOLD_THRESHOLD) in text
+    assert "- campaign" not in text  # header only, no entries
+
+
+def test_header_precreation_is_idempotent_and_entries_append_below_it(pg_store, pg_store_dsn):
+    _seed_business(pg_store_dsn, "roashist7")
+    pg_store.assemble_roas_run_history("roashist7")
+    first = _history(pg_store, "roashist7")
+    pg_store.assemble_roas_run_history("roashist7")
+    assert _history(pg_store, "roashist7") == first  # re-running never duplicates the header
+    _upsert_meta_policy(pg_store_dsn, "roashist7", "cmp1")
+    _write_plan(pg_store, "roashist7", "cmp1")
+    _write_sync(pg_store, "roashist7", "cmp1", "s1.json", _PIXEL_TOTALS)
+    out = pg_store.assemble_roas_run_history("roashist7")
+    assert out["appended"] == 1
+    text = _history(pg_store, "roashist7")
+    assert text.count("Operator policy") == 1
+    assert "- campaign cmp1" in text
