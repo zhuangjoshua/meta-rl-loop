@@ -11,7 +11,7 @@ export function PublicSiteHeader({ access }: { access: HeaderAccess }) {
 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/95 shadow-sm backdrop-blur">
-      <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-4">
+      <div className="flex w-full flex-wrap items-center justify-between gap-4 px-6 py-4 sm:px-8 lg:px-12">
         <Link to={access.authenticated ? "/app" : "/"} className="flex items-center gap-3">
           <img
             src={brandMarkDataUri()}

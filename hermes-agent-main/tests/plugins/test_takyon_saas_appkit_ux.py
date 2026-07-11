@@ -28,6 +28,8 @@ def test_public_shell_separates_login_signup_and_redirects_signed_in_viewers():
     assert navigation.count("Log in") >= 1
     assert navigation.count("Sign up") >= 1
     assert "border-b border-border" in navigation
+    assert "max-w-7xl" not in navigation
+    assert 'className="flex w-full' in navigation
 
 
 def test_nested_public_pages_have_stable_header_and_no_conversion_ctas():
