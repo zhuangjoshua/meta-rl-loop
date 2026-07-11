@@ -7487,6 +7487,7 @@ _STARTER_OWNED_REFRESH_FILES = (
     "src/components/site-navigation.tsx",
     "src/components/social-proof-marquee.tsx",
     "src/screens/app-layout.tsx",
+    "src/screens/support.tsx",
 )
 
 
@@ -7686,7 +7687,7 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- Public nested pages such as FAQ, privacy, terms, articles, and guides must not show Open app or Subscribe CTAs. Use `BackButton` on nested pages; the only public conversion surfaces are the landing's Log in/Sign up actions and the pricing page.",
         "- Treat the signed-in product as a full-width application workspace. Do not wrap the primary `/app` workflow in a narrow centered marketing container or a single small card; use the available viewport for the real workflow while preserving readable inner regions.",
         "- Every created or generated customer artifact must survive tab and route changes: persist it through `saveRecord(...)`, render lists from `listRecords(...)`/`useRecords(...)`, and keep stale successful records visible if a refresh transiently fails. Component-local action results and browser storage are not durable product state.",
-        "- The landing must show polished, product-specific UI visuals as the visitor scrolls (real representations of the workflow, not generic icon cards) and a prominent proof section. Preserve the canonical `SocialProofMarquee`, which provides truthful Coscale portfolio proof without inventing customer quotes. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
+        "- The landing must show polished, product-specific UI visuals as the visitor scrolls (real representations of the workflow, not generic icon cards) and a prominent proof section. The canonical route in `src/main.tsx` renders `SocialProofMarquee` outside the worker-owned landing, so every signed-out landing keeps truthful Coscale portfolio proof even when `src/screens/landing.tsx` is redesigned. Quantified outcome claims must come from verified research or real product data; never fabricate statistics, testimonials, or customer counts.",
         "- The public header is a visually separated, full-viewport-width banner (border/background/shadow with responsive edge padding) and remains structurally static within signed-out and signed-in states. Do not constrain it to the landing content width or vary its options by public page.",
         "- Pricing may display only the exact published plan price, billing interval, and usage limits exported in `surfaceContext.plans`; never invent a promotion, introductory price, discount, trial, feature allowance, or quota that checkout/billing does not enforce. Use `defaultPlanPriceLabel()` and `defaultPlanLimitLabels()`.",
         "- Keep the canonical AppKit interaction-sound installer in `src/lib/interaction-sounds.ts`; it provides a quiet click sound for enabled buttons as progressive enhancement and must never block an interaction.",

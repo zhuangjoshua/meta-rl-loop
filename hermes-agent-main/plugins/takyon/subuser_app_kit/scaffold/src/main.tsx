@@ -2,7 +2,9 @@ import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import "./index.css";
+import { SocialProofMarquee } from "./components/social-proof-marquee";
 import { installInteractionSounds } from "./lib/interaction-sounds";
+import { useViewerAccess } from "./lib/hooks";
 import { ProductAuthProvider } from "./lib/product-auth";
 import { LandingScreen } from "./screens/landing";
 // Not lazy: the store lives on the landing chunk already (StoreSection is rendered inline on the
@@ -34,6 +36,17 @@ const ProfileScreen = lazy(() =>
   import("./screens/profile").then((m) => ({ default: m.ProfileScreen })),
 );
 
+function PublicLandingRoute() {
+  const access = useViewerAccess();
+  if (access.loading || access.authenticated) return <LandingScreen />;
+  return (
+    <>
+      <LandingScreen />
+      <SocialProofMarquee />
+    </>
+  );
+}
+
 const container = document.getElementById("root");
 if (!container) throw new Error("root element missing");
 
@@ -45,7 +58,7 @@ createRoot(container).render(
       <ProductAuthProvider>
         <Suspense fallback={null}>
           <Routes>
-            <Route path="/" element={<LandingScreen />} />
+            <Route path="/" element={<PublicLandingRoute />} />
             <Route path="/store" element={<StoreScreen />} />
             <Route path="/faq" element={<FaqScreen />} />
             <Route path="/pricing" element={<PricingScreen />} />

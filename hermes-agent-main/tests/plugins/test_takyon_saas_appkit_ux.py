@@ -92,14 +92,16 @@ def test_navigation_component_is_force_refreshed_with_appkit_rails():
     assert "src/components/site-navigation.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/components/social-proof-marquee.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
     assert "src/lib/interaction-sounds.ts" in takyon_core._STARTER_OWNED_REFRESH_FILES
+    assert "src/screens/support.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
 
 
 def test_landing_has_truthful_coscale_social_proof_and_default_interaction_sounds():
-    landing = read("src/screens/landing.tsx")
     proof = read("src/components/social-proof-marquee.tsx")
     main = read("src/main.tsx")
     sounds = read("src/lib/interaction-sounds.ts")
-    assert "SocialProofMarquee" in landing
+    assert "SocialProofMarquee" in main
+    assert "PublicLandingRoute" in main
+    assert '<Route path="/" element={<PublicLandingRoute />} />' in main
     assert "Used by professionals building with Coscale" in proof
     assert "animate-proof-marquee" in proof
     assert "installInteractionSounds" in main
