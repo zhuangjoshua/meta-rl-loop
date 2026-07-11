@@ -128,9 +128,9 @@ _CREATIVE_AUDIENCE_CREDIT_ACTION = {
 # Gemini; a UGC capability may hit OpenAI (the reference image) AND FAL (the clips); a static-ad
 # capability may hit OpenAI. This binds the reserved creative action to exactly the providers that
 # action legitimately uses, so a cheap action's token cannot drive an unrelated provider.
-_CREATIVE_GEMINI_AUDIENCES = frozenset({_CREATIVE_LOGO_AUDIENCE})
+_CREATIVE_GEMINI_AUDIENCES = frozenset({_CREATIVE_LOGO_AUDIENCE, _CREATIVE_SITE_IMAGE_AUDIENCE})
 _CREATIVE_OPENAI_AUDIENCES = frozenset(
-    {_CREATIVE_UGC_AUDIENCE, _CREATIVE_STATIC_AD_AUDIENCE, _CREATIVE_SITE_IMAGE_AUDIENCE}
+    {_CREATIVE_UGC_AUDIENCE, _CREATIVE_STATIC_AD_AUDIENCE}
 )
 _CREATIVE_FAL_AUDIENCES = frozenset({_CREATIVE_UGC_AUDIENCE})
 
@@ -2265,7 +2265,12 @@ def _gemini_image_provider_caller(payload: dict[str, Any]):
         # Secret boundary: the safebox makes ONLY the keyed provider call and returns the RAW image
         # bytes. The alpha-key / PNG post-process is a pure pixel transform (no secret) and runs on
         # the runtime plane after the broker returns — never here (the safebox has no numpy).
-        raw_bytes = creative_gateway._gemini_generate_image_raw(api_key=key, prompt=prompt)
+        image_kwargs = {"api_key": key, "prompt": prompt}
+        if str((payload or {}).get("aspect_ratio") or "").strip():
+            image_kwargs["aspect_ratio"] = str(payload["aspect_ratio"]).strip()
+        if str((payload or {}).get("image_size") or "").strip():
+            image_kwargs["image_size"] = str(payload["image_size"]).strip()
+        raw_bytes = creative_gateway._gemini_generate_image_raw(**image_kwargs)
         result = {"image_base64": _b64.b64encode(raw_bytes).decode("ascii"), "format": "raw"}
         return result, int(actual_microusd)
 
@@ -2681,7 +2686,12 @@ def _creative_gemini_caller(payload: dict[str, Any]):
             raise BrokerLedgerError("gemini_unconfigured")
         # Secret boundary: keyed provider call only; return RAW bytes. The runtime alpha-keys after
         # the broker returns (no numpy/PIL build on the secret host).
-        raw_bytes = creative_gateway._gemini_generate_image_raw(api_key=key, prompt=prompt)
+        image_kwargs = {"api_key": key, "prompt": prompt}
+        if str((payload or {}).get("aspect_ratio") or "").strip():
+            image_kwargs["aspect_ratio"] = str(payload["aspect_ratio"]).strip()
+        if str((payload or {}).get("image_size") or "").strip():
+            image_kwargs["image_size"] = str(payload["image_size"]).strip()
+        raw_bytes = creative_gateway._gemini_generate_image_raw(**image_kwargs)
         return {"image_base64": _b64.b64encode(raw_bytes).decode("ascii"), "format": "raw"}
 
     return _call
@@ -5789,6 +5799,18 @@ def build_safebox_app() -> FastAPI:
         return _creative_provider_route(
             body,
             allowed_audiences=_CREATIVE_GEMINI_AUDIENCES,
+            caller_builder=_creative_gemini_caller,
+        )
+
+    @app.post("/v1/providers/gemini/site-image")
+    def provider_gemini_site_image(
+        body: _CreativeProviderCallBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        return _creative_provider_route(
+            body,
+            allowed_audiences=frozenset({_CREATIVE_SITE_IMAGE_AUDIENCE}),
             caller_builder=_creative_gemini_caller,
         )
 

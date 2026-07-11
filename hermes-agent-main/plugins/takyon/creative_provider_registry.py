@@ -223,23 +223,23 @@ _GEMINI_LOGO_IMAGE = CreativeProviderSpec(
     money_gate=CreditActionGate(credit_action="logo_generate"),
 )
 
-# OpenAI site imagery. This is deliberately separate from static-ad generation: site assets are
-# published into product/site, carry no channel budget, and are scoped by their own capability so an
-# image token cannot be replayed against advertising or video routes.
-_OPENAI_SITE_IMAGE = CreativeProviderSpec(
-    canonical_id="image:openai-site",
+# Gemini site imagery. This is deliberately separate from logo generation: site assets are
+# published into product/site and are scoped by their own capability so an image token cannot be
+# replayed against the logo or usage-metered product-image routes.
+_GEMINI_SITE_IMAGE = CreativeProviderSpec(
+    canonical_id="image:gemini-site",
     capability="image",
-    provider="openai",
-    model="gpt-image-2",
-    pricing_key=("openai", "gpt-image-2"),
-    key_aliases=("OPENAI_API_KEY",),
-    safebox_route=("openai", "images"),
+    provider="gemini",
+    model="gemini-3.1-flash-image",
+    pricing_key=("google", "gemini-3.1-flash-image"),
+    key_aliases=("TAKYON_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    safebox_route=("gemini", "site-image"),
     money_gate=CreditActionGate(credit_action="site_image_generate"),
 )
 
 CREATIVE_PROVIDER_REGISTRY: dict[str, CreativeProviderSpec] = {
     _GEMINI_LOGO_IMAGE.canonical_id: _GEMINI_LOGO_IMAGE,
-    _OPENAI_SITE_IMAGE.canonical_id: _OPENAI_SITE_IMAGE,
+    _GEMINI_SITE_IMAGE.canonical_id: _GEMINI_SITE_IMAGE,
 }
 
 

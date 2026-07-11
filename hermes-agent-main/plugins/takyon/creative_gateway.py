@@ -318,7 +318,9 @@ def _render_logo_png(prompt: str, *, capability_token: str) -> bytes:
     return _key_white_background_to_alpha(base64.b64decode(image_b64))
 
 
-def _gemini_generate_image_raw(*, api_key: str, prompt: str) -> bytes:
+def _gemini_generate_image_raw(
+    *, api_key: str, prompt: str, aspect_ratio: str = "", image_size: str = ""
+) -> bytes:
     """Call Gemini image generation and return the RAW provider image bytes — NO post-processing.
 
     This is the ONLY step that needs the provider key, so it is the ONLY step that runs on the
@@ -341,9 +343,10 @@ def _gemini_generate_image_raw(*, api_key: str, prompt: str) -> bytes:
 
     try:
         from google import genai
+        from google.genai import types
     except Exception as exc:  # provider SDK not installed
         raise RuntimeError(
-            "google-genai is not installed; cannot render brand logo"
+            "google-genai is not installed; cannot render image"
         ) from exc
 
     def _image_to_png_bytes(image: Any) -> bytes:
@@ -375,9 +378,19 @@ def _gemini_generate_image_raw(*, api_key: str, prompt: str) -> bytes:
         return parts
 
     client = genai.Client(api_key=api_key)
+    config = None
+    if aspect_ratio or image_size:
+        config = types.GenerateContentConfig(
+            response_modalities=["IMAGE"],
+            image_config=types.ImageConfig(
+                aspect_ratio=(aspect_ratio or None),
+                image_size=(image_size or None),
+            ),
+        )
     response = client.models.generate_content(
         model=_GEMINI_IMAGE_MODEL,
         contents=[prompt],
+        **({"config": config} if config is not None else {}),
     )
     for part in _parts_from_response(response):
         # Prefer the provider's RAW inline bytes (no PIL/numpy on the safebox). Fall back to the SDK

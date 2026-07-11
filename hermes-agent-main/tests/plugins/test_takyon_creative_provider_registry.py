@@ -119,11 +119,11 @@ def test_gemini_logo_priced_from_usage_pricing_ssot():
     assert core._logo_provider_cost_usd() == pytest.approx(cost)
 
 
-def test_openai_site_image_spec_is_priced_and_credit_gated():
+def test_gemini_site_image_spec_is_priced_and_credit_gated():
     reg = _reg()
-    spec = reg.get_creative_provider_spec("image:openai-site")
-    assert spec.model == "gpt-image-2"
-    assert spec.safebox_route == ("openai", "images")
+    spec = reg.get_creative_provider_spec("image:gemini-site")
+    assert spec.model == "gemini-3.1-flash-image"
+    assert spec.safebox_route == ("gemini", "site-image")
     assert isinstance(spec.money_gate, reg.CreditActionGate)
     assert spec.money_gate.credit_action == "site_image_generate"
     assert reg.resolve_priced_model_cost_usd(spec) > 0
