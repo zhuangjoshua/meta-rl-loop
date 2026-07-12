@@ -50,6 +50,35 @@ def test_link_clicks_and_conversion_rate_from_actions():
     assert totals["link_click_conversion_rate"] == 5.0
 
 
+def test_custom_conversion_boundary_excludes_other_businesses_purchases():
+    # SHARED-PIXEL isolation: a click-through that bought on a DIFFERENT business's site
+    # arrives as a generic purchase action. With the business's own custom-conversion
+    # boundary, ONLY offsite_conversion.custom.<id> counts — the generic purchase is
+    # someone else's revenue and must not pollute this ROAS.
+    rows = [
+        _row(
+            spend="20.00",
+            action_values=[
+                {"action_type": "purchase", "value": "500.00"},          # other business's sale
+                {"action_type": "omni_purchase", "value": "500.00"},     # same sale, synonym
+                {"action_type": "offsite_conversion.custom.777", "value": "40.00"},  # OURS
+            ],
+            actions=[
+                {"action_type": "purchase", "value": "9"},
+                {"action_type": "offsite_conversion.custom.777", "value": "2"},
+            ],
+        )
+    ]
+    totals = core._meta_aggregate_insights_rows(
+        rows, purchase_action_types=("offsite_conversion.custom.777",))
+    assert totals["purchase_value_usd"] == 40.0   # not 500
+    assert totals["purchase_count"] == 2          # not 9
+    assert totals["roas"] == 2.0                  # 40/20, ours only
+    # Default (no boundary) keeps the legacy generic behavior unchanged.
+    generic = core._meta_aggregate_insights_rows(rows)
+    assert generic["purchase_value_usd"] == 500.0
+
+
 def test_no_link_clicks_leaves_conversion_rate_null():
     rows = [_row(spend="10.00", action_values=[], actions=[{"action_type": "purchase", "value": "1"}])]
     totals = core._meta_aggregate_insights_rows(rows)

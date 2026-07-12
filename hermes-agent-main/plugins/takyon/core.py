@@ -33511,7 +33511,16 @@ def _meta_first_action_metric(entries: Any, action_types: tuple[str, ...]) -> fl
     return None
 
 
-def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _meta_aggregate_insights_rows(
+    rows: list[dict[str, Any]], *,
+    purchase_action_types: tuple[str, ...] = _META_PURCHASE_ACTION_TYPES,
+) -> dict[str, Any]:
+    """Aggregate Meta insights rows into totals. ``purchase_action_types`` is the ATTRIBUTION
+    BOUNDARY: by default the generic shared-pixel purchase synonyms; a business with its own
+    custom conversion passes ``("offsite_conversion.custom.<id>",)`` so purchases/revenue/ROAS
+    count ONLY conversions on that business's own site — on the SHARED pixel, a click-through
+    that buys on a DIFFERENT business's site otherwise lands in this campaign's generic
+    purchase actions and pollutes its ROAS."""
     totals = {
         "rows": len(rows),
         "spend_cents": 0,
@@ -33549,10 +33558,10 @@ def _meta_aggregate_insights_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         # Meta-attributed purchase VALUE (revenue) and count for this object, deduped across the
         # synonym action_types so one purchase is not counted several times. Fed by the client-side
         # `Purchase` pixel event; zero until that event fires.
-        purchase_value = _meta_first_action_metric(row.get("action_values"), _META_PURCHASE_ACTION_TYPES)
+        purchase_value = _meta_first_action_metric(row.get("action_values"), purchase_action_types)
         if purchase_value is not None:
             totals["purchase_value_cents"] += int((Decimal(str(purchase_value)) * 100).quantize(Decimal("1")))
-        purchase_count = _meta_first_action_metric(row.get("actions"), _META_PURCHASE_ACTION_TYPES)
+        purchase_count = _meta_first_action_metric(row.get("actions"), purchase_action_types)
         if purchase_count is not None:
             totals["purchase_count"] += int(round(purchase_count))
         # Outbound LINK clicks (`link_click` action) — distinct from `clicks`, which is Meta's

@@ -259,6 +259,39 @@ def _launch_receipt_rel(slug: str) -> str:
     return f"distribution/meta-ads/{slug}/receipt.json"
 
 
+def _business_purchase_attribution(store: Any, business: str) -> tuple[tuple[str, ...], str]:
+    """Resolve THIS business's purchase-attribution boundary for insights aggregation.
+
+    When pixel-ensure has minted the business its own custom conversion on the SHARED pixel
+    (URL rule scoped to the business's own site), purchases must be counted ONLY from that
+    conversion's action type (``offsite_conversion.custom.<id>``) — the generic purchase
+    synonyms would also count click-throughs that bought on a DIFFERENT business's site and
+    pollute this business's ROAS. Reads the newest ensure receipt under
+    ``metrics/meta-pixel/*/ensure.json``; absent one (single-business worlds, pre-pixel
+    businesses, the rig) falls back to the generic synonyms unchanged.
+
+    Returns ``(action_types, attribution_label)`` — the label is recorded on the sync
+    receipt so every ROAS is traceable to the boundary that computed it."""
+    try:
+        base = store._resolve_business_file(business, "metrics/meta-pixel", sync=False)
+        newest_id = ""
+        if base.is_dir():
+            for path in sorted(base.glob("*/ensure.json")):
+                try:
+                    doc = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                conversion_id = str((doc or {}).get("custom_conversion_id") or "").strip()
+                if conversion_id:
+                    newest_id = conversion_id
+        if newest_id:
+            return ((f"offsite_conversion.custom.{newest_id}",),
+                    f"custom_conversion:{newest_id}")
+    except Exception:
+        pass
+    return core._META_PURCHASE_ACTION_TYPES, "generic_purchase"
+
+
 def _load_launch_receipt(store: Any, business: str, slug: str) -> Mapping[str, Any]:
     receipt_rel = _launch_receipt_rel(slug)
     receipt_abs = store._resolve_business_file(business, receipt_rel)
@@ -1147,8 +1180,11 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
         # carries them (parity with the reddit receipt shape) so downstream readers — episode
         # metrics snapshots, evaluate, operators — get impressions/clicks/spend without re-reading
         # insights.jsonl.
+        purchase_action_types, attribution_label = _business_purchase_attribution(store, business)
+        base_sync["purchase_attribution"] = attribution_label
         totals = core._meta_aggregate_insights_rows(
-            [dict(r) for r in rows if isinstance(r, Mapping)]
+            [dict(r) for r in rows if isinstance(r, Mapping)],
+            purchase_action_types=purchase_action_types,
         )
         try:
             policy = core._load_ad_spend_policy(business, channel="meta", slug=slug)
@@ -1231,7 +1267,8 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
 
             try:
                 _metrics_totals = core._meta_aggregate_insights_rows(
-                    [dict(r) for r in rows if isinstance(r, Mapping)]
+                    [dict(r) for r in rows if isinstance(r, Mapping)],
+                    purchase_action_types=purchase_action_types,
                 )
             except Exception:
                 _metrics_totals = {}
@@ -1266,9 +1303,13 @@ def handle_business_meta_ad_insights_sync(args: dict, **_: Any) -> str:
 
 
 # ── 4. EVALUATE ───────────────────────────────────────────────────────────────────────────────────
-def _evaluate_rows(rows: list[Mapping[str, Any]], *, cpa_baseline_usd: float) -> dict[str, Any]:
+def _evaluate_rows(rows: list[Mapping[str, Any]], *, cpa_baseline_usd: float,
+                   purchase_action_types: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Apply references/benchmarks.md thresholds to aggregated insights → verdict + recommended action."""
-    totals = core._meta_aggregate_insights_rows([dict(r) for r in rows])
+    totals = core._meta_aggregate_insights_rows(
+        [dict(r) for r in rows],
+        purchase_action_types=purchase_action_types or core._META_PURCHASE_ACTION_TYPES,
+    )
     ctr = totals.get("ctr")  # percent
     cpc = totals.get("cpc")
     cpm = totals.get("cpm")
@@ -1386,7 +1427,10 @@ def handle_business_meta_ad_evaluate(args: dict, **_: Any) -> str:
                 "created_at": core._now(),
             }
         else:
-            result = _evaluate_rows(rows, cpa_baseline_usd=cpa_baseline_usd)
+            purchase_action_types, attribution_label = _business_purchase_attribution(store, business)
+            result = _evaluate_rows(rows, cpa_baseline_usd=cpa_baseline_usd,
+                                    purchase_action_types=purchase_action_types)
+            result["purchase_attribution"] = attribution_label
             evaluation = {
                 "idempotency_key": idempotency_key,
                 "business": business,

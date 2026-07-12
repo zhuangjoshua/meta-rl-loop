@@ -292,10 +292,12 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
                     return None
         return None
 
-    def _meta_aggregate_insights_rows(rows):
+    def _meta_aggregate_insights_rows(rows, *, purchase_action_types=None):
         # Faithful mirror of core._meta_aggregate_insights_rows: derive ctr/cpc/cpm
         # from summed clicks/impressions/spend (the row's literal ctr/cpc are ignored)
-        # and Meta-attributed purchase value/count/roas from action_values/actions.
+        # and Meta-attributed purchase value/count/roas from action_values/actions,
+        # bounded by purchase_action_types (the per-business attribution boundary).
+        wanted_types = tuple(purchase_action_types or _purchase_action_types)
         totals = {
             "rows": len(rows),
             "spend_usd": 0.0,
@@ -319,10 +321,10 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
             totals["impressions"] += _meta_int_metric(row.get("impressions"))
             totals["reach"] += _meta_int_metric(row.get("reach"))
             totals["clicks"] += _meta_int_metric(row.get("clicks"))
-            pv = _first_action_metric(row.get("action_values"), _purchase_action_types)
+            pv = _first_action_metric(row.get("action_values"), wanted_types)
             if pv is not None:
                 totals["purchase_value_cents"] += int(round(pv * 100))
-            pc = _first_action_metric(row.get("actions"), _purchase_action_types)
+            pc = _first_action_metric(row.get("actions"), wanted_types)
             if pc is not None:
                 totals["purchase_count"] += int(round(pc))
         totals["spend_usd"] = round(spend, 2)
@@ -587,6 +589,7 @@ def _build_fake_core(tmp_path: Path, graph_rec: "_GraphRecorder", mcp_rec: "_MCP
     mod._read_existing_receipt = _read_existing_receipt
     mod._meta_int_metric = _meta_int_metric
     mod._meta_aggregate_insights_rows = _meta_aggregate_insights_rows
+    mod._META_PURCHASE_ACTION_TYPES = _purchase_action_types
 
     # Schema/property helpers used by TAKYON_META_ADS_V2_DEFINITIONS.
     def _schema(name, description, properties, required):
@@ -1344,6 +1347,71 @@ def test_insights_sync_defaults_to_receipt_owned_object(harness):
     insights_path = harness.business_file_path("clipbook", "metrics/meta-ads/demo-meta/insights.jsonl")
     lines = [json.loads(line) for line in insights_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert lines[0]["object_id"] == "ad-1"
+
+
+def test_insights_sync_isolates_revenue_to_the_business_custom_conversion(harness):
+    # SHARED-PIXEL hardening: once pixel-ensure has minted this business its own custom
+    # conversion, the sync receipt's purchases/revenue/ROAS count ONLY that conversion's
+    # action type — a generic purchase (someone buying on ANOTHER business's site after
+    # clicking this ad) must not pollute the totals. The receipt records the boundary used.
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+    harness.write_business_file(
+        "clipbook", "metrics/meta-pixel/clipbook/ensure.json",
+        json.dumps({"custom_conversion_id": "42424242"}).encode("utf-8"),
+    )
+    harness.graph.graph_forward_get_response = {
+        "data": [
+            {
+                "ad_id": "ad-1",
+                "date_start": "2026-06-24",
+                "date_stop": "2026-06-24",
+                "impressions": "1200",
+                "clicks": "40",
+                "spend": "20.00",
+                "actions": [
+                    {"action_type": "purchase", "value": "9"},                        # not ours
+                    {"action_type": "offsite_conversion.custom.42424242", "value": "2"},
+                ],
+                "action_values": [
+                    {"action_type": "purchase", "value": "900.00"},                   # not ours
+                    {"action_type": "offsite_conversion.custom.42424242", "value": "40.00"},
+                ],
+            }
+        ]
+    }
+
+    result = _result(harness.module.handle_business_meta_ad_insights_sync({
+        "business": "clipbook", "slug": "demo-meta", "level": "ad",
+        "idempotency_key": "clipbook-meta-cc-v1",
+    }))
+
+    assert result["success"] is True
+    totals = result["value"]["totals"]
+    assert totals["purchase_value_usd"] == 40.0   # ours only, not 900
+    assert totals["purchase_count"] == 2
+    assert totals["roas"] == 2.0
+    assert result["value"]["purchase_attribution"] == "custom_conversion:42424242"
+
+
+def test_insights_sync_without_custom_conversion_uses_generic_and_says_so(harness):
+    harness.set_business_mode("clipbook", "live")
+    _write_launch_receipt(harness)
+    harness.graph.graph_forward_get_response = {
+        "data": [{
+            "ad_id": "ad-1", "date_start": "2026-06-24", "date_stop": "2026-06-24",
+            "impressions": "100", "clicks": "10", "spend": "10.00",
+            "actions": [{"action_type": "purchase", "value": "1"}],
+            "action_values": [{"action_type": "purchase", "value": "30.00"}],
+        }]
+    }
+    result = _result(harness.module.handle_business_meta_ad_insights_sync({
+        "business": "clipbook", "slug": "demo-meta", "level": "ad",
+        "idempotency_key": "clipbook-meta-generic-v1",
+    }))
+    assert result["success"] is True
+    assert result["value"]["totals"]["purchase_value_usd"] == 30.0
+    assert result["value"]["purchase_attribution"] == "generic_purchase"
 
 
 def test_insights_sync_requests_and_surfaces_meta_attributed_revenue(harness):
