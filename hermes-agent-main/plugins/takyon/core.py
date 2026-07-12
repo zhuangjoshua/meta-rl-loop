@@ -24874,6 +24874,24 @@ def _verified_business_file_mutation_response(
         return tool_error(str(exc), success=False)
 
 
+# The canonical purchase-attribution record is a FINANCIAL decision boundary activated only
+# by business_meta_pixel_ensure after provider read-back + live-instrumentation verification.
+# Ordinary file tools must never create, edit, or blank it — a hand-written record would let
+# unverified (or another business's) conversions masquerade as revenue attribution.
+_TOOL_IMMUTABLE_BUSINESS_FILES = frozenset({"metrics/meta-pixel/purchase-attribution.json"})
+
+
+def _refuse_tool_write_to_attribution_record(rel: str) -> None:
+    normalized = str(rel or "").strip().lstrip("/")
+    if normalized in _TOOL_IMMUTABLE_BUSINESS_FILES:
+        raise TakyonError(
+            "metrics/meta-pixel/purchase-attribution.json is the canonical purchase-attribution "
+            "record and is tool-immutable: only business_meta_pixel_ensure "
+            "(custom_event_type=PURCHASE) may write it, after provider and live-instrumentation "
+            "verification"
+        )
+
+
 def _refuse_starter_owned_product_write(rel: str) -> None:
     """Fail closed on durable edits that can never persist: scaffold-owned product files.
 
@@ -24914,6 +24932,7 @@ def handle_business_write_file(args: dict, **_: Any) -> str:
         action="artifact.write",
     )
     _refuse_starter_owned_product_write(rel)
+    _refuse_tool_write_to_attribution_record(rel)
     previous_content = (
         file_path.read_text(encoding="utf-8", errors="replace")
         if file_path.exists()
@@ -24948,6 +24967,7 @@ def handle_business_patch_file(args: dict, **_: Any) -> str:
         action="artifact.patch",
     )
     _refuse_starter_owned_product_write(rel)
+    _refuse_tool_write_to_attribution_record(rel)
     if not file_path.exists():
         raise TakyonError(f"cannot patch missing file: {args.get('path')}")
     old = str(args.get("old") or "")

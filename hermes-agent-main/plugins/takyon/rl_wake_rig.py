@@ -171,7 +171,12 @@ class RigSafebox:
 
     def meta_graph_ensure_custom_conversion(self, **kw: Any) -> dict[str, Any]:
         self.calls.append({"op": "ensure_custom_conversion", **{k: str(v)[:60] for k, v in kw.items()}})
-        return {"id": self._next("cc"), "created": True}
+        return {
+            "id": self._next("cc"), "existed": False, "verified": True,
+            "custom_event_type": str(kw.get("custom_event_type") or "").upper(),
+            "pixel_id": str(kw.get("event_source_id") or ""),
+            "rule": str(kw.get("rule") or ""),
+        }
 
 
 # ------------------------------------------------------------------ rig environment
@@ -428,16 +433,26 @@ def seed_business(dsn: str, store: Any, slug: str) -> None:
     # for an explicit PURCHASE conversion). Without it the strict boundary is UNAVAILABLE —
     # ROAS would be None everywhere and the rig could not test the feedback loop at all,
     # which is exactly the fail-closed behavior production businesses get pre-pixel.
+    import urllib.parse
+
+    from plugins.takyon import core as takyon_core
+
+    # The record must satisfy the STRICT resolver: status active, url_match/rule scoped to
+    # the business's AUTHORITATIVE hostname (derived from the canonical publish-target
+    # machinery, same as production), pixel matching the rig config's pixel id.
+    site_host = urllib.parse.urlparse(takyon_core._product_publish_target(slug)).netloc
     attribution = store._resolve_business_file(
         slug, "metrics/meta-pixel/purchase-attribution.json", sync=False)
     attribution.parent.mkdir(parents=True, exist_ok=True)
     attribution.write_text(json.dumps({
+        "status": "active",
         "business": slug,
         "custom_conversion_id": _rig_purchase_conversion_id(slug),
         "custom_event_type": "PURCHASE",
         "pixel_id": "PIX-RIG-1",
-        "rule": json.dumps({"url": {"i_contains": "demo.localtest.me"}}),
-        "url_match": "demo.localtest.me",
+        "rule": json.dumps({"url": {"i_contains": site_host}}),
+        "url_match": site_host,
+        "verified_at": "2026-07-01T00:00:00+00:00",
         "created_at": "2026-07-01T00:00:00+00:00",
     }), encoding="utf-8")
     set_meta_channel_budget(store, slug, 40_000)

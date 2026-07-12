@@ -360,6 +360,82 @@ def update_daily_budget(
     )
 
 
+def get_custom_conversion(token: str, conversion_id: str, *, version: str = "v21.0") -> dict:
+    """Read a custom conversion back from Meta — the trust step. Creation (or duplicate
+    recovery) only proves an id exists; this read proves WHAT that id actually is."""
+    return _graph(
+        "GET",
+        str(conversion_id),
+        {"fields": "id,name,custom_event_type,rule,pixel"},
+        token=token,
+        version=version,
+    )
+
+
+def find_custom_conversion_id_by_name(
+    token: str, ad_account_id: str, name: str, *, version: str = "v21.0"
+) -> str:
+    """Deterministic duplicate recovery: list the account's custom conversions and match the
+    EXACT name. Replaces the removed error-text digit-scan heuristic — an attribution id must
+    come from a Meta read, never from guessing numbers out of an error string."""
+    acct = account_path(ad_account_id)
+    payload = _graph(
+        "GET",
+        f"{acct}/customconversions",
+        {"fields": "id,name", "limit": 500},
+        token=token,
+        version=version,
+    )
+    for entry in payload.get("data") or []:
+        if isinstance(entry, dict) and str(entry.get("name") or "") == str(name):
+            return str(entry.get("id") or "")
+    return ""
+
+
+def _normalized_rule(rule_value: object) -> str:
+    """Canonical JSON form for rule comparison (Meta may reserialize key order/whitespace)."""
+    try:
+        return json.dumps(json.loads(str(rule_value)), sort_keys=True, separators=(",", ":"))
+    except Exception:
+        return str(rule_value or "").strip()
+
+
+def verify_custom_conversion(
+    token: str,
+    conversion_id: str,
+    *,
+    expected_rule: str,
+    expected_event_type: str,
+    expected_pixel_id: str,
+    version: str = "v21.0",
+) -> dict:
+    """Read the conversion from Meta and require id, pixel, event type, and EXACT rule to
+    match what we intended. A same-named conversion with a different rule/pixel/type must
+    never be accepted as the purchase-attribution boundary. Raises MetaGraphError on any
+    mismatch; returns the read payload on success."""
+    payload = get_custom_conversion(token, conversion_id, version=version)
+    problems: list[str] = []
+    if str(payload.get("id") or "") != str(conversion_id):
+        problems.append(f"id {payload.get('id')!r} != {conversion_id!r}")
+    got_type = str(payload.get("custom_event_type") or "").strip().upper()
+    if got_type != str(expected_event_type or "").strip().upper():
+        problems.append(f"custom_event_type {got_type!r} != {expected_event_type!r}")
+    pixel_field = payload.get("pixel")
+    got_pixel = str(
+        (pixel_field.get("id") if isinstance(pixel_field, dict) else pixel_field) or ""
+    ).strip()
+    if got_pixel != str(expected_pixel_id or "").strip():
+        problems.append(f"pixel {got_pixel!r} != {expected_pixel_id!r}")
+    if _normalized_rule(payload.get("rule")) != _normalized_rule(expected_rule):
+        problems.append(f"rule {payload.get('rule')!r} != {expected_rule!r}")
+    if problems:
+        raise MetaGraphError(
+            f"custom conversion {conversion_id} failed read-back verification "
+            f"({'; '.join(problems)}) — refusing to certify it as the purchase-attribution boundary"
+        )
+    return payload
+
+
 def ensure_custom_conversion(
     token: str,
     ad_account_id: str,
@@ -370,15 +446,16 @@ def ensure_custom_conversion(
     event_source_id: str,
     version: str = "v21.0",
 ) -> dict:
-    """Create (or return) a URL-rule custom conversion for per-business attribution.
+    """Create (or deterministically recover) a URL-rule custom conversion and VERIFY it.
 
-    The platform shares ONE pixel across businesses; per-business attribution is
-    achieved by a URL-rule custom conversion on the account. ``rule`` is Meta's
-    JSON rule string (e.g. a URL CONTAINS match for the business's domain/slug).
-    If a conversion with the same name already exists Meta returns an error
-    whose body carries the existing id; we surface that id so callers stay
-    idempotent instead of erroring on re-run.
-    """
+    The platform shares ONE pixel across businesses; per-business attribution is achieved by
+    a URL-rule custom conversion anchored to that pixel. Flow:
+      1. POST create.
+      2. On a duplicate-name error, recover the existing id by LISTING the account's
+         conversions and matching the exact name (no error-text guessing).
+      3. READ the conversion back and verify id, pixel, event type, and exact rule.
+    Only a verified conversion is returned; the result carries ``verified: True`` plus the
+    verified fields so callers can gate the canonical attribution record on them."""
     acct = account_path(ad_account_id)
     rule_value = rule if isinstance(rule, str) else json.dumps(rule)
     # Meta REQUIRES the event source (the pixel this conversion listens to): the API
@@ -386,49 +463,48 @@ def ensure_custom_conversion(
     # Required at every layer of this chain so a missing pixel fails loudly at the edge.
     if not str(event_source_id or "").strip():
         raise ValueError("ensure_custom_conversion requires event_source_id (the pixel id)")
-    params = {
-        "name": name,
-        "rule": rule_value,
-        "custom_event_type": custom_event_type,
-        "event_source_id": str(event_source_id).strip(),
-    }
+    pixel_id = str(event_source_id).strip()
+    existed = False
     try:
-        return _graph(
+        created = _graph(
             "POST",
             f"{acct}/customconversions",
-            params,
+            {
+                "name": name,
+                "rule": rule_value,
+                "custom_event_type": custom_event_type,
+                "event_source_id": pixel_id,
+            },
             token=token,
             version=version,
         )
+        conversion_id = str(created.get("id") or "").strip()
     except MetaGraphError as exc:
-        # Meta error 2650 / "already exists" carries the existing conversion id
-        # in error_data; if we can recover it, treat the call as idempotent.
-        existing = _existing_conversion_id_from_error(exc)
-        if existing:
-            return {"id": existing, "existed": True}
-        raise
-
-
-def _existing_conversion_id_from_error(exc: MetaGraphError) -> str:
-    """Best-effort: pull an existing-object id out of a duplicate-name error.
-
-    Meta embeds the existing id in error_data for some duplicate errors; the
-    detail is already folded into the exception string, so scan it for a
-    numeric id. Returns "" when nothing is recoverable (caller re-raises).
-    """
-    text = str(exc)
-    if "already" not in text.lower() and "exists" not in text.lower():
-        return ""
-    # Grab the longest run of digits as a heuristic conversion id.
-    best = ""
-    current = ""
-    for ch in text:
-        if ch.isdigit():
-            current += ch
-        else:
-            if len(current) > len(best):
-                best = current
-            current = ""
-    if len(current) > len(best):
-        best = current
-    return best if len(best) >= 6 else ""
+        text = str(exc).lower()
+        if "already" not in text and "exists" not in text and "duplicate" not in text:
+            raise
+        conversion_id = find_custom_conversion_id_by_name(
+            token, ad_account_id, name, version=version
+        )
+        if not conversion_id:
+            raise
+        existed = True
+    if not conversion_id:
+        raise MetaGraphError("custom conversion create returned no id")
+    verified = verify_custom_conversion(
+        token,
+        conversion_id,
+        expected_rule=rule_value,
+        expected_event_type=custom_event_type,
+        expected_pixel_id=pixel_id,
+        version=version,
+    )
+    return {
+        "id": conversion_id,
+        "existed": existed,
+        "verified": True,
+        "custom_event_type": str(verified.get("custom_event_type") or "").strip().upper(),
+        "pixel_id": pixel_id,
+        "rule": str(verified.get("rule") or rule_value),
+        "name": str(verified.get("name") or name),
+    }
