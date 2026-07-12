@@ -39,6 +39,9 @@ Environment=TAKYON_STRIPE_MODE=live
 # fourmanifold.com after the coscale cutover). NOTE: EnvironmentFile= overrides Environment=, so a
 # secrets/.env line for this var wins — keep that file in sync; this pin covers the file dropping it.
 Environment=PUBLIC_COMPANY_BASE_DOMAIN=coscale.app
+# Public measurement identifier, pinned on the authority host so checkout CAPI metadata is
+# composed by Safebox rather than trusted from caller-supplied checkout parameters.
+Environment=TAKYON_META_PIXEL_ID=2577484896001021
 # Operator/infrastructure-only routes require this exact client allowlist in addition to the shared
 # transport token and TAKYON_SAFEBOX_OPERATOR_TOKEN. Do not widen to 10.116.0.0/20; the sub-user host is
 # 10.116.0.3 and must not mint operator capabilities or touch private workspace/provider infrastructure.

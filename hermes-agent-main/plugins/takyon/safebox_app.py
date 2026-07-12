@@ -838,6 +838,20 @@ def _claim_app_checkout_intent_authority(params: dict[str, Any]) -> dict[str, An
         "metadata[source]": "takyon_app",
         "subscription_data[metadata][checkout_intent_id]": intent_id,
     })
+    meta_pixel_id = str(os.getenv("TAKYON_META_PIXEL_ID") or "").strip()
+    product_base_domain = str(
+        os.getenv("PUBLIC_COMPANY_BASE_DOMAIN") or "coscale.app"
+    ).strip().lower().strip(".")
+    if meta_pixel_id.isdigit() and product_base_domain:
+        meta_binding = {
+            "takyon_meta_capi": "1",
+            "takyon_meta_pixel_id": meta_pixel_id,
+            "takyon_meta_site_host": f"{business}.{product_base_domain}",
+        }
+        for key, value in meta_binding.items():
+            authoritative[f"metadata[{key}]"] = value
+            authoritative[f"subscription_data[metadata][{key}]"] = value
+            binding[key] = value
     for key, value in binding.items():
         authoritative[f"line_items[0][price_data][product_data][metadata][{key}]"] = value
         authoritative[f"metadata[{key}]"] = value

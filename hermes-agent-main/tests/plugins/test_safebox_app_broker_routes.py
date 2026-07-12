@@ -1666,6 +1666,8 @@ def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypa
 
     monkeypatch.setattr(safebox_app, "_safebox_db_conn", _fake_conn)
     monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
+    monkeypatch.setenv("TAKYON_META_PIXEL_ID", "2577484896001021")
+    monkeypatch.setenv("PUBLIC_COMPANY_BASE_DOMAIN", "coscale.app")
 
     resp = client.post("/v1/stripe/request", headers=_auth(), json=_checkout_request())
 
@@ -1687,6 +1689,10 @@ def test_generic_stripe_checkout_uses_recorded_intent_authority(client, monkeypa
             authoritative[f"line_items[0][price_data][product_data][metadata][{key}]"]
             == value
         )
+    assert authoritative["metadata[takyon_meta_capi]"] == "1"
+    assert authoritative["metadata[takyon_meta_pixel_id]"] == "2577484896001021"
+    assert authoritative["metadata[takyon_meta_site_host]"] == "climblog.coscale.app"
+    assert authoritative["subscription_data[metadata][takyon_meta_capi]"] == "1"
     assert captured["idempotency_key"] == (
         "takyon-app-checkout-00000000-0000-0000-0000-000000000123"
     )
