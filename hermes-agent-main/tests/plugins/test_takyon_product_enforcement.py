@@ -1316,6 +1316,7 @@ def test_scaffold_typechecks_browser_and_action_code_in_separate_global_environm
         ") {\n"
         "  await ctx.getRecord(\"proposal\", \"ui-invented-slug\");\n"
         "  await ctx.publishRecord(\"ui-invented-slug\");\n"
+        "  await ctx.refundSubscription();\n"
         "  return {\n"
         "    payload,\n"
         "    window,\n"
@@ -1343,6 +1344,7 @@ def test_scaffold_typechecks_browser_and_action_code_in_separate_global_environm
         assert unavailable in diagnostics
     assert "Expected 1 arguments, but got 2" in diagnostics
     assert "Property 'publishRecord' does not exist" in diagnostics
+    assert "Property 'refundSubscription' does not exist" in diagnostics
 
     # The immutable action bundle requires explicit local `.ts` specifiers so Deno executes the
     # exact checked module graph. The action compiler must accept that same spelling; otherwise

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import shutil
 from pathlib import Path
 
@@ -208,7 +209,7 @@ def test_navigation_component_is_force_refreshed_with_appkit_rails():
     assert "src/screens/support.tsx" in takyon_core._STARTER_OWNED_REFRESH_FILES
 
 
-def test_active_subscription_cancel_control_is_starter_owned_and_immediate():
+def test_subscription_cancel_control_is_starter_owned_and_backend_truthful():
     main = read("src/main.tsx")
     component = read("src/components/subscription-cancellation.tsx")
     hooks = read("src/lib/hooks.ts")
@@ -219,13 +220,16 @@ def test_active_subscription_cancel_control_is_starter_owned_and_immediate():
     assert "hasNonterminalStripeSubscription(access.account)" in component
     assert "client.cancelSubscription()" in component
     assert "Cancel subscription now" in component
-    assert "end immediately" in component
-    assert "There is no grace period" in component
+    assert "subscription_cancellation_policy" in component
+    assert 'policy?.effective_timing === "immediate"' in component
+    assert 'policy?.refund_policy === "none"' in component
+    assert "outcome.effective_immediately === true" in component
+    assert "outcome.cancel_at_period_end === false" in component
     assert "window.confirm" in component
-    assert "setCanceledLocally(true)" in component
+    assert "setSuccessMessage(cancellationResultCopy(outcome))" in component
     assert "cancellation already succeeded" in component
     assert 'data-takyon-appkit="subscription-cancellation-success"' in component
-    assert "Your access ended immediately" in component
+    assert "current_period_end" in component
     assert "export function hasNonterminalStripeSubscription" in hooks
     assert "sandbox_retired" in hooks
     assert 'source === "stripe"' in hooks
@@ -236,8 +240,21 @@ def test_active_subscription_cancel_control_is_starter_owned_and_immediate():
     assert "payload" not in cancel_method
 
     contract = takyon_core._subuser_app_kit_contract_block(None)
-    assert "Immediate self-service subscription cancellation is a non-removable AppKit invariant" in contract
-    assert "never tell customers to contact/email/message support" in contract
+    assert "Self-service subscription cancellation is a non-removable AppKit invariant" in contract
+    assert "machine-readable backend contract and exact action result" in contract
+    assert '"effective_timing": "immediate"' in contract
+    assert '"refund_policy": "none"' in contract
+    assert "never add a refund action or control" in contract
+
+
+def test_backend_cancellation_policy_is_one_machine_source_of_truth():
+    assert takyon_core.subscription_cancellation_policy() == {
+        "version": 1,
+        "effective_timing": "immediate",
+        "refund_policy": "none",
+    }
+    account_handler = inspect.getsource(takyon_core.handle_business_read_app_account)
+    assert '"subscription_cancellation_policy": subscription_cancellation_policy()' in account_handler
 
 
 def test_subscription_cancel_conformance_blocks_support_mediation(tmp_path):
@@ -258,14 +275,66 @@ def test_subscription_cancel_conformance_blocks_support_mediation(tmp_path):
     blocker = takyon_core._appkit_subscription_cancellation_unfinished_blocker(
         {"inventory": {"risk_markers": markers}}
     )
-    assert "remove support-mediated cancellation copy" in blocker
-    assert "no grace period" in blocker
+    assert "support-mediated" in blocker
+    assert "product cancellation does not expose refunds" in blocker
 
     profile.write_text(
         'export const Profile = () => <p>Cancel any active plan instantly in Account. Contact support for help understanding an invoice.</p>;\n',
         encoding="utf-8",
     )
     assert takyon_core._appkit_subscription_cancellation_markers(root) == []
+
+
+@pytest.mark.parametrize(
+    "source,issue",
+    [
+        (
+            'export const Profile = () => <p>Your subscription ends August 12, 2026.</p>;\n',
+            "unverified_subscription_cancellation_timing",
+        ),
+        (
+            'export const Profile = () => <p>Cancellation is scheduled for the end of the current billing period.</p>;\n',
+            "unverified_subscription_cancellation_timing",
+        ),
+        (
+            'export const Refund = () => <button onClick={requestRefund}>Request refund</button>;\n',
+            "product_subscription_refund_option",
+        ),
+    ],
+)
+def test_subscription_conformance_blocks_worker_timing_and_refund_options(
+    tmp_path, source, issue
+):
+    root = tmp_path / "site"
+    for rel in ("src/main.tsx", "src/components/subscription-cancellation.tsx"):
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(read(rel), encoding="utf-8")
+    profile = root / "src" / "screens" / "profile.tsx"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(source, encoding="utf-8")
+
+    markers = takyon_core._appkit_subscription_cancellation_markers(root)
+
+    assert issue in [marker["issue"] for marker in markers]
+
+
+def test_subscription_conformance_scans_product_actions_for_refund_options(tmp_path):
+    root = tmp_path / "site"
+    for rel in ("src/main.tsx", "src/components/subscription-cancellation.tsx"):
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(read(rel), encoding="utf-8")
+    action = root / "actions" / "refund-subscription.ts"
+    action.parent.mkdir(parents=True, exist_ok=True)
+    action.write_text(
+        "export default async function requestRefund() { return { refund: true }; }\n",
+        encoding="utf-8",
+    )
+
+    markers = takyon_core._appkit_subscription_cancellation_markers(root)
+
+    assert any(marker["issue"] == "product_subscription_refund_option" for marker in markers)
 
 
 def test_subscription_cancel_conformance_scans_beyond_300_files_and_prunes_generated_dirs(
@@ -299,7 +368,7 @@ def test_subscription_cancel_conformance_scans_beyond_300_files_and_prunes_gener
     assert not any(marker["issue"] == "appkit_subscription_scan_incomplete" for marker in markers)
 
 
-def test_mobile_profile_exposes_the_same_immediate_self_service_cancel():
+def test_mobile_profile_exposes_the_same_backend_truthful_self_service_cancel():
     profile = (MOBILE_SCAFFOLD / "src" / "screens" / "profile.tsx").read_text(
         encoding="utf-8"
     )
@@ -319,7 +388,11 @@ def test_mobile_profile_exposes_the_same_immediate_self_service_cancel():
     assert 'source === "stripe"' in auth
     assert "await client.cancelSubscription()" in cancellation
     assert "Cancel subscription now" in cancellation
-    assert "There is no grace period" in cancellation
+    assert "subscription_cancellation_policy" in cancellation
+    assert 'policy?.effective_timing === "immediate"' in cancellation
+    assert 'policy?.refund_policy === "none"' in cancellation
+    assert "outcome?.effective_immediately === true" in cancellation
+    assert "outcome?.cancel_at_period_end === false" in cancellation
     assert "setCanceledLocally(true)" in cancellation
     assert "Stripe cancellation is complete" in cancellation
     assert "cancelSubscription(): Promise<any>" in runtime

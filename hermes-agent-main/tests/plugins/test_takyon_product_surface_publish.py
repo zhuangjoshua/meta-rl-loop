@@ -432,6 +432,67 @@ def test_publish_product_surface_does_not_block_on_best_effort_source_cache_sync
     assert result["source_cache_sync_warning"] == "product source cache sync failed: subuser: ssh key not found"
 
 
+def test_prod_product_source_cache_targets_every_canonical_subuser_replica(monkeypatch):
+    monkeypatch.setenv("TAKYON_ENV", "prod")
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOST", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_VPS_HOSTS", raising=False)
+    monkeypatch.delenv("TAKYON_SUBUSER_REPLICA_HOSTS", raising=False)
+    monkeypatch.setenv("TAKYON_SUBUSER_VPS_USER", "root")
+
+    assert takyon_core._subuser_vps_ssh_targets() == [
+        "root@134.209.123.8",
+        "root@206.81.10.173",
+    ]
+
+
+def test_nonprod_product_source_cache_uses_only_explicit_environment_hosts(monkeypatch):
+    monkeypatch.setenv("TAKYON_ENV", "dev")
+    monkeypatch.setenv("TAKYON_SUBUSER_VPS_HOST", "root@10.20.0.3")
+    monkeypatch.setenv(
+        "TAKYON_SUBUSER_VPS_HOSTS",
+        "root@10.20.0.3,root@10.20.0.4",
+    )
+    monkeypatch.setenv("TAKYON_SUBUSER_REPLICA_HOSTS", "root@10.20.0.4 root@10.20.0.5")
+
+    assert takyon_core._subuser_vps_ssh_targets() == [
+        "root@10.20.0.3",
+        "root@10.20.0.4",
+        "root@10.20.0.5",
+    ]
+
+
+def test_product_source_cache_sync_fans_out_and_labels_each_replica(tmp_path, monkeypatch):
+    source = tmp_path / "site"
+    source.mkdir()
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        takyon_core,
+        "_sync_local_product_source_cache",
+        lambda *_args: {"target": "local", "synced": True, "status": "synced"},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_subuser_vps_ssh_targets",
+        lambda: ["root@134.209.123.8", "root@206.81.10.173"],
+    )
+
+    def fake_remote(*, target, label, **_kwargs):
+        calls.append((target, label))
+        return {"target": target, "plane": label, "synced": True, "status": "synced"}
+
+    monkeypatch.setattr(takyon_core, "_sync_remote_product_source_cache", fake_remote)
+    monkeypatch.delenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", raising=False)
+
+    result = takyon_core._sync_product_source_caches("notewave", source)
+
+    assert calls == [
+        ("root@134.209.123.8", "subuser"),
+        ("root@206.81.10.173", "subuser_replica_2"),
+    ]
+    assert result["subuser"]["synced"] is True
+    assert result["subuser_replica_2"]["synced"] is True
+
+
 def test_publish_product_surface_can_explicitly_require_source_cache_sync(tmp_path, monkeypatch):
     business_root = tmp_path / "businesses" / "plannerly"
     dist = business_root / "product" / "site" / "dist"
@@ -462,6 +523,45 @@ def test_publish_product_surface_can_explicitly_require_source_cache_sync(tmp_pa
 
     assert result["status"] == "blocked"
     assert result["blocker"] == "product source cache sync failed: subuser: ssh key not found"
+
+
+def test_mac_prod_publish_automatically_requires_every_source_cache_replica(tmp_path, monkeypatch):
+    business_root = tmp_path / "businesses" / "plannerly"
+    dist = business_root / "product" / "site" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html><body>dist site</body></html>\n", encoding="utf-8")
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monkeypatch.setenv("TAKYON_PRODUCT_SITE_ROOT", str(tmp_path / "product-sites"))
+    monkeypatch.setenv("TAKYON_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("TAKYON_STORAGE_LOCAL_DIR", str(tmp_path / "storage"))
+    monkeypatch.delenv("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC", raising=False)
+    monkeypatch.setenv("TAKYON_ENV", "prod")
+    monkeypatch.setenv("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS", "1")
+    monkeypatch.setattr(
+        takyon_core,
+        "_sync_product_source_caches",
+        lambda _slug, _source_root: {
+            "local": {"synced": True, "status": "synced"},
+            "subuser": {"synced": True, "status": "synced"},
+            "subuser_replica_2": {
+                "synced": False,
+                "status": "verification_failed",
+                "error": "source digest drift",
+            },
+        },
+    )
+
+    result = takyon_core._publish_product_surface_path(
+        business_root=business_root,
+        slug="plannerly",
+        source_path="product/site",
+        publish_target="https://plannerly.fourmanifold.com/",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocker"] == (
+        "product source cache sync failed: subuser_replica_2: source digest drift"
+    )
 
 
 def test_publish_product_surface_mirrors_to_r2_via_remote_storage_authority(tmp_path, monkeypatch):

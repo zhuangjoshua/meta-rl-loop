@@ -1056,6 +1056,7 @@ def test_generic_stripe_route_does_not_read_billing_objects():
     assert "checkout/sessions" in normalize_src
     assert "products" in normalize_src and "prices" in normalize_src
     assert "subscriptions" not in normalize_src
+    assert "refunds" not in normalize_src
     assert "stripe_method == \"GET\"" not in normalize_src
     assert 'safebox.stripe_request(f"checkout/sessions/{session_id}"' in safebox_app_src
     assert 'f"subscriptions/{subscription_id}"' in safebox_app_src
@@ -1090,6 +1091,11 @@ def test_app_plane_subscription_cancel_uses_safebox_authority():
     )
     assert "app_payments.cancel_subscription" in safebox_app_src
     assert "subscription_canceler=safebox.cancel_stripe_subscription_immediately" in safebox_app_src
+    cancel_body_src = inspect.getsource(safebox_app._AppSubscriptionCancelBody)
+    assert 'ConfigDict(extra="forbid")' in cancel_body_src
+    cancellation_src = inspect.getsource(app_payments.cancel_subscription)
+    assert "subscription_cancellation_policy()" in cancellation_src
+    assert "refund" not in cancellation_src.lower()
 
 
 def test_app_plane_service_email_uses_service_session_ports():

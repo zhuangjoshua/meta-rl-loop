@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from typing import Any, Iterable
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from . import safebox
 from .request_limits import RequestBodyLimitMiddleware, request_method_may_have_body
@@ -1637,6 +1637,8 @@ class _AppChargeReversalReconcileBody(BaseModel):
 
 
 class _AppSubscriptionCancelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     business_slug: str
     app_user_id: str
     session_token: str | None = None

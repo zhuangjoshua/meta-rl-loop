@@ -3007,6 +3007,11 @@ async def _app_post_account(request, business, parts, bound, token, body):
         .replace("-", "_")
     )
     if action == "cancel_subscription":
+        if set(body) != {"action"}:
+            return _takyon_app_json(
+                HTTPStatus.BAD_REQUEST,
+                {"success": False, "error": "unsupported_account_action_fields"},
+            )
         # SESSION_REQUIRED already enforced by the gate; token is present here.
         status, payload = await _takyon_app_tool_off_loop(handle_business_cancel_app_subscription, {
             "business": business,

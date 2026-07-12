@@ -2777,7 +2777,13 @@ def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):
             {
                 "success": True,
                 "business": args["business"],
-                "cancel_at_period_end": True,
+                "cancel_at_period_end": False,
+                "effective_immediately": True,
+                "subscription_cancellation_policy": {
+                    "version": 1,
+                    "effective_timing": "immediate",
+                    "refund_policy": "none",
+                },
             }
         )
 
@@ -2799,8 +2805,52 @@ def test_app_account_post_dispatches_cancel_subscription_action(monkeypatch):
             del web_server.app.state.bound_host
 
     assert response.status_code == 200
-    assert response.json()["cancel_at_period_end"] is True
+    assert response.json()["cancel_at_period_end"] is False
+    assert response.json()["effective_immediately"] is True
+    assert response.json()["subscription_cancellation_policy"]["refund_policy"] == "none"
     assert calls == [{"business": "mathflow", "session_token": "session_123"}]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"action": "refund_subscription"},
+        {"action": "cancel_subscription", "refund": True},
+        {"action": "cancel_subscription", "cancel_at_period_end": True},
+        {"action": "cancel_subscription", "prorate": True},
+    ],
+)
+def test_app_account_rejects_refund_and_cancellation_override_inputs(monkeypatch, body):
+    from starlette.testclient import TestClient
+
+    import takyon_cli.web_server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "handle_business_cancel_app_subscription",
+        lambda args: pytest.fail(f"cancel handler called with {args}"),
+    )
+
+    web_server.app.state.bound_host = "127.0.0.1"
+    try:
+        client = TestClient(web_server.app)
+        response = client.post(
+            "/api/takyon/apps/mathflow/account",
+            json=body,
+            headers={
+                "Host": "mathflow.coscale.app",
+                "Cookie": "takyon_app_session=session_123",
+            },
+        )
+    finally:
+        if hasattr(web_server.app.state, "bound_host"):
+            del web_server.app.state.bound_host
+
+    assert response.status_code == 400
+    assert response.json()["error"] in {
+        "unsupported_account_action",
+        "unsupported_account_action_fields",
+    }
 
 
 def test_app_records_routes_dispatch_session_scoped_handlers(monkeypatch):

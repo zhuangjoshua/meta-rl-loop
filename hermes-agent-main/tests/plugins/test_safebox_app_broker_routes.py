@@ -1001,6 +1001,21 @@ def test_generic_stripe_route_cannot_mutate_subscriptions(client, monkeypatch):
     assert resp.json()["detail"] == "stripe_path_not_allowed"
 
 
+def test_generic_stripe_route_cannot_create_customer_refunds(client, monkeypatch):
+    monkeypatch.setattr(safebox_app.safebox, "stripe_request", lambda *a, **k: pytest.fail("stripe called"))
+    resp = client.post(
+        "/v1/stripe/request",
+        headers=_auth(),
+        json={
+            "path": "refunds",
+            "method": "POST",
+            "params": {"payment_intent": "pi_123"},
+        },
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "stripe_path_not_allowed"
+
+
 def test_generic_stripe_route_cannot_read_subscription_or_checkout_objects(client, monkeypatch):
     monkeypatch.setattr(safebox_app.safebox, "stripe_request", lambda *a, **k: pytest.fail("stripe called"))
 
@@ -1091,6 +1106,11 @@ def test_app_subscription_cancel_uses_session_bound_user(client, monkeypatch):
             "stripe_subscription_status": canceled["status"],
             "cancel_at_period_end": False,
             "effective_immediately": True,
+            "subscription_cancellation_policy": {
+                "version": 1,
+                "effective_timing": "immediate",
+                "refund_policy": "none",
+            },
         }
 
     monkeypatch.setattr(safebox_app.safebox, "stripe_request", _stripe)
@@ -1103,9 +1123,6 @@ def test_app_subscription_cancel_uses_session_bound_user(client, monkeypatch):
             "business_slug": "climblog",
             "app_user_id": "cust_X",
             "session_token": "sess-for-cust-x",
-            # A legacy client cannot restore grace-period behavior; the dedicated server route
-            # ignores this obsolete field and always performs Stripe DELETE.
-            "cancel_at_period_end": True,
         },
     )
 
@@ -1114,6 +1131,39 @@ def test_app_subscription_cancel_uses_session_bound_user(client, monkeypatch):
     assert stripe_calls == [("subscriptions/sub_123", {}, "DELETE")]
     assert resp.json()["stripe_subscription_id"] == "sub_123"
     assert resp.json()["effective_immediately"] is True
+    assert resp.json()["subscription_cancellation_policy"]["refund_policy"] == "none"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"cancel_at_period_end": True},
+        {"refund": True},
+        {"refund_amount": 999},
+        {"prorate": True},
+        {"invoice_now": True},
+    ],
+)
+def test_app_subscription_cancel_rejects_timing_and_refund_inputs(
+    client, monkeypatch, extra
+):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "stripe_request",
+        lambda *a, **k: pytest.fail("stripe called"),
+    )
+    resp = client.post(
+        "/v1/stripe/app-subscription/cancel",
+        headers=_auth(operator=False),
+        json={
+            "business_slug": "climblog",
+            "app_user_id": "cust_X",
+            "session_token": "sess-for-cust-x",
+            **extra,
+        },
+    )
+
+    assert resp.status_code == 422
 
 
 def test_immediate_subscription_cancel_retry_reads_terminal_provider_truth(monkeypatch):

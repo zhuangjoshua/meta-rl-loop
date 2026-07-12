@@ -64,7 +64,7 @@ from agent.skill_utils import get_all_skills_dirs, parse_frontmatter
 from takyon_constants import get_default_takyon_root, get_takyon_home
 from tools.registry import tool_error, tool_result
 
-from .app_runtime_constants import APP_SESSION_COOKIE
+from .app_runtime_constants import APP_SESSION_COOKIE, subscription_cancellation_policy
 from .product_claims import (
     customer_feature_claims,
     feature_claim_blocker,
@@ -261,7 +261,7 @@ MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 """
 MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App Store rail):
 - The `_takyon/` directory is PLATFORM-OWNED and overwritten wholesale per business — never edit it. Import the runtime client and surface context only via the `@takyon/*` path alias.
-- The mobile cancellation rail is a platform invariant: `app/profile.tsx`, `src/lib/product-auth.tsx`, and `src/components/subscription-cancellation.tsx` are force-refreshed from AppKit. You may freely redesign `src/screens/profile.tsx`, but it must visibly compose `<SubscriptionCancellation />`, and signed-in product UI outside the profile implementation must keep a visible link/button to `/profile`; never remove or replace immediate in-app Stripe cancellation with a support workflow.
+- The mobile cancellation rail is a platform invariant: `app/profile.tsx`, `src/lib/product-auth.tsx`, and `src/components/subscription-cancellation.tsx` are force-refreshed from AppKit. You may freely redesign `src/screens/profile.tsx`, but it must visibly compose `<SubscriptionCancellation />`, and signed-in product UI outside the profile implementation must keep a visible link/button to `/profile`. Timing/refund copy comes only from the backend policy and exact cancellation result inside that component; never hand-write continuation/end-date copy, expose a refund action/control, or replace cancellation with a support workflow.
 - Auth, sessions, entitlements, records, and AI generation go through the `_takyon` runtime client against the platform runtime API. Do not call providers directly and do not add your own backend.
 - NEVER add Stripe, web checkout, or any external purchase flow inside the app — Apple rejects external digital purchases (guideline 3.1.1). Subscription upsell copy may link to the product website account page; in-app purchase rails land later.
 - Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
@@ -6023,12 +6023,12 @@ def _subuser_app_starter_account_page_js() -> str:
                   ""
                 ).trim() || "Not set yet";
               const bannerTitle = cancelScheduled
-                ? "Cancellation scheduled."
+                ? "Cancellation pending."
                 : appState.entitled
                   ? "Account ready."
                   : "Subscription required.";
               const bannerBody = cancelScheduled
-                ? `Your subscription stays active until ${formatDate(currentPeriodEnd)}.`
+                ? "Refresh this account for the authoritative cancellation result."
                 : appState.entitled
                   ? "Manage your plan, billing state, and profile from one place."
                   : statusState === "past_due"
@@ -6058,17 +6058,23 @@ def _subuser_app_starter_account_page_js() -> str:
 
               async function handleCancelSubscription() {
                 if (typeof window !== "undefined") {
-                  const confirmed = window.confirm("Cancel this subscription at the end of the current billing period?");
+                  const confirmed = window.confirm("Cancel this subscription? The server response will confirm when access ends.");
                   if (!confirmed) return;
                 }
                 setCancelPending(true);
                 setCancelMessage("");
                 setCancelError("");
                 try {
-                  await starterCancelSubscription();
+                  const cancellation = await starterCancelSubscription();
                   const nextAppState = await starterLoadAppState();
                   setAppState(nextAppState);
-                  setCancelMessage("Cancellation scheduled. Access stays active until the end of the current period.");
+                  setCancelMessage(
+                    cancellation?.effective_immediately === true && cancellation?.cancel_at_period_end === false
+                      ? "Cancellation confirmed. Access ended immediately."
+                      : cancellation?.cancel_at_period_end === true
+                        ? `Cancellation confirmed. Subscription ends ${formatDate(cancellation?.current_period_end)}.`
+                        : "Cancellation confirmed."
+                  );
                 } catch (cancelRequestError) {
                   setCancelError(
                     String(
@@ -6152,7 +6158,7 @@ def _subuser_app_starter_account_page_js() -> str:
                       </div>
                       {cancelScheduled ? (
                         <div className="starter-alert">
-                          Cancellation is already scheduled. Access remains live until {formatDate(currentPeriodEnd)}.
+                          Cancellation is pending. Refresh for the authoritative result.
                         </div>
                       ) : null}
                       {cancelMessage ? <div className="starter-alert">{cancelMessage}</div> : null}
@@ -7084,12 +7090,12 @@ def _subuser_app_starter_pages_js() -> str:
                   ""
                 ).trim() || "Not set yet";
               const bannerTitle = cancelScheduled
-                ? "Cancellation scheduled."
+                ? "Cancellation pending."
                 : appState.entitled
                   ? "Membership active."
                   : "Membership needs attention.";
               const bannerBody = cancelScheduled
-                ? `Your subscription stays active until ${formatDate(currentPeriodEnd)}.`
+                ? "Refresh this account for the authoritative cancellation result."
                 : appState.entitled
                 ? "Your account, billing state, and profile live here. Changes should show up here after they save."
                 : statusState === "past_due"
@@ -7099,17 +7105,23 @@ def _subuser_app_starter_pages_js() -> str:
 
               async function handleCancelSubscription() {
                 if (typeof window !== "undefined") {
-                  const confirmed = window.confirm("Cancel this subscription at the end of the current billing period?");
+                  const confirmed = window.confirm("Cancel this subscription? The server response will confirm when access ends.");
                   if (!confirmed) return;
                 }
                 setCancelPending(true);
                 setCancelMessage("");
                 setCancelError("");
                 try {
-                  await starterCancelSubscription();
+                  const cancellation = await starterCancelSubscription();
                   const nextAppState = await starterLoadAppState();
                   setAppState(nextAppState);
-                  setCancelMessage("Cancellation scheduled. Your access stays active until the end of the current period.");
+                  setCancelMessage(
+                    cancellation?.effective_immediately === true && cancellation?.cancel_at_period_end === false
+                      ? "Cancellation confirmed. Access ended immediately."
+                      : cancellation?.cancel_at_period_end === true
+                        ? `Cancellation confirmed. Subscription ends ${formatDate(cancellation?.current_period_end)}.`
+                        : "Cancellation confirmed."
+                  );
                 } catch (cancelRequestError) {
                   setCancelError(
                     String(
@@ -7193,7 +7205,7 @@ def _subuser_app_starter_pages_js() -> str:
                       </div>
                       {cancelScheduled ? (
                         <div className="starter-alert">
-                          Cancellation is already scheduled. Access remains live until {formatDate(currentPeriodEnd)}.
+                          Cancellation is pending. Refresh for the authoritative result.
                         </div>
                       ) : null}
                       {cancelMessage ? <div className="starter-alert">{cancelMessage}</div> : null}
@@ -7768,7 +7780,10 @@ def _subuser_app_kit_contract_block(surface: dict[str, Any] | None) -> str:
         "- The single plan is a MONTHLY paid subscription billed every month. There is NO trial of any kind — not a free trial and not a paid trial. Never show \"free trial\", \"N-day free trial\", \"trial\", \"Start Free Trial\", \"try free\", \"no credit card\", or any countdown/trial CTA, even attached to the paid plan. The subscribe CTA must read like \"Subscribe\" / \"Subscribe — $N/month\", and price copy must say \"/month\".",
         "- Prefer the scaffold access helpers in `src/lib/hooks.ts` such as `useViewerAccess()` and `resolveViewerCta()` when deciding whether the primary path is sign in, complete subscription, or continue.",
         "- The shared account rail returns canonical account truth as `user` plus `entitlements[]`; if a screen needs subscription/access state, derive it from those helpers instead of reviving legacy `has_active_subscription`, nested `subscription.status`, or custom `client.account()` field guesses.",
-        "- Immediate self-service subscription cancellation is a non-removable AppKit invariant. Starter-owned `src/main.tsx` renders `SubscriptionCancellation` on `/app/profile` for every active Stripe subscription and the server revokes access immediately with no grace period. Keep that control visible, never replace cancellation with a billing-portal or support workflow, and never tell customers to contact/email/message support to cancel, change, or manage billing.",
+        "- Self-service subscription cancellation is a non-removable AppKit invariant. Starter-owned `src/main.tsx` renders `SubscriptionCancellation` on `/app/profile` for every nonterminal Stripe subscription. Cancellation timing and refund policy belong exclusively to the machine-readable backend contract and exact action result; never infer them from a renewal/current-period date, never hand-write continuation/end-date/refund copy, never add a refund action or control, and never replace cancellation with a billing-portal or support workflow.",
+        "- Current backend subscription cancellation policy (source-of-truth generated, not prose guessed by this prompt): `"
+        + json.dumps(subscription_cancellation_policy(), sort_keys=True)
+        + "`. Consume it through the canonical AppKit component; do not duplicate it in worker-owned UI.",
         "- Do not hand-roll subscription gates inside `src/screens/app-home.tsx` or `src/screens/profile.tsx` when the shared hooks already answer whether the viewer should subscribe, continue, update billing, or open the app.",
         "- Never return `null` for anonymous or unentitled viewers on `/app` or `/app/profile`; render a visible sign-in/subscribe/account gate wired to `useProductAuth()` and `resolveViewerCta()`.",
         "- Any starter source already present in `src/` is just route and runtime plumbing. Replace or flesh out the screens themselves.",
@@ -11489,6 +11504,26 @@ _SUPPORT_MEDIATED_CANCELLATION_PATTERN = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+_UNVERIFIED_CANCELLATION_TIMING_PATTERN = re.compile(
+    r"(?:"
+    r"\bcancel(?:lation|led|ed|ing)?\b.{0,180}\b(?:immediate(?:ly)?|grace\s+period|scheduled|"
+    r"current\s+period|billing\s+period|effective\s+(?:date|time)|continues?|stays?|remains?|ends?)\b"
+    r"|\b(?:access|subscription)\b.{0,100}\b(?:continues?|stays?|remains?|ends?)\b.{0,120}"
+    r"\b(?:until|after\s+cancell|current\s+period|billing\s+period|\d{4})\b"
+    r"|\bcancel_at_period_end\b|\bcancelAtPeriodEnd\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_CUSTOMER_REFUND_OPTION_PATTERN = re.compile(
+    r"(?:"
+    r"\b(?:request|get|claim|issue|process|initiate|offer|receive|submit|create|automatic|prorat\w*)\b"
+    r".{0,100}\brefunds?\b"
+    r"|\brefunds?\b.{0,100}\b(?:request|available|eligible|option|action|button|credit|prorat\w*|subscription)\b"
+    r"|\b(?:refundSubscription|requestRefund|refund_subscription|request_refund)\b"
+    r"|<\s*(?:button|a|Link)\b[^>]{0,300}>[^<]{0,160}\brefund\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 _APPKIT_COPY_SCAN_MAX_FILES = 10_000
 _APPKIT_COPY_SCAN_MAX_TOTAL_BYTES = 32 * 1024 * 1024
 _APPKIT_COPY_SCAN_SKIP_DIRS = {
@@ -11609,6 +11644,27 @@ def _appkit_customer_copy_markers(
                             "snippet": _truncate_text(match.group(0).strip(), 220),
                         }
                     )
+                rel = path.relative_to(root).as_posix()
+                platform_owned = rel in _STARTER_OWNED_REFRESH_FILES or rel in _MOBILE_STARTER_OWNED_REFRESH_FILES
+                if not platform_owned:
+                    timing_match = _UNVERIFIED_CANCELLATION_TIMING_PATTERN.search(text)
+                    if timing_match is not None and len(markers) < 8:
+                        markers.append(
+                            {
+                                "path": rel,
+                                "issue": "unverified_subscription_cancellation_timing",
+                                "snippet": _truncate_text(timing_match.group(0).strip(), 220),
+                            }
+                        )
+                    refund_match = _CUSTOMER_REFUND_OPTION_PATTERN.search(text)
+                    if refund_match is not None and len(markers) < 8:
+                        markers.append(
+                            {
+                                "path": rel,
+                                "issue": "product_subscription_refund_option",
+                                "snippet": _truncate_text(refund_match.group(0).strip(), 220),
+                            }
+                        )
             if exhausted:
                 break
         if walk_error is not None and not exhausted:
@@ -11789,6 +11845,9 @@ def _appkit_subscription_cancellation_markers(root: Path) -> list[dict[str, Any]
         or "<AccountRoute" not in main_source
         or "client.cancelSubscription()" not in component_source
         or "Cancel subscription now" not in component_source
+        or "subscription_cancellation_policy" not in component_source
+        or 'policy?.refund_policy === "none"' not in component_source
+        or "cancellationResultCopy(outcome)" not in component_source
     ):
         markers.append(
             {
@@ -11801,7 +11860,7 @@ def _appkit_subscription_cancellation_markers(root: Path) -> list[dict[str, Any]
             }
         )
 
-    markers.extend(_appkit_customer_copy_markers(root))
+    markers.extend(_appkit_customer_copy_markers(root, source_roots=("src", "actions")))
     return markers
 
 
@@ -11838,7 +11897,9 @@ def _mobile_appkit_subscription_cancellation_markers(root: Path) -> list[dict[st
         "hasNonterminalStripeSubscription(auth.account)" not in component_source
         or "client.cancelSubscription()" not in component_source
         or "Cancel subscription now" not in component_source
-        or "There is no grace period" not in component_source
+        or "subscription_cancellation_policy" not in component_source
+        or 'policy?.refund_policy === "none"' not in component_source
+        or "cancellationResultCopy(outcome)" not in component_source
         or "account?.entitlements" not in auth_source
         or re.search(
             r'import\s*\{[^}]*SubscriptionCancellation[^}]*\}\s*from\s*[\'"]\.\./components/subscription-cancellation[\'"]',
@@ -11869,7 +11930,7 @@ def _mobile_appkit_subscription_cancellation_markers(root: Path) -> list[dict[st
                 ),
             }
         )
-    markers.extend(_appkit_customer_copy_markers(root, source_roots=("app", "src")))
+    markers.extend(_appkit_customer_copy_markers(root, source_roots=("app", "src", "actions")))
     return markers
 
 
@@ -12032,6 +12093,8 @@ def _appkit_subscription_cancellation_unfinished_blocker(refresh: dict[str, Any]
             "appkit_subscription_cancel_missing",
             "appkit_subscription_scan_incomplete",
             "support_mediated_subscription_cancel",
+            "unverified_subscription_cancellation_timing",
+            "product_subscription_refund_option",
         }
     ]
     if not cancellation_markers:
@@ -12044,7 +12107,7 @@ def _appkit_subscription_cancellation_unfinished_blocker(refresh: dict[str, Any]
     return (
         "product subscription cancellation violates the AppKit contract: "
         + "; ".join(details)
-        + " — keep the canonical in-app cancel control, complete the bounded source scan, and remove support-mediated cancellation copy; cancellation must end access immediately with no grace period"
+        + " — keep the canonical in-app control, consume only the backend policy/action result for timing, and remove support-mediated, hand-written timing, and refund-option UI; product cancellation does not expose refunds"
     )
 
 
@@ -14370,6 +14433,44 @@ def _subuser_vps_ssh_target() -> str:
     return f"{user}@134.209.123.8"
 
 
+_PROD_SUBUSER_SYNC_HOSTS = ("134.209.123.8", "206.81.10.173")
+
+
+def _subuser_vps_ssh_targets() -> list[str]:
+    """Every sub-user cache replica for this environment, never only the primary.
+
+    Production's two canonical members are additive and cannot be replaced by an env override.
+    Non-production environments use only their explicit host configuration, so this helper cannot
+    leak a dev publish onto production hosts.
+    """
+
+    load_takyon_env()
+    env_name = str(os.getenv("TAKYON_ENV") or "prod").strip().lower() or "prod"
+    user = str(os.getenv("TAKYON_SUBUSER_VPS_USER") or "root").strip() or "root"
+    targets: list[str] = []
+    endpoints: set[str] = set()
+
+    def add(raw: str) -> None:
+        value = str(raw or "").strip()
+        if not value:
+            return
+        target = value if "@" in value else f"{user}@{value}"
+        endpoint = target.rsplit("@", 1)[-1].strip().lower()
+        if not endpoint or endpoint in endpoints:
+            return
+        endpoints.add(endpoint)
+        targets.append(target)
+
+    if env_name == "prod":
+        for host in _PROD_SUBUSER_SYNC_HOSTS:
+            add(host)
+    add(str(os.getenv("TAKYON_SUBUSER_VPS_HOST") or ""))
+    for variable in ("TAKYON_SUBUSER_VPS_HOSTS", "TAKYON_SUBUSER_REPLICA_HOSTS"):
+        for candidate in re.split(r"[\s,]+", str(os.getenv(variable) or "").strip()):
+            add(candidate)
+    return targets
+
+
 def _subuser_vps_default_ssh_key_candidates() -> list[Path]:
     return [
         Path.home() / ".ssh" / "takyon_argon_alpha14",
@@ -14461,11 +14562,6 @@ def _local_product_source_cache_path(slug: str) -> Path:
     return target
 
 
-# Best-effort remote sync targets that failed with a connection-class error in THIS process.
-# Publishing repeatedly to a firewalled/unreachable plane must not re-pay the TCP connect
-# timeout every time; a restart clears the cache so a recovered host heals naturally.
-_UNREACHABLE_CACHE_SYNC_TARGETS: set[str] = set()
-
 _PRODUCT_SOURCE_CACHE_EXCLUDES = {
     ".cache",
     ".git",
@@ -14527,18 +14623,6 @@ def _sync_remote_product_source_cache(
         return {**summary, "synced": False, "status": "blocked", "error": "ssh is unavailable"}
     if not ssh_key.exists():
         return {**summary, "synced": False, "status": "blocked", "error": f"ssh key not found: {ssh_key}"}
-    # Best-effort plane, so don't re-pay a dead host's TCP connect timeout on EVERY publish: once a
-    # target fails with a connection-class error, later publishes in this process skip it instantly
-    # (status skipped_unreachable, synced=False — an operator who set the REQUIRE flag still blocks,
-    # unchanged). Observed: the sub-user host's firewall silently drops operator-VPS ssh, so each
-    # publish burned a full connect timeout on a leg that can never succeed until a restart anyway.
-    if target in _UNREACHABLE_CACHE_SYNC_TARGETS:
-        return {
-            **summary,
-            "synced": False,
-            "status": "skipped_unreachable",
-            "error": "target marked unreachable earlier in this process; skipping best-effort cache sync",
-        }
     source = source_root.resolve()
     if not source.is_dir():
         return {**summary, "synced": False, "status": "missing_source", "error": f"product source not found: {source}"}
@@ -14577,8 +14661,6 @@ def _sync_remote_product_source_cache(
         )
         if mkdir_proc.returncode != 0:
             error_text = (mkdir_proc.stderr or mkdir_proc.stdout or f"ssh mkdir exited {mkdir_proc.returncode}").strip()
-            if "connection timed out" in error_text.lower() or "connection refused" in error_text.lower():
-                _UNREACHABLE_CACHE_SYNC_TARGETS.add(target)
             return {
                 **summary,
                 "synced": False,
@@ -14590,6 +14672,7 @@ def _sync_remote_product_source_cache(
                 rsync,
                 "-az",
                 "--delete",
+                "--omit-dir-times",
                 *excludes,
                 "-e",
                 " ".join(shlex.quote(part) for part in ssh_base),
@@ -14608,6 +14691,37 @@ def _sync_remote_product_source_cache(
                 "synced": False,
                 "status": "failed",
                 "error": (rsync_proc.stderr or rsync_proc.stdout or f"rsync exited {rsync_proc.returncode}").strip(),
+            }
+        verify_proc = subprocess.run(
+            [
+                rsync,
+                "-aznc",
+                "--delete",
+                "--omit-dir-times",
+                "--itemize-changes",
+                *excludes,
+                "-e",
+                " ".join(shlex.quote(part) for part in ssh_base),
+                f"{source}/",
+                f"{target}:{shlex.quote(str(remote_path))}/",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+            env=_runtime_env(),
+        )
+        if verify_proc.returncode != 0 or (verify_proc.stdout or "").strip():
+            detail = (
+                verify_proc.stderr
+                or verify_proc.stdout
+                or f"rsync verification exited {verify_proc.returncode}"
+            ).strip()
+            return {
+                **summary,
+                "synced": False,
+                "status": "verification_failed",
+                "error": detail,
             }
         chown_proc = subprocess.run(
             [*ssh_base, target, f"chown -R takyon:takyon -- {shlex.quote(str(remote_business_root))}"],
@@ -14632,14 +14746,16 @@ def _sync_remote_product_source_cache(
 def _sync_product_source_caches(slug: str, source_root: Path) -> dict[str, Any]:
     """Keep product-app runtime source caches in step with the just-published product source."""
     result: dict[str, Any] = {"local": _sync_local_product_source_cache(slug, source_root)}
-    result["subuser"] = _sync_remote_product_source_cache(
-        slug=slug,
-        source_root=source_root,
-        target=_subuser_vps_ssh_target(),
-        ssh_key=_subuser_vps_ssh_key_path(),
-        remote_home=_subuser_remote_home(),
-        label="subuser",
-    )
+    for index, target in enumerate(_subuser_vps_ssh_targets(), start=1):
+        label = "subuser" if index == 1 else f"subuser_replica_{index}"
+        result[label] = _sync_remote_product_source_cache(
+            slug=slug,
+            source_root=source_root,
+            target=target,
+            ssh_key=_subuser_vps_ssh_key_path(),
+            remote_home=_subuser_remote_home(),
+            label=label,
+        )
     # Local production compute runs outside the operator VPS. Sync the operator cache too so a later
     # tracked sub-user deploy does not copy stale operator cache state back over the product runtime.
     if _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"):
@@ -16039,20 +16155,26 @@ def _publish_product_surface_path(
     # Product publish truth is the committed workspace + build artifact + public R2 pointer. The
     # SSH-mirrored product source cache is a best-effort operator convenience cache and is not read
     # by the live product edge or the app-action runtime. A missing deploy key on the worker plane
-    # therefore must not hard-stop a successful publish for future businesses. Keep the sync result
-    # in the receipt for diagnostics, and only fail closed when an operator explicitly opts into a
-    # cache-sync gate for debugging.
+    # therefore must not hard-stop a successful publish on the VPS fallback, whose firewall cannot
+    # reach the sub-user SSH plane. The approved Mac production rail can reach every host and is the
+    # primary publisher, so it fails closed on any replica drift automatically. An operator may also
+    # opt into that gate explicitly elsewhere.
     required_cache_planes: list[str] = []
-    if _env_truthy("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC"):
-        required_cache_planes.append("subuser")
+    require_cache_sync = _env_truthy("TAKYON_REQUIRE_PRODUCT_SOURCE_CACHE_SYNC") or (
+        str(os.getenv("TAKYON_ENV") or "prod").strip().lower() == "prod"
+        and _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS")
+    )
+    if require_cache_sync:
+        required_cache_planes.extend(
+            plane for plane in source_cache_sync if plane.startswith("subuser")
+        )
         if _env_truthy("TAKYON_ALLOW_POSTGRES_OUTSIDE_VPS"):
             required_cache_planes.append("operator")
     failed_cache_sync = [
         f"{plane}: {sync.get('error') or sync.get('status')}"
-        for plane, sync in (
-            (plane, source_cache_sync.get(plane) if isinstance(source_cache_sync.get(plane), Mapping) else {})
-            for plane in ("subuser", "operator")
-        )
+        for plane, raw_sync in source_cache_sync.items()
+        if plane != "local"
+        for sync in [raw_sync if isinstance(raw_sync, Mapping) else {}]
         if sync and not sync.get("synced")
     ]
     if failed_cache_sync:
@@ -28400,7 +28522,7 @@ def handle_business_read_app_account(args: dict, **_: Any) -> str:
                     entitlement["cancel_at_period_end"] = bool(metadata.get("cancel_at_period_end"))
                 if "stripe_subscription_status" not in entitlement and "stripe_subscription_status" in metadata:
                     entitlement["stripe_subscription_status"] = metadata.get("stripe_subscription_status")
-        return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "usage_allocation": usage_allocation, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
+        return tool_result({"success": True, "business": business, "user": user, "entitlements": entitlements, "subscription_cancellation_policy": subscription_cancellation_policy(), "usage_this_period": {"events": int(usage["count"] or 0), "estimated_cost_microusd": int(usage["estimated"] or 0), "actual_cost_microusd": int(usage["actual"] or 0)}, "usage_allocation": usage_allocation, "revenue": {"events": int(revenue["count"] or 0), "amount_paid_cents": int(revenue["cents"] or 0)}})
     except Exception as exc:
         return tool_error(str(exc), success=False)
 
@@ -28439,7 +28561,14 @@ def handle_business_cancel_app_subscription(args: dict, **_: Any) -> str:
                     payload={
                         "app_user_id": user.id,
                         "stripe_subscription_id": outcome.get("stripe_subscription_id"),
-                        "effective_immediately": True,
+                        "effective_immediately": bool(outcome.get("effective_immediately")),
+                        "cancel_at_period_end": bool(outcome.get("cancel_at_period_end")),
+                        "refund_policy": str(
+                            (outcome.get("subscription_cancellation_policy") or {}).get(
+                                "refund_policy"
+                            )
+                            or ""
+                        ),
                         "already_canceled": bool(outcome.get("already_canceled")),
                         "authority": "safebox",
                     },
@@ -39312,6 +39441,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     )
                 if mobile_app_workspace:
                     worker_instruction_parts.append(MOBILE_APP_WORKER_CONTRACT)
+                    worker_instruction_parts.append(
+                        "Current backend subscription cancellation policy (machine source of truth): `"
+                        + json.dumps(subscription_cancellation_policy(), sort_keys=True)
+                        + "`. The platform-owned cancellation component consumes it; worker-owned UI must not duplicate cancellation timing or refund copy."
+                    )
                 if _workspace_needs_runtime_ui_contract(workspace_rel):
                     worker_instruction_parts.append(PUBLIC_LANDING_COMPOSITION_CONTRACT)
                     worker_instruction_parts.append(PRODUCT_VISUAL_CRAFT_CONTRACT)

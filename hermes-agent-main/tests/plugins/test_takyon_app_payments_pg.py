@@ -657,11 +657,22 @@ def test_cancel_subscription_ends_access_immediately_and_retries_idempotently(pg
     assert result["cancel_at_period_end"] is False
     assert result["stripe_subscription_status"] == "canceled"
     assert result["effective_immediately"] is True
+    assert result["subscription_cancellation_policy"] == {
+        "version": 1,
+        "effective_timing": "immediate",
+        "refund_policy": "none",
+    }
     assert result["already_canceled"] is False
     ent = app_entitlements.list_entitlements(pg_conn, slug, app_user_id=user.id)[0]
     assert ent.metadata["cancel_at_period_end"] is False
     assert ent.status == "cancelled"
     assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "unentitled"
+    reversal_count = pg_conn.execute(
+        "select count(*) from app_revenue_events "
+        "where business_slug = %s and revenue_type = 'reversal'",
+        (slug,),
+    ).fetchone()[0]
+    assert reversal_count == 0
 
     repeated = app_payments.cancel_subscription(
         pg_conn,
@@ -675,6 +686,7 @@ def test_cancel_subscription_ends_access_immediately_and_retries_idempotently(pg
     assert repeated["effective_immediately"] is True
     assert repeated["already_canceled"] is True
     assert repeated["stripe_subscription_status"] == "canceled"
+    assert repeated["subscription_cancellation_policy"]["refund_policy"] == "none"
 
 
 def test_cancel_subscription_revoke_fallback_is_terminal_on_real_postgres(pg_conn, monkeypatch):
