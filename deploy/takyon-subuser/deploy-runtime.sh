@@ -147,15 +147,17 @@ if [[ "$TAKYON_SUBUSER_FANOUT_CHILD" != "1" ]]; then
           "$0" || true
       done
       # Bash 3.2 with nounset rejects a direct expansion of an empty array. The deploy
-      # runs from macOS, so preserve the empty cleanup case without masking real errors.
-      for host in "${staged_hosts_done[@]+"${staged_hosts_done[@]}"}"; do
-        env \
-          TAKYON_SUBUSER_FANOUT_CHILD=1 \
-          TAKYON_SUBUSER_DEPLOY_PHASE=discard \
-          TAKYON_VPS_HOST="$host" \
-          TAKYON_RUN_WEB_BUILD=0 \
-          "$0" || true
-      done
+      # runs from macOS, so skip the expansion when no host finished staging.
+      if (( ${#staged_hosts_done[@]} )); then
+        for host in "${staged_hosts_done[@]}"; do
+          env \
+            TAKYON_SUBUSER_FANOUT_CHILD=1 \
+            TAKYON_SUBUSER_DEPLOY_PHASE=discard \
+            TAKYON_VPS_HOST="$host" \
+            TAKYON_RUN_WEB_BUILD=0 \
+            "$0" || true
+        done
+      fi
     fi
     return "$status"
   }
@@ -546,7 +548,12 @@ if [[ "$TAKYON_SYNC_PRODUCT_SITES" == "1" ]]; then
   ssh_opts_source=(-i "$PRODUCT_SITES_SOURCE_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
   ssh_opts_target=(-i "$TAKYON_VPS_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
   ssh "${ssh_opts_source[@]}" "$PRODUCT_SITES_SOURCE_HOST" "set -euo pipefail; cd /opt/takyon; tar -cf - .takyon/product-sites" \
-    | ssh "${ssh_opts_target[@]}" "$TAKYON_VPS_HOST" "set -euo pipefail; tar --overwrite -C '$TAKYON_REMOTE_ROOT' -xf -"
+    | ssh "${ssh_opts_target[@]}" "$TAKYON_VPS_HOST" "set -euo pipefail
+      incoming=\$(mktemp -d)
+      trap 'rm -rf \"\$incoming\"' EXIT
+      tar -C \"\$incoming\" -xf -
+      rsync -a --force \"\$incoming/.takyon/product-sites/\" '$TAKYON_REMOTE_PRODUCT_SITES/'
+      chown -R takyon:takyon '$TAKYON_REMOTE_PRODUCT_SITES'"
 fi
 
 if [[ "$TAKYON_SYNC_PRODUCT_SOURCE_CACHE" == "1" ]]; then

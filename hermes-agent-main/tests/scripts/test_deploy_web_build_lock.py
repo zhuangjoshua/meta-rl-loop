@@ -640,8 +640,8 @@ def test_all_runtime_deploys_hold_shared_lock_and_consume_artifact():
         "TAKYON_SUBUSER_DEPLOY_PHASE=finalize"
     )
     assert "sub-user deploy never runs migrations" in subuser_source
-    assert 'for host in "${staged_hosts_done[@]+"${staged_hosts_done[@]}"}"; do' in subuser_source
-    assert "tar --overwrite -C '$TAKYON_REMOTE_ROOT' -xf -" in subuser_source
+    assert 'if (( ${#staged_hosts_done[@]} )); then' in subuser_source
+    assert 'rsync -a --force \\"\\$incoming/.takyon/product-sites/\\"' in subuser_source
 
     safebox_source = (ROOT / "deploy/takyon-safebox/deploy-runtime.sh").read_text()
     assert 'TAKYON_RUN_WEB_BUILD="${TAKYON_RUN_WEB_BUILD:-1}"' in safebox_source
