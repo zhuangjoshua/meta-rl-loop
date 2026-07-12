@@ -1922,28 +1922,21 @@ def test_operator_task_receipt_context_can_bind_parent_attempt_across_child_clai
             }
 
 
-def test_bootstrap_completion_grace_requires_full_web_launch_and_never_arms_for_mobile(monkeypatch):
-    state = {"product": True, "x": False}
+def test_bootstrap_completion_grace_requires_final_workflow_and_never_arms_for_landing_or_mobile(monkeypatch):
     monkeypatch.setattr(
         worker,
         "_bootstrap_has_durable_live_product",
-        lambda *_a, **_k: state["product"],
-    )
-    monkeypatch.setattr(
-        worker,
-        "_bootstrap_x_launch_outcome",
-        lambda *_a, **_k: {"status": "published" if state["x"] else "pending"},
+        lambda *_a, **_k: True,
     )
 
     assert worker._bootstrap_ready_for_completion_grace(
         object(), "acme", workflow_requested=True, archetype="web_saas",
         bootstrap_job_id="job-1", bootstrap_attempt=1,
-    ) is False
-    state["x"] = True
-    assert worker._bootstrap_ready_for_completion_grace(
-        object(), "acme", workflow_requested=True, archetype="web_saas",
-        bootstrap_job_id="job-1", bootstrap_attempt=1,
     ) is True
+    assert worker._bootstrap_ready_for_completion_grace(
+        object(), "acme", workflow_requested=False, archetype="web_saas",
+        bootstrap_job_id="job-1", bootstrap_attempt=1,
+    ) is False
     assert worker._bootstrap_ready_for_completion_grace(
         object(), "acme", workflow_requested=True, archetype="mobile_app",
         bootstrap_job_id="job-1", bootstrap_attempt=1,
@@ -2250,9 +2243,8 @@ def test_bootstrap_completed_and_published_job_completes_not_requeued(monkeypatc
     assert result.result["business_slug"] == "acme"
     assert result.actual_cost_cents == 100  # $1.00 → 100c
     assert result.result["bootstrap_completion_status"] == "completed"
-    assert result.result["x_launch_status"] == "published"
-    assert result.result["x_launch_outcome"]["bootstrap_job_id"] == "job-abc-123"
-    assert result.result["x_launch_outcome"]["bootstrap_attempt"] == 1
+    assert "x_launch_status" not in result.result
+    assert "x_launch_outcome" not in result.result
     # Wake schedule was committed and the final "completed" receipt event fired.
     assert captured["store"].commits, "wake-cron schedule should have been committed"
     assert ("completed", "ceo_bootstrap") in captured["events"]
@@ -2286,7 +2278,7 @@ def test_bootstrap_platform_publish_failure_stops_without_requeue_or_human_claim
     assert ("blocked", "ceo_bootstrap") in captured["events"]
 
 
-def test_bootstrap_blocked_x_outcome_stops_immediately_for_human_review(monkeypatch):
+def test_bootstrap_ignores_legacy_x_outcome_and_enables_wake(monkeypatch):
     captured = _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=True,
@@ -2316,31 +2308,22 @@ def test_bootstrap_blocked_x_outcome_stops_immediately_for_human_review(monkeypa
         )
     )
 
-    assert result.result["bootstrap_completion_status"] == "needs_human_review"
-    assert result.result["review_required"] is True
-    assert result.result["x_launch_status"] == "blocked"
-    assert result.result["x_launch_outcome"]["bootstrap_attempt"] == 2
-    assert "Bootstrap stopped for human review" in result.result["final_response"]
-    assert "x channel credits exhausted" in result.result["final_response"]
-    assert result.result["wake"] == {
-        "status": "suppressed",
-        "enabled": False,
-        "reason": "bootstrap_human_review_required",
-        "requested_schedule": "every 6h",
-    }
-    assert captured["store"].commits == []
-    assert ("blocked", "ceo_bootstrap") in captured["events"]
-    assert ("completed", "ceo_bootstrap") not in captured["events"]
+    assert result.result["bootstrap_completion_status"] == "completed"
+    assert "x_launch_status" not in result.result
+    assert captured["store"].commits
+    assert ("completed", "ceo_bootstrap") in captured["events"]
 
 
 def test_bootstrap_published_but_turn_capped_completes_not_requeued(monkeypatch):
-    # Turn hit the iteration cap (turn_completed=False), but both the site and X launch are durably
-    # terminal (installed by the shared fixture). It must complete, not requeue.
+    # A workflow-required turn may be capped after its final action-backed publish; durable product
+    # proof is sufficient and does not depend on X.
     _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
+        goal="Build a proposal SaaS where customers generate and save proposals.",
         surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
     )
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"proposal"})
     job = SimpleNamespace(id="job-abc-456", business_slug="acme", payload={})
 
     result = worker.ceo_bootstrap_handler(job)
@@ -2380,39 +2363,32 @@ def test_bootstrap_incomplete_workflow_continues_in_same_job_and_preserves_ident
     assert "do not restart, rebrand, or redo completed work" in prompts[1]
 
 
-def test_bootstrap_published_product_without_x_continues_same_job(monkeypatch):
+def test_bootstrap_published_workflow_without_x_completes_in_first_turn(monkeypatch):
     prompts: list[str] = []
-    state = {"x": False}
 
     def _turn(**kwargs):
         prompts.append(kwargs["user_prompt"])
-        if len(prompts) == 2:
-            state["x"] = True
         return "continue", 0.10, "exact", False
 
     _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
         run_turn=_turn,
+        goal="Build a proposal SaaS where customers generate, save, revise, and delete proposals.",
         surface_refresh={
             "publish": {"status": "published", "public_url": "https://acme.coscale.app/"}
         },
     )
     monkeypatch.setattr(worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True)
-    monkeypatch.setattr(
-        worker,
-        "_bootstrap_x_launch_outcome",
-        lambda *_a, **_k: {"status": "published" if state["x"] else "pending"},
-    )
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"proposal"})
 
     result = worker.ceo_bootstrap_handler(
-        SimpleNamespace(id="job-needs-x", business_slug="acme", payload={})
+        SimpleNamespace(id="job-no-x", business_slug="acme", payload={})
     )
 
     assert isinstance(result, jobs.JobRunResult)
-    assert len(prompts) == 2
-    assert "exactly one X launch outcome" in prompts[1]
-    assert "do not redo an already-live product" in prompts[1]
+    assert len(prompts) == 1
+    assert "x_launch_status" not in result.result
 
 
 def test_bootstrap_taste_human_review_blocker_stops_without_continuation_or_refresh(monkeypatch):
@@ -2472,7 +2448,7 @@ def test_bootstrap_taste_human_review_blocker_stops_without_continuation_or_refr
     }
 
 
-def test_bootstrap_passes_bounded_runtime_and_full_launch_probe(monkeypatch):
+def test_bootstrap_passes_bounded_runtime_and_final_product_probe(monkeypatch):
     captured_turn: dict[str, Any] = {}
 
     def _bounded_turn(**kwargs):
@@ -2482,10 +2458,12 @@ def test_bootstrap_passes_bounded_runtime_and_full_launch_probe(monkeypatch):
     _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
+        goal="Build a proposal SaaS where customers generate and save proposals.",
         surface_refresh={"publish": {"status": "published", "public_url": "https://acme.coscale.app/"}},
         run_turn=_bounded_turn,
     )
     monkeypatch.setattr(worker, "_bootstrap_has_durable_live_product", lambda *_a, **_k: True)
+    monkeypatch.setattr(worker, "_bootstrap_real_http_actions", lambda *_a, **_k: {"proposal"})
     monkeypatch.setattr(worker, "_bootstrap_has_live_delegated_child", lambda *_a, **_k: True)
 
     result = worker.ceo_bootstrap_handler(

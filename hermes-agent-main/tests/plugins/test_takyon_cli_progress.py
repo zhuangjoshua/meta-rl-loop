@@ -932,7 +932,7 @@ def test_ceo_turn_bounds_absolute_and_post_completion_tails():
         wall_clock_limit=3000.0,
         completion_observed_at=100.0,
         completion_grace_seconds=600.0,
-    ) == "durable bootstrap launch outcome remained complete for 600s grace window"
+    ) == "durable bootstrap product outcome remained complete for 600s grace window"
     assert worker._ceo_turn_bound_reason(
         now=699.0,
         started_at=0.0,
@@ -1682,7 +1682,7 @@ def test_follow_worker_job_live_detach_does_not_claim_bootstrap_done(monkeypatch
 
     output = out.getvalue()
     assert "product site for business:acme is LIVE" in output
-    assert "bootstrap is still running required launch steps" in output
+    assert "bootstrap is still finalizing product state" in output
     assert "not a clean bootstrap completion" in output
     assert "effectively done" not in output
     assert result["site_live_on_detach"] is True
@@ -1937,7 +1937,7 @@ def test_format_cli_value_action_verified_still_requires_full_browser_e2e():
     assert "Create completed" not in rendered
 
 
-def test_format_cli_value_surfaces_attempt_scoped_blocked_x_launch():
+def test_format_cli_value_ignores_legacy_bootstrap_x_fields():
     rendered = cli._format_cli_value(
         {
             "success": True,
@@ -1962,13 +1962,9 @@ def test_format_cli_value_surfaces_attempt_scoped_blocked_x_launch():
         }
     )
 
-    assert "Create product build completed" in rendered
-    assert "X launch is BLOCKED" in rendered
-    assert "x channel credits exhausted" in rendered
-    assert "not a clean bootstrap completion" in rendered
-    assert "Human review is REQUIRED" in rendered
-    assert "job-x-blocked attempt 2" in rendered
-    assert "Create completed" not in rendered
+    assert "Create completed for business:pitchweave0711" in rendered
+    assert "X launch" not in rendered
+    assert "Bootstrap job: job-x-blocked" in rendered
 
 
 def test_format_cli_value_surfaces_platform_publish_stop_without_human_review():
@@ -1992,7 +1988,7 @@ def test_format_cli_value_surfaces_platform_publish_stop_without_human_review():
     assert "HUMAN REVIEW REQUIRED" not in rendered
 
 
-def test_format_cli_value_surfaces_attempt_scoped_published_x_launch():
+def test_format_cli_value_completed_product_does_not_report_x():
     rendered = cli._format_cli_value(
         {
             "success": True,
@@ -2016,7 +2012,7 @@ def test_format_cli_value_surfaces_attempt_scoped_published_x_launch():
     )
 
     assert "Create completed for business:pitchweave0711" in rendered
-    assert "X launch is PUBLISHED" in rendered
+    assert "X launch" not in rendered
     assert "Bootstrap job: job-x-published" in rendered
 
 
@@ -2035,7 +2031,7 @@ def test_format_cli_value_live_detach_is_truthful_about_required_tail():
     )
 
     assert "product site for business:acme is LIVE" in rendered
-    assert "bootstrap is still running required launch steps" in rendered
+    assert "bootstrap is still finalizing product state" in rendered
     assert "not a clean bootstrap completion" in rendered
     assert "effectively done" not in rendered
 

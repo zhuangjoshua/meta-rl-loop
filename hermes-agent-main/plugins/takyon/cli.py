@@ -614,16 +614,6 @@ def _format_cli_value(value: Any) -> str:
             action_execution_status = str(
                 live_action_verification.get("status") or "pending"
             ).strip().lower()
-            x_launch_outcome = (
-                follow_job_result.get("x_launch_outcome")
-                if isinstance(follow_job_result.get("x_launch_outcome"), dict)
-                else {}
-            )
-            x_launch_status = str(
-                follow_job_result.get("x_launch_status")
-                or x_launch_outcome.get("status")
-                or ""
-            ).strip().lower()
             bootstrap_completion_status = str(
                 follow_job_result.get("bootstrap_completion_status") or ""
             ).strip().lower()
@@ -635,20 +625,19 @@ def _format_cli_value(value: Any) -> str:
             published_build = str(follow.get("site_published_build") or "").strip()
             published_suffix = (
                 f" — BUT the product site IS built and published (live build {published_build[:12]});"
-                " only later bootstrap steps may be missing"
+                " only later product verification may be missing"
                 if published_build and status in {"failed", "blocked"}
                 else ""
             )
-            # The follow-tail capped out while the job kept running its required launch tail, but
-            # the product site is already published. State both facts without presenting the live
-            # product milestone as a clean end-to-end bootstrap completion.
+            # The follow-tail capped out while the job kept finalizing product state. State both
+            # facts without presenting an intermediate live milestone as clean E2E completion.
             if follow.get("site_live_on_detach") and status not in {"failed", "blocked"}:
                 live_suffix = f" (live build {published_build[:12]})" if published_build else ""
                 return (
                     f"The product site for business:{slug} is LIVE{live_suffix}{took_suffix}, but "
-                    "the bootstrap is still running required launch steps. This is not a clean "
+                    "the bootstrap is still finalizing product state. This is not a clean "
                     "bootstrap completion. Use /use "
-                    f"{slug} to inspect it, or `takyon logs -f` to watch the required tail."
+                    f"{slug} to inspect it, or `takyon logs -f` to watch completion."
                 )
             if value.get("detached"):
                 return f"Create {status} for business:{slug}. Use /use {slug} to attach."
@@ -673,59 +662,24 @@ def _format_cli_value(value: Any) -> str:
                     f"Create STOPPED for business:{slug}{took_suffix}: PLATFORM PUBLISH BLOCKED — "
                     f"{blocker}. No automatic retry or human-review claim was made.{job_suffix}"
                 )
-            if status == "completed" and (
-                x_launch_status == "blocked"
-                or bootstrap_completion_status == "completed_with_launch_blocker"
-            ):
-                blocker = str(
-                    x_launch_outcome.get("blocker") or "the X launch gate blocked publication"
-                ).strip()
-                attempt = str(x_launch_outcome.get("bootstrap_attempt") or "").strip()
-                attempt_suffix = f" attempt {attempt}" if attempt else ""
-                job_suffix = f" Bootstrap job: {job_id}{attempt_suffix}." if job_id else ""
-                action_suffix = ""
-                review_suffix = (
-                    " Human review is REQUIRED."
-                    if x_launch_outcome.get("review_required")
-                    else ""
-                )
-                if action_execution_required:
-                    action_label = (
-                        "ACTION-VERIFIED"
-                        if action_execution_status == "action_verified"
-                        else "PENDING"
-                    )
-                    action_suffix = (
-                        f" Signed-in live action execution verification is {action_label}; full "
-                        "browser workflow E2E remains REQUIRED."
-                    )
-                return (
-                    f"Create product build completed for business:{slug}{took_suffix}, but the X "
-                    f"launch is BLOCKED: {blocker}. This is not a clean bootstrap completion."
-                    f"{review_suffix}{action_suffix}{job_suffix}"
-                )
             if status == "completed" and action_execution_required:
                 blocker = str(live_action_verification.get("blocker") or "").strip()
                 blocker_suffix = f" Blocker: {blocker}." if blocker else ""
                 job_suffix = f" Bootstrap job: {job_id}." if job_id else ""
-                launch_clause = " X launch is PUBLISHED;" if x_launch_status == "published" else ""
                 action_label = (
                     "ACTION-VERIFIED"
                     if action_execution_status == "action_verified"
                     else "PENDING"
                 )
                 return (
-                    f"Create build completed for business:{slug}{took_suffix};{launch_clause} signed-in live "
+                    f"Create build completed for business:{slug}{took_suffix}; signed-in live "
                     f"action execution verification is {action_label}.{blocker_suffix} Full browser "
                     f"workflow E2E remains REQUIRED (save, exact-ref reopen, revise, copy, export, "
                     f"delete).{job_suffix}"
                 )
-            if status == "completed" and x_launch_status == "published":
+            if status == "completed":
                 job_suffix = f" Bootstrap job: {job_id}." if job_id else ""
-                return (
-                    f"Create completed for business:{slug}{took_suffix}; X launch is PUBLISHED."
-                    f"{job_suffix}"
-                )
+                return f"Create completed for business:{slug}{took_suffix}.{job_suffix}"
             if job_id:
                 return f"Create {status} for business:{slug}{took_suffix}{published_suffix}. Bootstrap job: {job_id}."
             return f"Create {status} for business:{slug}{took_suffix}{published_suffix}."
@@ -2768,9 +2722,8 @@ def _follow_worker_job(
                 )
                 queued_warned = True
             if elapsed > max_seconds:
-                # The follow-tail hit its cap while the required bootstrap launch tail may still
-                # be running after product publication. Check the durable live-build pointer and
-                # state both truths; a live product is not evidence of clean E2E completion.
+                # The follow-tail hit its cap while product finalization may still be running after
+                # an intermediate publication. Check the durable live-build pointer and state both truths.
                 detach_live_build = ""
                 try:
                     with store._connect() as conn:
@@ -2786,9 +2739,9 @@ def _follow_worker_job(
                     detached_live_build = detach_live_build
                     print(
                         f"\n✓ The product site for business:{slug} is LIVE (build "
-                        f"{detach_live_build[:12]}), but the bootstrap is still running required "
-                        "launch steps. This is not a clean bootstrap completion. "
-                        "(`takyon logs -f` to watch the required tail.)",
+                        f"{detach_live_build[:12]}), but the bootstrap is still finalizing product "
+                        "state. This is not a clean bootstrap completion. "
+                        "(`takyon logs -f` to watch completion.)",
                         flush=True,
                     )
                 else:

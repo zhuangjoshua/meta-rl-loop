@@ -66,12 +66,12 @@ _MOBILE_BOOTSTRAP_TURN_TIMEOUT = 1800.0
 # A bootstrap is one bounded launch transaction, not an unbounded background agent session.  The
 # coding workers inside it retain their own tighter per-call ceilings; these bounds cap the outer
 # CEO choreography even while it remains active.  The short completion grace may start only after
-# the whole web launch has a durable outcome (published product plus published/blocked X launch),
-# never at the earlier product-publish milestone; an absolute ceiling catches runs that never reach
-# a terminal launch outcome.
+# the required product has a durable live outcome,
+# never at the earlier landing-only milestone; an absolute ceiling catches runs that never reach
+# a terminal product outcome.
 _DEFAULT_BOOTSTRAP_WALL_TIMEOUT = 3000.0
 _MOBILE_BOOTSTRAP_WALL_TIMEOUT = 3300.0
-_DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE = 600.0
+_DEFAULT_BOOTSTRAP_POST_PUBLISH_GRACE = 60.0
 _BOOTSTRAP_COMPLETION_PROBE_INTERVAL = 15.0
 # Default queue poll cadence when a tick drains nothing. Drain itself is tight (run_one in a loop).
 _DEFAULT_POLL_SECONDS = 15.0
@@ -1199,7 +1199,7 @@ def _ceo_turn_bound_reason(
         and now - completion_observed_at >= completion_grace
     ):
         return (
-            "durable bootstrap launch outcome remained complete for "
+            "durable bootstrap product outcome remained complete for "
             f"{int(completion_grace)}s grace window"
         )
     return ""
@@ -1797,8 +1797,8 @@ def _bootstrap_has_durable_live_product(
 ) -> bool:
     """Whether the required product milestone is durably live.
 
-    This is deliberately not the bootstrap completion predicate: the bootstrap instruction has
-    mandatory research and X-launch phases after product publication.
+    For workflow-required web businesses this is also the early completion predicate because the
+    action gate proves the final product pass published. Landing-only businesses finish naturally.
     """
     try:
         with store._connect() as conn:
@@ -2042,11 +2042,7 @@ def _bootstrap_human_review_blocker(
             SELECT event_type, payload_json
             FROM events
             WHERE business_slug = ?
-              AND event_type IN (
-                'bootstrap.human_review_required',
-                'bootstrap.x_launch.outcome',
-                'business.operator_update'
-              )
+              AND event_type = 'bootstrap.human_review_required'
             ORDER BY created_at DESC
             LIMIT 100
             """,
@@ -2085,49 +2081,14 @@ def _bootstrap_human_review_blocker(
         review_required = bool(payload.get("review_required"))
         blocker = str(payload.get("blocker") or "").strip()
         source = str(payload.get("source") or event_type).strip()
-        if event_type == "bootstrap.x_launch.outcome":
-            review_required = bool(
-                review_required
-                and str(payload.get("status") or "").strip().lower() == "blocked"
-            )
-        elif event_type == "business.operator_update":
-            milestones = payload.get("milestones") if isinstance(payload.get("milestones"), list) else []
-            launch_blocked = next(
-                (
-                    item
-                    for item in milestones
-                    if isinstance(item, Mapping)
-                    and str(item.get("category") or "").strip().upper() == "LAUNCH"
-                    and str(item.get("status") or "").strip().lower() == "blocked"
-                ),
-                None,
-            )
-            review_required = launch_blocked is not None
-            if launch_blocked is not None:
-                blocker = str(
-                    launch_blocked.get("description")
-                    or payload.get("summary")
-                    or "X launch requires human review"
-                ).strip()
-                source = "business.operator_update"
         if review_required:
-            result = {
+            return {
                 "review_required": True,
                 "blocker": blocker or "human review required",
                 "source": source or "runtime",
                 "workspace": str(payload.get("workspace") or "").strip(),
                 "operator_task": dict(operator_task),
             }
-            if event_type == "bootstrap.x_launch.outcome":
-                result["x_launch_outcome"] = {
-                    "status": "blocked",
-                    "blocker": blocker or "X launch requires human review",
-                    "source": source or event_type,
-                    "review_required": True,
-                    "bootstrap_job_id": run_id,
-                    "bootstrap_attempt": event_attempt,
-                }
-            return result
     return {}
 
 
@@ -2199,27 +2160,18 @@ def _bootstrap_ready_for_completion_grace(
 ) -> bool:
     """Whether it is safe for the outer CEO completion grace to begin.
 
-    Web bootstraps are terminal only after both the live product and X launch outcome exist. Mobile
-    bootstraps have the store-signed app phase after X, so they intentionally rely on their absolute
+    Web bootstraps are terminal after the required product is durably live. Mobile bootstraps have
+    the store-signed app phase after the web product, so they intentionally rely on their absolute
     ceiling and natural turn completion rather than arming this earlier web completion probe.
     """
-    if str(archetype or "").strip().lower() == "mobile_app":
+    if str(archetype or "").strip().lower() == "mobile_app" or not workflow_requested:
         return False
     product_complete = _bootstrap_has_durable_live_product(
         store,
         slug,
         workflow_requested=workflow_requested,
     )
-    launch_outcome = _bootstrap_x_launch_outcome(
-        store,
-        slug,
-        bootstrap_job_id=bootstrap_job_id,
-        bootstrap_attempt=bootstrap_attempt,
-    )
-    return product_complete and str(launch_outcome.get("status") or "") in {
-        "published",
-        "blocked",
-    }
+    return product_complete
 
 
 def _bootstrap_delegated_children(
@@ -2770,14 +2722,14 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     )
     user_prompt = str(bootstrap_turn.get("user_prompt") or "")
     system_prompt = str(bootstrap_turn.get("ephemeral_system_prompt") or "")
-    toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "takyon-authority", "web", "skills"])
+    toolsets = list(bootstrap_turn.get("enabled_toolsets") or ["takyon", "takyon-authority", "skills"])
     payload = job.payload or {}
     try:
         max_turns = int(payload.get("max_turns") or _DEFAULT_MAX_TURNS)
     except (TypeError, ValueError):
         max_turns = _DEFAULT_MAX_TURNS
     inactivity_limit = _env_float("TAKYON_WORKER_TURN_TIMEOUT", _DEFAULT_TURN_TIMEOUT)
-    # Mobile bootstrap is a marathon turn — research + landing + logo + X + an iOS app build (a
+    # Mobile bootstrap is a marathon turn — landing + logo + an iOS app build (a
     # 10-20min docker worker) + a store-signed publish. Its long model sub-steps and build waits
     # exceed the 600s default and were FALSE-killing the turn mid-build (sipstreak, 2026-07-09,
     # both attempts). Give it 30min of idle headroom: streaming tokens and the app-build heartbeat
@@ -2995,39 +2947,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         )
                     except Exception:
                         durable_product_complete = False
-                    try:
-                        x_launch_outcome = _bootstrap_x_launch_outcome(
-                            store,
-                            slug,
-                            bootstrap_job_id=bootstrap_job_id,
-                            bootstrap_attempt=bootstrap_attempt,
-                        )
-                    except Exception:
-                        x_launch_outcome = {"status": "pending"}
-                    x_launch_status = str(x_launch_outcome.get("status") or "").strip().lower()
-                    if x_launch_status == "blocked" and bool(
-                        x_launch_outcome.get("review_required")
-                    ):
-                        human_review_blocker = {
-                            "review_required": True,
-                            "blocker": str(
-                                x_launch_outcome.get("blocker")
-                                or "X launch requires human review"
-                            ).strip(),
-                            "source": str(
-                                x_launch_outcome.get("source") or "x_launch"
-                            ).strip(),
-                            "operator_task": {
-                                "task_kind": "ceo_bootstrap",
-                                "run_id": bootstrap_job_id,
-                                "attempt": bootstrap_attempt,
-                            },
-                            "x_launch_outcome": dict(x_launch_outcome),
-                        }
-                        break
                     mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
-                    if durable_product_complete and x_launch_status in {"published", "blocked"} and (
-                        turn_completed or not mobile_bootstrap
+                    if durable_product_complete and (
+                        turn_completed or (workflow_requested and not mobile_bootstrap)
                     ):
                         break
                     if same_job_turn >= _BOOTSTRAP_MAX_SAME_JOB_TURNS:
@@ -3039,13 +2961,12 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                         "the existing product files, surface contract, receipts, actions, and build "
                         "artifacts; do not restart, rebrand, or redo completed work. Resolve the "
                         "current completeness blocker and continue immediately. Complete every "
-                        "remaining phase from the original bootstrap instruction, including the "
-                        "evidence pass and exactly one X launch outcome; do not redo an already-live "
-                        "product. If X is blocked by its credit/provider gate, post the required "
-                        "customer-visible LAUNCH blocked milestone with the exact blocker. Do not "
+                        "remaining product phase from the original bootstrap instruction; do not "
+                        "redo an already-live product. Do not perform research, pulse, X, or distribution "
+                        "work in this bootstrap. Do not "
                         "conclude with a status report or next-step suggestion until the public "
                         "product is published, every requested customer workflow is implemented "
-                        "with real runtime-backed actions, and the launch phase is terminal."
+                        "with real runtime-backed actions."
                     )
     except Exception as exc:
         # Every exceptional parent path—not only inactivity—must cancel and drain its exact queued/
@@ -3156,11 +3077,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 "status": "blocked",
             },
         )
-        blocked_x_outcome = (
-            human_review_blocker.get("x_launch_outcome")
-            if isinstance(human_review_blocker.get("x_launch_outcome"), Mapping)
-            else {}
-        )
         return JobRunResult(
             result={
                 "business_slug": slug,
@@ -3171,10 +3087,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 "review_required": True,
                 "review_blocker": blocker_text,
                 "review_source": str(human_review_blocker.get("source") or "runtime"),
-                "x_launch_status": str(
-                    blocked_x_outcome.get("status") or "pending"
-                ).strip().lower(),
-                "x_launch_outcome": dict(blocked_x_outcome),
                 "wake": wake_result,
             },
             actual_cost_cents=cents,
@@ -3220,9 +3132,8 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
     # whole product and PUBLISHED the site, then a post-turn step raised and run_one requeued it —
     # observed on business "simple": turn ended 04:31:42, requeued 04:31:49 (reason=handler_error,
     # error == the bare job id == JobNotRunning), attempt 2 re-ran the full 287s Docker build and
-    # blocked a fresh business behind it. The done-gate below still trusts canonical product/X
-    # state when this bookkeeping refresh wobbles, but never mistakes product publish alone for the
-    # end of the required launch choreography.
+    # blocked a fresh business behind it. The done-gate below still trusts canonical product state
+    # when this bookkeeping refresh wobbles.
     surface_refresh: dict[str, Any] | None = None
     publish_status = "unknown"
     try:
@@ -3262,10 +3173,9 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             command=command,
         )
 
-    # The done-gate. Product publication is an intermediate bootstrap milestone: research and the X
-    # launch still follow it. A web bootstrap is terminal only when the product requirement and a
-    # durable X outcome both hold. Mobile additionally requires the CEO turn to finish naturally,
-    # because its store-signed app phase follows X and must never be cut off by the web completion
+    # The done-gate. A web bootstrap is terminal when the product requirement holds. Research and
+    # distribution run later on the existing wake rail. Mobile additionally requires the CEO turn
+    # to finish naturally, because its store-signed app phase follows the web product and must not be cut off by the web completion
     # probe. This prevents an interrupted/capped post-product turn from settling as fake "done".
     real_http_actions = _bootstrap_real_http_actions(store, slug) if workflow_requested else set()
     try:
@@ -3276,27 +3186,12 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         )
     except Exception:
         durable_product_complete = False
-    try:
-        x_launch_outcome = _bootstrap_x_launch_outcome(
-            store,
-            slug,
-            bootstrap_job_id=bootstrap_job_id,
-            bootstrap_attempt=bootstrap_attempt,
-        )
-    except Exception as exc:
-        x_launch_outcome = {
-            "status": "pending",
-            "bootstrap_job_id": bootstrap_job_id,
-            "bootstrap_attempt": bootstrap_attempt,
-            "blocker": f"X launch outcome evidence could not be read: {exc}",
-        }
-    x_launch_status = str(x_launch_outcome.get("status") or "pending").strip().lower()
     product_complete = (publish_status == "published" or durable_product_complete) and (
         not workflow_requested or bool(real_http_actions)
     )
     mobile_bootstrap = str(archetype or "").strip().lower() == "mobile_app"
-    bootstrap_done = product_complete and x_launch_status in {"published", "blocked"} and (
-        bool(turn_completed) or not mobile_bootstrap
+    bootstrap_done = product_complete and (
+        bool(turn_completed) or (workflow_requested and not mobile_bootstrap)
     )
     if not bootstrap_done:
         if workflow_requested and publish_status == "published" and not real_http_actions:
@@ -3304,36 +3199,20 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                 f"bootstrap for business:{slug} published the access shell but never materialized "
                 "a real /app workflow action"
             )
-        if product_complete and x_launch_status not in {"published", "blocked"}:
-            raise RuntimeError(
-                f"bootstrap for business:{slug} published its product but never completed or "
-                f"explicitly blocked the mandatory X launch phase in bootstrap job "
-                f"{bootstrap_job_id} attempt {bootstrap_attempt}"
-            )
         if product_complete and mobile_bootstrap and not turn_completed:
             raise RuntimeError(
-                f"bootstrap for business:{slug} stopped before its mobile launch phases completed"
+                f"bootstrap for business:{slug} stopped before its mobile release phase completed"
+            )
+        if product_complete and not turn_completed:
+            raise RuntimeError(
+                f"bootstrap for business:{slug} stopped before its final product pass completed"
             )
         raise RuntimeError(
             f"bootstrap for business:{slug} exhausted its iteration budget before publishing "
             f"(surface status={publish_status})"
         )
 
-    launch_blocked = x_launch_status == "blocked"
-    launch_blocker = str(
-        x_launch_outcome.get("blocker") or "the X launch gate blocked publication"
-    ).strip()
-    launch_review_required = bool(x_launch_outcome.get("review_required"))
-    bootstrap_completion_status = (
-        "completed_with_launch_blocker" if launch_blocked else "completed"
-    )
-    if launch_blocked:
-        final_response = (
-            final_response.rstrip()
-            + ("\n\n" if final_response.strip() else "")
-            + f"X launch blocked for this bootstrap attempt: {launch_blocker}."
-            + (" Human review is required." if launch_review_required else "")
-        )
+    bootstrap_completion_status = "completed"
 
     live_action_verification: dict[str, Any] = {
         "action_execution_required": False,
@@ -3377,31 +3256,7 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         )
 
     wake_result: dict[str, object] | None = None
-    if schedule and launch_blocked and launch_review_required:
-        # A human-review launch blocker is terminal for automation, not a reason to arm a cron
-        # loop that will repeatedly hit the same authority gate. Keep the requested schedule in
-        # the job result for operator visibility, but do not create/enable a wake schedule.
-        wake_result = {
-            "status": "suppressed",
-            "enabled": False,
-            "reason": "launch_human_review_required",
-            "requested_schedule": schedule,
-        }
-        _record_runtime_event(
-            slug,
-            kind="ceo_bootstrap",
-            status="output",
-            detail=(
-                "wake schedule suppressed: X launch blocker requires human review before "
-                "automation can continue"
-            ),
-            line=(
-                "wake schedule suppressed: X launch blocker requires human review before "
-                "automation can continue"
-            ),
-            command=command,
-        )
-    elif schedule:
+    if schedule:
         try:
             wake_result = store.commit(
                 scope=f"business:{slug}",
@@ -3457,12 +3312,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
         )
     )
     runtime_completion_status = "completed"
-    if launch_blocked:
-        runtime_completion_status = "blocked"
-        completion_detail = (
-            "CEO bootstrap product work completed, but the X launch is blocked for this exact "
-            f"attempt: {launch_blocker}"
-        )
     _record_runtime_event(
         slug,
         kind="ceo_bootstrap",
@@ -3485,8 +3334,6 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
             "cost_status": cost_status,
             "surface_refresh": surface_refresh,
             "bootstrap_completion_status": bootstrap_completion_status,
-            "x_launch_status": x_launch_status,
-            "x_launch_outcome": x_launch_outcome,
             "live_action_execution_status": live_action_execution_status,
             "live_action_execution_verification": live_action_verification,
             "wake": wake_result,

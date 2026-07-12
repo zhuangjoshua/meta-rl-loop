@@ -120,10 +120,11 @@ def test_bootstrap_prompt_trusts_authoritative_product_result_and_stops_on_block
     )
 
     # The contract, not the sentence: the CEO must trust the tool's exact result, stop on a real
-    # blocker, and never proceed to X as if a blocked build had completed.
+    # blocker, and never continue post-product work after a blocked build.
     assert "trusting only its exact success/blocker and surface_refresh publish status" in prompt
     assert "record that exact blocker in research/strategy.md and stop bootstrap there" in prompt
-    assert "do not continue to X as if the product build completed." in prompt
+    assert "Do not paraphrase a different platform diagnosis." in prompt
+    assert "publish to X" in prompt
     assert "Do not inspect the worker result." not in prompt
     assert "If something is blocked, record the blocker in research/strategy.md and continue with the next step." not in prompt
 
@@ -138,7 +139,7 @@ def test_bootstrap_prompt_passes_explicit_search_console_site_url():
 
     assert 'Call business_register_search_console with the business, site_url "https://roomviewer-2.coscale.app/"' in prompt
     assert "Do not rely on inferred public_url here." in prompt
-    assert '- Call business_seo_add_property with site_url "https://roomviewer-2.coscale.app/"' in prompt
+    assert "business_seo_add_property" not in prompt
 
 
 def test_bootstrap_turn_config_uses_expanded_shared_turn_budget():

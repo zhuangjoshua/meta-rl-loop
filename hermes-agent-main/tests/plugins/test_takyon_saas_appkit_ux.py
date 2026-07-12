@@ -118,7 +118,9 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
     assert "route graph and required public/auth behavior are immutable" in prompt
     assert "business_generate_site_image" in prompt
     assert "Persist every created/generated customer artifact" in prompt
-    assert "Upgrade landing proof from the verified research" in prompt
+    assert "Upgrade landing proof from the verified research" not in prompt
+    assert "### 4. X post" not in prompt
+    assert "scheduled CEO wake rail" in prompt
 
 
 def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
@@ -142,9 +144,7 @@ def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
     assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product_pass
     assert "intentionally separate from the Taste landing's medium/60/900 bounds" in product_pass
 
-    proof_pass = prompt.split("#### 3a. Upgrade landing proof", 1)[1].split("### 4. X post", 1)[0]
-    assert "guidance_skills: []" in proof_pass
-    assert "do not rerun Taste" in proof_pass
+    assert "#### 3a. Upgrade landing proof" not in prompt
 
 
 def test_bootstrap_keeps_named_cancellation_policy_out_of_worker_authored_copy():

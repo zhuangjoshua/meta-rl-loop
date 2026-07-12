@@ -21672,6 +21672,7 @@ class TakyonStore:
             "This is a scheduled or manually triggered CEO wake, not the initial /create bootstrap turn.\n"
             "Start with business_calculate_pulse to see what changed: usage, revenue, unresolved inbound, queued jobs, blockers, and recent activity. "
             "Then read research/strategy.md before choosing the next move. If new evidence changes the business thesis, ICP, offer, pricing, channel, or X angle, update research/strategy.md before continuing. "
+            "On the first wake after /create, if research/strategy.md is still marked as an idea-only landing brief, use takyon-market-research to deepen it with real evidence before any top-level X post. "
             "Use takyon-business-metrics to write metrics/summary.md and record a business.pulse.snapshot event. Use concrete business_* tools to read state, update research and metrics files, "
             "create workspaces, enqueue jobs, and adjust the next wakeup if useful. From the evidence, decide the 1-2 highest "
             "expected-impact moves under the business goal, budget, evidence, active campaigns, failures, and kill switches; "
@@ -28089,6 +28090,20 @@ def _handle_live_business_x_publish_outreach(args: dict) -> str:
     try:
         store = _store()
         business = _resolved_business_slug(args, required=True)
+        if _active_operator_task_kind() == "ceo_bootstrap":
+            return tool_result(
+                {
+                    "success": False,
+                    "action": "business_x_publish_outreach",
+                    "business": business,
+                    "status": "not_allowed_in_bootstrap",
+                    "external_side_effects": "none",
+                    "note": (
+                        "X publication is not part of /create. The existing scheduled CEO wake "
+                        "owns research and distribution after the product is live."
+                    ),
+                }
+            )
         operator_task = _active_operator_task_receipt_context()
         # Launch-post dedupe: a ceo_bootstrap turn publishes EXACTLY ONE launch X post. A
         # re-enqueued bootstrap (retry after a crash, or a spill to the fallback worker) would

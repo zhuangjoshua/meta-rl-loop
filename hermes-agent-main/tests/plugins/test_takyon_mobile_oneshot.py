@@ -42,17 +42,15 @@ def test_bootstrap_instruction_web_prose_unchanged_without_archetype():
     assert "takyon-mobile-app" not in base
 
 
-def test_bootstrap_instruction_mobile_gains_step_5():
+def test_bootstrap_instruction_mobile_gains_step_3_without_x():
     mobile = _business_bootstrap_instruction(
         "acme", "goal", "live", business_name="Acme", archetype="mobile_app"
     )
-    assert "### 5. iOS app build + first store-signed build" in mobile
-    assert "takyon-mobile-app at step 5" in mobile
+    assert "### 3. iOS app build + first store-signed build" in mobile
+    assert "takyon-mobile-app at step 3" in mobile
     assert "business_publish_mobile_release with lane preview" in mobile
     assert "FRESH idempotency_key" in mobile
-    # The web steps stay intact ahead of it.
-    assert "### 4. X post" in mobile
-    assert mobile.index("### 4. X post") < mobile.index("### 5. iOS app")
+    assert "### 4. X post" not in mobile
 
 
 # ── host-independent builder lane ─────────────────────────────────────────────────────────
@@ -228,7 +226,7 @@ def test_mobile_release_audience_registered_on_both_halves():
 # ── X launch-post dedupe across re-enqueued bootstraps ────────────────────────────────────
 
 
-def test_x_launch_post_deduped_on_bootstrap_when_receipt_exists(monkeypatch, tmp_path):
+def test_x_launch_post_is_refused_during_bootstrap_before_receipt_lookup(monkeypatch, tmp_path):
     import json as _json
     from plugins.takyon import core
 
@@ -268,9 +266,10 @@ def test_x_launch_post_deduped_on_bootstrap_when_receipt_exists(monkeypatch, tmp
         }],
     )
     out = _json.loads(core._handle_live_business_x_publish_outreach({"business": "acme", "channel": "x", "provider": "x", "body": "hi"}))
-    assert out["success"] is True and out["deduped"] is True
-    assert out["post_id"] == "111"
-    assert commits[0]["operations"][0]["event_type"] == "bootstrap.x_launch.outcome"
+    assert out["success"] is False
+    assert out["status"] == "not_allowed_in_bootstrap"
+    assert out["external_side_effects"] == "none"
+    assert commits == []
 
 
 @pytest.mark.parametrize(
@@ -330,12 +329,9 @@ def test_x_launch_post_refuses_stale_business_wide_receipt(
     )
 
     assert out["success"] is False
-    assert out["blocked"] is True
-    assert out["review_required"] is True
-    assert out["status"] == "blocked_stale_x_receipt_scope"
-    assert owner_text in out["error"]
-    assert "new-job" in out["error"]
-    assert commits[0]["operations"][0]["event_type"] == "bootstrap.x_launch.outcome"
+    assert out["status"] == "not_allowed_in_bootstrap"
+    assert out["external_side_effects"] == "none"
+    assert commits == []
 
 
 def test_x_launch_post_not_deduped_on_wake(monkeypatch):
@@ -438,7 +434,7 @@ def test_x_publish_metadata_accepts_only_runtime_owned_operator_task(monkeypatch
     }
 
 
-def test_x_creative_credit_blocker_requires_human_review_on_real_branch(monkeypatch):
+def test_x_bootstrap_refusal_precedes_creative_credit_gate(monkeypatch):
     import contextlib
     import json as _json
     from plugins.takyon import core
@@ -493,9 +489,6 @@ def test_x_creative_credit_blocker_requires_human_review_on_real_branch(monkeypa
     )
 
     assert result["success"] is False
-    assert result["blocked"] is True
-    assert result["review_required"] is True
-    assert recorded["status"] == "blocked"
-    assert recorded["source"] == "creative_credit_preflight"
-    assert recorded["review_required"] is True
-    assert recorded["operator_task"] == runtime_context
+    assert result["status"] == "not_allowed_in_bootstrap"
+    assert result["external_side_effects"] == "none"
+    assert recorded == {}

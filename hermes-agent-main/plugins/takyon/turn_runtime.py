@@ -187,8 +187,7 @@ def _business_bootstrap_instruction(
     goal_text = goal or "Use current business state and evidence to define the business goal."
     workflow_requested = _bootstrap_goal_requests_product_workflow(goal_text)
     effective_mode = "live" if str(active_mode or "").strip().lower() != "live" else "live"
-    # Archetype-aware bootstrap: web steps run unchanged (byte-identical prose for web_saas); a
-    # mobile_app business gains step 5 — the iOS app build + first store-signed TestFlight-lane
+    # Archetype-aware bootstrap: a mobile_app business gains step 3 — the iOS app build + first store-signed TestFlight-lane
     # release, routed through the takyon-mobile-app skill.
     mobile_app = str(archetype or "").strip().lower() == "mobile_app"
     lines = [
@@ -200,12 +199,12 @@ def _business_bootstrap_instruction(
         *(
             [
                 "MANDATORY FOR THIS BUSINESS: it is a mobile_app (iOS) business. Its PRIMARY deliverable "
-                "is a real, store-signed iOS app, not the website. You MUST run every step through step 5 "
+                "is a real, store-signed iOS app, not the website. You MUST run every step through step 3 "
                 "(the iOS app build + first store-signed build) and you MUST NOT declare the bootstrap "
                 "complete after only the landing/website. Publishing the landing is an early milestone, "
-                "NOT the finish line. The only acceptable end states are: (a) step 5 produced a real "
-                "build_id, or (b) step 5 hit a concrete, recorded blocker (compliance gate, credits, "
-                "eas_builder_unconfigured) after a genuine attempt. Concluding without reaching step 5 is a "
+                "NOT the finish line. The only acceptable end states are: (a) step 3 produced a real "
+                "build_id, or (b) step 3 hit a concrete, recorded blocker (compliance gate, credits, "
+                "eas_builder_unconfigured) after a genuine attempt. Concluding without reaching step 3 is a "
                 "failed bootstrap.",
                 "",
             ]
@@ -225,15 +224,16 @@ def _business_bootstrap_instruction(
         "- Do NOT call skills_list.",
         (
             "- Load a skill only at the step that uses it, with one skill_view right before use: "
-            "takyon-brand-logo at 2b, takyon-market-research at step 3, takyon-x at step 4"
-            + (", takyon-mobile-app at step 5" if mobile_app else "")
-            + ". Do not preload skills up front, do not load takyon-distribution during bootstrap, "
+            "takyon-brand-logo at 2b"
+            + (", takyon-mobile-app at step 3" if mobile_app else "")
+            + ". Do not preload skills up front; do not load takyon-market-research, takyon-x, or "
+            "takyon-distribution during bootstrap, "
             "and do not load any other skill."
         ),
         "- After completing each step, move to the next immediately.",
         "- Treat the canonical business name above as the owner/account name. If it is an internal slug (digits, test suffixes, or machine separators), choose ONE short human product display name in step 1 from the idea, record it in the surface contract, and use it consistently. Never expose or title-case the routing slug as public branding. Do not invent a second competing brand.",
-        "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (researching the market, designing the product, putting the site online, drafting the launch post) — never the runtime plumbing.",
-        "- Curated update channel: the customer sees ONLY the curated update you post with business_post_operator_update, never your raw assistant reasoning. Keep ALL planning, deliberation, tool choreography, and chain-of-thought internal. At the very start of this turn, call business_post_operator_update with a warm headline, a 1-2 sentence summary, and a milestones plan covering the steps below — e.g. {title: \"Research the market\", category: RESEARCH, status: running}, {title: \"Design and build the product site\", category: PRODUCT, status: queued}, {title: \"Put the launch post out\", category: LAUNCH, status: queued}. Re-post the update (flipping each milestone's status) as you complete research, then the product build, then the X post, and when anything blocks. The milestones become the customer's Tasks cards; do not narrate low-level tool calls yourself.",
+        "- Consumer voice: this bootstrap turn is shown live to the customer on the build screen and product chat. Write every visible sentence as a warm, high-level, business-focused update describing the BUSINESS work (defining the offer, designing the product, and putting it online) — never the runtime plumbing.",
+        "- Curated update channel: the customer sees ONLY the curated update you post with business_post_operator_update, never your raw assistant reasoning. Keep ALL planning, deliberation, tool choreography, and chain-of-thought internal. At the very start of this turn, call business_post_operator_update with a warm headline, a 1-2 sentence summary, and a milestones plan covering the steps below — e.g. {title: \"Define the offer\", category: RESEARCH, status: running}, {title: \"Design and build the product\", category: PRODUCT, status: queued}. Re-post the update (flipping each milestone's status) as you complete the brief, the product build, and when anything blocks. The milestones become the customer's Tasks cards; do not narrate low-level tool calls yourself.",
         "- Never surface raw internal platform/tool/runtime strings in the visible reply. Do not quote TAKYON_* flags, docker path diagnostics, workspace-mode errors, or similar internals; summarize blockers in normal operator language instead.",
         "- Forbidden in any customer-visible sentence: \"bootstrap\", \"site worker\", \"scaffold\"/\"scaffolding\", \"upsert\"/\"upserted\", \"provision\"/\"provisioned\", \"app account\", \"workspace exists\"/\"workspace ready\" (say \"your company space\" instead), \"runtime\", \"surface contract\", \"app shell\", \"kit\", any tool name (business_upsert_*, business_claude_agent_task, etc.), and verbatim tool/web-access limitations like \"publicly cached\".",
         "- If a web or tool capability is limited, say it plainly to the customer, e.g. \"I'm working from the sources I can reach right now\", without naming the mechanism.",
@@ -243,12 +243,12 @@ def _business_bootstrap_instruction(
         "",
         "### 1. Minimal landing brief (from the idea alone — NO web research yet)",
         "Goal: get the customer a real, branded landing page live FAST. Derive the landing brief from the BUSINESS IDEA ALONE. The complete pinned Taste implementation skill owns the first public landing from Design Read through implementation and preflight in one continuous worker call — do NOT do any web research before the first landing publishes.",
-        "Do NOT load takyon-market-research in this step, and do NOT call web_search, web_extract, web_tools, business_web_search, Tavily, or any other live-evidence/market-research tool before the 2a landing pass. That web-extract pass is the slowest part of bootstrap and would delay the customer's first paint by minutes; it is deferred entirely to step 3 (after the landing is live).",
-        "From the idea (and the canonical business name and goal above), reason out and pin down: ONE short human product display name (never the routing slug), a one-line tagline, the core value proposition, who the customer is (ICP / audience), the core problem the product solves, the offer, the brand tone, and one launch angle. This is straightforward derivation from the idea, not research — no sources are required for a truthful, branded landing.",
+        "Do NOT load takyon-market-research in this step, and do NOT call web_search, web_extract, web_tools, business_web_search, Tavily, or any other live-evidence/market-research tool during bootstrap. Research and distribution run later through the existing scheduled CEO wake rail.",
+        "From the idea (and the canonical business name and goal above), reason out and pin down: ONE short human product display name (never the routing slug), a one-line tagline, the core value proposition, who the customer is (ICP / audience), the core problem the product solves, the offer, the brand tone, and one positioning angle. This is straightforward derivation from the idea, not research — no sources are required for a truthful, branded landing.",
         "If the goal names subscription cancellation timing or refund policy, treat those as AppKit/backend constraints only. Do not turn them into strategy, landing, pricing, or profile copy; the canonical account control may describe them only from the typed backend policy or the exact cancellation action result.",
-        "Write that into research/strategy.md as the initial landing brief. Mark it as the idea-only fast pass; you will deepen and source-back it in step 3 after the landing is live.",
-        "Keep the landing TRUTHFUL: a landing built from the idea alone is fine, but do NOT fabricate statistics, customer counts, testimonials, named partners, awards, or evidence-backed claims you have not verified. Stick to the product's own value proposition and offer. Deeper, source-backed claims come later in step 3 and the X post.",
-        "Stop as soon as you have enough of the brief for truthful, branded landing copy, then move straight to step 2. The deeper market/X research is deferred to step 3 so it overlaps the rest of bootstrap instead of blocking the first landing publish.",
+        "Write that into research/strategy.md as the idea-only landing brief. A later scheduled CEO wake may deepen and source-back it.",
+        "Keep the landing TRUTHFUL: a landing built from the idea alone is fine, but do NOT fabricate statistics, customer counts, testimonials, named partners, awards, or evidence-backed claims you have not verified. Stick to the product's own value proposition and offer.",
+        "Stop as soon as you have enough of the brief for truthful, branded landing copy, then move straight to step 2.",
         "",
         "### 2. Product surface + landing build (publish the landing FIRST)",
         "Call business_upsert_app_surface_contract with:",
@@ -261,7 +261,7 @@ def _business_bootstrap_instruction(
         "This seeds the COMPLETE app kit up front (landing, the /app access shell, the /app/profile account page, support, and the shared auth/checkout/account rails). The two build passes below only change WHEN each screen is customized and published; they never change the final fileset. The end state must be the same complete app kit as a single-pass build.",
         "",
         "If the app shell is monthly paid, call business_upsert_app_plan for the canonical `monthly` plan before the site worker runs so the existing checkout rail has a real plan object to use.",
-        "- Use the researched monthly price when it is already known.",
+        "- Use an explicitly requested monthly price when one is already known.",
         "- Set `included_ai_budget_microusd` together with `price_cents`.",
         "- If pricing is not settled yet, keep the canonical starter monthly plan instead of leaving checkout planless.",
         "",
@@ -291,7 +291,7 @@ def _business_bootstrap_instruction(
         "",
         "This 2a pass with `refresh_surface: true` PUBLISHES AND SERVES the landing immediately on its own: the worker's `surface_refresh.publish.status` should come back `published` and the live site at the customer host serves the new landing right away, with the still-seeded real `/app` access shell shipping behind sign-in until 2b refines it. The landing does NOT wait for 2b to be served — confirm `surface_refresh.publish.status == \"published\"` and a real `public_url` in this pass's structured result before continuing.",
         "",
-        "Inspect the structured result from this first business_claude_agent_task. Trust only its exact success/blocker and surface_refresh publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, the rest of the app kit, or X.",
+        "Inspect the structured result from this first business_claude_agent_task. Trust only its exact success/blocker and surface_refresh publish status. If the landing build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there; do not continue to Search Console, the logo, or the rest of the app kit.",
         "A `detached: true` result (status `queued` or `running`, with a re-attach note) is NOT a blocker and NOT a failure — the build is simply still running on the worker plane. Do NOT record it as a blocker and do NOT stop the bootstrap. Re-call business_claude_agent_task with the SAME workspace, instruction, and idempotency_key to re-attach and collect the published result; repeat until it returns either `surface_refresh.publish.status == \"published\"` (continue) or a real blocker (then stop). Only an explicit blocker/error stops the landing.",
         "",
         "#### 2a.1. Register Search Console (immediately after the landing publishes)",
@@ -302,7 +302,7 @@ def _business_bootstrap_instruction(
         "#### 2b. Add the real logo, then finish the /app access shell + profile",
         "Once the landing page has published in 2a:",
         "",
-        "First — BEFORE the X launch (step 4) and BEFORE any other creative-credit spend (ads, UGC) — generate the real brand logo. This step is REQUIRED: do NOT skip it, do NOT defer it past the X launch, and do NOT spend a creative credit on anything else until the logo is generated. The fresh business's starter creative credits are reserved for the logo first; the X launch and any ad/UGC creative come only AFTER the logo is generated (or it returns an explicit blocker), so the logo can never be starved of credits. Load takyon-brand-logo (skill_view) and follow its procedure: assemble `business_context` ({name, category, tone}) from the research you wrote in research/strategy.md (do not invent brand voice), then call business_generate_logo with the business, a fresh idempotency_key, that business_context, and `republish: false`. The tool publishes /brand-logo.png plus a real PNG favicon into the workspace and live asset path; `republish: false` skips the tool's own chained site rebuild because the 2b app-shell build below publishes the whole site minutes later and carries the favicon/header forward — one publish instead of two. business_generate_logo is live-only and creative-credit gated: ONLY if it returns an explicit insufficient-credits or unconfigured-provider blocker do you record that exact blocker in research/strategy.md, leave the seeded monogram placeholder, and continue with the rest of 2b — in every other case you MUST generate the logo here before proceeding. Do not fabricate a logo and do not stop the whole build for it.",
+        "First — BEFORE any other creative-credit spend (ads, UGC) — generate the real brand logo. This step is REQUIRED: do NOT spend a creative credit on anything else until the logo is generated. The fresh business's starter creative credits are reserved for the logo first. Load takyon-brand-logo (skill_view) and follow its procedure: assemble `business_context` ({name, category, tone}) from the research you wrote in research/strategy.md (do not invent brand voice), then call business_generate_logo with the business, a fresh idempotency_key, that business_context, and `republish: false`. The tool publishes /brand-logo.png plus a real PNG favicon into the workspace and live asset path; `republish: false` skips the tool's own chained site rebuild because the 2b app-shell build below publishes the whole site minutes later and carries the favicon/header forward — one publish instead of two. business_generate_logo is live-only and creative-credit gated: ONLY if it returns an explicit insufficient-credits or unconfigured-provider blocker do you record that exact blocker in research/strategy.md, leave the seeded monogram placeholder, and continue with the rest of 2b — in every other case you MUST generate the logo here before proceeding. Do not fabricate a logo and do not stop the whole build for it.",
         "",
         "Then finish the access shell and account page in a SECOND business_claude_agent_task with:",
         "- If `Explicit product workflow requested: yes`, immediately BEFORE this second task call business_upsert_app_surface_contract again with the same display_name, source_path, runtime_features, and routes, plus workflow_completion_required: true. This flips the canonical publish gate from landing-first mode to final-workflow mode: a compiling unchanged starter or missing action/records/generate wiring must not publish. Do not set this flag during 2a because the intentional landing-first milestone precedes the workflow build.",
@@ -335,7 +335,7 @@ def _business_bootstrap_instruction(
         "",
         "For /:",
         "- Write ICP-specific copy immediately.",
-        "- The hero, problem, features, pricing, and CTA must reflect the researched customer and pain.",
+        "- The hero, problem, features, pricing, and CTA must reflect the idea brief's customer and pain.",
         "- The landing page should be bold, visually opinionated, and unmistakably product-specific from the first pass, not timid, generic, or scaffold-like.",
         "",
         "For /app:",
@@ -360,10 +360,10 @@ def _business_bootstrap_instruction(
         "- The result should be publishable and product-specific on the first pass.",
         "- Always pass `refresh_surface: true`.",
         "- If `Explicit product workflow requested: no`, also pass `max_turns: 30`, `effort: low`, and `timeout_ms: 600000` — this pass restyles the two seeded access/account screens on EXISTING rails (no new architecture, no new routes), so the tight budget is sufficient and materially faster. Any internal recovery remains inside this call's one absolute deadline and must not create an overlapping worker.",
-        "- Do NOT pass `wait_ms` — run this build to completion here. (Measured live: the fired/deferred build pays a full workspace re-materialize + cold sandbox start + a separate publish pass, costing far more than the research/X overlap saves.)",
+        "- Do NOT pass `wait_ms` — run this build to completion here. A fired/deferred build pays a full workspace re-materialize + cold sandbox start + a separate publish pass.",
         "- If `Explicit product workflow requested: yes`, this SAME second pass owns the real workflow build, so also pass `effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`. These are the established product-workflow limits and are intentionally separate from the Taste landing's medium/60/900 bounds. For `model`: PASS NOTHING — the deployment-pinned coding-worker model must remain unchanged for the whole run.",
         "",
-        "Inspect the structured result from business_claude_agent_task, trusting only its exact success/blocker and surface_refresh publish status. If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there. Do not paraphrase a different platform diagnosis and do not continue to X as if the product build completed. A `detached: true` result is NOT a blocker — re-call with the SAME arguments and idempotency_key only to observe and collect this same durable call; it must not create another attempt.",
+        "Inspect the structured result from business_claude_agent_task, trusting only its exact success/blocker and surface_refresh publish status. If the product build or publish is blocked, record that exact blocker in research/strategy.md and stop bootstrap there. Do not paraphrase a different platform diagnosis. A `detached: true` result is NOT a blocker — re-call with the SAME arguments and idempotency_key only to observe and collect this same durable call; it must not create another attempt.",
         "",
         "#### 2c. Workflow verification gate, when explicitly requested",
         "If `Explicit product workflow requested: no`, skip this step.",
@@ -371,29 +371,13 @@ def _business_bootstrap_instruction(
         "Use the business goal as the source of truth for the customer workflow. Example shape: a signed-in subscribed customer enters the requested input, triggers a real product action, and receives the requested AI output.",
         "Verify that `/app` is wired to at least one real non-underscore HTTP action file under `product/site/actions/`, and that the named action exists as customer-facing UI code rather than as an orphan backend file.",
         "Do NOT call business_invoke_app_action during ceo_bootstrap; app action execution requires a real signed-in subscribed product-user session and is verified immediately after bootstrap completes.",
-        "If the action file is missing, schedule-only, placeholder-only, or the UI never calls it, record the exact blocker in research/strategy.md and stop bootstrap there. Do not proceed to X or final completion with a published access shell and no real workflow.",
+        "If the action file is missing, schedule-only, placeholder-only, or the UI never calls it, record the exact blocker in research/strategy.md and stop bootstrap there. Do not declare final completion with a published access shell and no real workflow.",
         "",
-        "Once the product site is published, register its public URL with the operator's Search Console service account so the new site is owned and trackable from day one:",
-        f"- Call business_seo_add_property with site_url \"{_bootstrap_public_site_url(slug)}\".",
-        "- This is internal plumbing: never mention search console, indexing, ownership, or the tool name in any customer-visible sentence, and do not give it its own milestone card.",
-        "- If it is blocked (the Search Console service-account secret is not configured in Safebox, or the URL is not under an owner-verified parent property), record the exact blocker in research/strategy.md and continue the remaining steps; do not fake success and do not abort bootstrap for it.",
-        "",
-        "### 3. Deepen research with real evidence (now the landing is live)",
-        "The landing is already published and registered, so the heavier market/X research no longer blocks the customer seeing their site. This is the FIRST web-evidence pass of the whole bootstrap — none ran before the landing. Load takyon-market-research (skill_view) and run its FULL procedure now, including the live web_search + web_extract evidence gathering it requires, to deepen research/strategy.md beyond the idea-only landing brief from step 1: expand the customer/problem evidence with sourced findings, validate the offer and pricing, and lock the X angle.",
-        "Update research/strategy.md in place; this deeper pass informs the X post in step 4 and the later in-app workflow. Keep all claims truthful and evidence-backed; stop once the X claims are sound.",
-        "",
-        "#### 3a. Upgrade landing proof from the verified research",
-        "After the evidence pass, run one focused business_claude_agent_task on workspace product/site with refresh_surface: true, guidance_skills: [], max_turns: 18, effort: low, timeout_ms: 480000, and no model override. This is a bounded evidence-copy correction, not a redesign: do not rerun Taste, reinterpret the Design Read, change `src/tokens.css`, or start a new design cycle. Edit only `src/screens/landing.tsx`; preserve `PublicSiteHeader`, the established composition, product visuals, tokens, app screens, actions, and all runtime rails. Replace the proof section's idea-stage copy with the strongest relevant quantified outcome benchmark or problem statistic that is actually sourced in research/strategy.md, and make its source/context visible enough that the claim is not presented as this new business's own customer result. If research found no defensible quantified claim, strengthen the section with verified qualitative evidence and explicitly avoid inventing a number. Keep Log in and Sign up as the landing actions; do not add price-first Subscribe/Open app CTAs. Re-call with the same idempotency key while detached; stop bootstrap on a real build/publish blocker.",
-        "",
-        "### 4. X post",
-        "Load takyon-x (skill_view) and execute its procedure to draft and publish EXACTLY ONE X post about this business — a single launch post, not a thread. Do not publish additional posts or thread replies during bootstrap; follow-up posts belong to later scheduled wakes with real traction evidence.",
-        "Use research findings to make the post truthful and compelling. The post links the already-live landing page; do not claim in-app features or polish that may still be building.",
-        "Before any live X publish or paid creative/ad action, call business_read_channel_credit_budgets. If the required bucket cannot cover the action cost, record that exact blocker in research/strategy.md and stop before enqueueing or launching the spendful step.",
-        "For broader distribution-thread execution, load takyon-distribution.",
+        "Bootstrap ends once the complete required product is durably published (and the mobile release step below is terminal for mobile businesses). Do not perform deep market research, revise the published landing from later research, publish to X, run pulse work, or start distribution here. Those are bounded tasks for the existing scheduled CEO wake rail after /create completes.",
         *(
             [
                 "",
-                "### 5. iOS app build + first store-signed build (this business is archetype mobile_app)",
+                "### 3. iOS app build + first store-signed build (this business is archetype mobile_app)",
                 "This business's deliverable includes a REAL iOS app, not only the web surface. Load takyon-mobile-app (skill_view) right before this step and follow its Procedure.",
                 "Build the app source first: call business_claude_agent_task with workspace product/app. The platform seeds the pinned Expo scaffold into that workspace automatically and injects the mobile worker contract + build gates by code — instruct the worker to turn the seeded scaffold into this business's real app (screens, flows, copy, theme) from research/strategy.md and the offer, and to finish only on its injected green gates (npm ci + tsc + expo config).",
                 "Then cut the first store-signed build: call business_publish_mobile_release with lane preview and a FRESH idempotency_key. The result's build_id + logs_url are the receipt; record them in metrics/ and reflect the milestone in the curated operator update.",
@@ -407,21 +391,20 @@ def _business_bootstrap_instruction(
         "## Constraints",
         "Never fake auth, sessions, users, entitlements, checkout, subscriptions, outreach sends, deploys, revenue, metrics, or provider results.",
         "If a product feature is not wired to Hermes/Takyon rails, keep the customer surface normal and unavailable.",
-        "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked. If the operator explicitly asked for one, build and verify it in step 2c before launch/distribution.",
+        "Do not invent product workflow, extra tabs, or speculative routes unless the operator explicitly asked. If the operator explicitly asked for one, build and verify it in step 2c before completion.",
         "Missing credentials, budget authority, or provider gates are blockers; hard-fail instead of creating fake receipts.",
         "If any business_* tool says the business does not exist, stop immediately and report a platform provisioning failure.",
         "Do not retry business_write_file, and do not call business_create_workspace to paper over a missing business row.",
-        "If a later non-product step is blocked, record the exact blocker and stop that step without inventing a fake success.",
         "",
         "## Final response",
         "Concise status only: business filesystem root, what was created, what is blocked or missing.",
         "If a blocker has a clear next unblocked move, name that one re-run or follow-up explicitly.",
         *(
             [
-                "This is a mobile_app business: the final response is only valid if you actually reached step 5. "
+                "This is a mobile_app business: the final response is only valid if you actually reached step 3. "
                 "It MUST state the iOS build outcome — the build_id of the store-signed build, or the exact "
-                "step-5 blocker. A final response that stops at the website (no step-5 build_id and no step-5 "
-                "blocker) is a FAILED bootstrap, not a completion — keep going and do step 5 instead of closing.",
+                "step-3 blocker. A final response that stops at the website (no step-3 build_id and no step-3 "
+                "blocker) is a FAILED bootstrap, not a completion — keep going and do step 3 instead of closing.",
             ]
             if mobile_app
             else []
@@ -456,7 +439,7 @@ def _ceo_bootstrap_turn_config(
         # provisioning). They stay quarantined in their own toolset (never folded into ``takyon``) so
         # they cannot leak into generic Hermes/sub-agent/product-runtime contexts; the tools are
         # fail-closed money gates and worker-only operations self-guard against session-bound calls.
-        "enabled_toolsets": ["takyon", "takyon-authority", "web", "skills"],
+        "enabled_toolsets": ["takyon", "takyon-authority", "skills"],
         "disabled_toolsets": [
             "cronjob",
             "messaging",
