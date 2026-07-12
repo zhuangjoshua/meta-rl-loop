@@ -1,6 +1,9 @@
-from pathlib import Path
+import json
+import re
 import shutil
+import sqlite3
 import subprocess
+from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -241,10 +244,10 @@ def test_production_safebox_deploy_defaults_to_exact_checkout_pause_preflight():
         assert f"grep -Fxq '{assignment}'" in deploy
 
 
-def test_operator_deploy_can_skip_runtime_migrations_after_manual_apply():
+def test_operator_deploy_runs_migrations_only_when_revision_requires_them():
     src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
 
-    assert 'TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-1}"' in src
+    assert 'TAKYON_RUN_DB_MIGRATIONS="${TAKYON_RUN_DB_MIGRATIONS:-0}"' in src
     assert 'if [[ "$TAKYON_RUN_DB_MIGRATIONS" != "1" ]]' in src
     assert "run_remote_migrations" in src
 
@@ -257,6 +260,72 @@ def test_operator_deploy_drain_probe_survives_ssh_double_quoted_string():
     assert 'assert_takyon_pg_role(conn, "operator")' not in drain
     assert "resolve_database_url(plane='operator')" in drain
     assert "assert_takyon_pg_role(conn, 'operator')" in drain
+
+
+def test_operator_deploy_drain_ignores_only_unambiguous_mac_owned_work():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+    drain = src.split("wait_for_remote_runtime_idle() {", 1)[1].split("wait_for_remote_runtime_idle", 1)[0]
+
+    assert "mac_job.payload->>'work_request_id' = work_request.id" in drain
+    assert "COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%'" in drain
+    assert "other_job.payload->>'work_request_id' = work_request.id" in drain
+    assert "COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%'" in drain
+    assert "COALESCE(locked_by, '') NOT LIKE 'mac-operator-%'" in drain
+
+
+def test_operator_deploy_drain_owner_query_semantics():
+    src = (ROOT / "deploy/argon-alpha-14/deploy-runtime.sh").read_text()
+    match = re.search(
+        r'cur\.execute\(\s*\\"\\"\\"\s*'
+        r'(SELECT COUNT\(\*\)\s+FROM business_work_requests AS work_request.*?)'
+        r'\s*\\"\\"\\",\s*'
+        r'\(f\\"\$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\\",\),',
+        src,
+        re.S,
+    )
+    assert match is not None
+    query = re.sub(
+        r"AND NULLIF\(work_request\.updated_at, ''\)::timestamptz >= \(NOW\(\) - %s::interval\)",
+        "AND 1 = 1",
+        match.group(1),
+        count=1,
+    )
+
+    cases = {
+        "mac-only": ([('running', 'mac-operator-local-1')], 0),
+        "mixed-owner": ([('running', 'mac-operator-local-1'), ('running', 'vps-worker-1')], 1),
+        "queued-sibling": ([('running', 'mac-operator-local-1'), ('queued', None)], 1),
+        "missing-link": ([], 1),
+        "unknown-owner": ([('running', None)], 1),
+        "terminal-sibling": ([('running', 'mac-operator-local-1'), ('completed', 'vps-worker-1')], 0),
+    }
+    for label, (jobs, expected) in cases.items():
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            CREATE TABLE business_work_requests (id TEXT, status TEXT, updated_at TEXT);
+            CREATE TABLE jobs (payload TEXT, status TEXT, locked_by TEXT);
+            INSERT INTO business_work_requests VALUES ('work-1', 'running', 'now');
+            """
+        )
+        conn.executemany(
+            "INSERT INTO jobs VALUES (?, ?, ?)",
+            [
+                (json.dumps({"work_request_id": "work-1"}), status, locked_by)
+                for status, locked_by in jobs
+            ],
+        )
+        assert conn.execute(query).fetchone()[0] == expected, label
+        conn.close()
+
+
+def test_operator_bootstrap_remote_shell_contains_no_local_command_substitutions():
+    src = (ROOT / "deploy/argon-alpha-14/bootstrap-host.sh").read_text()
+    remote = src.split('ssh "${target_ssh[@]}" "$TARGET_HOST" "set -euo pipefail', 1)[1].split(
+        '\n"\n\n# Provision the rate_limit module', 1
+    )[0]
+
+    assert "`" not in remote
 
 
 def test_operator_prod_script_targets_the_exact_active_local_worker_pool():

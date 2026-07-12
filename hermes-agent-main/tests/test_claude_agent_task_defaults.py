@@ -419,8 +419,8 @@ def test_claude_agent_task_defaults_product_site_guidance_when_omitted(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
-    assert result["guidance_selection_reason"] == "auto-layered Taste above Claude Design for customer-facing product surface"
+    assert result["guidance_skills"] == ["claude-design"]
+    assert result["guidance_selection_reason"] == "defaulted to dense-product-safe Claude Design guidance"
     assert "[Hermes guidance skill: default-product-site]" in instruction
 
 
@@ -642,8 +642,8 @@ def test_claude_agent_task_defaults_full_pack_set_not_keyword_inferred(tmp_path,
 
     instruction = str(captured["payload"]["instruction"])
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
-    assert result["guidance_selection_reason"] == "auto-layered Taste above Claude Design for customer-facing product surface"
+    assert result["guidance_skills"] == ["claude-design"]
+    assert result["guidance_selection_reason"] == "defaulted to dense-product-safe Claude Design guidance"
     assert "[Hermes guidance skill: inferred-product-site]" in instruction
 
 
@@ -760,8 +760,8 @@ def test_claude_agent_task_respects_explicit_empty_guidance_for_product_site(tmp
     )
 
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
-    assert result["guidance_selection_reason"] == "layered Taste and Claude Design above explicit customer-facing guidance"
+    assert result["guidance_skills"] == []
+    assert result["guidance_selection_reason"] == "used explicit customer-facing guidance exactly as requested"
 
 
 def test_claude_agent_task_reuses_session_workspace_for_docker_product_work(tmp_path, monkeypatch):
@@ -1766,6 +1766,8 @@ def test_claude_agent_task_formats_signal_terminated_worker_error(tmp_path, monk
 
 def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    monotonic_ticks = iter((100.0, 101.0, 102.0, 103.0))
+    monkeypatch.setattr(takyon_core.time, "monotonic", lambda: next(monotonic_ticks))
 
     class _CapturingStore(_FakeStore):
         def __init__(self, root: Path):
@@ -1826,6 +1828,7 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
                 "idempotency_key": "workspace-product-turn-cap-retry",
                 "install": False,
                 "max_turns": 20,
+                "timeout_ms": 900_000,
                 "refresh_surface": False,
             }
         )
@@ -1833,11 +1836,204 @@ def test_claude_agent_task_retries_product_turn_cap_once_with_higher_budget(tmp_
 
     assert result["success"] is True
     assert [payload["maxTurns"] for payload in captured_payloads] == [20, 60]
+    assert captured_payloads[0]["timeoutMs"] == 900_000
+    assert 0 < captured_payloads[1]["timeoutMs"] < captured_payloads[0]["timeoutMs"]
     assert result["worker_attempts"] == 2
     assert result["turn_cap_retries"] == [{"from": 20, "to": 60}]
     operations = store.commits[-1]["operations"]
     agent_record = next(op for op in operations if op.get("action") == "agent.record")
     assert agent_record["result"]["turn_cap_retries"] == [{"from": 20, "to": 60}]
+
+
+def test_taste_task_never_restarts_fresh_session_after_turn_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = _FakeStore(tmp_path)
+    process_calls: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        process_calls.append(dict(payload))
+        return types.SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps(
+                {
+                    "success": False,
+                    "error": "Claude Code returned an error result: Reached maximum number of turns (60)",
+                }
+            ),
+            stderr="",
+        )
+
+    _patch_non_docker_product_site(monkeypatch, store)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Implement and preflight the landing.",
+                "guidance_skills": ["taste-frontend"],
+                "idempotency_key": "taste-single-session-turn-cap",
+                "install": False,
+                "max_turns": 60,
+                "timeout_ms": 900_000,
+                "refresh_surface": False,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["worker_attempts"] == 1
+    assert result["turn_cap_retries"] == []
+    assert len(process_calls) == 1
+
+
+def test_taste_task_never_restarts_fresh_session_after_build_blocker(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = _FakeStore(tmp_path)
+    process_calls: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        process_calls.append(dict(payload))
+        Path(str(payload["cwd"]), "index.html").write_text("<h1>Latexflow</h1>\n", encoding="utf-8")
+        Path(str(payload["cwd"]), "DESIGN.md").write_text(
+            "# Design Read\nEditorial precision for proposal teams.\n\n"
+            "DESIGN_VARIANCE: 6\nMOTION_INTENSITY: 4\nVISUAL_DENSITY: 5\n",
+            encoding="utf-8",
+        )
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"success": True, "summary": "implemented"}),
+            stderr="",
+        )
+
+    _patch_non_docker_product_site(monkeypatch, store)
+    monkeypatch.setattr(
+        takyon_core,
+        "_workspace_needs_runtime_ui_contract",
+        lambda workspace_rel: workspace_rel == "product/site",
+    )
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: {
+            "status": "failed",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/taste-build-blocker.json",
+            "runtime_features": [],
+            "inventory": {},
+            "error": "typecheck failed: unused variable",
+            "blocker": "typecheck failed: unused variable",
+            "publish": {"status": "blocked", "blocker": "typecheck failed: unused variable"},
+        },
+    )
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Implement and preflight the landing.",
+                "guidance_skills": ["taste-frontend"],
+                "idempotency_key": "taste-single-session-build-blocker",
+                "install": False,
+                "max_turns": 60,
+                "timeout_ms": 900_000,
+                "refresh_surface": True,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["worker_attempts"] == 1
+    assert len(process_calls) == 1
+
+
+def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+    store = _FakeStore(tmp_path)
+    process_calls: list[dict[str, object]] = []
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        process_calls.append(dict(payload))
+        Path(str(payload["cwd"]), "index.html").write_text(
+            "<h1>Latexflow</h1>\n", encoding="utf-8"
+        )
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"success": True, "summary": "implemented"}),
+            stderr="",
+        )
+
+    _patch_non_docker_product_site(monkeypatch, store)
+    monkeypatch.setattr(
+        takyon_core,
+        "_workspace_needs_runtime_ui_contract",
+        lambda workspace_rel: workspace_rel == "product/site",
+    )
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: pytest.fail("missing Taste contract must block before publish"),
+    )
+
+    result = json.loads(
+        handle_business_claude_agent_task(
+            {
+                "business": "latexflow",
+                "workspace": "product/site",
+                "instruction": "Implement and preflight the landing.",
+                "guidance_skills": ["design-taste-frontend"],
+                "idempotency_key": "taste-missing-design-contract",
+                "install": False,
+                "max_turns": 60,
+                "timeout_ms": 900_000,
+                "refresh_surface": True,
+            }
+        )
+    )
+
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["worker_attempts"] == 1
+    assert result["taste_design_contract"] is None
+    assert "Taste design contract missing" in result["error"]
+    assert len(process_calls) == 1
 
 
 def test_claude_agent_task_bash_wrapper_uses_absolute_env_and_bash_paths():

@@ -35,8 +35,10 @@ import logging
 import concurrent.futures
 import contextvars
 import os
+import threading
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from . import billing
@@ -62,6 +64,15 @@ class JobNotRunning(JobError):
     double-finalize or a lost claim. Raised loud rather than silently overwriting a terminal row."""
 
 
+class JobClaimLost(JobNotRunning):
+    """The handler's exact ``(job id, worker id, attempt)`` generation is no longer authoritative.
+
+    A job id alone is not an ownership token: a stale-job requeue can give the same row back to the
+    same worker process with ``attempts + 1``.  Raising this distinct error lets long-running child
+    work terminate without retrying or committing through the newer attempt's claim.
+    """
+
+
 class BusinessOwnerMissing(JobError):
     """A job's business has no resolvable owner_user_id (0001 makes it NOT NULL), so its spend could
     not be reserved against anyone — an integrity violation, surfaced rather than charged to no one."""
@@ -78,12 +89,27 @@ class NonRetryableJobError(JobError):
 
 _TERMINAL = ("completed", "blocked", "failed", "cancelled")
 
-# Lanes: the per-business concurrency gate in claim_one is PER LANE, not per business-total. CEO
-# turns (ceo_bootstrap/ceo_wake) share one 'ceo' lane so a business never runs two CEO turns at
-# once; every other kind is its own lane so a long-running job cannot starve wakes — and a CEO turn
-# that enqueues another kind and waits on it cannot deadlock behind its own business gate. The lane
-# is derived from kind in SQL (no schema change, dispatch_due_wakes untouched).
-_LANE_SQL = "(case when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' else {a}.kind end)"
+# Lanes: CEO turns serialize with CEO turns but remain separate from the canonical product-writer
+# lane so a CEO can await its delegated build without deadlocking.  All jobs capable of advancing
+# product source/build/live pointers share ONE lane; otherwise a refresh or store build can overlap a
+# Claude writer for the same business even though same-kind attempts are generation-fenced.
+_PRODUCT_WRITER_KINDS = ("claude.agent_task", "product.surface_refresh", "store.build")
+_LANE_SQL = (
+    "(case "
+    "when {a}.kind in ('ceo_bootstrap', 'ceo_wake') then 'ceo' "
+    "when {a}.kind in ('claude.agent_task', 'product.surface_refresh', 'store.build') then 'product' "
+    "else {a}.kind end)"
+)
+
+
+def job_lane(kind: str) -> str:
+    """Python mirror of ``_LANE_SQL`` for diagnostics and deterministic regressions."""
+    normalized = str(kind or "").strip()
+    if normalized in {"ceo_bootstrap", "ceo_wake"}:
+        return "ceo"
+    if normalized in _PRODUCT_WRITER_KINDS:
+        return "product"
+    return normalized
 
 # Session ownership (modularization Stage 2, UC1): a job may be RESERVED for a worker pool via
 # the indexed reservation columns stamped at enqueue from a ClaimScope (claim_scope.py). The old
@@ -179,6 +205,68 @@ class JobRunResult:
 
     result: dict[str, Any] | None = None
     actual_cost_cents: int = 0
+
+
+@dataclass
+class JobClaimGuard:
+    """Process-local cancellation handle for one exact durable job claim generation."""
+
+    job_id: str
+    worker_id: str
+    attempt: int
+    _lost: threading.Event = field(default_factory=threading.Event, repr=False)
+    _reason: str = field(default="", repr=False)
+
+    @property
+    def lost(self) -> bool:
+        return self._lost.is_set()
+
+    @property
+    def reason(self) -> str:
+        return self._reason or "durable job claim is no longer owned"
+
+    def mark_lost(self, reason: str = "") -> None:
+        if reason and not self._reason:
+            self._reason = str(reason)
+        self._lost.set()
+
+    def assert_owned(self, operation: str = "continue") -> None:
+        if self.lost:
+            raise JobClaimLost(
+                f"worker claim lost before {operation}: job={self.job_id} "
+                f"worker={self.worker_id} attempt={self.attempt}: {self.reason}"
+            )
+
+
+_ACTIVE_JOB_CLAIM: contextvars.ContextVar[JobClaimGuard | None] = contextvars.ContextVar(
+    "takyon_active_job_claim", default=None
+)
+_LIVE_LOCAL_HANDLER_CLAIMS: set[tuple[str, int]] = set()
+_LIVE_LOCAL_HANDLER_CLAIMS_LOCK = threading.Lock()
+
+
+def current_job_claim() -> JobClaimGuard | None:
+    """Return the exact claim guard bound to the current handler context, if any."""
+    return _ACTIVE_JOB_CLAIM.get()
+
+
+@contextmanager
+def _bound_job_claim(guard: JobClaimGuard):
+    token = _ACTIVE_JOB_CLAIM.set(guard)
+    claim_key = (guard.job_id, guard.attempt)
+    with _LIVE_LOCAL_HANDLER_CLAIMS_LOCK:
+        _LIVE_LOCAL_HANDLER_CLAIMS.add(claim_key)
+    try:
+        yield guard
+    finally:
+        with _LIVE_LOCAL_HANDLER_CLAIMS_LOCK:
+            _LIVE_LOCAL_HANDLER_CLAIMS.discard(claim_key)
+        _ACTIVE_JOB_CLAIM.reset(token)
+
+
+def _live_local_job_ids() -> list[str]:
+    with _LIVE_LOCAL_HANDLER_CLAIMS_LOCK:
+        return sorted({job_id for job_id, _attempt in _LIVE_LOCAL_HANDLER_CLAIMS})
 
 
 @dataclass(frozen=True)
@@ -319,9 +407,10 @@ def claim_one(
     """Atomically claim the next queued job (optionally restricted to ``kinds``): prefer
     ``ceo_bootstrap`` over ordinary queued work, then fall back to FIFO within that priority class.
     A business runs at most ONE job per lane at a time (see ``_LANE_SQL``): CEO turns serialize
-    against each other, while other kinds run in their own lane alongside them. Lock one row with
-    ``FOR UPDATE SKIP LOCKED`` so a second worker skips it, then flip it to 'running', stamp
-    locked_by/locked_at, and increment attempts. Returns the claimed job, or None if the queue is
+    against each other, canonical product writers serialize together, and unrelated kinds retain
+    independent lanes. Lock one row with ``FOR UPDATE SKIP LOCKED`` so a second worker skips it,
+    then flip it to 'running', stamp locked_by/locked_at, and increment attempts. Returns the
+    claimed job, or None if the queue is
     empty. The whole claim is one transaction; the row is committed 'running' before this returns.
 
     ``claim_pool_id`` is the claiming pool's registry identity: reserved jobs are honored via the
@@ -402,74 +491,138 @@ def claim_one(
     return _row_to_job(row)
 
 
-def heartbeat(conn, job_id: str, *, worker_id: str) -> None:
-    """Refresh a running job's claim so other workers can distinguish live work from a stale claim."""
+def heartbeat(conn, job_id: str, *, worker_id: str, attempt: int | None = None) -> None:
+    """Refresh one exact running claim generation.
+
+    ``worker_id`` alone is insufficient because the same process can reclaim the same row after a
+    stale requeue.  Callers that own a claimed :class:`Job` pass ``attempt`` so an old handler can
+    never heartbeat the newer generation back to life.
+    """
     _refresh_job_lifecycle_session(conn)
+    attempt_gate = " and attempts = %s" if attempt is not None else ""
+    params: tuple[Any, ...] = (
+        (job_id, worker_id, int(attempt)) if attempt is not None else (job_id, worker_id)
+    )
     with conn.transaction():
         updated = conn.execute(
             "update jobs set locked_at = now(), updated_at = now() "
-            "where id = %s and status = 'running' and locked_by = %s",
-            (job_id, worker_id),
+            "where id = %s and status = 'running' and locked_by = %s" + attempt_gate,
+            params,
         ).rowcount
     if updated == 0:
-        row = conn.execute("select status, locked_by from jobs where id = %s", (job_id,)).fetchone()
+        row = conn.execute(
+            "select status, locked_by, attempts from jobs where id = %s", (job_id,)
+        ).fetchone()
         if (
             row is not None
             and str(row[0]) == "running"
             and str(row[1] or "") == worker_id
+            and (attempt is None or int(row[2]) == int(attempt))
         ):
             return
-        raise JobNotRunning(job_id)
+        raise JobClaimLost(
+            f"heartbeat rejected stale claim generation: job={job_id} "
+            f"worker={worker_id} attempt={attempt}"
+        )
 
 
-def complete(conn, job_id: str, *, result: dict[str, Any] | None = None) -> None:
+def complete(
+    conn,
+    job_id: str,
+    *,
+    result: dict[str, Any] | None = None,
+    worker_id: str | None = None,
+    attempt: int | None = None,
+) -> None:
     """Terminal success. Only a 'running' job may complete — the lifecycle is single-writer (the
     claimer holds it), so a non-'running' row means a bug, and we raise rather than overwrite."""
     _refresh_job_lifecycle_session(conn)
     body = json.dumps(result) if result is not None else None
+    claim_gate = ""
+    params: list[Any] = [body, job_id]
+    if worker_id is not None:
+        claim_gate += " and locked_by = %s"
+        params.append(str(worker_id))
+    if attempt is not None:
+        claim_gate += " and attempts = %s"
+        params.append(int(attempt))
     with conn.transaction():
         updated = conn.execute(
             "update jobs set status = 'completed', result = %s::jsonb, error = null, "
             "locked_by = null, locked_at = null, updated_at = now() "
-            "where id = %s and status = 'running'",
-            (body, job_id),
+            "where id = %s and status = 'running'" + claim_gate,
+            tuple(params),
         ).rowcount
     if updated == 0:
-        raise JobNotRunning(job_id)
+        raise JobClaimLost(f"complete rejected stale claim generation for job={job_id}")
 
 
-def block(conn, job_id: str, *, reason: str, detail: dict[str, Any] | None = None) -> None:
+def block(
+    conn,
+    job_id: str,
+    *,
+    reason: str,
+    detail: dict[str, Any] | None = None,
+    worker_id: str | None = None,
+    attempt: int | None = None,
+) -> None:
     """Terminal block (invariant #8): the work could not run for a NAMED reason (budget exhausted, no
     handler, missing config). Distinct from 'failed' (the work was attempted and errored)."""
     err = {"reason": reason}
     if detail:
         err["detail"] = detail
     _refresh_job_lifecycle_session(conn)
+    claim_gate = ""
+    params: list[Any] = [json.dumps(err), job_id]
+    if worker_id is not None:
+        claim_gate += " and locked_by = %s"
+        params.append(str(worker_id))
+    if attempt is not None:
+        claim_gate += " and attempts = %s"
+        params.append(int(attempt))
     with conn.transaction():
         updated = conn.execute(
             "update jobs set status = 'blocked', error = %s::jsonb, "
             "locked_by = null, locked_at = null, updated_at = now() "
-            "where id = %s and status = 'running'",
-            (json.dumps(err), job_id),
+            "where id = %s and status = 'running'" + claim_gate,
+            tuple(params),
         ).rowcount
     if updated == 0:
-        raise JobNotRunning(job_id)
+        raise JobClaimLost(f"block rejected stale claim generation for job={job_id}")
 
 
-def fail(conn, job_id: str, *, error: str, retryable: bool = True) -> str:
+def fail(
+    conn,
+    job_id: str,
+    *,
+    error: str,
+    retryable: bool = True,
+    worker_id: str | None = None,
+    attempt: int | None = None,
+) -> str:
     """The work was attempted and raised. If retryable and attempts remain, re-queue (back to
     'queued', lock released) for another claim; else mark 'failed'. Returns 'requeued' or 'failed'.
     The hold is released by run_one BEFORE this is called, and the stale-hold reconciliation in
     run_one releases it again (idempotent) on the next attempt, so no reservation leaks on requeue."""
     err = json.dumps({"reason": "handler_error", "error": error})
     _refresh_job_lifecycle_session(conn)
+    claim_gate = ""
+    params: list[Any] = [job_id]
+    if worker_id is not None:
+        claim_gate += " and locked_by = %s"
+        params.append(str(worker_id))
+    if attempt is not None:
+        claim_gate += " and attempts = %s"
+        params.append(int(attempt))
     with conn.transaction():
         row = conn.execute(
-            "select attempts, max_attempts from jobs where id = %s and status = 'running' for update",
-            (job_id,),
+            "select attempts, max_attempts from jobs where id = %s and status = 'running'"
+            + claim_gate
+            + " for update",
+            tuple(params),
         ).fetchone()
         if row is None:
-            raise JobNotRunning(job_id)
+            raise JobClaimLost(f"fail rejected stale claim generation for job={job_id}")
         attempts, max_attempts = int(row[0]), int(row[1])
         if retryable and attempts < max_attempts:
             conn.execute(
@@ -492,6 +645,7 @@ def fail_if_still_owned(
     job_id: str,
     *,
     worker_id: str,
+    attempt: int | None = None,
     error: str,
     retryable: bool = True,
 ) -> str | None:
@@ -503,10 +657,16 @@ def fail_if_still_owned(
     err = json.dumps({"reason": "handler_error", "error": error})
     _refresh_job_lifecycle_session(conn)
     with conn.transaction():
+        attempt_gate = " and attempts = %s" if attempt is not None else ""
+        params: tuple[Any, ...] = (
+            (job_id, worker_id, int(attempt)) if attempt is not None else (job_id, worker_id)
+        )
         row = conn.execute(
             "select attempts, max_attempts from jobs "
-            "where id = %s and status = 'running' and locked_by = %s for update",
-            (job_id, worker_id),
+            "where id = %s and status = 'running' and locked_by = %s"
+            + attempt_gate
+            + " for update",
+            params,
         ).fetchone()
         if row is None:
             return None
@@ -534,20 +694,37 @@ def requeue_stale(conn, *, older_than_seconds: int = 900, worker_id: str = "reap
     attempts left; those at max_attempts are blocked with a reason (never retried forever). The next
     claim's run_one releases any stale billing hold before reserving again. Returns rows touched."""
     _refresh_job_lifecycle_session(conn)
+    local_job_ids = _live_local_job_ids()
+    local_guard = " and not (id = any(%s))" if local_job_ids else ""
+    local_params: tuple[Any, ...] = (local_job_ids,) if local_job_ids else ()
+    # A bootstrap may be quiet while a delegated build owns its own fresh claim on another worker
+    # thread/process.  Never reclaim the parent alongside that child.  If the child itself is stale,
+    # this sweep reclaims it first and the next sweep may safely recover the parent.
+    delegated_child_guard = (
+        " and not (kind = 'ceo_bootstrap' and exists ("
+        "select 1 from jobs child where child.business_slug = jobs.business_slug "
+        "and child.id <> jobs.id "
+        "and child.kind in ('claude.agent_task', 'product.surface_refresh') "
+        "and child.status = 'running'))"
+    )
     with conn.transaction():
         requeued = conn.execute(
             "update jobs set status = 'queued', locked_by = null, locked_at = null, updated_at = now(), "
             f"{_RENEW_AFTER_LEASE_SQL} "
             "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
-            "and attempts < max_attempts",
-            (older_than_seconds,),
+            "and attempts < max_attempts"
+            + local_guard
+            + delegated_child_guard,
+            (older_than_seconds, *local_params),
         ).rowcount
         blocked = conn.execute(
             "update jobs set status = 'blocked', "
             "error = %s::jsonb, locked_by = null, locked_at = null, updated_at = now() "
             "where status = 'running' and locked_at < now() - make_interval(secs => %s) "
-            "and attempts >= max_attempts",
-            (json.dumps({"reason": "stalled_max_attempts"}), older_than_seconds),
+            "and attempts >= max_attempts"
+            + local_guard
+            + delegated_child_guard,
+            (json.dumps({"reason": "stalled_max_attempts"}), older_than_seconds, *local_params),
         ).rowcount
     return int(requeued) + int(blocked)
 
@@ -632,7 +809,14 @@ def run_one(
 
     handler = handlers.get(job.kind)
     if handler is None:
-        block(conn, job.id, reason="no_handler", detail={"kind": job.kind})
+        block(
+            conn,
+            job.id,
+            reason="no_handler",
+            detail={"kind": job.kind},
+            worker_id=worker_id,
+            attempt=job.attempts,
+        )
         _emit_job_event("blocked", error="no_handler")
         return JobOutcome(job.id, job.kind, "blocked", reason="no_handler")
 
@@ -661,6 +845,8 @@ def run_one(
                 job.id,
                 reason="budget_exhausted",
                 detail={"estimate_cents": estimate_cents, "error": str(exc)},
+                worker_id=worker_id,
+                attempt=job.attempts,
             )
             _emit_job_event(
                 "blocked",
@@ -698,12 +884,19 @@ def run_one(
             pass
         job_lifecycle_conn = None
 
+    claim_guard = JobClaimGuard(
+        job_id=str(job.id),
+        worker_id=str(worker_id),
+        attempt=int(job.attempts),
+    )
+
     def _claim_is_recent(lifecycle_conn) -> bool:
         stale_seconds = max(60.0, float(os.getenv("TAKYON_WORKER_STALE_SECONDS") or 14_400))
         warning_window_seconds = max(300.0, float(heartbeat_interval_seconds or 0) * 20.0)
         window_seconds = min(warning_window_seconds, stale_seconds / 2.0)
         row = lifecycle_conn.execute(
-            "select status, locked_by, locked_at > now() - (%s::double precision * interval '1 second') "
+            "select status, locked_by, attempts, "
+            "locked_at > now() - (%s::double precision * interval '1 second') "
             "from jobs where id = %s",
             (window_seconds, job.id),
         ).fetchone()
@@ -711,7 +904,8 @@ def run_one(
             row is not None
             and str(row[0]) == "running"
             and str(row[1] or "") == worker_id
-            and row[2]
+            and int(row[2]) == int(job.attempts)
+            and row[3]
         )
 
     try:
@@ -722,8 +916,13 @@ def run_one(
         )
         run_result: JobRunResult | None = None
         ctx = contextvars.copy_context()
+
+        def _run_claimed_handler() -> JobRunResult:
+            with _bound_job_claim(claim_guard):
+                return handler(job)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(ctx.run, handler, job)
+            future = pool.submit(ctx.run, _run_claimed_handler)
             while True:
                 if wait_timeout is None:
                     run_result = future.result()
@@ -745,13 +944,23 @@ def run_one(
                 # the single authority on the outcome.
                 try:
                     hb_conn, _close_hb = _lifecycle_conn()
-                    heartbeat(hb_conn, job.id, worker_id=worker_id)
+                    heartbeat(
+                        hb_conn,
+                        job.id,
+                        worker_id=worker_id,
+                        attempt=job.attempts,
+                    )
                 except Exception as hb_exc:  # noqa: BLE001 — lost claim / DB blip must not requeue live work
                     if heartbeat_conn_factory is not None:
                         _reset_lifecycle_conn()
                         try:
                             hb_conn, _close_hb = _lifecycle_conn()
-                            heartbeat(hb_conn, job.id, worker_id=worker_id)
+                            heartbeat(
+                                hb_conn,
+                                job.id,
+                                worker_id=worker_id,
+                                attempt=job.attempts,
+                            )
                             continue
                         except Exception:
                             pass
@@ -760,6 +969,9 @@ def run_one(
                         probe_conn, _close_probe = _lifecycle_conn()
                         if _claim_is_recent(probe_conn):
                             continue
+                        claim_guard.mark_lost(
+                            "heartbeat probe confirmed that a newer/terminal claim owns the row"
+                        )
                     except Exception:
                         pass
                     _log.warning(
@@ -790,14 +1002,23 @@ def run_one(
                         _reset_lifecycle_conn()
                         lifecycle_conn, close_lifecycle = _lifecycle_conn()
             try:
-                status = fail(lifecycle_conn, job.id, error=str(exc), retryable=True)
+                status = fail(
+                    lifecycle_conn,
+                    job.id,
+                    error=str(exc),
+                    retryable=not isinstance(exc, JobClaimLost),
+                    worker_id=worker_id,
+                    attempt=job.attempts,
+                )
             except JobNotRunning:
+                claim_guard.mark_lost("terminal failure transition rejected stale claim")
                 repaired_status = fail_if_still_owned(
                     lifecycle_conn,
                     job.id,
                     worker_id=worker_id,
+                    attempt=job.attempts,
                     error=str(exc),
-                    retryable=True,
+                    retryable=not isinstance(exc, JobClaimLost),
                 )
                 _log.warning(
                     "jobs: handler failed after job %s (kind=%s) lost its running claim; "
@@ -824,40 +1045,57 @@ def run_one(
             job.id, job.kind, status, reserved_cents=reserved, reason="handler_error"
         )
 
-    # The handler SUCCEEDED. Settle + complete are the terminal authority. But the claim may have been
-    # lost while the long build ran (requeue_stale + sibling re-claim) — then this row is no longer
-    # 'running'/ours, so settle()/complete() raise JobNotRunning. That is NOT a failure to surface: the
-    # work is done and its side effects already landed; re-running it would only re-build a published
-    # product. Treat a lost claim on a successful finish as a benign "already finalized elsewhere":
-    # release our own hold so no reservation leaks, log it, and report completion. A genuine bug (double
-    # complete of a truly-terminal row) is the same harmless idempotent no-op here.
+    # The handler returned successfully, but success is authoritative only while THIS exact attempt
+    # still owns the claim. Refresh/verify before money settlement so an obsolete attempt cannot charge
+    # and cannot report completion through a sibling's newer generation.
     actual = 0
     lifecycle_conn, close_lifecycle = _lifecycle_conn()
     try:
+        claim_guard.assert_owned("job settlement")
+        heartbeat(
+            lifecycle_conn,
+            job.id,
+            worker_id=worker_id,
+            attempt=job.attempts,
+        )
         if estimate_cents > 0:
             actual = max(0, min(int(run_result.actual_cost_cents or 0), reserved))
             billing.settle(lifecycle_conn, reservation_key, actual)
-        complete(lifecycle_conn, job.id, result=run_result.result)
+        complete(
+            lifecycle_conn,
+            job.id,
+            result=run_result.result,
+            worker_id=worker_id,
+            attempt=job.attempts,
+        )
     except JobNotRunning:
-        # Our claim was reclaimed mid-build (the build outran the stale window). Don't requeue a
-        # finished, side-effect-complete job. Release our hold idempotently so the refund isn't lost.
+        # Our generation was superseded before authoritative settlement/finalization. Never mutate
+        # the newer row and never claim completion; release this attempt's hold idempotently.
         if estimate_cents > 0:
             try:
                 billing.refund(lifecycle_conn, reservation_key)
             except Exception:  # noqa: BLE001 — best-effort; the sibling attempt reconciles the hold too
                 pass
+        claim_guard.mark_lost("terminal completion transition rejected stale claim")
         _log.warning(
-            "jobs: job %s (kind=%s) finished but its claim was lost before finalize; reporting "
-            "completion without requeue (side effects already landed)",
+            "jobs: job %s (kind=%s) handler returned after losing attempt %s; refusing to "
+            "finalize or report completion",
             job.id,
             job.kind,
+            job.attempts,
         )
         _emit_job_event(
-            "completed",
+            "failed",
+            error="lost exact job claim before finalize",
             extra={"reserved_cents": reserved, "lost_claim": True},
         )
         return JobOutcome(
-            job.id, job.kind, "completed", reserved_cents=reserved, actual_cents=0
+            job.id,
+            job.kind,
+            "failed",
+            reserved_cents=reserved,
+            actual_cents=0,
+            reason="lost_claim",
         )
     finally:
         _close_lifecycle_conn(lifecycle_conn, close_lifecycle)

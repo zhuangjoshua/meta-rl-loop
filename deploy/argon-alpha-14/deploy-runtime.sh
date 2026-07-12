@@ -258,9 +258,31 @@ with psycopg.connect(resolve_database_url(plane='operator'), autocommit=True, pr
         cur.execute(
             \"\"\"
             SELECT COUNT(*)
-            FROM business_work_requests
-            WHERE status IN ('queued', 'running')
-              AND NULLIF(updated_at, '')::timestamptz >= (NOW() - %s::interval)
+            FROM business_work_requests AS work_request
+            WHERE work_request.status IN ('queued', 'running')
+              AND NULLIF(work_request.updated_at, '')::timestamptz >= (NOW() - %s::interval)
+              -- A live Mac worker is outside the VPS restart boundary. Ignore its mirrored work
+              -- request only when no other queued/running execution for that request has an
+              -- unknown or non-Mac owner. Missing links and ambiguous owners remain counted.
+              AND NOT (
+                  EXISTS (
+                      SELECT 1
+                      FROM jobs AS mac_job
+                      WHERE mac_job.payload->>'work_request_id' = work_request.id
+                        AND mac_job.status = 'running'
+                        AND COALESCE(mac_job.locked_by, '') LIKE 'mac-operator-%'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM jobs AS other_job
+                      WHERE other_job.payload->>'work_request_id' = work_request.id
+                        AND other_job.status IN ('queued', 'running')
+                        AND (
+                            other_job.status <> 'running'
+                            OR COALESCE(other_job.locked_by, '') NOT LIKE 'mac-operator-%'
+                        )
+                  )
+              )
             \"\"\",
             (f\"$TAKYON_DEPLOY_ACTIVE_WORK_REQUEST_FRESHNESS_SECONDS seconds\",),
         )

@@ -1,13 +1,17 @@
 ---
 name: claude-design-superhuman
-description: Shared premium productivity design system for speed, focus, and executive-feeling software. Layer beneath taste-frontend and claude-design.
+description: Optional premium productivity design reference for speed, focus, and executive-feeling software; use only when the caller explicitly selects it.
 license: Apache-2.0
 ---
 
 # Claude Design Superhuman
 
-Layer this beneath `taste-frontend` and `claude-design` when the product should feel fast, premium,
-and highly focused. Taste adapts this vocabulary to the brief; do not copy it verbatim.
+Use this optional reference only when the caller explicitly selects `claude-design-superhuman`;
+never auto-add it beneath Taste or Claude Design. For a dense product continuation,
+`product/site/DESIGN.md`, existing tokens, and existing assets are authoritative: this reference may
+reinforce an already-selected direction but must not override or reinterpret the established brand.
+When explicitly selected for a new compatible context, apply its fast, premium, and highly focused
+vocabulary without copying it verbatim.
 
 ## When To Use
 

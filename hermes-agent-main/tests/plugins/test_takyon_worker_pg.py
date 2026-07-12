@@ -1410,10 +1410,11 @@ def test_best_effort_terminalize_owned_timeout_refunds_with_estimate(monkeypatch
         assert isinstance(conn, _FakeConn)
         calls.append(("refund", reservation_key))
 
-    def _fake_fail_if_still_owned(conn, job_id, *, worker_id, error, retryable):
+    def _fake_fail_if_still_owned(conn, job_id, *, worker_id, attempt, error, retryable):
         assert isinstance(conn, _FakeConn)
         calls.append(("fail", job_id))
         assert worker_id == "w-timeout"
+        assert attempt == 2
         assert error == "idle timeout"
         assert retryable is True
         return "queued"
@@ -2077,7 +2078,7 @@ def test_bootstrap_capped_before_publish_still_requeues(monkeypatch):
     assert "iteration budget" in str(exc.value)
 
 
-def test_bootstrap_timeout_calls_owned_timeout_finalizer(monkeypatch):
+def test_bootstrap_timeout_waits_for_delegated_child_before_outer_requeue(monkeypatch):
     captured = _install_bootstrap_handler_stubs(
         monkeypatch,
         turn_completed=False,
@@ -2086,19 +2087,27 @@ def test_bootstrap_timeout_calls_owned_timeout_finalizer(monkeypatch):
             TimeoutError("CEO wake for business:acme idle past 600s inactivity limit")
         ),
     )
-    finalized: dict[str, Any] = {}
+    child_checks: list[bool] = []
+    child_states = iter((True, False))
     monkeypatch.setattr(
         worker,
         "_best_effort_terminalize_owned_timeout",
-        lambda job, *, error: finalized.update(job_id=str(job.id), error=error) or "queued",
+        lambda *_args, **_kwargs: pytest.fail("handler must not requeue itself before it exits"),
     )
+    monkeypatch.setattr(
+        worker,
+        "_bootstrap_has_live_delegated_child",
+        lambda *_args, **_kwargs: child_checks.append(state := next(child_states)) or state,
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(worker.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
     job = SimpleNamespace(id="job-timeout", business_slug="acme", payload={}, locked_by="w1")
 
     with pytest.raises(TimeoutError):
         worker.ceo_bootstrap_handler(job)
 
-    assert finalized["job_id"] == "job-timeout"
-    assert "inactivity limit" in finalized["error"]
+    assert child_checks == [True, False]
+    assert sleeps == [5.0]
     assert ("failed", "ceo_bootstrap") in captured["events"]
 
 

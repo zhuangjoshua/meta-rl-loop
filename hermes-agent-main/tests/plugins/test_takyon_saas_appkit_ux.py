@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from plugins.takyon import core as takyon_core
@@ -7,6 +8,15 @@ from plugins.takyon import turn_runtime
 
 
 SCAFFOLD = Path(takyon_core.__file__).resolve().parent / "subuser_app_kit" / "scaffold"
+HERMES_ROOT = Path(takyon_core.__file__).resolve().parents[2]
+TASTE_SKILL = HERMES_ROOT / "skills" / "creative" / "taste-frontend" / "SKILL.md"
+CLAUDE_DESIGN_SKILL = HERMES_ROOT / "skills" / "creative" / "claude-design" / "SKILL.md"
+PRODUCT_SKILL = HERMES_ROOT / "skills" / "takyon" / "takyon-product" / "SKILL.md"
+DESIGN_COMMAND = HERMES_ROOT / "plugins" / "takyon" / "harness" / "commands" / "design.md"
+OPTIONAL_STYLE_SKILLS = tuple(
+    HERMES_ROOT / "skills" / "creative" / f"claude-design-{name}" / "SKILL.md"
+    for name in ("stripe", "openai", "doodle", "brutalist", "superhuman")
+)
 
 
 def read(rel: str) -> str:
@@ -80,13 +90,108 @@ def test_saas_worker_contract_keeps_app_graph_fixed_and_landing_composition_flui
         "saas-appkit-test", "Build a SaaS workflow", "live", archetype="web_saas"
     )
     assert "Preserve and render the canonical `PublicSiteHeader`" in prompt
-    assert 'guidance_skills: pass exactly THREE — "taste-frontend" first, "claude-design" second' in prompt
-    assert "Taste sits above and adapts the selected system; it never replaces it." in prompt
+    landing_pass = prompt.split("#### 2a. Build and publish the landing page", 1)[1].split(
+        "#### 2a.1. Register Search Console", 1
+    )[0]
+    assert 'guidance_skills: pass exactly ONE — "taste-frontend"' in landing_pass
+    assert '"claude-design" or any "claude-design-*"' in landing_pass
+    assert "emit its one-line Design Read" in landing_pass
+    assert "finish every applicable item in Taste's full upstream preflight" in landing_pass
+    assert "`DESIGN_VARIANCE`, `MOTION_INTENSITY`, and `VISUAL_DENSITY`" in landing_pass
+    assert "persist that one-line Design Read" in landing_pass
+    assert "`product/site/DESIGN.md` as the canonical design source" in landing_pass
+    assert "verify responsive breakpoint/collapse and reduced-motion behavior in the source" in landing_pass
+    assert "live responsive browser QA belongs to the post-publish acceptance review" in landing_pass
+    assert "run the build/typecheck and responsive visual inspection" not in landing_pass
+    assert "max_turns: 60" in landing_pass
+    assert "effort: medium" in landing_pass
+    assert "timeout_ms: 900000" in landing_pass
+    assert "Do not start a fresh retry or a second Taste worker" in landing_pass
     assert "without prescribing a section count or layout family" in prompt
     assert "route graph and required public/auth behavior are immutable" in prompt
     assert "business_generate_site_image" in prompt
     assert "Persist every created/generated customer artifact" in prompt
     assert "Upgrade landing proof from the verified research" in prompt
+
+
+def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "taste-once-test",
+        "Build a SaaS where customers generate and save proposals",
+        "live",
+        archetype="web_saas",
+    )
+    product_pass = prompt.split("Then finish the access shell and account page", 1)[1].split(
+        "#### 2c. Workflow verification gate", 1
+    )[0]
+    assert 'guidance_skills: pass exactly ONE — "claude-design"' in product_pass
+    assert 'Do NOT pass "taste-frontend"' in product_pass
+    assert "FIRST read the canonical `DESIGN.md` written by 2a" in product_pass
+    assert "then inspect `src/tokens.css`, the landing source, and existing assets" in product_pass
+    assert "Preserve the exact Design Read, three dial values" in product_pass
+    assert "fixed brand source of truth" in product_pass
+    assert 'guidance_skills: pass the SAME layered set used in 2a' not in prompt
+    assert "exactly like 2a" not in product_pass
+    assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product_pass
+    assert "intentionally separate from the Taste landing's medium/60/900 bounds" in product_pass
+
+    proof_pass = prompt.split("#### 3a. Upgrade landing proof", 1)[1].split("### 4. X post", 1)[0]
+    assert "guidance_skills: []" in proof_pass
+    assert "do not rerun Taste" in proof_pass
+
+
+def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
+    content = TASTE_SKILL.read_bytes()
+    assert hashlib.sha256(content).hexdigest() == (
+        "aa194351b246b8b4799099d4ed7b033d29eab6e6e3d58d8d2172978be7b3ec89"
+    )
+    text = content.decode("utf-8")
+    assert "name: design-taste-frontend" in text
+    assert "Not dashboards, not data tables, not multi-step product UI." in text
+    assert 'Output a one-line "Design Read" before generating' in text
+    assert "## 14. FINAL PRE-FLIGHT CHECK" in text
+    provenance = TASTE_SKILL.with_name("UPSTREAM.md").read_text(encoding="utf-8")
+    assert "b17742737e796305d829b3ad39eda3add0d79060" in provenance
+    assert "byte-identical" in provenance
+
+
+def test_product_design_method_supports_brand_inheriting_continuations_without_taste():
+    method = CLAUDE_DESIGN_SKILL.read_text(encoding="utf-8")
+    assert "used standalone for dense product continuations that inherit an established brand" in method
+    assert "The canonical initial public-landing call uses the" in method
+    assert "full Taste skill alone" in method
+    assert "only when the caller explicitly selected it" in method
+    assert "Choose one coherent visual direction from the available style packs before building" not in method
+
+
+def test_product_owner_and_design_command_route_taste_only_to_the_initial_landing():
+    product = PRODUCT_SKILL.read_text(encoding="utf-8")
+    command = DESIGN_COMMAND.read_text(encoding="utf-8")
+
+    for text in (product, command):
+        assert 'guidance_skills: ["taste-frontend"]' in text or "`taste-frontend` skill explicitly and alone" in text
+        assert "`effort: medium`" in text
+        assert "`max_turns: 60`" in text
+        assert "`timeout_ms: 900000`" in text
+        assert "`guidance_skills: []`" in text
+        assert "defaults to `claude-design` only" in text
+
+    assert 'guidance_skills: ["claude-design"]' in product
+    assert "Do not pass Taste" in product
+    assert "`effort: high`, `max_turns: 90`, `budget_usd: 25.0`, and `timeout_ms: 1800000`" in product
+    assert "For every `product/site` design pass" not in command
+
+
+def test_optional_style_references_are_explicit_and_cannot_override_an_existing_brand():
+    for skill_file in OPTIONAL_STYLE_SKILLS:
+        text = skill_file.read_text(encoding="utf-8")
+        normalized = " ".join(text.split())
+        assert "only when the caller explicitly selects" in normalized
+        assert "never auto-add it beneath Taste or Claude Design" in normalized
+        assert "`product/site/DESIGN.md`, existing tokens, and existing assets are authoritative" in normalized
+        assert "must not override or reinterpret the established brand" in normalized
+        assert "Layer beneath taste-frontend and claude-design" not in text
+        assert "Layer this beneath `taste-frontend` and `claude-design`" not in text
 
 
 def test_navigation_component_is_force_refreshed_with_appkit_rails():

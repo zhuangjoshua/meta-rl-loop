@@ -1898,7 +1898,7 @@ def test_recorded_live_truth_metadata_labels_intended_live_state():
     assert truth["surface"] == "recorded_live"
     assert truth["live"] is True
     assert truth["publish_status"] == "published"
-    assert truth["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert truth["public_url"] == "https://latexflow.coscale.app/"
     assert truth["probe"] == "unknown"
 
 
@@ -2210,4 +2210,4 @@ def test_recorded_live_truth_metadata_prefers_live_build_pointer_over_stale_stat
     assert truth["committed"] is True
     assert truth["publish_status"] == "published"
     assert truth["build_id"] == "build-123"
-    assert truth["public_url"] == "https://latexflow.fourmanifold.com/"
+    assert truth["public_url"] == "https://latexflow.coscale.app/"

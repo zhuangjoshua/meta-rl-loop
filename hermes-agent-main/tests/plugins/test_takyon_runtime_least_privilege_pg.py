@@ -188,6 +188,42 @@ def test_billing_ops_write_under_safebox_authority_role(pg_conn):
     assert billing.reconcile_billing(pg_conn, uid)["ok"] is True
 
 
+def test_safebox_billing_function_acls_are_authority_only(pg_conn):
+    signatures = (
+        "safebox_billing_open_account(uuid,bigint)",
+        "safebox_billing_grant_allowance(uuid,bigint,text,timestamp with time zone,timestamp with time zone)",
+        "safebox_billing_reserve(uuid,bigint,text,text,text)",
+        "safebox_billing_settle(text,bigint)",
+        "safebox_billing_refund(text)",
+    )
+    for signature in signatures:
+        authority, operator, app = pg_conn.execute(
+            "select has_function_privilege('takyon_safebox_authority', %s, 'execute'), "
+            "has_function_privilege('takyon_operator_runtime', %s, 'execute'), "
+            "has_function_privilege('takyon_app_runtime', %s, 'execute')",
+            (signature, signature, signature),
+        ).fetchone()
+        assert authority is True
+        assert operator is False
+        assert app is False
+
+        # PUBLIC is a pseudo-role, not a pg_roles row. Inspect the routine's effective ACL instead of
+        # passing "public" to has_function_privilege as though it were a login role. In aclexplode,
+        # grantee oid 0 is PUBLIC; acldefault preserves PostgreSQL's default function EXECUTE grant
+        # when proacl is NULL, so this also catches an accidental reset to default privileges.
+        public_execute = pg_conn.execute(
+            "select exists ("
+            "select 1 from pg_proc p "
+            "cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl "
+            "where p.oid = %s::regprocedure "
+            "and acl.grantee = 0 "
+            "and acl.privilege_type = 'EXECUTE'"
+            ")",
+            (signature,),
+        ).fetchone()[0]
+        assert public_execute is False
+
+
 def test_operator_role_cannot_execute_billing_mint_functions(pg_conn):
     uid = _owner(pg_conn)
     billing.open_billing_account(pg_conn, uid)

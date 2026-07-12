@@ -1,14 +1,17 @@
 ---
 name: claude-design-brutalist
-description: Shared industrial-brutalist design system for dev tools, security/infra, terminal-adjacent, and experimental technical brands. Layer beneath taste-frontend and claude-design.
+description: Optional industrial-brutalist design reference for dev tools, security/infra, terminal-adjacent, and experimental technical brands; use only when the caller explicitly selects it.
 license: MIT
 ---
 
 # Claude Design Brutalist
 
-Layer this beneath `taste-frontend` and `claude-design` when the product should feel raw, mechanical,
-precise, and unapologetically technical: Swiss print rigor fused with tactical-terminal telemetry.
-Taste adapts this vocabulary to the brief; do not copy it verbatim.
+Use this optional reference only when the caller explicitly selects `claude-design-brutalist`;
+never auto-add it beneath Taste or Claude Design. For a dense product continuation,
+`product/site/DESIGN.md`, existing tokens, and existing assets are authoritative: this reference may
+reinforce an already-selected direction but must not override or reinterpret the established brand.
+When explicitly selected for a new compatible context, apply its raw, mechanical, precise, and
+unapologetically technical vocabulary without copying it verbatim.
 
 ## When To Use
 

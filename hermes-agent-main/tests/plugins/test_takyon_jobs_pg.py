@@ -287,6 +287,28 @@ def test_claim_one_serializes_per_lane_not_per_business(pg_conn):
     assert drained is not None and drained.id == second_publish.id
 
 
+def test_claim_one_serializes_all_product_writers_but_not_parent_ceo(pg_conn):
+    slug, _uid = _provision_business(pg_conn)
+    claude = jobs.enqueue(pg_conn, slug, "claude.agent_task", idempotency_key="product-claude")
+    refresh = jobs.enqueue(
+        pg_conn, slug, "product.surface_refresh", idempotency_key="product-refresh"
+    )
+    store_build = jobs.enqueue(pg_conn, slug, "store.build", idempotency_key="product-store")
+
+    product_claim = jobs.claim_one(pg_conn, worker_id="product-worker")
+    assert product_claim is not None and product_claim.id == claude.id
+    # Distinct product job kinds share the same canonical-writer lane.
+    assert jobs.claim_one(pg_conn, worker_id="other-product-worker") is None
+
+    parent = jobs.enqueue(pg_conn, slug, "ceo_bootstrap", idempotency_key="parent-ceo")
+    ceo_claim = jobs.claim_one(pg_conn, worker_id="ceo-worker")
+    assert ceo_claim is not None and ceo_claim.id == parent.id
+
+    jobs.complete(pg_conn, product_claim.id, result={"ok": True})
+    next_product = jobs.claim_one(pg_conn, worker_id="other-product-worker")
+    assert next_product is not None and next_product.id in {refresh.id, store_build.id}
+
+
 def test_claim_one_skips_rows_locked_by_another_worker(pg_conn):
     # The real FOR UPDATE SKIP LOCKED guarantee: a row another transaction already holds is skipped,
     # not blocked on, so two workers never contend for one job. A second live connection holds the
@@ -476,7 +498,15 @@ def test_handler_error_lost_claim_does_not_wedge_worker(pg_conn, monkeypatch):
     )
     handler = _RecordingHandler(raises=RuntimeError("workspace missing"))
 
-    def _lost_claim_fail(conn, job_id: str, *, error: str, retryable: bool = True) -> str:
+    def _lost_claim_fail(
+        conn,
+        job_id: str,
+        *,
+        error: str,
+        retryable: bool = True,
+        worker_id: str | None = None,
+        attempt: int | None = None,
+    ) -> str:
         raise jobs.JobNotRunning(job_id)
 
     monkeypatch.setattr(jobs, "fail", _lost_claim_fail)
@@ -538,9 +568,11 @@ def test_run_one_heartbeats_while_handler_is_running(pg_conn, monkeypatch):
     heartbeat_calls: list[tuple[str, str]] = []
     original_heartbeat = jobs.heartbeat
 
-    def _wrapped_heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+    def _wrapped_heartbeat(
+        conn, job_id: str, *, worker_id: str, attempt: int | None = None
+    ) -> None:
         heartbeat_calls.append((job_id, worker_id))
-        original_heartbeat(conn, job_id, worker_id=worker_id)
+        original_heartbeat(conn, job_id, worker_id=worker_id, attempt=attempt)
 
     monkeypatch.setattr(jobs, "heartbeat", _wrapped_heartbeat)
 
@@ -610,11 +642,13 @@ def test_run_one_uses_isolated_heartbeat_connection(pg_conn, monkeypatch):
 
     original_heartbeat = jobs.heartbeat
 
-    def _wrapped_heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+    def _wrapped_heartbeat(
+        conn, job_id: str, *, worker_id: str, attempt: int | None = None
+    ) -> None:
         assert isinstance(conn, _HeartbeatConn)
         heartbeat_calls.append(job_id)
         release.set()
-        original_heartbeat(conn, job_id, worker_id=worker_id)
+        original_heartbeat(conn, job_id, worker_id=worker_id, attempt=attempt)
 
     monkeypatch.setattr(jobs, "heartbeat", _wrapped_heartbeat)
 
@@ -660,10 +694,23 @@ def test_run_one_uses_isolated_lifecycle_connection_for_completion(pg_conn, monk
 
     original_complete = jobs.complete
 
-    def _wrapped_complete(conn, job_id: str, *, result=None) -> None:
+    def _wrapped_complete(
+        conn,
+        job_id: str,
+        *,
+        result=None,
+        worker_id: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
         assert isinstance(conn, _LifecycleConn)
         completion_conn_used.append(True)
-        original_complete(conn, job_id, result=result)
+        original_complete(
+            conn,
+            job_id,
+            result=result,
+            worker_id=worker_id,
+            attempt=attempt,
+        )
 
     monkeypatch.setattr(jobs, "complete", _wrapped_complete)
 
@@ -713,13 +760,18 @@ def test_run_one_heartbeat_failure_does_not_requeue_a_finished_job(pg_conn, monk
     )
     release = threading.Event()
     heartbeat_calls: list[str] = []
+    real_heartbeat = jobs.heartbeat
 
-    def _failing_heartbeat(conn, job_id: str, *, worker_id: str) -> None:
+    def _failing_heartbeat(
+        conn, job_id: str, *, worker_id: str, attempt: int | None = None
+    ) -> None:
         # First heartbeat fails like a lost claim; let the handler finish so we exercise the
         # finished-but-heartbeat-failed path, not the handler-error path.
         heartbeat_calls.append(job_id)
         release.set()
-        raise jobs.JobNotRunning(job_id)
+        if len(heartbeat_calls) == 1:
+            raise jobs.JobNotRunning(job_id)
+        real_heartbeat(conn, job_id, worker_id=worker_id, attempt=attempt)
 
     monkeypatch.setattr(jobs, "heartbeat", _failing_heartbeat)
 
@@ -747,16 +799,19 @@ def test_run_one_heartbeat_failure_does_not_requeue_a_finished_job(pg_conn, monk
     assert bal.allowance_used_cents == 300
 
 
-def test_run_one_lost_claim_on_successful_finish_completes_without_requeue(pg_conn):
+def test_run_one_lost_claim_on_successful_finish_refuses_stale_completion(pg_conn, monkeypatch):
     """If the claim is lost WHILE a successful build runs (requeue_stale + a sibling re-claim that then
     finalizes the row first), the terminal complete() sees a non-'running' row and raises JobNotRunning.
-    That is NOT a failure to surface: the work is done and its side effects already landed — re-running
-    it would only rebuild a published product. run_one reports completion and never requeues."""
+    The stale attempt must not report completion through the newer generation, even if its handler
+    returns success; the sibling's terminal row remains authoritative and the old hold is refunded."""
     slug, uid = _provision_business(pg_conn, allowance_cents=100_000)
     jobs.enqueue(
         pg_conn, slug, "ceo_bootstrap", idempotency_key="j",
         payload={"estimate_cents": 500}, max_attempts=2,
     )
+    # Simulate a reaper in another process; process-local handler registry is intentionally absent
+    # there, so only the durable generation fence can stop the old attempt.
+    monkeypatch.setattr(jobs, "_live_local_job_ids", lambda: [])
 
     class _ReclaimingHandler:
         """Simulate the lost-claim race: while 'running', the reaper requeues this job, a sibling
@@ -779,8 +834,9 @@ def test_run_one_lost_claim_on_successful_finish_completes_without_requeue(pg_co
         handlers={"ceo_bootstrap": _ReclaimingHandler()},
         heartbeat_interval_seconds=0,  # no heartbeat loop: isolate the terminal lost-claim path
     )
-    # The original attempt finished its build; it reports completion rather than requeuing/crashing.
-    assert outcome is not None and outcome.status == "completed"
+    # The original attempt is explicitly rejected; it never claims the sibling's completion.
+    assert outcome is not None and outcome.status == "failed"
+    assert outcome.reason == "lost_claim"
     # The row is terminal (completed by whichever attempt finalized first) — NOT requeued. The original
     # attempt's own hold was released so nothing leaks from it.
     job = jobs.get_job(pg_conn, outcome.job_id)

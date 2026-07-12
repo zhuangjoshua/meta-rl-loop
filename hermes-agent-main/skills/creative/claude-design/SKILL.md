@@ -1,14 +1,16 @@
 ---
 name: claude-design
-description: Distilled implementation method for high-quality product/site frontend work. Layer beneath taste-frontend and above at most one shared claude-design-* visual system.
+description: Distilled implementation method for high-quality product/site frontend work, used standalone for dense product continuations that inherit an established brand.
 license: Apache-2.0
 ---
 
 # Claude Design
 
-Use this skill for outward-facing `product/site` work beneath `taste-frontend`. Taste interprets the
-brief and controls art direction; this skill provides the implementation method. Add at most one
-shared visual system beneath both:
+Use this skill as the standalone implementation method for a dashboard, data table, multi-step
+product UI, or other `product/site` continuation. The canonical initial public-landing call uses the
+full Taste skill alone; do not auto-stack this skill beneath it. Inherit the established public
+surface's tokens, assets, and visual thesis instead of choosing a second direction. Add at most one
+shared visual system only when the caller explicitly selected it:
 
 - `claude-design-openai`
 - `claude-design-stripe`
@@ -17,7 +19,8 @@ shared visual system beneath both:
 - `claude-design-brutalist`
 
 Do not mix multiple style skills in the same worker run. Do not override Taste's brief-specific art
-direction with a preset's house aesthetic.
+direction with a preset's house aesthetic, and do not reinterpret an established brand during a
+product-continuation pass.
 
 ## When To Use
 
@@ -28,9 +31,10 @@ direction with a preset's house aesthetic.
 - UI refreshes
 - customer-facing HTML/CSS/JS surfaces
 
-## Shared Style Selection
+## Optional Shared Style Selection
 
-Choose one coherent visual direction from the available style packs before building:
+Use one of these style packs only when the caller explicitly selected it. Otherwise use Claude
+Design by itself; for a dense product continuation, preserve the established tokens and assets:
 
 - `claude-design-openai`: calm serious for AI tools, prosumer software, research/productivity surfaces
 - `claude-design-stripe`: premium commercial, fintech, infra, or polished B2B marketing
@@ -40,8 +44,8 @@ Choose one coherent visual direction from the available style packs before build
 
 ## Workflow
 
-1. Follow Taste's reading of the brief, audience, core job, and emotional tone before choosing the look.
-2. Choose one style pack and stay inside its typography, spacing, color, and component posture.
+1. Read and preserve the existing tokens, assets, typography, and visual thesis instead of choosing the look again.
+2. If the caller explicitly supplied one style pack, stay inside its typography, spacing, color, and component posture. Otherwise do not choose a pack; preserve the established tokens and assets.
 3. Build from a coherent page rhythm, not isolated pretty sections.
 4. Keep the interface honest: real controls, real labels, real states, no poster-only hero fakery.
 5. Use one visual thesis and carry it through typography, spacing, chrome, and motion.
@@ -137,7 +141,7 @@ Then run the mechanical pass — each of these is a countable check, not a vibe:
 
 ## Hard Rules
 
-- Use this skill beneath Taste and with at most one shared style pack; commit to one coherent visual direction in the artifact.
+- Use this standalone for a dense product continuation that inherits the existing brand; do not auto-stack it into the canonical Taste-only landing call, and use at most one explicitly selected shared style pack.
 - Do not mix visual systems.
 - Do not flood the page with accent color.
 - Do not use filler copy, fake numbers, or fake backend behavior.

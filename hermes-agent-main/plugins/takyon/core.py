@@ -304,7 +304,17 @@ _WORKER_GUIDANCE_SKILL_SECTIONS: dict[str, tuple[str, ...]] = {
         "Anti-Slop",
         "Preflight",
     ),
+    "design-taste-frontend": (
+        "Design Read",
+        "Fluid Composition",
+        "Design System",
+        "Product UI",
+        "Assets",
+        "Anti-Slop",
+        "Preflight",
+    ),
 }
+_TASTE_GUIDANCE_SKILL_NAMES = frozenset({"taste-frontend", "design-taste-frontend"})
 _WORKER_GUIDANCE_DESIGN_REFERENCE_SECTIONS: dict[str, tuple[str, ...]] = {
     "claude-design-openai": (
         "Visual Theme & Atmosphere",
@@ -1985,23 +1995,26 @@ def _normalize_guidance_skills(raw: Any) -> list[str]:
     return normalized
 
 
-# Default hierarchy for customer-facing product work. Taste is the art-direction layer; Claude
-# Design is the implementation method beneath it. A caller may add ONE fitting claude-design-* style
-# system, but may not remove the two shared layers from product/site work.
+# Default for an unspecified customer-facing product task is the dense-product-safe Claude Design
+# method.  Full Taste is an explicit landing/editorial implementation skill; bootstrap 2a opts into
+# it, while 2b and later app work must not silently inherit it outside upstream's declared scope.
 _DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS: tuple[str, ...] = (
-    "taste-frontend",
     "claude-design",
 )
 
 
 def _layer_product_design_guidance(skills: list[str]) -> list[str]:
-    """Put Taste above the shared design method while preserving optional guidance order."""
-    by_key = {skill.lower(): skill for skill in skills}
-    layered = [
-        by_key.get("taste-frontend", "taste-frontend"),
-        by_key.get("claude-design", "claude-design"),
-    ]
-    layered.extend(skill for skill in skills if skill.lower() not in {"taste-frontend", "claude-design"})
+    """Canonicalize an EXPLICIT design list without adding skills the caller did not request."""
+    selected_taste = [
+        skill for skill in skills if skill.lower() in _TASTE_GUIDANCE_SKILL_NAMES
+    ][:1]
+    shared_design = [skill for skill in skills if skill.lower() == "claude-design"][:1]
+    layered = [*selected_taste, *shared_design]
+    layered.extend(
+        skill
+        for skill in skills
+        if skill.lower() not in {*_TASTE_GUIDANCE_SKILL_NAMES, "claude-design"}
+    )
     return layered
 
 
@@ -2021,13 +2034,13 @@ def _resolve_worker_guidance_skills(
         if is_product_surface:
             return (
                 _layer_product_design_guidance(explicit),
-                "layered Taste and Claude Design above explicit customer-facing guidance",
+                "used explicit customer-facing guidance exactly as requested",
             )
         return explicit, "used explicit guidance_skills from caller"
     if is_product_surface:
         return (
             list(_DEFAULT_PRODUCT_DESIGN_GUIDANCE_SKILLS),
-            "auto-layered Taste above Claude Design for customer-facing product surface",
+            "defaulted to dense-product-safe Claude Design guidance",
         )
     return [], ""
 
@@ -7743,6 +7756,62 @@ def _claude_agent_summary_is_blocked(summary: Any) -> bool:
     return bool(lines and lines[-1].startswith("BLOCKED:"))
 
 
+def _read_taste_design_contract(workspace_path: Path) -> tuple[dict[str, Any], str]:
+    """Validate the durable handoff produced by one complete Taste implementation session."""
+    contract_path = Path(workspace_path) / "DESIGN.md"
+    if not contract_path.is_file():
+        return {}, (
+            "Taste design contract missing: DESIGN.md must contain a nonempty Design Read and "
+            "explicit DESIGN_VARIANCE, MOTION_INTENSITY, and VISUAL_DENSITY values (1-10)."
+        )
+    try:
+        if contract_path.stat().st_size > 256 * 1024:
+            return {}, "Taste design contract invalid: DESIGN.md exceeds 256 KiB."
+        content = contract_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, f"Taste design contract unreadable: DESIGN.md: {exc}"
+
+    heading = re.search(
+        r"(?ims)^#{1,6}\s+Design Read\s*$\n(.*?)(?=^#{1,6}\s|\Z)",
+        content,
+    )
+    design_read = str(heading.group(1) if heading else "").strip()
+    if not design_read:
+        inline = re.search(
+            r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Design Read(?:\*\*)?\s*:\s*(\S.*)$",
+            content,
+        )
+        design_read = str(inline.group(1) if inline else "").strip()
+    if not design_read:
+        return {}, "Taste design contract invalid: DESIGN.md has no nonempty Design Read."
+
+    dials: dict[str, int] = {}
+    missing: list[str] = []
+    for name in ("DESIGN_VARIANCE", "MOTION_INTENSITY", "VISUAL_DENSITY"):
+        dial = re.search(
+            rf"(?im)^[^\n]*\b{re.escape(name)}\b[^\n]*?(\d{{1,2}})\b",
+            content,
+        )
+        if dial is None:
+            missing.append(name)
+            continue
+        value = int(dial.group(1))
+        if not 1 <= value <= 10:
+            return {}, f"Taste design contract invalid: {name} must be an integer from 1 to 10."
+        dials[name] = value
+    if missing:
+        return {}, (
+            "Taste design contract invalid: DESIGN.md is missing explicit values for "
+            + ", ".join(missing)
+            + "."
+        )
+    return {
+        "path": "DESIGN.md",
+        "design_read": design_read,
+        **dials,
+    }, ""
+
+
 def _should_run_claude_agent_in_docker(workspace_rel: str) -> bool:
     mode = str(os.getenv("TAKYON_CLAUDE_AGENT_DOCKER", "auto") or "auto").strip().lower()
     if mode in {"0", "false", "no", "off"}:
@@ -7999,6 +8068,80 @@ _ACTIVE_OPERATOR_TASK_KIND: contextvars.ContextVar[str] = contextvars.ContextVar
 )
 
 
+def _active_worker_claim_guard():
+    """The exact durable job claim bound by ``jobs.run_one`` around this handler, if any."""
+    try:
+        from . import jobs as worker_jobs
+    except ImportError:  # pragma: no cover - alternate top-level package load
+        from plugins.takyon import jobs as worker_jobs
+    return worker_jobs.current_job_claim()
+
+
+def _assert_active_worker_claim(store: "TakyonStore", operation: str) -> None:
+    """Fence durable side effects to the current ``(job, worker, attempt)`` generation.
+
+    A stale handler can share both job id and worker id with a newer attempt after requeue, so every
+    workspace commit/publish must also match ``attempts``.  Unknown DB state fails closed: generation
+    work may be retried, but two writers may never advance one business concurrently.
+    """
+    guard = _active_worker_claim_guard()
+    if guard is None:
+        return
+    guard.assert_owned(operation)
+    try:
+        with store._connect() as conn:
+            row = conn.execute(
+                "SELECT status, locked_by, attempts FROM jobs WHERE id = ?",
+                (guard.job_id,),
+            ).fetchone()
+    except Exception as exc:
+        guard.mark_lost(f"could not verify durable ownership: {exc}")
+        guard.assert_owned(operation)
+        return
+    matches = bool(
+        row is not None
+        and str(row["status"] if isinstance(row, Mapping) else row[0]) == "running"
+        and str((row["locked_by"] if isinstance(row, Mapping) else row[1]) or "")
+        == guard.worker_id
+        and int(row["attempts"] if isinstance(row, Mapping) else row[2]) == guard.attempt
+    )
+    if not matches:
+        guard.mark_lost("durable row belongs to a newer or terminal claim generation")
+        guard.assert_owned(operation)
+
+
+@contextmanager
+def _hold_active_worker_claim_for_publish(store: "TakyonStore", operation: str):
+    """Hold the exact job row lock across the live-pointer flip.
+
+    The R2 publisher uploads immutable build objects and writes ``<slug>/current`` last.  A plain
+    check immediately before upload leaves a narrow race where a stale reaper can supersede the job
+    during that upload and the old worker can still flip ``current``.  Holding ``FOR UPDATE`` makes
+    ownership loss and pointer activation mutually exclusive without a schema change.
+    """
+    guard = _active_worker_claim_guard()
+    if guard is None:
+        yield
+        return
+    guard.assert_owned(operation)
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT status, locked_by, attempts FROM jobs WHERE id = ? FOR UPDATE",
+            (guard.job_id,),
+        ).fetchone()
+        matches = bool(
+            row is not None
+            and str(row["status"] if isinstance(row, Mapping) else row[0]) == "running"
+            and str((row["locked_by"] if isinstance(row, Mapping) else row[1]) or "")
+            == guard.worker_id
+            and int(row["attempts"] if isinstance(row, Mapping) else row[2]) == guard.attempt
+        )
+        if not matches:
+            guard.mark_lost("publish lock found a newer or terminal claim generation")
+            guard.assert_owned(operation)
+        yield
+
+
 @contextmanager
 def _bound_operator_task_run(run_id: str):
     """Bind the canonical worker-plane run id so live progress events can reference the durable row."""
@@ -8098,6 +8241,112 @@ def _record_claude_agent_sdk_progress(
     )
 
 
+def _docker_run_with_cidfile(run_cmd: list[str]) -> tuple[list[str], Path | None]:
+    """Attach a host cidfile to a ``docker run`` command so cancellation can kill the container.
+
+    Killing only the docker CLI is not a container lifecycle guarantee: Docker Desktop/daemon may
+    keep the container (and its bind-mounted editor) alive after the client process disappears.
+    """
+    if len(run_cmd) < 2 or str(run_cmd[1]).strip().lower() != "run":
+        return list(run_cmd), None
+    executable = Path(str(run_cmd[0] or "")).name.lower()
+    if executable not in {"docker", "podman"}:
+        return list(run_cmd), None
+    fd, raw_path = tempfile.mkstemp(prefix="takyon-claude-container-", suffix=".cid")
+    os.close(fd)
+    cidfile = Path(raw_path)
+    try:
+        cidfile.unlink()
+    except OSError:
+        pass
+    return [run_cmd[0], run_cmd[1], "--cidfile", str(cidfile), *run_cmd[2:]], cidfile
+
+
+def _terminate_claude_worker_process(
+    proc: subprocess.Popen[str],
+    *,
+    run_cmd: list[str],
+    cidfile: Path | None,
+) -> None:
+    """Stop the full worker process group, stop its container, and reap the wrapper."""
+    already_exited = proc.poll() is not None
+    if already_exited:
+        try:
+            proc.wait(timeout=0)
+        except Exception:
+            pass
+    elif os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    else:  # pragma: no cover - production is Linux; keep local Windows fallback correct
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    container_id = ""
+    if cidfile is not None:
+        try:
+            container_id = cidfile.read_text(encoding="utf-8").strip()
+        except OSError:
+            container_id = ""
+    if container_id and run_cmd:
+        docker_exe = str(run_cmd[0])
+        try:
+            subprocess.run(
+                [docker_exe, "kill", container_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    try:
+        if not already_exited:
+            proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError, AttributeError):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        else:  # pragma: no cover
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    finally:
+        # Reap unconditionally; after SIGKILL this blocks only until the kernel reports exit.
+        try:
+            proc.wait()
+        except Exception:
+            pass
+
+    # ``--rm`` normally removes the stopped container.  If the client died before handling the
+    # daemon event, force-remove it so no bind-mounted editor can survive this function.
+    if container_id and run_cmd:
+        try:
+            subprocess.run(
+                [str(run_cmd[0]), "rm", "-f", container_id],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            pass
+
+
 def _run_claude_agent_task_process(
     *,
     run_cmd: list[str],
@@ -8108,8 +8357,10 @@ def _run_claude_agent_task_process(
     business: str,
     workspace_rel: str,
 ) -> subprocess.CompletedProcess[str]:
+    original_run_cmd = list(run_cmd)
+    effective_run_cmd, docker_cidfile = _docker_run_with_cidfile(original_run_cmd)
     proc = subprocess.Popen(
-        run_cmd,
+        effective_run_cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -8117,6 +8368,7 @@ def _run_claude_agent_task_process(
         cwd=cwd,
         env=dict(env or {}),
         bufsize=1,
+        start_new_session=(os.name == "posix"),
     )
     stdout_chunks: list[str] = []
     stderr_lines: list[str] = []
@@ -8241,9 +8493,39 @@ def _run_claude_agent_task_process(
         if proc.stdin is not None:
             proc.stdin.write(json.dumps(payload))
             proc.stdin.close()
-        returncode = proc.wait(timeout=(timeout_ms / 1000.0) + 30)
+        deadline = time.monotonic() + max(0.001, float(timeout_ms) / 1000.0)
+        claim_guard = _active_worker_claim_guard()
+        while True:
+            if claim_guard is not None:
+                claim_guard.assert_owned("Claude worker execution")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(original_run_cmd, float(timeout_ms) / 1000.0)
+            try:
+                returncode = proc.wait(
+                    timeout=min(1.0, remaining) if claim_guard is not None else remaining
+                )
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(
+                        original_run_cmd,
+                        float(timeout_ms) / 1000.0,
+                    )
+                continue
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _terminate_claude_worker_process(
+            proc,
+            run_cmd=original_run_cmd,
+            cidfile=docker_cidfile,
+        )
+        raise
+    except Exception:
+        _terminate_claude_worker_process(
+            proc,
+            run_cmd=original_run_cmd,
+            cidfile=docker_cidfile,
+        )
         raise
     finally:
         _heartbeat_stop.set()
@@ -8265,8 +8547,13 @@ def _run_claude_agent_task_process(
                 proc.stdin.close()
             except Exception:
                 pass
+        if docker_cidfile is not None:
+            try:
+                docker_cidfile.unlink()
+            except OSError:
+                pass
     return subprocess.CompletedProcess(
-        run_cmd,
+        original_run_cmd,
         returncode,
         stdout="".join(stdout_chunks),
         stderr="\n".join(stderr_lines).strip(),
@@ -8793,7 +9080,10 @@ def _find_guidance_skill_file(identifier: str) -> Path | None:
         return None
     identifier = raw_identifier.lstrip("/")
     identifier_path = Path(raw_identifier).expanduser()
-    scan_dirs = get_all_skills_dirs()
+    scan_dirs = list(get_all_skills_dirs())
+    bundled_skills_dir = Path(__file__).resolve().parents[2] / "skills"
+    if bundled_skills_dir.is_dir() and bundled_skills_dir not in scan_dirs:
+        scan_dirs.append(bundled_skills_dir)
 
     if identifier_path.is_absolute():
         if identifier_path.is_dir():
@@ -8919,19 +9209,30 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
         frontmatter, body = parse_frontmatter(raw)
         skill_name = str(frontmatter.get("name") or skill_file.parent.name).strip() or skill_file.parent.name
         resolved_names.append(skill_name)
-        section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(skill_name.lower(), ())
-        excerpt = _excerpt_guidance_skill(body, section_titles=section_titles)
-        if skill_name.lower() == "taste-frontend":
+        normalized_skill_name = skill_name.lower()
+        section_titles = _WORKER_GUIDANCE_SKILL_SECTIONS.get(normalized_skill_name, ())
+        # Taste is one end-to-end implementation skill (design read → implementation → complete
+        # preflight), not a planning excerpt.  Preserve the byte-complete body regardless of whether
+        # callers use the legacy local id or upstream's canonical frontmatter name.
+        excerpt = (
+            str(body or "").strip()
+            if normalized_skill_name in _TASTE_GUIDANCE_SKILL_NAMES
+            else _excerpt_guidance_skill(body, section_titles=section_titles)
+        )
+        if normalized_skill_name in _TASTE_GUIDANCE_SKILL_NAMES:
             preamble = (
-                "Treat Taste as the required top-level art-direction and quality-control layer. "
-                "Use it to interpret the brief and adapt the lower design method/system; do not "
-                "discard the selected system or copy it mechanically."
+                "Use Taste as the complete landing/editorial implementation skill: perform its "
+                "Design Read, implement in this same worker session, and complete its full preflight. "
+                "Do not reduce it to a planning summary or assume another design skill is present. "
+                "Before finishing, write DESIGN.md in the workspace with a nonempty `# Design Read` "
+                "section and explicit `DESIGN_VARIANCE: N`, `MOTION_INTENSITY: N`, and "
+                "`VISUAL_DENSITY: N` values (each 1-10); this is the durable handoff to later workers."
             )
         elif skill_name.lower() == "claude-design" or skill_name.lower().startswith("claude-design-"):
             preamble = (
-                "Treat this as lower-layer design guidance beneath Taste. Follow its craft rules and "
-                "concrete visual system, while allowing Taste to adapt it to the business brief instead "
-                "of reproducing a house style verbatim."
+                "Use this as standalone-safe product implementation guidance and follow its craft rules. "
+                "If Taste is also explicitly supplied, apply this as the implementation method beneath "
+                "Taste; otherwise do not invent or wait for a Taste layer."
             )
         else:
             preamble = (
@@ -8949,7 +9250,10 @@ def _compose_worker_guidance_block(skill_identifiers: list[str]) -> tuple[list[s
             blocks.append(design_reference)
     lower_design_names = [name for name in resolved_names if name.lower() == "claude-design" or name.lower().startswith("claude-design-")]
     concrete_style_names = [name for name in resolved_names if name.lower().startswith("claude-design-")]
-    if "taste-frontend" in {name.lower() for name in resolved_names} and lower_design_names:
+    if (
+        _TASTE_GUIDANCE_SKILL_NAMES.intersection(name.lower() for name in resolved_names)
+        and lower_design_names
+    ):
         blocks.insert(
             0,
             (
@@ -16765,6 +17069,10 @@ class TakyonStore:
         last_exc: BaseException | None = None
         for _attempt in range(_WORKSPACE_COMMIT_MAX_ATTEMPTS):
             try:
+                _assert_active_worker_claim(
+                    self,
+                    f"workspace sync for business:{normalized} attempt {_attempt + 1}",
+                )
                 if before_attempt is not None:
                     # Re-assert caller-owned new files into the (possibly re-materialized) mirror.
                     # sync=False: do NOT trigger our own re-materialize here — that would wipe the very
@@ -19962,6 +20270,7 @@ class TakyonStore:
         actor: str = "agent",
         principal: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        _assert_active_worker_claim(self, f"durable commit {idempotency_key or '<missing>'}")
         self._workspace_sync_cache.clear()
         if not idempotency_key or not str(idempotency_key).strip():
             raise TakyonError("idempotency_key is required for every durable Takyon write")
@@ -24738,6 +25047,8 @@ def _finalize_product_surface_refresh(
     except Exception:
         from plugins.takyon import app_actions as takyon_app_actions
 
+    _assert_active_worker_claim(store, f"product refresh for business:{business}")
+
     surface_with_workflow = {
         **surface,
         "product_workflow": _surface_product_workflow_shape(surface),
@@ -24812,14 +25123,22 @@ def _finalize_product_surface_refresh(
         ][:8],
     )
     if refresh.get("status") == "passed":
-        publish = _publish_product_surface_path(
-            business_root=store._business_root(business),
-            slug=business,
-            source_path=str(refresh.get("source_path") or source_path),
-            publish_target=publish_target,
-            source_revision=getattr(store, "_canonical_workspace_revision", lambda _slug: 0)(business),
-            surface=surface,
-        )
+        # The build/typecheck may take minutes. Re-check the exact claim generation AFTER it and
+        # immediately before any live artifact upload; a superseded worker may inspect its partial,
+        # but it may never publish it.
+        _assert_active_worker_claim(store, f"product publish for business:{business}")
+        with _hold_active_worker_claim_for_publish(
+            store,
+            f"live product pointer activation for business:{business}",
+        ):
+            publish = _publish_product_surface_path(
+                business_root=store._business_root(business),
+                slug=business,
+                source_path=str(refresh.get("source_path") or source_path),
+                publish_target=publish_target,
+                source_revision=getattr(store, "_canonical_workspace_revision", lambda _slug: 0)(business),
+                surface=surface,
+            )
     else:
         publish = {
             "status": "blocked",
@@ -24828,6 +25147,10 @@ def _finalize_product_surface_refresh(
             "publish_source_path": str(refresh.get("source_path") or source_path),
             "blocker": _surface_refresh_exact_blocker(refresh),
         }
+    # _publish_product_surface_path activates both R2 <slug>/current and the local current symlink
+    # while the exact job row is locked above. Re-check after releasing that lock before recording
+    # receipts/metadata; a stale generation can neither flip the pointer nor claim the result.
+    _assert_active_worker_claim(store, f"product publish activation for business:{business}")
     inventory = refresh.get("inventory") if isinstance(refresh.get("inventory"), dict) else {}
     if not inventory:
         inventory = _product_inventory(store._business_root(business), str(refresh.get("source_path") or source_path), surface=surface)
@@ -36678,6 +37001,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
         turn_cap_retries: list[dict[str, int]] = []
         surface_build_retries: list[dict[str, str]] = []
         agent_record: dict[str, Any] | None = None
+        taste_guidance_active = False
         with workspace_context as mounted_context, ExitStack() as scoped_workspaces:
             active_store = store
             mounted_home = None
@@ -36712,6 +37036,11 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     raise
                 resolved_guidance_skills, guidance_block = [], ""
                 guidance_selection_reason = "design packs unavailable; proceeded without guidance"
+            taste_guidance_active = bool(
+                _TASTE_GUIDANCE_SKILL_NAMES.intersection(
+                    name.lower() for name in resolved_guidance_skills
+                )
+            )
             if refresh_surface and workspace_targets_product_surface:
                 _enforce_canonical_product_surface_source_path(
                     business=business,
@@ -36845,11 +37174,43 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 else _bound_claude_worker_progress(_default_worker_progress_sink)
             )
             scoped_workspaces.enter_context(worker_progress_binding)
+            # ONE wall-clock budget for the entire coding task.  Turn-cap, build-fix, and Docker
+            # bind retries all consume this same deadline; no retry receives a fresh timeout.  The
+            # caller chooses the total (bootstrap passes 900s), while timeout-partial validation may
+            # still run afterward under the ownership fence to determine whether the source is
+            # already complete and publishable.
+            worker_deadline = time.monotonic() + (float(timeout_ms) / 1000.0)
+
+            def _remaining_worker_timeout_ms() -> int:
+                remaining_ms = int((worker_deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise subprocess.TimeoutExpired(
+                        ["takyon-claude-agent-task"],
+                        float(timeout_ms) / 1000.0,
+                    )
+                return max(1, remaining_ms)
+
             while True:
+                _assert_active_worker_claim(
+                    active_store,
+                    f"Claude worker attempt {worker_attempts + 1}",
+                )
+                deadline_exhausted_before_attempt = False
+                if worker_attempts == 0:
+                    attempt_timeout_ms = int(timeout_ms)
+                else:
+                    try:
+                        attempt_timeout_ms = _remaining_worker_timeout_ms()
+                    except subprocess.TimeoutExpired:
+                        # Route deadline exhaustion through the same owned timeout-partial gate
+                        # below; never escape and discard the warm workspace between retries.
+                        deadline_exhausted_before_attempt = True
+                        attempt_timeout_ms = 1
                 worker_attempts += 1
                 attempt_payload = {
                     **payload_base,
                     "maxTurns": active_max_turns,
+                    "timeoutMs": attempt_timeout_ms,
                     "instruction": active_worker_instruction,
                 }
                 started_line = (
@@ -36866,11 +37227,16 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 )
                 worker_invoked = True
                 try:
+                    if deadline_exhausted_before_attempt:
+                        raise subprocess.TimeoutExpired(
+                            ["takyon-claude-agent-task"],
+                            float(timeout_ms) / 1000.0,
+                        )
                     if docker_isolated_worker:
                         run_cmd, docker_payload, worker_cwd, worker_env = _run_claude_agent_task_in_docker(
                             payload=attempt_payload,
                             workspace_path=workspace_path,
-                            timeout_ms=timeout_ms,
+                            timeout_ms=attempt_timeout_ms,
                             business=business,
                             operator_user_id=operator_user_id,
                         )
@@ -36880,11 +37246,16 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         # safe: no model request, edit, or billable side effect occurred.  Ordinary
                         # worker failures are never replayed here.
                         for bind_attempt in range(3):
+                            process_timeout_ms = _remaining_worker_timeout_ms()
+                            docker_payload = {
+                                **docker_payload,
+                                "timeoutMs": process_timeout_ms,
+                            }
                             proc = _run_claude_agent_task_process(
                                 run_cmd=run_cmd,
                                 payload=docker_payload,
                                 cwd=worker_cwd,
-                                timeout_ms=timeout_ms,
+                                timeout_ms=process_timeout_ms,
                                 env=worker_env,
                                 business=business,
                                 workspace_rel=workspace_rel,
@@ -36915,7 +37286,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             run_cmd=[node, str(script)],
                             payload=attempt_payload,
                             cwd=str(_repo_root()),
-                            timeout_ms=timeout_ms,
+                            timeout_ms=_remaining_worker_timeout_ms(),
                             env=worker_env,
                             business=business,
                             workspace_rel=workspace_rel,
@@ -37002,6 +37373,31 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                             "Claude Agent SDK output blocked because source files were written under a "
                             f"duplicate workspace prefix and could not be safely repaired: {prefix_repair.get('reason')}"
                         )
+                if sdk_result.get("success") and taste_guidance_active:
+                    design_contract, design_contract_blocker = _read_taste_design_contract(
+                        workspace_path
+                    )
+                    if design_contract_blocker:
+                        # Preserve the one Taste session's source for honest human review, but fail
+                        # closed before refresh/publish and never start a second stateless Taste
+                        # worker merely to recreate the missing handoff.
+                        try:
+                            blocked_sync_status = active_store._sync_business_workspace_remote(
+                                business
+                            )
+                        except Exception as sync_exc:
+                            blocked_sync_status = f"failed: {sync_exc}"
+                        sdk_result = {
+                            **sdk_result,
+                            "success": False,
+                            "blocked": True,
+                            "blocker": "taste_design_contract_invalid",
+                            "error": design_contract_blocker,
+                            "taste_design_contract": None,
+                            "workspace_sync_status": blocked_sync_status,
+                        }
+                    else:
+                        sdk_result["taste_design_contract"] = design_contract
                 if sdk_result.get("success"):
                     # The SDK summary often contains the worker's internal design deliberation
                     # ("Now I have full context... Reading this as... Dial: variance=..."). Preserve
@@ -37184,6 +37580,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                 should_retry_turn_cap = (
                     not sdk_result.get("success")
                     and customer_facing_product_workspace
+                    and not taste_guidance_active
                     and len(turn_cap_retries) < 1
                     and _claude_agent_hit_turn_cap(sdk_result.get("error") or "")
                 )
@@ -37224,6 +37621,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                     and surface_refresh.get("status") == "failed"
                     and not _surface_refresh_has_forbidden_source_blockers(surface_refresh)
                     and customer_facing_product_workspace
+                    and not taste_guidance_active
                     and len(surface_build_retries) < 2
                 )
                 if should_retry_surface_build:
@@ -37327,6 +37725,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
                         "workspace_sync_status": sdk_result.get("workspace_sync_status"),
                         "workspace_durability": sdk_result.get("workspace_durability"),
                         "workspace_prefix_repair": sdk_result.get("workspace_prefix_repair"),
+                        "taste_design_contract": sdk_result.get("taste_design_contract"),
                         "surface_refresh": surface_refresh,
                     },
                 }
@@ -37400,6 +37799,7 @@ def handle_business_claude_agent_task(args: dict, **_: Any) -> str:
             "actual_cost_cents": worker_actual_cents,
             "workspace_sync_status": sdk_result.get("workspace_sync_status"),
             "workspace_durability": sdk_result.get("workspace_durability"),
+            "taste_design_contract": sdk_result.get("taste_design_contract"),
             "timed_out": bool(sdk_result.get("timed_out")),
             "partial_workspace_sync_status": sdk_result.get("partial_workspace_sync_status"),
             "error": sdk_result.get("error"),
@@ -39403,7 +39803,7 @@ TAKYON_TOOL_DEFINITIONS = [
                 "business": _BUSINESS_PROP,
                 "workspace": {"type": "string", "description": "Business-relative workspace directory under one of product/, distribution/, research/, metrics/ (default 'product/site'). Edits product/site source with file/code tools; NOT for market research (research runs inline via takyon-market-research)."},
                 "instruction": {"type": "string", "description": "Bounded task for the Claude SDK worker"},
-                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to distill into the worker instruction. Every product/site task always layers taste-frontend above claude-design; callers may add one fitting claude-design-* visual system. The injected App Kit behavior contract remains authoritative."},
+                "guidance_skills": {"type": "array", "items": {"type": "string"}, "description": "Optional installed Hermes skill names to inject into the worker instruction exactly as requested. Use full design-taste-frontend for landing/editorial implementation, claude-design for dense product UI, and at most one fitting claude-design-* visual system. The injected App Kit behavior contract remains authoritative."},
                 "budget_usd": {"type": "number", "description": "Per-task spend reservation, default 8.0 for product/site work and 2.0 otherwise, capped at 25.0"},
                 "effort": {"type": "string", "description": "Optional worker reasoning effort override: low, medium, or high. Product/site work defaults to medium; other work defaults to high."},
                 "max_turns": {"type": "integer", "description": "SDK turn cap, default 60 for product/site work and 12 otherwise"},

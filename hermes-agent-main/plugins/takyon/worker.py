@@ -158,6 +158,7 @@ def _best_effort_terminalize_owned_timeout(job: Job, *, error: str) -> str | Non
             conn,
             job_id,
             worker_id=worker_id,
+            attempt=int(getattr(job, "attempts", 0) or 0),
             error=error,
             retryable=True,
         )
@@ -1342,6 +1343,7 @@ def _run_ceo_turn(
         run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}
         future = pool.submit(ctx.run, agent.run_conversation, user_prompt, **run_kwargs)
         timed_out = False
+        ownership_lost_reason = ""
         bounded_stop_reason = ""
         completion_observed_at: float | None = None
         next_completion_probe_at = turn_started_monotonic
@@ -1354,6 +1356,10 @@ def _run_ceo_turn(
                     done, _ = concurrent.futures.wait({future}, timeout=5.0)
                     if done:
                         result = future.result()
+                        break
+                    active_claim = jobs.current_job_claim()
+                    if active_claim is not None and active_claim.lost:
+                        ownership_lost_reason = active_claim.reason
                         break
                     idle = 0.0
                     if hasattr(agent, "get_activity_summary"):
@@ -1444,13 +1450,55 @@ def _run_ceo_turn(
                         timed_out = True
                         break
         finally:
+            # ``Future.cancel`` cannot stop a running thread.  Interrupt the agent first, then JOIN
+            # the thread before this handler is allowed to raise/return.  The old wait=False path
+            # requeued the durable bootstrap while its agent/tool thread was still editing the same
+            # business (BriefVault/AppKitProof), creating overlapping revisions and stale-base
+            # conflicts.  run_one continues heartbeating the parent claim while this join waits.
+            if timed_out or bounded_stop_reason or ownership_lost_reason:
+                if hasattr(agent, "interrupt"):
+                    if ownership_lost_reason:
+                        agent.interrupt("CEO worker claim lost")
+                    elif timed_out:
+                        agent.interrupt("CEO wake timed out (inactivity)")
+                    else:
+                        agent.interrupt(f"CEO bootstrap stopped: {bounded_stop_reason}")
+                interrupt_started = time.monotonic()
+                next_pinned_log = interrupt_started + 30.0
+                while not future.done():
+                    concurrent.futures.wait({future}, timeout=2.0)
+                    if future.done():
+                        break
+                    if time.monotonic() >= next_pinned_log:
+                        # Python cannot safely kill a live thread.  This is an explicit fail-closed
+                        # posture, not a silent wrapper hang: retain/heartbeat the current claim and
+                        # forbid requeue until the agent/tool thread acknowledges interrupt.  Its
+                        # subprocess/container has a separately enforced hard deadline + process-
+                        # group reap, and every durable write is claim-generation fenced.
+                        _log.error(
+                            "worker: interrupted CEO thread for business:%s still alive after %.0fs; "
+                            "pinning claim and refusing requeue until it exits",
+                            slug,
+                            time.monotonic() - interrupt_started,
+                        )
+                        next_pinned_log = time.monotonic() + 30.0
+                try:
+                    future.result()
+                except Exception:
+                    # The requested interrupt normally surfaces as an exception from the agent
+                    # thread.  Joining it is the invariant; its interrupt exception is represented
+                    # by the explicit timeout/bounded/lost-claim outcome below.
+                    pass
             if progress is not None:
                 progress.finish_stream()
-            pool.shutdown(wait=False, cancel_futures=True)
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    if ownership_lost_reason:
+        raise jobs.JobClaimLost(
+            f"CEO turn for business:{slug} lost its exact worker claim: {ownership_lost_reason}"
+        )
 
     if timed_out:
-        if hasattr(agent, "interrupt"):
-            agent.interrupt("CEO wake timed out (inactivity)")
         _emit_turn_event(
             "timeout",
             error=f"idle past {int(limit)}s inactivity limit",
@@ -1460,8 +1508,6 @@ def _run_ceo_turn(
         )
 
     if bounded_stop_reason:
-        if hasattr(agent, "interrupt"):
-            agent.interrupt(f"CEO bootstrap stopped: {bounded_stop_reason}")
         final_response = f"Launch work stopped at its bounded runtime: {bounded_stop_reason}."
         _record_ceo_turn_chat(slug, final_response)
         cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0.0) or 0.0)
@@ -2023,13 +2069,26 @@ def ceo_bootstrap_handler(job: Job) -> JobRunResult:
                     )
     except Exception as exc:
         if _is_ceo_inactivity_timeout(exc):
-            status = _best_effort_terminalize_owned_timeout(job, error=str(exc))
-            if status:
-                _log.warning(
-                    "worker: ceo_bootstrap inactivity timeout terminalized durable job %s as %s before bubbling",
-                    getattr(job, "id", ""),
-                    status,
-                )
+            # The agent thread has been interrupted and joined by _run_ceo_turn, but a fire-and-
+            # continue delegated build may still own a separate durable claim.  Keep THIS parent
+            # handler alive (and therefore heartbeating in run_one) until every child claim ends;
+            # only then may the normal outer failure path requeue the bootstrap.  The previous
+            # early ``fail_if_still_owned`` transition was the BriefVault overlap: attempt 2 began
+            # while attempt 1's delegated child kept editing through revisions r10→r13.
+            while True:
+                try:
+                    delegated_child_alive = _bootstrap_has_live_delegated_child(
+                        store,
+                        slug,
+                        freshness_seconds=120.0,
+                    )
+                except Exception:
+                    # Unknown liveness fails closed against duplicate generation.  run_one keeps
+                    # this claim fresh and the next bounded poll retries the canonical read.
+                    delegated_child_alive = True
+                if not delegated_child_alive:
+                    break
+                time.sleep(5.0)
         _record_runtime_event(
             slug,
             kind="ceo_bootstrap",
@@ -2520,9 +2579,16 @@ def _operator_tool_task_handler(job: Job, *, tool_name: str, handler_fn) -> JobR
             )
             with _bound_operator_task_context(run_id=work_request_id, task_kind=tool_name):
                 raw = handler_fn(dict(args))
+                active_claim = jobs.current_job_claim()
+                if active_claim is not None:
+                    active_claim.assert_owned(f"recording {tool_name} result")
         result = _parse_jsonish_output(str(raw or ""))
         if not isinstance(result, dict) or not result:
             result = {"success": False, "error": f"{tool_name} returned no parseable result"}
+    except jobs.JobClaimLost:
+        # The newer attempt owns both the job row and work-request reconciliation.  A stale wrapper
+        # must not overwrite that run with its late result/error.
+        raise
     except Exception as exc:
         if work_request_id:
             _update_work_request(

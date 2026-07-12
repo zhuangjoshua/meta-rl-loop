@@ -68,7 +68,7 @@ def test_tracked_wrapper_stops_every_producer_and_proves_safebox_down():
     assert "export TAKYON_HOME=/opt/takyon/.takyon" in wrapper
 
 
-def test_operator_deploy_orders_cutover_before_prod_service_restart():
+def test_operator_deploy_migrates_before_stop_and_cutover_before_restart():
     deploy = (
         Path(__file__).resolve().parents[3]
         / "deploy"
@@ -80,4 +80,4 @@ def test_operator_deploy_orders_cutover_before_prod_service_restart():
     migrate = activation.index("\nrun_remote_migrations\n")
     finalize = activation.index('if [[ "$TAKYON_FINALIZE_STRIPE_LIVE" == "1" ]]')
     restart = activation.index("systemctl restart takyon-dashboard.service")
-    assert stop < migrate < finalize < restart
+    assert migrate < stop < finalize < restart

@@ -877,6 +877,49 @@ local_tcp_port_listening() {
   nc -z 127.0.0.1 "$port" >/dev/null 2>&1
 }
 
+tunnel_restart_lock_path() {
+  local port="$1"
+  local lock_root="$LOCAL_PROD_ROOT/tunnel-locks"
+  mkdir -p "$lock_root"
+  printf '%s/restart-%s.lock' "$lock_root" "$port"
+}
+
+current_shell_process_pid() {
+  # Bash 3.2 keeps $$ pinned to the parent shell inside an async function, and this helper is
+  # itself called through command substitution. A tiny child asks for its parent's parent: the
+  # stable monitor process that must own and release this cross-shell lock.
+  sh -c 'ps -o ppid= -p "$PPID" | tr -d "[:space:]"'
+}
+
+require_tunnel_restart_lock_tool() {
+  if [[ ! -x /usr/bin/shlock ]]; then
+    echo "takyon-prod: /usr/bin/shlock is required for shared tunnel ownership on the Mac production rail" >&2
+    return 1
+  fi
+}
+
+acquire_tunnel_restart_lock() {
+  local port="$1"
+  local lock_file current_pid
+  require_tunnel_restart_lock_tool || return 2
+  lock_file="$(tunnel_restart_lock_path "$port")"
+  current_pid="$(current_shell_process_pid)"
+  # shlock performs stale validation and the replacement link as one established dot-lock
+  # protocol, so two contenders cannot both remove an observed stale lock and delete the winner.
+  /usr/bin/shlock -f "$lock_file" -p "$current_pid"
+}
+
+release_tunnel_restart_lock() {
+  local port="$1"
+  local lock_file owner_pid current_pid
+  lock_file="$(tunnel_restart_lock_path "$port")"
+  owner_pid="$(tr -d '[:space:]' <"$lock_file" 2>/dev/null || true)"
+  current_pid="$(current_shell_process_pid)"
+  if [[ "$owner_pid" == "$current_pid" ]]; then
+    rm -f "$lock_file"
+  fi
+}
+
 tunnel_healthy() {
   safebox_tunnel_healthy && dashboard_tunnel_healthy
 }
@@ -975,11 +1018,43 @@ ensure_managed_tunnel() {
   start_managed_tunnel "$label" "$command" "$health_url" "$log_file" "$pid_file"
 }
 
+restart_managed_tunnel_if_unowned() {
+  local label="$1"
+  local command="$2"
+  local health_url="$3"
+  local log_file="$4"
+  local pid_file="$5"
+  local health_fn="$6"
+  local port="$7"
+  local result=0
+  local lock_status=0
+
+  acquire_tunnel_restart_lock "$port" || lock_status="$?"
+  if [[ "$lock_status" == "1" ]]; then
+    return 0
+  fi
+  if [[ "$lock_status" != "0" ]]; then
+    return "$lock_status"
+  fi
+  # Recheck both signals after taking the shared lock: another shell may have repaired the tunnel
+  # between this monitor's failed health check and lock acquisition.
+  if ! "$health_fn" && ! local_tcp_port_listening "$port"; then
+    stop_pid_file_process "$pid_file"
+    echo "$label tunnel dropped; restarting..."
+    if ! start_managed_tunnel "$label" "$command" "$health_url" "$log_file" "$pid_file"; then
+      result=1
+    fi
+  fi
+  release_tunnel_restart_lock "$port"
+  return "$result"
+}
+
 monitor_console_tunnels() {
   local safebox_log="$1"
   local safebox_pid_file="$2"
   local dashboard_log="$3"
   local dashboard_pid_file="$4"
+  require_tunnel_restart_lock_tool || return 2
   while true; do
     sleep "$CONSOLE_TUNNEL_MONITOR_SECONDS"
     if ! safebox_tunnel_healthy; then
@@ -987,9 +1062,9 @@ monitor_console_tunnels() {
       # remote service briefly restarts. Do not race it by binding the same port; the next monitor
       # tick will health-check the existing listener again.
       if ! local_tcp_port_listening "$LOCAL_SAFEBOX_PORT"; then
-        stop_pid_file_process "$safebox_pid_file"
-        echo "Safebox tunnel dropped; restarting..."
-        start_managed_tunnel "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" "$safebox_log" "$safebox_pid_file" || true
+        restart_managed_tunnel_if_unowned \
+          "Safebox" "safebox-tunnel" "$LOCAL_SAFEBOX_URL/healthz" \
+          "$safebox_log" "$safebox_pid_file" safebox_tunnel_healthy "$LOCAL_SAFEBOX_PORT" || true
       fi
     fi
     if [[ "$TARGET" == "dev" ]]; then
@@ -999,9 +1074,9 @@ monitor_console_tunnels() {
       if local_tcp_port_listening "$LOCAL_DASHBOARD_PORT"; then
         continue
       fi
-      stop_pid_file_process "$dashboard_pid_file"
-      echo "Operator dashboard tunnel dropped; restarting..."
-      start_managed_tunnel "Operator dashboard" "dashboard-tunnel" "$LOCAL_DASHBOARD_URL/healthz" "$dashboard_log" "$dashboard_pid_file" || true
+      restart_managed_tunnel_if_unowned \
+        "Operator dashboard" "dashboard-tunnel" "$LOCAL_DASHBOARD_URL/healthz" \
+        "$dashboard_log" "$dashboard_pid_file" dashboard_tunnel_healthy "$LOCAL_DASHBOARD_PORT" || true
     fi
   done
 }
@@ -1035,6 +1110,7 @@ start_worker_tunnel_guard() {
     return 0
   fi
 
+  require_tunnel_restart_lock_tool || die "shared tunnel ownership preflight failed"
   mkdir -p "$LOCAL_PROD_ROOT/logs"
   local timestamp
   timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -1701,6 +1777,7 @@ cmd_console() {
   fi
 
   require_files
+  require_tunnel_restart_lock_tool || die "shared tunnel ownership preflight failed"
   mkdir -p "$LOCAL_PROD_ROOT/logs"
   OPERATOR_USER_ID_OVERRIDE="$operator_user_id"
 

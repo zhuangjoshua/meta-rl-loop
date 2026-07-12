@@ -3356,11 +3356,10 @@ Use this skill for strong product UI work.
 
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend", "claude-design"]
-    assert result["guidance_selection_reason"] == "layered Taste and Claude Design above explicit customer-facing guidance"
-    assert "[Design guidance hierarchy]" in instruction
-    assert "Taste is the top-level brief interpretation" in instruction
-    assert "[Hermes guidance skill: taste-frontend]" in instruction
+    assert result["guidance_skills"] == ["claude-design"]
+    assert result["guidance_selection_reason"] == "used explicit customer-facing guidance exactly as requested"
+    assert "[Design guidance hierarchy]" not in instruction
+    assert "[Hermes guidance skill: taste-frontend]" not in instruction
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "## Workflow" in instruction
     assert "Build the artifact with intentional hierarchy." in instruction
@@ -3493,10 +3492,9 @@ Playful shared design system.
 
     instruction = captured["payload"]["instruction"]
     assert result["success"] is True
-    assert result["guidance_skills"] == ["taste-frontend", "claude-design", "claude-design-doodle"]
-    assert "[Design guidance hierarchy]" in instruction
-    assert "Taste is the top-level brief interpretation" in instruction
-    assert "[Hermes guidance skill: taste-frontend]" in instruction
+    assert result["guidance_skills"] == ["claude-design", "claude-design-doodle"]
+    assert "[Design guidance hierarchy]" not in instruction
+    assert "[Hermes guidance skill: taste-frontend]" not in instruction
     assert "[Hermes guidance skill: claude-design]" in instruction
     assert "[Hermes guidance skill: claude-design-doodle]" in instruction
     assert "[Hermes design reference: claude-design-doodle / DESIGN.md]" in instruction
