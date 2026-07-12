@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sqlite3
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -844,6 +845,77 @@ def test_ceo_turn_interrupts_before_next_model_iteration_on_human_review_blocker
         assert interrupted == [
             "CEO bootstrap stopped: durable bootstrap blocker requires human review"
         ]
+
+
+def test_ceo_turn_mirrors_parent_context_into_registered_tool_module(monkeypatch):
+    observed: dict[str, object] = {"active": False}
+
+    @contextlib.contextmanager
+    def twin_binding(**kwargs):
+        observed["bound"] = dict(kwargs)
+        observed["active"] = True
+        try:
+            yield
+        finally:
+            observed["active"] = False
+
+    class FakeAgent:
+        session_estimated_cost_usd = 0.0
+        session_cost_status = "exact"
+        _memory_nudge_interval = 0
+        _skill_nudge_interval = 0
+        activity_callback = None
+        suppress_status_output = False
+
+        def run_conversation(self, _prompt, **_kwargs):
+            assert observed["active"] is True
+            return {"final_response": "Done", "completed": True}
+
+    twin_core = SimpleNamespace(_bound_operator_task_context=twin_binding)
+    monkeypatch.setitem(sys.modules, "takyon_plugins.takyon.core", twin_core)
+    monkeypatch.setattr(turn_runtime, "_read_model_config", lambda _store: {"provider": "anthropic"})
+    monkeypatch.setattr(
+        turn_runtime,
+        "_require_agent_model_config",
+        lambda _cfg, model_override="": "claude-sonnet-5",
+    )
+    monkeypatch.setattr(worker, "_business_owner_user_id", lambda _slug: "user-1")
+    monkeypatch.setattr(worker, "_record_ceo_turn_chat", lambda _slug, _text: None)
+    monkeypatch.setattr("plugins.takyon.core.load_takyon_env", lambda: None)
+    monkeypatch.setattr("plugins.takyon.core.TakyonStore", lambda: _FakeStore())
+    monkeypatch.setattr(
+        "takyon_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested=None, target_model=None: {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+        },
+    )
+    monkeypatch.setattr(
+        "plugins.takyon.operator_gateway.build_operator_gateway_agent",
+        lambda **_kwargs: FakeAgent(),
+    )
+
+    with takyon_core._bound_operator_task_context(
+        run_id="bootstrap-job", task_kind="ceo_bootstrap", attempt=3, deadline_at=456.0
+    ):
+        response, _, _, completed = worker._run_ceo_turn(
+            slug="acme",
+            system_prompt="ceo",
+            user_prompt="bootstrap",
+            toolsets=["takyon"],
+            max_turns=30,
+            inactivity_limit=0.0,
+        )
+
+    assert response == "Done"
+    assert completed is True
+    assert observed["active"] is False
+    assert observed["bound"] == {
+        "run_id": "bootstrap-job",
+        "task_kind": "ceo_bootstrap",
+        "attempt": 3,
+        "deadline_at": 456.0,
+    }
 
 
 def test_ceo_turn_bounds_absolute_and_post_completion_tails():

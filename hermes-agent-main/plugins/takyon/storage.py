@@ -1068,6 +1068,23 @@ class SafeboxStorageBackend:
         safe_prefix = _safe_rel(prefix.rstrip("/"), field="prefix") if prefix.strip("/") else ""
         return safebox.storage_list_object_sizes(self.name, safe_prefix)
 
+    def list_prefix_bytes(self, prefixes: list[str]) -> dict[str, int]:
+        safe_prefixes = [
+            _safe_rel(prefix.rstrip("/"), field="prefix") if prefix.strip("/") else ""
+            for prefix in prefixes
+        ]
+        result: dict[str, int] = {}
+        for offset in range(0, len(safe_prefixes), 512):
+            batch = safe_prefixes[offset : offset + 512]
+            totals = safebox.storage_prefix_bytes(self.name, batch)
+            if set(totals) != set(batch) or any(
+                isinstance(size, bool) or not isinstance(size, int) or size < 0
+                for size in totals.values()
+            ):
+                raise StorageError("storage prefix batch response was invalid")
+            result.update({prefix: int(totals[prefix]) for prefix in batch})
+        return result
+
 
 def r2_configured() -> bool:
     """True iff the public R2 product-site mirror is fully provisioned.
@@ -1640,7 +1657,17 @@ def operator_storage_bytes(backend: StorageBackend, slugs: Iterable[str]) -> int
     # for a bootstrap: one listing for the brand-new slug, cache hits for the other N owned.
     stale = [safe for safe in unique if safe not in values]
     if stale:
-        fresh = _map_concurrently(lambda safe: prefix_bytes(backend, object_prefix(safe)), stale)
+        batch_prefix_bytes = getattr(backend, "list_prefix_bytes", None)
+        prefixes = [object_prefix(safe).rstrip("/") for safe in stale]
+        if len(stale) > 1 and callable(batch_prefix_bytes):
+            totals = batch_prefix_bytes(prefixes)
+            if set(totals) != set(prefixes):
+                raise StorageError("storage prefix batch response was incomplete")
+            fresh = [int(totals[prefix]) for prefix in prefixes]
+        else:
+            fresh = _map_concurrently(
+                lambda safe: prefix_bytes(backend, object_prefix(safe)), stale
+            )
         with _OPERATOR_STORAGE_CACHE_LOCK:
             for safe, size in zip(stale, fresh):
                 values[safe] = int(size)

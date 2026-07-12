@@ -1560,6 +1560,11 @@ class _StorageListBody(BaseModel):
     prefix: str
 
 
+class _StoragePrefixesBody(BaseModel):
+    provider: str
+    prefixes: list[str]
+
+
 class _AppMediaPutBody(BaseModel):
     provider: str
     business: str
@@ -4619,6 +4624,45 @@ def build_safebox_app() -> FastAPI:
             return {"provider": provider, "prefix": body.prefix, "sizes": safebox.storage_list_object_sizes(provider, body.prefix)}
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/v1/storage/prefix-bytes")
+    def storage_prefix_bytes(
+        request: Request,
+        body: _StoragePrefixesBody,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _require_internal_token(authorization)
+        _require_operator_client(request)
+        provider = _storage_provider(body.provider)
+        prefixes = [str(prefix or "") for prefix in body.prefixes]
+        if not prefixes or len(prefixes) > 512 or len(set(prefixes)) != len(prefixes):
+            raise HTTPException(status_code=400, detail="invalid_storage_prefix_batch")
+        businesses = [_storage_business_slug(prefix, require_existing=False) for prefix in prefixes]
+        with _safebox_db_conn() as conn:
+            rows = conn.execute(
+                "SELECT slug FROM businesses WHERE slug = ANY(%s)",
+                (sorted(set(businesses)),),
+            ).fetchall()
+        existing = {str(row[0]) for row in rows}
+        allowed = [
+            prefix for prefix, business in zip(prefixes, businesses) if business in existing
+        ]
+        try:
+            totals = safebox.storage_prefix_bytes(provider, allowed) if allowed else {}
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if set(totals) != set(allowed) or any(
+            isinstance(size, bool) or not isinstance(size, int) or size < 0
+            for size in totals.values()
+        ):
+            raise HTTPException(status_code=502, detail="invalid_storage_prefix_batch_response")
+        return {
+            "provider": provider,
+            "prefix_bytes": {
+                prefix: int(totals[prefix]) if business in existing else 0
+                for prefix, business in zip(prefixes, businesses)
+            },
+        }
 
     @app.post("/v1/billing/webhook/process")
     def process_billing_webhook(

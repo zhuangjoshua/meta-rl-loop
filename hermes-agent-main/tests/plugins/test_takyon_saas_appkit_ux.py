@@ -147,6 +147,20 @@ def test_bootstrap_uses_taste_once_then_inherits_brand_for_product_work():
     assert "do not rerun Taste" in proof_pass
 
 
+def test_bootstrap_keeps_named_cancellation_policy_out_of_worker_authored_copy():
+    prompt = turn_runtime._business_bootstrap_instruction(
+        "policy-copy-test",
+        "Offer a $9.99 monthly plan with immediate self-service cancellation and no refund option.",
+        "live",
+        archetype="web_saas",
+    )
+
+    assert "treat those as AppKit/backend constraints only" in prompt
+    assert "even when the business goal names that policy" in prompt
+    assert "account.product_runtime_contract.subscription.cancellation" in prompt
+    assert "cancellation ends access immediately with no grace period" not in prompt
+
+
 def test_taste_skill_is_byte_exact_pinned_upstream_implementation():
     content = TASTE_SKILL.read_bytes()
     assert hashlib.sha256(content).hexdigest() == (

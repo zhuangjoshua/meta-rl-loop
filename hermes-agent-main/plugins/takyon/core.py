@@ -36937,9 +36937,14 @@ def _handle_business_claude_agent_task_owned(args: dict) -> str:
             if surface_refresh and surface_refresh.get("blocker"):
                 status = "blocked"
             record_operations: list[dict[str, Any]] = []
+            # A completed Taste worker can still hit a deterministic platform/source publish gate.
+            # That is machine-fixable platform truth, not evidence that Taste timed out or failed.
             taste_review_required = bool(
                 taste_guidance_active
-                and (status != "completed" or bool(sdk_result.get("timed_out")))
+                and (
+                    bool(sdk_result.get("timed_out"))
+                    or not bool(sdk_result.get("success"))
+                )
             )
             taste_review_blocker = ""
             if taste_review_required:

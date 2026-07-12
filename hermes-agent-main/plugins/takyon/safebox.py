@@ -30,6 +30,7 @@ import base64
 import hashlib
 import hmac
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -281,6 +282,7 @@ _REMOTE_IDEMPOTENT_READ_PATHS = (
     "/v1/storage/get",
     "/v1/storage/list-digests",
     "/v1/storage/list-sizes",
+    "/v1/storage/prefix-bytes",
     "/healthz",
 )
 _REMOTE_READ_RETRY_DELAYS_S = (0.5, 1.5)
@@ -895,6 +897,42 @@ def storage_list_object_sizes(provider: str, prefix: str) -> dict[str, int]:
         sizes = payload.get("sizes")
         return {str(k): int(v or 0) for k, v in sizes.items()} if isinstance(sizes, dict) else {}
     return _storage_backend(provider).list_object_sizes(str(prefix or ""))
+
+
+def storage_prefix_bytes(provider: str, prefixes: list[str]) -> dict[str, int]:
+    """Return total bytes for each bounded prefix in one Safebox request."""
+    values = [str(prefix or "") for prefix in prefixes]
+    if not values or len(values) > 512 or len(set(values)) != len(values):
+        raise ValueError("storage prefix batch must contain 1..512 unique prefixes")
+    if _remote_enabled() and not _local_authority_enabled():
+        payload = _remote_json(
+            "POST",
+            "/v1/storage/prefix-bytes",
+            {"provider": str(provider or ""), "prefixes": values},
+            timeout=120.0,
+        )
+        totals = payload.get("prefix_bytes")
+        if not isinstance(totals, dict) or set(totals) != set(values):
+            raise RuntimeError("Safebox storage prefix batch response was incomplete")
+        if any(
+            isinstance(size, bool) or not isinstance(size, int) or size < 0
+            for size in totals.values()
+        ):
+            raise RuntimeError("Safebox storage prefix batch response was invalid")
+        result = {str(key): int(size) for key, size in totals.items()}
+        return result
+    backend = _storage_backend(provider)
+
+    def _measure(prefix: str) -> int:
+        return sum(int(size or 0) for size in backend.list_object_sizes(prefix).values())
+
+    workers = min(12, len(values))
+    if workers <= 1:
+        totals = [_measure(values[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            totals = list(pool.map(_measure, values))
+    return {prefix: total for prefix, total in zip(values, totals)}
 
 
 # ── Provider broker client (STEP C cutover) ─────────────────────────────────────────────────────

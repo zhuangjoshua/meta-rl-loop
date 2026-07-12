@@ -41,6 +41,36 @@ def test_provider_broker_enabled_requires_flag_remote_and_not_safebox_host(monke
     assert safebox.provider_broker_enabled() is True
 
 
+def test_storage_prefix_bytes_uses_one_remote_batch_and_validates_response(monkeypatch):
+    monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
+    monkeypatch.setenv("TAKYON_HOST_ROLE", "operator")
+    seen = {}
+
+    def fake_remote_json(method, path, payload=None, *, timeout=10.0):
+        seen.update(method=method, path=path, payload=payload, timeout=timeout)
+        return {"prefix_bytes": {"biz-a": 10, "biz-b": 20}}
+
+    monkeypatch.setattr(safebox, "_remote_json", fake_remote_json)
+    assert safebox.storage_prefix_bytes("supabase_s3", ["biz-a", "biz-b"]) == {
+        "biz-a": 10,
+        "biz-b": 20,
+    }
+    assert seen == {
+        "method": "POST",
+        "path": "/v1/storage/prefix-bytes",
+        "payload": {"provider": "supabase_s3", "prefixes": ["biz-a", "biz-b"]},
+        "timeout": 120.0,
+    }
+
+    monkeypatch.setattr(
+        safebox,
+        "_remote_json",
+        lambda *_a, **_k: {"prefix_bytes": {"biz-a": -1}},
+    )
+    with pytest.raises(RuntimeError, match="incomplete|invalid"):
+        safebox.storage_prefix_bytes("supabase_s3", ["biz-a", "biz-b"])
+
+
 def test_broker_provider_call_product_inline_shape(monkeypatch):
     monkeypatch.setenv("TAKYON_SAFEBOX_URL", "http://10.0.0.2:8000")
     seen = {}

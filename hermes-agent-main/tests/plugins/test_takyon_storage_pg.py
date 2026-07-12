@@ -529,6 +529,15 @@ def test_live_build_pointer_uses_transaction_local_set_config(monkeypatch, tmp_p
 # ── per-operator storage quota + deletion (S3 storage limits per person + deletion) ─────────────────
 
 
+@pytest.fixture(autouse=True)
+def _clear_operator_storage_cache():
+    with storage._OPERATOR_STORAGE_CACHE_LOCK:
+        storage._OPERATOR_PREFIX_BYTES_CACHE.clear()
+    yield
+    with storage._OPERATOR_STORAGE_CACHE_LOCK:
+        storage._OPERATOR_PREFIX_BYTES_CACHE.clear()
+
+
 def _owned_business(pg_conn, owner_user_id: str) -> str:
     """Add another business under an EXISTING operator; return its slug."""
     slug = f"biz-{uuid.uuid4().hex[:8]}"
@@ -564,6 +573,42 @@ def test_operator_storage_bytes_aggregates_across_owned_businesses(tmp_path):
     assert storage.operator_storage_bytes(backend, ["biz-a", "biz-b"]) == 300
     # De-duplicates a repeated slug rather than double-counting.
     assert storage.operator_storage_bytes(backend, ["biz-a", "biz-a"]) == 100
+
+
+def test_operator_storage_bytes_batches_stale_safebox_prefixes_and_caches():
+    class _BatchBackend:
+        def __init__(self):
+            self.calls: list[list[str]] = []
+
+        def list_prefix_bytes(self, prefixes):
+            self.calls.append(list(prefixes))
+            return {"quota-a": 100, "quota-b": 250}
+
+        def list_object_sizes(self, _prefix):
+            pytest.fail("batched stale prefixes must not use per-prefix listings")
+
+    backend = _BatchBackend()
+    with storage._OPERATOR_STORAGE_CACHE_LOCK:
+        storage._OPERATOR_PREFIX_BYTES_CACHE.clear()
+
+    assert storage.operator_storage_bytes(backend, ["quota-a", "quota-b"]) == 350
+    assert backend.calls == [["quota-a", "quota-b"]]
+    assert storage.operator_storage_bytes(backend, ["quota-a", "quota-b"]) == 350
+    assert backend.calls == [["quota-a", "quota-b"]]
+
+
+def test_operator_storage_bytes_rejects_incomplete_safebox_batch():
+    class _IncompleteBatchBackend:
+        def list_prefix_bytes(self, _prefixes):
+            return {"quota-c": 100}
+
+        def list_object_sizes(self, _prefix):
+            pytest.fail("batched stale prefixes must not use per-prefix listings")
+
+    with storage._OPERATOR_STORAGE_CACHE_LOCK:
+        storage._OPERATOR_PREFIX_BYTES_CACHE.clear()
+    with pytest.raises(storage.StorageError, match="incomplete"):
+        storage.operator_storage_bytes(_IncompleteBatchBackend(), ["quota-c", "quota-d"])
 
 
 def test_enforce_operator_quota_trips_at_or_above_limit(tmp_path):

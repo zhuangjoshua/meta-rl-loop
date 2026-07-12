@@ -2116,6 +2116,61 @@ def test_storage_list_unknown_business_is_empty_for_bootstrap(client, monkeypatc
     assert sizes_resp.json()["sizes"] == {}
 
 
+def test_storage_prefix_bytes_batches_known_and_zeroes_unknown(client, monkeypatch):
+    class _RowsCursor:
+        def fetchall(self):
+            return [("climblog",)]
+
+    class _BatchConn:
+        def execute(self, sql, params=None):
+            assert "slug = ANY" in sql
+            assert params == (["climblog", "fresh-bootstrap"],)
+            return _RowsCursor()
+
+    @contextlib.contextmanager
+    def _batch_conn():
+        yield _BatchConn()
+
+    seen = []
+    monkeypatch.setattr(safebox_app, "_safebox_db_conn", _batch_conn)
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "storage_prefix_bytes",
+        lambda provider, prefixes: seen.append((provider, prefixes)) or {"climblog": 321},
+    )
+    response = client.post(
+        "/v1/storage/prefix-bytes",
+        headers=_auth(),
+        json={
+            "provider": "supabase_s3",
+            "prefixes": ["climblog", "fresh-bootstrap"],
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["prefix_bytes"] == {"climblog": 321, "fresh-bootstrap": 0}
+    assert seen == [("supabase_s3", ["climblog"])]
+
+
+def test_storage_prefix_bytes_rejects_unbounded_or_unsafe_batch(client, monkeypatch):
+    monkeypatch.setattr(
+        safebox_app.safebox,
+        "storage_prefix_bytes",
+        lambda *_a, **_k: pytest.fail("invalid batch must not hit storage"),
+    )
+    oversized = client.post(
+        "/v1/storage/prefix-bytes",
+        headers=_auth(),
+        json={"provider": "supabase_s3", "prefixes": [f"biz-{i}" for i in range(513)]},
+    )
+    assert oversized.status_code == 400
+    unsafe = client.post(
+        "/v1/storage/prefix-bytes",
+        headers=_auth(),
+        json={"provider": "supabase_s3", "prefixes": ["../secrets"]},
+    )
+    assert unsafe.status_code == 403
+
+
 def test_mint_rejects_unmappable_action(client):
     # An action with no mapped audience is unbrokerable: the mint route refuses it (400) rather than
     # falling back to the raw action string as the audience.

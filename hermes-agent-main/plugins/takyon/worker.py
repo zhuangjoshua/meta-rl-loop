@@ -1248,6 +1248,7 @@ def _run_ceo_turn(
     )
     from .core import (
         TakyonStore,
+        _active_operator_task_receipt_context,
         _bound_claude_worker_activity,
         _claude_worker_activity_run_identity,
         load_takyon_env,
@@ -1403,7 +1404,23 @@ def _run_ceo_turn(
         if progress is not None
         else nullcontext()
     )
-    with worker_activity_binding:
+    # The plugin registry loads Takyon handlers under ``takyon_plugins.takyon.core``, a twin
+    # module with separate ContextVars. Discovery has completed by the time the agent is built;
+    # mirror the exact canonical parent identity before copying context into the agent thread.
+    registered_tool_context_binding = nullcontext()
+    operator_task_context = _active_operator_task_receipt_context()
+    if operator_task_context:
+        import sys
+
+        registered_core = sys.modules.get("takyon_plugins.takyon.core")
+        registered_binder = getattr(
+            registered_core, "_bound_operator_task_context", None
+        )
+        if callable(registered_binder):
+            registered_tool_context_binding = registered_binder(
+                **operator_task_context
+            )
+    with worker_activity_binding, registered_tool_context_binding:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         ctx = contextvars.copy_context()
         run_kwargs = {"stream_callback": progress.stream_delta} if progress is not None else {}

@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import types
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,12 @@ def test_docker_bind_retry_is_limited_to_prestart_mount_failure(tmp_path):
 @pytest.fixture(autouse=True)
 def _pin_test_coding_worker_model(monkeypatch):
     monkeypatch.setenv("TAKYON_CLAUDE_AGENT_MODEL", "deepseek-v4-pro")
+    monkeypatch.setattr(
+        takyon_core,
+        "_hold_business_product_writer_lease",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(takyon_core, "_product_worker_runtime_snapshot", lambda root: root)
 
 
 class _FakeConn:
@@ -84,6 +91,9 @@ class _FakeStore:
 
     def _active_operator_user_id(self):
         return "user-123"
+
+    def enforce_operator_business_access(self, *_args, **_kwargs):
+        return None
 
     def read(self, *, scope, query, include=None, limit=None):
         if query == "summary":
@@ -205,7 +215,7 @@ def test_claude_agent_task_uses_broader_defaults_and_pinned_model_for_product_si
     completed = [event for event in runtime_events if event.get("status") == "completed"]
     assert completed[-1]["detail"] == "Claude worker completed for product/site."
     assert not any("Reading this as" in str(event) for event in runtime_events)
-    assert payload["timeoutMs"] == 1200000
+    assert payload["timeoutMs"] == 900000
     assert payload["maxBudgetUsd"] == 8.0
     assert payload["effort"] == "medium"
     assert payload["model"] == "deepseek-v4-pro"
@@ -2056,6 +2066,101 @@ def test_taste_task_never_restarts_fresh_session_after_build_blocker(tmp_path, m
     assert result["blocked"] is True
     assert result["worker_attempts"] == 1
     assert len(process_calls) == 1
+
+
+def test_successful_taste_worker_with_policy_publish_blocker_is_not_human_review(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TAKYON_HOME", str(tmp_path))
+
+    class _CapturingStore(_FakeStore):
+        def __init__(self, root):
+            super().__init__(root)
+            self.commits: list[dict[str, object]] = []
+
+        def commit(self, **kwargs):
+            self.commits.append(dict(kwargs))
+            return {"success": True}
+
+    store = _CapturingStore(tmp_path)
+
+    def fake_process(*, payload: dict[str, object], **_kwargs):
+        root = Path(str(payload["cwd"]))
+        root.joinpath("index.html").write_text("<h1>ProposalProof</h1>\n", encoding="utf-8")
+        root.joinpath("DESIGN.md").write_text(
+            "# Design Read\nEditorial precision.\n\n"
+            "DESIGN_VARIANCE: 4\nMOTION_INTENSITY: 2\nVISUAL_DENSITY: 3\n",
+            encoding="utf-8",
+        )
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"success": True, "summary": "implemented"}),
+            stderr="",
+        )
+
+    _patch_non_docker_product_site(monkeypatch, store, session_slug="proposalproof")
+    monkeypatch.setattr(
+        takyon_core,
+        "_workspace_needs_runtime_ui_contract",
+        lambda workspace_rel: workspace_rel == "product/site",
+    )
+    monkeypatch.setattr(takyon_core, "_materialize_subuser_app_kit", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        takyon_core,
+        "_reserve_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800},
+    )
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_operator_task_budget",
+        lambda **_kwargs: {"reservation_key": "r1", "reserved_cents": 800, "status": "charged"},
+    )
+    monkeypatch.setattr(takyon_core, "_run_claude_agent_task_process", fake_process)
+    monkeypatch.setattr(
+        takyon_core,
+        "_finalize_product_surface_refresh",
+        lambda **_kwargs: {
+            "status": "passed",
+            "source_path": "product/site",
+            "receipt_path": "metrics/receipts/product-surface/policy-blocked.json",
+            "runtime_features": [],
+            "inventory": {},
+            "blocker": "subscription policy copy is worker-authored",
+            "publish": {
+                "status": "blocked",
+                "blocker": "subscription policy copy is worker-authored",
+            },
+        },
+    )
+    monkeypatch.setattr(takyon_core, "_product_surface_refresh_operations", lambda **_kwargs: [])
+
+    with takyon_core._bound_operator_task_context(
+        run_id="bootstrap-job", task_kind="ceo_bootstrap", attempt=1
+    ):
+        result = json.loads(
+            handle_business_claude_agent_task(
+                {
+                    "business": "proposalproof",
+                    "workspace": "product/site",
+                    "instruction": "Implement and preflight the landing.",
+                    "guidance_skills": ["taste-frontend"],
+                    "idempotency_key": "taste-policy-publish-blocker",
+                    "install": False,
+                    "max_turns": 60,
+                    "timeout_ms": 900_000,
+                    "refresh_surface": True,
+                }
+            )
+        )
+
+    assert result["blocked"] is True
+    assert result["review_required"] is False
+    operations = store.commits[-1]["operations"]
+    assert not any(
+        op.get("event_type") == "bootstrap.human_review_required" for op in operations
+    )
+    agent_record = next(op for op in operations if op.get("action") == "agent.record")
+    assert agent_record["result"]["review_required"] is False
 
 
 def test_taste_success_without_durable_design_contract_blocks_before_publish(tmp_path, monkeypatch):
