@@ -517,6 +517,20 @@ def test_request_http_error_becomes_stripe_error(monkeypatch):
     assert "card_declined" in str(excinfo.value)
 
 
+def test_request_transport_error_becomes_stripe_error(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
+    monkeypatch.setattr(
+        stripe_util.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            urllib.error.URLError("connection reset")
+        ),
+    )
+
+    with pytest.raises(StripeError, match="transport failed: URLError"):
+        stripe_request("subscriptions/sub_123", {}, method="DELETE")
+
+
 def test_request_get_uses_querystring_and_no_body(monkeypatch):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_xyz")
     captured: dict[str, object] = {}

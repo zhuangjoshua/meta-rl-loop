@@ -15,6 +15,7 @@ interface AuthState {
   authenticated: boolean;
   configured: boolean;
   user: any | null;
+  account: any | null;
   tier: string;
   signInWithGoogle: () => Promise<void>;
   logoutLocal: () => Promise<void>;
@@ -22,6 +23,30 @@ interface AuthState {
 }
 
 const Ctx = createContext<AuthState | null>(null);
+
+function normalizedEntitlementStatus(entitlement: any): string {
+  const status = String(entitlement?.status ?? "").trim().toLowerCase();
+  if (status === "paid") return "active";
+  if (status === "cancelled") return "canceled";
+  return status;
+}
+
+export function hasNonterminalStripeSubscription(account: any): boolean {
+  const entitlements = Array.isArray(account?.entitlements) ? account.entitlements : [];
+  return entitlements.some((entitlement: any) => {
+    const source = String(entitlement?.source ?? "").trim().toLowerCase();
+    const subscriptionId = String(
+      entitlement?.stripe_subscription_id ?? entitlement?.stripeSubscriptionId ?? "",
+    ).trim();
+    return (
+      (!source || source === "stripe") &&
+      Boolean(subscriptionId) &&
+      !["canceled", "cancelled", "sandbox_retired"].includes(
+        normalizedEntitlementStatus(entitlement),
+      )
+    );
+  });
+}
 
 function makeSupabase(): SupabaseClient | null {
   const url = surface.auth?.url;
@@ -38,17 +63,37 @@ export function ProductAuthProvider({ children }: { children: React.ReactNode })
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [user, setUser] = useState<any | null>(null);
+  const [account, setAccount] = useState<any | null>(null);
   const [tier, setTier] = useState("unentitled");
 
   const refresh = useCallback(async () => {
     try {
       const s = await client.session();
-      setAuthenticated(!!s?.authenticated);
+      const signedIn = !!s?.authenticated;
+      setAuthenticated(signedIn);
+      if (!signedIn) {
+        setUser(null);
+        setAccount(null);
+        setTier("unentitled");
+        return;
+      }
       setUser(s?.user ?? null);
       setTier(String(s?.tier ?? "unentitled"));
+      try {
+        const nextAccount = await client.account();
+        setAccount(nextAccount ?? null);
+        setUser(nextAccount?.user ?? s?.user ?? null);
+        setTier(String(nextAccount?.user?.tier ?? s?.tier ?? "unentitled"));
+      } catch {
+        // Session truth remains valid when a display/account projection is temporarily unavailable.
+        // Fail closed for cancellation by clearing stale entitlement data.
+        setAccount(null);
+      }
     } catch {
       setAuthenticated(false);
       setUser(null);
+      setAccount(null);
+      setTier("unentitled");
     } finally {
       setReady(true);
     }
@@ -82,6 +127,8 @@ export function ProductAuthProvider({ children }: { children: React.ReactNode })
     } finally {
       setAuthenticated(false);
       setUser(null);
+      setAccount(null);
+      setTier("unentitled");
     }
   }, []);
 
@@ -90,6 +137,7 @@ export function ProductAuthProvider({ children }: { children: React.ReactNode })
     authenticated,
     configured,
     user,
+    account,
     tier,
     signInWithGoogle,
     logoutLocal,

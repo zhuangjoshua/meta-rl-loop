@@ -7,7 +7,7 @@ import {
   CardHeader,
   CardTitle,
 } from "./ui/card";
-import { hasActiveStripeSubscription, useViewerAccess } from "../lib/hooks";
+import { hasNonterminalStripeSubscription, useViewerAccess } from "../lib/hooks";
 import { client } from "../lib/takyon";
 
 function errorMessage(error: unknown): string {
@@ -24,8 +24,19 @@ export function SubscriptionCancellation() {
   const access = useViewerAccess();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canceledLocally, setCanceledLocally] = useState(false);
 
-  if (!hasActiveStripeSubscription(access.account)) return null;
+  if (canceledLocally) {
+    return (
+      <Card data-takyon-appkit="subscription-cancellation-success" role="status">
+        <CardHeader>
+          <CardTitle>Subscription canceled</CardTitle>
+          <CardDescription>Your access ended immediately.</CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+  if (!hasNonterminalStripeSubscription(access.account)) return null;
 
   const cancelNow = async () => {
     const confirmed = window.confirm(
@@ -36,9 +47,18 @@ export function SubscriptionCancellation() {
     setError(null);
     try {
       await client.cancelSubscription();
-      await access.refresh();
+      // The server response is provider-authoritative terminal truth. Hide the control now; a
+      // projection refresh is best-effort and must never turn completed cancellation into an error.
+      setCanceledLocally(true);
     } catch (cause) {
       setError(errorMessage(cause));
+      setBusy(false);
+      return;
+    }
+    try {
+      await access.refresh();
+    } catch {
+      // The next account read will reconcile UI projection; cancellation already succeeded.
     } finally {
       setBusy(false);
     }

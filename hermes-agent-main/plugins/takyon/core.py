@@ -261,6 +261,7 @@ MOBILE_APP_BUILD_GATE_CONTRACT = """Mobile app build gate (HARD):
 """
 MOBILE_APP_WORKER_CONTRACT = """Takyon mobile app workspace contract (iOS App Store rail):
 - The `_takyon/` directory is PLATFORM-OWNED and overwritten wholesale per business — never edit it. Import the runtime client and surface context only via the `@takyon/*` path alias.
+- The mobile cancellation rail is a platform invariant: `app/profile.tsx`, `src/lib/product-auth.tsx`, and `src/components/subscription-cancellation.tsx` are force-refreshed from AppKit. You may freely redesign `src/screens/profile.tsx`, but it must visibly compose `<SubscriptionCancellation />`, and signed-in product UI outside the profile implementation must keep a visible link/button to `/profile`; never remove or replace immediate in-app Stripe cancellation with a support workflow.
 - Auth, sessions, entitlements, records, and AI generation go through the `_takyon` runtime client against the platform runtime API. Do not call providers directly and do not add your own backend.
 - NEVER add Stripe, web checkout, or any external purchase flow inside the app — Apple rejects external digital purchases (guideline 3.1.1). Subscription upsell copy may link to the product website account page; in-app purchase rails land later.
 - Do not change `expo.ios.bundleIdentifier`, `expo.scheme`, `expo.owner`, `ios.privacyManifests`, or delete `PrivacyInfo.xcprivacy` — these are store-compliance surfaces the publish gate scans.
@@ -3295,6 +3296,27 @@ def _mobile_app_scaffold_source_dir() -> Path:
     return Path(__file__).resolve().parent / "mobile_app_kit" / "scaffold"
 
 
+_MOBILE_STARTER_OWNED_REFRESH_FILES = (
+    "app/profile.tsx",
+    "src/lib/product-auth.tsx",
+    "src/components/subscription-cancellation.tsx",
+)
+
+
+def _rematerialize_mobile_starter_owned_files(workspace_root: Path) -> None:
+    """Restore the non-removable mobile account/cancellation boundary from AppKit."""
+    source = _mobile_app_scaffold_source_dir()
+    if not source.is_dir():
+        raise TakyonError("mobile_app scaffold missing from the runtime")
+    for rel in _MOBILE_STARTER_OWNED_REFRESH_FILES:
+        src_path = source / rel
+        if not src_path.is_file():
+            raise TakyonError(f"mobile_app scaffold is missing starter-owned {rel}")
+        destination = workspace_root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, destination)
+
+
 def _workspace_is_mobile_app_dir(workspace_raw: str) -> bool:
     normalized = str(workspace_raw or "").strip().strip("/").lower()
     return normalized == "product/app" or normalized.startswith("product/app/")
@@ -3403,6 +3425,7 @@ def _materialize_mobile_app_workspace(
         + ";\n",
         encoding="utf-8",
     )
+    _rematerialize_mobile_starter_owned_files(workspace_root)
     return seeded
 
 
@@ -11466,6 +11489,208 @@ _SUPPORT_MEDIATED_CANCELLATION_PATTERN = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+_APPKIT_COPY_SCAN_MAX_FILES = 10_000
+_APPKIT_COPY_SCAN_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+_APPKIT_COPY_SCAN_SKIP_DIRS = {
+    ".git",
+    ".next",
+    "_takyon",
+    "__fixtures__",
+    "build",
+    "dist",
+    "fixtures",
+    "node_modules",
+    "references",
+}
+_MOBILE_PROFILE_HREF_PATTERN = re.compile(
+    r'''\bhref\s*=\s*(?:['"]/?profile['"]|\{\s*['"]/?profile['"]\s*\}|'''
+    r'''\{\s*\{[^}]*\bpathname\s*:\s*['"]/?profile['"])''',
+    re.IGNORECASE | re.DOTALL,
+)
+_MOBILE_PROFILE_ROUTE_CALL_PATTERN = re.compile(
+    r'''\b(?:router|navigation)\s*\.\s*(?:push|navigate)\s*\(\s*(?:'''
+    r'''['"]/?profile['"]|\{[^}]*\bpathname\s*:\s*['"]/?profile['"])''',
+    re.IGNORECASE | re.DOTALL,
+)
+_MOBILE_INTERACTIVE_SOURCE_PATTERN = re.compile(
+    r"(?:\bonPress\s*=|<\s*(?:Button|Pressable|Touchable\w*|Link)\b)",
+    re.IGNORECASE,
+)
+
+
+def _appkit_customer_copy_markers(
+    root: Path,
+    *,
+    source_roots: tuple[str, ...] = ("src",),
+) -> list[dict[str, Any]]:
+    """Scan every bounded customer-copy source while pruning generated/dependency trees.
+
+    Unlike the old first-300-path scan, this walker never silently declares a large tree clean:
+    dependency/build directories are pruned before descent, and exceeding the explicit file/byte
+    budget produces a fail-closed marker.
+    """
+    markers: list[dict[str, Any]] = []
+    files_scanned = 0
+    bytes_scanned = 0
+    exhausted = ""
+    walk_error: OSError | None = None
+
+    def _record_walk_error(error: OSError) -> None:
+        nonlocal walk_error
+        walk_error = error
+
+    for source_rel in source_roots:
+        source_root = root / source_rel
+        if not source_root.is_dir():
+            continue
+        for current, dirnames, filenames in os.walk(
+            source_root,
+            followlinks=False,
+            onerror=_record_walk_error,
+        ):
+            current_path = Path(current)
+            retained_dirs: list[str] = []
+            for name in sorted(dirnames):
+                if name in _APPKIT_COPY_SCAN_SKIP_DIRS:
+                    continue
+                if (current_path / name).is_symlink():
+                    exhausted = (
+                        "refusing to follow source symlink "
+                        f"{(current_path / name).relative_to(root)}"
+                    )
+                    break
+                retained_dirs.append(name)
+            dirnames[:] = retained_dirs
+            if exhausted:
+                break
+            for filename in sorted(filenames):
+                path = current_path / filename
+                if path.suffix.lower() not in _PRODUCT_INVENTORY_TEXT_EXTENSIONS:
+                    continue
+                if path.is_symlink():
+                    exhausted = f"refusing to follow source symlink {path.relative_to(root)}"
+                    break
+                try:
+                    size = path.stat().st_size
+                except OSError as exc:
+                    exhausted = f"could not stat {path.relative_to(root)}: {exc}"
+                    break
+                if size > _PRODUCT_INVENTORY_MAX_BYTES:
+                    exhausted = (
+                        f"source file {path.relative_to(root)} exceeds "
+                        f"{_PRODUCT_INVENTORY_MAX_BYTES} bytes"
+                    )
+                    break
+                if files_scanned >= _APPKIT_COPY_SCAN_MAX_FILES:
+                    exhausted = (
+                        "customer-copy source exceeds "
+                        f"{_APPKIT_COPY_SCAN_MAX_FILES} relevant files"
+                    )
+                    break
+                if bytes_scanned + size > _APPKIT_COPY_SCAN_MAX_TOTAL_BYTES:
+                    exhausted = (
+                        "customer-copy source exceeds "
+                        f"{_APPKIT_COPY_SCAN_MAX_TOTAL_BYTES} scanned bytes"
+                    )
+                    break
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    exhausted = f"could not scan {path.relative_to(root)}: {exc}"
+                    break
+                files_scanned += 1
+                bytes_scanned += size
+                match = _SUPPORT_MEDIATED_CANCELLATION_PATTERN.search(text)
+                if match is not None and len(markers) < 8:
+                    markers.append(
+                        {
+                            "path": path.relative_to(root).as_posix(),
+                            "issue": "support_mediated_subscription_cancel",
+                            "snippet": _truncate_text(match.group(0).strip(), 220),
+                        }
+                    )
+            if exhausted:
+                break
+        if walk_error is not None and not exhausted:
+            exhausted = f"could not walk customer source: {walk_error.__class__.__name__}"
+        if exhausted:
+            break
+    if exhausted:
+        markers.append(
+            {
+                "path": "customer source",
+                "issue": "appkit_subscription_scan_incomplete",
+                "snippet": exhausted,
+            }
+        )
+    return markers
+
+
+def _mobile_profile_navigation_is_discoverable(root: Path) -> bool:
+    """Return true when worker-visible UI exposes an interactive route to /profile."""
+    excluded = {
+        "app/profile.tsx",
+        "src/components/subscription-cancellation.tsx",
+        "src/lib/product-auth.tsx",
+        "src/screens/profile.tsx",
+    }
+    files_seen = 0
+    bytes_seen = 0
+    walk_failed = False
+
+    def _record_walk_error(_error: OSError) -> None:
+        nonlocal walk_failed
+        walk_failed = True
+
+    for source_rel in ("app", "src"):
+        source_root = root / source_rel
+        if not source_root.is_dir():
+            continue
+        for current, dirnames, filenames in os.walk(
+            source_root,
+            followlinks=False,
+            onerror=_record_walk_error,
+        ):
+            current_path = Path(current)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if name not in _APPKIT_COPY_SCAN_SKIP_DIRS
+                and not (current_path / name).is_symlink()
+            )
+            for filename in sorted(filenames):
+                path = current_path / filename
+                rel = path.relative_to(root).as_posix()
+                if rel in excluded or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
+                    continue
+                if path.is_symlink():
+                    return False
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    return False
+                files_seen += 1
+                bytes_seen += size
+                if (
+                    files_seen > _APPKIT_COPY_SCAN_MAX_FILES
+                    or size > _PRODUCT_INVENTORY_MAX_BYTES
+                    or bytes_seen > _APPKIT_COPY_SCAN_MAX_TOTAL_BYTES
+                ):
+                    return False
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    return False
+                if _MOBILE_PROFILE_HREF_PATTERN.search(text):
+                    return True
+                if (
+                    _MOBILE_PROFILE_ROUTE_CALL_PATTERN.search(text)
+                    and _MOBILE_INTERACTIVE_SOURCE_PATTERN.search(text)
+                ):
+                    return True
+        if walk_failed:
+            return False
+    return False
 
 
 def _scaffold_placeholder_tokens_marker(root: Path) -> dict[str, Any] | None:
@@ -11576,28 +11801,75 @@ def _appkit_subscription_cancellation_markers(root: Path) -> list[dict[str, Any]
             }
         )
 
-    source_root = root / "src"
-    if source_root.is_dir():
-        for path in sorted(source_root.rglob("*"))[:300]:
-            if not path.is_file() or path.suffix.lower() not in _PRODUCT_SOURCE_EXTENSIONS:
-                continue
-            try:
-                if path.stat().st_size > _PRODUCT_INVENTORY_MAX_BYTES:
-                    continue
-                text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            match = _SUPPORT_MEDIATED_CANCELLATION_PATTERN.search(text)
-            if match is None:
-                continue
+    markers.extend(_appkit_customer_copy_markers(root))
+    return markers
+
+
+def _mobile_appkit_subscription_cancellation_markers(root: Path) -> list[dict[str, Any]]:
+    """Require a reachable mobile cancel control without owning final profile design."""
+    scaffold = _mobile_app_scaffold_source_dir()
+    markers: list[dict[str, Any]] = []
+    for rel in _MOBILE_STARTER_OWNED_REFRESH_FILES:
+        expected = scaffold / rel
+        actual = root / rel
+        try:
+            matches = expected.is_file() and actual.is_file() and expected.read_bytes() == actual.read_bytes()
+        except OSError:
+            matches = False
+        if not matches:
             markers.append(
                 {
-                    "path": path.relative_to(root).as_posix(),
-                    "issue": "support_mediated_subscription_cancel",
-                    "snippet": _truncate_text(match.group(0).strip(), 220),
+                    "path": rel,
+                    "issue": "mobile_appkit_subscription_cancel_missing",
+                    "snippet": "starter-owned mobile account/cancellation source is missing or modified",
                 }
             )
-            break
+    try:
+        component_source = (
+            scaffold / "src/components/subscription-cancellation.tsx"
+        ).read_text(encoding="utf-8")
+        auth_source = (scaffold / "src/lib/product-auth.tsx").read_text(encoding="utf-8")
+        profile_source = (root / "src/screens/profile.tsx").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        component_source = ""
+        profile_source = ""
+        auth_source = ""
+    if (
+        "hasNonterminalStripeSubscription(auth.account)" not in component_source
+        or "client.cancelSubscription()" not in component_source
+        or "Cancel subscription now" not in component_source
+        or "There is no grace period" not in component_source
+        or "account?.entitlements" not in auth_source
+        or re.search(
+            r'import\s*\{[^}]*SubscriptionCancellation[^}]*\}\s*from\s*[\'"]\.\./components/subscription-cancellation[\'"]',
+            profile_source,
+            re.DOTALL,
+        )
+        is None
+        or re.search(r"<\s*SubscriptionCancellation\b", profile_source) is None
+    ):
+        markers.append(
+            {
+                "path": "src/screens/profile.tsx",
+                "issue": "mobile_appkit_subscription_cancel_invalid",
+                "snippet": (
+                    "mobile profile must visibly compose the canonical entitlement-derived "
+                    "immediate SubscriptionCancellation control"
+                ),
+            }
+        )
+    if not _mobile_profile_navigation_is_discoverable(root):
+        markers.append(
+            {
+                "path": "app/src navigation",
+                "issue": "mobile_appkit_subscription_cancel_undiscoverable",
+                "snippet": (
+                    "signed-in product UI must expose a visible link or button that navigates "
+                    "to /profile"
+                ),
+            }
+        )
+    markers.extend(_appkit_customer_copy_markers(root, source_roots=("app", "src")))
     return markers
 
 
@@ -11756,7 +12028,11 @@ def _appkit_subscription_cancellation_unfinished_blocker(refresh: dict[str, Any]
         for marker in markers
         if isinstance(marker, dict)
         and str(marker.get("issue") or "").strip()
-        in {"appkit_subscription_cancel_missing", "support_mediated_subscription_cancel"}
+        in {
+            "appkit_subscription_cancel_missing",
+            "appkit_subscription_scan_incomplete",
+            "support_mediated_subscription_cancel",
+        }
     ]
     if not cancellation_markers:
         return ""
@@ -11768,7 +12044,7 @@ def _appkit_subscription_cancellation_unfinished_blocker(refresh: dict[str, Any]
     return (
         "product subscription cancellation violates the AppKit contract: "
         + "; ".join(details)
-        + " — keep the canonical in-app cancel control and remove support-mediated cancellation copy; cancellation must end access immediately with no grace period"
+        + " — keep the canonical in-app cancel control, complete the bounded source scan, and remove support-mediated cancellation copy; cancellation must end access immediately with no grace period"
     )
 
 
@@ -25770,6 +26046,22 @@ def handle_business_publish_mobile_release(args: dict, **_: Any) -> str:
                 "mobile_app_source_missing: product/app has no app.json. Build the app first "
                 "(business_claude_agent_task with workspace 'product/app' seeds and iterates it)."
             )
+        # Restore and verify the AppKit-owned account boundary immediately before any publish
+        # spend. A worker may redesign the product screens, but it cannot ship a mobile build that
+        # removes entitlement-derived, immediate self-service Stripe cancellation or replaces it
+        # with support-mediated copy.
+        _rematerialize_mobile_starter_owned_files(app_source)
+        mobile_cancellation_markers = _mobile_appkit_subscription_cancellation_markers(app_source)
+        if mobile_cancellation_markers:
+            detail = "; ".join(
+                f"{marker.get('path')}: {marker.get('snippet') or marker.get('issue')}"
+                for marker in mobile_cancellation_markers[:6]
+            )
+            return tool_error(
+                "mobile_appkit_subscription_cancellation_failed: " + detail,
+                success=False,
+                blockers=mobile_cancellation_markers,
+            )
         # Greenlight pre-submission compliance gate (readmodular §3) — BEFORE reserve: a failing
         # scan must cost nothing. preview ships to TestFlight-internal (internal lane thresholds);
         # production is the store lane (critical==0 AND high==0).
@@ -26271,9 +26563,14 @@ def _refuse_starter_owned_product_write(rel: str) -> None:
     injection) still go through the store's apply path unimpeded."""
     normalized = str(rel or "").strip().strip("/")
     prefix = "product/site/"
-    if not normalized.startswith(prefix):
-        return
-    if normalized[len(prefix):] in _STARTER_OWNED_REFRESH_FILES:
+    mobile_prefix = "product/app/"
+    starter_owned = normalized.startswith(prefix) and (
+        normalized[len(prefix):] in _STARTER_OWNED_REFRESH_FILES
+    )
+    mobile_starter_owned = normalized.startswith(mobile_prefix) and (
+        normalized[len(mobile_prefix):] in _MOBILE_STARTER_OWNED_REFRESH_FILES
+    )
+    if starter_owned or mobile_starter_owned:
         raise TakyonError(
             f"{normalized} is scaffold-owned and force-rewritten from the bundled scaffold on every "
             "product build/kit materialize — edits to it can never persist. Make the minimal repair in "

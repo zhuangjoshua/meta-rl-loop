@@ -12,6 +12,7 @@ export function AppLayout() {
   const auth = useProductAuth();
   const productName = businessDisplayName();
   const cta = resolveViewerCta(access);
+  const accountRoute = location.pathname.replace(/\/+$/, "") === "/app/profile";
   const subscribeIntent = searchParams.get("intent") === "subscribe";
   useSubscribeIntent(access, searchParams.get("intent"));
   useCheckoutReturnRefresh(access);
@@ -105,7 +106,7 @@ export function AppLayout() {
               </div>
             </div>
           </section>
-        ) : !access.entitled ? (
+        ) : !access.entitled && !accountRoute ? (
           <section className="mx-auto grid min-h-[70vh] max-w-xl place-items-center text-center">
             <div className="space-y-6 rounded-2xl border border-border bg-card p-8 shadow-lg">
               <div className="space-y-2">

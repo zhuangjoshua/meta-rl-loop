@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
 import types
+import urllib.error
 
 import pytest
 from starlette.testclient import TestClient
@@ -1136,6 +1138,203 @@ def test_immediate_subscription_cancel_retry_reads_terminal_provider_truth(monke
         ("subscriptions/sub_123", {}, "DELETE"),
         ("subscriptions/sub_123", {}, "GET"),
     ]
+
+
+def test_immediate_subscription_cancel_reconciles_ambiguous_transport_failure(monkeypatch):
+    calls: list[str] = []
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "id": "sub_123",
+                    "object": "subscription",
+                    "status": "canceled",
+                    "cancel_at_period_end": False,
+                }
+            ).encode("utf-8")
+
+    def _urlopen(request, timeout=None):
+        calls.append(request.method)
+        if request.method == "DELETE":
+            raise urllib.error.URLError("response disappeared after write")
+        return _Response()
+
+    monkeypatch.setenv("TAKYON_STRIPE_MODE", "test")
+    monkeypatch.setattr(safebox, "_remote_enabled", lambda: False)
+    monkeypatch.setattr(safebox, "_local_authority_enabled", lambda: True)
+    monkeypatch.setattr(
+        safebox,
+        "read_env_backed_value",
+        lambda key: "sk_test_transport" if key == "STRIPE_SECRET_KEY" else None,
+    )
+    monkeypatch.setattr(stripe_util.urllib.request, "urlopen", _urlopen)
+
+    result = safebox.cancel_stripe_subscription_immediately("sub_123")
+
+    assert result["status"] == "canceled"
+    assert calls == ["DELETE", "GET"]
+
+
+@pytest.mark.parametrize(
+    "reconciliation",
+    [
+        {"recorded": False, "reason": "subscription_account_binding_mismatch"},
+        {"recorded": True, "updated": [{"business_slug": "climblog"}]},
+    ],
+)
+def test_cancel_subscription_falls_back_to_terminal_local_revocation(
+    monkeypatch, reconciliation
+):
+    entitlement = types.SimpleNamespace(
+        stripe_subscription_id="sub_123",
+        status="active",
+        metadata={"stripe_subscription_status": "active"},
+        plan_key="monthly",
+        current_period_end=None,
+    )
+
+    class _Conn:
+        def transaction(self):
+            return contextlib.nullcontext()
+
+        def execute(self, _sql, _params=None):
+            return None
+
+    monkeypatch.setattr(
+        app_entitlements,
+        "list_entitlements",
+        lambda *_args, **_kwargs: [entitlement],
+    )
+    monkeypatch.setattr(
+        app_payments,
+        "reconcile_subscription",
+        lambda *_args, **_kwargs: reconciliation,
+    )
+    fallback_metadata: dict = {}
+
+    def _revoke(_conn, subscription_id, *, status, metadata, **_kwargs):
+        assert subscription_id == "sub_123"
+        assert status == "cancelled"
+        entitlement.status = "cancelled"
+        entitlement.metadata = {**entitlement.metadata, **metadata}
+        fallback_metadata.update(metadata)
+        return [{"business_slug": "climblog", "app_user_id": "cust_X"}]
+
+    monkeypatch.setattr(app_entitlements, "set_subscription_status", _revoke)
+
+    result = app_payments.cancel_subscription(
+        _Conn(),
+        "climblog",
+        app_user_id="cust_X",
+        subscription_canceler=lambda subscription_id: {
+            "id": subscription_id,
+            "object": "subscription",
+            "status": "canceled",
+            "cancel_at_period_end": False,
+        },
+    )
+
+    assert result["effective_immediately"] is True
+    assert result["stripe_subscription_status"] == "canceled"
+    assert result["reconciliation_fallback"]
+    assert fallback_metadata["cancellation_reconciliation_fallback"] == result[
+        "reconciliation_fallback"
+    ]
+    assert fallback_metadata["cancel_at_period_end"] is False
+
+
+def test_cancel_subscription_fails_if_terminal_local_reread_does_not_hold(monkeypatch):
+    entitlement = types.SimpleNamespace(
+        stripe_subscription_id="sub_123",
+        status="active",
+        metadata={},
+        plan_key="monthly",
+        current_period_end=None,
+    )
+
+    class _Conn:
+        def transaction(self):
+            return contextlib.nullcontext()
+
+        def execute(self, _sql, _params=None):
+            return None
+
+    monkeypatch.setattr(
+        app_entitlements,
+        "list_entitlements",
+        lambda *_args, **_kwargs: [entitlement],
+    )
+    monkeypatch.setattr(
+        app_payments,
+        "reconcile_subscription",
+        lambda *_args, **_kwargs: {"recorded": False, "reason": "binding_mismatch"},
+    )
+    monkeypatch.setattr(
+        app_entitlements,
+        "set_subscription_status",
+        lambda *_args, **_kwargs: [],
+    )
+
+    with pytest.raises(
+        app_payments.InvalidSubscriptionCancellation,
+        match="local entitlement did not become terminal",
+    ):
+        app_payments.cancel_subscription(
+            _Conn(),
+            "climblog",
+            app_user_id="cust_X",
+            subscription_canceler=lambda subscription_id: {
+                "id": subscription_id,
+                "status": "canceled",
+            },
+        )
+
+
+def test_cancel_subscription_ignores_openmeter_mirror_when_stripe_row_is_terminal(monkeypatch):
+    def _entitlement(source, status):
+        return types.SimpleNamespace(
+            source=source,
+            stripe_subscription_id="sub_123",
+            status=status,
+            metadata={"stripe_subscription_status": status},
+            plan_key="monthly",
+            current_period_end=None,
+        )
+
+    monkeypatch.setattr(
+        app_entitlements,
+        "list_entitlements",
+        lambda *_args, **_kwargs: [
+            _entitlement("openmeter", "active"),
+            _entitlement("stripe", "cancelled"),
+        ],
+    )
+
+    class _Conn:
+        def transaction(self):
+            return contextlib.nullcontext()
+
+        def execute(self, _sql, _params=None):
+            return None
+
+    result = app_payments.cancel_subscription(
+        _Conn(),
+        "climblog",
+        app_user_id="cust_X",
+        subscription_canceler=lambda _subscription_id: pytest.fail(
+            "a terminal Stripe row must make the retry provider-free"
+        ),
+    )
+
+    assert result["already_canceled"] is True
+    assert result["effective_immediately"] is True
 
 
 def test_app_checkout_reconcile_requires_expected_context(client, monkeypatch):

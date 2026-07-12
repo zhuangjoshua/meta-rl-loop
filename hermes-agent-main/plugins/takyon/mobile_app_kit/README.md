@@ -31,10 +31,11 @@ second backend.
    `readRecord(ref)`, `saveRecord({ ref, data, ...fields })`, and `deleteRecord(ref)`. Record saves
    are upserts, so `data` is required. Raw IDs and positional record operations remain runtime-only
    compatibility for already-published apps and are not part of the generated mobile SDK.
-7. **Self-service cancellation.** Every active paid subscription exposes an in-app cancel control
-   in `src/screens/profile.tsx`. It calls the shared account rail, ends access immediately with no
-   grace period, and refreshes authoritative account state; support-mediated cancellation is not
-   permitted.
+7. **Self-service cancellation.** Every nonterminal Stripe subscription, including a past-due one,
+   exposes `src/components/subscription-cancellation.tsx` from a discoverable account/profile
+   screen. The worker may restyle and recompose that screen, but the shared control calls the
+   account rail and ends access immediately with no grace period. A projection refresh is
+   best-effort after provider-authoritative success; support-mediated cancellation is forbidden.
 
 ## Pins
 

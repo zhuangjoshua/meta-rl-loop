@@ -96,6 +96,24 @@ function activePaidEntitlement(entitlement: Record<string, unknown>): boolean {
   return false;
 }
 
+export function hasNonterminalStripeSubscription(payload: AccountPayload | null): boolean {
+  return accountEntitlements(payload).some((entitlement) => {
+    const source = String(entitlement.source ?? "").trim().toLowerCase();
+    const subscriptionId = String(
+      entitlement.stripe_subscription_id ?? entitlement.stripeSubscriptionId ?? "",
+    ).trim();
+    const status = entitlementStatus(entitlement);
+    return (
+      (!source || source === "stripe") &&
+      Boolean(subscriptionId) &&
+      !["canceled", "cancelled", "sandbox_retired"].includes(status)
+    );
+  });
+}
+
+// Preserve the historical active/trialing predicate for worker-owned callers. Cancellation uses
+// the separate nonterminal helper because a denied/past-due Stripe subscription is still live and
+// must remain cancellable.
 export function hasActiveStripeSubscription(payload: AccountPayload | null): boolean {
   return accountEntitlements(payload).some((entitlement) => {
     const subscriptionId = String(

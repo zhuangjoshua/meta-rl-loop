@@ -141,6 +141,14 @@ def _stripe_http_request(
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise StripeError(f"Stripe {path} failed: {exc.code} {body}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        # A transport failure is ambiguous: Stripe may have committed the request before the
+        # response disappeared. Normalize it into StripeError so mutation-specific callers (most
+        # importantly immediate subscription cancellation) can read provider truth before deciding
+        # whether the operation failed.
+        raise StripeError(
+            f"Stripe {path} transport failed: {exc.__class__.__name__}"
+        ) from exc
 
 
 def _verify_live_account_identity(key: str) -> None:

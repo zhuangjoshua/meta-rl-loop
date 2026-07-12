@@ -1826,10 +1826,12 @@ cmd_product_edge_deploy() {
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 
 edge_dir = Path(sys.argv[1]).resolve()
+repo_root = edge_dir.parents[2]
 safebox_host = str(sys.argv[2]).strip()
 safebox_key = str(sys.argv[3]).strip()
 source_revision = str(sys.argv[4]).strip()
@@ -1889,41 +1891,95 @@ env = dict(base_env)
 env["CLOUDFLARE_API_TOKEN"] = token
 os.chdir(edge_dir)
 message = f"Takyon source {source_revision}"
-upload = subprocess.run(
-    [
-        "npx",
-        "--yes",
-        "wrangler@4.110.0",
-        "versions",
-        "upload",
-        "--tag",
-        source_revision,
-        "--message",
-        message,
-    ],
-    env=env,
-    check=False,
-)
+
+
+def run_bounded(argv, *, child_env, timeout, capture_output=False):
+    process = subprocess.Popen(
+        argv,
+        env=child_env,
+        start_new_session=True,
+        text=capture_output,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+try:
+    upload = run_bounded(
+        [
+            "npx",
+            "--yes",
+            "wrangler@4.110.0",
+            "versions",
+            "upload",
+            "--tag",
+            source_revision,
+            "--message",
+            message,
+        ],
+        child_env=env,
+        timeout=180,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit("takyon-prod: product-edge version upload failed or timed out") from None
 if upload.returncode != 0:
     raise SystemExit(upload.returncode)
-deployment = subprocess.run(
-    [
-        "npx",
-        "--yes",
-        "wrangler@4.110.0",
-        "versions",
-        "deploy",
-        "--version-tag",
-        source_revision,
-        "--percentage",
-        "100",
-        "--message",
-        message,
-        "--yes",
-    ],
-    env=env,
-    check=False,
-)
+
+# A concurrent push after the initial clean/published gate may not receive this older version.
+# Recheck origin/main after the inactive upload and immediately before changing live traffic.
+try:
+    refreshed = run_bounded(
+        ["git", "-C", str(repo_root), "fetch", "--quiet", "origin", "main"],
+        child_env=base_env,
+        timeout=30,
+    )
+    current_main = run_bounded(
+        ["git", "-C", str(repo_root), "rev-parse", "refs/remotes/origin/main"],
+        child_env=base_env,
+        timeout=10,
+        capture_output=True,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit("takyon-prod: could not revalidate origin/main before edge activation") from None
+if refreshed.returncode != 0 or current_main.returncode != 0:
+    raise SystemExit("takyon-prod: could not revalidate origin/main before edge activation")
+if str(current_main.stdout or "").strip() != source_revision:
+    raise SystemExit(
+        "takyon-prod: origin/main moved during edge upload; inactive version was not deployed"
+    )
+
+try:
+    deployment = run_bounded(
+        [
+            "npx",
+            "--yes",
+            "wrangler@4.110.0",
+            "versions",
+            "deploy",
+            "--version-tag",
+            source_revision,
+            "--percentage",
+            "100",
+            "--message",
+            message,
+            "--yes",
+        ],
+        child_env=env,
+        timeout=120,
+    )
+except (OSError, subprocess.TimeoutExpired):
+    raise SystemExit("takyon-prod: product-edge activation failed or timed out") from None
 raise SystemExit(deployment.returncode)
 PY
 }

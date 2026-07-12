@@ -46,15 +46,25 @@ def test_product_edge_deploy_is_clean_published_and_secret_isolated():
     assert 'env["CLOUDFLARE_API_TOKEN"] = token' in command
     assert 'safe_names = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL")' in command
     assert '"wrangler@4.110.0",' in command
-    assert '"versions",\n        "upload",' in command
-    assert '"versions",\n        "deploy",' in command
-    assert '"--version-tag",\n        source_revision,' in command
-    assert '"--percentage",\n        "100",' in command
+    assert '"versions",\n            "upload",' in command
+    assert '"versions",\n            "deploy",' in command
+    assert '"--version-tag",\n            source_revision,' in command
+    assert '"--percentage",\n            "100",' in command
+    assert "def run_bounded(" in command
+    assert "start_new_session=True" in command
+    assert "os.killpg(process.pid, signal.SIGTERM)" in command
+    assert "origin/main moved during edge upload; inactive version was not deployed" in command
+    assert command.index('"versions",\n            "upload",') < command.index(
+        '["git", "-C", str(repo_root), "fetch"'
+    ) < command.index('"versions",\n            "deploy",')
     assert "print(token)" not in command
     assert "TAKYON_OPERATOR_DATABASE_URL" not in command
     assert "TAKYON_SAFEBOX_OPERATOR_TOKEN" not in command
     assert "product-edge-deploy)" in script
     assert 'cmd_product_edge_deploy "$@"' in script
+
+    python_source = command.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    compile(python_source, "product-edge-deploy-heredoc", "exec")
 
 
 def test_shared_tunnel_monitor_and_initial_start_use_one_reconciler():

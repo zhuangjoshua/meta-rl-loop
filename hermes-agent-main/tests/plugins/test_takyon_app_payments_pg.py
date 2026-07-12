@@ -677,6 +677,55 @@ def test_cancel_subscription_ends_access_immediately_and_retries_idempotently(pg
     assert repeated["stripe_subscription_status"] == "canceled"
 
 
+def test_cancel_subscription_revoke_fallback_is_terminal_on_real_postgres(pg_conn, monkeypatch):
+    slug = _business(pg_conn, _owner(pg_conn))
+    user = app_identity.upsert_app_user(pg_conn, slug, "fallback-cancel@example.com")
+    app_entitlements.grant_entitlement(
+        pg_conn,
+        slug,
+        app_user_id=user.id,
+        tier="paid",
+        status="active",
+        source="stripe",
+        stripe_customer_id="cus_fallback_cancel",
+        stripe_subscription_id="sub_fallback_cancel",
+        plan_key="pro",
+        metadata={"stripe_subscription_status": "active"},
+    )
+    monkeypatch.setattr(
+        app_payments,
+        "reconcile_subscription",
+        lambda *_args, **_kwargs: {
+            "recorded": False,
+            "reason": "subscription_account_binding_mismatch",
+        },
+    )
+
+    result = app_payments.cancel_subscription(
+        pg_conn,
+        slug,
+        app_user_id=user.id,
+        subscription_canceler=lambda subscription_id: {
+            "id": subscription_id,
+            "object": "subscription",
+            "status": "canceled",
+            "customer": "cus_fallback_cancel",
+            "cancel_at_period_end": False,
+        },
+    )
+
+    assert result["effective_immediately"] is True
+    assert result["reconciliation_fallback"] == "subscription_account_binding_mismatch"
+    entitlement = app_entitlements.list_entitlements(
+        pg_conn,
+        slug,
+        app_user_id=user.id,
+    )[0]
+    assert entitlement.status == "cancelled"
+    assert entitlement.metadata["cancellation_effective_immediately"] is True
+    assert app_entitlements.resolve_user_tier(pg_conn, slug, user.id) == "unentitled"
+
+
 # ── webhook plumbing ────────────────────────────────────────────────────────────────────
 
 

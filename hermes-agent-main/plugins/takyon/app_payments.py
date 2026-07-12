@@ -1044,6 +1044,8 @@ def _subscription_entitlement_for_cancellation(conn, business_slug: str, app_use
         business_slug,
         app_user_id=app_user_id,
     ):
+        if str(getattr(entitlement, "source", "stripe") or "").strip().lower() != "stripe":
+            continue
         subscription_id = str(entitlement.stripe_subscription_id or "").strip()
         status = str(entitlement.status or "").strip().lower()
         if not subscription_id:
@@ -1054,6 +1056,31 @@ def _subscription_entitlement_for_cancellation(conn, business_slug: str, app_use
             continue
         return entitlement
     return terminal
+
+
+def _subscription_entitlement_by_id(
+    conn,
+    business_slug: str,
+    app_user_id: str,
+    stripe_subscription_id: str,
+):
+    """Re-read one exact locally-bound Stripe subscription entitlement."""
+    expected = str(stripe_subscription_id or "").strip()
+    if not expected:
+        return None
+    return next(
+        (
+            entitlement
+            for entitlement in app_entitlements.list_entitlements(
+                conn,
+                business_slug,
+                app_user_id=app_user_id,
+            )
+            if str(getattr(entitlement, "source", "stripe") or "").strip().lower() == "stripe"
+            if str(entitlement.stripe_subscription_id or "").strip() == expected
+        ),
+        None,
+    )
 
 
 def cancel_subscription(
@@ -1115,11 +1142,64 @@ def cancel_subscription(
             raise InvalidSubscriptionCancellation(
                 "Stripe did not confirm immediate cancellation of the requested subscription"
             )
-        reconcile_subscription(conn, subscription)
-        refreshed = (
-            _subscription_entitlement_for_cancellation(conn, business, user) or entitlement
+        reconciliation_error = ""
+        try:
+            reconciliation = reconcile_subscription(conn, subscription)
+        except Exception as exc:
+            reconciliation = {"recorded": False}
+            reconciliation_error = f"reconcile_exception:{exc.__class__.__name__}"
+        refreshed = _subscription_entitlement_by_id(
+            conn,
+            business,
+            user,
+            subscription_id,
         )
-        refreshed_metadata = refreshed.metadata or {}
+        refreshed_status = str(getattr(refreshed, "status", "") or "").strip().lower()
+        fallback_reason = ""
+        if not bool(reconciliation.get("recorded")) or refreshed_status not in {
+            "cancelled",
+            "canceled",
+        }:
+            fallback_reason = str(
+                reconciliation.get("reason")
+                or reconciliation.get("ignored")
+                or reconciliation_error
+                or (
+                    "subscription_not_terminal_after_reconcile"
+                    if reconciliation.get("recorded")
+                    else "subscription_not_recorded"
+                )
+            ).strip()
+            # Stripe returned terminal truth for the exact subscription id selected from this
+            # session-bound local entitlement. The generic live-object reconciler can refuse an
+            # old/malformed metadata binding; after provider success that refusal must not grant a
+            # grace period. This fallback can only revoke the already-authorized exact binding.
+            app_entitlements.set_subscription_status(
+                conn,
+                subscription_id,
+                status="cancelled",
+                stripe_customer_id=_stripe_object_id(subscription.get("customer")),
+                current_period_end=_subscription_period_end(subscription),
+                metadata={
+                    "stripe_subscription_status": returned_status,
+                    "cancel_at_period_end": False,
+                    "cancellation_effective_immediately": True,
+                    "cancellation_reconciliation_fallback": fallback_reason,
+                },
+            )
+            refreshed = _subscription_entitlement_by_id(
+                conn,
+                business,
+                user,
+                subscription_id,
+            )
+            refreshed_status = str(
+                getattr(refreshed, "status", "") or ""
+            ).strip().lower()
+        if refreshed is None or refreshed_status not in {"cancelled", "canceled"}:
+            raise InvalidSubscriptionCancellation(
+                "Stripe confirmed cancellation but the local entitlement did not become terminal"
+            )
         return {
             "recorded": True,
             "business_slug": business,
@@ -1132,6 +1212,7 @@ def cancel_subscription(
             "effective_immediately": True,
             "already_canceled": False,
             "already_canceling": False,
+            "reconciliation_fallback": fallback_reason or None,
         }
 
 

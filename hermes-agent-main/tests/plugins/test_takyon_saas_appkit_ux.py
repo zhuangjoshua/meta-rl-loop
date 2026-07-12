@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
+
+import pytest
 
 from plugins.takyon import core as takyon_core
 from plugins.takyon import turn_runtime
@@ -59,6 +62,8 @@ def test_app_layout_is_canonical_direct_full_width_gate():
     assert 'data-takyon-scaffold="app-layout"' in layout
     assert "!access.authenticated" in layout
     assert "!access.entitled" in layout
+    assert "!access.entitled && !accountRoute" in layout
+    assert 'location.pathname.replace(/\\/+$/, "") === "/app/profile"' in layout
     assert "<Outlet />" in layout
     assert 'className="w-full px-4 py-6 sm:px-6 lg:px-8"' in layout
     assert "max-w-6xl" not in layout
@@ -211,13 +216,21 @@ def test_active_subscription_cancel_control_is_starter_owned_and_immediate():
 
     assert "SubscriptionCancellation" in main
     assert '<Route path="profile" element={<AccountRoute />} />' in main
-    assert "hasActiveStripeSubscription(access.account)" in component
+    assert "hasNonterminalStripeSubscription(access.account)" in component
     assert "client.cancelSubscription()" in component
     assert "Cancel subscription now" in component
     assert "end immediately" in component
     assert "There is no grace period" in component
     assert "window.confirm" in component
-    assert "export function hasActiveStripeSubscription" in hooks
+    assert "setCanceledLocally(true)" in component
+    assert "cancellation already succeeded" in component
+    assert 'data-takyon-appkit="subscription-cancellation-success"' in component
+    assert "Your access ended immediately" in component
+    assert "export function hasNonterminalStripeSubscription" in hooks
+    assert "sandbox_retired" in hooks
+    assert 'source === "stripe"' in hooks
+    active_helper = hooks.split("export function hasActiveStripeSubscription", 1)[1]
+    assert "activePaidEntitlement(entitlement)" in active_helper
     cancel_method = runtime.split("async cancelSubscription()", 1)[1].split("async deleteAccount", 1)[0]
     assert 'JSON.stringify({ action: "cancel_subscription" })' in cancel_method
     assert "payload" not in cancel_method
@@ -255,21 +268,150 @@ def test_subscription_cancel_conformance_blocks_support_mediation(tmp_path):
     assert takyon_core._appkit_subscription_cancellation_markers(root) == []
 
 
+def test_subscription_cancel_conformance_scans_beyond_300_files_and_prunes_generated_dirs(
+    tmp_path,
+):
+    root = tmp_path / "site"
+    for rel in ("src/main.tsx", "src/components/subscription-cancellation.tsx"):
+        destination = root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(read(rel), encoding="utf-8")
+    for index in range(350):
+        path = root / "src" / "screens" / f"screen-{index:03d}.tsx"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"export const copy{index} = 'ordinary copy';\n", encoding="utf-8")
+    (root / "src" / "screens" / "screen-349.tsx").write_text(
+        "export const billing = 'To cancel or manage billing, contact support.';\n",
+        encoding="utf-8",
+    )
+    ignored = root / "src" / "node_modules" / "generated.ts"
+    ignored.parent.mkdir(parents=True, exist_ok=True)
+    ignored.write_text("export const x = 'contact support to cancel';\n", encoding="utf-8")
+
+    markers = takyon_core._appkit_subscription_cancellation_markers(root)
+
+    support_markers = [
+        marker for marker in markers if marker["issue"] == "support_mediated_subscription_cancel"
+    ]
+    assert [marker["path"] for marker in support_markers] == [
+        "src/screens/screen-349.tsx"
+    ]
+    assert not any(marker["issue"] == "appkit_subscription_scan_incomplete" for marker in markers)
+
+
 def test_mobile_profile_exposes_the_same_immediate_self_service_cancel():
     profile = (MOBILE_SCAFFOLD / "src" / "screens" / "profile.tsx").read_text(
         encoding="utf-8"
     )
+    cancellation = (
+        MOBILE_SCAFFOLD / "src" / "components" / "subscription-cancellation.tsx"
+    ).read_text(encoding="utf-8")
     runtime = (MOBILE_SCAFFOLD / "_takyon" / "runtime-client.ts").read_text(
         encoding="utf-8"
     )
-    assert "hasPaidSubscription" in profile
-    assert "await client.cancelSubscription()" in profile
-    assert "Cancel subscription now" in profile
-    assert "There is no grace period" in profile
+    auth = (MOBILE_SCAFFOLD / "src" / "lib" / "product-auth.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "SubscriptionCancellation" in profile
+    assert "<SubscriptionCancellation />" in profile
+    assert "hasNonterminalStripeSubscription(auth.account)" in cancellation
+    assert "account?.entitlements" in auth
+    assert 'source === "stripe"' in auth
+    assert "await client.cancelSubscription()" in cancellation
+    assert "Cancel subscription now" in cancellation
+    assert "There is no grace period" in cancellation
+    assert "setCanceledLocally(true)" in cancellation
+    assert "Stripe cancellation is complete" in cancellation
     assert "cancelSubscription(): Promise<any>" in runtime
     cancel_method = runtime.split("async cancelSubscription()", 1)[1].split("async profile", 1)[0]
     assert 'JSON.stringify({ action: "cancel_subscription" })' in cancel_method
     assert "payload" not in cancel_method
+
+
+def test_mobile_subscription_boundary_is_force_owned_and_conformance_checked(tmp_path):
+    app_root = tmp_path / "product" / "app"
+    app_root.mkdir(parents=True)
+    (app_root / "app.json").write_text("{}\n", encoding="utf-8")
+    profile = app_root / "src" / "screens" / "profile.tsx"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    custom_profile = (
+        'import { SubscriptionCancellation } from "../components/subscription-cancellation";\n'
+        "export default function Profile() { return <><h1>Custom account</h1>"
+        "<SubscriptionCancellation /></>; }\n"
+    )
+    profile.write_text(custom_profile, encoding="utf-8")
+    app_home = app_root / "src" / "screens" / "app-home.tsx"
+    app_home.write_text(
+        'export const Home = ({ router }: any) => <Button onPress={() => router.push("/profile")} />;\n',
+        encoding="utf-8",
+    )
+    for rel in takyon_core._MOBILE_STARTER_OWNED_REFRESH_FILES:
+        path = app_root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("// worker removed cancellation\n", encoding="utf-8")
+
+    takyon_core._materialize_mobile_app_workspace(
+        app_root,
+        slug="future-mobile",
+        business_name="Future Mobile",
+        description="A mobile product",
+        surface={},
+    )
+
+    assert takyon_core._mobile_appkit_subscription_cancellation_markers(app_root) == []
+    assert profile.read_text(encoding="utf-8") == custom_profile
+    for rel in takyon_core._MOBILE_STARTER_OWNED_REFRESH_FILES:
+        assert (app_root / rel).read_bytes() == (MOBILE_SCAFFOLD / rel).read_bytes()
+    with pytest.raises(takyon_core.TakyonError, match="scaffold-owned"):
+        takyon_core._refuse_starter_owned_product_write(
+            "product/app/src/components/subscription-cancellation.tsx"
+        )
+    takyon_core._refuse_starter_owned_product_write(
+        "product/app/src/screens/profile.tsx"
+    )
+
+
+def test_mobile_subscription_conformance_blocks_support_mediation(tmp_path):
+    app_root = tmp_path / "app"
+    for rel in takyon_core._MOBILE_STARTER_OWNED_REFRESH_FILES:
+        destination = app_root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(MOBILE_SCAFFOLD / rel, destination)
+    profile = app_root / "src" / "screens" / "profile.tsx"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MOBILE_SCAFFOLD / "src/screens/profile.tsx", profile)
+    app_home = app_root / "src" / "screens" / "app-home.tsx"
+    shutil.copy2(MOBILE_SCAFFOLD / "src/screens/app-home.tsx", app_home)
+    support_copy = app_root / "src" / "screens" / "billing-help.tsx"
+    support_copy.parent.mkdir(parents=True, exist_ok=True)
+    support_copy.write_text(
+        "export const help = 'Contact support to cancel your subscription.';\n",
+        encoding="utf-8",
+    )
+
+    markers = takyon_core._mobile_appkit_subscription_cancellation_markers(app_root)
+
+    assert any(marker["issue"] == "support_mediated_subscription_cancel" for marker in markers)
+
+
+def test_mobile_subscription_conformance_requires_discoverable_profile_navigation(tmp_path):
+    app_root = tmp_path / "app"
+    for rel in takyon_core._MOBILE_STARTER_OWNED_REFRESH_FILES:
+        destination = app_root / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(MOBILE_SCAFFOLD / rel, destination)
+    profile = app_root / "src" / "screens" / "profile.tsx"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(MOBILE_SCAFFOLD / "src/screens/profile.tsx", profile)
+    home = app_root / "src" / "screens" / "app-home.tsx"
+    home.write_text("export default function Home() { return <Text>Workspace</Text>; }\n")
+
+    markers = takyon_core._mobile_appkit_subscription_cancellation_markers(app_root)
+
+    assert any(
+        marker["issue"] == "mobile_appkit_subscription_cancel_undiscoverable"
+        for marker in markers
+    )
 
 
 def test_landing_has_truthful_coscale_social_proof_and_default_interaction_sounds():
